@@ -6,8 +6,8 @@ import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 
 /*
  * Обзвон из телефона (раздел dial_list): панели настроек отдела, базы водителей
- * и переключатель у сотрудника. Используются в разделе «Обзвон из телефона» и в
- * карточке отдела на Binotel в «Настройках SIP».
+ * и переключатель у сотрудника. Используются в разделе «Удаленный КЦ» (до 07.10.2026
+ * он назывался «Обзвон из телефона») и в карточке отдела на Binotel в «Настройках SIP».
  *
  * Как работает режим: оператор видит в iCORE Phone только ФИО водителей и кнопку
  * «Позвонить»; номер в телефон не уходит — звонок инициирует сервер через Binotel
@@ -528,6 +528,10 @@ export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, 
                                 <div className="flex items-center gap-2">
                                     <span className="truncate text-[13.5px] font-medium text-slate-800">{u.name || `#${u.id}`}</span>
                                     {u.login && <span className="text-[11.5px] text-slate-400">@{u.login}</span>}
+                                    {/* Сотрудник другого отдела, посаженный на линию: чей он. */}
+                                    {u.guest && u.department_name && (
+                                        <span className="truncate text-[11.5px] text-slate-400">· {u.department_name}</span>
+                                    )}
                                     <IosBadge tone={effective ? 'green' : 'slate'}>{effective ? 'обзвон' : 'обычный телефон'}</IosBadge>
                                 </div>
                                 <div className="text-[11.5px] text-slate-500">

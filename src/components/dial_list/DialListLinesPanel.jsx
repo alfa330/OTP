@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge } from '../ui/ios';
+import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { assignedToast, buildLinePickerOptions, canReleaseHolder, defaultPickedUser } from './linePicker';
 
 /*
  * Линии Binotel отдела: какие внутренние номера есть у компании, кто из них
@@ -9,6 +10,11 @@ import CustomSelect from '../ui/CustomSelect';
  *
  * Назначение — одна кнопка: сервер сам связывает линию с сотрудником, дальше тот
  * входит в iCORE Phone логином iCORE и регистрируется на этой линии.
+ *
+ * Сидеть на линии может сотрудник любого отдела: глава СЗоВ и суперадмины выбирают
+ * его по ФИО из всей компании (право и список считает сервер — can_seat_anyone,
+ * candidates), остальные руководители раздела — только из сотрудников отдела линии.
+ * Что кому предлагать — в linePicker.js.
  */
 
 const readError = async (resp) => {
@@ -25,7 +31,7 @@ const fmtAgo = (unix) => {
     return `${Math.floor(sec / 86400)} дн назад`;
 };
 
-const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = true, showToast }) => {
+const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentName = '', canEdit = true, showToast }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -68,9 +74,10 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
         if (!pickedUser) return;
         setBusyLine(line.internal_number);
         try {
-            const user = (data?.users || []).find((u) => String(u.id) === String(pickedUser));
-            await post('assign', { user_id: Number(pickedUser), internal_number: line.internal_number });
-            toast(`Линия ${line.internal_number} назначена: ${user?.name || ''}. Сотруднику нужно войти в iCORE Phone заново`, 'success');
+            const name = pickerOptions.find((o) => o.value === String(pickedUser))?.name || '';
+            const result = await post('assign', { user_id: Number(pickedUser), internal_number: line.internal_number });
+            // guest — сервер посадил сотрудника другого отдела (см. assignedToast).
+            toast(assignedToast(line.internal_number, name, result?.guest === true), 'success');
             setPicking(null);
             setPickedUser('');
             await load();
@@ -96,7 +103,12 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
     };
 
     const users = data?.users || [];
-    const freeUsers = users.filter((u) => !u.sip_number);
+    // Сажать на линию сотрудника другого отдела — глава СЗоВ и суперадмины; признак
+    // и список таких сотрудников (candidates) приходят с сервера.
+    const canSeatAnyone = data?.can_seat_anyone === true;
+    const pickerOptions = useMemo(() => buildLinePickerOptions({
+        users: data?.users, candidates: data?.candidates, canSeatAnyone, departmentName,
+    }), [data, canSeatAnyone, departmentName]);
     const lines = data?.lines || [];
     const online = lines.filter((l) => l.online).length;
 
@@ -160,6 +172,10 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
                                                 <span className="font-medium text-slate-800">
                                                     {line.icore_user.name}
                                                     {line.icore_user.login && <span className="ml-1 text-[12px] font-normal text-slate-400">@{line.icore_user.login}</span>}
+                                                    {/* Сотрудник другого отдела: чей он, видно сразу. */}
+                                                    {line.icore_user.guest && line.icore_user.department_name && (
+                                                        <span className="ml-1 text-[12px] font-normal text-slate-400">· {line.icore_user.department_name}</span>
+                                                    )}
                                                 </span>
                                             ) : (
                                                 <span className="text-slate-400">никому в iCORE не назначена</span>
@@ -168,14 +184,17 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
                                     </div>
                                     {canEdit && !isPicking && (
                                         line.icore_user ? (
-                                            <button type="button" onClick={() => release(line)} disabled={busy} className={iosBtnGhost}>
-                                                <FaIcon className={busy ? 'fas fa-spinner fa-spin' : 'fas fa-link-slash'} />
-                                                Снять
-                                            </button>
+                                            /* Сотрудника другого отдела снимает тот же, кто вправе его сажать. */
+                                            canReleaseHolder(line.icore_user, canSeatAnyone) && (
+                                                <button type="button" onClick={() => release(line)} disabled={busy} className={iosBtnGhost}>
+                                                    <FaIcon className={busy ? 'fas fa-spinner fa-spin' : 'fas fa-link-slash'} />
+                                                    Снять
+                                                </button>
+                                            )
                                         ) : (
                                             <button
                                                 type="button"
-                                                onClick={() => { setPicking(line.internal_number); setPickedUser(freeUsers[0] ? String(freeUsers[0].id) : ''); }}
+                                                onClick={() => { setPicking(line.internal_number); setPickedUser(defaultPickedUser(users)); }}
                                                 disabled={busy}
                                                 className={iosBtnSecondary}
                                             >
@@ -187,20 +206,23 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
                                 </div>
                                 {isPicking && (
                                     <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
-                                        <span className="text-[12.5px] text-slate-600">Кому:</span>
+                                        <span className="flex items-center gap-1 text-[12.5px] text-slate-600">
+                                            Кому:
+                                            {canSeatAnyone && (
+                                                <IosHint text="Можно выбрать сотрудника любого отдела. Он остаётся в своём отделе: пока сидит на линии, его iCORE Phone работает на ней и показывает вкладку «Обзвон», а после «Снять» возвращается к настройкам своего отдела. Показатели считаются как у сотрудников удалённого КЦ." />
+                                            )}
+                                        </span>
                                         <CustomSelect
-                                            className="w-72"
+                                            className="w-80 max-w-full"
                                             variant="ios"
                                             value={pickedUser}
                                             onChange={(v) => setPickedUser(String(v))}
                                             ariaLabel="Сотрудник"
-                                            placeholder={users.length === 0 ? 'В отделе нет сотрудников' : 'Выберите сотрудника'}
-                                            disabled={users.length === 0}
-                                            searchable={users.length > 8}
-                                            options={users.map((u) => ({
-                                                value: String(u.id),
-                                                label: `${u.name}${u.login ? ` (@${u.login})` : ''}${u.sip_number ? ` — сейчас линия ${u.sip_number}` : ''}`,
-                                            }))}
+                                            placeholder={pickerOptions.length === 0 ? 'В отделе нет сотрудников' : 'Выберите сотрудника'}
+                                            disabled={pickerOptions.length === 0}
+                                            searchable={pickerOptions.length > 8}
+                                            searchPlaceholder="Поиск по ФИО"
+                                            options={pickerOptions}
                                         />
                                         <button type="button" onClick={() => assign(line)} disabled={busy || !pickedUser} className={iosBtnPrimary}>
                                             <FaIcon className={busy ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />

@@ -5,6 +5,7 @@
 проверяется по исходникам: ни один запрос, собирающий ответ для оператора, не
 выбирает phone_norm, а маршруты телефона не читают лид напрямую.
 """
+import contextlib
 import inspect
 import json
 import os
@@ -206,11 +207,21 @@ class LinesTests(unittest.TestCase):
 
         svc = dial_service.DialListService(_DB())
         svc._binotel_employees = lambda dep: list(self.EMPLOYEES["listOfEmployees"].values())
-        svc.department_users = lambda dep: [
+        users = [
             {"id": 10, "name": "Иван", "login": "ivan", "role": "operator", "sip_number": "", "status": ""},
             {"id": 11, "name": "Пётр", "login": "petr", "role": "operator", "sip_number": "902", "status": ""},
         ]
+        svc.department_users = lambda dep: users
         svc.department_sip_server = lambda dep: "sip52.binotel.com"
+        # Привязки сотрудников других отделов к линиям, замок линии и поиск того, кто её
+        # держит, — своя тема (tests/test_dial_list_line_members.py); здесь привязок нет,
+        # а линию держит тот, у кого она в SIP-настройках.
+        svc.line_member = lambda uid: None
+        svc._line_lock = lambda dep, number: contextlib.nullcontext(None)
+        svc._line_holder = lambda cur, dep, number, exclude_user_id=None: next(
+            (u for u in users if u["sip_number"] == number and u["id"] != exclude_user_id), None)
+        svc._release_member = lambda cur, uid, changed_by=None: ""
+        svc._release_dead_holders = lambda cur, dep, number, changed_by=None: None
         return svc, saved
 
     def test_list_lines_hides_credentials(self):

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Схема раздела «Обзвон из телефона». Все таблицы с префиксом dial_list_.
+"""Схема раздела «Удаленный КЦ» (до 07.10.2026 — «Обзвон из телефона»). Все таблицы
+с префиксом dial_list_.
 
 Идемпотентно (CREATE ... IF NOT EXISTS), вызывается один раз при старте из
 Database._init_db через init_dial_list_schema(cursor) — как у op_funnel и
@@ -32,6 +33,9 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_webhook_log          сырые POST'ы Binotel «API Call Completed» —
                                    на время внедрения, чтобы видеть, что именно
                                    присылает АТС; чистится по возрасту.
+    dial_list_line_members         сотрудник ДРУГОГО отдела на линии отдела: отдел
+                                   и номер линии, её учётка у Binotel. Его
+                                   собственные SIP-настройки при этом не меняются.
 
 Почему свои таблицы настроек, а не колонки в sip_department_config:
 _SIP_OPERATOR_SELECT читает строки по индексам, и каждая новая колонка там —
@@ -297,6 +301,31 @@ DDL = [
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS success_resolved_at TIMESTAMP WITH TIME ZONE",
     # Строки файла без ИИН или с ошибкой в нём — не загружаются, считаются отдельно.
     "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS rows_bad_iin INTEGER NOT NULL DEFAULT 0",
+    # Сотрудник ДРУГОГО отдела на линии (запрос владельца 07.10.2026: «добавлять на
+    # линию любого сотрудника по ФИО»). Своему сотруднику отдела линия пишется в его
+    # же SIP-настройки (users.sip_number + user_sip_settings); чужому так нельзя: там
+    # лежит телефония его отдела — у СЗоВ users.sip_number это логин Oktell, по нему
+    # работают табло и «Ограничитель», у отдела продаж — номер локальной АТС. Поэтому
+    # привязка живёт отдельно и ничего в его отделе не трогает:
+    #   department_id    отдел ЛИНИИ (удалённый КЦ), а не отдел человека
+    #   sip_login/…      учётка линии от Binotel — как у своих, наружу не отдаётся;
+    #                    при снятии с линии пароль стирается
+    #   released_at      NULL — сидит на линии сейчас. Строки не удаляются: по ним
+    #                    видно, кто, кого и когда сажал и снимал.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_line_members (
+        id BIGSERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        internal_number VARCHAR(64) NOT NULL,
+        sip_login VARCHAR(128) NOT NULL DEFAULT '',
+        sip_password VARCHAR(255) NOT NULL DEFAULT '',
+        assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        assigned_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        released_at TIMESTAMP WITH TIME ZONE
+    )
+    """,
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -349,6 +378,16 @@ DDL = [
     # Подписавшие, по кому решение об успешке ещё не принято.
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_success_pending ON dial_list_leads(signed_at)"
     " WHERE signed_at IS NOT NULL AND success_resolved_at IS NULL",
+    # Сотрудник другого отдела на линии: один человек — одна линия, одна линия —
+    # один человек. Только среди действующих привязок: история снятых не мешает.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_dial_list_line_members_user
+        ON dial_list_line_members(user_id) WHERE released_at IS NULL
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_dial_list_line_members_line
+        ON dial_list_line_members(department_id, internal_number) WHERE released_at IS NULL
+    """,
 ]
 
 

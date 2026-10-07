@@ -31041,6 +31041,46 @@ class Database:
             row = cur.fetchone()
         return {"user_id": row[0], "name": row[1] or ""} if row else None
 
+    def find_dial_list_line_holder(self, sip_login='', number='', domain='',
+                                   exclude_user_ids=None) -> Optional[dict]:
+        """Кто из сотрудников сидит на линии Binotel по привязке раздела «Удаленный КЦ».
+
+        В том разделе на линию сажают и сотрудника ДРУГОГО отдела; учётка линии тогда
+        лежит не в его SIP-настройках, а в dial_list_line_members, и проверки
+        find_sip_number_owners / find_sip_login_owner такой занятости не видят.
+        Ищем по SIP-логину линии либо по паре «номер + сервер отдела линии». Уволенный
+        линию не держит. Любой сбой (раздел не развёрнут) — None: сохранение
+        SIP-настроек из-за соседнего раздела останавливаться не должно."""
+        sip_login = str(sip_login or '').strip()
+        number = str(number or '').strip()
+        domain = str(domain or '').strip().lower()
+        if not sip_login and not (number and domain):
+            return None
+        exclude = sorted({int(u) for u in (exclude_user_ids or []) if u is not None})
+        try:
+            with self._get_cursor() as cur:
+                cur.execute("""
+                    SELECT u.id, u.name, m.internal_number
+                    FROM dial_list_line_members m
+                    JOIN users u ON u.id = m.user_id
+                    LEFT JOIN sip_department_config dc ON dc.department_id = m.department_id
+                    WHERE m.released_at IS NULL
+                      AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
+                      AND u.id <> ALL(%s)
+                      AND ((%s <> '' AND LOWER(TRIM(m.sip_login)) = LOWER(%s))
+                           OR (%s <> '' AND TRIM(m.internal_number) = %s
+                               AND LOWER(TRIM(COALESCE(dc.sip_server, ''))) = %s))
+                    LIMIT 1
+                """, (list(self._SIP_INACTIVE_STATUSES), exclude, sip_login, sip_login,
+                      number if domain else '', number, domain))
+                row = cur.fetchone()
+        except Exception:
+            logging.exception("SIP: не удалось проверить привязки к линиям раздела «Удаленный КЦ»")
+            return None
+        if not row:
+            return None
+        return {"user_id": row[0], "name": row[1] or "", "internal_number": (row[2] or "").strip()}
+
     def save_user_sip_settings(self, user_id: int, payload: dict, changed_by=None) -> dict:
         """Сохранить SIP-аккаунты сотрудника одной транзакцией.
 
@@ -31141,6 +31181,20 @@ class Database:
             owner = self.find_sip_login_owner(sip_login, exclude_user_ids=[user_id])
             if owner:
                 raise ValueError(f"SIP-логин {sip_login} уже занят: {owner['name']}")
+        # Линию Binotel может держать и сотрудник ДРУГОГО отдела, посаженный на неё в
+        # разделе «Удаленный КЦ»: его привязка лежит отдельно от SIP-настроек, и обе
+        # проверки выше её не видят. Два телефона на одной учётке перебивали бы
+        # регистрацию друг другу, поэтому занятую так линию здесь не отдаём.
+        if binotel:
+            new_login = sip_login if sip_login != current['sip_login'] else ''
+            new_number, new_domain = main_pair if main_pair in changed_pairs else ('', '')
+            if new_login or new_number:
+                holder = self.find_dial_list_line_holder(
+                    sip_login=new_login, number=new_number, domain=new_domain,
+                    exclude_user_ids=[user_id])
+                if holder:
+                    raise ValueError(
+                        f"Линия {holder['internal_number']} занята: на ней сидит {holder['name']}")
 
         # Выключенный FOP2 — тоже персональная настройка: без него строка с
         # одним лишь fop2_enabled=FALSE ушла бы в DELETE ниже, и флаг молча
@@ -31572,13 +31626,33 @@ class Database:
             "cabinet_password": row[1] or "",
         }
 
-    def get_user_sip_account(self, user_id: int) -> dict:
+    def get_user_sip_account(self, user_id: int, line_member: Optional[dict] = None) -> dict:
         """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон.
 
         Значения берутся по цепочке «персональное → отдела»; глобального яруса
         больше нет. У Binotel персональны логин и пароль — их «на отдел» не
-        задать; сервер с задачи #309 наследуется, как и автопринятие."""
+        задать; сервер с задачи #309 наследуется, как и автопринятие.
+
+        line_member — привязка сотрудника к линии Binotel ДРУГОГО отдела (раздел
+        «Удаленный КЦ», dial_list.service.line_member). Пока она действует, телефон
+        работает на этой линии: учётка, сервер и ярус автоприёма берутся у линии, а
+        телефония собственного отдела человека (номер, автодозвон, FOP2, кабинет)
+        не применяется — и остаётся нетронутой до снятия с линии."""
         row = self.get_sip_operator(int(user_id)) or {}
+        on_line = bool(line_member) and (line_member.get("provider") or '') == 'binotel'
+        if on_line:
+            row = dict(
+                row,
+                department_provider='binotel',
+                sip_number=line_member.get("internal_number") or "",
+                sip_login=line_member.get("sip_login") or "",
+                sip_password=line_member.get("sip_password") or "",
+                # Персональный домен человека — от АТС его отдела, к линии не относится.
+                sip_domain="",
+                department_sip_server=line_member.get("sip_server") or "",
+                department_auto_answer=line_member.get("auto_answer"),
+                department_auto_answer_delay=line_member.get("auto_answer_delay"),
+            )
         provider = row.get("department_provider") or SIP_PROVIDER_DEFAULT
         sip_number = (row.get("sip_number") or "").strip()
         # Автопринятие считаем ОДИН раз и выше развилки провайдера: ниже два
@@ -31623,7 +31697,9 @@ class Database:
                 # выше развилки (персональное → отдела → выключено).
                 "auto_answer": auto_answer,
                 "auto_answer_delay": auto_answer_delay,
-                "binotel": self.get_binotel_account(user_id),
+                # У сидящего на линии другого отдела учётка кабинета (если есть) — от
+                # кабинета ЕГО отдела: телефон менял бы статус не в той компании.
+                "binotel": None if on_line else self.get_binotel_account(user_id),
             }
 
         server = (row.get("department_sip_server") or "").strip()

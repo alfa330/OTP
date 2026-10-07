@@ -1283,6 +1283,11 @@ def _get_user_payload(user):
         except Exception:
             logging.exception("Не удалось определить модель направления пользователя %s", user_id)
 
+    # Сидит ли человек на линии удалённого КЦ, числясь в другом отделе (раздел
+    # «Удаленный КЦ», вкладка «Линии»). По флагу портал показывает ему «Скачать
+    # iCore Phone»; сам доступ к файлу проверяет _can_download_icore_phone.
+    dial_list_line_member = bool(_dial_list_line_member(user_id)) if user_id is not None else False
+
     return {
         "role": role,
         "id": user_id,
@@ -1292,6 +1297,7 @@ def _get_user_payload(user):
         "gender": gender,
         "department_id": department_id,
         "department_code": department_code,
+        "dial_list_line_member": dial_list_line_member,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -30563,7 +30569,10 @@ def operator_sip_settings_endpoint():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        account = db.get_user_sip_account(requester_id)
+        # Сидящий на линии удалённого КЦ сотрудник ДРУГОГО отдела регистрируется на
+        # этой линии, а не на телефонии своего отдела: её настройки для него сейчас
+        # не действуют (и не меняются). У остальных привязки нет — путь прежний.
+        account = _dial_list_line_account(requester_id) or db.get_user_sip_account(requester_id)
         provider = account.get("provider") or 'asterisk'
         main = account.get("main")
         # Текст 409 зависит от провайдера. На локальной АТС всё держится на
@@ -30651,6 +30660,11 @@ ICORE_PHONE_PREFIX = 'icore_phone'
 # Ограничение обязано жить на сервере, а не только в интерфейсе: спрятанная кнопка
 # ничего не ограничивает, подписанную ссылку можно было бы запросить напрямую.
 ICORE_PHONE_DEPARTMENT_IDS = (367, 560)
+# Главы этих отделов получают дистрибутив, хотя сам отдел на телефоне не работает:
+# глава СЗоВ сажает людей на линии удалённого КЦ (раздел «Удаленный КЦ») и раздаёт им
+# программу — решение владельца 07.10.2026. Сотрудникам СЗоВ это телефон не выдаёт.
+# Та же константа на фронте (ICORE_PHONE_HEAD_DEPARTMENT_CODES в src/App.jsx).
+ICORE_PHONE_HEAD_DEPARTMENT_CODES = ('szov',)
 # Час, а не 15 минут как у аватаров: телефон может проснуться на медленной машине,
 # и протухшая на полпути ссылка означала бы, что обновление не доедет.
 ICORE_PHONE_URL_TTL_MINUTES = 60
@@ -30672,8 +30686,24 @@ def _icore_phone_bucket_name() -> str:
     return ''
 
 
+def _heads_icore_phone_department(requester_id) -> bool:
+    """Возглавляет ли человек отдел из ICORE_PHONE_HEAD_DEPARTMENT_CODES (СЗоВ).
+
+    По всем возглавляемым отделам, а не по первому: _headed_department_id отдаёт
+    один, и у главы двух отделов СЗоВ мог оказаться вторым."""
+    try:
+        return any(
+            str((item or {}).get('code') or '').strip().lower() in ICORE_PHONE_HEAD_DEPARTMENT_CODES
+            for item in (db.get_headed_departments_for_user(requester_id) or [])
+        )
+    except Exception:
+        logging.warning("iCORE Phone: не удалось прочитать возглавляемые отделы %s", requester_id)
+        return False
+
+
 def _can_download_icore_phone(requester_id, role) -> bool:
-    """Дистрибутив телефона: администраторы, отдел продаж и Тез КЦ (см. ICORE_PHONE_DEPARTMENT_IDS).
+    """Дистрибутив телефона: администраторы, отдел продаж и Тез КЦ (см. ICORE_PHONE_DEPARTMENT_IDS),
+    отдел удалённого КЦ, глава СЗоВ и все, кого посадили на линию в разделе «Удаленный КЦ».
 
     Глава разрешённого отдела проходит даже если его собственный department_id пуст —
     у глав он не всегда заполнен, а отдел за ними закреплён отдельно.
@@ -30689,6 +30719,13 @@ def _can_download_icore_phone(requester_id, role) -> bool:
         pass
     except Exception:
         logging.warning("iCORE Phone: не удалось определить отдел главы %s", requester_id)
+    if _heads_icore_phone_department(requester_id):
+        return True
+    # Сотрудник любого отдела, посаженный на линию удалённого КЦ: без этого он не
+    # скачал бы телефон, а установленный ловил бы 403 на автообновлении. Стоит выше
+    # проверки отдела: человек без отдела на линии — тоже на линии.
+    if _dial_list_line_member(requester_id):
+        return True
     try:
         dept_id = db.get_user_department_id(requester_id)
     except Exception:
@@ -30789,7 +30826,7 @@ def icore_phone_download_endpoint():
         # Та же проверка закрывает и кнопку в iCORE, и автообновление телефона:
         # за ссылкой оба приходят сюда.
         if not _can_download_icore_phone(requester_id, requester[3]):
-            return jsonify({"error": "iCORE Phone доступен отделам продаж и Тез КЦ, а также администраторам"}), 403
+            return jsonify({"error": "iCORE Phone вам не выдан — обратитесь к руководителю"}), 403
         variant = db.normalize_icore_phone_variant(request.args.get('variant'))
         release = db.get_icore_phone_release(variant)
         if not release:
@@ -65862,12 +65899,15 @@ try:
         # считает сам раздел (dial_list.service.manager_scope), не «Настройки SIP».
         is_admin_role=_is_admin_role,
         headed_department_ids=_headed_department_ids,
+        # Сажать на линию сотрудника другого отдела — суперадмину и главе СЗоВ
+        # (dial_list.service.can_seat_anyone); обычной роли «админ» этого мало.
+        is_super_admin_role=_is_super_admin_role,
     )
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service
-    logging.info("Раздел «Обзвон из телефона»: Blueprint подключён на /api/operator/dial_list")
+    logging.info("Раздел «Удаленный КЦ»: Blueprint подключён на /api/operator/dial_list")
 except Exception:
-    logging.exception("Раздел «Обзвон из телефона»: Blueprint НЕ подключён")
+    logging.exception("Раздел «Удаленный КЦ»: Blueprint НЕ подключён")
 
 
 def _dial_list_department_allowed(department_id):
@@ -65882,12 +65922,58 @@ def _dial_list_department_allowed(department_id):
         return False
 
 
+def _dial_list_line_member(user_id):
+    """Привязка сотрудника к линии ДРУГОГО отдела (раздел «Удаленный КЦ») или None.
+
+    Читается один раз на HTTP-запрос: её спрашивают и регистрация телефона, и блок
+    dial_list, и доступ к дистрибутиву — ответы обязаны совпадать между собой.
+    Любой сбой — None: человек остаётся на телефонии своего отдела. Ронять из-за
+    раздела регистрацию всем телефонам (ручка у них общая) нельзя."""
+    if _dial_list_service is None or not user_id:
+        return None
+    cache = None
+    try:
+        cache = getattr(g, '_dial_list_line_member_cache', None)
+        if cache is None:
+            cache = {}
+            g._dial_list_line_member_cache = cache
+    except RuntimeError:
+        cache = None
+    except Exception:
+        cache = None
+    if cache is not None and user_id in cache:
+        return cache[user_id]
+    try:
+        member = _dial_list_service.line_member(int(user_id))
+    except Exception:
+        logging.exception("dial_list: не удалось прочитать привязку к линии для %s", user_id)
+        member = None
+    if cache is not None:
+        cache[user_id] = member
+    return member
+
+
+def _dial_list_line_account(user_id):
+    """Регистрация iCORE Phone на линии удалённого КЦ для сотрудника другого отдела;
+    None — привязки нет, и телефон работает по настройкам его собственного отдела."""
+    member = _dial_list_line_member(user_id)
+    if not member:
+        return None
+    try:
+        return db.get_user_sip_account(int(user_id), line_member=member)
+    except Exception:
+        logging.exception("dial_list: не удалось собрать регистрацию на линии для %s", user_id)
+        return None
+
+
 def _dial_list_phone_settings(user_id):
     """Блок dial_list для /api/operator/sip_settings; при любом сбое — выключено."""
     if _dial_list_service is None:
         return {"enabled": False}
     try:
-        return _dial_list_service.phone_settings(int(user_id))
+        # Привязка — та же, по которой собрана регистрация: оба блока одного ответа
+        # не должны разойтись (линия удалённого КЦ, а вкладки обзвона нет).
+        return _dial_list_service.phone_settings(int(user_id), member=_dial_list_line_member(user_id))
     except Exception:
         logging.exception("dial_list: не удалось собрать настройки для телефона %s", user_id)
         return {"enabled": False}

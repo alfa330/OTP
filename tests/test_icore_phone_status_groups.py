@@ -295,19 +295,28 @@ class SipSettingsStatusProfileTests(unittest.TestCase):
                        "provider == 'binotel'"):
             self.assertIn(pinned, body, pinned)
 
-    def _endpoint_settings(self, profile_result):
-        """Тело ручки, исполненное с заглушками: что уходит телефону в settings."""
+    def _endpoint_settings(self, profile_result, line_account=None, seen=None):
+        """Тело ручки, исполненное с заглушками: что уходит телефону в settings.
+
+        line_account — регистрация на линии удалённого КЦ для сотрудника другого
+        отдела (_dial_list_line_account); None — человек на линии не сидит."""
         node = copy.deepcopy(source_cache.function_node(BOT_PATH, 'operator_sip_settings_endpoint'))
         node.decorator_list = []
         module = ast.Module(body=[node], type_ignores=[])
         ast.fix_missing_locations(module)
         unknown = object()
+        seen = seen if seen is not None else {}
 
         class _Db:
             @staticmethod
             def get_user_sip_account(user_id):
+                seen['own_account_read'] = True
                 return {'provider': 'asterisk',
                         'main': {'server': 'pbx', 'password': 'p', 'number': '6735'}}
+
+        def status_profile(user_id, provider):
+            seen['profile_provider'] = provider
+            return unknown if profile_result == 'unknown' else profile_result
 
         namespace = {
             'request': mock.Mock(method='GET'),
@@ -315,17 +324,46 @@ class SipSettingsStatusProfileTests(unittest.TestCase):
             'logging': logging,
             'db': _Db,
             '_get_authenticated_requester': lambda: (5, {}, None),
-            '_dial_list_phone_settings': lambda user_id: {'enabled': False},
+            '_dial_list_line_account': lambda user_id: line_account,
+            '_dial_list_phone_settings': lambda user_id: {'enabled': bool(line_account)},
             'SIP_AUTO_ANSWER_DELAY_DEFAULT': 3,
             '_ICORE_PHONE_PROFILE_UNKNOWN': unknown,
-            '_icore_phone_status_profile': lambda user_id, provider: (
-                unknown if profile_result == 'unknown' else profile_result),
+            '_icore_phone_status_profile': status_profile,
         }
         exec(compile(module, '<sip-settings-endpoint>', 'exec'), namespace)
         body, code = namespace['operator_sip_settings_endpoint']()
         self.assertEqual(code, 200)
         self.assertEqual(body['status'], 'success')
         return body['settings']
+
+    def test_employee_seated_on_a_remote_cc_line_registers_on_that_line(self):
+        """Сотрудник другого отдела на линии удалённого КЦ (07.10.2026): телефону уходит
+        учётка ЛИНИИ, а не телефония его отдела — её настройки даже не читаются."""
+        line_account = {
+            'provider': 'binotel',
+            'main': {'username': 'lg905', 'password': 'pw', 'server': 'sip53.binotel.com',
+                     'domain': 'sip53.binotel.com', 'auth_id': 'lg905', 'number': '905'},
+            'autodial': None, 'autodial_code': '', 'fop2_enabled': False,
+            'auto_answer': True, 'auto_answer_delay': 3, 'binotel': None,
+        }
+        seen = {}
+        settings = self._endpoint_settings(None, line_account=line_account, seen=seen)
+        self.assertEqual((settings['provider'], settings['number'], settings['server'], settings['username']),
+                         ('binotel', '905', 'sip53.binotel.com', 'lg905'))
+        self.assertIsNone(settings['autodial'])
+        self.assertIs(settings['fop2_enabled'], False)
+        self.assertIsNone(settings['binotel'])
+        self.assertEqual(settings['dial_list'], {'enabled': True})
+        # Набор статусов групп ОП считается по провайдеру ЛИНИИ: у Binotel его нет.
+        self.assertEqual(seen['profile_provider'], 'binotel')
+        self.assertNotIn('own_account_read', seen)
+        # Привязки нет — путь прежний: настройки собственного отдела.
+        seen = {}
+        settings = self._endpoint_settings(None, seen=seen)
+        self.assertEqual((settings['provider'], settings['number']), ('asterisk', '6735'))
+        self.assertTrue(seen['own_account_read'])
+        body = _function_source(BOT_PATH, 'operator_sip_settings_endpoint')
+        self.assertIn('_dial_list_line_account(requester_id) or db.get_user_sip_account(requester_id)', body)
 
     def test_endpoint_has_three_states_of_the_key(self):
         """Объект — набор, null — набора точно нет, ключа нет — посчитать не удалось."""

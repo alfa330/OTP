@@ -192,6 +192,11 @@ class _StubDb:
     def _sip_operator_row(self, row):
         return self._ns["_sip_operator_row"](row)
 
+    def find_dial_list_line_holder(self, **_kwargs):
+        """Привязок к линиям раздела «Удаленный КЦ» у этих тестов нет; сама проверка —
+        в SaveUserSipSettingsSeatedLineTests."""
+        return None
+
     def call(self, name, *args, **kwargs):
         return self._ns[name](self, *args, **kwargs)
 
@@ -1930,6 +1935,231 @@ class UserSipAccountBinotelTests(unittest.TestCase):
 
     def test_the_answer_carries_no_common_config_block(self):
         self.assertNotIn("config", self._account())
+
+
+class UserSipAccountOnAnotherDepartmentLineTests(unittest.TestCase):
+    """Сотрудник другого отдела на линии удалённого КЦ (запрос владельца 07.10.2026).
+
+    Раздел «Удаленный КЦ» сажает на линию Binotel сотрудника любого отдела. Его
+    собственные SIP-настройки при этом не меняются — привязка приходит отдельно
+    (line_member), и резолвер собирает регистрацию ПО НЕЙ: телефон работает на
+    линии, а не на телефонии его отдела. Снимут с линии — привязки нет, и ответ
+    снова собирается из его же настроек.
+    """
+
+    MEMBER = {
+        "user_id": 41, "department_id": 1954, "internal_number": "905",
+        "sip_login": "sip-fixture-905", "sip_password": "L1nePassw0rd",
+        "provider": "binotel", "sip_server": "sip53.binotel.com",
+        "auto_answer": None, "auto_answer_delay": None,
+    }
+
+    def setUp(self):
+        self.ns = _database_namespace({"get_user_sip_account"})
+        self.db = _StubDb(self.ns)
+        self.row = dict(OPERATOR_STATE)
+        # Отдел продаж: своя локальная АТС, номер 1024, автодозвон и FOP2.
+        self.row.update({
+            "department_sip_server": "192.168.88.251",
+            "department_base_password": "Secret",
+            "department_autodial_code": "*55",
+            "autodial_number": "2024",
+            "sip_domain": "pbx.personal",
+        })
+        self.db.get_sip_config = _no_common_tier
+        self.db.get_sip_operator = lambda user_id: dict(self.row)
+        self.cabinet_reads = []
+        self.db.get_binotel_account = lambda user_id: self.cabinet_reads.append(user_id) or {
+            "cabinet_login": "op@tez.kz"}
+
+    def _account(self, member="default"):
+        member = dict(self.MEMBER) if member == "default" else member
+        return self.ns["get_user_sip_account"](self.db, 41, line_member=member)
+
+    def test_the_phone_registers_on_the_line_not_on_the_own_department_pbx(self):
+        account = self._account()
+        self.assertEqual("binotel", account["provider"])
+        self.assertEqual({
+            "username": "sip-fixture-905", "password": "L1nePassw0rd",
+            "server": "sip53.binotel.com", "transport": "UDP",
+            "domain": "sip53.binotel.com", "auth_id": "sip-fixture-905",
+            "number": "905",
+        }, account["main"])
+
+    def test_own_department_telephony_is_not_applied_while_on_the_line(self):
+        """Ни номера 1024, ни персонального домена, ни автодозвона, ни FOP2 его отдела."""
+        account = self._account()
+        self.assertNotIn("1024", str(account))
+        self.assertNotIn("pbx.personal", str(account))
+        self.assertNotIn("192.168.88.251", str(account))
+        self.assertIsNone(account["autodial"])
+        self.assertEqual("", account["autodial_code"])
+        self.assertIs(False, account["fop2_enabled"])
+
+    def test_the_cabinet_of_the_own_department_does_not_travel(self):
+        """Учётка кабинета Binotel у человека — от кабинета ЕГО отдела (Тез КЦ):
+        телефон менял бы по ней статус не в той компании. И читать её незачем."""
+        self.assertIsNone(self._account()["binotel"])
+        self.assertEqual([], self.cabinet_reads)
+
+    def test_auto_answer_is_personal_then_the_line_department_tier(self):
+        """Личная настройка — это поведение телефона человека, она сильнее; ярус же
+        берётся у отдела ЛИНИИ, а не у его собственного отдела."""
+        self.row.update({"department_auto_answer": True, "department_auto_answer_delay": 9})
+        account = self._account()      # у отдела линии яруса нет, у своего отдела — есть
+        self.assertIs(False, account["auto_answer"])
+        self.assertEqual(self.ns["SIP_AUTO_ANSWER_DELAY_DEFAULT"], account["auto_answer_delay"])
+        account = self._account(dict(self.MEMBER, auto_answer=True, auto_answer_delay=4))
+        self.assertIs(True, account["auto_answer"])
+        self.assertEqual(4, account["auto_answer_delay"])
+        self.row.update({"auto_answer": False, "auto_answer_delay": 1})
+        account = self._account(dict(self.MEMBER, auto_answer=True, auto_answer_delay=4))
+        self.assertIs(False, account["auto_answer"])
+        self.assertEqual(1, account["auto_answer_delay"])
+
+    def test_without_the_binding_the_answer_is_built_from_own_settings(self):
+        """Привязки нет (не сидит или сняли) — всё как у любого сотрудника его отдела."""
+        for member in (None, {}):
+            account = self._account(member)
+            self.assertEqual("asterisk", account["provider"], member)
+            self.assertEqual("1024", account["main"]["number"])
+            self.assertEqual("pbx.personal", account["main"]["server"])
+            self.assertEqual("2024", account["autodial"]["number"])
+        self.assertEqual(self.ns["get_user_sip_account"](self.db, 41), self._account(None))
+
+    def test_a_line_of_a_department_that_left_binotel_is_ignored(self):
+        """Отдел линии увели с Binotel — линии как учётки больше нет: человек остаётся
+        на своей телефонии, а не получает регистрацию «в никуда»."""
+        account = self._account(dict(self.MEMBER, provider="asterisk"))
+        self.assertEqual("asterisk", account["provider"])
+        self.assertEqual("1024", account["main"]["number"])
+
+    def test_incomplete_line_credentials_give_no_account(self):
+        for field in ("sip_login", "sip_password", "sip_server"):
+            account = self._account(dict(self.MEMBER, **{field: ""}))
+            self.assertEqual("binotel", account["provider"], field)
+            self.assertIsNone(account["main"], field)
+
+
+class SaveUserSipSettingsSeatedLineTests(unittest.TestCase):
+    """«Настройки SIP» не отдают линию, на которой сидит сотрудник другого отдела.
+
+    Его привязка к линии лежит в dial_list_line_members, а не в SIP-настройках, и
+    прежние проверки (номер в пределах домена, глобальный SIP-логин) такой занятости
+    не видят. Без этой проверки своему сотруднику отдела записывалась учётка занятой
+    линии — два телефона на одной учётке Binotel перебивали регистрацию друг другу
+    (находка разбора 07.10.2026).
+    """
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "save_user_sip_settings", "_mask_sip_secret", "_sip_operator_row",
+            "normalize_sip_domain", "find_dial_list_line_holder",
+        })
+        import logging
+        self.ns["logging"] = logging
+        self.db = _StubDb(self.ns)
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.current = dict(OPERATOR_STATE)
+        self.current.update({
+            "department_id": 1954, "department_name": "Удаленный КЦ",
+            "department_provider": "binotel", "department_sip_server": "SIP53.binotel.com",
+            "sip_number": "", "sip_login": "", "fop2_enabled": False,
+        })
+        self.db.get_sip_operator = lambda user_id: dict(self.current)
+        self.db.get_sip_config = _no_common_tier
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        self.db.find_sip_login_owner = lambda sip_login, exclude_user_ids=None: None
+        self.holder = None
+        self.asked = []
+
+        def _holder(**kwargs):
+            self.asked.append(kwargs)
+            return self.holder
+        self.db.find_dial_list_line_holder = _holder
+
+    def _save(self, payload):
+        return self.ns["save_user_sip_settings"](self.db, 41, payload, changed_by=7)
+
+    def _written(self):
+        return [sql for sql, _ in self.db.cursor.calls if sql.startswith(("UPDATE", "INSERT", "DELETE"))]
+
+    def test_a_line_held_by_a_seated_employee_is_refused(self):
+        self.holder = {"user_id": 77, "name": "Гостев Глеб", "internal_number": "903"}
+        with self.assertRaises(ValueError) as raised:
+            self._save({"sip_number": "903", "sip_login": "lg903", "sip_password": "pw903"})
+        self.assertEqual("Линия 903 занята: на ней сидит Гостев Глеб", str(raised.exception))
+        self.assertEqual([], self._written(), "занятая линия записана сотруднику")
+
+    def test_the_check_gets_the_new_login_and_the_new_number_on_the_department_server(self):
+        self._save({"sip_number": "903", "sip_login": "lg903", "sip_password": "pw903"})
+        self.assertEqual([{"sip_login": "lg903", "number": "903", "domain": "sip53.binotel.com",
+                           "exclude_user_ids": [41]}], self.asked)
+        self.assertTrue(self._written())
+
+    def test_only_what_changed_is_checked(self):
+        """Сохранение карточки ради другого поля не должно спотыкаться о линию человека."""
+        self.current.update({"sip_number": "903", "sip_login": "lg903", "sip_password": "pw903"})
+        self._save({"auto_answer": True})
+        self.assertEqual([], self.asked)
+        # Сменился только логин — номер в проверку не идёт, и наоборот.
+        self._save({"sip_login": "lg904"})
+        self.assertEqual({"sip_login": "lg904", "number": "", "domain": "", "exclude_user_ids": [41]},
+                         self.asked[-1])
+        self._save({"sip_number": "904"})
+        self.assertEqual({"sip_login": "", "number": "904", "domain": "sip53.binotel.com",
+                          "exclude_user_ids": [41]}, self.asked[-1])
+
+    def test_releasing_the_line_asks_nothing(self):
+        self.current.update({"sip_number": "903", "sip_login": "lg903", "sip_password": "pw903"})
+        self._save({"sip_number": "", "sip_login": "", "sip_password": ""})
+        self.assertEqual([], self.asked)
+
+    def test_the_local_pbx_department_is_not_concerned(self):
+        """Привязки бывают только к линиям Binotel: у локальной АТС проверять нечего."""
+        self.current.update({"department_provider": "asterisk", "department_sip_server": "sip.local"})
+        self._save({"sip_number": "1024"})
+        self.assertEqual([], self.asked)
+
+    def _find(self, cursor, **kwargs):
+        db = _StubDb(self.ns, cursor=cursor)
+        return self.ns["find_dial_list_line_holder"](db, **kwargs)
+
+    def test_the_holder_is_found_by_login_or_by_number_on_the_line_server(self):
+        cursor = _FakeCursor(rows=[(77, "Гостев Глеб", " 903 ")])
+        holder = self._find(cursor, sip_login=" LG903 ", number="903", domain=" SIP53.binotel.com ",
+                            exclude_user_ids=[41, None])
+        self.assertEqual({"user_id": 77, "name": "Гостев Глеб", "internal_number": "903"}, holder)
+        sql, params = cursor.calls[0]
+        self.assertIn("FROM dial_list_line_members m JOIN users u ON u.id = m.user_id "
+                      "LEFT JOIN sip_department_config dc ON dc.department_id = m.department_id "
+                      "WHERE m.released_at IS NULL "
+                      "AND LOWER(COALESCE(u.status, '')) <> ALL(%s) "
+                      "AND u.id <> ALL(%s) "
+                      "AND ((%s <> '' AND LOWER(TRIM(m.sip_login)) = LOWER(%s)) "
+                      "OR (%s <> '' AND TRIM(m.internal_number) = %s "
+                      "AND LOWER(TRIM(COALESCE(dc.sip_server, ''))) = %s)) LIMIT 1", sql)
+        self.assertEqual((["fired", "dismissal"], [41], "LG903", "LG903", "903", "903", "sip53.binotel.com"),
+                         params)
+
+    def test_a_number_without_a_server_is_not_a_line(self):
+        """Один номер без сервера ни о чём не говорит: 903 есть и у другой компании Binotel."""
+        cursor = _FakeCursor()
+        self.assertIsNone(self._find(cursor, number="903"))
+        self.assertIsNone(self._find(cursor))
+        self.assertEqual([], cursor.calls, "в базу ходить незачем")
+        self._find(cursor, sip_login="lg903", number="903")
+        self.assertEqual("", cursor.calls[0][1][4], "номер без сервера в запрос ушёл как условие")
+
+    def test_a_failure_of_the_neighbour_section_does_not_stop_the_save(self):
+        """Таблицы раздела может не быть (схема не применилась): SIP-настройки от этого
+        сохраняться не перестают."""
+        class _Broken(_FakeCursor):
+            def execute(self, sql, params=None):
+                raise RuntimeError('relation "dial_list_line_members" does not exist')
+
+        with self.assertLogs(level="ERROR"):
+            self.assertIsNone(self._find(_Broken(), sip_login="lg903"))
 
 
 class BinotelAccountTests(unittest.TestCase):

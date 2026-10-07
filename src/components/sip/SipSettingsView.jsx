@@ -407,7 +407,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         [withAccessTokenHeader, user?.id]
     );
 
-    // Отделы, работающие через «Обзвон из телефона» (режим у отдела включён): их
+    // Отделы, работающие через обзвон из телефона (режим у отдела включён; раздел
+    // «Удаленный КЦ»): их
     // сотрудникам линию Binotel назначают там, и учётку АТС здесь вводить не
     // нужно — карточка показывает только подсказку. Подключённый к разделу отдел
     // с выключенным режимом сюда не входит (dialListManagedDepartmentIds).
@@ -1705,7 +1706,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
 
                     {/* Программа телефона. Раздают её отсюда же, где ведут SIP-настройки:
                         обновляется парк машин сам, но ссылка нужна для новых сотрудников.
-                        Видна только тем, кому телефон положен (ICORE_PHONE_DEPARTMENT_IDS) —
+                        Видна только тем, кому телефон положен (canDownloadIcorePhone в App.jsx) —
                         у главы другого отдела ссылка всё равно вернула бы 403. */}
                     {canDownloadPhone && !isBinotel && (
                     <section className="space-y-1.5">
@@ -2225,7 +2226,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 footer={canEdit ? (
                     isBinotel && dialListDeptIds.has(Number(editing?.department_id)) ? (
                         /* Отдел на обзвоне: сохранять здесь нечего — линия и режим
-                           задаются в разделе «Обзвон из телефона». */
+                           задаются в разделе «Удаленный КЦ». */
                         <button type="button" onClick={closeEditor} className={iosBtnSecondary}>Закрыть</button>
                     ) : (
                     <>
@@ -2254,9 +2255,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         <FaIcon className="fas fa-list-check" style={{ width: 16, height: 16 }} />
                                     </div>
                                     <div className="min-w-0">
-                                        <div className="text-[13.5px] font-semibold text-slate-800">Отдел работает через «Обзвон из телефона»</div>
+                                        <div className="text-[13.5px] font-semibold text-slate-800">Отдел работает через обзвон из телефона</div>
                                         <div className="mt-0.5 text-[12.5px] leading-snug text-slate-500">
-                                            Линию Binotel сотруднику назначают в разделе «Обзвон из телефона», вкладка «Линии».
+                                            Линию Binotel сотруднику назначают в разделе «Удаленный КЦ», вкладка «Линии».
                                             Телефон подключается к АТС сам после входа логином iCORE — вводить здесь ничего не нужно.
                                         </div>
                                         <div className="mt-3">

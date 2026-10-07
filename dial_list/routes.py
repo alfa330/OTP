@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""HTTP раздела «Обзвон из телефона» (Flask Blueprint).
+"""HTTP раздела «Удаленный КЦ» — до 07.10.2026 «Обзвон из телефона» (Flask Blueprint).
 
 Зависимости приходят аргументами фабрики, а не импортом `bot_schedule2`: тот
 сам подключает этот модуль (как op_funnel/routes.py, oktell_guard/routes.py).
@@ -30,6 +30,12 @@
     GET     /api/dial_list/departments                       отделы раздела в моей зоне
     GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
+    GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
+                                                             посадить (candidates — сотрудники других
+                                                             отделов: только главе СЗоВ и суперадмину)
+    POST    /api/dial_list/departments/<id>/lines/assign     {user_id, internal_number}; сотрудника
+                                                             другого отдела — те же двое, иначе 403
+    POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
                                                              ИИН обязателен, после загрузки — проверка подписания
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
@@ -77,9 +83,11 @@ LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
 
 def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               resolve_requester, is_admin_role, headed_department_ids,
-                              service=None):
+                              is_super_admin_role=None, service=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
-    is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int]."""
+    is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
+    is_super_admin_role(role) -> bool — кому, кроме главы СЗоВ, можно сажать на линию
+    сотрудника другого отдела (не передан — суперадминов для раздела нет)."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -99,19 +107,24 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     def _manager(department_id=None):
         """Руководитель раздела и его зона (None — все отделы раздела)."""
-        requester_id, requester, error = resolve_requester()
-        if error:
-            message, status = error
-            raise DialListError(message, status)
+        requester_id, requester = _operator()
         role = requester[3]
         # Логин — восьмое поле строки get_user (u.login); по нему работает пилот.
         login = requester[7] if len(requester) > 7 else None
         scope = svc.manager_scope(bool(is_admin_role(role)), headed_department_ids(requester_id), login=login)
         if scope is not None and not scope:
-            raise DialListError("Раздел «Обзвон из телефона» вам недоступен", 403)
+            raise DialListError("Раздел «Удаленный КЦ» вам недоступен", 403)
         if department_id is not None and scope is not None and int(department_id) not in set(scope):
             raise DialListError("Это не ваш отдел", 403)
-        return int(requester_id), scope
+        return requester_id, scope
+
+    def _seats_anyone():
+        """Может ли запросивший сажать на линию сотрудника ДРУГОГО отдела и снимать
+        его: суперадмин или глава СЗоВ (svc.can_seat_anyone). Зовётся после _manager —
+        сам по себе доступа к разделу не даёт."""
+        requester_id, requester = _operator()
+        is_super = bool(is_super_admin_role and is_super_admin_role(requester[3]))
+        return svc.can_seat_anyone(is_super, headed_department_ids(requester_id))
 
     def _error(exc):
         return jsonify({"error": str(exc)}), exc.status
@@ -249,9 +262,17 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def department_users(department_id):
-        """Сотрудники отдела с линией и персональным включением обзвона."""
+        """Операторы раздела у отдела с линией и персональным включением обзвона.
+
+        former — кто обзванивал базу отдела, но в нынешнем составе его нет (сняли с
+        линии, уволили, перевели): для фильтра журнала, чтобы их звонки можно было
+        отобрать так же, как звонки тех, кто на линии сейчас."""
         _manager(department_id)
-        return jsonify({"status": "success", "users": svc.department_users(department_id)}), 200
+        users = svc.department_users(department_id)
+        return jsonify({
+            "status": "success", "users": users,
+            "former": svc.former_operators(department_id, exclude_ids=[u["id"] for u in users]),
+        }), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/settings', methods=['GET', 'PUT', 'OPTIONS'])
     @require_api_key
@@ -268,7 +289,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_settings(user_id):
-        target = db.get_sip_operator(user_id)
+        # Отдел — тот, по которому человек работает в разделе: у сидящего на линии
+        # другого отдела это отдел ЛИНИИ, и «как у отдела» значит «как у отдела линии».
+        target = svc.dial_operator(user_id)
         if not target:
             raise DialListError("Сотрудник не найден", 404)
         requester_id, _scope = _manager(target.get('department_id'))
@@ -295,13 +318,20 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def lines(department_id):
-        """Линии Binotel компании отдела и сотрудники отдела — для назначения. Без секретов."""
+        """Линии Binotel компании отдела и сотрудники для назначения. Без секретов.
+
+        users — сотрудники отдела и те, кто уже сидит на его линиях. candidates —
+        сотрудники ДРУГИХ отделов для выбора по ФИО: только главе СЗоВ и суперадмину
+        (can_seat_anyone), остальным список пуст, а сервер чужого не посадит."""
         _manager(department_id)
+        anyone = _seats_anyone()
         return jsonify({
             "status": "success",
             "sip_server": svc.department_sip_server(department_id),
             "lines": svc.list_lines(department_id),
             "users": svc.department_users(department_id),
+            "can_seat_anyone": anyone,
+            "candidates": svc.line_candidates(department_id) if anyone else [],
         }), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/lines/assign', methods=['POST', 'OPTIONS'])
@@ -314,7 +344,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             user_id = int(payload.get('user_id'))
         except (TypeError, ValueError):
             raise DialListError("user_id: число")
-        result = svc.assign_line(department_id, user_id, payload.get('internal_number'), changed_by=requester_id)
+        result = svc.assign_line(department_id, user_id, payload.get('internal_number'),
+                                 changed_by=requester_id, seat_anyone=_seats_anyone())
         return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/lines/release', methods=['POST', 'OPTIONS'])
@@ -327,7 +358,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             user_id = int(payload.get('user_id'))
         except (TypeError, ValueError):
             raise DialListError("user_id: число")
-        return jsonify({"status": "success", **svc.release_line(department_id, user_id, changed_by=requester_id)}), 200
+        return jsonify({"status": "success", **svc.release_line(
+            department_id, user_id, changed_by=requester_id, seat_anyone=_seats_anyone())}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/upload', methods=['POST', 'OPTIONS'])
     @require_api_key

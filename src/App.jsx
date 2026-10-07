@@ -313,6 +313,11 @@ const AI_QA_OP_DEPARTMENT_ID = 367;
 // там главная, потому что решает не только видимость кнопки, но и доступ к ссылке.
 // Поедет телефон в другой отдел — добавить id в оба места.
 const ICORE_PHONE_DEPARTMENT_IDS = new Set([367, 560]);
+// Главы этих отделов тоже скачивают программу, хотя сам отдел на телефоне не
+// работает: глава СЗоВ сажает людей на линии удалённого КЦ (раздел «Удаленный КЦ»)
+// и раздаёт им телефон — решение владельца 07.10.2026. Сотрудникам СЗоВ кнопка не
+// положена. Та же константа на бэкенде — ICORE_PHONE_HEAD_DEPARTMENT_CODES.
+const ICORE_PHONE_HEAD_DEPARTMENT_CODES = new Set(['szov']);
 // Отделы, которые ОЦЕНИВАЕТ раздел «ИИ-оценка»: у каждого свои направления,
 // своя телефония и свой источник переписки. Та же константа на бэкенде
 // (AI_QA_SUBJECT_DEPARTMENT_CODES в bot_schedule2.py -> call_qa.config).
@@ -379,7 +384,8 @@ const SIP_SETTINGS_DEPARTMENT_CODES = new Set(['szov', 'op', 'tez']);
 // держится доступ к разделу в целом.
 const SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES = new Set(['szov', 'op']);
 const SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES = new Set(['tez']);
-// Отдел удалённого колл-центра — раздел «Обзвон из телефона». Код тот же, что в
+// Отдел удалённого колл-центра — раздел «Удаленный КЦ» (до 07.10.2026 он назывался
+// «Обзвон из телефона»; ключ раздела прежний — dial_list). Код тот же, что в
 // dial_list/service.py (DIAL_LIST_DEPARTMENT_CODES); отдел заводится отдельно и
 // к ТЭЗ КЦ не относится.
 const DIAL_LIST_DEPARTMENT_CODES = new Set(['remote_cc']);
@@ -433,7 +439,8 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   baiga — BAIGA_SECTION_DEPARTMENT_CODES;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
- *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
+ *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ), отдел
+ *   удалённого КЦ и СЗоВ, чей глава раздаёт программу (canDownloadIcorePhone);
  *   работа с линией (графики, часы, оценки, шкала, зарплата) — по
  *   DEPARTMENT_VIEW_ALLOWLIST: у бэк-офиса и маркетинга ни смен, ни часов,
  *   ни оценок нет.
@@ -487,7 +494,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
        общефирменным и виден при ЛЮБОМ выбранном отделе. */
     fleet_edm: [],
     driver_mailings: [],
-    download_icore_phone: ['op', 'tez'],
+    download_icore_phone: ['op', 'tez', 'remote_cc', 'szov'],
     // Раздел удалённого колл-центра (DIAL_LIST_DEPARTMENT_CODES выше). Ограничений
     // по разделам у отдела нет, поэтому в DEPARTMENT_VIEW_ALLOWLIST его код не значится.
     dial_list: ['remote_cc'],
@@ -42743,7 +42750,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 || isSipSettingsFleetSupervisor(user);
             const canAccessSipSettingsTez = isAdminLikeRole
                 || isSipSettingsTezDepartmentHead(user);
-            // «Обзвон из телефона» — раздел удалённого колл-центра (отдельный отдел,
+            // «Удаленный КЦ» — раздел удалённого колл-центра (отдельный отдел,
             // к Тез не относится): админы и глава отдела с кодом из
             // DIAL_LIST_DEPARTMENT_CODES. Периметр отделов и права на бэкенде
             // считает сам раздел (dial_list.service.manager_scope).
@@ -42764,9 +42771,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
             const canDownloadIcorePhone = isAdminLikeRole
                 || ICORE_PHONE_DEPARTMENT_IDS.has(Number(user?.department_id ?? user?.departmentId))
-                // Отдел удалённого колл-центра («Обзвон из телефона») работает на том же
+                // Отдел удалённого колл-центра (раздел «Удаленный КЦ») работает на том же
                 // телефоне; решающая проверка — на сервере (_can_download_icore_phone).
-                || DIAL_LIST_DEPARTMENT_CODES.has(normalizeDepartmentCode(user?.department_code ?? user?.departmentCode));
+                || DIAL_LIST_DEPARTMENT_CODES.has(normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))
+                // Глава СЗоВ: сажает людей на линии удалённого КЦ и раздаёт им программу.
+                || (isDepartmentHead(user)
+                    && aiQaHeadDepartmentCodesOf(user).some((code) => ICORE_PHONE_HEAD_DEPARTMENT_CODES.has(code)))
+                // Сотрудник любого отдела, которого посадили на линию во вкладке «Линии»
+                // раздела «Удаленный КЦ»: флаг считает сервер и отдаёт с профилем.
+                || user?.dial_list_line_member === true;
             // «Ограничитель Перезвона»: глобальные админы, глава СЗоВ и СВ СЗоВ.
             // Глава чужого отдела не проходит — назначение главой заменяет базовую
             // роль и режет периметр отделом, ровно как у табло СЗоВ. СВ раздел
@@ -52296,7 +52309,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings'
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
-                // «Обзвон из телефона» — раздел отделов на Binotel, вне allowlist отдела.
+                // «Удаленный КЦ» — раздел отделов на Binotel, вне allowlist отдела.
                 if (view === 'dial_list' && canAccessDialListSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
@@ -54728,7 +54741,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onClick={(e) => handleSidebarViewNavigation(e, 'dial_list')}
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Обзвон из телефона</span>
+                                                            <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -54813,7 +54826,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'dial_list')}
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
                                                 >
-                                                    <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Обзвон из телефона</span>
+                                                    <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
                                                 </button>
                                             </li>
                                             )}
@@ -57334,7 +57347,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {/* Обзвон из телефона: раздел удалённого колл-центра — сводка по
+                        {/* «Удаленный КЦ»: раздел удалённого колл-центра — сводка по
                             операторам, база водителей и настройки отдела. Свой круг доступа. */}
                         {( view === "dial_list" && canAccessDialListSection && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>

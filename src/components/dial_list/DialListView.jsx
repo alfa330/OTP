@@ -10,9 +10,11 @@ import DialListAnalytics from './DialListAnalytics';
 import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
 import { monthLabel } from './dialListPeriods';
+import { sameSectionTitle } from './linePicker';
 
 /*
- * Раздел «Обзвон из телефона» — экран руководителя удалённого колл-центра.
+ * Раздел «Удаленный КЦ» (до 07.10.2026 — «Обзвон из телефона») — экран руководителя
+ * удалённого колл-центра.
  *
  * Вкладки: «Операторы» (кто сколько сделал за день), «Аналитика» (показатели базы
  * месяца: воронка, подписание документов, дни, операторы), «Линии», «База
@@ -72,6 +74,11 @@ const writeLastDept = (id) => { try { if (id) window.localStorage.setItem(LAST_D
 
 const initials = (name) => String(name || '')
     .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '•';
+
+// Название раздела. С 07.10.2026 оно совпадает с названием самого отдела удалённого
+// КЦ, поэтому плашка единственного отдела в шапке показывается, только когда имя
+// отдела другое (sameSectionTitle): иначе в одной строке дважды стояло бы «Удаленный КЦ».
+const SECTION_TITLE = 'Удаленный КЦ';
 
 /* Строка оператора: имя, полоса «обработано из выданных», цифры справа. */
 const OperatorRow = ({ row, showDepartment }) => {
@@ -269,7 +276,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         </div>
                         <div>
                             <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
-                                Обзвон из телефона
+                                {SECTION_TITLE}
                                 <IosHint text="Оператор видит в iCORE Phone только ФИО и кнопку «Позвонить». Звонок инициирует сервер через Binotel API, номер водителя телефону не передаётся. Исход каждого звонка подтверждает Binotel, а не телефон." />
                             </div>
                             <div className="text-[12.5px] text-slate-500">{subtitle}</div>
@@ -298,7 +305,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                 }))}
                             />
                         )}
-                        {departments && departments.length === 1 && (
+                        {departments && departments.length === 1 && !sameSectionTitle(selected?.department_name, SECTION_TITLE) && (
                             <span className="rounded-xl bg-slate-100 px-3 py-2 text-[13px] font-medium text-slate-700">{selected?.department_name}</span>
                         )}
                     </div>
@@ -417,10 +424,14 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     )}
 
                     {tab === 'lines' && (
+                        /* key: открытый выбор «Кому» — состояние панели, и при смене отдела
+                           оно не должно уехать в запрос к линиям другого отдела. */
                         <DialListLinesPanel
+                            key={selected.department_id}
                             apiBaseUrl={apiBaseUrl}
                             authHeaders={authHeaders}
                             departmentId={selected.department_id}
+                            departmentName={selected.department_name}
                             canEdit={canEdit}
                             showToast={showToast}
                         />

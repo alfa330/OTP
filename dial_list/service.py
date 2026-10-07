@@ -27,6 +27,7 @@
 меньше max_attempts. Так оператор не обязан звонить одному водителю трижды
 подряд, а следующая порция выдаётся ровно когда текущая закрыта.
 """
+import contextlib
 import json
 import logging
 import os
@@ -175,6 +176,17 @@ DIAL_LIST_PILOT_LOGINS = frozenset()
 # Главы этих отделов видят весь раздел, как админы: удалённый КЦ работает под
 # крылом СЗоВ (решение владельца 25.09.2026). Код отдела — в карточке отдела.
 DIAL_LIST_OVERSEER_DEPARTMENT_CODES = frozenset({"szov"})
+
+# Кто сажает на линию сотрудника ДРУГОГО отдела и снимает его с неё (решение
+# владельца 07.10.2026: «добавлять на линию любого сотрудника по ФИО, доступ у главы
+# отдела СЗоВ и у суперадминов»): суперадмины и главы этих отделов. Остальные
+# руководители раздела выбирают только из сотрудников отдела линии. Свой список, а
+# не DIAL_LIST_OVERSEER_DEPARTMENT_CODES: новый отдел-куратор не должен получить
+# это молча, заодно с доступом к разделу.
+DIAL_LIST_SEAT_ANYONE_HEAD_CODES = frozenset({"szov"})
+SEAT_ANYONE_DENIED = "Сотрудника другого отдела сажают на линию и снимают с неё глава СЗоВ и суперадмины"
+# «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
+MEMBER_NOT_GIVEN = object()
 
 
 def pilot_allows(login):
@@ -482,12 +494,214 @@ class DialListService:
 
     def _heads_overseer(self, department_ids):
         """Возглавляет ли человек отдел-куратор раздела (код из DIAL_LIST_OVERSEER_DEPARTMENT_CODES)."""
-        if not department_ids or not DIAL_LIST_OVERSEER_DEPARTMENT_CODES:
+        return self._heads_department_with_code(department_ids, DIAL_LIST_OVERSEER_DEPARTMENT_CODES)
+
+    def _heads_department_with_code(self, department_ids, codes):
+        """Есть ли среди возглавляемых отделов отдел с кодом из `codes`."""
+        if not department_ids or not codes:
             return False
         with self.db._get_cursor() as cur:
             cur.execute("SELECT LOWER(COALESCE(code, '')) FROM departments WHERE id = ANY(%s)",
                         ([int(x) for x in department_ids],))
-            return any((r[0] or "") in DIAL_LIST_OVERSEER_DEPARTMENT_CODES for r in cur.fetchall())
+            return any((r[0] or "") in codes for r in cur.fetchall())
+
+    def can_seat_anyone(self, is_super_admin, headed_department_ids):
+        """Можно ли запросившему сажать на линию сотрудника ДРУГОГО отдела и снимать
+        его с неё: суперадмин либо глава отдела из DIAL_LIST_SEAT_ANYONE_HEAD_CODES
+        (СЗоВ). Роль «админ» сама по себе этого не даёт — решение владельца 07.10.2026."""
+        if is_super_admin:
+            return True
+        headed = sorted({int(x) for x in (headed_department_ids or [])})
+        return self._heads_department_with_code(headed, DIAL_LIST_SEAT_ANYONE_HEAD_CODES)
+
+    # ------------------------------------------------------------ сотрудник другого отдела на линии
+    # Линия — ресурс отдела удалённого КЦ, а сидеть на ней может сотрудник любого
+    # отдела. Своему сотруднику отдела учётка линии пишется в его же SIP-настройки,
+    # как раньше. Чужому так нельзя: в users.sip_number и user_sip_settings у него
+    # лежит телефония его отдела (у СЗоВ это логин Oktell — по нему работают табло и
+    # «Ограничитель»; у отдела продаж — номер локальной АТС), и перезапись сломала бы
+    # ему основную работу. Его привязка живёт в dial_list_line_members. Пока она
+    # действует, раздел и телефон считают его сотрудником отдела ЛИНИИ: та же база,
+    # те же итоги и скрипт, тот же счёт показателей, что у сотрудников удалённого КЦ.
+
+    _LINE_MEMBER_SQL = """
+        SELECT m.user_id, m.department_id, m.internal_number, m.sip_login, m.sip_password,
+               COALESCE(dc.provider, 'asterisk'), COALESCE(dc.sip_server, ''),
+               dc.auto_answer, dc.auto_answer_delay
+        FROM dial_list_line_members m
+        LEFT JOIN sip_department_config dc ON dc.department_id = m.department_id
+        WHERE m.user_id = %s AND m.released_at IS NULL
+    """
+
+    def line_member(self, user_id):
+        """Действующая привязка сотрудника к линии другого отдела или None.
+
+        Учётка линии отсюда уходит только телефону самого сотрудника
+        (/api/operator/sip_settings); в ручки руководителя она не попадает."""
+        with self.db._get_cursor() as cur:
+            cur.execute(self._LINE_MEMBER_SQL, (int(user_id),))
+            r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "user_id": int(r[0]), "department_id": int(r[1]),
+            "internal_number": (r[2] or "").strip(),
+            "sip_login": r[3] or "", "sip_password": r[4] or "",
+            "provider": r[5] or "asterisk", "sip_server": (r[6] or "").strip(),
+            # Ярус автоприёма отдела ЛИНИИ; None — отдел его не задавал.
+            "auto_answer": None if r[7] is None else bool(r[7]),
+            "auto_answer_delay": None if r[8] is None else int(r[8]),
+        }
+
+    def dial_operator(self, user_id, operator=None, member=MEMBER_NOT_GIVEN):
+        """SIP-карточка сотрудника глазами раздела (или None, если человека нет).
+
+        Сидящему на линии другого отдела подставляются отдел, провайдер и номер
+        ЛИНИИ — дальше все правила раздела (включён ли режим, база, итоги, запросы
+        в Binotel) работают для него так же, как для сотрудника этого отдела.
+        member — уже прочитанная привязка (line_member), чтобы не читать её дважды."""
+        operator = operator or self.db.get_sip_operator(int(user_id))
+        if not operator:
+            return None
+        if member is MEMBER_NOT_GIVEN:
+            member = self.line_member(user_id)
+        if not member:
+            return operator
+        return dict(operator, department_id=member["department_id"],
+                    department_provider=member["provider"],
+                    sip_number=member["internal_number"], line_member=True)
+
+    def _department_provider(self, department_id):
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT COALESCE(provider, 'asterisk') FROM sip_department_config WHERE department_id = %s",
+                        (int(department_id),))
+            row = cur.fetchone()
+        return (row[0] if row else "") or "asterisk"
+
+    def _inactive_statuses(self):
+        """Статусы «не работает» — те же, что у панели SIP и department_users."""
+        return [str(s).lower() for s in getattr(self.db, "_SIP_INACTIVE_STATUSES", ("fired",))]
+
+    def _release_member(self, cur, user_id, changed_by=None):
+        """Снять действующую привязку человека к линии. Строка остаётся как история,
+        пароль линии стирается. Возвращает номер линии или ''."""
+        cur.execute("""
+            UPDATE dial_list_line_members
+            SET released_at = CURRENT_TIMESTAMP, released_by = %s, sip_password = ''
+            WHERE user_id = %s AND released_at IS NULL
+            RETURNING internal_number
+        """, (changed_by, int(user_id)))
+        row = cur.fetchone()
+        return (row[0] or "") if row else ""
+
+    def _unseat_member(self, user_id, changed_by=None):
+        with self.db._get_cursor() as cur:
+            return self._release_member(cur, user_id, changed_by)
+
+    def _release_dead_holders(self, cur, department_id, internal_number, changed_by=None):
+        """Закрыть привязки УВОЛЕННЫХ к этой линии: человек её уже не держит, а
+        действующая строка не дала бы посадить другого и вернула бы его на линию,
+        если его восстановят. Привязку работающего сотрудника не трогает."""
+        cur.execute("""
+            UPDATE dial_list_line_members m
+            SET released_at = CURRENT_TIMESTAMP, released_by = %s, sip_password = ''
+            FROM users u
+            WHERE u.id = m.user_id AND m.department_id = %s AND m.internal_number = %s
+              AND m.released_at IS NULL
+              AND LOWER(COALESCE(u.status, '')) = ANY(%s)
+        """, (changed_by, int(department_id), internal_number, self._inactive_statuses()))
+
+    def _seat_member(self, cur, department_id, user_id, internal_number, login, password, changed_by=None):
+        """Посадить сотрудника другого отдела на линию — в транзакции вызывающего:
+        прежняя его привязка снимается (один человек — одна линия), привязка
+        УВОЛЕННОГО к этой же линии — тоже, и заводится новая."""
+        self._release_member(cur, user_id, changed_by)
+        self._release_dead_holders(cur, department_id, internal_number, changed_by)
+        cur.execute("""
+            INSERT INTO dial_list_line_members
+                (user_id, department_id, internal_number, sip_login, sip_password, assigned_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (int(user_id), int(department_id), internal_number, login, password, changed_by))
+
+    @staticmethod
+    def _seat_conflict(exc, internal_number):
+        """Гонка двух руководителей, которую отсёк уникальный индекс: какой из двух
+        индексов сработал, тот и говорит, что именно произошло."""
+        constraint = getattr(getattr(exc, "diag", None), "constraint_name", "") or ""
+        if constraint == "uq_dial_list_line_members_user":
+            return DialListError("Сотрудника только что посадили на другую линию — обновите список", 409)
+        return DialListError(f"Линию {internal_number} только что заняли — обновите список", 409)
+
+    @contextlib.contextmanager
+    def _line_lock(self, department_id, internal_number):
+        """Одна посадка на линию за раз. Занятость линии лежит в двух местах — в
+        SIP-настройках своего сотрудника и в привязке чужого, — и без замка два
+        руководителя, одновременно сажающие на одну линию своего и чужого, прошли бы
+        обе проверки. Замок живёт до конца транзакции этого курсора."""
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                        (f"dial_list_line:{int(department_id)}:{internal_number}",))
+            yield cur
+
+    def _line_holder(self, cur, department_id, internal_number, exclude_user_id=None):
+        """Кто сейчас держит линию отдела (кроме exclude_user_id): {'id', 'name'} или None.
+
+        Держит её либо сотрудник любого отдела с действующей привязкой к этой линии,
+        либо свой сотрудник отдела, у которого она записана в SIP-настройках. Второй
+        считается, даже если его самого посадили на линию ДРУГОГО отдела: учётка этой
+        линии по-прежнему в его настройках, и после снятия там он вернётся на неё.
+        Уволенные линию не держат."""
+        department_id = int(department_id)
+        cur.execute("""
+            SELECT u.id, u.name
+            FROM users u
+            LEFT JOIN dial_list_line_members m ON m.user_id = u.id AND m.released_at IS NULL
+            WHERE u.id <> %s
+              AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
+              AND ((m.department_id = %s AND m.internal_number = %s)
+                   OR (u.department_id = %s AND TRIM(COALESCE(u.sip_number, '')) = %s
+                       AND (m.user_id IS NULL OR m.department_id <> %s)))
+            ORDER BY u.name
+            LIMIT 1
+        """, (int(exclude_user_id or 0), self._inactive_statuses(), department_id, internal_number,
+              department_id, internal_number, department_id))
+        row = cur.fetchone()
+        return {"id": row[0], "name": row[1] or ""} if row else None
+
+    def former_operators(self, department_id, exclude_ids=()):
+        """Кто обзванивал базу отдела, но в нынешнем составе раздела его нет: снятый с
+        линии сотрудник другого отдела, уволенный, переведённый. Нужны фильтру журнала:
+        их звонки в показателях остаются, и отобрать по ним водителей должно быть можно
+        так же, как по тем, кто на линии сейчас."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT u.id, u.name, COALESCE(u.login, '')
+                FROM dial_list_portions p
+                JOIN users u ON u.id = p.operator_id
+                WHERE p.department_id = %s AND u.id <> ALL(%s)
+                ORDER BY u.name
+            """, (int(department_id), [int(x) for x in exclude_ids]))
+            return [{"id": r[0], "name": r[1] or "", "login": r[2]} for r in cur.fetchall()]
+
+    def line_candidates(self, department_id):
+        """Кого ещё можно посадить на линию отдела: действующие сотрудники ДРУГИХ
+        отделов, которые на его линиях пока не сидят. Только ФИО, логин и отдел —
+        для выбора по ФИО; отдаётся тем, кому это разрешено (can_seat_anyone)."""
+        inactive = self._inactive_statuses()
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT u.id, u.name, COALESCE(u.login, ''), COALESCE(dep.name, '')
+                FROM users u
+                LEFT JOIN departments dep ON dep.id = u.department_id
+                LEFT JOIN dial_list_line_members m
+                       ON m.user_id = u.id AND m.released_at IS NULL AND m.department_id = %s
+                WHERE u.department_id IS DISTINCT FROM %s
+                  AND m.user_id IS NULL
+                  AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
+                ORDER BY dep.name NULLS LAST, u.name
+            """, (int(department_id), int(department_id), inactive))
+            return [{"id": r[0], "name": r[1] or "", "login": r[2], "department_name": r[3]}
+                    for r in cur.fetchall()]
 
     # ------------------------------------------------------------ линии Binotel
     # Официальный API компании отдаёт по каждой внутренней линии SIP-логин и
@@ -546,25 +760,38 @@ class DialListService:
         return "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите"
 
     def department_users(self, department_id):
-        """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером и
-        персональным включением обзвона (None — как у отдела)."""
+        """Операторы раздела у отдела: его сотрудники (все роли: тест ведёт и сам
+        владелец) и сотрудники других отделов, посаженные на его линии. У каждого —
+        линия (sip_number) и персональное включение обзвона (None — как у отдела).
+        guest — человек из другого отдела, тогда department_name — его отдел."""
         # «Работает ли человек» в iCORE — это users.status ('working' / 'fired' / …),
         # а не is_active: тот у большинства живых сотрудников FALSE (так пропал из
         # списка первый же тест-оператор). Список уволенных — тот же, что у панели SIP.
         inactive = list(getattr(self.db, "_SIP_INACTIVE_STATUSES", ("fired",)))
+        department_id = int(department_id)
         with self.db._get_cursor() as cur:
+            # Линия посаженного — из его привязки, а не users.sip_number: там номер
+            # телефонии его собственного отдела. Свой сотрудник отдела, которого
+            # посадили на линию ДРУГОГО отдела, из этого списка уходит — работает он там.
             cur.execute("""
                 SELECT u.id, u.name, COALESCE(u.login, ''), COALESCE(u.role, ''),
-                       COALESCE(u.sip_number, ''), COALESCE(u.status, ''), ds.enabled
+                       COALESCE(m.internal_number, u.sip_number, ''), COALESCE(u.status, ''), ds.enabled,
+                       (m.user_id IS NOT NULL AND u.department_id IS DISTINCT FROM m.department_id),
+                       COALESCE(dep.name, '')
                 FROM users u
+                LEFT JOIN dial_list_line_members m ON m.user_id = u.id AND m.released_at IS NULL
+                LEFT JOIN departments dep ON dep.id = u.department_id
                 LEFT JOIN dial_list_user_settings ds ON ds.user_id = u.id
-                WHERE u.department_id = %s
-                  AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
+                WHERE LOWER(COALESCE(u.status, '')) <> ALL(%s)
+                  AND ((u.department_id = %s AND (m.user_id IS NULL OR m.department_id = %s))
+                       OR m.department_id = %s)
                 ORDER BY u.name
-            """, (int(department_id), inactive))
+            """, (inactive, department_id, department_id, department_id))
             return [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
                      "sip_number": (r[4] or "").strip(), "status": r[5],
-                     "dial_list_enabled": None if r[6] is None else bool(r[6])} for r in cur.fetchall()]
+                     "dial_list_enabled": None if r[6] is None else bool(r[6]),
+                     "guest": bool(r[7]), "department_name": (r[8] or "") if r[7] else ""}
+                    for r in cur.fetchall()]
 
     def unenroll_department(self, department_id):
         """Отключить отдел от раздела. Только пока по нему нет выдач и базы: иначе
@@ -613,7 +840,10 @@ class DialListService:
                 "binotel_employee": {"employee_id": emp_id, "name": rec.get("name") or "",
                                      "email": rec.get("email") or "",
                                      "presence": rec.get("presenceState") or ""} if linked else None,
-                "icore_user": {"id": holder["id"], "name": holder["name"], "login": holder["login"]} if holder else None,
+                # guest — сотрудник другого отдела; его отдел идёт подписью к имени.
+                "icore_user": {"id": holder["id"], "name": holder["name"], "login": holder["login"],
+                               "guest": bool(holder.get("guest")),
+                               "department_name": holder.get("department_name") or ""} if holder else None,
             })
         lines.sort(key=lambda x: (len(x["internal_number"]), x["internal_number"]))
         return lines
@@ -625,18 +855,38 @@ class DialListService:
             row = cur.fetchone()
         return (row[0] or "").strip() if row else ""
 
-    def assign_line(self, department_id, user_id, internal_number, changed_by=None):
-        """Посадить сотрудника отдела на линию: SIP-логин/пароль линии → его SIP-настройки."""
+    def assign_line(self, department_id, user_id, internal_number, changed_by=None, seat_anyone=False):
+        """Посадить сотрудника на линию отдела.
+
+        Свой сотрудник отдела: SIP-логин/пароль линии → его SIP-настройки. Сотрудник
+        другого отдела — только при seat_anyone (право считает can_seat_anyone): учётка
+        линии → dial_list_line_members, его собственные SIP-настройки не меняются."""
         department_id = int(department_id)
+        user_id = int(user_id)
         internal_number = str(internal_number or "").strip()
         if not internal_number:
             raise DialListError("Укажите внутренний номер линии")
-        operator = self.db.get_sip_operator(int(user_id))
+        operator = self.db.get_sip_operator(user_id)
         if not operator:
             raise DialListError("Сотрудник не найден", 404)
-        if operator.get("department_id") != department_id:
-            raise DialListError("Сотрудник из другого отдела", 400)
-        if (operator.get("department_provider") or "asterisk") != "binotel":
+        own = operator.get("department_id") == department_id
+        # Свой сотрудник отдела может сейчас сидеть на линии ДРУГОГО отдела как чужой.
+        # Посадка здесь снимет его оттуда (один человек — одна линия), а снимать чужих
+        # вправе не каждый руководитель раздела: без этой проверки право обходилось
+        # назначением линии человеку в его же собственном отделе.
+        member = self.line_member(user_id)
+        seated_elsewhere = bool(member) and member["department_id"] != department_id
+        if (not own or seated_elsewhere) and not seat_anyone:
+            raise DialListError(SEAT_ANYONE_DENIED, 403)
+        if str(operator.get("status") or "").strip().lower() in self._inactive_statuses():
+            raise DialListError("Сотрудник уволен — на линию его не посадить", 409)
+        # Чужого сажают только на линии отделов раздела: иначе привязка легла бы к
+        # отделу, которого в разделе нет, — её там не увидеть и не снять.
+        if not own and not self.list_departments([department_id]):
+            raise DialListError("Отдел не подключён к разделу «Удаленный КЦ»", 404)
+        # Провайдер — у отдела ЛИНИИ: у чужого сотрудника в карточке провайдер его отдела.
+        provider = operator.get("department_provider") if own else self._department_provider(department_id)
+        if (provider or "asterisk") != "binotel":
             raise DialListError("Телефония отдела не Binotel: переключите провайдера отдела в «Настройках SIP»", 409)
         endpoint = None
         for rec in self._binotel_employees(department_id):
@@ -650,34 +900,61 @@ class DialListService:
         password = str(endpoint.get("password") or "")
         if not login or not password:
             raise DialListError(f"Binotel не отдал SIP-учётку линии {internal_number}", 502)
-        for u in self.department_users(department_id):
-            if u["sip_number"] == internal_number and u["id"] != int(user_id):
-                raise DialListError(f"Линия {internal_number} уже у сотрудника {u['name']}", 409)
         try:
-            self.db.save_user_sip_settings(int(user_id), {
-                "sip_number": internal_number,
-                "sip_login": login,
-                "sip_password": password,
-            }, changed_by=changed_by)
-        except ValueError as exc:
-            raise DialListError(str(exc), 400)
-        log.info("dial_list: сотруднику %s назначена линия Binotel %s (отдел %s)", user_id, internal_number, department_id)
+            # Проверка занятости и запись — под одним замком линии (см. _line_lock).
+            with self._line_lock(department_id, internal_number) as cur:
+                holder = self._line_holder(cur, department_id, internal_number, exclude_user_id=user_id)
+                if holder:
+                    raise DialListError(f"Линия {internal_number} уже у сотрудника {holder['name']}", 409)
+                if own:
+                    try:
+                        self.db.save_user_sip_settings(user_id, {
+                            "sip_number": internal_number,
+                            "sip_login": login,
+                            "sip_password": password,
+                        }, changed_by=changed_by)
+                    except ValueError as exc:
+                        raise DialListError(str(exc), 400)
+                    # Только после удачной записи: отказ в ней не должен оставить человека
+                    # без линии. Его привязка «как чужого» сильнее SIP-настроек и держала
+                    # бы его на прежней линии; привязка уволенного к этой — мёртвый груз.
+                    self._release_member(cur, user_id, changed_by)
+                    self._release_dead_holders(cur, department_id, internal_number, changed_by)
+                else:
+                    self._seat_member(cur, department_id, user_id, internal_number, login, password, changed_by)
+        except psycopg2.errors.UniqueViolation as exc:
+            raise self._seat_conflict(exc, internal_number)
+        log.info("dial_list: сотруднику %s назначена линия Binotel %s (отдел %s%s, назначил %s)", user_id,
+                 internal_number, department_id, "" if own else ", сотрудник другого отдела", changed_by)
         return {
-            "user_id": int(user_id), "internal_number": internal_number,
+            "user_id": user_id, "internal_number": internal_number,
             "sip_server": self.department_sip_server(department_id),
+            "guest": not own,
         }
 
-    def release_line(self, department_id, user_id, changed_by=None):
-        """Снять сотрудника с линии: очистить его SIP-настройки."""
-        operator = self.db.get_sip_operator(int(user_id))
-        if not operator or operator.get("department_id") != int(department_id):
+    def release_line(self, department_id, user_id, changed_by=None, seat_anyone=False):
+        """Снять сотрудника с линии отдела. Свой сотрудник — очистить его SIP-настройки.
+        Сотрудник другого отдела (только при seat_anyone) — снять привязку к линии:
+        его собственные SIP-настройки при этом как были, так и остаются."""
+        department_id = int(department_id)
+        user_id = int(user_id)
+        operator = self.db.get_sip_operator(user_id)
+        member = self.line_member(user_id) if operator else None
+        if member and member["department_id"] == department_id:
+            if operator.get("department_id") != department_id and not seat_anyone:
+                raise DialListError(SEAT_ANYONE_DENIED, 403)
+            self._unseat_member(user_id, changed_by)
+            log.info("dial_list: сотрудник %s снят с линии Binotel %s (отдел %s, снял %s)", user_id,
+                     member["internal_number"], department_id, changed_by)
+            return {"user_id": user_id, "internal_number": ""}
+        if not operator or operator.get("department_id") != department_id:
             raise DialListError("Сотрудник не найден в этом отделе", 404)
         try:
-            self.db.save_user_sip_settings(int(user_id), {"sip_number": "", "sip_login": "", "sip_password": ""},
+            self.db.save_user_sip_settings(user_id, {"sip_number": "", "sip_login": "", "sip_password": ""},
                                            changed_by=changed_by)
         except ValueError as exc:
             raise DialListError(str(exc), 400)
-        return {"user_id": int(user_id), "internal_number": ""}
+        return {"user_id": user_id, "internal_number": ""}
 
     # ------------------------------------------------------------ настройки
     def department_settings(self, department_id):
@@ -795,12 +1072,13 @@ class DialListService:
                 """, (int(user_id), bool(enabled), changed_by))
         return {"user_id": int(user_id), "enabled": enabled}
 
-    def phone_settings(self, user_id, operator=None):
+    def phone_settings(self, user_id, operator=None, member=MEMBER_NOT_GIVEN):
         """Блок `dial_list` для GET /api/operator/sip_settings.
 
         Режим имеет смысл только у Binotel: звонок инициирует АТС по API. У
-        локальной АТС такого API нет, и телефон не должен показывать вкладку."""
-        operator = operator or self.db.get_sip_operator(int(user_id)) or {}
+        локальной АТС такого API нет, и телефон не должен показывать вкладку.
+        Сидящий на линии другого отдела получает настройки отдела ЛИНИИ (dial_operator)."""
+        operator = self.dial_operator(user_id, operator, member=member) or {}
         department_id = operator.get("department_id")
         provider = operator.get("department_provider") or "asterisk"
         if provider != "binotel" or department_id is None:
@@ -1949,8 +2227,9 @@ class DialListService:
 
     # ------------------------------------------------------------ оператор
     def operator_context(self, user_id):
-        """Кто звонит: отдел, внутренний номер, включён ли режим. DialListError, если нельзя."""
-        operator = self.db.get_sip_operator(int(user_id))
+        """Кто звонит: отдел, внутренний номер, включён ли режим. DialListError, если нельзя.
+        У сидящего на линии другого отдела отдел и номер — ЛИНИИ (dial_operator)."""
+        operator = self.dial_operator(user_id)
         if not operator:
             raise DialListError("Сотрудник не найден", 404)
         if (operator.get("department_provider") or "asterisk") != "binotel":
@@ -3046,11 +3325,14 @@ class DialListService:
         """Сводка за день по операторам: сколько строк выдано/обработано, попыток,
         дозвонов, секунд разговора, успешек (водитель подписал в этот день и
         подпись засчитана оператору). department_ids=None — все отделы."""
-        params = [day, day, day]
-        dept_filter = ""
+        params = {"day": day}
+        # Отбор — по отделу БАЗЫ, которую обзванивали, а не по отделу человека: на линии
+        # отдела может сидеть сотрудник другого отдела, и его звонки — показатели отдела
+        # линии. Отбор по users.department_id такого оператора из сводки терял.
+        lead_filter = ""
         if department_ids is not None:
-            dept_filter = "AND u.department_id = ANY(%s)"
-            params.append([int(d) for d in department_ids])
+            lead_filter = "AND l.department_id = ANY(%(departments)s)"
+            params["departments"] = [int(d) for d in department_ids]
         with self.db._get_cursor() as cur:
             cur.execute(f"""
                 WITH att AS (
@@ -3062,20 +3344,23 @@ class DialListService:
                            COUNT(*) FILTER (WHERE t.state = 'failed') AS failed,
                            COUNT(*) FILTER (WHERE t.cancelled) AS cancelled
                     FROM dial_list_attempts t
-                    WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %s
+                    JOIN dial_list_assignments a ON a.id = t.assignment_id
+                    JOIN dial_list_leads l ON l.id = a.lead_id
+                    WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
                     GROUP BY t.operator_id
                 ), asg AS (
                     SELECT a.operator_id,
                            COUNT(*) AS issued,
                            COUNT(*) FILTER (WHERE a.state = 'done') AS done
                     FROM dial_list_assignments a
-                    WHERE (a.created_at AT TIME ZONE 'Asia/Almaty')::date = %s
+                    JOIN dial_list_leads l ON l.id = a.lead_id
+                    WHERE (a.created_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
                     GROUP BY a.operator_id
                 ), suc AS (
                     SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
                     FROM dial_list_leads l
                     WHERE l.success_attempt_id IS NOT NULL
-                      AND (l.signed_at AT TIME ZONE 'Asia/Almaty')::date = %s
+                      AND (l.signed_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
                     GROUP BY l.success_operator_id
                 )
                 SELECT u.id, u.name, u.department_id, dep.name,
@@ -3089,7 +3374,7 @@ class DialListService:
                 LEFT JOIN asg ON asg.operator_id = u.id
                 LEFT JOIN suc ON suc.operator_id = u.id
                 WHERE (att.operator_id IS NOT NULL OR asg.operator_id IS NOT NULL
-                       OR suc.operator_id IS NOT NULL) {dept_filter}
+                       OR suc.operator_id IS NOT NULL)
                 ORDER BY dep.name NULLS LAST, u.name
             """, params)
             rows = [{

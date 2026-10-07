@@ -12,6 +12,7 @@ import { OutcomeBadge } from './DialListOutcomesPanel';
 import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
+import { operatorsForFilter } from './linePicker';
 
 /*
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
@@ -1095,7 +1096,9 @@ const DialListJournal = ({
                 const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/users`, { credentials: 'include', headers: authHeaders() });
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-                if (!cancelled) setUsers(Array.isArray(data.users) ? data.users : []);
+                // former — кто обзванивал базу, но в нынешнем составе раздела его нет
+                // (сняли с линии, уволили): отбор по ним обязан работать так же.
+                if (!cancelled) setUsers(operatorsForFilter(data));
             } catch {
                 if (!cancelled) setUsers([]);
             }
@@ -1276,7 +1279,9 @@ const DialListJournal = ({
 
     const operatorOptions = useMemo(() => [
         { value: '', label: 'Все операторы' },
-        ...users.map((u) => ({ value: String(u.id), label: u.name || u.login || `#${u.id}` })),
+        ...users.map((u) => ({
+            value: String(u.id), label: u.name || u.login || `#${u.id}`, ...(u.former ? { muted: true } : {}),
+        })),
     ], [users]);
 
     const batchOptions = useMemo(() => [
