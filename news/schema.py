@@ -518,6 +518,14 @@ _STATEMENTS = [
     # счёт с нуля дарил бы оператору новые три минуты за каждый перезапуск.
     "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS read_spent_seconds INTEGER;",
     "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS quiz_spent_seconds INTEGER;",
+    # ── ОКНА OKTELL ПО ЧЕЛОВЕКУ И ДНЮ (задача #382) ─────────────────────────
+    #
+    # «Графики работы» спрашивают, какие объявления показывались оператору в
+    # этот день (queries.oktell_windows), — по человеку и времени показа. Ключ
+    # таблицы начинается с news_id, а idx_news_reads_user частичный и держит
+    # только неподтверждённые: без этого индекса запрос перебирал бы журнал
+    # всех объявлений портала на каждое открытие дня.
+    "CREATE INDEX IF NOT EXISTS idx_news_reads_user_shown ON news_reads(user_id, shown_at);",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.

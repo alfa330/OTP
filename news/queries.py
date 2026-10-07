@@ -1675,6 +1675,53 @@ def record_time_spent(cursor, *, news_id, user_id, read_seconds, quiz_seconds):
     )
 
 
+def oktell_windows(cursor, *, user_id, day):
+    """Окна объявлений Oktell у человека, задевшие сутки `day` (задача #382).
+
+    На время окна программа ставит оператору перерыв «Тренинг», и супервайзер
+    потом подтверждает этот интервал в «Графиках работы». Чтобы он видел, ЧТО
+    человек читал, отдаём название объявления и границы окна — показ и
+    подтверждение.
+
+    Границы — секундами от полуночи суток `day`, а не датой-временем: интервалы
+    статусов в окне дня считаются так же, и сравнить их можно без разбора
+    времени на клиенте. Окно, открытое вчера или подтверждённое завтра, приходит
+    с отрицательным началом или концом больше 86 400 — сегодняшний интервал оно
+    объясняет всё равно.
+
+    Неподтверждённое окно приходит БЕЗ конца (`end_sec` — None), а не «открыто
+    до сих пор»: `shown_at` ставится один раз (mark_shown) и повторным показом
+    не двигается, поэтому снятое без подтверждения объявление иначе подписало
+    бы собой все будущие тренинги человека.
+
+    Требует колонки канала (schema.channel_ready) — спрашивает вызывающий.
+    """
+    cursor.execute(
+        """
+        SELECT p.id, p.title,
+               EXTRACT(EPOCH FROM (r.shown_at - %(day)s::date))::bigint,
+               EXTRACT(EPOCH FROM (r.confirmed_at - %(day)s::date))::bigint
+          FROM news_reads r
+          JOIN news_posts p ON p.id = r.news_id
+         WHERE r.user_id = %(user_id)s
+           AND p.channel = 'oktell'
+           AND r.shown_at < %(day)s::date + 1
+           AND COALESCE(r.confirmed_at, r.shown_at) >= %(day)s::date
+         ORDER BY r.shown_at, p.id
+        """,
+        {'user_id': user_id, 'day': day},
+    )
+    return [
+        {
+            'news_id': row[0],
+            'title': row[1],
+            'start_sec': int(row[2]),
+            'end_sec': None if row[3] is None else int(row[3]),
+        }
+        for row in cursor.fetchall()
+    ]
+
+
 def set_audience(cursor, *, post_id, rules, audience_max_role_level=None):
     """Полная замена адресатов. Частичной правки у набора нет намеренно:
     «кому ушла новость» — один ответ, и собирать его из добавленных и удалённых

@@ -50646,6 +50646,54 @@ def get_work_schedule_status_track():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/work_schedules/training_news', methods=['GET'])
+@require_api_key
+def get_work_schedule_training_news():
+    """Объявления Oktell, которые показывались оператору в этот день (задача #382).
+
+    Окно объявления ставит оператору перерыв «Тренинг», и в учёте часов он
+    выглядит обычным интервалом статуса. Ручка отвечает на вопрос супервайзера
+    «что это был за тренинг»: название объявления и границы окна секундами от
+    полуночи запрошенного дня.
+
+    Отдельная узкая ручка, а не поле в /operators: тот ответ тяжёлый и после
+    каждой правки перезапрашивается на три месяца, а объявления нужны одному
+    дню одного человека — и только когда у дня есть интервалы тренинга.
+
+    Периметр — обычный для чтения графиков: тренер смотрит, но не правит.
+
+    Query params: operator_id, date (YYYY-MM-DD).
+    """
+    try:
+        viewer_id, viewer, viewer_error = _resolve_work_schedule_viewer()
+        if viewer_error:
+            message, status_code = viewer_error
+            return jsonify({"error": message}), status_code
+
+        try:
+            operator_id = int(request.args.get('operator_id') or '')
+        except (TypeError, ValueError):
+            return jsonify({"error": "operator_id is required"}), 400
+        date_raw = (request.args.get('date') or '').strip()
+        try:
+            datetime.strptime(date_raw, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+
+        if not _filter_operators_for_requester_scope(viewer, viewer_id, [{'id': operator_id}]):
+            return jsonify({"error": "Forbidden for this operator"}), 403
+
+        from work_schedules import training_news as schedule_training_news
+        with db._get_cursor() as cursor:
+            items = schedule_training_news.windows_for_day(
+                cursor, operator_id=operator_id, day=date_raw)
+        return jsonify({"items": items}), 200
+
+    except Exception as e:
+        logging.error(f"Error getting work schedule training news: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/work_schedules/direction', methods=['GET'])
 @require_api_key
 def get_direction_work_schedules():

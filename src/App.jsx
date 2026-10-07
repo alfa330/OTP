@@ -74,6 +74,10 @@ import {
 } from './components/schedule/MyShiftsMobile';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
+import TrainingNewsLine from './components/schedule/TrainingNewsLine';
+import {
+    NEWS_TRAINING_REASON, buildNewsComment, newsForSegment, normalizeNewsWindows, planTrainingSaves
+} from './components/schedule/trainingNews';
 import {
     WS_PHONE_BUTTON, WS_PHONE_TIME_INPUT, WorkSchedulesDayRow, WorkSchedulesEmpty, WorkSchedulesFlagRow,
     WorkSchedulesOperatorRow, WorkSchedulesPeriodHeader, WorkSchedulesShiftRow, WorkSchedulesSummary,
@@ -16131,7 +16135,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 endTime: '10:00',
                 reason: '',
                 comment: '',
-                countInHours: true
+                countInHours: true,
+                news: []
             });
             const [plannerTrainingActionLoading, setPlannerTrainingActionLoading] = useState(false);
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
@@ -16139,6 +16144,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const plannerLoadedTrainingMonthKeysRef = useRef(new Set());
             const [plannerTrainingRejectionsByOperator, setPlannerTrainingRejectionsByOperator] = useState({});
             const plannerLoadedRejectionMonthKeysRef = useRef(new Set());
+            // Объявления Oktell за интервалами «Тренинг» (задача #382): окна по ключу
+            // «оператор|день». Грузятся при открытии дня, у которого такие интервалы есть.
+            const [plannerTrainingNewsByKey, setPlannerTrainingNewsByKey] = useState({});
+            const plannerTrainingNewsLoadingRef = useRef(new Set());
             const [plannerTechStatusModalState, setPlannerTechStatusModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -16997,6 +17006,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 mergePlannerTrainingRejectionRows(rows);
                 plannerLoadedRejectionMonthKeysRef.current.add(normalizedMonth);
             }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRejectionRows]);
+            // Какие объявления Oktell показывались оператору в этот день. Спрашиваем при
+            // каждом открытии дня: подтверждение объявления приходит позже показа, а
+            // прежний ответ тем временем остаётся на экране.
+            const fetchPlannerTrainingNews = useCallback(async (operatorId, dayKey) => {
+                const opId = Number(operatorId);
+                const day = String(dayKey || '').trim();
+                if (!user?.id || !Number.isFinite(opId) || opId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+                const key = `${opId}|${day}`;
+                if (plannerTrainingNewsLoadingRef.current.has(key)) return;
+                plannerTrainingNewsLoadingRef.current.add(key);
+                try {
+                    const qs = new URLSearchParams({ operator_id: String(opId), date: day });
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/training_news?${qs.toString()}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    const windows = normalizeNewsWindows(payload?.items);
+                    setPlannerTrainingNewsByKey(prev => ({ ...(prev || {}), [key]: windows }));
+                } finally {
+                    plannerTrainingNewsLoadingRef.current.delete(key);
+                }
+            }, [API_BASE_URL, user?.id, withAccessTokenHeader]);
             useEffect(() => {
                 const datesToLoad = [];
                 if (plannerTrainingModalState?.open && plannerTrainingModalState?.date) {
@@ -22397,6 +22432,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (presetEndTime) endSeed = presetEndTime;
                 }
 
+                // Интервал, за которым стоит объявление Oktell (задача #382): тема и название
+                // подставляются сами — супервайзер видит их до сохранения и может сменить.
+                // Время записи считает планировщик (trainingNews.js): он поджимает её к уже
+                // сохранённым тренингам, иначе второе объявление из очереди упиралось бы в
+                // запись первого и подтвердить его было бы нельзя.
+                let reasonSeed = String(preset?.reason || '').trim();
+                let commentSeed = String(preset?.comment || '').trim();
+                let newsSeed = [];
+                if (String(mode || '') === 'confirm_training_flag' && hasPresetMinutes) {
+                    const [planned] = planTrainingSaves([preset], {
+                        windows: modalTrainingNewsWindows,
+                        busy: modalSavedTrainingRanges
+                    });
+                    if (planned) {
+                        startSeed = planned.startTime;
+                        endSeed = planned.endTime;
+                        newsSeed = planned.news;
+                        if (newsSeed.length > 0 && !reasonSeed) {
+                            reasonSeed = NEWS_TRAINING_REASON;
+                            if (!commentSeed) commentSeed = buildNewsComment(newsSeed);
+                        }
+                    }
+                }
+
                 const startSeedMinutes = timeToMinutes(startSeed);
                 const endSeedMinutes = timeToMinutes(endSeed);
                 if (!Number.isFinite(endSeedMinutes) || endSeedMinutes <= startSeedMinutes) {
@@ -22413,9 +22472,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     intervals: presetIntervals,
                     startTime: startSeed,
                     endTime: endSeed,
-                    reason: String(preset?.reason || '').trim(),
-                    comment: String(preset?.comment || '').trim(),
-                    countInHours: typeof preset?.countInHours === 'boolean' ? preset.countInHours : true
+                    reason: reasonSeed,
+                    comment: commentSeed,
+                    countInHours: typeof preset?.countInHours === 'boolean' ? preset.countInHours : true,
+                    news: newsSeed
                 });
             };
 
@@ -22432,7 +22492,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     endTime: '10:00',
                     reason: '',
                     comment: '',
-                    countInHours: true
+                    countInHours: true,
+                    news: []
                 });
             };
 
@@ -22486,19 +22547,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerTrainingModalError('Не удалось определить оператора или дату.');
                     return;
                 }
-                if (!reason) {
-                    setPlannerTrainingModalError('Выберите причину тренинга.');
-                    return;
-                }
-
-                let intervalsToSave = [];
+                // У каждой записи своя тема и свой комментарий: при «Подтвердить все» интервалам,
+                // за которыми стоит объявление Oktell, их ставит планировщик (задача #382), а
+                // причина из формы достаётся только тем, за кем объявления нет.
+                let payloadIntervals = [];
                 if (isBulkConfirm) {
-                    intervalsToSave = normalizePlannerModalIntervals(plannerTrainingModalState?.intervals);
-                    if (intervalsToSave.length === 0) {
+                    if (plannerTrainingModalPlan.length === 0) {
                         setPlannerTrainingModalError('Интервалы тренинга не найдены для подтверждения.');
                         return;
                     }
+                    if (!reason && plannerTrainingModalPlan.some(save => save.news.length === 0)) {
+                        setPlannerTrainingModalError('Выберите причину тренинга.');
+                        return;
+                    }
+                    payloadIntervals = plannerTrainingModalPlan.map(save => (save.news.length > 0
+                        ? { startTime: save.startTime, endTime: save.endTime, reason: NEWS_TRAINING_REASON, comment: buildNewsComment(save.news) }
+                        : { startTime: save.startTime, endTime: save.endTime, reason, comment }));
                 } else {
+                    if (!reason) {
+                        setPlannerTrainingModalError('Выберите причину тренинга.');
+                        return;
+                    }
                     if (!startTime || !endTime) {
                         setPlannerTrainingModalError('Укажите время начала и окончания.');
                         return;
@@ -22509,12 +22578,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setPlannerTrainingModalError('Время окончания должно быть позже времени начала.');
                         return;
                     }
-                    intervalsToSave = [{ startMin: startMinutes, endMin: endMinutes }];
+                    const single = plannerIntervalToApiTimes({ startMin: startMinutes, endMin: endMinutes });
+                    if (single) payloadIntervals = [{ ...single, reason, comment }];
                 }
 
-                const payloadIntervals = intervalsToSave
-                    .map(plannerIntervalToApiTimes)
-                    .filter(Boolean);
                 if (payloadIntervals.length === 0) {
                     setPlannerTrainingModalError('Не удалось подготовить интервалы для сохранения.');
                     return;
@@ -22570,8 +22637,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     date: dayKey,
                                     start_time: interval.startTime,
                                     end_time: interval.endTime,
-                                    reason,
-                                    comment: comment || null,
+                                    reason: interval.reason,
+                                    comment: interval.comment || null,
                                     count_in_hours: !!plannerTrainingModalState?.countInHours
                                 })
                             });
@@ -23762,6 +23829,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => (modalTrainingStatusSegments || []).filter(seg => modalTrainingSegmentStatusById[seg.id] === 'pending'),
                 [modalTrainingStatusSegments, modalTrainingSegmentStatusById]
             );
+            // ── Объявление Oktell за интервалом «Тренинг» (задача #382) ──────────────
+            // Окно объявления ставит оператору перерыв «Тренинг», и супервайзер подтверждал
+            // такой интервал вслепую. Объявления дня спрашиваем, только когда интервалы
+            // тренинга у дня есть; не ответил сервер — день остаётся без названий, как был,
+            // и подтверждать это не мешает.
+            const modalTrainingNewsKey = (!isBulkSelectionModal && modalState?.opId && modalState?.date)
+                ? `${Number(modalState.opId)}|${modalState.date}`
+                : '';
+            const modalHasTrainingSegments = modalTrainingStatusSegments.length > 0;
+            useEffect(() => {
+                if (!modalTrainingNewsKey || !modalHasTrainingSegments) return;
+                const [operatorId, dayKey] = modalTrainingNewsKey.split('|');
+                fetchPlannerTrainingNews(operatorId, dayKey).catch(error => {
+                    console.error('Error loading planner training news:', error);
+                });
+            }, [modalTrainingNewsKey, modalHasTrainingSegments, fetchPlannerTrainingNews]);
+            const modalTrainingNewsWindows = useMemo(
+                () => (modalTrainingNewsKey ? (plannerTrainingNewsByKey[modalTrainingNewsKey] || []) : []),
+                [modalTrainingNewsKey, plannerTrainingNewsByKey]
+            );
+            const modalTrainingNewsBySegmentId = useMemo(() => {
+                const map = {};
+                if (modalTrainingNewsWindows.length === 0) return map;
+                for (const seg of (modalTrainingStatusSegments || [])) {
+                    const matches = newsForSegment(seg, modalTrainingNewsWindows);
+                    if (matches.length > 0) map[seg.id] = matches;
+                }
+                return map;
+            }, [modalTrainingStatusSegments, modalTrainingNewsWindows]);
+            // Одной строкой для телефона: там интервалы по одному не показываются.
+            const modalTrainingNewsNote = useMemo(
+                () => buildNewsComment(Object.values(modalTrainingNewsBySegmentId).flat()),
+                [modalTrainingNewsBySegmentId]
+            );
+            // Сохранённые тренинги дня — стены для новых записей: запись подтверждения
+            // поджимается к их краю, а не наезжает на них.
+            const modalSavedTrainingRanges = useMemo(
+                () => (modalSavedTrainings || []).map(plannerTrainingRecordToMinutes).filter(Boolean),
+                [modalSavedTrainings, plannerTrainingRecordToMinutes]
+            );
+            // Что уйдёт в «Тренинги» при «Подтвердить все»: записи считает планировщик
+            // (trainingNews.js) — он же решает, за какими из них стоит объявление. Одно
+            // вычисление на окно и на сохранение: показанное обязано совпасть с записанным.
+            const plannerTrainingModalPlan = useMemo(() => {
+                if (!plannerTrainingModalState?.open) return [];
+                if (String(plannerTrainingModalState?.mode || '') !== 'confirm_training_flag_all') return [];
+                const operatorId = Number(plannerTrainingModalState?.operatorId);
+                const dayKey = String(plannerTrainingModalState?.date || '');
+                const busy = (plannerTrainingsByOperator[String(operatorId)] || [])
+                    .filter(t => String(t?.date || '') === dayKey)
+                    .map(plannerTrainingRecordToMinutes)
+                    .filter(Boolean);
+                return planTrainingSaves(plannerTrainingModalState?.intervals, {
+                    windows: plannerTrainingNewsByKey[`${operatorId}|${dayKey}`] || [],
+                    busy
+                });
+            }, [
+                plannerTrainingModalState?.open,
+                plannerTrainingModalState?.mode,
+                plannerTrainingModalState?.operatorId,
+                plannerTrainingModalState?.date,
+                plannerTrainingModalState?.intervals,
+                plannerTrainingsByOperator,
+                plannerTrainingNewsByKey,
+                plannerTrainingRecordToMinutes
+            ]);
             // Дневной флаг тренинга из решений по интервалам:
             // есть ожидающие → 'pending'; иначе есть подтверждённые → 'confirm'; иначе все отклонены → 'reject'.
             const computeTrainingDayFlagAction = (segments, confirmedIvs, rejectedIvs) => {
@@ -30226,6 +30359,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             }
 
+            /* «Подтвердить все»: за какими интервалами стоит объявление Oktell
+               (задача #382). Им тему и название ставит планировщик, поэтому поле
+               причины нужно только остальным — а если остальных нет, не нужно вовсе. */
+            const plannerTrainingModalIsBulk = String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all';
+            const plannerTrainingModalNewsWindows = plannerTrainingNewsByKey[
+                `${Number(plannerTrainingModalState.operatorId)}|${plannerTrainingModalState.date}`
+            ] || [];
+            const plannerTrainingModalHasNews = plannerTrainingModalPlan.some(save => save.news.length > 0);
+            const plannerTrainingModalNeedsReason = !plannerTrainingModalIsBulk
+                || plannerTrainingModalPlan.some(save => save.news.length === 0);
+
             /* Окна тренинга, тех. причины, офлайн-активности и штрафа общие для
                компьютера и телефона: их открывают обработчики вкладки «Контроль»,
                а она есть в обоих деревьях. Разметка одна — вынесена в переменную,
@@ -30273,15 +30417,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </div>
 
-                            {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all' ? (
+                            {plannerTrainingModalIsBulk ? (
                                 <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
-                                    <div className="text-xs font-semibold text-blue-800 mb-1">
-                                        Интервалы для подтверждения: {Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals.length : 0}
+                                    <div className="text-xs font-semibold text-blue-800 mb-1 flex items-center gap-1.5">
+                                        <span>Интервалы для подтверждения: {Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals.length : 0}</span>
+                                        {plannerTrainingModalHasNews && (
+                                            <InfoHint
+                                                text={`Интервалы с новостью Oktell запишутся в «Тренинги» с темой «${NEWS_TRAINING_REASON}», название новости — в комментарии. Чтобы сменить тему, подтвердите такой интервал отдельно.`}
+                                            />
+                                        )}
                                     </div>
-                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
+                                    {/* Выше прежних 176 px: с названием объявления интервал
+                                        занимает две-три строки, и в старую высоту их
+                                        помещалось три — остальные прятались под прокруткой. */}
+                                    <div className="max-h-64 overflow-auto space-y-1 pr-1">
                                         {(Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals : []).map((seg, idx) => (
-                                            <div key={`planner-training-modal-interval-${idx}`} className="text-[11px] text-blue-900 tabular-nums">
-                                                {plannerModalSegmentRangeText(seg)}
+                                            <div key={`planner-training-modal-interval-${idx}`}>
+                                                <div className="text-[11px] text-blue-900 tabular-nums">
+                                                    {plannerModalSegmentRangeText(seg)}
+                                                </div>
+                                                <TrainingNewsLine matches={newsForSegment(seg, plannerTrainingModalNewsWindows)} />
                                             </div>
                                         ))}
                                     </div>
@@ -30332,30 +30487,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             )}
 
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
-                                <select
-                                    value={plannerTrainingModalState.reason || ''}
-                                    onChange={(e) => updatePlannerTrainingDraftField('reason', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                >
-                                    <option value="">Выберите причину</option>
-                                    {plannerTrainingReasonOptions.map(reason => (
-                                        <option key={`planner-training-reason-${reason}`} value={reason}>{reason}</option>
-                                    ))}
-                                </select>
-                            </div>
+                            {/* Один интервал, за которым стоит объявление Oktell: оно стоит
+                                рядом со временем записи — сверить одно с другим и есть
+                                вся проверка супервайзера. */}
+                            {!plannerTrainingModalIsBulk && Array.isArray(plannerTrainingModalState.news) && plannerTrainingModalState.news.length > 0 && (
+                                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                    <TrainingNewsLine matches={plannerTrainingModalState.news} />
+                                </div>
+                            )}
 
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
-                                <textarea
-                                    rows={3}
-                                    value={plannerTrainingModalState.comment || ''}
-                                    onChange={(e) => updatePlannerTrainingDraftField('comment', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                                    placeholder="Комментарий (необязательно)"
-                                />
-                            </div>
+                            {plannerTrainingModalNeedsReason && (
+                                <>
+                                    {plannerTrainingModalIsBulk && plannerTrainingModalHasNews && (
+                                        <div className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                            Для интервалов без новости
+                                        </div>
+                                    )}
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                        <select
+                                            value={plannerTrainingModalState.reason || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('reason', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        >
+                                            <option value="">Выберите причину</option>
+                                            {plannerTrainingReasonOptions.map(reason => (
+                                                <option key={`planner-training-reason-${reason}`} value={reason}>{reason}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                        <textarea
+                                            rows={3}
+                                            value={plannerTrainingModalState.comment || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('comment', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                            placeholder="Комментарий (необязательно)"
+                                        />
+                                    </div>
+                                </>
+                            )}
 
                             {plannerTrainingModalError && (
                                 <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
@@ -32167,6 +32340,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     minutes={`${item.minutes} мин`}
                                                     statusLabel={item.statusLabel}
                                                     statusTone={item.statusTone}
+                                                    note={item.key === 'training' ? (modalTrainingNewsNote || null) : null}
                                                     actions={plannerReadOnly ? [] : (item.penalty ? [
                                                         {
                                                             label: 'Согласовано',
@@ -34938,6 +35112,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             Отклонён — изменить нельзя
                                                                         </span>
                                                                     )}
+                                                                    <TrainingNewsLine matches={modalTrainingNewsBySegmentId[seg.id]} />
                                                                 </div>
                                                             );
                                                         })}
