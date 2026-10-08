@@ -4,6 +4,7 @@ import React, {
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import Orb from './Orb.jsx';
+import useAssistantAppearance from './useAssistantAppearance.js';
 import useAssistantChat from './useAssistantChat';
 import {
     PANEL_SIZE, clampPosition, defaultPosition, movedEnough, normalizePanelSize, panelAnchor,
@@ -137,6 +138,7 @@ export default function AssistantOrb({
     onOpenWikiTarget = null,
 }) {
     const userId = user?.id;
+    const [appearance, setAppearance] = useAssistantAppearance(userId);
     const [position, setPosition] = useState(null);   // null — ещё не примерились к окну
     const [open, setOpen] = useState(false);
     const [dragging, setDragging] = useState(false);
@@ -680,6 +682,8 @@ export default function AssistantOrb({
             </div>
         )}>
             <AssistantPanel
+                appearance={appearance}
+                onAppearanceChange={setAppearance}
                 chat={chat}
                 locked={locked}
                 lockChecking={lockChecking}
@@ -717,7 +721,7 @@ export default function AssistantOrb({
                         ? 'Помощник открыт в отдельном окне'
                         : 'Помощник — вопрос по базе знаний'}
                 >
-                    <Orb animated={!hidden} />
+                    <Orb effect={appearance} animated={!hidden} />
                 </button>
             )}
 

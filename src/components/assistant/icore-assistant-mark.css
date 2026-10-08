@@ -1,0 +1,146 @@
+/* Effects are translucent and clipped to the original iCORE mark. There is no
+   round background. Animation uses transform/opacity, with no canvas or timers. */
+.icore-assistant-mark {
+    --icore-mark-mask: url('../common/sidebar-logo-mark.svg');
+    --icore-mark-edge: rgb(89 113 173 / 48%);
+    --icore-mark-light: rgb(255 255 255 / 92%);
+    position: relative;
+    display: inline-block;
+    width: var(--icore-mark-size, 56px);
+    height: var(--icore-mark-size, 56px);
+    flex: none;
+    vertical-align: middle;
+    isolation: isolate;
+    pointer-events: none;
+}
+
+.icore-assistant-mark__interior {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    -webkit-mask: var(--icore-mark-mask) center / 122% 122% no-repeat;
+    mask: var(--icore-mark-mask) center / 122% 122% no-repeat;
+}
+
+.icore-assistant-mark__interior > i { position: absolute; display: block; inset: 0; }
+
+.icore-assistant-mark__glass {
+    background: linear-gradient(145deg, rgb(230 246 255 / 32%), rgb(160 190 237 / 7%) 42%, rgb(127 159 232 / 21%) 82%, rgb(255 255 255 / 34%));
+}
+
+.icore-assistant-mark__color {
+    inset: -45% !important;
+    background:
+        radial-gradient(ellipse at 28% 34%, rgb(96 165 250 / 42%), transparent 40%),
+        radial-gradient(ellipse at 68% 69%, rgb(167 189 255 / 38%), transparent 38%);
+    animation: icore-mark-drift 12s ease-in-out infinite alternate;
+}
+
+.icore-assistant-mark__ribbon {
+    inset: -45% !important;
+    background: conic-gradient(from 60deg, transparent 15%, rgb(181 223 255 / 28%) 22%, transparent 28% 63%, rgb(255 255 255 / 42%) 68%, transparent 73%);
+    animation: icore-mark-orbit 20s linear infinite;
+}
+
+.icore-assistant-mark__shine {
+    inset: -80% !important;
+    background: linear-gradient(118deg, transparent 38%, rgb(255 255 255 / 5%) 43%, rgb(255 255 255 / 68%) 46%, rgb(255 255 255 / 10%) 48%, transparent 53%);
+    animation: icore-mark-sheen 8s ease-in-out infinite;
+}
+
+.icore-assistant-mark__particles { display: none !important; }
+
+.icore-assistant-mark__edge,
+.icore-assistant-mark__light { position: absolute; inset: -11%; width: 122%; height: 122%; overflow: visible; }
+.icore-assistant-mark__edge :is(path, ellipse),
+.icore-assistant-mark__light :is(path, ellipse) { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.icore-assistant-mark__edge :is(path, ellipse) { stroke: var(--icore-mark-edge); stroke-width: 2.6; }
+.icore-assistant-mark__light {
+    -webkit-mask-image: linear-gradient(145deg, #000 8%, transparent 34% 57%, #000 85%);
+    mask-image: linear-gradient(145deg, #000 8%, transparent 34% 57%, #000 85%);
+}
+.icore-assistant-mark__light :is(path, ellipse) { stroke: var(--icore-mark-light); stroke-width: 3.7; }
+
+.icore-assistant-mark--glass .icore-assistant-mark__ribbon { opacity: .5; }
+.icore-assistant-mark--glass .icore-assistant-mark__shine { animation-duration: 10s; }
+
+.icore-assistant-mark--aurora .icore-assistant-mark__color {
+    background:
+        radial-gradient(ellipse at 28% 35%, rgb(25 218 194 / 84%), transparent 38%),
+        radial-gradient(ellipse at 68% 66%, rgb(137 104 246 / 80%), transparent 39%),
+        radial-gradient(ellipse at 57% 24%, rgb(130 189 255 / 58%), transparent 32%);
+    animation-duration: 9s;
+}
+.icore-assistant-mark--aurora .icore-assistant-mark__ribbon {
+    background: conic-gradient(from 20deg, transparent 10%, rgb(149 255 224 / 62%) 23%, transparent 33% 51%, rgb(198 162 255 / 53%) 62%, transparent 76%);
+    animation-duration: 17s;
+}
+
+.icore-assistant-mark--flow .icore-assistant-mark__color {
+    background:
+        radial-gradient(ellipse at 34% 31%, rgb(61 119 251 / 70%), transparent 43%),
+        radial-gradient(ellipse at 72% 63%, rgb(152 94 244 / 64%), transparent 38%);
+}
+.icore-assistant-mark--flow .icore-assistant-mark__ribbon {
+    background: repeating-radial-gradient(ellipse at 10% 78%, transparent 0 8%, rgb(112 208 255 / 65%) 8.5%, rgb(233 243 255 / 90%) 9%, rgb(109 127 255 / 38%) 9.8%, transparent 11% 19%);
+    transform: rotate(-24deg);
+    animation: icore-mark-wave 7s ease-in-out infinite alternate;
+}
+.icore-assistant-mark--flow .icore-assistant-mark__shine { opacity: .5; }
+
+.icore-assistant-mark--dust .icore-assistant-mark__color {
+    background:
+        radial-gradient(ellipse at 39% 39%, rgb(133 113 236 / 66%), transparent 46%),
+        radial-gradient(ellipse at 66% 73%, rgb(90 122 233 / 52%), transparent 40%);
+    animation-duration: 16s;
+}
+.icore-assistant-mark--dust .icore-assistant-mark__ribbon {
+    background: conic-gradient(from 150deg, transparent 15%, rgb(174 160 247 / 36%) 25%, transparent 40% 60%, rgb(144 201 255 / 36%) 75%, transparent 85%);
+}
+.icore-assistant-mark--dust .icore-assistant-mark__particles {
+    display: block !important;
+    inset: -35%;
+    background:
+        radial-gradient(circle at 20% 30%, #fff 0 .6%, rgb(140 204 255 / 50%) .8%, transparent 2%),
+        radial-gradient(circle at 35% 54%, #e8dcff 0 .65%, transparent 1.8%),
+        radial-gradient(circle at 54% 36%, #fff 0 .55%, transparent 1.6%),
+        radial-gradient(circle at 58% 58%, #e8dcff 0 .55%, transparent 1.6%),
+        radial-gradient(circle at 74% 52%, #fff 0 .7%, transparent 2%),
+        radial-gradient(circle at 26% 68%, #fff 0 .5%, transparent 1.6%),
+        radial-gradient(circle at 62% 77%, #d0eaff 0 .65%, transparent 1.7%),
+        radial-gradient(circle at 43% 23%, #e8dcff 0 .45%, transparent 1.4%),
+        radial-gradient(circle at 80% 28%, #fff 0 .5%, transparent 1.6%);
+    animation: icore-mark-stars 11s ease-in-out infinite alternate;
+}
+.icore-assistant-mark--dust .icore-assistant-mark__shine { opacity: .3; animation-duration: 14s; }
+
+html[data-otp-theme="dark"] .icore-assistant-mark,
+[data-icon-theme="dark"] .icore-assistant-mark { --icore-mark-edge: rgb(157 181 242 / 65%); --icore-mark-light: rgb(230 246 255 / 94%); }
+html[data-otp-theme="dark"] .icore-assistant-mark__color,
+[data-icon-theme="dark"] .icore-assistant-mark__color { opacity: .9; }
+
+@keyframes icore-mark-drift {
+    from { transform: translate(-7%, -5%) rotate(-16deg); }
+    to { transform: translate(7%, 5%) rotate(30deg); }
+}
+@keyframes icore-mark-orbit { to { transform: rotate(360deg); } }
+@keyframes icore-mark-sheen {
+    0%, 12% { transform: translateX(-26%); opacity: .25; }
+    50% { opacity: .9; }
+    88%, 100% { transform: translateX(26%); opacity: .25; }
+}
+@keyframes icore-mark-wave {
+    from { transform: translate(-7%, -6%) rotate(-24deg) scale(.95); }
+    to { transform: translate(8%, 8%) rotate(12deg) scale(1.1); }
+}
+@keyframes icore-mark-stars {
+    from { transform: translate(-4%, 5%) rotate(-8deg); opacity: .55; }
+    to { transform: translate(4%, -5%) rotate(8deg); opacity: 1; }
+}
+
+.icore-assistant-mark--paused *,
+.aorb-idle .icore-assistant-mark *,
+.aorb-dragging .icore-assistant-mark * { animation-play-state: paused !important; }
+@media (prefers-reduced-motion: reduce) {
+    .icore-assistant-mark * { animation: none !important; }
+}

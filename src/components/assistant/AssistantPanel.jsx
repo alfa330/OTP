@@ -6,6 +6,7 @@ import {
 import { ChatComposer } from '../ui/chat';
 import { AssistantMessage, fmtChatDate, useReplyScroll } from './assistantThread.jsx';
 import Orb from './Orb.jsx';
+import AssistantAppearancePicker from './AssistantAppearancePicker.jsx';
 
 /* Мини-чат шарика: тот же помощник, что во вкладке вики, в колонке 384 пикселя.
  *
@@ -140,6 +141,7 @@ const HistoryScreen = ({ chats, loading, activeId, onOpen, onDelete, onBack }) =
 
 export default function AssistantPanel({
     chat, spaceName,
+    appearance, onAppearanceChange,
     locked = false, lockChecking = false, onRequestQr,
     onOpenArticle, onOpenFullAssistant, onClose, showToast,
     detached = false, canDetach = false, onDetach, onAttach,
@@ -199,8 +201,8 @@ export default function AssistantPanel({
     return (
         <div className="flex h-full flex-col overflow-hidden">
             {/* Шапка */}
-            <div className="flex items-center gap-2 border-b border-slate-200/70 bg-white/70 px-2.5 py-2 backdrop-blur">
-                <Orb variant="mini" animated={false} />
+            <div className="relative z-10 flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/70 px-2.5 py-2 backdrop-blur">
+                <AssistantAppearancePicker effect={appearance} onChange={onAppearanceChange} />
                 <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
                         {PANEL_TITLE}
@@ -309,7 +311,7 @@ export default function AssistantPanel({
                     >
                         {empty && (
                             <div className={`${NARROW_COLUMN} flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center`}>
-                                <Orb variant="hero" />
+                                <Orb variant="hero" effect={appearance} />
                                 <div className="mt-1 text-[13.5px] font-semibold text-slate-900">
                                     Спросите про что угодно из базы знаний
                                 </div>
