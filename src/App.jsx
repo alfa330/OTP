@@ -437,7 +437,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
  *   water — фронт-офисы, СЗоВ и ОП (canAccessWaterSectionForUser);
  *   thermoboxes — THERMOBOXES_SECTION_DEPARTMENT_CODES;
- *   baiga — BAIGA_SECTION_DEPARTMENT_CODES;
+ *   baiga — отделы круга раздела по умолчанию (baiga/access.py: SECTION_DEPARTMENT_CODES);
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ), отдел
@@ -742,9 +742,9 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'library',
     // «Учёт воды»: тренер — как операторы своего отдела (01.10.2026).
     'water',
-    // «Списки Байги»: по кругу раздела тренеру закрыто, но раздел выдают и из
-    // него самого (кнопка «Доступ») — человеку, группе, отделу, и тренер под
-    // выдачу попадает. Без выдачи его уводит своя ветка раздела в гарде ниже.
+    // «Списки Байги»: в круге раздела тренера нет, но раздел выдают и из него
+    // самого (кнопка «Доступ») — человеку, группе, отделу, и тренер под выдачу
+    // попадает. Без выдачи его уводит своя ветка раздела в гарде ниже.
     'baiga',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
@@ -2525,27 +2525,20 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
 
 /* «Списки Байги» (#356) — итоги еженедельной акции Байга.
 
-   Кому открыт (решение владельца 05.10.2026):
-     супер-админ и глава «Маркетинга» — всё: загрузка недель, выгрузка, журнал;
-     главы и супервайзеры ОП и СЗоВ — ищут и смотрят;
-     операторы ОП и СЗоВ и сотрудники «Маркетинга» — ищут и смотрят после QR.
-   С 06.10.2026 — аналитик из именного списка: всё и без QR.
-   Остальным закрыт: тренеру, стажёру, админу вне списка, прочим отделам.
-
-   С 07.10.2026 раздел выдают ещё и из него самого — кнопка «Доступ»: человеку,
-   группе, отделу. По должности и отделу такую выдачу не вычислить, поэтому её
-   приносит сервер флагом baiga_access в профиле (bot_schedule2.py:
-   _baiga_section_open_for — то же правило, что у гейта ручек).
+   Кому раздел открыт, решает сервер (baiga/access.py) и сообщает флагом
+   baiga_access в профиле (bot_schedule2.py: _baiga_section_open_for — то же
+   правило, что у гейта ручек). Своего круга экран не считает намеренно: и
+   выдачи (с 07.10.2026), и сам круг «открыт по умолчанию» (с 08.10.2026) правят
+   из раздела кнопкой «Доступ», так что должность и отдел на экране ничего не
+   доказывают — зеркало показывало бы пункт тому, кому раздел уже закрыли, и
+   прятало бы от того, кому открыли.
 
    Здесь решается только «показывать ли пункт меню»; кто выгружает и грузит,
-   считает baiga/access.py — тест гоняет этот предикат против сервера. В строках
-   ФИО и номер ВУ водителя, поэтому рядовой входит только через QR-замок, как в
-   «Посылки». */
-const BAIGA_MANAGE_DEPARTMENT_CODE = 'marketing';
-const BAIGA_READ_DEPARTMENT_CODES = ['op', 'szov'];
-const BAIGA_SECTION_DEPARTMENT_CODES = [BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_READ_DEPARTMENT_CODES];
+   считает baiga/access.py. В строках ФИО и номер ВУ водителя, поэтому рядовой
+   входит только через QR-замок, как в «Посылки». */
 
-/* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
+/* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём. Замок
+   раздела их не спрашивает (baigaQrRequiredFor).
    Зеркало baiga/access.py: ANALYST_USER_IDS — тест сверяет списки. */
 const BAIGA_ANALYST_USER_IDS = new Set([540]);
 
@@ -2555,27 +2548,16 @@ const BAIGA_ANALYST_USER_IDS = new Set([540]);
 const BAIGA_PILOT_SUPER_ADMIN_ONLY = false;
 
 const canAccessBaigaSectionForUser = (userLike) => {
-    const role = normalizeRole(userLike?.role);
-    if (role === 'super_admin') return true;
+    // Супер-админу раздел открыт всегда: его строка в круге не правится.
+    if (normalizeRole(userLike?.role) === 'super_admin') return true;
     if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;
-    // Раздел выдан из него самого или человеку поручено его раздавать. Строго
-    // true: старый профиль из кэша поля не несёт, и «нет поля» — не выдача.
-    if (userLike?.baiga_access === true) return true;
-    if (BAIGA_ANALYST_USER_IDS.has(Number(userLike?.id))) return true;
-    // Главы: «Маркетинга» — ведёт раздел, ОП и СЗоВ — читают.
-    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
-        (code) => BAIGA_SECTION_DEPARTMENT_CODES.includes(code),
-    )) return true;
-    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
-    if (isSupervisorRole(role)) return BAIGA_READ_DEPARTMENT_CODES.includes(own);
-    // Рядовой — только тот, кого спросит QR-замок: кого замок не спрашивает
-    // (стажёр, тренер, админ вне списка), тому раздел закрыт.
-    return sensitiveSectionQrRequiredFor(userLike) && BAIGA_SECTION_DEPARTMENT_CODES.includes(own);
+    // Ответ сервера. Строго true: профиль без поля (старый кэш) — не доступ.
+    return userLike?.baiga_access === true;
 };
 
 /* Замок раздела: кого «Списки Байги» спрашивают о QR. Всех, кому портал вообще
-   выдаёт код (sensitiveQrAvailableFor), — шире общего замка на стажёра: по
-   кругу раздел стажёру закрыт, но выдать его можно и ему, и тогда он читал бы
+   выдаёт код (sensitiveQrAvailableFor), — шире общего замка на стажёра: в
+   круге раздела стажёра нет, но выдать раздел можно и ему, и тогда он читал бы
    без подтверждения то, что оператор рядом открывает кодом. Кроме аналитика из
    именного списка — раздел выдан ему целиком, а числится он оператором, и
    замок запер бы от него то, что он ведёт.

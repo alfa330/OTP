@@ -24,6 +24,14 @@
 и уровень, положенный по нему, не понижает. Раздают супер-админ и двое
 названных владельцем (ACCESS_MANAGER_USER_IDS) — и только они.
 
+С 08.10.2026 и сам круг правят из того же листа (решение владельца: «есть
+открыт по умолчанию, сделай так чтобы можно было его редактировать»). Таблица
+выше — теперь значения ПО УМОЛЧАНИЮ: круг разложен на строки «должность в
+отделе» (CIRCLE), у каждой уровень можно поднять, опустить или снять вовсе.
+Правка лежит в baiga_access_circle и приходит в контексте (circle_levels). Кто
+под строку подпадает, по-прежнему решает код: правится уровень строки, а не её
+состав; супер-админ не правится — запереть раздел от всех нельзя.
+
 Рядовой сотрудник входит ТОЛЬКО через QR-замок, ключ тот же, что у «Посылок»
 (двух разных QR на один экран человек не различит). Кого общий замок портала не
 спрашивает и кто не назван выше (стажёр, тренер), тому раздел по кругу закрыт:
@@ -53,7 +61,7 @@ from wiki.access import normalize_role as _exact_role
 PILOT_SUPER_ADMIN_ONLY = False
 
 # Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
-# Зеркало — BAIGA_ANALYST_USER_IDS в App.jsx (аналитику нужен пункт меню).
+# Зеркало — BAIGA_ANALYST_USER_IDS в App.jsx (замок экрана аналитика не спрашивает).
 # 540 — сотрудник отдела аналитики, назван владельцем 06.10.2026.
 ANALYST_USER_IDS = frozenset({540})
 
@@ -79,6 +87,18 @@ _SUPERVISOR_ROLES = ('sv', 'supervisor')
 # Зеркало с подписями — LEVELS в src/components/baiga/baigaAccess.js.
 LEVEL_READ, LEVEL_EXPORT, LEVEL_FULL = 'read', 'export', 'full'
 LEVELS = (LEVEL_READ, LEVEL_EXPORT, LEVEL_FULL)
+
+# «Нет доступа» — только у строк круга: строку круга закрывают, а выдачу снимают.
+LEVEL_NONE = 'none'
+CIRCLE_LEVELS = (LEVEL_NONE,) + LEVELS
+
+# Круг раздела по умолчанию: отдел → должность в нём → уровень. Порядок — порядок
+# показа в листе «Доступ». Супервайзеров в «Маркетинге» нет, и строки у них нет:
+# закрытая строка несуществующей должности была бы шумом.
+SLOT_HEAD, SLOT_SV, SLOT_STAFF, SLOT_NAMED = 'head', 'sv', 'staff', 'named'
+CIRCLE = ((MANAGE_DEPARTMENT_CODE, ((SLOT_HEAD, LEVEL_FULL), (SLOT_STAFF, LEVEL_READ))),) + tuple(
+    (code, ((SLOT_HEAD, LEVEL_READ), (SLOT_SV, LEVEL_READ), (SLOT_STAFF, LEVEL_READ)))
+    for code in READ_DEPARTMENT_CODES)
 
 # Кому выдают: человеку, группе, отделу — ровно то, что назвал владелец.
 SUBJECT_USER, SUBJECT_GROUP, SUBJECT_DEPARTMENT = 'user', 'group', 'department'
@@ -162,24 +182,55 @@ def strongest(levels):
     return max((level for level in (levels or ()) if level in LEVELS), key=level_rank, default=None)
 
 
-def _can_read(ctx):
-    """Искать и смотреть по кругу раздела — без выгрузки и загрузки."""
-    if _heads(ctx, READ_DEPARTMENT_CODES):
-        return True
+def circle_slot(kind, key):
+    """Имя строки круга: «head:marketing», «staff:op», «named:540»."""
+    return '%s:%s' % (kind, key)
+
+
+def circle_defaults():
+    """Строки круга и их уровни по умолчанию: {строка: уровень}. Они же — все
+    строки, которые можно править. Функцией, а не константой: именной список
+    читается в момент вызова."""
+    defaults = {circle_slot(kind, code): level for code, kinds in CIRCLE for kind, level in kinds}
+    defaults.update((circle_slot(SLOT_NAMED, user_id), LEVEL_FULL) for user_id in ANALYST_USER_IDS)
+    return defaults
+
+
+def _circle_slots(ctx):
+    """Строки круга, под которые подпадает человек."""
+    slots = []
+    if is_analyst(ctx):
+        slots.append(circle_slot(SLOT_NAMED, _user_id(ctx)))
+    headed = _codes(ctx.get('headed_department_codes'))
     own = _own_code(ctx)
-    if normalize_role(ctx.get('role')) in _SUPERVISOR_ROLES:
-        return own in READ_DEPARTMENT_CODES
+    supervisor = normalize_role(ctx.get('role')) in _SUPERVISOR_ROLES
     # Рядовой — только тот, кого спросит ОБЩИЙ замок портала: одно условие и
     # пускает в раздел, и закрывает данные, разъехаться им негде.
-    return _asked(ctx, _COMMON_QR_ROLES) and own in SECTION_DEPARTMENT_CODES
+    staff = _asked(ctx, _COMMON_QR_ROLES)
+    for code, kinds in CIRCLE:
+        for kind, _default in kinds:
+            if ((kind == SLOT_HEAD and code in headed)
+                    or (kind == SLOT_SV and supervisor and own == code)
+                    or (kind == SLOT_STAFF and staff and own == code)):
+                slots.append(circle_slot(kind, code))
+    return slots
+
+
+def _slot_level(slot, edited, default):
+    """Уровень строки: правка из листа, а без неё — значение по умолчанию.
+    Незнакомое значение в базе строку закрывает, а не возвращает к умолчанию."""
+    level = (edited or {}).get(slot, default)
+    return level if level in LEVELS else None
 
 
 def _circle_level(ctx):
-    """Уровень по кругу раздела — без выдач."""
-    if (normalize_role(ctx.get('role')) == 'super_admin' or is_analyst(ctx)
-            or _heads(ctx, (MANAGE_DEPARTMENT_CODE,))):
+    """Уровень по кругу раздела — без выдач: старший из строк, под которые
+    человек подпадает. Супер-админ — всегда всё: его строка не правится."""
+    if normalize_role(ctx.get('role')) == 'super_admin':
         return LEVEL_FULL
-    return LEVEL_READ if _can_read(ctx) else None
+    defaults = circle_defaults()
+    edited = ctx.get('circle_levels')
+    return strongest(_slot_level(slot, edited, defaults[slot]) for slot in _circle_slots(ctx))
 
 
 def level_of(ctx):
@@ -199,45 +250,51 @@ def level_of(ctx):
     return strongest(levels)
 
 
-def circle():
-    """Круг раздела строками — для листа «Доступ»: раздающий обязан видеть, кому
-    раздел открыт и без выдач, иначе он выдаёт то, что уже выдано, и не видит
-    того, чего выдать нельзя.
+def circle(edited=None):
+    """Круг раздела строками — для листа «Доступ», в порядке показа: кому раздел
+    открыт без выдач и на каком уровне СЕЙЧАС (edited — правки из листа,
+    circle_levels контекста). Раздающий обязан это видеть, иначе он выдаёт то,
+    что уже открыто, и не видит, что закрыто.
 
-    Строки — те же ветки, что у _circle_level и _can_read, в том же порядке;
-    тест сверяет каждую с настоящим правилом. Названия отделов и имена
-    подставляет ручка: здесь только коды и id.
+    Строки — те же, что у _circle_slots; тест сверяет каждую с настоящим
+    правилом. Названия отделов и имена подставляет ручка: здесь коды и id.
     """
-    return (
-        {'key': 'super_admin', 'level': LEVEL_FULL, 'qr': False},
-        {'key': 'head', 'level': LEVEL_FULL, 'qr': False, 'departments': (MANAGE_DEPARTMENT_CODE,)},
-        {'key': 'named', 'level': LEVEL_FULL, 'qr': False, 'user_ids': tuple(sorted(ANALYST_USER_IDS))},
-        {'key': 'lead', 'level': LEVEL_READ, 'qr': False, 'departments': READ_DEPARTMENT_CODES},
-        {'key': 'staff', 'level': LEVEL_READ, 'qr': True, 'departments': SECTION_DEPARTMENT_CODES},
-    )
+    def row(slot, kind, default, **extra):
+        level = _slot_level(slot, edited, default)
+        # Замок спрашивает рядовых — в круге это строки «staff»; названного
+        # поимённо не спрашивает (requires_sensitive_qr).
+        return dict(extra, slot=slot, kind=kind, level=level or LEVEL_NONE, qr=kind == SLOT_STAFF, locked=False)
+
+    rows = [{'slot': 'super_admin', 'kind': 'super_admin', 'level': LEVEL_FULL, 'qr': False, 'locked': True}]
+    rows.extend(row(circle_slot(kind, code), kind, default, code=code)
+                for code, kinds in CIRCLE for kind, default in kinds)
+    rows.extend(row(circle_slot(SLOT_NAMED, user_id), SLOT_NAMED, LEVEL_FULL, user_id=user_id)
+                for user_id in sorted(ANALYST_USER_IDS))
+    return rows
 
 
 def can_manage(ctx):
     """Загрузить, заменить и удалить неделю, журнал, исходник — кому раздел
-    открыт полностью: супер-админ, глава «Маркетинга», аналитик и те, кому
-    полный доступ выдан."""
+    открыт полностью: супер-админ, по умолчанию глава «Маркетинга» и аналитик,
+    и те, кому полный доступ выдан."""
     return level_of(ctx) == LEVEL_FULL
 
 
 def can_export(ctx):
     """Выгрузить выборку в Excel — от уровня «выгрузка».
 
-    По кругу раздела это только полный доступ: главам и супервайзерам ОП и
-    СЗоВ, операторам и сотрудникам «Маркетинга» владелец дал чтение — файл со
+    По умолчанию в круге это только полный доступ: главам и супервайзерам ОП
+    и СЗоВ, операторам и сотрудникам «Маркетинга» владелец дал чтение — файл со
     всеми ФИО и номерами ВУ они не уносят. Выгрузку без ведения раздела даёт
-    только выдача.
+    выдача или правка строки круга в листе «Доступ».
     """
     return level_rank(level_of(ctx)) >= level_rank(LEVEL_EXPORT)
 
 
 def can_open_section(ctx):
     """Пускать ли в раздел. Проверяется на КАЖДОМ роуте: спрятанный пункт меню
-    доступом не является. Зеркало — canAccessBaigaSectionForUser в App.jsx."""
+    доступом не является. Экран своего круга не считает: ответ этой функции
+    приходит ему флагом профиля baiga_access (canAccessBaigaSectionForUser)."""
     return level_of(ctx) is not None
 
 

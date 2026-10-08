@@ -10,9 +10,10 @@ import { ROLE_TITLE, peopleLabel } from '../wiki/accessRecipients.js';
  * у вики: сам лист — модалка с загрузкой по сети, и до этих подписей серверный
  * рендер не доходит.
  *
- * Выдача только ДОБАВЛЯЕТ доступ к кругу раздела (baiga/access.py): круг задан
- * правилом и отсюда не меняется, поэтому в листе он показан отдельно и без
- * единого органа управления.
+ * Выдача только ДОБАВЛЯЕТ доступ к кругу раздела (baiga/access.py). Сам круг —
+ * «открыт по умолчанию» — в листе стоит отдельным экраном: строки «должность в
+ * отделе», у каждой правится уровень (решение владельца 08.10.2026). Состав
+ * строк задаёт сервер, строка супер-админов не правится.
  */
 
 /* Уровни — по возрастанию, каждый включает предыдущий. Зеркало LEVELS из
@@ -33,16 +34,38 @@ export const LEVELS = [
 
 export const levelOf = (key) => LEVELS.find((level) => level.key === key) || null;
 
+/* «Нет» — только у строк «открыт по умолчанию»: строку круга закрывают, а
+   выдачу просто снимают. Зеркало LEVEL_NONE из baiga/access.py. */
+export const NONE_LEVEL = {
+    key: 'none', label: 'Нет',
+    note: 'Раздел по умолчанию закрыт; отдельным людям и группам его открывают выдачей.',
+};
+
+/* Уровни строки круга: «Нет» и те же три. Зеркало CIRCLE_LEVELS на сервере. */
+export const CIRCLE_LEVELS = [NONE_LEVEL, ...LEVELS];
+
+export const circleLevelOf = (key) => CIRCLE_LEVELS.find((level) => level.key === key) || null;
+
 /* Пояснение к выбору уровня под «i» — в том виде, что у выборов «Оплаты
    счетов»: зачем выбор, по строке на вариант и оговорка. Строки собраны из
-   самих LEVELS: подсказка называет ровно те варианты, что стоят в сегментах. */
-export const LEVEL_HINT = {
+   самих уровней: подсказка называет ровно те варианты, что стоят в сегментах. */
+const QR_NOTE = 'Операторам, стажёрам, сотрудникам бухгалтерии и маркетинга раздел откроется после '
+    + 'QR-подтверждения — при любом уровне.';
+
+const hintOf = (levels, outro) => ({
     intro: 'Каждый уровень включает предыдущий.',
-    options: LEVELS.map((level) => [
+    options: levels.map((level) => [
         level.label, level.note.charAt(0).toLowerCase() + level.note.slice(1).replace(/\.$/, '')]),
-    outro: 'Операторам, стажёрам, сотрудникам бухгалтерии и маркетинга раздел откроется после '
-        + 'QR-подтверждения — при любом уровне.',
-};
+    outro,
+});
+
+export const LEVEL_HINT = hintOf(LEVELS, QR_NOTE);
+
+/* У строки круга про QR сказано только там, где его спросят: рядовым отдела.
+   Главе, супервайзеру и названному поимённо раздел открыт без замка. */
+const QR_ROW_NOTE = 'Раздел откроется после QR-подтверждения — при любом уровне.';
+
+export const circleLevelHint = (row) => hintOf(CIRCLE_LEVELS, row?.qr ? QR_ROW_NOTE : '');
 
 /* Сколько адресатов принимает одна выдача. Зеркало MAX_GRANT_SUBJECTS из
    baiga/access.py: без потолка в форме человек отмечает сто строк и получает
@@ -133,44 +156,92 @@ export const grantMeta = (grant) => {
     ]);
 };
 
-/* Строки круга раздела — кому он открыт и без выдач. Ключи — access.circle() на
-   сервере; оттуда же названия отделов и имена названных поимённо. */
-const quoted = (names = []) => names.map((name) => `«${name}»`).join(', ');
+/* Пункт меню у человека берётся из профиля, а профиль читается при загрузке
+   страницы: без этой фразы раздающий говорит «я тебе открыл», а человек раздела
+   не видит. Смены уровня это не касается — права раздел спрашивает сам. */
+const RELOAD_NOTE = 'Раздел появится в меню после обновления страницы.';
 
-const CIRCLE_ROWS = {
-    super_admin: () => ({ title: 'Супер-админы' }),
-    head: (row) => ({ title: `Глава отдела ${quoted(row.departments)}` }),
-    named: (row) => ({ title: (row.people || []).join(', '), meta: 'поимённо' }),
-    lead: (row) => ({ title: 'Главы и супервайзеры', meta: (row.departments || []).join(', ') }),
-    staff: (row) => ({ title: 'Операторы и сотрудники', meta: (row.departments || []).join(', ') }),
+/* Строки «открыт по умолчанию» — кому раздел открыт без выдач. Состав и порядок
+   задаёт сервер (access.circle()): строка = должность в отделе или человек,
+   названный поимённо; оттуда же названия отделов и имена. */
+const SLOT_TITLE = { super_admin: 'Супер-админы', head: 'Глава отдела', sv: 'Супервайзеры', staff: 'Операторы' };
+
+/* В «Маркетинге» рядовые — не операторы: там свои должности. */
+const STAFF_TITLE_BY_CODE = { marketing: 'Сотрудники' };
+
+export const slotTitle = (row) => {
+    if (!row) return '';
+    if (row.kind === 'named') return row.person || '';
+    if (row.kind === 'staff') return STAFF_TITLE_BY_CODE[row.code] || SLOT_TITLE.staff;
+    return SLOT_TITLE[row.kind] || '';
 };
 
-/** Круг раздела строками листа: [{ key, title, meta, value }]. */
-export function circleRows(circle = []) {
-    return circle.map((row) => {
-        const build = CIRCLE_ROWS[row.key];
-        if (!build) return null;
-        const { title, meta = '' } = build(row);
-        // Поимённая строка без имён (человека уволили) — показывать нечего.
-        if (!title) return null;
-        return {
-            key: row.key,
-            title,
-            meta,
-            // «После QR» — в правой колонке, рядом с уровнем: там строка не
-            // обрезается, а в подписи слева длинные названия отделов её съедали.
-            value: join([levelOf(row.level)?.summary || '', row.qr ? 'после QR' : '']),
-        };
-    }).filter(Boolean);
+/* Чья строка — подзаголовок её экрана и заголовок секции. */
+export const NAMED_SECTION = 'Поимённо';
+
+export const slotOwner = (row) => {
+    if (!row) return '';
+    if (row.kind === 'named') return NAMED_SECTION;
+    return row.department || '';
+};
+
+/* Открыта ли строка: уровень — один из трёх. «Нет» и незнакомое слово — закрыта. */
+const slotOpen = (row) => Boolean(levelOf(row?.level));
+
+/* Правая колонка строки: уровень и, у рядовых, «после QR». Уровень — тем же
+   словом, что в сегментах её экрана (label): строка и выбор за ней читаются
+   одинаково, а «Чтение и выгрузка · после QR» на телефоне в 360 px обрезало
+   саму должность. Закрытой строке QR ни к чему. */
+export const slotValue = (row) => join([
+    (circleLevelOf(row?.level) || NONE_LEVEL).label,
+    row?.qr && slotOpen(row) ? 'после QR' : '',
+]);
+
+/**
+ * Экран «Открыт по умолчанию» секциями: супер-админы (не правятся), по секции
+ * на отдел, названные поимённо. [{ key, title, rows: [{ slot, title, value,
+ * muted, locked, row }] }] — row нужен экрану правки строки.
+ */
+export function circleSections(circle = []) {
+    const sections = [];
+    circle.forEach((row) => {
+        const title = slotTitle(row);
+        // Строка без подписи (незнакомый вид, человек без имени) — показывать нечего.
+        if (!title) return;
+        const key = row.locked ? 'always' : row.kind === 'named' ? 'named' : `department:${row.code}`;
+        let section = sections.find((item) => item.key === key);
+        if (!section) {
+            section = { key, title: row.locked ? '' : slotOwner(row), rows: [] };
+            sections.push(section);
+        }
+        section.rows.push({
+            slot: row.slot, title, value: slotValue(row), muted: !slotOpen(row), locked: Boolean(row.locked), row,
+        });
+    });
+    return sections;
 }
 
-/** Одна строка о круге для списка: отделы круга через запятую. */
+/** Одна строка о круге для списка: кому раздел сейчас открыт по умолчанию. */
 export const circleSummary = (circle = []) => {
     const names = [];
-    circle.forEach((row) => (row.departments || []).forEach((name) => {
-        if (!names.includes(name)) names.push(name);
-    }));
+    circle.forEach((row) => {
+        if (row.locked || !slotOpen(row) || !row.department) return;
+        if (!names.includes(row.department)) names.push(row.department);
+    });
     return ['супер-админы', ...names].join(', ');
+};
+
+/* Тело запроса правки строки: PATCH /api/baiga/access/circle — { slot, level }. */
+export const circleBody = (slot, level) => ({ slot, level });
+
+/* Строку открыли — у её людей появится пункт меню, а он читается при загрузке
+   страницы (то же, что у новой выдачи). Закрыли — раздел перестаёт отвечать им
+   сразу; смена уровня открытой строки перезагрузки тоже не требует. */
+export const circleToast = (before, after) => {
+    const was = Boolean(levelOf(before));
+    const now = Boolean(levelOf(after));
+    if (was === now) return 'Доступ изменён';
+    return now ? `Доступ открыт. ${RELOAD_NOTE}` : 'Доступ закрыт';
 };
 
 /** У скольких из выбранных выдача уже есть И уровень другой — он сменится.
@@ -186,11 +257,6 @@ export const replacingNote = (count) => {
         ? 'Одному из выбранных раздел уже выдан — его уровень сменится.'
         : `Раздел уже выдан ${count} из выбранных — их уровень сменится.`;
 };
-
-/* Пункт меню у человека берётся из профиля, а профиль читается при загрузке
-   страницы: без этой фразы раздающий говорит «я тебе открыл», а человек раздела
-   не видит. Смены уровня это не касается — права раздел спрашивает сам. */
-const RELOAD_NOTE = 'Раздел появится в меню после обновления страницы.';
 
 /** Что произошло — по ответу сервера, а не по числу отмеченных. */
 export const grantToast = ({ granted = 0, changed = 0 } = {}) => {

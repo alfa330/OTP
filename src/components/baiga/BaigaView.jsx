@@ -283,6 +283,15 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null,
 
     useEffect(() => { loadScreen(); }, [loadScreen]);
 
+    /* После правки в листе «Доступ» права перечитываются: раздающий меняет и свой
+       уровень, а кнопки раздела рисуются по ним. Тихо: сорвавшийся запрос не
+       заменяет раздел ошибкой — под открытым листом это закрыло бы и его. */
+    const refreshScreen = useCallback(() => {
+        axios.get(`${apiBaseUrl}/api/baiga`, { headers: headers() })
+            .then((response) => { if (response.data) setScreen(response.data); })
+            .catch(() => {});
+    }, [apiBaseUrl, headers]);
+
     const capabilities = screen?.capabilities || {};
     const limits = screen?.limits || {};
     const options = screen?.options || {};
@@ -585,6 +594,7 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null,
                 <BaigaAccessSheet
                     open={accessOpen}
                     onClose={() => setAccessOpen(false)}
+                    onChanged={refreshScreen}
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}
                     toast={toast}

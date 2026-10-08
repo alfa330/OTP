@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { ChevronRight, Loader2, Plus, RotateCw, Trash2 } from 'lucide-react';
+import { ChevronRight, Loader2, Lock, Plus, RotateCw, Trash2 } from 'lucide-react';
 import {
     IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel,
 } from '../ui/ios';
@@ -8,8 +8,9 @@ import CustomSelect from '../ui/CustomSelect';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    LEVELS, LEVEL_HINT, MAX_SUBJECTS, buildRecipients, circleRows, circleSummary, grantBody, grantMeta,
-    grantTitle, grantToast, grantedLevels, levelBody, levelOf, replacingCount, replacingNote,
+    CIRCLE_LEVELS, LEVELS, LEVEL_HINT, MAX_SUBJECTS, buildRecipients, circleBody, circleLevelHint,
+    circleSections, circleSummary, circleToast, grantBody, grantMeta, grantTitle, grantToast, grantedLevels,
+    levelBody, levelOf, replacingCount, replacingNote, slotOwner, slotTitle,
 } from './baigaAccess';
 import { fmtStamp } from './baigaMeta';
 
@@ -19,33 +20,37 @@ import { fmtStamp } from './baigaMeta';
  * Просьба владельца 07.10.2026: «в самом разделе можно было раздавать доступы…
  * группам, людям и отделам, примерно как в вики структуре». Отсюда форма — та
  * же, что у «Доступа к разделу» во вкладке «Структура» вики
- * (WikiSectionAccess.jsx): одно окно и два уровня, как в «Настройках» iOS.
+ * (WikiSectionAccess.jsx): одно окно и уровни вглубь, как в «Настройках» iOS.
  * Первый — список «кому открыт», одной строкой на адресата; второй — либо
  * выдача (адресатов отмечают галочками, сколько нужно, уровень один на всех),
  * либо одна готовая выдача: сменить уровень или снять.
  *
  * Кому раздел открыт и без выдач (супер-админы, «Маркетинг», ОП, СЗоВ —
  * baiga/access.py), в списке стоит ОДНОЙ строкой «Открыт по умолчанию» и
- * раскрывается своим экраном: это задано правилом и отсюда не меняется, а пять
- * запертых строк над выдачами читались бы как пять вещей, которые надо
- * настроить. Выдача только добавляет к этому кругу.
+ * раскрывается своим экраном: десяток строк над выдачами отодвинул бы главное
+ * дело листа — выдать доступ. С 08.10.2026 этот экран правится (просьба
+ * владельца: «есть открыт по умолчанию, сделай так чтобы можно было его
+ * редактировать»): строки — должности по отделам, как «Должности отдела» в
+ * вики; нажатие открывает уровень строки — «Нет», «Чтение», «Выгрузка»,
+ * «Полный». Строка супер-админов заперта: закрыть раздел от всех нельзя.
  *
- * Каждое сохранение — один запрос, и ответ несёт свежий список выдач: второго
+ * Каждое сохранение — один запрос, и ответ несёт свежий список: второго
  * запроса «перечитать» нет.
  */
 
 const errorOf = (requestError, fallback) => requestError?.response?.data?.error || fallback;
 
 /* Навигационная строка в духе «Настроек»: слева адресат, справа одно слово о
-   выданном и шеврон. */
-const AccessRow = ({ title, meta, value = '', muted = false, onOpen }) => (
+   выданном и шеврон. muted гасит слово справа («Нет доступа»), faded — и самого
+   адресата: его уже нет (уволен, группа в архиве), выдача никому ничего не открывает. */
+const AccessRow = ({ title, meta, value = '', muted = false, faded = false, onOpen }) => (
     <button
         type="button"
         onClick={onOpen}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
     >
         <div className="min-w-0 grow basis-0">
-            <div className={`truncate text-[14px] font-medium ${muted ? 'text-slate-400' : 'text-slate-900'}`}>
+            <div className={`truncate text-[14px] font-medium ${faded ? 'text-slate-400' : 'text-slate-900'}`}>
                 {title}
             </div>
             {meta && <div className="mt-0.5 truncate text-[11.5px] text-slate-400">{meta}</div>}
@@ -61,27 +66,27 @@ const AccessRow = ({ title, meta, value = '', muted = false, onOpen }) => (
    а не строкой под полем: это нужно один раз. «i» — общий InfoHint: он
    рисуется порталом, и короткое окно выдачи его не обрезает (пузырь IosHint
    внутри тела окна терял нижние строки). */
-const LevelPicker = ({ value, onChange }) => (
+const LevelPicker = ({ value, onChange, levels = LEVELS, hint = LEVEL_HINT }) => (
     <section className="space-y-2">
         <div className="flex items-center gap-1.5">
             <span className={iosGroupLabel}>Что разрешено</span>
             <InfoHint side="left">
                 <div className="space-y-1.5">
-                    <div>{LEVEL_HINT.intro}</div>
+                    <div>{hint.intro}</div>
                     <div className="space-y-1">
-                        {LEVEL_HINT.options.map(([name, meaning]) => (
+                        {hint.options.map(([name, meaning]) => (
                             <div key={name}>
                                 <span className="font-semibold text-slate-800">{name}</span> — {meaning}
                             </div>
                         ))}
                     </div>
-                    <div className="text-slate-500">{LEVEL_HINT.outro}</div>
+                    {hint.outro && <div className="text-slate-500">{hint.outro}</div>}
                 </div>
             </InfoHint>
         </div>
         <IosSegmented
             value={value}
-            options={LEVELS.map((level) => ({ value: level.key, label: level.label }))}
+            options={levels.map((level) => ({ value: level.key, label: level.label }))}
             size="lg"
             ariaLabel="Что разрешено"
             onChange={onChange}
@@ -89,7 +94,7 @@ const LevelPicker = ({ value, onChange }) => (
     </section>
 );
 
-const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
+const BaigaAccessSheet = ({ open, onClose, onChanged, apiBaseUrl, headers, toast }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     /* Отказ загрузки — отдельное состояние, а не пустой список: сорвавшийся
@@ -98,9 +103,11 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
     const [busy, setBusy] = useState(false);
     /* Второй уровень окна. Одновременно открыт ровно один: circleOpen — кому
        раздел открыт по умолчанию, draft — выдача (новая или готовая). Правка
-       идёт в копии: «Отмена» ничего не откатывает руками. */
+       идёт в копии: «Отмена» ничего не откатывает руками. Под «открыт по
+       умолчанию» есть третий уровень — slot: уровень одной его строки. */
     const [circleOpen, setCircleOpen] = useState(false);
     const [draft, setDraft] = useState(null);
+    const [slot, setSlot] = useState(null);
     // Направление перехода: вперёд экран приезжает справа, назад — слева.
     const [anim, setAnim] = useState('');
     const narrow = useIsMobileShell();
@@ -119,12 +126,13 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
         if (!open) return;
         setCircleOpen(false);
         setDraft(null);
+        setSlot(null);
         setAnim('');
         load();
     }, [open, load]);
 
     const grants = useMemo(() => data?.grants || [], [data]);
-    const circle = useMemo(() => circleRows(data?.circle || []), [data]);
+    const circle = useMemo(() => circleSections(data?.circle || []), [data]);
     const recipients = useMemo(() => buildRecipients(data?.catalog || {}), [data]);
     const recipientByKey = useMemo(() => new Map(recipients.map((item) => [item.key, item])), [recipients]);
     const granted = useMemo(() => grantedLevels(grants), [grants]);
@@ -147,8 +155,11 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
         });
     }, [recipientByKey]);
 
+    /* На уровень назад: со строки круга — к «открыт по умолчанию», оттуда и с
+       выдачи — в список. */
     const leave = () => {
         setAnim('animate-pop-in');
+        if (slot) { setSlot(null); return; }
         setCircleOpen(false);
         setDraft(null);
     };
@@ -159,6 +170,8 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
 
     const openCircle = () => { setAnim('animate-push-in'); setCircleOpen(true); };
 
+    const openSlot = (row) => { setAnim('animate-push-in'); setSlot({ row, level: row.level }); };
+
     const openGrant = (grant) => {
         setAnim('animate-push-in');
         setDraft(grant
@@ -168,22 +181,25 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
             : { grant: null, subjects: [], level: LEVELS[0].key });
     };
 
-    const changed = draft && (draft.grant
-        ? draft.level !== draft.grant.level
-        : draft.subjects.length > 0);
+    const changed = slot
+        ? slot.level !== slot.row.level
+        : draft && (draft.grant ? draft.level !== draft.grant.level : draft.subjects.length > 0);
     const replacing = draft && !draft.grant ? replacingCount(draft.subjects, granted, draft.level) : 0;
 
-    /* Сохранение и снятие отвечают свежим списком выдач — кладём его на место
-       и возвращаемся в список. На отказе экран остаётся открытым: иначе
-       несохранённый выбор пропал бы вместе с ним. */
-    const run = (request, message) => {
+    /* Сохранение и снятие отвечают свежим списком (выдач или строк круга) —
+       кладём его на место и возвращаемся на уровень назад. На отказе экран
+       остаётся открытым: иначе несохранённый выбор пропал бы вместе с ним. */
+    const run = (request, message, key = 'grants') => {
         if (busy) return;
         setBusy(true);
         request
             .then((response) => {
-                setData((prev) => ({ ...(prev || {}), grants: response.data?.grants || [] }));
+                setData((prev) => ({ ...(prev || {}), [key]: response.data?.[key] || [] }));
                 toast(typeof message === 'function' ? message(response.data || {}) : message, 'success');
                 leave();
+                // Раздающий мог сменить и свой уровень: кнопки раздела под листом
+                // рисуются по правам, и права перечитываются.
+                onChanged?.();
             })
             .catch((requestError) => {
                 toast(errorOf(requestError, 'Не удалось сохранить доступ'), 'error');
@@ -197,6 +213,12 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
     };
 
     const save = () => {
+        if (slot) {
+            run(axios.patch(`${apiBaseUrl}/api/baiga/access/circle`,
+                circleBody(slot.row.slot, slot.level), { headers: headers() }),
+            circleToast(slot.row.level, slot.level), 'circle');
+            return;
+        }
         if (draft.grant) {
             run(axios.patch(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`,
                 levelBody(draft.level), { headers: headers() }), 'Доступ изменён');
@@ -220,7 +242,7 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
        (useScreenBackGesture), иначе следующий жест прошёл бы мимо листа. */
     const handleClose = () => {
         if (busy) return false;
-        if ((draft && changed) || (narrow && (circleOpen || draft))) { leave(); return false; }
+        if (changed || (narrow && (circleOpen || draft))) { leave(); return false; }
         onClose?.();
         return undefined;
     };
@@ -229,9 +251,24 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
     let subtitle = 'Списки Байги';
     let footer = <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>;
 
-    if (circleOpen) {
+    const backAndSave = (
+        <>
+            <button type="button" className={iosBtnSecondary} disabled={busy} onClick={goBack}>
+                {changed ? 'Отмена' : 'Назад'}
+            </button>
+            <button type="button" className={iosBtnPrimary} disabled={busy || !changed} onClick={save}>
+                {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
+            </button>
+        </>
+    );
+
+    if (slot) {
+        title = slotTitle(slot.row);
+        subtitle = `${slotOwner(slot.row)} · открыт по умолчанию`;
+        footer = backAndSave;
+    } else if (circleOpen) {
         title = 'Открыт по умолчанию';
-        subtitle = 'Задано правилом раздела — здесь не меняется';
+        subtitle = 'Кому раздел открыт без выдач';
         footer = <button type="button" className={iosBtnSecondary} onClick={goBack}>Назад</button>;
     } else if (draft) {
         title = draft.grant ? grantTitle(draft.grant) : 'Выдать доступ';
@@ -248,23 +285,19 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
                         <Trash2 size={14} /> Снять доступ
                     </button>
                 )}
-                <button type="button" className={iosBtnSecondary} disabled={busy} onClick={goBack}>
-                    {changed ? 'Отмена' : 'Назад'}
-                </button>
-                <button type="button" className={iosBtnPrimary} disabled={busy || !changed} onClick={save}>
-                    {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
-                </button>
+                {backAndSave}
             </>
         );
     }
 
-    const screen = circleOpen ? 'circle' : draft ? `grant:${draft.grant?.id || 'new'}` : 'list';
+    const screen = slot ? `slot:${slot.row.slot}`
+        : circleOpen ? 'circle' : draft ? `grant:${draft.grant?.id || 'new'}` : 'list';
 
     return (
         <IosModal
             open={open}
             onClose={handleClose}
-            onBack={circleOpen || draft ? goBack : null}
+            onBack={circleOpen || draft || slot ? goBack : null}
             title={title}
             subtitle={subtitle}
             maxWidth="max-w-xl"
@@ -274,19 +307,53 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
                 проигралась бы один раз за всю жизнь окна. */}
             <div key={screen} className={anim}>
 
-                {/* ── Открыт по умолчанию ─────────────────────────────────── */}
-                {circleOpen && (
-                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {circle.map((row) => (
-                            <div key={row.key} className="flex items-center gap-3 px-4 py-3">
-                                <div className="min-w-0 grow basis-0">
-                                    <div className="truncate text-[14px] font-medium text-slate-900">{row.title}</div>
-                                    {row.meta && (
-                                        <div className="mt-0.5 truncate text-[11.5px] text-slate-400">{row.meta}</div>
-                                    )}
+                {/* ── Строка «открыт по умолчанию»: её уровень ────────────── */}
+                {slot && (
+                    <div className="space-y-4">
+                        <LevelPicker
+                            value={slot.level}
+                            onChange={(level) => setSlot({ ...slot, level })}
+                            levels={CIRCLE_LEVELS}
+                            hint={circleLevelHint(slot.row)}
+                        />
+                        {/* Строку правили — кто и когда, как «Выдано» у выдачи. */}
+                        {(slot.row.updated_by_name || slot.row.updated_at) && (
+                            <p className="px-1 text-[11.5px] text-slate-400">
+                                {['Изменено', slot.row.updated_by_name, fmtStamp(slot.row.updated_at)]
+                                    .filter(Boolean).join(' · ')}
+                            </p>
+                        )}
+                    </div>
+                )}
+
+                {/* ── Открыт по умолчанию: должности по отделам ───────────── */}
+                {circleOpen && !slot && (
+                    <div className="space-y-4">
+                        {circle.map((section) => (
+                            <section key={section.key} className="space-y-1.5">
+                                {section.title && <div className={iosGroupLabel}>{section.title}</div>}
+                                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                    {section.rows.map((row) => (row.locked ? (
+                                        /* Супер-админы: строка показана, но заперта —
+                                           закрыть раздел от всех нельзя. */
+                                        <div key={row.slot} className="flex items-center gap-3 px-4 py-3">
+                                            <div className="min-w-0 grow basis-0 truncate text-[14px] font-medium text-slate-900">
+                                                {row.title}
+                                            </div>
+                                            <span className="shrink-0 text-[13px] text-slate-700">{row.value}</span>
+                                            <Lock size={13} className="shrink-0 text-slate-300" />
+                                        </div>
+                                    ) : (
+                                        <AccessRow
+                                            key={row.slot}
+                                            title={row.title}
+                                            value={row.value}
+                                            muted={row.muted}
+                                            onOpen={() => openSlot(row.row)}
+                                        />
+                                    )))}
                                 </div>
-                                <span className="shrink-0 text-[13px] text-slate-700">{row.value}</span>
-                            </div>
+                            </section>
                         ))}
                     </div>
                 )}
@@ -350,7 +417,7 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
                             <span className={iosGroupLabel}>Кому открыт</span>
                             <InfoHint
                                 side="left"
-                                text="Первая строка — кому раздел открыт по умолчанию: это задано правилом и здесь не меняется. Ниже — кому он выдан дополнительно: группе, отделу или человеку. Выдача только добавляет доступ."
+                                text="Первая строка — кому раздел открыт по умолчанию: должности по отделам, уровень каждой можно сменить или снять. Ниже — кому он выдан дополнительно: группе, отделу или человеку. Выдача только добавляет доступ."
                             />
                         </div>
                         <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
@@ -380,6 +447,7 @@ const BaigaAccessSheet = ({ open, onClose, apiBaseUrl, headers, toast }) => {
                                             meta={grantMeta(grant)}
                                             value={levelOf(grant.level)?.summary || grant.level}
                                             muted={grant.active === false}
+                                            faded={grant.active === false}
                                             onOpen={() => openGrant(grant)}
                                         />
                                     ))}

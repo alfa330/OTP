@@ -114,24 +114,40 @@ SELECT
     COALESCE((SELECT array_agg(code) FROM headed), '{}'),
     """
 
+_GRANT_LEVELS = "COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}')"
+_NO_GRANT_LEVELS = "'{}'::varchar[]"
+# Правки круга (лист «Доступ» → «Открыт по умолчанию») — одни на всех: строка
+# круга → уровень. Таблица в десяток строк, и читается она тем же запросом.
+_CIRCLE_LEVELS = "COALESCE((SELECT json_object_agg(slot, level) FROM baiga_access_circle), '{}'::json)"
+_NO_CIRCLE_LEVELS = "'{}'::json"
+
 _CONTEXT_WITH_GRANTS_SQL = (_CONTEXT_PROFILE + _CONTEXT_GRANTS + _CONTEXT_COLUMNS
-                            + "COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}')")
-_CONTEXT_WITHOUT_GRANTS_SQL = _CONTEXT_PROFILE + _CONTEXT_COLUMNS + "'{}'::varchar[]"
+                            + _GRANT_LEVELS + ',\n    ' + _CIRCLE_LEVELS)
+_CONTEXT_WITHOUT_CIRCLE_SQL = (_CONTEXT_PROFILE + _CONTEXT_GRANTS + _CONTEXT_COLUMNS
+                               + _GRANT_LEVELS + ',\n    ' + _NO_CIRCLE_LEVELS)
+_CONTEXT_WITHOUT_GRANTS_SQL = (_CONTEXT_PROFILE + _CONTEXT_COLUMNS
+                               + _NO_GRANT_LEVELS + ',\n    ' + _NO_CIRCLE_LEVELS)
+
+
+def _context_sql(cursor):
+    """Таблиц выдач или правок круга ещё нет (миграция не легла) — контекст
+    тот же, без них: раздел живёт по тому, что развёрнуто, а не падает."""
+    if not schema.grants_ready(cursor):
+        return _CONTEXT_WITHOUT_GRANTS_SQL
+    return _CONTEXT_WITH_GRANTS_SQL if schema.circle_ready(cursor) else _CONTEXT_WITHOUT_CIRCLE_SQL
 
 
 def load_access_context(cursor, user_id):
-    """Профиль, главенство и уровни выдач — одним запросом.
+    """Профиль, главенство, уровни выдач и правки круга — одним запросом.
 
     Должность отдаётся как в карточке, а не сведённой к оператору: замку нужно
-    отличать кадровика от оператора (access.requires_sensitive_qr). Таблиц
-    выдач ещё нет (миграция не легла) — контекст тот же, без выдач.
+    отличать кадровика от оператора (access.requires_sensitive_qr).
     """
-    sql = _CONTEXT_WITH_GRANTS_SQL if schema.grants_ready(cursor) else _CONTEXT_WITHOUT_GRANTS_SQL
-    cursor.execute(sql, {'user_id': int(user_id)})
+    cursor.execute(_context_sql(cursor), {'user_id': int(user_id)})
     row = cursor.fetchone()
     if not row or row[1] is None:
         return None
-    name, role, department_id, department_code, city, headed, headed_codes, grant_levels = row
+    name, role, department_id, department_code, city, headed, headed_codes, grant_levels, circle_levels = row
     return {
         'user_id': int(user_id),
         'name': name,
@@ -142,6 +158,7 @@ def load_access_context(cursor, user_id):
         'headed_department_ids': list(headed or []),
         'headed_department_codes': list(headed_codes or []),
         'grant_levels': list(grant_levels or []),
+        'circle_levels': dict(circle_levels or {}),
     }
 
 
@@ -697,6 +714,31 @@ def delete_grant(cursor, grant, actor):
     log_access(cursor, actor, [{'action': 'revoke', 'subject_type': grant['subject_type'],
                                 'subject_id': grant['subject_id'], 'label': grant.get('label'),
                                 'before': grant['level']}])
+
+
+def circle_edits(cursor):
+    """Правки круга: {строка: {уровень, кто и когда правил}}. Свежим чтением —
+    под блокировкой правок доступа «было → стало» в журнале не расходится с
+    таблицей; лист показывает по ним, кто сменил уровень строки."""
+    cursor.execute("SELECT slot, level, updated_by_name, updated_at FROM baiga_access_circle")
+    return {slot: {'level': level, 'updated_by_name': name, 'updated_at': stamp}
+            for slot, level, name, stamp in cursor.fetchall()}
+
+
+def set_circle_level(cursor, slot, before, level, actor):
+    """Записать уровень строки круга и оставить след: before — уровень, который
+    действовал до правки (по умолчанию или прежняя правка)."""
+    cursor.execute(
+        "INSERT INTO baiga_access_circle (slot, level, updated_by, updated_by_name) "
+        "VALUES (%%(slot)s, %%(level)s, %%(actor_id)s, %%(actor_name)s) "
+        "ON CONFLICT (slot) DO UPDATE SET level = EXCLUDED.level, updated_by = EXCLUDED.updated_by, "
+        "updated_by_name = EXCLUDED.updated_by_name, updated_at = %s" % _NOW,
+        {'slot': slot, 'level': level, 'actor_id': actor['user_id'], 'actor_name': actor.get('name')},
+    )
+    # Адресат строки круга — не человек, не группа и не отдел: в журнале он
+    # записан именем строки, номера у него нет.
+    log_access(cursor, actor, [{'action': 'circle', 'subject_type': 'circle', 'subject_id': 0,
+                                'label': slot, 'before': before, 'after': level}])
 
 
 def log_access(cursor, actor, entries):

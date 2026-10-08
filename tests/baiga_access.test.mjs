@@ -1,15 +1,17 @@
 // «Списки Байги», лист «Доступ» (решение владельца 07.10.2026): уровни,
-// список адресатов и подписи строк. Сами правила доступа и ручки сверяет
-// tests/test_baiga.py; здесь — то, что живёт только во фронте.
+// список адресатов и подписи строк; с 08.10.2026 — и правка строк «открыт по
+// умолчанию». Сами правила доступа и ручки сверяет tests/test_baiga.py; здесь —
+// то, что живёт только во фронте.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-    KIND_LABEL, LEVELS, LEVEL_HINT, MAX_SUBJECTS, buildRecipients, circleRows, circleSummary, grantBody,
+    CIRCLE_LEVELS, KIND_LABEL, LEVELS, LEVEL_HINT, MAX_SUBJECTS, NAMED_SECTION, NONE_LEVEL, buildRecipients,
+    circleBody, circleLevelHint, circleLevelOf, circleSections, circleSummary, circleToast, grantBody,
     grantMeta, grantTitle, grantToast, grantedLevels, levelBody, levelOf, replacingCount, replacingNote,
-    roleTitle, subjectKey,
+    roleTitle, slotOwner, slotTitle, slotValue, subjectKey,
 } from '../src/components/baiga/baigaAccess.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -175,9 +177,14 @@ test('лист не теряет выбор и не залипает: сохра
     assert.ok(sheet.includes('<button type="button" className={iosBtnSecondary} disabled={busy} onClick={goBack}>'));
     assert.ok(sheet.includes('        if (busy) return;\n        setBusy(true);'));
     // Жест «назад» на телефоне: false — «остаюсь», иначе следующий жест прошёл бы мимо листа.
+    // Несохранённый выбор — и выдачи, и строки «открыт по умолчанию» — первым выходом не теряется.
     assert.ok(sheet.includes('        if (busy) return false;\n'
-        + '        if ((draft && changed) || (narrow && (circleOpen || draft))) { leave(); return false; }\n'
+        + '        if (changed || (narrow && (circleOpen || draft))) { leave(); return false; }\n'
         + '        onClose?.();'));
+    assert.ok(sheet.includes('    const changed = slot\n        ? slot.level !== slot.row.level\n'));
+    // Назад — по одному уровню: со строки круга к «открыт по умолчанию», оттуда в список.
+    assert.ok(sheet.includes('        if (slot) { setSlot(null); return; }\n        setCircleOpen(false);\n'));
+    assert.ok(sheet.includes('onBack={circleOpen || draft || slot ? goBack : null}'));
     // Выдачу успели снять — в список; и список, и справочник перечитываются.
     assert.ok(sheet.includes('                if (status === 404) leave();\n'));
     assert.ok(sheet.includes('                if (status === 404 || status === 422) load();'));
@@ -222,42 +229,192 @@ test('на сервер уходит ровно то, что он ждёт', () 
     assert.ok(sheet.includes('levelBody(draft.level), { headers: headers() }), \'Доступ изменён\');'));
 });
 
+/* Круг, как его отдаёт GET /api/baiga/access: строка — должность в отделе или
+   человек, названный поимённо (baiga/routes.py: _circle). */
+const circleRow = (slot, level, extra = {}) => {
+    const [kind, code] = slot.split(':');
+    return {
+        slot, kind, level, qr: kind === 'staff', locked: false, code: kind === 'named' ? null : code,
+        department: { marketing: 'Маркетинг', op: 'Отдел продаж', szov: 'СЗоВ' }[code] || null,
+        person: null, updated_by_name: null, updated_at: null, ...extra,
+    };
+};
+
 const CIRCLE = [
-    { key: 'super_admin', level: 'full', qr: false, departments: [], people: [] },
-    { key: 'head', level: 'full', qr: false, departments: ['Маркетинг'], people: [] },
-    { key: 'named', level: 'full', qr: false, departments: [], people: ['Аналитиков А. А.'] },
-    { key: 'lead', level: 'read', qr: false, departments: ['Отдел продаж', 'СЗоВ'], people: [] },
-    { key: 'staff', level: 'read', qr: true, departments: ['Маркетинг', 'Отдел продаж', 'СЗоВ'], people: [] },
+    { slot: 'super_admin', kind: 'super_admin', level: 'full', qr: false, locked: true, code: null,
+      department: null, person: null, updated_by_name: null, updated_at: null },
+    circleRow('head:marketing', 'full'),
+    circleRow('staff:marketing', 'read'),
+    circleRow('head:op', 'read'),
+    circleRow('sv:op', 'read'),
+    circleRow('staff:op', 'read'),
+    circleRow('head:szov', 'read'),
+    circleRow('sv:szov', 'read'),
+    circleRow('staff:szov', 'read'),
+    circleRow('named:540', 'full', { person: 'Аналитиков А. А.' }),
 ];
 
-test('кому раздел открыт по умолчанию — строками, с уровнем и замком', () => {
-    assert.deepEqual(circleRows(CIRCLE), [
-        { key: 'super_admin', title: 'Супер-админы', meta: '', value: 'Полный доступ' },
-        { key: 'head', title: 'Глава отдела «Маркетинг»', meta: '', value: 'Полный доступ' },
-        { key: 'named', title: 'Аналитиков А. А.', meta: 'поимённо', value: 'Полный доступ' },
-        { key: 'lead', title: 'Главы и супервайзеры', meta: 'Отдел продаж, СЗоВ', value: 'Чтение' },
-        // «После QR» — справа, у уровня: слева длинные названия отделов его обрезали.
-        { key: 'staff', title: 'Операторы и сотрудники', meta: 'Маркетинг, Отдел продаж, СЗоВ', value: 'Чтение · после QR' },
+const edited = (changes) => CIRCLE.map((row) => (row.slot in changes ? { ...row, level: changes[row.slot] } : row));
+
+// Строки секций без ссылки на исходную строку — она сверяется отдельно.
+const plain = (sections) => sections.map((section) => ({
+    ...section, rows: section.rows.map(({ row, ...rest }) => rest),
+}));
+
+test('уровни строки круга — «Нет» и те же три, как на сервере', () => {
+    const none = /^LEVEL_NONE = '(\w+)'$/m.exec(ACCESS_PY);
+    assert.ok(none && /^CIRCLE_LEVELS = \(LEVEL_NONE,\) \+ LEVELS$/m.test(ACCESS_PY), 'в baiga/access.py нет уровней круга');
+    assert.equal(NONE_LEVEL.key, none[1]);
+    assert.deepEqual(CIRCLE_LEVELS.map((level) => level.key), [none[1], ...LEVELS.map((level) => level.key)]);
+    assert.deepEqual(CIRCLE_LEVELS.map((level) => level.label), ['Нет', 'Чтение', 'Выгрузка', 'Полный']);
+    for (const level of CIRCLE_LEVELS) assert.equal(circleLevelOf(level.key), level);
+    assert.equal(circleLevelOf('owner'), null);
+    // «Нет» — только у круга: выдачу не «выдают на нет», её снимают.
+    assert.equal(levelOf(NONE_LEVEL.key), null);
+    assert.ok(!LEVELS.includes(NONE_LEVEL));
+});
+
+test('подсказка у строки круга: варианты сегментов, про QR — только рядовым', () => {
+    const staff = circleLevelHint(CIRCLE[5]);
+    assert.deepEqual(staff.options.map(([name]) => name), CIRCLE_LEVELS.map((level) => level.label));
+    for (const [name, meaning] of staff.options) {
+        assert.match(meaning, /^[а-яё]/, name);
+        assert.doesNotMatch(meaning, /\.$/, name);
+        assert.doesNotMatch(meaning, /\. [А-ЯЁ]/, name);
+    }
+    assert.match(staff.outro, /после QR-подтверждения/);
+    // Главу, супервайзера и названного поимённо замок не спрашивает — и подсказка молчит.
+    for (const row of [CIRCLE[1], CIRCLE[3], CIRCLE[4], CIRCLE[9]]) assert.equal(circleLevelHint(row).outro, '', row.slot);
+    assert.equal(circleLevelHint().outro, '');
+    const sheet = read('../src/components/baiga/BaigaAccessSheet.jsx');
+    assert.ok(sheet.includes('{hint.outro && <div className="text-slate-500">{hint.outro}</div>}'));
+    assert.ok(sheet.includes('levels={CIRCLE_LEVELS}'));
+    assert.ok(sheet.includes('hint={circleLevelHint(slot.row)}'));
+});
+
+test('«открыт по умолчанию» — секциями по отделам: должность, уровень, замок', () => {
+    const sections = circleSections(CIRCLE);
+    assert.deepEqual(plain(sections), [
+        { key: 'always', title: '', rows: [
+            { slot: 'super_admin', title: 'Супер-админы', value: 'Полный', muted: false, locked: true },
+        ] },
+        { key: 'department:marketing', title: 'Маркетинг', rows: [
+            { slot: 'head:marketing', title: 'Глава отдела', value: 'Полный', muted: false, locked: false },
+            // В «Маркетинге» рядовые — не операторы.
+            { slot: 'staff:marketing', title: 'Сотрудники', value: 'Чтение · после QR', muted: false, locked: false },
+        ] },
+        { key: 'department:op', title: 'Отдел продаж', rows: [
+            { slot: 'head:op', title: 'Глава отдела', value: 'Чтение', muted: false, locked: false },
+            { slot: 'sv:op', title: 'Супервайзеры', value: 'Чтение', muted: false, locked: false },
+            // «После QR» — справа, у уровня: там строка не обрезается.
+            { slot: 'staff:op', title: 'Операторы', value: 'Чтение · после QR', muted: false, locked: false },
+        ] },
+        { key: 'department:szov', title: 'СЗоВ', rows: [
+            { slot: 'head:szov', title: 'Глава отдела', value: 'Чтение', muted: false, locked: false },
+            { slot: 'sv:szov', title: 'Супервайзеры', value: 'Чтение', muted: false, locked: false },
+            { slot: 'staff:szov', title: 'Операторы', value: 'Чтение · после QR', muted: false, locked: false },
+        ] },
+        { key: 'named', title: NAMED_SECTION, rows: [
+            { slot: 'named:540', title: 'Аналитиков А. А.', value: 'Полный', muted: false, locked: false },
+        ] },
     ]);
+    // Справа — то же слово, что в сегментах экрана строки.
+    const words = new Set(CIRCLE_LEVELS.map((level) => level.label));
+    for (const row of sections.flatMap((section) => section.rows)) {
+        assert.ok(words.has(row.value.replace(' · после QR', '')), row.slot);
+    }
+    // Экрану правки строка отдаётся целиком, той же ссылкой: в ней имя строки и её уровень.
+    assert.equal(sections[2].rows[2].row, CIRCLE[5]);
     assert.equal(circleSummary(CIRCLE), 'супер-админы, Маркетинг, Отдел продаж, СЗоВ');
 });
 
-test('строки круга — те же ключи, что отдаёт сервер', () => {
-    const body = ACCESS_PY.split('def circle():')[1].split('\ndef ')[0];
-    const server = [...body.matchAll(/\{'key': '(\w+)'/g)].map((match) => match[1]);
-    assert.deepEqual(server, CIRCLE.map((row) => row.key));
-    // Каждый ключ сервера листу знаком: незнакомая строка молча пропала бы.
-    assert.equal(circleRows(server.map((key) => ({
-        key, level: 'read', qr: false, departments: ['Отдел'], people: ['Человек Ч.'],
-    }))).length, server.length);
+test('правленая строка: уровень — словом сегмента, закрытая — «Нет» без QR', () => {
+    const rows = Object.fromEntries(circleSections(edited({
+        'staff:op': 'none', 'sv:op': 'export', 'staff:szov': 'full', 'head:marketing': 'read', 'named:540': 'none',
+    })).flatMap((section) => section.rows).map((row) => [row.slot, row]));
+    assert.deepEqual([rows['staff:op'].value, rows['staff:op'].muted], ['Нет', true]);
+    assert.deepEqual([rows['sv:op'].value, rows['sv:op'].muted], ['Выгрузка', false]);
+    assert.deepEqual([rows['staff:szov'].value, rows['staff:szov'].muted], ['Полный · после QR', false]);
+    assert.deepEqual([rows['head:marketing'].value, rows['head:marketing'].muted], ['Чтение', false]);
+    // Закрытая строка остаётся в списке: её открывают обратно там же.
+    assert.deepEqual([rows['named:540'].value, rows['named:540'].muted], ['Нет', true]);
+    // Незнакомое слово вместо уровня — закрыта, а не «открыта неизвестно как».
+    assert.equal(slotValue({ ...CIRCLE[5], level: 'owner' }), 'Нет');
+    assert.equal(slotValue({ ...CIRCLE[5], level: undefined }), 'Нет');
+    assert.equal(slotValue(), 'Нет');
+});
+
+test('сводка в списке называет отделы, где хоть одна строка открыта', () => {
+    assert.equal(circleSummary(edited({ 'staff:op': 'none' })), 'супер-админы, Маркетинг, Отдел продаж, СЗоВ');
+    assert.equal(circleSummary(edited({ 'head:op': 'none', 'sv:op': 'none', 'staff:op': 'none' })),
+        'супер-админы, Маркетинг, СЗоВ');
+    const all = Object.fromEntries(CIRCLE.filter((row) => !row.locked).map((row) => [row.slot, 'none']));
+    assert.equal(circleSummary(edited(all)), 'супер-админы');
+    assert.equal(circleSummary(), 'супер-админы');
+});
+
+test('виды строк круга — те же, что отдаёт сервер, и каждая подписана', () => {
+    const server = /^SLOT_HEAD, SLOT_SV, SLOT_STAFF, SLOT_NAMED = '(\w+)', '(\w+)', '(\w+)', '(\w+)'$/m.exec(ACCESS_PY);
+    assert.ok(server, 'в baiga/access.py нет видов строк круга');
+    const kinds = ['super_admin', ...server.slice(1, 5)];
+    assert.deepEqual([...new Set(CIRCLE.map((row) => row.kind))].sort(), [...kinds].sort());
+    // Незнакомая строка молча пропала бы — у каждого вида сервера есть подпись.
+    for (const kind of kinds) {
+        assert.ok(slotTitle({ kind, code: 'op', person: 'Человек Ч.' }), kind);
+    }
+    assert.ok(ACCESS_PY.includes("rows = [{'slot': 'super_admin', 'kind': 'super_admin'"));
+    // Чья строка — подзаголовок её экрана.
+    assert.equal(slotOwner(CIRCLE[5]), 'Отдел продаж');
+    assert.equal(slotOwner(CIRCLE[9]), NAMED_SECTION);
+    assert.equal(slotOwner(), '');
+    assert.equal(slotTitle(), '');
 });
 
 test('круг без имён и с незнакомой строкой не ломает лист', () => {
-    // Названного поимённо уволили — имён нет, и строки нет.
-    assert.deepEqual(circleRows([{ key: 'named', level: 'full', qr: false, people: [] }]), []);
-    assert.deepEqual(circleRows([{ key: 'новое правило', level: 'read', qr: false }]), []);
-    assert.deepEqual(circleRows(), []);
-    assert.equal(circleSummary(), 'супер-админы');
+    // Названного поимённо уволили — имени нет, и строки нет (и пустой секции тоже).
+    assert.deepEqual(circleSections([circleRow('named:540', 'full')]), []);
+    assert.deepEqual(circleSections([{ slot: 'trainer:op', kind: 'trainer', level: 'read', code: 'op', department: 'Отдел продаж' }]), []);
+    assert.deepEqual(circleSections(), []);
+    // Отдел без названия в справочнике подписан кодом — так его отдаёт сервер; секция не пропадает.
+    assert.equal(circleSections([circleRow('head:op', 'read', { department: 'op' })])[0].title, 'op');
+});
+
+test('правка строки круга: тело запроса и разводка в листе', () => {
+    // PATCH /api/baiga/access/circle — { slot, level } (baiga/routes.py).
+    assert.deepEqual(circleBody('staff:op', 'none'), { slot: 'staff:op', level: 'none' });
+    const routes = read('../baiga/routes.py');
+    assert.ok(routes.includes("@baiga_route('/access/circle', methods=('PATCH',), need='access')"));
+    assert.ok(routes.includes("slot = str(data.get('slot') or '').strip()"));
+    assert.ok(routes.includes("level = str(data.get('level') or '').strip().lower()"));
+    assert.ok(routes.includes('return jsonify({"circle": circle})'));
+    const sheet = read('../src/components/baiga/BaigaAccessSheet.jsx');
+    // Уходит имя строки и уровень из черновика, а ответ кладётся на место круга.
+    assert.ok(sheet.includes('            run(axios.patch(`${apiBaseUrl}/api/baiga/access/circle`,\n'
+        + '                circleBody(slot.row.slot, slot.level), { headers: headers() }),\n'
+        + "            circleToast(slot.row.level, slot.level), 'circle');"));
+    assert.ok(sheet.includes('setData((prev) => ({ ...(prev || {}), [key]: response.data?.[key] || [] }));'));
+    // Черновик строки начинается с её уровня: «Сохранить» гаснет, пока он тот же.
+    assert.ok(sheet.includes('setSlot({ row, level: row.level });'));
+    assert.ok(sheet.includes('onOpen={() => openSlot(row.row)}'));
+    // Строка супер-админов — без нажатия: это не кнопка.
+    assert.ok(sheet.includes('{section.rows.map((row) => (row.locked ? ('));
+    // Кто и когда правил строку — как «Выдано» у выдачи.
+    assert.ok(sheet.includes("{['Изменено', slot.row.updated_by_name, fmtStamp(slot.row.updated_at)]"));
+    // Раздающий правит и свою строку — права раздела под листом перечитываются.
+    assert.ok(sheet.includes('                onChanged?.();'));
+    assert.ok(read('../src/components/baiga/BaigaView.jsx').includes('onChanged={refreshScreen}'));
+});
+
+test('тост правки строки: открыли, закрыли или сменили уровень', () => {
+    const reload = 'Раздел появится в меню после обновления страницы.';
+    // Открыли закрытую строку — пункт меню у людей появится после обновления страницы.
+    assert.equal(circleToast('none', 'read'), `Доступ открыт. ${reload}`);
+    assert.equal(circleToast('none', 'full'), `Доступ открыт. ${reload}`);
+    assert.equal(circleToast('read', 'none'), 'Доступ закрыт');
+    assert.equal(circleToast('full', 'none'), 'Доступ закрыт');
+    // Смена уровня открытой строки перезагрузки не требует.
+    assert.equal(circleToast('read', 'export'), 'Доступ изменён');
+    assert.equal(circleToast('full', 'read'), 'Доступ изменён');
 });
 
 test('тост говорит, что произошло, по ответу сервера', () => {

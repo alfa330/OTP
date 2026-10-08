@@ -1302,10 +1302,14 @@ def _get_user_payload(user):
     # iCore Phone»; сам доступ к файлу проверяет _can_download_icore_phone.
     dial_list_line_member = bool(_dial_list_line_member(user_id)) if user_id is not None else False
 
-    # Открыт ли человеку раздел «Списки Байги». Его выдают из самого раздела —
-    # человеку, группе, отделу, — и по должности с отделом портал такую выдачу
-    # не вычислит, а пункт меню показать обязан (canAccessBaigaSectionForUser).
-    baiga_access = _baiga_section_open_for(user_id) if user_id is not None else False
+    # Открыт ли человеку раздел «Списки Байги». И выдачи, и круг «открыт по
+    # умолчанию» правят из самого раздела, поэтому пункт меню экран рисует
+    # только по этому флагу (canAccessBaigaSectionForUser). Профиль — запасной
+    # расчёт на случай, если контекст раздела не прочитался.
+    baiga_access = _baiga_section_open_for(user_id, {
+        'role': role, 'department_code': department_code,
+        'headed_department_ids': headed_department_ids, 'headed_department_codes': headed_department_codes,
+    }) if user_id is not None else False
 
     return {
         "role": role,
@@ -65774,21 +65778,33 @@ except Exception:
     logging.exception("Раздел «Списки Байги»: Blueprint НЕ подключён")
 
 
-def _baiga_section_open_for(user_id):
+def _baiga_section_open_for(user_id, profile=None):
     """Открыт ли человеку раздел «Списки Байги» — флаг baiga_access в профиле.
 
     Тот же контекст и то же правило, что у гейта ручек раздела
-    (baiga.access.can_open_section): флаг и ответ сервера не расходятся. Любой
-    сбой — False: вход в портал из-за раздела падать не должен, а круг по
-    должности и отделу портал считает и сам.
+    (baiga.access.can_open_section): флаг и ответ сервера не расходятся. Пункт
+    меню экран рисует только по этому флагу — своей копии круга у него нет.
+
+    Сбой вход в портал не роняет. Не прочитался контекст (база занята, идёт
+    выкладка) — флаг считается по кругу ПО УМОЛЧАНИЮ из того, что профиль уже
+    знает (profile: должность, отдел, возглавляемые отделы — и id, и коды: по id
+    правило отличает главу от рядового), без выдач и правок круга: пункт меню у
+    оператора из-за одного сорвавшегося запроса пропадать не должен. Доступом
+    флаг не является — раздел проверяет каждый запрос сам.
     """
     if not user_id:
         return False
     try:
         from baiga import access as baiga_access, queries as baiga_queries
 
-        with db._get_cursor() as cursor:
-            ctx = baiga_queries.load_access_context(cursor, int(user_id))
+        try:
+            with db._get_cursor() as cursor:
+                ctx = baiga_queries.load_access_context(cursor, int(user_id))
+        except Exception:
+            logging.exception("Списки Байги: не удалось определить доступ для %s", user_id)
+            if not profile:
+                return False
+            ctx = dict(profile, user_id=int(user_id))
         return bool(ctx and baiga_access.can_open_section(ctx))
     except Exception:
         logging.exception("Списки Байги: не удалось определить доступ для %s", user_id)

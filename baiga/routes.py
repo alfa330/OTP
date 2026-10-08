@@ -24,6 +24,7 @@ Blueprint собирается фабрикой и получает зависи
     POST   /access/grants          выдать уровень сразу нескольким адресатам
     PATCH  /access/grants/<id>     сменить уровень выдачи
     DELETE /access/grants/<id>     снять выдачу
+    PATCH  /access/circle          сменить уровень строки «открыт по умолчанию»
 
 Экран и поиск — всем, кому раздел открыт; выгрузка — от уровня «выгрузка»,
 загрузка и журнал — тем, кому он открыт полностью (access.can_manage); доступ
@@ -436,17 +437,29 @@ def build_baiga_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               'BAIGA_ACCESS_TOO_MANY')
         return subjects, None
 
-    def _circle(cursor):
-        """Круг раздела строками — с названиями отделов и именами названных."""
-        rows = [dict(row) for row in access.circle()]
-        codes = sorted({code for row in rows for code in row.get('departments', ())})
-        user_ids = sorted({user_id for row in rows for user_id in row.get('user_ids', ())})
+    def _circle(cursor, edits):
+        """Строки «открыт по умолчанию» с названиями отделов и именами названных
+        поимённо. edits — правки круга (queries.circle_edits): уровень строки
+        сейчас и кто его сменил. Названный, которого в штате уже нет, строкой не
+        показывается: подписать её нечем."""
+        rows = access.circle({slot: edit['level'] for slot, edit in edits.items()})
+        codes = sorted({row['code'] for row in rows if row.get('code')})
+        user_ids = sorted({row['user_id'] for row in rows if row.get('user_id')})
         departments, people = queries.circle_names(cursor, codes, user_ids)
-        return [{
-            'key': row['key'], 'level': row['level'], 'qr': row['qr'],
-            'departments': [departments.get(code, code) for code in row.get('departments', ())],
-            'people': [people[user_id] for user_id in row.get('user_ids', ()) if user_id in people],
-        } for row in rows]
+        shown = []
+        for row in rows:
+            if row.get('user_id') and row['user_id'] not in people:
+                continue
+            edit = edits.get(row['slot']) or {}
+            shown.append({
+                'slot': row['slot'], 'kind': row['kind'], 'level': row['level'], 'qr': row['qr'],
+                'locked': row['locked'], 'code': row.get('code'),
+                'department': departments.get(row['code'], row['code']) if row.get('code') else None,
+                'person': people.get(row.get('user_id')),
+                # Строку не правили — уровень по умолчанию, и автора у него нет.
+                'updated_by_name': edit.get('updated_by_name'), 'updated_at': edit.get('updated_at'),
+            })
+        return shown
 
     @baiga_route('/access', need='access')
     def baiga_access(ctx):
@@ -455,9 +468,11 @@ def build_baiga_blueprint(*, db, require_api_key, build_cors_preflight_response,
         with db._get_cursor() as cursor:
             if not schema.grants_ready(cursor):
                 return _access_not_ready()
+            # Таблица правок круга моложе выдач: нет её — круг по умолчанию.
+            edits = queries.circle_edits(cursor) if schema.circle_ready(cursor) else {}
             return jsonify({
                 "grants": queries.list_grants(cursor),
-                "circle": _circle(cursor),
+                "circle": _circle(cursor, edits),
                 "catalog": queries.access_catalog(cursor),
                 "max_subjects": access.MAX_GRANT_SUBJECTS,
             })
@@ -518,5 +533,31 @@ def build_baiga_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.delete_grant(cursor, grant, _actor(ctx))
             grants = queries.list_grants(cursor)
         return jsonify({"grants": grants})
+
+    @baiga_route('/access/circle', methods=('PATCH',), need='access')
+    def baiga_access_circle(ctx):
+        """Сменить уровень строки круга — кому раздел открыт без выдач. Строки
+        заданы кодом (access.CIRCLE и именной список): правится уровень, а не
+        состав, и строки супер-админа среди них нет."""
+        data = _payload()
+        slot = str(data.get('slot') or '').strip()
+        level = str(data.get('level') or '').strip().lower()
+        defaults = access.circle_defaults()
+        if slot not in defaults:
+            return _bad('Такой строки среди открытых по умолчанию нет', 'BAIGA_ACCESS_BAD_SLOT')
+        if level not in access.CIRCLE_LEVELS:
+            return _bad('Выберите, что разрешить', 'BAIGA_ACCESS_BAD_LEVEL')
+        with db._get_cursor() as cursor:
+            if not (schema.grants_ready(cursor) and schema.circle_ready(cursor)):
+                return _access_not_ready()
+            queries.lock_access(cursor)
+            edits = queries.circle_edits(cursor)
+            before = edits[slot]['level'] if slot in edits else defaults[slot]
+            if before != level:
+                queries.set_circle_level(cursor, slot, before, level, _actor(ctx))
+                # Перечитываем: время правки ставит база.
+                edits = queries.circle_edits(cursor)
+            circle = _circle(cursor, edits)
+        return jsonify({"circle": circle})
 
     return bp

@@ -2,7 +2,8 @@
 """Необязательная проверка настоящим SQL: BAIGA_TEST_PORT — порт локального Postgres.
 
 Выдачи раздела «Списки Байги» (кнопка «Доступ», решение владельца 07.10.2026):
-человеку, группе, отделу. tests/test_baiga.py сверяет правило и ручки на
+человеку, группе, отделу — и правки строк «открыт по умолчанию» (08.10.2026).
+tests/test_baiga.py сверяет правило и ручки на
 подменённом слое запросов и видит только, что запрос НАПИСАН. Что он ЗНАЧИТ —
 под какие выдачи подпадает человек, кто считается в группе и в штате, как
 повторная выдача меняет уровень — исполняется здесь, на настоящей схеме раздела
@@ -125,8 +126,9 @@ def db(monkeypatch):
         admin.rollback()
         admin.close()
         raise
-    # Схема теста — не public: «таблицы выдач есть» отвечаем сами.
+    # Схема теста — не public: «таблицы выдач и правок круга есть» отвечаем сами.
     monkeypatch.setattr(schema, 'grants_ready', lambda cursor: True)
+    monkeypatch.setattr(schema, 'circle_ready', lambda cursor: True)
     try:
         yield base
     finally:
@@ -163,7 +165,7 @@ def test_context_is_the_profile_and_headed_departments(db):
     assert operator == {
         'user_id': SZOV_OPERATOR, 'name': 'Сзовов Саян', 'role': 'operator', 'department_id': SZOV,
         'department_code': 'SZOV', 'city': None, 'headed_department_ids': [], 'headed_department_codes': [],
-        'grant_levels': [],
+        'grant_levels': [], 'circle_levels': {},
     }
     # Глава Тез КЦ числится в СЗоВ: свой отдел — один, возглавляемый — другой.
     assert (head['department_id'], head['headed_department_ids'], head['headed_department_codes']) == (
@@ -370,6 +372,111 @@ def test_already_granted_levels_are_read_by_kind_and_number(db):
         assert queries.granted_levels(cur, [('user', IN_GROUP), ('group', GROUP), ('department', TEZ),
                                             ('group', IN_GROUP)]) == {
             ('user', IN_GROUP): 'read', ('group', GROUP): 'full'}
+
+
+def context(db, user_id):
+    with db.cursor() as cur:
+        return queries.load_access_context(cur, user_id)
+
+
+def test_circle_edit_reaches_the_people_of_the_row(db):
+    """Правка строки «открыт по умолчанию» доходит до контекста каждого — тем же
+    запросом, что профиль и выдачи, — и меняет ответ правила тем, кто под
+    строку подпадает."""
+    assert access.capabilities(context(db, SZOV_OPERATOR))['can_open'] is True
+    with db.cursor() as cur:
+        queries.lock_access(cur)
+        assert queries.circle_edits(cur) == {}
+        queries.set_circle_level(cur, 'staff:szov', 'read', 'none', ACTOR)
+    operator = context(db, SZOV_OPERATOR)
+    assert operator['circle_levels'] == {'staff:szov': 'none'}
+    assert access.capabilities(operator) == {'can_open': False, 'can_export': False, 'can_manage': False,
+                                             'can_manage_access': False}
+    # Глава «Маркетинга» видит ту же таблицу правок, но его строка не тронута.
+    head = context(db, MARKETING_HEAD)
+    assert head['circle_levels'] == {'staff:szov': 'none'}
+    assert access.level_of(head) == 'full'
+    # Подняли строку до выгрузки — оператор СЗоВ выгружает.
+    with db.cursor() as cur:
+        queries.set_circle_level(cur, 'staff:szov', 'none', 'export', ACTOR)
+    assert access.capabilities(context(db, SZOV_OPERATOR))['can_export'] is True
+    # Закрытая строка и выдача складываются: строку закрыли, выданное осталось.
+    with db.cursor() as cur:
+        queries.set_circle_level(cur, 'staff:szov', 'export', 'none', ACTOR)
+    grant(db, 'user', SZOV_OPERATOR, 'read')
+    operator = context(db, SZOV_OPERATOR)
+    assert (operator['grant_levels'], operator['circle_levels']) == (['read'], {'staff:szov': 'none'})
+    assert access.level_of(operator) == 'read'
+
+
+def test_circle_edit_is_one_row_per_slot_with_the_author_and_a_trace(db):
+    other = {'user_id': SZOV_OPERATOR, 'name': 'Другой'}
+    with db.cursor() as cur:
+        queries.set_circle_level(cur, 'staff:op', 'read', 'none', ACTOR)
+        queries.set_circle_level(cur, 'head:szov', 'read', 'full', ACTOR)
+    first = rows(db, "SELECT updated_at FROM baiga_access_circle WHERE slot = 'staff:op'")[0][0]
+    with db.cursor() as cur:
+        queries.set_circle_level(cur, 'staff:op', 'none', 'export', other)
+        edits = queries.circle_edits(cur)
+    # Повторная правка переписала строку: уровень, автор, время — второй строки нет.
+    assert rows(db, "SELECT slot, level, updated_by, updated_by_name FROM baiga_access_circle ORDER BY slot") == [
+        ('head:szov', 'full', MARKETING_HEAD, 'Маркетова Мадина'),
+        ('staff:op', 'export', SZOV_OPERATOR, 'Другой'),
+    ]
+    assert {slot: (edit['level'], edit['updated_by_name']) for slot, edit in edits.items()} == {
+        'head:szov': ('full', 'Маркетова Мадина'), 'staff:op': ('export', 'Другой')}
+    assert edits['staff:op']['updated_at'] >= first
+    # Время — настенные часы Алматы, как у остальных таблиц раздела.
+    drift = rows(db, "SELECT abs(extract(epoch FROM (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') - updated_at)) "
+                     "FROM baiga_access_circle WHERE slot = 'staff:op'")[0][0]
+    assert drift < 60
+    assert rows(db, "SELECT action, subject_type, subject_id, subject_label, level_before, level_after, "
+                    "actor_user_id, actor_name FROM baiga_access_log ORDER BY id") == [
+        ('circle', 'circle', 0, 'staff:op', 'read', 'none', MARKETING_HEAD, 'Маркетова Мадина'),
+        ('circle', 'circle', 0, 'head:szov', 'read', 'full', MARKETING_HEAD, 'Маркетова Мадина'),
+        ('circle', 'circle', 0, 'staff:op', 'none', 'export', SZOV_OPERATOR, 'Другой'),
+    ]
+
+
+def test_one_circle_row_cannot_have_two_edits(db):
+    import psycopg2
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO baiga_access_circle (slot, level) VALUES ('staff:op', 'none')")
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with db.cursor() as cur:
+            cur.execute("INSERT INTO baiga_access_circle (slot, level) VALUES ('staff:op', 'full')")
+
+
+def test_circle_edit_outlives_its_author(db):
+    """Правившего удалили из базы — правка и её след остаются, подписаны его именем."""
+    with db.cursor() as cur:
+        queries.set_circle_level(cur, 'staff:op', 'read', 'none', ACTOR)
+        cur.execute("DELETE FROM users WHERE id = %s", (MARKETING_HEAD,))
+    assert rows(db, "SELECT slot, level, updated_by, updated_by_name FROM baiga_access_circle") == [
+        ('staff:op', 'none', None, 'Маркетова Мадина')]
+    assert rows(db, "SELECT action, subject_label, actor_user_id, actor_name FROM baiga_access_log") == [
+        ('circle', 'staff:op', None, 'Маркетова Мадина')]
+    assert context(db, SZOV_OPERATOR)['circle_levels'] == {'staff:op': 'none'}
+
+
+def test_without_the_circle_table_the_context_is_the_default_circle(db, monkeypatch):
+    """Таблица правок круга моложе выдач: не легла она — контекст собирается без
+    неё (запрос её не упоминает), выдачи работают, круг — по умолчанию."""
+    grant(db, 'user', NO_GROUP, 'export')
+    with db.cursor() as cur:
+        cur.execute("DROP TABLE baiga_access_circle")
+    monkeypatch.setattr(schema, 'circle_ready', lambda cursor: False)
+    ctx = context(db, NO_GROUP)
+    assert (ctx['grant_levels'], ctx['circle_levels']) == (['export'], {})
+    assert access.capabilities(context(db, SZOV_OPERATOR))['can_open'] is True
+    # И без таблиц выдач — тоже: раздел живёт по кругу, как до кнопки «Доступ».
+    with db.cursor() as cur:
+        cur.execute("DROP TABLE baiga_access_grants")
+        cur.execute("DROP TABLE baiga_access_log")
+    monkeypatch.setattr(schema, 'grants_ready', lambda cursor: False)
+    ctx = context(db, NO_GROUP)
+    assert (ctx['grant_levels'], ctx['circle_levels']) == ([], {})
+    assert access.capabilities(context(db, SZOV_OPERATOR))['can_open'] is True
 
 
 def test_circle_names_ignore_code_case_and_the_fired(db):

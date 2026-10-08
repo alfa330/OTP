@@ -954,7 +954,7 @@ class ProfileCarriesHeadedDepartmentsTests(unittest.TestCase):
             'logging': logging,
             '_build_avatar_signed_url': lambda _bucket, _path: None,
             '_dial_list_line_member': lambda _user_id: None,
-            '_baiga_section_open_for': lambda _user_id: False,
+            '_baiga_section_open_for': lambda _user_id, _profile=None: False,
         }
         exec(_endpoint("_get_user_payload"), namespace)
         return namespace["_get_user_payload"]({'id': 300, 'role': 'admin', 'name': 'Руководитель'})

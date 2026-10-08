@@ -294,6 +294,28 @@ class AccessTests(unittest.TestCase):
             self.assertFalse(self.reads(person(role, 'tez', grants=('full',)), False)[0], role)
             self.assertTrue(self.reads(person(role, 'tez', grants=('full',)), True)[0], role)
 
+    def test_edited_circle_reaches_the_assistant(self):
+        """Круг «открыт по умолчанию» правят из листа «Доступ» (08.10.2026) — и
+        помощник читает списки по правленому кругу, как ручки раздела: закрытой
+        строке не читает и с QR, оставшимся — через тот же замок."""
+        edits = {'staff:op': 'none', 'sv:szov': 'full', 'head:marketing': 'none'}
+        opened = 0
+        for role, code, heads in grid():
+            ctx = person(role, code, heads, circle=edits)
+            for qr in (False, True):
+                by_route = access.can_open_section(ctx) and (not access.requires_sensitive_qr(ctx) or qr)
+                self.assertEqual(self.reads(ctx, qr)[0], by_route, (role, code, heads, qr))
+                opened += by_route
+        self.assertGreater(opened, 50)
+        # Поимённо: оператору ОП строку закрыли, его супервайзеру — нет.
+        closed = person('operator', 'op', circle=edits)
+        self.assertEqual([self.reads(closed, qr)[0] for qr in (False, True)], [False, False])
+        self.assertTrue(self.reads(person('sv', 'op', circle=edits), False)[0])
+        self.assertFalse(self.reads(person('admin', 'marketing', ('marketing',), circle=edits), True)[0])
+        # Закрытая строка и выдача складываются — и для помощника.
+        granted = person('operator', 'op', grants=('read',), circle=edits)
+        self.assertEqual([self.reads(granted, qr)[0] for qr in (False, True)], [False, True])
+
     def test_qr_is_asked_about_this_person_on_this_cursor(self):
         _opened, asked, cursor = self.reads(person('operator', 'op'), True)
         self.assertEqual(asked, [(10, cursor)])

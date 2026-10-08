@@ -69,14 +69,16 @@ def _read(path):
     return path.read_text(encoding='utf-8-sig')
 
 
-def person(role='operator', department_code='marketing', headed_codes=(), user_id=10, grants=()):
-    """grants — уровни выдач, под которые человек подпадает (кнопка «Доступ»)."""
+def person(role='operator', department_code='marketing', headed_codes=(), user_id=10, grants=(), circle=None):
+    """grants — уровни выдач, под которые человек подпадает (кнопка «Доступ»);
+    circle — правки строк «открыт по умолчанию»: {строка: уровень}."""
     return {
         'user_id': user_id, 'name': 'Сотрудник %d' % user_id, 'role': role,
         'department_id': 909, 'department_code': department_code, 'city': 'Алматы',
         'headed_department_ids': [909] if headed_codes else [],
         'headed_department_codes': list(headed_codes),
         'grant_levels': list(grants),
+        'circle_levels': dict(circle or {}),
     }
 
 
@@ -444,38 +446,229 @@ class GrantAccessTests(unittest.TestCase):
                 ctx = dict(person(department_code='tez'), user_id=user_id)
                 self.assertEqual(access.can_manage_access(ctx), named, repr(user_id))
 
-    def test_circle_rows_describe_the_real_rule(self):
-        """Строки «открыт по умолчанию» в листе доступа — не пересказ, а то же
-        правило: каждая сверяется с настоящим уровнем и замком на образце."""
-        rows = access.circle()
-        self.assertEqual([row['key'] for row in rows], ['super_admin', 'head', 'named', 'lead', 'staff'])
-        by_key = {row['key']: row for row in rows}
 
-        def check(row, ctx):
-            self.assertEqual(access.level_of(ctx), row['level'], (row['key'], ctx['role'], ctx['department_code']))
-            self.assertEqual(access.requires_sensitive_qr(ctx), row['qr'], (row['key'], ctx['role']))
+# Кто подпадает под строку круга — записано здесь ещё раз, независимо от
+# access._circle_slots: сторож обязан считать сам, а не спрашивать у проверяемого.
+_RANK_AND_FILE = ('operator', 'marketing_manager', 'accounting_manager')
 
-        check(by_key['super_admin'], person(role='super_admin', department_code=None))
-        self.assertEqual(by_key['head']['departments'], (access.MANAGE_DEPARTMENT_CODE,))
-        for code in by_key['head']['departments']:
-            check(by_key['head'], person(role='admin', department_code=code, headed_codes=(code,)))
-        self.assertEqual(by_key['named']['user_ids'], tuple(sorted(access.ANALYST_USER_IDS)))
-        for user_id in by_key['named']['user_ids']:
-            check(by_key['named'], person(department_code='analytik', user_id=user_id))
-        self.assertEqual(by_key['lead']['departments'], access.READ_DEPARTMENT_CODES)
-        for code in by_key['lead']['departments']:
-            check(by_key['lead'], person(role='admin', department_code=code, headed_codes=(code,)))
-            check(by_key['lead'], person(role='sv', department_code=code))
-        self.assertEqual(by_key['staff']['departments'], access.SECTION_DEPARTMENT_CODES)
-        for code in by_key['staff']['departments']:
-            check(by_key['staff'], person(role='operator', department_code=code))
-        # И обратно: всякий, кому раздел открыт без выдач, описан одной из строк.
-        described = {(row['level'], row['qr']) for row in rows}
+
+def in_circle_row(slot, role, code, heads):
+    kind, key = slot.split(':')
+    if kind == 'head':
+        return key in heads
+    if kind == 'sv':
+        return role in ('sv', 'supervisor') and code == key
+    if kind == 'staff':
+        return role in _RANK_AND_FILE and not heads and code == key
+    raise AssertionError(slot)
+
+
+DEPARTMENT_ROWS = ('head:marketing', 'staff:marketing', 'head:op', 'sv:op', 'staff:op',
+                   'head:szov', 'sv:szov', 'staff:szov')
+
+
+class CircleEditTests(unittest.TestCase):
+    """Круг раздела — «открыт по умолчанию» — правят из листа «Доступ»
+    (решение владельца 08.10.2026: «сделай так чтобы можно было его
+    редактировать»). Круг разложен на строки «должность в отделе»; правится
+    уровень строки, а не её состав. Правки приходят в контексте: circle_levels."""
+
+    def setUp(self):
+        patcher = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_defaults_are_the_circle_named_by_the_owner(self):
+        """Без единой правки круг тот же, что владелец назвал 05–06.10.2026."""
+        self.assertEqual(access.circle_defaults(), {
+            'head:marketing': 'full', 'staff:marketing': 'read',
+            'head:op': 'read', 'sv:op': 'read', 'staff:op': 'read',
+            'head:szov': 'read', 'sv:szov': 'read', 'staff:szov': 'read',
+            'named:%d' % ANALYST_ID: 'full',
+        })
+        self.assertEqual(access.CIRCLE_LEVELS, ('none',) + access.LEVELS)
+        opened = 0
         for role, code, heads in grid():
+            if role == 'super_admin' or 'marketing' in heads:
+                expected = 'full'
+            elif (set(heads) & {'op', 'szov'}
+                  or (role in ('sv', 'supervisor') and code in ('op', 'szov'))
+                  or (role in _RANK_AND_FILE and not heads and code in ('marketing', 'op', 'szov'))):
+                expected = 'read'
+            else:
+                expected = None
             ctx = person(role=role, department_code=code, headed_codes=heads)
-            if access.can_open_section(ctx):
-                self.assertIn((access.level_of(ctx), access.requires_sensitive_qr(ctx)), described,
-                              (role, code, heads))
+            self.assertEqual(access.level_of(ctx), expected, (role, code, heads))
+            # Контекст без поля правок (старый вызывающий) — круг по умолчанию.
+            del ctx['circle_levels']
+            self.assertEqual(access.level_of(ctx), expected, (role, code, heads))
+            opened += expected is not None
+        self.assertGreater(opened, 50)
+
+    def test_edit_reaches_the_people_of_the_row_and_nobody_else(self):
+        """На всей сетке: правка строки меняет уровень тех, кто под неё
+        подпадает, а у остальных не меняет ничего."""
+        defaults = access.circle_defaults()
+        for slot in DEPARTMENT_ROWS:
+            for level in access.CIRCLE_LEVELS:
+                touched = 0
+                for role, code, heads in grid():
+                    before = access.level_of(person(role=role, department_code=code, headed_codes=heads))
+                    after = access.level_of(person(role=role, department_code=code, headed_codes=heads,
+                                                   circle={slot: level}))
+                    if role == 'super_admin':
+                        self.assertEqual(after, 'full', (slot, level))
+                        continue
+                    mine = [row for row in DEPARTMENT_ROWS if in_circle_row(row, role, code, heads)]
+                    if slot not in mine:
+                        self.assertEqual(after, before, (slot, level, role, code, heads))
+                        continue
+                    touched += 1
+                    # Старший из строк человека: правленая — по правке, прочие — по умолчанию.
+                    levels = [level if row == slot else defaults[row] for row in mine]
+                    self.assertEqual(after, access.strongest(levels), (slot, level, role, code, heads))
+                self.assertGreater(touched, 0, slot)
+
+    def test_each_row_by_name(self):
+        """Поимённо, без формул: кого какая строка открывает и закрывает."""
+        people = {
+            'head:marketing': person(role='admin', department_code='marketing', headed_codes=('marketing',)),
+            'staff:marketing': person(role='marketing_manager', department_code='marketing'),
+            'head:op': person(role='admin', department_code='op', headed_codes=('op',)),
+            'sv:op': person(role='sv', department_code='op'),
+            'staff:op': person(role='operator', department_code='op'),
+            'head:szov': person(role='admin', department_code=None, headed_codes=('szov',)),
+            'sv:szov': person(role='supervisor', department_code='szov'),
+            'staff:szov': person(role='operator', department_code='szov'),
+            'named:%d' % ANALYST_ID: person(role='operator', department_code='analytik', user_id=ANALYST_ID),
+        }
+        self.assertEqual(set(people), set(access.circle_defaults()))
+        wanted = {'none': CLOSED, 'read': READ, 'export': EXPORT, 'full': FULL}
+        for slot, ctx in people.items():
+            for level, caps in wanted.items():
+                self.assertEqual(access.capabilities(dict(ctx, circle_levels={slot: level})), caps, (slot, level))
+                # Соседние строки от правки не меняются.
+                for other, neighbour in people.items():
+                    if other != slot:
+                        self.assertEqual(access.level_of(dict(neighbour, circle_levels={slot: level})),
+                                         access.circle_defaults()[other], (slot, level, other))
+
+    def test_the_strongest_row_of_a_person_wins(self):
+        both = person(role='sv', department_code='szov', headed_codes=('op',))     # глава ОП и СВ СЗоВ
+        self.assertEqual(access.level_of(dict(both, circle_levels={'head:op': 'none'})), 'read')
+        self.assertEqual(access.level_of(dict(both, circle_levels={'head:op': 'none', 'sv:szov': 'full'})), 'full')
+        self.assertEqual(access.level_of(dict(both, circle_levels={'head:op': 'export'})), 'export')
+        self.assertIsNone(access.level_of(dict(both, circle_levels={'head:op': 'none', 'sv:szov': 'none'})))
+
+    def test_closed_row_and_grants_do_not_cancel_each_other(self):
+        """Строку круга закрыли — выданное отдельной выдачей остаётся; выдача
+        одному закрытую строку остальным не открывает."""
+        closed = {'staff:op': 'none'}
+        self.assertEqual(access.capabilities(person(department_code='op', circle=closed)), CLOSED)
+        self.assertEqual(access.capabilities(person(department_code='op', circle=closed, grants=('export',))), EXPORT)
+        self.assertEqual(access.capabilities(person(department_code='op', circle={'staff:op': 'full'},
+                                                    grants=('read',))), FULL)
+
+    def test_junk_in_the_table_closes_the_row_instead_of_resetting_it(self):
+        for junk in ('owner', '', None, 'READ', 'read ', 0, True):
+            ctx = person(department_code='op', circle={'staff:op': junk})
+            self.assertEqual(access.capabilities(ctx), CLOSED, repr(junk))
+        # Правки нет вовсе (ключа нет) — значение по умолчанию.
+        self.assertEqual(access.capabilities(person(department_code='op', circle={'staff:szov': 'none'})), READ)
+
+    def test_rows_outside_the_circle_open_nothing(self):
+        """Правится уровень строки, а не состав круга: строка, которой в круге
+        нет (чужой отдел, должность без строки), никому ничего не открывает."""
+        edits = {'staff:tez': 'full', 'head:tez': 'full', 'sv:marketing': 'full', 'staff:front_office': 'full',
+                 'trainer:op': 'full', 'named:78': 'full', 'super_admin': 'none'}
+        for kwargs in ({'department_code': 'tez'}, {'role': 'admin', 'department_code': 'tez', 'headed_codes': ('tez',)},
+                       {'role': 'sv', 'department_code': 'marketing'}, {'department_code': 'front_office'},
+                       {'role': 'trainer', 'department_code': 'op'}, {'department_code': 'analytik', 'user_id': 78},
+                       {'role': 'trainee', 'department_code': 'szov'}):
+            self.assertEqual(access.capabilities(person(circle=edits, **kwargs)), CLOSED, kwargs)
+        for slot in edits:
+            self.assertNotIn(slot, access.circle_defaults())
+
+    def test_super_admin_cannot_be_locked_out(self):
+        everything_closed = dict.fromkeys(list(access.circle_defaults()) + ['super_admin'], 'none')
+        self.assertEqual(access.capabilities(person(role='super_admin', department_code=None,
+                                                    circle=everything_closed)), OWNER)
+        self.assertNotIn('super_admin', access.circle_defaults())
+        # Остальным при этом закрыто всё — на всей сетке.
+        for role, code, heads in grid():
+            if role != 'super_admin':
+                ctx = person(role=role, department_code=code, headed_codes=heads, circle=everything_closed)
+                self.assertEqual(access.capabilities(ctx), CLOSED, (role, code, heads))
+
+    def test_named_row_follows_the_named_list(self):
+        with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+            self.assertIn('named:77', access.circle_defaults())
+            self.assertNotIn('named:%d' % ANALYST_ID, access.circle_defaults())
+            named = person(department_code='tez', user_id=77)
+            self.assertEqual(access.capabilities(named), FULL)
+            self.assertEqual(access.capabilities(dict(named, circle_levels={'named:77': 'read'})), READ)
+            self.assertEqual(access.capabilities(dict(named, circle_levels={'named:77': 'none'})), CLOSED)
+            # Без замка он и тогда, когда раздел достался ему иначе — выдачей.
+            granted = dict(named, circle_levels={'named:77': 'none'}, grant_levels=['read'])
+            self.assertEqual(access.capabilities(granted), READ)
+            self.assertFalse(access.requires_sensitive_qr(granted))
+            # Чужая именная строка его не касается.
+            self.assertEqual(access.capabilities(dict(named, circle_levels={'named:78': 'none'})), FULL)
+
+    def test_the_one_who_hands_out_access_keeps_the_section(self):
+        """Раздающий не запирает сам себя: закрыл свою строку — чтение и кнопка
+        «Доступ» остаются, вернуть уровень он может там же."""
+        everything_closed = dict.fromkeys(access.circle_defaults(), 'none')
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            head = person(role='admin', department_code='marketing', headed_codes=('marketing',), user_id=77,
+                          circle=everything_closed)
+            self.assertEqual(access.capabilities(head), dict(READ, can_manage_access=True))
+
+    def test_lock_does_not_depend_on_the_circle(self):
+        edits = {'staff:op': 'full', 'head:op': 'none', 'sv:szov': 'export'}
+        for role, code, heads in grid():
+            plain = person(role=role, department_code=code, headed_codes=heads)
+            self.assertEqual(access.requires_sensitive_qr(dict(plain, circle_levels=edits)),
+                             access.requires_sensitive_qr(plain), (role, code, heads))
+
+    def test_switch_is_stronger_than_the_circle(self):
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertEqual(access.capabilities(person(department_code='op', circle={'staff:op': 'full'})), CLOSED)
+
+    def test_rows_for_the_sheet_describe_the_real_rule(self):
+        """Строки «открыт по умолчанию» в листе — не пересказ: порядок и состав
+        берутся из того же круга, уровень — как его посчитает правило."""
+        rows = access.circle()
+        self.assertEqual([row['slot'] for row in rows],
+                         ['super_admin'] + list(DEPARTMENT_ROWS) + ['named:%d' % ANALYST_ID])
+        self.assertEqual(rows[0], {'slot': 'super_admin', 'kind': 'super_admin', 'level': 'full', 'qr': False,
+                                   'locked': True})
+        # Правятся все строки, кроме строки супер-админа, — ровно те, что знает ручка.
+        self.assertEqual({row['slot'] for row in rows if not row['locked']}, set(access.circle_defaults()))
+        self.assertEqual([row['locked'] for row in rows], [True] + [False] * (len(rows) - 1))
+        by_slot = {row['slot']: row for row in rows}
+        self.assertEqual(by_slot['staff:op'], {'slot': 'staff:op', 'kind': 'staff', 'code': 'op', 'level': 'read',
+                                               'qr': True, 'locked': False})
+        self.assertEqual(by_slot['named:%d' % ANALYST_ID]['user_id'], ANALYST_ID)
+        # «После QR» — у строк рядовых, и замок правила с этим согласен.
+        for row in rows[1:]:
+            self.assertEqual(row['qr'], row['kind'] == 'staff', row['slot'])
+        self.assertTrue(access.requires_sensitive_qr(person(department_code='op')))
+        self.assertFalse(access.requires_sensitive_qr(person(role='sv', department_code='op')))
+        # Уровень строки — с правками: закрытая и испорченная показаны как «нет».
+        edited = {row['slot']: row['level'] for row in access.circle({'staff:op': 'none', 'head:szov': 'export',
+                                                                      'sv:op': 'owner'})}
+        self.assertEqual((edited['staff:op'], edited['head:szov'], edited['sv:op'], edited['staff:szov']),
+                         ('none', 'export', 'none', 'read'))
+        for slot, level in edited.items():
+            if slot in access.circle_defaults() and slot.split(':')[0] != 'named':
+                kind, code = slot.split(':')
+                sample = {'head': person(role='admin', department_code=code, headed_codes=(code,)),
+                          'sv': person(role='sv', department_code=code),
+                          'staff': person(role='operator', department_code=code)}[kind]
+                got = access.level_of(dict(sample, circle_levels={'staff:op': 'none', 'head:szov': 'export',
+                                                                  'sv:op': 'owner'}))
+                self.assertEqual(got or 'none', level, slot)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -912,9 +1105,11 @@ class ReportTests(unittest.TestCase):
 class _Cursor:
     def __init__(self):
         self.statements = []
+        self.params = []
 
     def execute(self, sql, params=None):
         self.statements.append(' '.join(sql.split()))
+        self.params.append(params)
 
 
 class SchemaTests(unittest.TestCase):
@@ -923,8 +1118,8 @@ class SchemaTests(unittest.TestCase):
         cursor = _Cursor()
         schema.init_baiga_schema(cursor)
         kinds = ['table' if 'CREATE TABLE' in sql else 'other' for sql in cursor.statements]
-        self.assertEqual(kinds[:6], ['table'] * 6)
-        self.assertNotIn('table', kinds[6:])
+        self.assertEqual(kinds[:7], ['table'] * 7)
+        self.assertNotIn('table', kinds[7:])
         ddl = [sql for sql in cursor.statements if 'SAVEPOINT' not in sql]
         self.assertTrue(all('IF NOT EXISTS' in sql for sql in ddl))
 
@@ -956,7 +1151,33 @@ class SchemaTests(unittest.TestCase):
             cursor = Answering([False, False, True])
             self.assertEqual([schema.grants_ready(cursor) for _ in range(5)], [False, False, True, True, True])
             self.assertEqual(len(cursor.statements), 3)
-            self.assertIn("to_regclass('public.baiga_access_log')", cursor.statements[0])
+            self.assertEqual(cursor.params, [{'table': 'public.baiga_access_log'}] * 3)
+        # Таблица правок круга моложе таблиц выдач — и спрашивается отдельно:
+        # не легла она, выдачи работают как работали.
+        with mock.patch.dict(schema._circle_seen, {'ready': False}):
+            cursor = Answering([False, True])
+            self.assertEqual([schema.circle_ready(cursor) for _ in range(4)], [False, True, True, True])
+            self.assertEqual(cursor.params, [{'table': 'public.baiga_access_circle'}] * 2)
+            self.assertIn('SELECT to_regclass(%(table)s) IS NOT NULL', cursor.statements[0])
+        # «Есть» одной таблицы за другую не отвечает. Выдачи уже видели, а таблица
+        # правок круга не легла: общая память ответила бы «есть», контекст пошёл бы
+        # в таблицу, которой нет, и раздел падал бы на каждом запросе.
+        with mock.patch.dict(schema._grants_seen, {'ready': True}), \
+                mock.patch.dict(schema._circle_seen, {'ready': False}):
+            cursor = Answering([False])
+            self.assertEqual((schema.grants_ready(cursor), schema.circle_ready(cursor)), (True, False))
+            self.assertEqual(cursor.params, [{'table': 'public.baiga_access_circle'}])
+            self.assertEqual((schema._grants_seen['ready'], schema._circle_seen['ready']), (True, False))
+        with mock.patch.dict(schema._grants_seen, {'ready': False}), \
+                mock.patch.dict(schema._circle_seen, {'ready': True}):
+            cursor = Answering([False])
+            self.assertEqual((schema.circle_ready(cursor), schema.grants_ready(cursor)), (True, False))
+            self.assertEqual(cursor.params, [{'table': 'public.baiga_access_log'}])
+
+    def test_circle_edits_are_one_row_per_slot(self):
+        ddl = ' '.join(' '.join(statement.split()) for statement in schema._STATEMENTS)
+        self.assertIn('CREATE TABLE IF NOT EXISTS baiga_access_circle ( slot VARCHAR(48) PRIMARY KEY, '
+                      'level VARCHAR(16) NOT NULL,', ddl)
 
     def test_trigram_index_cannot_break_the_section(self):
         class Failing(_Cursor):
@@ -985,18 +1206,20 @@ class ContextTests(unittest.TestCase):
         def fetchone(self):
             return self.row
 
-    def load(self, row, ready=True, user_id=31):
+    def load(self, row, ready=True, user_id=31, circle=True):
         cursor = self.Cursor(row)
-        with mock.patch.object(schema, 'grants_ready', lambda cursor: ready):
+        with mock.patch.object(schema, 'grants_ready', lambda cursor: ready), \
+                mock.patch.object(schema, 'circle_ready', lambda cursor: circle):
             return queries.load_access_context(cursor, user_id), cursor
 
     def test_role_stays_as_written_and_grant_levels_come_along(self):
-        ctx, cursor = self.load(('Кадрова К. К.', ' HR_Manager ', 168, 'hr', None, [7], ['HR'], ['read', 'full']),
-                                user_id='31')
+        ctx, cursor = self.load(('Кадрова К. К.', ' HR_Manager ', 168, 'hr', None, [7], ['HR'], ['read', 'full'],
+                                 {'staff:op': 'none'}), user_id='31')
         self.assertEqual(ctx, {
             'user_id': 31, 'name': 'Кадрова К. К.', 'role': 'hr_manager', 'department_id': 168,
             'department_code': 'hr', 'city': None, 'headed_department_ids': [7],
             'headed_department_codes': ['HR'], 'grant_levels': ['read', 'full'],
+            'circle_levels': {'staff:op': 'none'},
         })
         # Замку нужна должность из карточки: «Посылки» свели бы кадровика к
         # оператору и спросили бы код, которого портал ему не выдаёт.
@@ -1019,7 +1242,10 @@ class ContextTests(unittest.TestCase):
         # Группы — ЭТОГО человека, уровни — из ЕГО выдач: без этих двух строк
         # одна выдача открывала бы раздел всему порталу.
         self.assertIn("WHERE m.user_id = %(user_id)s AND m.start_date <= CURRENT_DATE", sql)
-        self.assertTrue(sql.endswith("COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}')"), sql[-90:])
+        # Последние две колонки: уровни выдач ЭТОГО человека и правки круга (они одни на всех).
+        self.assertTrue(sql.endswith(
+            "COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}'), "
+            "COALESCE((SELECT json_object_agg(slot, level) FROM baiga_access_circle), '{}'::json)"), sql[-200:])
         self.assertIn("my_grants AS ( SELECT a.level FROM baiga_access_grants a WHERE (a.subject_type = 'user'", sql)
 
     def test_group_is_the_same_thing_as_in_the_wiki(self):
@@ -1038,16 +1264,29 @@ class ContextTests(unittest.TestCase):
         self.assertIn('gom.start_date <= CURRENT_DATE AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)', wiki)
 
     def test_without_grant_tables_the_context_is_the_circle_alone(self):
-        ctx, cursor = self.load(('Оператов О. О.', 'operator', 191, 'op', None, [], [], []), ready=False)
-        self.assertEqual(ctx['grant_levels'], [])
+        ctx, cursor = self.load(('Оператов О. О.', 'operator', 191, 'op', None, [], [], [], {}), ready=False)
+        self.assertEqual((ctx['grant_levels'], ctx['circle_levels']), ([], {}))
         self.assertEqual(access.capabilities(ctx), READ)
         sql = cursor.calls[0][0]
         self.assertNotIn('baiga_access_grants', sql)
+        self.assertNotIn('baiga_access_circle', sql)
         self.assertNotIn('memberships', sql)
+        self.assertTrue(sql.endswith("'{}'::varchar[], '{}'::json"), sql[-60:])
+
+    def test_without_the_circle_table_grants_work_and_the_circle_is_the_default(self):
+        """Таблица правок круга не легла, а таблицы выдач на месте: выдачи
+        действуют, круг — по умолчанию; раздел не отвечает ошибкой каждому."""
+        ctx, cursor = self.load(('Оператов О. О.', 'sv', 70, 'tez', None, [], [], ['export'], {}), circle=False)
+        self.assertEqual((ctx['grant_levels'], ctx['circle_levels']), (['export'], {}))
+        self.assertEqual(access.capabilities(ctx), EXPORT)
+        sql = cursor.calls[0][0]
+        self.assertIn('FROM baiga_access_grants a', sql)
+        self.assertNotIn('baiga_access_circle', sql)
+        self.assertTrue(sql.endswith("FROM my_grants), '{}'), '{}'::json"), sql[-60:])
 
     def test_unknown_user_has_no_context(self):
         self.assertIsNone(self.load(None)[0])
-        self.assertIsNone(self.load((None, None, None, None, None, [], [], []))[0])
+        self.assertIsNone(self.load((None, None, None, None, None, [], [], [], {}))[0])
 
     def test_staff_means_everyone_who_can_still_log_in(self):
         """Число людей под выдачей и список «кому выдать» считают тех, кто в
@@ -1209,6 +1448,35 @@ class GrantQueryTests(unittest.TestCase):
         queries.lock_access(cursor)
         self.assertEqual(cursor.calls, [("SELECT pg_advisory_xact_lock(hashtext('baiga:access'))", None)])
 
+    def test_circle_edits_are_read_whole(self):
+        stamp = datetime(2026, 10, 8, 12, 0)
+        cursor = self.Cursor([('staff:op', 'none', 'Раздающий Р. Р.', stamp), ('head:szov', 'export', None, stamp)])
+        self.assertEqual(queries.circle_edits(cursor), {
+            'staff:op': {'level': 'none', 'updated_by_name': 'Раздающий Р. Р.', 'updated_at': stamp},
+            'head:szov': {'level': 'export', 'updated_by_name': None, 'updated_at': stamp}})
+        self.assertEqual(cursor.calls, [('SELECT slot, level, updated_by_name, updated_at FROM baiga_access_circle',
+                                         None)])
+        self.assertEqual(queries.circle_edits(self.Cursor()), {})
+
+    def test_circle_edit_is_one_row_per_slot_and_leaves_a_trace(self):
+        written = self.batches()
+        cursor = self.Cursor()
+        queries.set_circle_level(cursor, 'staff:op', 'read', 'none', self.ACTOR)
+        (sql, params), = cursor.calls
+        # Строка на правленую строку круга: повторная правка переписывает уровень,
+        # автора и время, а не кладёт вторую строку.
+        self.assertEqual(sql, 'INSERT INTO baiga_access_circle (slot, level, updated_by, updated_by_name) '
+                              'VALUES (%(slot)s, %(level)s, %(actor_id)s, %(actor_name)s) '
+                              'ON CONFLICT (slot) DO UPDATE SET level = EXCLUDED.level, '
+                              'updated_by = EXCLUDED.updated_by, updated_by_name = EXCLUDED.updated_by_name, '
+                              "updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')")
+        # В базу уходит НОВЫЙ уровень; прежний — только в журнал.
+        self.assertEqual(params, {'slot': 'staff:op', 'level': 'none', 'actor_id': 415,
+                                  'actor_name': 'Раздающий Р. Р.'})
+        (log_sql, log), = written
+        self.assertIn('INSERT INTO baiga_access_log', log_sql)
+        self.assertEqual(log, [('circle', 'circle', 0, 'staff:op', 'read', 'none', 415, 'Раздающий Р. Р.')])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ручки — на подменённом слое запросов
@@ -1233,6 +1501,13 @@ class Store:
         self.access_steps = []
         self.subjects = {('user', 31): 'Оператов О. О.', ('user', 32): 'Тренеров Т. Т.',
                          ('group', 5): 'Регионы', ('department', 44): 'Бухгалтерия'}
+        # Правки круга — таблица baiga_access_circle: {строка: уровень} и кто правил.
+        self.circle = {}
+        self.circle_by = {}
+        # Таблицы правок круга нет (миграция не легла): любой запрос к ней падает.
+        self.circle_missing = False
+        # Названные поимённо, которых в штате уже нет.
+        self.gone_people = set()
 
     # экран и поиск
     def list_weeks(self, cursor, campaign):
@@ -1345,7 +1620,27 @@ class Store:
 
     def circle_names(self, cursor, codes, user_ids):
         return ({code: 'Отдел %s' % code for code in codes},
-                {user_id: 'Названный %d' % user_id for user_id in user_ids})
+                {user_id: 'Названный %d' % user_id for user_id in user_ids if user_id not in self.gone_people})
+
+    def _circle_table(self):
+        if self.circle_missing:
+            raise RuntimeError('relation "baiga_access_circle" does not exist')
+
+    def circle_edits(self, cursor):
+        self._circle_table()
+        self.access_steps.append('circle:read')
+        return {slot: {'level': level, 'updated_by_name': self.circle_by.get(slot),
+                       'updated_at': datetime(2026, 10, 8, 12, 0) if slot in self.circle_by else None}
+                for slot, level in self.circle.items()}
+
+    def set_circle_level(self, cursor, slot, before, level, actor):
+        self._circle_table()
+        self.access_steps.append('circle:set')
+        self.circle[slot] = level
+        self.circle_by[slot] = actor.get('name')
+        self.access_log.append({'action': 'circle', 'subject_type': 'circle', 'subject_id': 0, 'label': slot,
+                                'before': before, 'after': level,
+                                'actor_id': actor['user_id'], 'actor_name': actor.get('name')})
 
     def find_subjects(self, cursor, subjects):
         self.access_steps.append('find')
@@ -1425,7 +1720,13 @@ class _Base(unittest.TestCase):
         self.qr_granted = False
         self.qr_error = None
         self.authorized = False
-        patches = {'load_access_context': lambda cursor, user_id: dict(self.viewer)}
+
+        def load_access_context(cursor, user_id):
+            # Правки круга — из «базы», как у настоящей выборки контекста: ручка
+            # правит таблицу, а следующий запрос любого человека это уже видит.
+            return dict(self.viewer, circle_levels=dict(self.store.circle))
+
+        patches = {'load_access_context': load_access_context}
         for name in ('list_weeks', 'filter_options', 'totals', 'search', 'found_keys', 'export_rows',
                      'zachet_summary', 'find_overlapping_uploads',
                      'lock_week', 'find_active_upload', 'insert_upload', 'insert_file', 'insert_rows',
@@ -1434,7 +1735,8 @@ class _Base(unittest.TestCase):
                      # Доступ. write_grants и log_access — настоящие: подменена только
                      # пачечная запись под ними (execute_values).
                      'list_grants', 'access_catalog', 'circle_names', 'find_subjects', 'lock_access',
-                     'granted_levels', 'execute_values', 'get_grant', 'set_grant_level', 'delete_grant'):
+                     'granted_levels', 'execute_values', 'get_grant', 'set_grant_level', 'delete_grant',
+                     'circle_edits', 'set_circle_level'):
             patches[name] = getattr(self.store, name)
         patcher = mock.patch.multiple(queries, **patches)
         patcher.start()
@@ -1446,6 +1748,10 @@ class _Base(unittest.TestCase):
         grants = mock.patch.object(schema, 'grants_ready', lambda cursor: self.grants_ready)
         grants.start()
         self.addCleanup(grants.stop)
+        self.circle_ready = True
+        circle = mock.patch.object(schema, 'circle_ready', lambda cursor: self.circle_ready)
+        circle.start()
+        self.addCleanup(circle.stop)
         # Ручки проверяются со снятым выключателем; сам выключатель — SwitchTests.
         pilot = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
         pilot.start()
@@ -1514,6 +1820,7 @@ class GateTests(_Base):
                              json={'subjects': [{'type': 'user', 'id': 31}], 'level': 'full'}),
             self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'}),
             self.client.delete('/api/baiga/access/grants/1'),
+            self.client.patch('/api/baiga/access/circle', json={'slot': 'staff:op', 'level': 'full'}),
         ]
 
     def codes(self, responses):
@@ -1593,11 +1900,14 @@ class GateTests(_Base):
                 (403, 'BAIGA_MANAGE_FORBIDDEN'),
                 (403, 'BAIGA_ACCESS_FORBIDDEN'), (403, 'BAIGA_ACCESS_FORBIDDEN'),
                 (403, 'BAIGA_ACCESS_FORBIDDEN'), (403, 'BAIGA_ACCESS_FORBIDDEN'),
+                (403, 'BAIGA_ACCESS_FORBIDDEN'),
             ], kwargs)
         # Ни одной записи и ни одной строки журнала выгрузок от читающих.
         self.assertEqual(self.store.writes, before)
         self.assertEqual(self.store.exports, [])
         self.assertEqual((self.store.grants, self.store.access_log, self.store.access_locks), ({}, [], 0))
+        # И круг они себе не подняли: ручка правки круга стоит за тем же гейтом.
+        self.assertEqual(self.store.circle, {})
         self.assertEqual(self.store.uploads[1]['status'], 'active')
 
     def test_heads_and_supervisors_are_not_asked_for_qr(self):
@@ -1814,7 +2124,7 @@ class AccessSheetTests(_Base):
     """Лист «Доступ»: ручки /api/baiga/access*. Смотрит супер-админ, пока тест
     не назначит другого."""
 
-    ACCESS_ROUTES = 4
+    ACCESS_ROUTES = 5
 
     def grant(self, subjects, level='read'):
         return self.client.post('/api/baiga/access/grants', json={
@@ -1826,10 +2136,12 @@ class AccessSheetTests(_Base):
             self.grant([('user', 31)], 'full'),
             self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'}),
             self.client.delete('/api/baiga/access/grants/1'),
+            self.client.patch('/api/baiga/access/circle', json={'slot': 'staff:op', 'level': 'full'}),
         ]
 
     def state(self):
-        return (json.dumps(self.store.grants, default=str, sort_keys=True), len(self.store.access_log))
+        return (json.dumps(self.store.grants, default=str, sort_keys=True), len(self.store.access_log),
+                dict(self.store.circle))
 
     def test_sheet_is_one_request(self):
         self.assertEqual(self.grant([('group', 5)]).status_code, 200)
@@ -1841,15 +2153,29 @@ class AccessSheetTests(_Base):
         self.assertEqual(data['max_subjects'], access.MAX_GRANT_SUBJECTS)
         self.assertEqual(set(data['catalog']), {'department', 'group', 'user'})
         self.assertEqual([item['name'] for item in data['catalog']['user']], ['Оператов О. О.', 'Тренеров Т. Т.'])
-        # Круг — с названиями отделов и именами названных, без кодов и id.
-        circle = {row['key']: row for row in data['circle']}
-        self.assertEqual([row['key'] for row in data['circle']], [row['key'] for row in access.circle()])
-        self.assertEqual(circle['head'], {'key': 'head', 'level': 'full', 'qr': False,
-                                          'departments': ['Отдел marketing'], 'people': []})
-        self.assertEqual(circle['named']['people'], ['Названный %d' % ANALYST_ID])
-        self.assertEqual(circle['staff']['departments'], ['Отдел marketing', 'Отдел op', 'Отдел szov'])
-        self.assertTrue(circle['staff']['qr'])
-        self.assertNotIn('user_ids', json.dumps(data['circle']))
+        # Круг — строками «должность в отделе», в порядке правила, с названиями
+        # отделов и именами названных; id людей наружу не уходят.
+        circle = {row['slot']: row for row in data['circle']}
+        self.assertEqual([row['slot'] for row in data['circle']], [row['slot'] for row in access.circle()])
+        self.assertEqual(circle['super_admin'], {'slot': 'super_admin', 'kind': 'super_admin', 'level': 'full',
+                                                 'qr': False, 'locked': True, 'code': None, 'department': None,
+                                                 'person': None, 'updated_by_name': None, 'updated_at': None})
+        self.assertEqual(circle['head:marketing'], {'slot': 'head:marketing', 'kind': 'head', 'level': 'full',
+                                                    'qr': False, 'locked': False, 'code': 'marketing',
+                                                    'department': 'Отдел marketing', 'person': None,
+                                                    'updated_by_name': None, 'updated_at': None})
+        self.assertEqual(circle['staff:szov'], {'slot': 'staff:szov', 'kind': 'staff', 'level': 'read',
+                                                'qr': True, 'locked': False, 'code': 'szov',
+                                                'department': 'Отдел szov', 'person': None,
+                                                'updated_by_name': None, 'updated_at': None})
+        named = circle['named:%d' % ANALYST_ID]
+        self.assertEqual((named['kind'], named['level'], named['person'], named['department'], named['locked']),
+                         ('named', 'full', 'Названный %d' % ANALYST_ID, None, False))
+        self.assertNotIn('user_id', json.dumps(data['circle']))
+        # Названного в штате уже нет — строки нет: подписать её нечем.
+        self.store.gone_people.add(ANALYST_ID)
+        slots = [row['slot'] for row in self.client.get('/api/baiga/access').get_json()['circle']]
+        self.assertEqual(slots, [row['slot'] for row in access.circle() if row['kind'] != 'named'])
 
     def test_grant_to_many_at_once(self):
         response = self.grant([('user', 31), ('group', 5), ('department', 44)], 'export')
@@ -2028,6 +2354,7 @@ class AccessSheetTests(_Base):
         codes = [(response.status_code, response.get_json()['code']) for response in self.access_routes()]
         self.assertEqual(codes, [(409, 'BAIGA_ACCESS_NOT_READY')] * self.ACCESS_ROUTES)
         self.assertEqual((self.store.grants, self.store.access_log, self.store.access_locks), ({}, [], 0))
+        self.assertEqual(self.store.circle, {})
         self.assertEqual(self.client.get('/api/baiga').status_code, 200)
         self.assertEqual(self.client.post('/api/baiga/rows', json={}).status_code, 200)
 
@@ -2065,6 +2392,261 @@ class AccessSheetTests(_Base):
         self.viewer = person(role='hr_manager', department_code='hr', grants=('read',))
         self.qr_granted = False
         self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], READ)
+
+
+class CircleRouteTests(_Base):
+    """PATCH /api/baiga/access/circle — уровень строки «открыт по умолчанию».
+    Правит супер-админ, пока тест не назначит другого; «база» правок —
+    store.circle, и контекст каждого следующего запроса читает её же."""
+
+    OP = {'department_code': 'op'}
+    SV_OP = {'role': 'sv', 'department_code': 'op'}
+
+    def edit(self, slot, level):
+        return self.client.patch('/api/baiga/access/circle', json={'slot': slot, 'level': level})
+
+    def as_person(self, **kwargs):
+        """Что раздел отвечает человеку: (код экрана, права или код отказа)."""
+        admin, self.viewer = self.viewer, person(**kwargs)
+        try:
+            response = self.client.get('/api/baiga')
+            data = response.get_json()
+            return response.status_code, data.get('capabilities') or data.get('code')
+        finally:
+            self.viewer = admin
+
+    def state(self):
+        return dict(self.store.circle), len(self.store.access_log), self.store.access_locks
+
+    def test_level_of_a_row_is_changed_and_the_people_of_the_row_get_it(self):
+        self.qr_granted = True
+        self.assertEqual(self.as_person(**self.OP), (200, READ))
+        response = self.edit('staff:op', 'export')
+        self.assertEqual(response.status_code, 200)
+        # Блокировка — до чтения таблицы: два раздающих не читают одно состояние.
+        # После записи таблица перечитана: время правки ставит база.
+        self.assertEqual(self.store.access_steps, ['lock', 'circle:read', 'circle:set', 'circle:read'])
+        data = response.get_json()
+        # Ответ — свежие строки круга, те же, что отдаст лист: второго запроса нет.
+        self.assertEqual(set(data), {'circle'})
+        self.assertEqual(data['circle'], self.client.get('/api/baiga/access').get_json()['circle'])
+        levels = {row['slot']: row['level'] for row in data['circle']}
+        self.assertEqual(levels['staff:op'], 'export')
+        self.assertEqual({slot: level for slot, level in levels.items() if slot != 'staff:op'},
+                         {row['slot']: row['level'] for row in access.circle() if row['slot'] != 'staff:op'})
+        self.assertEqual(self.store.circle, {'staff:op': 'export'})
+        # У правленой строки — кто и когда её правил; у нетронутых этого нет.
+        edited = {row['slot']: (row['updated_by_name'], row['updated_at']) for row in data['circle']}
+        self.assertEqual(edited.pop('staff:op'), (self.viewer['name'], '2026-10-08T12:00:00'))
+        self.assertEqual(set(edited.values()), {(None, None)})
+        # Оператор ОП выгружает; его супервайзер и оператор СЗоВ — как были.
+        self.assertEqual(self.as_person(**self.OP), (200, EXPORT))
+        self.assertEqual(self.as_person(**self.SV_OP), (200, READ))
+        self.assertEqual(self.as_person(department_code='szov'), (200, READ))
+        # След: что было (значение по умолчанию), что стало и кто правил.
+        self.assertEqual(self.store.access_log, [{
+            'action': 'circle', 'subject_type': 'circle', 'subject_id': 0, 'label': 'staff:op',
+            'before': 'read', 'after': 'export',
+            'actor_id': self.viewer['user_id'], 'actor_name': self.viewer['name']}])
+
+    def test_closed_row_closes_the_section_for_its_people_only(self):
+        self.qr_granted = True
+        self.assertEqual(self.edit('staff:op', 'none').status_code, 200)
+        self.assertEqual(self.as_person(**self.OP), (403, 'BAIGA_SECTION_CLOSED'))
+        self.assertEqual(self.as_person(**self.SV_OP), (200, READ))
+        self.assertEqual(self.as_person(department_code='szov'), (200, READ))
+        self.assertEqual(self.as_person(role='admin', department_code='op', headed_codes=('op',)), (200, READ))
+        # Закрытая строка в листе — «нет», и следом её открывают обратно.
+        shown = {row['slot']: row['level'] for row in self.client.get('/api/baiga/access').get_json()['circle']}
+        self.assertEqual((shown['staff:op'], shown['sv:op']), ('none', 'read'))
+        self.assertEqual(self.edit('staff:op', 'read').status_code, 200)
+        self.assertEqual(self.as_person(**self.OP), (200, READ))
+        self.assertEqual([(entry['before'], entry['after']) for entry in self.store.access_log],
+                         [('read', 'none'), ('none', 'read')])
+
+    def test_every_row_and_every_level_goes_through(self):
+        """Каждая строка × каждый уровень: ответ, таблица и строка листа."""
+        defaults = access.circle_defaults()
+        for slot in defaults:
+            for level in access.CIRCLE_LEVELS:
+                response = self.edit(slot, level)
+                self.assertEqual(response.status_code, 200, (slot, level))
+                shown = {row['slot']: row['level'] for row in response.get_json()['circle']}
+                self.assertEqual(shown[slot], level, (slot, level))
+            # Вернули как было — и раздел отвечает как до правок.
+            self.assertEqual(self.edit(slot, defaults[slot]).status_code, 200)
+        self.assertEqual(self.store.circle, defaults)
+        self.assertEqual([row['level'] for row in self.client.get('/api/baiga/access').get_json()['circle']],
+                         [row['level'] for row in access.circle()])
+
+    def test_same_level_writes_nothing(self):
+        # Уровень по умолчанию, пока строки в таблице нет, — тоже «тот же».
+        before = self.state()
+        self.assertEqual(self.edit('staff:op', 'read').status_code, 200)
+        self.assertEqual(self.edit('head:marketing', 'full').status_code, 200)
+        self.assertEqual((self.store.circle, self.store.access_log), ({}, []))
+        self.assertEqual(self.store.access_steps, ['lock', 'circle:read'] * 2)
+        self.assertEqual(self.state()[:2], before[:2])
+        self.edit('staff:op', 'full')
+        del self.store.access_steps[:]
+        before = self.state()
+        self.viewer = person(role='super_admin', department_code=None, user_id=11)
+        self.assertEqual(self.edit('staff:op', 'full').status_code, 200)
+        self.assertEqual(self.state()[:2], before[:2])
+        self.assertEqual(self.store.access_steps, ['lock', 'circle:read'])
+
+    def test_bad_requests_are_refused_before_any_write(self):
+        self.edit('sv:szov', 'export')
+        before = self.state()
+        cases = [
+            # Строки супер-админа среди правимых нет: запереть раздел от всех нельзя.
+            ({'slot': 'super_admin', 'level': 'none'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'super_admin', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            # Правится уровень строки, а не состав круга: чужого отдела, должности
+            # без строки и чужого имени в нём нет.
+            ({'slot': 'staff:tez', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'head:tez', 'level': 'full'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'sv:marketing', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'trainer:op', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'named:%d' % (ANALYST_ID + 1), 'level': 'full'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'named:415', 'level': 'full'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'STAFF:OP', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'staff', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': '', 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': None, 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': ['staff:op'], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 7, 'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'level': 'read'}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({}, 'BAIGA_ACCESS_BAD_SLOT'),
+            ({'slot': 'staff:op'}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': ''}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': None}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': 'owner'}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': 'нет'}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': ['read']}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': 0}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'slot': 'staff:op', 'level': False}, 'BAIGA_ACCESS_BAD_LEVEL'),
+        ]
+        for body, code in cases:
+            response = self.client.patch('/api/baiga/access/circle', json=body)
+            self.assertEqual((response.status_code, response.get_json()['code']), (400, code), body)
+            self.assertEqual(self.state(), before, body)
+        # Не JSON вовсе — тот же отказ, а не 500.
+        response = self.client.patch('/api/baiga/access/circle', data='slot=staff:op', content_type='text/plain')
+        self.assertEqual((response.status_code, response.get_json()['code']), (400, 'BAIGA_ACCESS_BAD_SLOT'))
+        self.assertEqual(self.state(), before)
+
+    def test_junk_in_the_table_is_shown_closed_and_is_overwritten(self):
+        self.qr_granted = True
+        self.store.circle['staff:op'] = 'owner'
+        shown = {row['slot']: row['level'] for row in self.client.get('/api/baiga/access').get_json()['circle']}
+        self.assertEqual(shown['staff:op'], 'none')
+        self.assertEqual(self.as_person(**self.OP), (403, 'BAIGA_SECTION_CLOSED'))
+        # «Нет» поверх мусора — не «тот же уровень»: в таблицу ложится настоящее значение.
+        self.assertEqual(self.edit('staff:op', 'none').status_code, 200)
+        self.assertEqual(self.store.circle, {'staff:op': 'none'})
+        self.assertEqual([(entry['before'], entry['after']) for entry in self.store.access_log], [('owner', 'none')])
+
+    def test_without_the_table_the_edit_says_so_and_the_sheet_shows_the_defaults(self):
+        """Таблица правок моложе выдач: не легла она — лист открывается с кругом
+        по умолчанию, выдачи работают, а правка честно отвечает «ещё нет»."""
+        self.circle_ready = False
+        self.store.circle_missing = True
+        before = self.state()
+        response = self.edit('staff:op', 'none')
+        self.assertEqual((response.status_code, response.get_json()['code']), (409, 'BAIGA_ACCESS_NOT_READY'))
+        self.assertEqual(self.state(), before)
+        sheet = self.client.get('/api/baiga/access')
+        self.assertEqual(sheet.status_code, 200)
+        self.assertEqual([row['level'] for row in sheet.get_json()['circle']],
+                         [row['level'] for row in access.circle()])
+        granted = self.client.post('/api/baiga/access/grants',
+                                   json={'subjects': [{'type': 'user', 'id': 31}], 'level': 'read'})
+        self.assertEqual(granted.status_code, 200)
+        # И без таблиц выдач — тот же ответ, а не правка круга вслепую.
+        self.store.circle_missing = False
+        self.circle_ready, self.grants_ready = True, False
+        response = self.edit('staff:op', 'none')
+        self.assertEqual((response.status_code, response.get_json()['code']), (409, 'BAIGA_ACCESS_NOT_READY'))
+        self.assertEqual(self.store.circle, {})
+
+    def test_only_those_who_hand_out_access_edit_the_circle(self):
+        """Полный доступ к разделу круг не правит: глава «Маркетинга» с чужим id,
+        аналитик, человек с выданным «полным» — отказ и ни одной записи."""
+        for viewer in (person(role='admin', department_code='marketing', headed_codes=('marketing',)),
+                       person(department_code='analytik', user_id=ANALYST_ID),
+                       person(role='sv', department_code='tez', grants=('full',)),
+                       person(role='admin', department_code='szov', headed_codes=('szov',))):
+            self.viewer = viewer
+            for slot, level in (('staff:op', 'full'), ('head:szov', 'full'), ('head:marketing', 'none')):
+                response = self.edit(slot, level)
+                self.assertEqual((response.status_code, response.get_json()['code']),
+                                 (403, 'BAIGA_ACCESS_FORBIDDEN'), (viewer, slot))
+        self.assertEqual(self.state(), ({}, 0, 0))
+
+    def test_named_manager_edits_the_circle_and_cannot_lock_himself_out(self):
+        manager = person(role='admin', department_code='marketing', headed_codes=('marketing',), user_id=415)
+        self.viewer = manager
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], OWNER)
+        self.assertEqual(self.edit('sv:szov', 'export').status_code, 200)
+        self.assertEqual(self.store.access_log[0]['actor_id'], 415)
+        # Свою строку он закрыл: вести раздел перестал, но читает и раздаёт —
+        # и там же возвращает уровень обратно.
+        self.assertEqual(self.edit('head:marketing', 'none').status_code, 200)
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], dict(READ, can_manage_access=True))
+        self.assertEqual(self.client.get('/api/baiga/journal').get_json()['code'], 'BAIGA_MANAGE_FORBIDDEN')
+        self.assertEqual(self.client.get('/api/baiga/access').status_code, 200)
+        self.assertEqual(self.edit('head:marketing', 'full').status_code, 200)
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], OWNER)
+
+    def test_super_admin_stays_in_with_everything_closed(self):
+        for slot in access.circle_defaults():
+            self.assertEqual(self.edit(slot, 'none').status_code, 200, slot)
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], OWNER)
+        shown = {row['slot']: row['level'] for row in self.client.get('/api/baiga/access').get_json()['circle']}
+        self.assertEqual(shown.pop('super_admin'), 'full')
+        self.assertEqual(set(shown.values()), {'none'})
+        self.qr_granted = True
+        for kwargs in (self.OP, self.SV_OP, {'role': 'marketing_manager', 'department_code': 'marketing'},
+                       {'role': 'admin', 'department_code': 'marketing', 'headed_codes': ('marketing',)},
+                       {'role': 'admin', 'department_code': 'szov', 'headed_codes': ('szov',)},
+                       {'department_code': 'analytik', 'user_id': ANALYST_ID}):
+            self.assertEqual(self.as_person(**kwargs), (403, 'BAIGA_SECTION_CLOSED'), kwargs)
+
+    def test_named_row_is_edited_like_the_rest_and_keeps_no_lock(self):
+        analyst = {'role': 'operator', 'department_code': 'analytik', 'user_id': ANALYST_ID}
+        slot = 'named:%d' % ANALYST_ID
+        self.qr_granted = False
+        self.assertEqual(self.as_person(**analyst), (200, FULL))
+        self.assertEqual(self.edit(slot, 'read').status_code, 200)
+        self.assertEqual(self.as_person(**analyst), (200, READ))
+        self.assertEqual(self.edit(slot, 'none').status_code, 200)
+        self.assertEqual(self.as_person(**analyst), (403, 'BAIGA_SECTION_CLOSED'))
+        # Сосед по отделу от правок именной строки ничего не получил.
+        self.assertEqual(self.as_person(role='operator', department_code='analytik', user_id=ANALYST_ID + 1),
+                         (403, 'BAIGA_SECTION_CLOSED'))
+
+    def test_closed_row_keeps_what_was_granted_separately(self):
+        """Строку закрыли — выдача человеку остаётся: круг и выдачи складываются,
+        а не отменяют друг друга."""
+        self.qr_granted = True
+        self.edit('staff:op', 'none')
+        self.assertEqual(self.as_person(grants=('export',), **self.OP), (200, EXPORT))
+        self.assertEqual(self.as_person(**self.OP), (403, 'BAIGA_SECTION_CLOSED'))
+
+    def test_rank_and_file_of_an_opened_row_still_wait_for_qr(self):
+        """Строку подняли до «полного» — замок остаётся: оператор ведёт раздел
+        только после QR-подтверждения."""
+        self.edit('staff:op', 'full')
+        self.qr_granted = False
+        self.assertEqual(self.as_person(**self.OP), (403, 'SENSITIVE_ACCESS_REQUIRED'))
+        self.qr_granted = True
+        self.assertEqual(self.as_person(**self.OP), (200, FULL))
+        # И кнопки «Доступ» полный уровень не даёт.
+        self.viewer = person(**self.OP)
+        response = self.edit('staff:op', 'none')
+        self.assertEqual((response.status_code, response.get_json()['code']), (403, 'BAIGA_ACCESS_FORBIDDEN'))
+        self.assertEqual(self.store.circle, {'staff:op': 'full'})
 
 
 class WiringTests(unittest.TestCase):
@@ -2124,13 +2706,22 @@ class WiringTests(unittest.TestCase):
         self.assertLess(self.app.index("handleSidebarViewNavigation(e, 'thermoboxes')"),
                         self.app.index("handleSidebarViewNavigation(e, 'baiga')"))
 
-    def test_department_lists_are_the_same_on_both_sides(self):
-        self.assertIn("const BAIGA_MANAGE_DEPARTMENT_CODE = '%s';" % access.MANAGE_DEPARTMENT_CODE, self.app)
-        self.assertIn('const BAIGA_READ_DEPARTMENT_CODES = [%s];'
-                      % ', '.join("'%s'" % code for code in access.READ_DEPARTMENT_CODES), self.app)
-        self.assertIn('const BAIGA_SECTION_DEPARTMENT_CODES = '
-                      '[BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_READ_DEPARTMENT_CODES];', self.app)
+    def test_screen_keeps_no_copy_of_the_circle(self):
+        """Круг раздела правят из листа «Доступ», поэтому экран его не считает:
+        второй копии правила (отделы, должности) в App.jsx быть не должно —
+        она показывала бы пункт тому, кому раздел уже закрыли."""
+        for name in ('BAIGA_MANAGE_DEPARTMENT_CODE', 'BAIGA_READ_DEPARTMENT_CODES', 'BAIGA_SECTION_DEPARTMENT_CODES'):
+            self.assertNotIn(name, self.app)
+        body = self.app.split('const canAccessBaigaSectionForUser = (userLike) => {')[1].split('\n};')[0]
+        code = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith('//')]
+        self.assertEqual(code, [
+            "if (normalizeRole(userLike?.role) === 'super_admin') return true;",
+            'if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;',
+            'return userLike?.baiga_access === true;',
+        ])
+        # Круг по умолчанию задан на сервере — и только там.
         self.assertEqual(access.SECTION_DEPARTMENT_CODES, ('marketing', 'op', 'szov'))
+        self.assertEqual([code for code, _kinds in access.CIRCLE], list(access.SECTION_DEPARTMENT_CODES))
 
     def _front_answers(self, users, analysts=None, predicate='canAccessBaigaSectionForUser', pilot=None):
         """Настоящий предикат из App.jsx, выполненный node, — поведение, а не текст.
@@ -2142,16 +2733,13 @@ class WiringTests(unittest.TestCase):
         if not node:
             self.skipTest('node недоступен')
         app = self.app
-        normalize = re.search(r'^const normalizeDepartmentCode = .*$', app, re.M).group(0)
-        start = app.index('const aiQaHeadDepartmentCodesOf = (userLike) => {')
-        head_codes = app[start:app.index('\n};\n', start) + 3]
         start = app.index('const SENSITIVE_QR_GATED_ROLES = ')
         qr_lock = app[start:app.index('\n);\n', app.index('const sensitiveSectionQrRequiredFor = ')) + 3]
         # Замок раздела спрашивает всех, кому портал выдаёт код: общий замок плюс
         # замок «Чатов водителей» (стажёр) — sensitiveQrAvailableFor.
         start = app.index('const driverChatsQrRequiredFor = (userLike) => {')
         wide_lock = app[start:app.index('\n);\n', app.index('const sensitiveQrAvailableFor = ')) + 3]
-        start = app.index('const BAIGA_MANAGE_DEPARTMENT_CODE = ')
+        start = app.index('const BAIGA_ANALYST_USER_IDS = ')
         section = app[start:app.index('\n);\n', app.index('const baigaQrRequiredFor = ')) + 3]
         self.assertIn('const canAccessBaigaSectionForUser = ', section)
         if analysts is not None:
@@ -2167,7 +2755,7 @@ class WiringTests(unittest.TestCase):
         script = '\n'.join((
             "import { normalizeRole, isDepartmentHead, isSupervisorRole } from '%s';"
             % (ROOT / 'src' / 'utils' / 'roles.js').as_uri(),
-            normalize, head_codes, qr_lock, wide_lock, section,
+            qr_lock, wide_lock, section,
             'const users = %s;' % json.dumps(users),
             'process.stdout.write(JSON.stringify(users.map((u) => %s(u))));' % predicate,
         ))
@@ -2181,152 +2769,140 @@ class WiringTests(unittest.TestCase):
         user = {'id': user_id, 'role': role, 'department_code': code,
                 'headed_department_id': 1 if heads else None, 'headed_department_codes': list(heads)}
         if granted is not None:
-            # Флаг профиля: раздел выдан из него самого (bot_schedule2.py).
+            # Флаг профиля: ответ сервера «раздел открыт» (bot_schedule2.py).
             user['baiga_access'] = granted
         return user
 
-    def test_predicate_answers_like_the_server(self):
-        """Пункт меню и сервер обязаны совпадать: иначе человек видит пункт, а
-        раздел отвечает отказом, — или доступ выдан, а пункта нет."""
+    def _profile_user(self, role, code, heads, user_id=10, grants=(), circle=None):
+        """Человек, каким его видит экран: профиль с флагом, который посчитал
+        сервер (как _baiga_section_open_for — access.can_open_section)."""
+        ctx = person(role=role, department_code=code, headed_codes=heads, user_id=user_id, grants=grants,
+                     circle=circle)
+        return self._front_user(role, code, heads, user_id=user_id, granted=access.can_open_section(ctx)), ctx
+
+    def test_menu_item_follows_the_answer_of_the_server(self):
+        """Пункт меню — это ответ сервера, пришедший флагом профиля: на всей
+        сетке, с кругом по умолчанию. Иначе человек видит пункт, а раздел
+        отвечает отказом, — или доступ есть, а пункта нет."""
         cases = grid()
-        front = self._front_answers([self._front_user(*case) for case in cases])
+        pairs = [self._profile_user(*case) for case in cases]
+        front = self._front_answers([user for user, _ctx in pairs])
         shown = 0
-        for (role, code, heads), answer in zip(cases, front):
-            ctx = person(role=role, department_code=code, headed_codes=heads)
-            self.assertEqual(answer, access.can_open_section(ctx), (role, code, heads))
+        for case, (_user, ctx), answer in zip(cases, pairs, front):
+            self.assertEqual(answer, access.can_open_section(ctx), case)
             shown += answer
         # Сетка не вырождена: открыто заметной части и далеко не всем.
         self.assertGreater(shown, 50)
         self.assertLess(shown, len(cases) - 50)
 
-    def test_predicate_ignores_case_and_spaces_in_codes_like_the_server(self):
-        cases = [('operator', ' OP ', ()), ('sv', 'SZOV', ()), ('operator', 'Marketing', ()),
-                 ('admin', None, (' Marketing ',)), ('admin', None, ('OP',)), ('SV', 'op', ()),
-                 ('Supervisor', 'szov', ())]
-        front = self._front_answers([self._front_user(*case) for case in cases])
-        self.assertEqual(front, [True] * len(cases))
-        for role, code, heads in cases:
-            self.assertTrue(access.can_open_section(person(role=role, department_code=code, headed_codes=heads)),
-                            (role, code, heads))
+    def test_without_the_flag_the_screen_opens_nothing_by_itself(self):
+        """Должность и отдел на экране ничего не доказывают: без ответа сервера
+        пункта нет ни у кого, кроме супер-админа, — даже у тех, кто в круге по
+        умолчанию. И «почти true» (строка из старого кэша) ответом не считается."""
+        cases = grid()
+        bare = self._front_answers([self._front_user(*case) for case in cases])
+        denied = self._front_answers([self._front_user(*case, granted=False) for case in cases])
+        for (role, code, heads), without, refused in zip(cases, bare, denied):
+            self.assertEqual((without, refused), (role == 'super_admin',) * 2, (role, code, heads))
+        odd = [dict(self._front_user('operator', 'op', ()), baiga_access=value)
+               for value in ('true', 1, 'yes', [], {}, None)]
+        self.assertEqual(self._front_answers(odd), [False] * len(odd))
 
-    def test_analyst_by_id_gets_the_menu_item_like_on_the_server(self):
-        users = [self._front_user('operator', 'tez', (), user_id=user_id) for user_id in (77, 78)]
-        self.assertEqual(self._front_answers(users, analysts=(77,)), [True, False])
-        with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
-            self.assertEqual([access.can_open_section(person(department_code='tez', user_id=user_id))
-                              for user_id in (77, 78)], [True, False])
+    def test_edited_circle_reaches_the_menu_through_the_flag(self):
+        """Строку круга закрыли или открыли в листе «Доступ» — пункт меню следует
+        за сервером у каждого, а не за должностью и отделом."""
+        edits = {'staff:op': 'none', 'head:szov': 'none', 'sv:szov': 'full'}
+        cases = grid()
+        pairs = [self._profile_user(*case, circle=edits) for case in cases]
+        front = self._front_answers([user for user, _ctx in pairs])
+        changed = 0
+        for case, (_user, ctx), answer in zip(cases, pairs, front):
+            self.assertEqual(answer, access.can_open_section(ctx), case)
+            changed += answer != access.can_open_section(person(role=case[0], department_code=case[1],
+                                                               headed_codes=case[2]))
+        # Правка действительно кого-то закрыла — и экран это показал.
+        self.assertGreater(changed, 5)
+        closed = self._profile_user('operator', 'op', (), circle=edits)[0]
+        self.assertEqual(self._front_answers([closed]), [False])
 
     def test_named_analyst_sees_the_menu_item_and_no_lock(self):
         """Боевой список, без подстановок: сотрудник отдела аналитики видит
         пункт и входит без замка, его сосед по отделу — нет."""
-        users = [self._front_user('operator', 'analytik', (), user_id=user_id)
+        users = [self._profile_user('operator', 'analytik', (), user_id=user_id)[0]
                  for user_id in (ANALYST_ID, ANALYST_ID + 1)]
         self.assertEqual(self._front_answers(users), [True, False])
         self.assertEqual(self._front_answers(users, predicate='baigaQrRequiredFor'), [False, True])
-        # Id в профиле бывает и строкой — пункт и замок от этого не меняются.
+        # Id в профиле бывает и строкой — замок от этого не меняется.
         as_text = [dict(users[0], id=str(ANALYST_ID))]
-        self.assertEqual(self._front_answers(as_text), [True])
         self.assertEqual(self._front_answers(as_text, predicate='baigaQrRequiredFor'), [False])
+        # Его строку в круге закрыли — пункта нет и у него.
+        closed = self._profile_user('operator', 'analytik', (), user_id=ANALYST_ID,
+                                    circle={'named:%d' % ANALYST_ID: 'none'})[0]
+        self.assertEqual(self._front_answers([closed]), [False])
 
-    def test_switch_closes_the_analyst_on_the_screen_like_on_the_server(self):
-        """Выключатель «только супер-админ» стоит раньше списка аналитиков на
-        обеих сторонах: включили — пункта меню нет и у аналитика, а сервер
-        отвечает ему «раздел закрыт». Разойдись порядок — человек видел бы
-        пункт, за которым каждая ручка отвечает отказом."""
-        users = [self._front_user('operator', 'analytik', (), user_id=ANALYST_ID),
-                 self._front_user('super_admin', None, ()),
-                 self._front_user('admin', 'marketing', ('marketing',)),
-                 self._front_user('operator', 'op', ())]
+    def test_switch_closes_everyone_on_the_screen_like_on_the_server(self):
+        """Выключатель «только супер-админ» стоит раньше ответа сервера: включили
+        его на экране — пункта нет ни у кого, даже с флагом. На сервере он же
+        закрывает и круг, и выдачи, и названных поимённо."""
+        users = [self._front_user('operator', 'analytik', (), user_id=ANALYST_ID, granted=True),
+                 self._front_user('super_admin', None, (), granted=True),
+                 self._front_user('admin', 'marketing', ('marketing',), granted=True),
+                 self._front_user('operator', 'tez', (), granted=True)]
         self.assertEqual(self._front_answers(users, pilot=True), [False, True, False, False])
         self.assertEqual(self._front_answers(users, pilot=False), [True, True, True, True])
         with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
             self.assertEqual(
                 [access.can_open_section(person(role='operator', department_code='analytik', user_id=ANALYST_ID)),
                  access.can_open_section(person(role='super_admin', department_code=None)),
-                 access.can_open_section(person(role='admin', department_code='marketing', headed_codes=('marketing',))),
-                 access.can_open_section(person(department_code='op'))],
+                 access.can_open_section(person(role='admin', department_code='marketing',
+                                                headed_codes=('marketing',))),
+                 access.can_open_section(person(department_code='tez', grants=('full',)))],
                 [False, True, False, False])
 
     def test_lock_on_the_screen_answers_like_the_server(self):
         """Замок экрана и замок сервера обязаны совпадать у каждого, кому раздел
         открыт: иначе экран рисует раздел, а ручки отвечают «нужен QR», — или
         человек видит замок там, где сервер пускает. Сверяем на всех сочетаниях
-        роли, отдела и главенства — для человека из списка и для чужого id."""
+        роли, отдела и главенства — по кругу и по выдаче, для человека из
+        именного списка и для чужого id; с кадровиком (кода ему не выдают) и
+        стажёром (по выдаче его спрашивают)."""
+        cases = grid() + [('hr_manager', code, heads) for code in GRID_DEPARTMENTS + ('hr',)
+                          for heads in ((), ('hr',))]
         compared = asked = 0
-        # По одному id за запуск node: сетка на оба id разом не влезает в
-        # предел длины одного аргумента командной строки (Linux, 128 КиБ).
-        for user_id in (77, 78):
-            users = [self._front_user(role, code, heads, user_id=user_id) for role, code, heads in grid()]
-            opened = self._front_answers(users, analysts=(77,))
-            locked = self._front_answers(users, analysts=(77,), predicate='baigaQrRequiredFor')
-            with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
-                for (role, code, heads), is_open, is_locked in zip(grid(), opened, locked):
-                    ctx = person(role=role, department_code=code, headed_codes=heads, user_id=user_id)
-                    self.assertEqual(is_open, access.can_open_section(ctx), (role, code, heads, user_id))
-                    if not is_open:
-                        continue
-                    self.assertEqual(is_locked, access.requires_sensitive_qr(ctx), (role, code, heads, user_id))
-                    compared += 1
-                    asked += is_locked
+        with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+            for user_id in (77, 78):
+                for grants in ((), ('read',)):
+                    # По одному набору за запуск node: сетка целиком не влезает в
+                    # предел длины одного аргумента командной строки (Linux, 128 КиБ).
+                    pairs = [self._profile_user(*case, user_id=user_id, grants=grants) for case in cases]
+                    users = [user for user, _ctx in pairs]
+                    opened = self._front_answers(users, analysts=(77,))
+                    locked = self._front_answers(users, analysts=(77,), predicate='baigaQrRequiredFor')
+                    for case, (_user, ctx), is_open, is_locked in zip(cases, pairs, opened, locked):
+                        self.assertEqual(is_open, access.can_open_section(ctx), (case, user_id, grants))
+                        if not is_open:
+                            continue
+                        self.assertEqual(is_locked, access.requires_sensitive_qr(ctx), (case, user_id, grants))
+                        compared += 1
+                        asked += is_locked
+        trainees = [self._front_user('trainee', code, (), granted=True) for code in GRID_DEPARTMENTS]
+        self.assertEqual(self._front_answers(trainees, predicate='baigaQrRequiredFor'), [True] * len(trainees))
         # Сетка не вырождена: есть и те, кого замок спрашивает, и те, кого нет.
-        self.assertGreater(asked, 5)
+        self.assertGreater(asked, 30)
         self.assertGreater(compared - asked, 400)
 
     def test_menu_never_leads_past_the_qr_lock(self):
-        """Должность, которой портал QR не выдаёт (кадровик), пункта не видит:
-        сервер свёл бы её к оператору и спросил бы код, который взять негде."""
-        cases = [('hr_manager', code, ()) for code in access.SECTION_DEPARTMENT_CODES]
-        front = self._front_answers([self._front_user(*case) for case in cases])
-        self.assertEqual(front, [False] * len(cases))
-        for role, code, heads in cases:
-            ctx = person(role=role, department_code=code, headed_codes=heads)
-            self.assertTrue(not access.can_open_section(ctx) or access.requires_sensitive_qr(ctx), code)
-
-    def test_granted_flag_opens_the_menu_item_like_the_server(self):
-        """Выдачу из раздела по должности и отделу не вычислить — её приносит
-        флаг профиля baiga_access. С флагом пункт меню есть у любого сочетания
-        роли, отдела и главенства, как и раздел на сервере с выдачей; без флага
-        и с false — ровно круг раздела."""
-        cases = grid()
-        granted = self._front_answers([self._front_user(*case, granted=True) for case in cases])
-        self.assertEqual(granted, [True] * len(cases))
-        for role, code, heads in cases:
-            self.assertTrue(access.can_open_section(person(role=role, department_code=code, headed_codes=heads,
-                                                           grants=('read',))), (role, code, heads))
-        without = self._front_answers([self._front_user(*case) for case in cases])
-        self.assertEqual(self._front_answers([self._front_user(*case, granted=False) for case in cases]), without)
-        # Выдача — только строгое true: строка из старого кэша профиля ею не станет.
-        odd = [dict(self._front_user('operator', 'tez', ()), baiga_access=value)
-               for value in ('true', 1, 'yes', [], {}, None)]
-        self.assertEqual(self._front_answers(odd), [False] * len(odd))
-
-    def test_lock_on_the_screen_answers_like_the_server_for_the_granted(self):
-        """Вошедшего по выдаче экран и сервер спрашивают о QR одинаково — на
-        всех сочетаниях, включая стажёра (спрашивают) и кадровика (не
-        спрашивают: кода ему портал не выдаёт)."""
-        cases = grid() + [('hr_manager', code, heads) for code in GRID_DEPARTMENTS + ('hr',)
-                          for heads in ((), ('hr',))]
-        asked = 0
-        for user_id in (77, 78):
-            users = [self._front_user(role, code, heads, user_id=user_id, granted=True)
-                     for role, code, heads in cases]
-            locked = self._front_answers(users, analysts=(77,), predicate='baigaQrRequiredFor')
-            with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
-                for (role, code, heads), is_locked in zip(cases, locked):
-                    ctx = person(role=role, department_code=code, headed_codes=heads, user_id=user_id,
-                                 grants=('read',))
-                    self.assertEqual(is_locked, access.requires_sensitive_qr(ctx), (role, code, heads, user_id))
-                    asked += is_locked
-        trainees = [self._front_user('trainee', code, (), granted=True) for code in GRID_DEPARTMENTS]
-        self.assertEqual(self._front_answers(trainees, predicate='baigaQrRequiredFor'), [True] * len(trainees))
-        self.assertGreater(asked, 20)
-
-    def test_switch_closes_the_granted_on_the_screen_like_on_the_server(self):
-        users = [self._front_user('operator', 'tez', (), granted=True),
-                 self._front_user('super_admin', None, (), granted=True)]
-        self.assertEqual(self._front_answers(users, pilot=True), [False, True])
-        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
-            self.assertFalse(access.can_open_section(person(department_code='tez', grants=('full',))))
+        """Должность, которой портал QR не выдаёт (кадровик), в круг не входит,
+        где бы ни числилась: пункта у неё нет, а по выдаче раздел открыт ей без
+        замка — запереть её было бы навсегда."""
+        for code in access.SECTION_DEPARTMENT_CODES:
+            user, ctx = self._profile_user('hr_manager', code, ())
+            self.assertFalse(access.can_open_section(ctx), code)
+            self.assertEqual(self._front_answers([user]), [False], code)
+            user, ctx = self._profile_user('hr_manager', code, (), grants=('read',))
+            self.assertEqual((self._front_answers([user]), self._front_answers([user], predicate='baigaQrRequiredFor')),
+                             ([True], [False]), code)
+            self.assertFalse(access.requires_sensitive_qr(ctx), code)
 
     def _profile_flag(self, ctx=None, error=None):
         """Настоящая _baiga_section_open_for из монолита — без его импорта."""
@@ -2369,16 +2945,59 @@ class WiringTests(unittest.TestCase):
         with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({31})):
             self.assertIs(self._profile_flag(person(role='sv', department_code='tez'))(31), True)
 
+    def test_profile_flag_survives_a_failed_context_by_the_default_circle(self):
+        """Контекст раздела не прочитался (база занята, идёт выкладка) — флаг
+        считается по кругу по умолчанию из профиля: экран своего круга больше
+        не держит, и без этого пункт меню пропал бы у всего круга разом."""
+        broken = self._profile_flag(error=RuntimeError('база недоступна'))
+
+        def profile(role, code, heads=()):
+            return {'role': role, 'department_code': code,
+                    'headed_department_ids': [909] if heads else [], 'headed_department_codes': list(heads)}
+
+        for case, expected in ((profile('operator', 'op'), True), (profile('sv', 'szov'), True),
+                               (profile('admin', 'marketing', ('marketing',)), True),
+                               (profile('marketing_manager', 'marketing'), True),
+                               (profile('operator', 'tez'), False), (profile('trainer', 'op'), False),
+                               (profile('trainee', 'szov'), False), (profile('admin', None), False),
+                               (profile(None, None), False), ({}, False), (None, False)):
+            self.assertIs(broken(31, case), expected, case)
+        self.assertIs(broken(ANALYST_ID, profile('operator', 'analytik')), True)
+        self.assertIs(broken(1, profile('super_admin', None)), True)
+        # На всей сетке запасной расчёт — ровно круг по умолчанию, без выдач и правок.
+        for role, code, heads in grid():
+            self.assertIs(broken(31, profile(role, code, heads)),
+                          access.can_open_section(person(role=role, department_code=code, headed_codes=heads,
+                                                         user_id=31)), (role, code, heads))
+        # Выключатель закрывает и запасной расчёт.
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertIs(broken(31, profile('operator', 'op')), False)
+            self.assertIs(broken(1, profile('super_admin', None)), True)
+        # Контекст прочитался — отвечает он, а не профиль: закрытая строка круга
+        # пункт меню прячет, выдача — показывает.
+        closed = self._profile_flag(person(department_code='op', circle={'staff:op': 'none'}))
+        self.assertIs(closed(31, profile('operator', 'op')), False)
+        granted = self._profile_flag(person(role='sv', department_code='tez', grants=('read',)))
+        self.assertIs(granted(31, profile('sv', 'tez')), True)
+        # Человека в базе нет — профиль его не «открывает».
+        self.assertIs(self._profile_flag(None)(31, profile('operator', 'op')), False)
+
     def test_profile_carries_the_flag(self):
         payload = source_cache.function_node(BOT_PY, '_get_user_payload')
         lines = source_cache.read(BOT_PY).splitlines()
         body = '\n'.join(lines[payload.lineno - 1:payload.end_lineno])
-        self.assertIn('    baiga_access = _baiga_section_open_for(user_id) if user_id is not None else False\n', body)
+        # Запасному расчёту профиль отдаёт и id возглавляемых отделов: по ним
+        # правило отличает главу от рядового (is_department_head).
+        self.assertIn("    baiga_access = _baiga_section_open_for(user_id, {\n"
+                      "        'role': role, 'department_code': department_code,\n"
+                      "        'headed_department_ids': headed_department_ids, "
+                      "'headed_department_codes': headed_department_codes,\n"
+                      "    }) if user_id is not None else False\n", body)
         self.assertIn('        "baiga_access": baiga_access,\n', body)
         # Сам предикат читает флаг ПОСЛЕ выключателя — иначе выключатель не закрыл бы выданных.
         predicate = self.app.split('const canAccessBaigaSectionForUser = (userLike) => {')[1].split('\n};')[0]
         self.assertLess(predicate.index('if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;'),
-                        predicate.index('if (userLike?.baiga_access === true) return true;'))
+                        predicate.index('return userLike?.baiga_access === true;'))
 
     def test_access_button_opens_the_sheet(self):
         view = _read(ROOT / 'src' / 'components' / 'baiga' / 'BaigaView.jsx')
@@ -2392,17 +3011,19 @@ class WiringTests(unittest.TestCase):
         self.assertIn('<BaigaAccessSheet', sheet)
         self.assertIn('open={accessOpen}', sheet)
         source = _read(ROOT / 'src' / 'components' / 'baiga' / 'BaigaAccessSheet.jsx')
-        # Четыре ручки листа — те же адреса, что у сервера.
+        # Пять ручек листа — те же адреса, что у сервера.
         for call in ("axios.get(`${apiBaseUrl}/api/baiga/access`",
                      "axios.post(`${apiBaseUrl}/api/baiga/access/grants`",
                      "axios.patch(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`",
-                     "axios.delete(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`"):
+                     "axios.delete(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`",
+                     "axios.patch(`${apiBaseUrl}/api/baiga/access/circle`"):
             self.assertEqual(source.count(call), 1, call)
         rules = {(rule.rule, tuple(sorted(rule.methods - {'HEAD', 'OPTIONS'})))
                  for rule in self._url_map() if '/access' in rule.rule}
         self.assertEqual(rules, {('/api/baiga/access', ('GET',)), ('/api/baiga/access/grants', ('POST',)),
                                  ('/api/baiga/access/grants/<int:grant_id>', ('PATCH',)),
-                                 ('/api/baiga/access/grants/<int:grant_id>', ('DELETE',))})
+                                 ('/api/baiga/access/grants/<int:grant_id>', ('DELETE',)),
+                                 ('/api/baiga/access/circle', ('PATCH',))})
 
     @staticmethod
     def _url_map():

@@ -136,10 +136,12 @@ _STATEMENTS = [
     )
     """ % _NOW,
 
-    # action: grant / change / revoke. След каждой выдачи: в строках ФИО и
-    # номера ВУ, и вопрос «кто открыл раздел этой группе» не должен оставаться
-    # без ответа после того, как выдачу сняли. Подпись адресата — как она
-    # читалась в тот день: группу потом могут переименовать или удалить.
+    # action: grant / change / revoke — выдачи; circle — правка строки круга
+    # (subject_type тоже circle, subject_id 0, имя строки — в subject_label).
+    # След каждой выдачи: в строках ФИО и номера ВУ, и вопрос «кто открыл раздел
+    # этой группе» не должен оставаться без ответа после того, как выдачу сняли.
+    # Подпись адресата — как она читалась в тот день: группу потом могут
+    # переименовать или удалить.
     """
     CREATE TABLE IF NOT EXISTS baiga_access_log (
         id              SERIAL PRIMARY KEY,
@@ -152,6 +154,20 @@ _STATEMENTS = [
         actor_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
         actor_name      VARCHAR(200),
         created_at      TIMESTAMP NOT NULL DEFAULT %s
+    )
+    """ % _NOW,
+
+    # Правки круга раздела (08.10.2026): кому раздел открыт БЕЗ выдач, задано в
+    # access.CIRCLE, а уровень каждой строки («должность в отделе») меняют из
+    # листа «Доступ». Строка здесь — только у правленой строки круга; нет её —
+    # действует значение по умолчанию из кода. level: none / read / export / full.
+    """
+    CREATE TABLE IF NOT EXISTS baiga_access_circle (
+        slot            VARCHAR(48) PRIMARY KEY,
+        level           VARCHAR(16) NOT NULL,
+        updated_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by_name VARCHAR(200),
+        updated_at      TIMESTAMP NOT NULL DEFAULT %s
     )
     """ % _NOW,
 
@@ -230,19 +246,31 @@ def schema_is_ready(cursor):
     return bool(row and row[0])
 
 
-# Таблицы выдач появились позже недель (07.10.2026). Их спрашивает проверка
-# доступа — то есть КАЖДЫЙ запрос раздела, — поэтому «есть» запоминается на
-# процесс: таблицы не исчезают, и второй раз спрашивать незачем. «Нет» не
-# запоминается: схема могла развернуться следующим стартом.
+# Таблицы выдач появились позже недель (07.10.2026), таблица правок круга —
+# ещё на день позже. Их спрашивает проверка доступа — то есть КАЖДЫЙ запрос
+# раздела, — поэтому «есть» запоминается на процесс: таблицы не исчезают, и
+# второй раз спрашивать незачем. «Нет» не запоминается: схема могла развернуться
+# следующим стартом.
 _grants_seen = {'ready': False}
+_circle_seen = {'ready': False}
+
+
+def _table_seen(cursor, seen, table):
+    if seen['ready']:
+        return True
+    cursor.execute("SELECT to_regclass(%(table)s) IS NOT NULL", {'table': 'public.' + table})
+    row = cursor.fetchone()
+    seen['ready'] = bool(row and row[0])
+    return seen['ready']
 
 
 def grants_ready(cursor):
     """Развёрнуты ли таблицы выдач. Нет (миграция не легла) — раздел живёт по
     кругу из access.py, как до кнопки «Доступ», а не отвечает ошибкой каждому."""
-    if _grants_seen['ready']:
-        return True
-    cursor.execute("SELECT to_regclass('public.baiga_access_log') IS NOT NULL")
-    row = cursor.fetchone()
-    _grants_seen['ready'] = bool(row and row[0])
-    return _grants_seen['ready']
+    return _table_seen(cursor, _grants_seen, 'baiga_access_log')
+
+
+def circle_ready(cursor):
+    """Развёрнута ли таблица правок круга. Нет — круг действует по умолчанию,
+    выдачи работают как работали."""
+    return _table_seen(cursor, _circle_seen, 'baiga_access_circle')
