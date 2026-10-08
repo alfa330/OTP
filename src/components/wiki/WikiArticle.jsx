@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, FolderTree, History,
+    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Download, Eye, FolderTree, History,
     KeyRound, List, Loader2, Maximize2, Megaphone, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
@@ -17,6 +17,7 @@ import { getScrollContainer, scrollToElement } from './scrollContainer';
 import { backLabel } from './articleTrail';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
+import { docxFileName, downloadErrorText, portalAddress, saveBlob } from './articleDownload';
 import { mountGalleries } from './gallery';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import useCopyGuard from './useCopyGuard';
@@ -275,6 +276,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         setBodyReady(!!node);
     }, []);
     const [archiving, setArchiving] = useState(false);
+    const [downloading, setDownloading] = useState(false);
     const [newsBusy, setNewsBusy] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     // Справка о статье: где она лежит и — супер-админу — кому открыта.
@@ -379,6 +381,25 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось убрать в архив'), 'error'))
             .finally(() => setArchiving(false));
+    };
+
+    /* Статья файлом Word. Файл собирает API (дверь требует авторизацию),
+       поэтому он приходит blob'ом и сохраняется в этом же окне — почему не
+       общий startFileDownload, написано в articleDownload.js. Адрес портала
+       уезжает параметром ради внутренних ссылок в документе: сервер его не
+       знает. Имя файла — из названия статьи, той же формулой, что на сервере. */
+    const download = () => {
+        if (!article?.id || downloading) return;
+        setDownloading(true);
+        axios.get(`${base}/articles/${article.id}/docx`, {
+            headers,
+            responseType: 'blob',
+            params: { portal: portalAddress() || undefined },
+        })
+            .then((r) => { saveBlob(r.data, docxFileName(article.title)); })
+            .catch(async (e) => showToast?.(
+                await downloadErrorText(e, 'Не удалось собрать файл'), 'error'))
+            .finally(() => setDownloading(false));
     };
 
     useEffect(() => {
@@ -836,6 +857,26 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             {article.can_view_readers
                                 ? <><KeyRound size={14} /> Доступ</>
                                 : <><FolderTree size={14} /> Расположение</>}
+                        </button>
+                    )}
+                    {/* Скачать статью файлом Word — администратору и выше
+                        (решение владельца 08.10.2026). Признак can_download
+                        считает сервер той же формулой, что дверь
+                        /articles/<id>/docx: кнопка не появится у того, кому
+                        дверь ответит отказом. Файл собирает API, поэтому он
+                        приходит blob'ом и сохраняется в этом же окне
+                        (articleDownload.js). */}
+                    {article.can_download && (
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            disabled={downloading}
+                            title="Скачать статью файлом Word (.docx)"
+                            onClick={download}
+                        >
+                            {downloading ? <Loader2 size={14} className="animate-spin" />
+                                : <Download size={14} />}
+                            Скачать
                         </button>
                     )}
                     {/* Новостью — только ВЫШЕДШАЯ статья: новость о черновике
