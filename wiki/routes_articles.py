@@ -8,13 +8,15 @@
 
 import logging
 
-from flask import jsonify, redirect, request
+from flask import jsonify, redirect, request, send_file
 
 from . import access as wiki_access
 from . import article_access as wiki_article_access
 from . import articles as wiki_articles
 from . import directory as wiki_directory
+from . import docx_export as wiki_docx
 from . import file_urls as wiki_file_urls
+from . import report_kit as wiki_report_kit
 from . import guests as wiki_guests
 from . import migration as wiki_migration
 from . import parks as wiki_parks
@@ -446,6 +448,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # кнопку справки — «Доступ» или «Расположение», — а вторая формула во
         # фронте однажды разошлась бы с дверью /articles/<id>/access.
         article['can_view_readers'] = wiki_article_access.sees_readers(ctx)
+        # Скачает ли человек статью файлом Word (администратор и выше). Признак
+        # тоже считает сервер: кнопка «Скачать» рисуется по нему, а дверь
+        # /articles/<id>/docx проверяет ту же формулу — кнопка не появится у
+        # того, кому дверь ответит отказом.
+        article['can_download'] = wiki_access.may_export(ctx['otp_role'])
         article['file_urls'] = _display_urls(cursor, ctx, article, visible)
         return jsonify(article)
 
@@ -505,6 +512,32 @@ def register(bp, wiki_route, db, log_ip, gcs):
         return jsonify(wiki_article_access.describe(
             cursor, ctx, article, sections, with_people=with_people))
 
+    def _readable_files(cursor, ctx, article, visible):
+        """Строки файлов, на которые ссылается тело статьи и которые читателю можно отдать.
+
+        ПРАВИЛО ДОСТУПА ЗДЕСЬ ТО ЖЕ, ЧТО У РУЧКИ /file/<id> НИЖЕ, и повторено
+        оно намеренно: тело статьи вправе ссылаться на файл, скопированный из
+        ЧУЖОЙ статьи — картинку вместе с разметкой переносят копированием, — и
+        выдача «на всё, что упомянуто в тексте» раздавала бы файлы из статей,
+        которых читателю не видно. Одна функция на обе двери — подпись для
+        витрины (_display_urls) и картинки в файле Word (/articles/<id>/docx):
+        второй экземпляр правила разошёлся бы с первым молча.
+        """
+        ids = wiki_file_urls.ids_in(article.get('content'))
+        if not ids:
+            return []
+        allowed = []
+        for row in wiki_articles.files_for_display(cursor, ids):
+            owner_article = row.get('article_id')
+            if owner_article:
+                if owner_article in visible:
+                    allowed.append(row)
+            elif row.get('uploaded_by') == ctx['user_id']:
+                # Файл, ещё не привязанный к статье: так выглядит картинка,
+                # загруженная в редакторе до первого сохранения.
+                allowed.append(row)
+        return allowed
+
     def _display_urls(cursor, ctx, article, visible):
         """{id файла: подписанный адрес} для картинок ТЕЛА статьи.
 
@@ -516,27 +549,112 @@ def register(bp, wiki_route, db, log_ip, gcs):
         есть был бы виден одному загрузившему. Поэтому в теле остаётся
         постоянный адрес, а подстановка живёт на витрине (WikiArticle.jsx).
 
-        ПРАВИЛО ДОСТУПА ЗДЕСЬ ТО ЖЕ, ЧТО У РУЧКИ /file/<id> НИЖЕ, и повторено
-        оно намеренно: тело статьи вправе ссылаться на файл, скопированный из
-        ЧУЖОЙ статьи — картинку вместе с разметкой переносят копированием, — и
-        подпись «на всё, что упомянуто в тексте» раздавала бы файлы из статей,
-        которых читателю не видно. Подписи не досталось — витрина покажет
-        прежний адрес ручки, то есть ровно то, что было до этой правки.
+        Кому какой файл можно, решает _readable_files. Подписи не досталось —
+        витрина покажет прежний адрес ручки, то есть ровно то, что было до
+        этой правки.
         """
-        ids = wiki_file_urls.ids_in(article.get('content'))
-        if not ids:
+        allowed = _readable_files(cursor, ctx, article, visible)
+        if not allowed:
             return {}
-        allowed = []
-        for row in wiki_articles.files_for_display(cursor, ids):
-            owner_article = row.get('article_id')
-            if owner_article:
-                if owner_article in visible:
-                    allowed.append(row)
-            elif row.get('uploaded_by') == ctx['user_id']:
-                # Файл, ещё не привязанный к статье: так выглядит картинка,
-                # загруженная в редакторе до первого сохранения.
-                allowed.append(row)
         return wiki_file_urls.sign_files(gcs, allowed)
+
+    # ── Статья файлом Word ───────────────────────────────────────────────
+    # Стоит ПОСЛЕ _display_urls намеренно: страж tests/test_wiki_article_access.py
+    # (test_door_does_not_write) читает исходник от двери /access до
+    # _display_urls и требует, чтобы та дверь ничего не писала. Эта дверь
+    # пишет в журнал — и должна, — поэтому живёт ниже границы стража.
+    @wiki_route('/articles/<int:article_id>/docx')
+    def wiki_article_docx(cursor, ctx, article_id):
+        """Статья файлом .docx — администратору и выше (access.may_export).
+
+        Порядок проверок: сначала должность, потом периметр. Отказ по должности
+        один на все номера статей, поэтому существования статьи он не
+        раскрывает; а невидимая статья отвечает 404, как и сама статья по
+        слагу — «нет доступа» раскрыло бы, что статья с таким номером есть.
+
+        Картинки тела идут в файл по тому же правилу, что подписи для витрины
+        (_readable_files): кадр из чужой статьи, скопированный вместе с
+        разметкой, в документ не попадает — на его месте пометка.
+
+        Запись в журнал обязательна: файл — ещё одна дверь, через которую текст
+        покидает портал (как история версий и поиск), и вопрос «кто унёс
+        регламент» журнал обязан отвечать.
+        """
+        if not wiki_access.may_export(ctx['otp_role']):
+            return jsonify({
+                "error": "Скачивать статьи файлом могут администраторы и выше",
+                "code": "WIKI_FORBIDDEN",
+                "required": "admin",
+            }), 403
+        if not wiki_docx.available():
+            return jsonify({"error": "Выгрузка в Word на сервере не настроена"}), 503
+
+        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        if article_id not in visible:
+            return jsonify({"error": "Статья не найдена"}), 404
+        article = wiki_articles.get_article(cursor, article_id=article_id)
+        if not article:
+            return jsonify({"error": "Статья не найдена"}), 404
+
+        files = {str(row['id']).lower(): row
+                 for row in _readable_files(cursor, ctx, article, visible)}
+        client = gcs.get('client') if gcs else None
+
+        def fetch_image(file_id):
+            row = files.get(str(file_id).lower())
+            if not row or not client:
+                return None
+            blob = client().bucket(row['bucket']).blob(row['blob_path'])
+            return blob.download_as_bytes(), row.get('content_type') or ''
+
+        stream, stats = wiki_docx.build_document(
+            article,
+            section_paths=_section_paths(cursor, article['section_ids']),
+            # Адрес портала для внутренних ссылок присылает интерфейс: сервер
+            # его не знает (фронт живёт на GitHub Pages с базовым путём).
+            # Чужое значение отбрасывается — ссылки остаются текстом.
+            portal_url=wiki_docx.portal_address(request.args.get('portal')),
+            fetch_image=fetch_image,
+            exported_at=wiki_report_kit.now_almaty(),
+        )
+        queries.log_action(
+            cursor, actor_id=ctx['user_id'], action='article.export',
+            entity_type='article', entity_id=article['id'],
+            details={'slug': article['slug'], 'format': 'docx', 'images': stats['images']},
+            ip_address=log_ip())
+        return send_file(
+            stream,
+            mimetype=wiki_docx.DOCX_MIME,
+            as_attachment=True,
+            download_name=wiki_docx.file_name(article['title']),
+        )
+
+    def _section_paths(cursor, section_ids):
+        """[[«Пространство», «Раздел», «Подраздел»], …] — где лежит статья.
+
+        Путь — тот же, что в окне «Расположение» (article_access.display_path):
+        живой раздел под архивным родителем показывается от корня пространства,
+        и документ не должен называть место иначе, чем экран.
+        """
+        chains = wiki_article_access.section_chains(cursor, section_ids)
+        if not chains:
+            return []
+        space_ids = sorted({chain[0]['space_id'] for chain in chains.values()
+                            if chain and chain[0].get('space_id')})
+        spaces = {}
+        if space_ids:
+            cursor.execute('SELECT id, name FROM wiki_spaces WHERE id = ANY(%s)',
+                           (space_ids,))
+            spaces = {row[0]: row[1] for row in (cursor.fetchall() or [])}
+        paths = []
+        for section_id in sorted(chains):
+            chain = chains[section_id]
+            path = wiki_article_access.display_path(chain)
+            if not path:
+                continue
+            space = spaces.get(chain[0].get('space_id'))
+            paths.append(([space] if space else []) + [node['name'] for node in path])
+        return paths
 
     # ── Файлы ────────────────────────────────────────────────────────────
     @wiki_route('/file/<file_id>')

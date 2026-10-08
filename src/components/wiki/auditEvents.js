@@ -16,7 +16,7 @@
  */
 
 import {
-    Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, FileDown,
+    Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, Download, FileDown,
     FilePlus2, FileText, FolderMinus, FolderPlus, Globe, KeyRound, Layers, MapPin, Megaphone, PenLine,
     RefreshCw, RotateCcw, ShieldAlert, ShieldOff, Sparkles, Star, Trash2, UserCheck, UserPlus,
 } from 'lucide-react';
@@ -70,6 +70,11 @@ export const ACTION_META = {
     'article.move': { label: 'Статья перемещена', tone: CHANGED, icon: ArrowRightLeft },
     'article.fork': { label: 'Сделана копия статьи', tone: CREATED, icon: Copy },
     'article.import': { label: 'Загружен файл', tone: CHANGED, icon: FileDown },
+    /* Статья уехала из портала файлом Word (администратор и выше, решение
+       владельца 08.10.2026). Серый тон: это не правка и не выдача доступа,
+       но знать, кто и когда унёс текст, журнал обязан — это ещё одна дверь,
+       через которую содержимое покидает вики. */
+    'article.export': { label: 'Статья скачана файлом Word', tone: CHANGED, icon: Download },
     'article.ai_draft': { label: 'Черновик статьи от ИИ', tone: CHANGED, icon: Sparkles },
     'article.ai_update': { label: 'ИИ сверил статью с файлом', tone: CHANGED, icon: Sparkles },
     'article.ai_edit': { label: 'Правка статьи через ИИ', tone: CHANGED, icon: Sparkles },
@@ -291,6 +296,7 @@ const CONSUMED = {
     'article.move': ['section_id', 'section_name', 'from_section_id', 'from_section_name'],
     'article.fork': ['section_id', 'section_name', 'source_article_id'],
     'article.import': ['file', 'kind', 'images'],
+    'article.export': ['format', 'images'],
     'article.ai_draft': ['file', 'kind', 'tables', 'warnings', 'model'],
     'article.ai_update': ['file', 'kind', 'changes', 'questions', 'model'],
     'article.ai_edit': ['changes', 'instruction', 'model'],
@@ -540,6 +546,11 @@ export function auditFacts(item, nameOf = null) {
             if (details.kind) facts.push(String(details.kind));
             if (details.images) facts.push(`картинок: ${details.images}`);
             facts.push(NOT_SAVED);
+            break;
+        /* Сколько картинок уехало вместе с текстом — единственная подробность,
+           которая у скачивания есть; формат в подписи назван и так. */
+        case 'article.export':
+            if (details.images) facts.push(`картинок: ${details.images}`);
             break;
         case 'article.ai_draft':
             if (details.file) facts.push(details.file);
