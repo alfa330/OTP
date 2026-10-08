@@ -1520,8 +1520,9 @@ function ChatsWorkspace(props) {
     })[pilot.connection] : '';
 
     return (
-        <div className={`w-full ${entering ? 'wz-workspace-enter' : ''}`} style={{ fontFamily: APPLE_FONT }}>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+        <div className={`wz-workspace flex h-full min-h-0 w-full flex-col ${entering ? 'wz-workspace-enter' : ''}`}
+             style={{ fontFamily: APPLE_FONT, '--wz-mobile-header-space': operator ? '154px' : '170px' }}>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:pl-11 sm:pr-6">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
                     {!operator && (
@@ -1576,15 +1577,16 @@ function ChatsWorkspace(props) {
             </div>
 
             {mainTab === 'authors' && (
-                <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                              account={account} />
+                <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+                    <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                  account={account} />
+                </div>
             )}
 
-            {/* У верификатора шапка на строку ниже (нет подписи под заголовком) —
-                эта строка отдана окну. */}
-            <div className={`${iosCard} wz-columns flex overflow-hidden`}
-                 style={{ height: operator ? 'calc(100vh - 154px)' : 'calc(100vh - 170px)', minHeight: 420,
-                          display: mainTab === 'chats' ? undefined : 'none' }}>
+            {/* Колонки занимают весь остаток после шапки, в том числе когда
+                кнопки переносятся на вторую строку или окно меняет высоту. */}
+            <div className="wz-columns flex min-h-0 flex-1 overflow-hidden border-t border-slate-200/70 bg-white"
+                 style={{ display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
                 <ChatChannelsSidebar channels={activeChannels} selectedChannelId={channelId}
                     onSelect={pickChannel} apiBaseUrl={apiBaseUrl} headers={headers}
@@ -1909,7 +1911,7 @@ function OperatorWorkspace(props) {
 
     if (!workspace.ready) {
         return (
-            <div className="grid min-h-[320px] place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
+            <div className="grid h-full overflow-y-auto px-4 py-8 place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
                 {workspace.error ? (
                     <div className="max-w-sm text-center">
                         <AlertCircle size={22} className="mx-auto text-slate-400" />
@@ -1922,8 +1924,10 @@ function OperatorWorkspace(props) {
             </div>
         );
     }
-    if (workspace.locked) return <ChatAccessGate />;
-    if (!onShift) return <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />;
+    if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
+    if (!onShift) return <div className="wazzup-scrollbar h-full overflow-y-auto">
+        <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />
+    </div>;
     return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />} />;
 }
 

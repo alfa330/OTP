@@ -55666,6 +55666,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className={`main-content w-full ${
                             isCallEvaluationView
                                 ? 'p-0 h-screen overflow-hidden'
+                                : view === 'wazzup_chats'
+                                    ? 'wz-main-content p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))

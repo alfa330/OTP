@@ -24,7 +24,7 @@ export default function ShiftStartScreen({ onStartIntent }) {
     };
 
     return (
-        <div className="wz-start grid min-h-[calc(100vh-140px)] place-items-center px-4" style={{ fontFamily: APPLE_FONT }}>
+        <div className="wz-start grid min-h-full place-items-center px-4 py-8" style={{ fontFamily: APPLE_FONT }}>
             <div className="flex w-full max-w-sm flex-col items-center text-center">
                 <div className="grid h-[72px] w-[72px] place-items-center rounded-[22px] bg-gradient-to-b from-blue-500 to-blue-600 text-white shadow-[0_10px_28px_rgba(37,99,235,0.32)]">
                     <MessagesSquare size={32} strokeWidth={1.8} />
