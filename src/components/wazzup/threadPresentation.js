@@ -3,6 +3,11 @@ const ATTACHMENTS = {
     geo: 'Геолокация', vcard: 'Контакт', missing_call: 'Пропущенный звонок',
 };
 
+export function canReplyOnDoubleClick(event) {
+    // Preserve embedded controls (quoted-message links, media and downloads).
+    return !event.target?.closest?.('button, a, input, textarea, select, audio, video, [contenteditable="true"]');
+}
+
 export function messageQuote(message, messagesById) {
     const messageId = message?.replyToMessageId;
     if (!messageId || messageId === message.messageId) return null;

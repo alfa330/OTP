@@ -159,6 +159,25 @@ test('hidden page closes stream; visible page reconnects and reconciles gaps', a
     await h.close(); assert.equal(h.timers.size, 0);
 });
 
+test('notes reconcile on connection and only unhydrated note events request their own refresh', async () => {
+    let noteReads = 0;
+    const h = harness({ refreshNotes: async () => { noteReads++; },
+        onChanges: (events) => ({ thread: false, list: false,
+            notes: events.some((event) => event.kind === 'note' && !event.note) }) });
+    await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);
+    assert.equal(noteReads, 1);
+    const baseline = { ...h.calls };
+    await h.emit('change', { changes: [{ kind: 'note', note: { id: 'note-1', text: 'Internal only' } }] });
+    await h.tick(1000);
+    assert.equal(noteReads, 1); assert.deepEqual(h.calls, baseline);
+    await h.emit('change', { changes: [{ kind: 'note', noteId: 'note-2' }] });
+    await h.tick(350);
+    assert.equal(noteReads, 2); assert.deepEqual(h.calls, baseline);
+    await h.visible(false); await h.visible(true); await h.emit('connected', { ready: true }); await h.tick(1000);
+    assert.equal(noteReads, 3);
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
 test('DB outage backs off; a late rejected refresh cannot schedule work after unmount', async () => {
     let reject;
     let attempts = 0;

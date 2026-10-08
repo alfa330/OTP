@@ -7,6 +7,8 @@ import threading
 import time
 from datetime import datetime
 
+from .notes import note_item
+
 CHANNEL = 'wazzup_pilot_events'
 HEARTBEAT_SECONDS = 20
 HYDRATE_BATCH_SIZE = 100
@@ -38,6 +40,11 @@ _HYDRATE_SQL = """
      WHERE m.account='op' AND m.message_id=ANY(%s)
 """
 
+_HYDRATE_NOTES_SQL = """
+    SELECT id,created_at,text,author_name,author_id,channel_id,chat_id
+      FROM wazzup_chat_notes WHERE account='op' AND id=ANY(%s::uuid[])
+"""
+
 
 def _change_key(event):
     return (event.get('account'), event.get('channelId'), event.get('chatId'), event['messageId'])
@@ -52,7 +59,7 @@ def merge_changes(previous, current):
     merged['statusOnly'] = previous.get('statusOnly') is True and current.get('statusOnly') is True
     if current.get('statusOnly') is not True:
         # A missing hydrated record is a refresh fallback, never a stale edit.
-        for key in ('message', 'chat'):
+        for key in ('message', 'chat', 'note'):
             if key not in current:
                 merged.pop(key, None)
     previous_status, current_status = previous.get('status'), current.get('status')
@@ -83,12 +90,23 @@ def broadcast_changes(cursor, changes, event_broker):
         pending.clear()
         with event_broker.condition:
             subscribed = event_broker.streams > 0
-        full = [e for e in events if e.get('statusOnly') is not True]
+        full = [e for e in events if e.get('statusOnly') is not True and e.get('kind') != 'note']
+        notes = [e for e in events if e.get('kind') == 'note' and e.get('noteId')]
         rows = {}
+        note_rows = {}
         if subscribed and full:
             cursor.execute(_HYDRATE_SQL, ([e['messageId'] for e in full],))
             rows = {row[0]: row for row in cursor.fetchall()}
+        if subscribed and notes:
+            cursor.execute(_HYDRATE_NOTES_SQL, ([e['noteId'] for e in notes],))
+            note_rows = {(str(row[0]), row[5], row[6]): row for row in cursor.fetchall()}
         for event in events:
+            if event.get('kind') == 'note':
+                row = note_rows.get((event.get('noteId'), event.get('channelId'), event.get('chatId')))
+                if row is not None:
+                    event = dict(event, note=note_item(row[:5]))
+                event_broker.publish(event)
+                continue
             row = rows.get(event['messageId'])
             if row is not None and event.get('statusOnly') is not True:
                 event = dict(event, message=_json_item(_MESSAGE_FIELDS, row[:15]), status=row[8])
@@ -126,7 +144,7 @@ class EventBroker:
         if size > min(MAX_EVENT_BYTES, self.max_bytes):
             # Fall back to the existing reconciliation endpoint for exceptional
             # messages. Do not truncate text, media URLs, or attachment data.
-            event = {key: value for key, value in event.items() if key not in ('message', 'chat')}
+            event = {key: value for key, value in event.items() if key not in ('message', 'chat', 'note')}
             size = len(json.dumps(event, ensure_ascii=False).encode('utf-8'))
         with self.condition:
             self.seq += 1

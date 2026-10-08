@@ -73,6 +73,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_assist_routes(bp, actor, require_api_key, preflight)
     from .attachments import register_attachment_routes
     register_attachment_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .notes import register_note_routes
+    register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
 
     @bp.route('', methods=['GET', 'OPTIONS'])
     @require_api_key

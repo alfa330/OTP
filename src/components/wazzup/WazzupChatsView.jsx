@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, StickyNote,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -19,8 +19,14 @@ import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
-import { firstVisibleMessage, messageQuote } from './threadPresentation';
+import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
+import ChatMessageImage from './ChatMessageImage';
+import MessageDeliveryStatus from './MessageDeliveryStatus';
+import ChatChannelsSidebar from './ChatChannelsSidebar';
+import useInternalNotes from './useInternalNotes';
+import ChatInternalNote from './ChatInternalNote';
+import ChatInternalNoteComposer from './ChatInternalNoteComposer';
 import './chatThread.css';
 
 const ChatAttachmentViewer = lazy(() => import('./ChatAttachmentViewer'));
@@ -65,8 +71,6 @@ const MEDIA_LABELS = {
 const MEDIA_ICONS = {
     document: FileText, geo: MapPin, vcard: Contact2, missing_call: PhoneMissed,
 };
-
-const STATUS_LABELS = { pending: 'Принято Wazzup', sent: 'Отправлено', delivered: 'Доставлено', read: 'Прочитано', error: 'Ошибка' };
 
 const fmtTime = (iso) => {
     if (!iso) return '';
@@ -172,10 +176,8 @@ function MediaContent({ msg, light, onAttachment }) {
 
     if (previewKind) {
         const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : 'Документ');
-        if (previewKind === 'image' && !failed) return <button type="button" onClick={() => onAttachment(msg)}
-            title="Открыть изображение и извлечь текст" className="block cursor-zoom-in rounded-xl text-left">
-            <img src={uri} alt={label} loading="lazy" onError={() => setFailed(true)} className="max-h-64 w-auto max-w-full rounded-xl" />
-        </button>;
+        if (previewKind === 'image') return <ChatMessageImage src={uri} label={label} light={light}
+            onOpen={() => onAttachment(msg)} />;
         return <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
             className={`inline-flex max-w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] font-medium ${
                 light ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
@@ -186,12 +188,11 @@ function MediaContent({ msg, light, onAttachment }) {
         </button>;
     }
 
-    if (uri && !failed && msg.type === 'image') {
+    if (uri && msg.type === 'image') {
         return (
             <>
-                <img src={uri} alt="" loading="lazy" onError={() => setFailed(true)}
-                     onClick={() => setZoom(true)}
-                     className="max-h-64 w-auto max-w-full cursor-zoom-in rounded-xl" />
+                <ChatMessageImage src={uri} label={attachmentName(msg) || 'Фото'} light={light}
+                    onOpen={() => setZoom(true)} />
                 <IosModal open={zoom} onClose={() => setZoom(false)} title="Фото" maxWidth="max-w-3xl">
                     <img src={uri} alt="" className="mx-auto max-h-[72vh] w-auto rounded-2xl" />
                     <div className="mt-3 text-center">
@@ -223,7 +224,7 @@ function MediaContent({ msg, light, onAttachment }) {
         : <span className={chip}><Icon size={13} /> {label}</span>;
 }
 
-/* Пузырь в стиле iMessage: исходящие — синие справа, входящие — белые слева. */
+/* Исходящие — мягко-зелёные справа, входящие — белые слева. */
 const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
@@ -231,33 +232,37 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
     return (
         <div data-message-id={msg.messageId} data-message-date={msg.dt}
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
-            <div className={`wazzup-message-bubble min-w-0 max-w-[85%] rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] sm:max-w-[78%] ${
-                out ? 'rounded-br-md bg-blue-500 text-white'
+            <div onDoubleClick={(event) => {
+                if (onReply && !msg.isDeleted && canReplyOnDoubleClick(event)) {
+                    event.preventDefault();
+                    onReply(msg);
+                }
+            }} className={`wazzup-message-bubble min-w-0 max-w-[85%] rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] sm:max-w-[min(78%,720px)] ${
+                out ? 'rounded-br-md bg-[#dcf8c6] text-slate-900'
                     : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>
                 {out && msg.authorName && (
-                    <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-blue-100">
+                    <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-emerald-800">
                         <Headset size={11} /> {msg.authorName}
                     </div>
                 )}
                 {quote && <button type="button" onClick={() => onQuote?.(quote.messageId)}
                     title="Перейти к исходному сообщению"
                     className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
-                        out ? 'border-blue-100 bg-white/15 text-blue-50' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
+                        out ? 'border-emerald-600 bg-black/5 text-emerald-950' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
                     <span className="block truncate font-semibold">{quote.author}</span>
                     <span className="line-clamp-2 whitespace-pre-wrap break-words">{quote.text}</span>
                 </button>}
-                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={out} onAttachment={onAttachment} /></div>}
+                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words">{msg.text}</div>}
                 {!msg.text && !hasMedia && (
-                    <div className={`italic ${out ? 'text-blue-100' : 'text-slate-400'}`}>
+                    <div className="italic text-slate-500">
                         [{msg.type || 'сообщение'}]
                     </div>
                 )}
-                <div className={`mt-0.5 flex flex-wrap items-center justify-end gap-1.5 text-[11px] ${
-                    out ? 'text-blue-100/90' : 'text-slate-400'}`}>
+                <div className="mt-0.5 flex flex-wrap items-center justify-end gap-1 text-[11px] text-slate-500">
                     {msg.isDeleted && (
-                        <span className={`flex items-center gap-0.5 ${out ? 'text-blue-50' : 'text-rose-500'}`}>
+                        <span className="flex items-center gap-0.5 text-rose-600">
                             <Ban size={10} /> удалено
                         </span>
                     )}
@@ -268,7 +273,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                             <Clock3 size={10} /> {fmtTime(msg.dt)}
                         </span>
                     ) : <span>{fmtTime(msg.dt)}</span>}
-                    {out && msg.status && STATUS_LABELS[msg.status] && <span>· {STATUS_LABELS[msg.status]}</span>}
+                    {out && <MessageDeliveryStatus status={msg.status} />}
                 </div>
             </div>
             {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
@@ -915,6 +920,7 @@ export default function WazzupChatsView(props) {
     const [thread, setThread] = useState(null);
     const [replySelection, setReplySelection] = useState(null);
     const [attachmentSelection, setAttachmentSelection] = useState(null);
+    const [noteComposerKey, setNoteComposerKey] = useState(null);
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     /* Переход по ссылке: пока номер разрешается в чат, лента не имеет права
@@ -942,6 +948,7 @@ export default function WazzupChatsView(props) {
         setAttachmentSelection({ key: selectedKey, message: { ...message } });
     }, [selectedKey]);
     const chooseReply = useCallback((message) => {
+        setNoteComposerKey(null);
         setReplySelection({ key: selectedKey, message: { ...message } });
     }, [selectedKey]);
     const cancelReply = useCallback((messageId) => {
@@ -966,6 +973,7 @@ export default function WazzupChatsView(props) {
     useEffect(() => {
         setReplySelection(null);
         setAttachmentSelection(null);
+        setNoteComposerKey(null);
         return () => {
             clearTimeout(quoteHighlight.current.timer);
             quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
@@ -1125,12 +1133,18 @@ export default function WazzupChatsView(props) {
     };
     const applyPilotChanges = (changes) => {
         if (accountRef.current !== 'op') return { thread: false, list: false };
-        unread.apply(changes);
+        unread.apply(changes.filter((event) => event.kind !== 'note'));
         const snapshot = pilotView.current;
-        const relevant = changes.filter((event) => event.kind !== 'unread');
+        const noteChanges = changes.filter((event) => event.kind === 'note'
+            && pilotChatKey('op', event) === snapshot.key);
+        noteChanges.forEach((event) => notes.apply(event));
+        const relevant = changes.filter((event) => event.kind !== 'unread' && event.kind !== 'note');
         const current = relevant.filter((event) => pilotChatKey('op', event) === snapshot.key);
         const box = threadBox.current;
         const atBottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+        if (atBottom && noteChanges.some((event) => event.note)) requestAnimationFrame(() => {
+            if (snapshot.key === pilotView.current.key && box) box.scrollTop = box.scrollHeight;
+        });
         if (snapshot.thread !== null && current.length) {
             setThread((prev) => {
                 const known = new Set((prev || []).map((message) => message.messageId));
@@ -1166,13 +1180,17 @@ export default function WazzupChatsView(props) {
             });
         }
         return {
+            notes: noteChanges.some((event) => !event.note),
             thread: current.some((event) => !event.statusOnly && (!event.message || snapshot.thread === null)),
             list: relevant.some((event) => event.affectsList !== false && !event.chat),
         };
     };
     const pilot = useChatPilot({ apiBaseUrl, user, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
-        onChanges: applyPilotChanges, refreshUnread: unread.refresh });
+        onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
+    const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
+        && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
+    const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
     const loadedChatsByKey = useMemo(() => new Map((chats || []).map((chat) => [pilotChatKey('op', chat), chat])), [chats]);
     const visibleChats = unreadOnly && pilot.enabled
         ? Object.values(unread.items).filter((item) => item.unreadCount > 0)
@@ -1397,6 +1415,7 @@ export default function WazzupChatsView(props) {
         loadChannels();
         loadChats();
         if (selected) loadThread(selected);
+        notes.refresh().catch(() => {});
     };
 
     // Группировка ленты по дням для разделителей — по местному дню (messageTime.js)
@@ -1404,13 +1423,16 @@ export default function WazzupChatsView(props) {
         if (!thread) return [];
         const out = [];
         let lastDay = null;
-        thread.forEach((m) => {
+        const entries = [...thread, ...notes.items.map((note) => ({
+            _note: note, messageId: `note:${note.id}`, dt: note.createdAt,
+        }))].sort((a, b) => new Date(a.dt) - new Date(b.dt) || a.messageId.localeCompare(b.messageId));
+        entries.forEach((m) => {
             const day = localDayKey(m.dt);
             if (day && day !== lastDay) { out.push({ _day: fmtDay(m.dt), messageId: `day-${day}` }); lastDay = day; }
             out.push(m);
         });
         return out;
-    }, [thread]);
+    }, [thread, notes.items]);
     const threadQuotes = useMemo(() => {
         const byId = new Map((thread || []).map((message) => [message.messageId, message]));
         return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
@@ -1494,37 +1516,9 @@ export default function WazzupChatsView(props) {
                  style={{ height: 'calc(100vh - 170px)', minHeight: 420,
                           display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
-                <div className="wazzup-scrollbar hidden w-56 shrink-0 flex-col overflow-y-auto border-r border-slate-100 bg-slate-50/70 py-1.5 md:flex">
-                    <button onClick={() => pickChannel('')}
-                            className={`mx-1.5 rounded-lg px-3 py-2.5 text-left text-[13.5px] transition ${
-                                !channelId ? 'bg-white font-semibold text-slate-900 shadow-sm ring-1 ring-slate-200/60'
-                                           : 'text-slate-600 hover:bg-slate-100'}`}>
-                        Все каналы
-                    </button>
-                    {channels === null && (
-                        <div className="flex items-center gap-2 px-4 py-3 text-xs text-slate-400">
-                            <Loader2 size={13} className="animate-spin" /> Загрузка…
-                        </div>
-                    )}
-                    {activeChannels.map((c) => (
-                        <button key={c.channelId} onClick={() => pickChannel(c.channelId)}
-                                className={`mx-1.5 mt-0.5 rounded-lg px-3 py-2 text-left transition ${
-                                    channelId === c.channelId ? 'bg-white shadow-sm ring-1 ring-slate-200/60'
-                                                              : 'hover:bg-slate-100'}`}>
-                            <div className={`truncate text-[13px] text-slate-800 ${channelId === c.channelId ? 'font-semibold' : ''}`}>
-                                {c.name || c.plainId || c.channelId}
-                            </div>
-                            <div className="mt-0.5 flex items-center justify-between gap-1.5 text-[11px] text-slate-400">
-                                <span className="truncate">{c.plainId || ''}</span>
-                                {(c.chatsCount || 0) > 0 && (
-                                    <span className="rounded-full bg-slate-200/80 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">
-                                        {c.chatsCount}
-                                    </span>
-                                )}
-                            </div>
-                        </button>
-                    ))}
-                </div>
+                <ChatChannelsSidebar channels={activeChannels} selectedChannelId={channelId}
+                    onSelect={pickChannel} apiBaseUrl={apiBaseUrl} headers={headers}
+                    user={user} account={account} loading={channels === null} />
 
                 {/* Список чатов */}
                 <div className="flex w-80 shrink-0 flex-col border-r border-slate-100">
@@ -1673,6 +1667,15 @@ export default function WazzupChatsView(props) {
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
+                                    {notesEnabled && <button type="button"
+                                        onClick={() => setNoteComposerKey((key) => key === selectedKey ? null : selectedKey)}
+                                        aria-label="Внутренний комментарий" title="Оставить внутренний комментарий"
+                                        aria-pressed={noteComposerKey === selectedKey}
+                                        className={`inline-flex h-9 w-9 items-center justify-center rounded-full transition ${
+                                            noteComposerKey === selectedKey ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300'
+                                                : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700'}`}>
+                                        <StickyNote size={17} />
+                                    </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
                                         конкретной неправдой — ссылка открывает переписку
@@ -1703,7 +1706,7 @@ export default function WazzupChatsView(props) {
                             <div className="relative min-h-0 flex-1">
                             <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
-                            <div className="mx-auto w-full max-w-[900px] space-y-2">
+                            <div className="w-full space-y-2">
                                 {thread === null && (
                                     <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
                                         <Loader2 size={15} className="animate-spin" /> Загрузка переписки…
@@ -1719,11 +1722,19 @@ export default function WazzupChatsView(props) {
                                         </button>
                                     </div>
                                 )}
+                                {notes.error && <div role="alert" className="px-4 text-center text-xs text-amber-700">
+                                    {notes.error} <button type="button" onClick={() => notes.refresh().catch(() => {})}
+                                        className="font-semibold underline">Повторить</button>
+                                </div>}
                                 {threadWithDays.map((m) => m._day ? (
                                     <div key={m.messageId} className="flex justify-center py-1.5">
                                         <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
                                             {m._day}
                                         </span>
+                                    </div>
+                                ) : m._note ? (
+                                    <div key={m.messageId} data-message-id={m.messageId} data-message-date={m.dt}>
+                                        <ChatInternalNote note={m._note} />
                                     </div>
                                 ) : (
                                     <React.Fragment key={m.messageId}>
@@ -1744,13 +1755,26 @@ export default function WazzupChatsView(props) {
                                             </div>}
                                     </React.Fragment>
                                 ))}
-                                {thread !== null && thread.length === 0 && (
+                                {thread !== null && thread.length === 0 && notes.items.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
                                 )}
                             </div>
                             </div>
                             </div>
-                            {pilotCanSend && (
+                            {notesEnabled && noteComposerKey === selectedKey ? (
+                                <ChatInternalNoteComposer key={selectedKey} chat={selected}
+                                    apiBaseUrl={apiBaseUrl} headers={headers}
+                                    onCancel={() => setNoteComposerKey(null)}
+                                    onSaved={(item) => {
+                                        notes.apply({ kind: 'note', account: 'op', channelId: selected.channelId,
+                                            chatId: selected.chatId, note: item });
+                                        setNoteComposerKey(null);
+                                        requestAnimationFrame(() => {
+                                            if (pilotView.current.key === selectedKey && threadBox.current)
+                                                threadBox.current.scrollTop = threadBox.current.scrollHeight;
+                                        });
+                                    }} />
+                            ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}

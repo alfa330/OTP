@@ -43,7 +43,7 @@ def test_relay_needs_explicit_enable_and_its_own_credentials(relay_env, monkeypa
 
 @pytest.mark.parametrize('url', [
     'http://relay.example.test/wazzup',
-    'https://username:password@relay.example.test/wazzup',
+    'https://example-user:example-password@relay.example.test/wazzup',
     'file:///tmp/webhook',
     'not a URL',
 ])
