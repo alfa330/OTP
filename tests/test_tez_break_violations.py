@@ -42,6 +42,9 @@ NAMES = {
     # Отбивка табло Тез КЦ (23.09.2026): период, итоги часа, отклонения, подпись, картинки.
     'TEZ_AR_TARGET_PERCENT', 'TEZ_AR_BAD_PERCENT', 'TEZ_WALLBOARD_ABANDON_FROM_SECONDS',
     'TEZ_BROADCAST_HOUR_MIN_CALLS', 'TEZ_BROADCAST_TIMEZONE', 'TEZ_BROADCAST_JOURNAL_WAIT_SECONDS',
+    # Повтор снимка, когда в первом не оказалось ТП (08.10.2026).
+    'TEZ_WALLBOARD_CACHE_TTL_SECONDS', 'TEZ_BROADCAST_TP_RETRY_SECONDS',
+    'TEZ_BROADCAST_TP_RETRY_BUSY_SECONDS', '_tez_broadcast_prepare',
     'TELEGRAM_MAX_CAPTION_CHARS', 'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
     '_szov_wallboard_int', '_szov_plural', '_szov_format_age_ru', '_szov_broadcast_stale_note',
     '_op_broadcast_percent', '_op_broadcast_duration',
@@ -686,6 +689,150 @@ class TezBroadcastJournalTests(unittest.TestCase):
         direct = body[body.index('if day_key != today_key:'):body.index('deadline =')]
         self.assertNotIn('_tez_wallboard_journal', direct)
         self.assertIn('run_in_executor(\n                None,', direct)
+
+
+class TezBroadcastQueueRetryTests(unittest.TestCase):
+    """Один кадр без ТП — ещё не «страница очереди недоступна»: отбивка переспрашивает снимок.
+
+    Отбивка снимает страницу раз в час и всегда в одну и ту же секунду. 07.10.2026 в 21:00:03
+    кабинет был пойман в момент пересчёта (счётчики занятости пришли нулями), и главе отдела
+    ушла тревога при живом Binotel. Писать, что показателей ТП нет, можно только когда их нет
+    и во втором снимке."""
+
+    NOW = datetime(2026, 9, 23, 10, 0, 5)
+    CALLS = [_call('2026-09-23 09:10:00'), _call('2026-09-23 09:20:00'), _call('2026-09-23 09:30:00')]
+
+    def _prepare(self, snapshots, journal=None, **kwargs):
+        """Гоняет настоящий _tez_broadcast_prepare на подставленной череде снимков."""
+        ns = _namespace(db=_AssembleDb())
+        asked, sleeps = [], []
+
+        def snapshot():
+            asked.append(len(asked))
+            item = snapshots[min(len(asked) - 1, len(snapshots) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        async def journal_stub(day_key, hour_end_ts):
+            return (self.CALLS if journal is None else journal), None
+
+        class _FastAsyncio:
+            get_event_loop = staticmethod(asyncio.get_event_loop)
+
+            @staticmethod
+            async def sleep(seconds):
+                sleeps.append(seconds)
+
+        ns['asyncio'] = _FastAsyncio
+        ns['_tez_wallboard_snapshot'] = snapshot
+        ns['_tez_broadcast_journal'] = journal_stub
+        for name in ('_tez_render_tp_day_png', '_tez_render_tp_hour_png', '_tez_render_op_png'):
+            ns[name] = lambda data, _name=name: _name.encode()
+        data, text, media = asyncio.run(ns['_tez_broadcast_prepare'](self.NOW, **kwargs))
+        return ns, data, text, media, asked, sleeps
+
+    def _without_tp(self):
+        return _snapshot(tp=None, tp_error='Страница очереди Binotel: в работе + не работают = 0, '
+                                           'а сотрудников с тел. линией 10')
+
+    def test_second_snapshot_with_tp_cancels_the_alarm(self):
+        ns, data, text, media, asked, sleeps = self._prepare([self._without_tp(), _snapshot()])
+        self.assertEqual(len(asked), 2)
+        self.assertEqual(sleeps, [ns['TEZ_BROADCAST_TP_RETRY_SECONDS']])
+        self.assertTrue(data['tp'])
+        self.assertEqual(ns['_tez_broadcast_deviations'](data), [])
+        self.assertNotIn('Страница очереди', text)
+        # Картинки ТП на месте: в ложной тревоге их не было вовсе.
+        self.assertEqual([name for name, _blob in media],
+                         ['tez_tp_day.png', 'tez_tp_hour.png', 'tez_op.png'])
+
+    def test_two_snapshots_without_tp_are_a_real_alarm(self):
+        ns, data, text, media, asked, sleeps = self._prepare([self._without_tp(), self._without_tp()])
+        self.assertEqual(len(asked), 2, 'переспрашиваем ровно один раз')
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(ns['_tez_broadcast_deviations'](data),
+                         ['Страница очереди Binotel недоступна — показателей ТП нет.'])
+        self.assertEqual([name for name, _blob in media], ['tez_op.png'])
+
+    def test_healthy_snapshot_is_asked_once_and_without_a_pause(self):
+        _ns, data, _text, _media, asked, sleeps = self._prepare([_snapshot()])
+        self.assertEqual((len(asked), sleeps), (1, []))
+        self.assertTrue(data['tp'])
+
+    def test_failed_retry_keeps_the_first_snapshot(self):
+        """Повтор упал целиком — остаёмся с первым снимком: ОП в нём есть, и картинку
+        продаж терять из-за второй попытки незачем."""
+        with self.assertLogs(level='ERROR') as logs:
+            ns, data, _text, media, asked, _sleeps = self._prepare(
+                [self._without_tp(), RuntimeError('Binotel HTTP 502')])
+        self.assertEqual(len(asked), 2)
+        self.assertIsNone(data['snapshot_error'])
+        self.assertIn('Страница очереди Binotel недоступна', ns['_tez_broadcast_deviations'](data)[0])
+        self.assertEqual([name for name, _blob in media], ['tez_op.png'])
+        self.assertTrue(any('повторный снимок' in line for line in logs.output))
+
+    def test_dead_cabinet_is_not_asked_twice(self):
+        """Снимок не собрался вовсе — это другой случай со своей пометкой; повтор тут не нужен:
+        кабинет и так опрашивается с паузой после отказа."""
+        with self.assertLogs(level='ERROR'):
+            ns, data, _text, media, asked, sleeps = self._prepare([RuntimeError('Binotel HTTP 502')])
+        self.assertEqual((len(asked), sleeps), (1, []))
+        self.assertEqual(ns['_tez_broadcast_deviations'](data),
+                         ['Binotel не отвечает — показателей табло Тез КЦ нет.'])
+        self.assertEqual(media, [])
+
+    def test_retry_comes_after_the_wall_cache_expires(self):
+        """Раньше срока кэша табло вернулся бы тот же самый снимок без ТП."""
+        ns = _namespace()
+        self.assertGreater(ns['TEZ_BROADCAST_TP_RETRY_SECONDS'], ns['TEZ_WALLBOARD_CACHE_TTL_SECONDS'])
+
+    def _stale_without_tp(self):
+        """Не новый обход, а прежний снимок: замок снимка занят зрителем стены."""
+        return dict(self._without_tp(), stale=True, error='Обновление ещё идёт')
+
+    def test_busy_lock_on_the_retry_gets_one_more_try(self):
+        """На повтор пришёл не новый обход, а прежний снимок с пометкой «устарел»: кабинет в
+        эту секунду обходит зритель стены. Свежий кадр с ТП появится через секунды — ради
+        них тревогу не поднимаем, а спрашиваем ещё раз."""
+        ns, data, text, media, asked, sleeps = self._prepare(
+            [self._without_tp(), self._stale_without_tp(), _snapshot()])
+        self.assertEqual(len(asked), 3)
+        self.assertEqual(sleeps, [ns['TEZ_BROADCAST_TP_RETRY_SECONDS'],
+                                  ns['TEZ_BROADCAST_TP_RETRY_BUSY_SECONDS']])
+        self.assertTrue(data['tp'])
+        self.assertEqual(ns['_tez_broadcast_deviations'](data), [])
+
+    def test_retries_are_bounded(self):
+        """Повторов не больше двух, чем бы они ни кончились: отбивка не висит в ожидании."""
+        ns, data, _text, _media, asked, sleeps = self._prepare(
+            [self._without_tp(), self._stale_without_tp(), self._stale_without_tp(), _snapshot()])
+        self.assertEqual((len(asked), len(sleeps)), (3, 2))
+        self.assertIn('Страница очереди Binotel недоступна', ns['_tez_broadcast_deviations'](data)[0])
+
+    def test_fresh_frame_without_tp_ends_the_retries(self):
+        """Новый обход, и ТП в нём снова нет — это уже не случайный кадр: третьей попытки нет."""
+        _ns, _data, _text, _media, asked, sleeps = self._prepare(
+            [self._without_tp(), self._without_tp(), _snapshot()])
+        self.assertEqual((len(asked), len(sleeps)), (2, 1))
+
+    def test_manual_send_and_preview_do_not_retry(self):
+        """Проверочная отправка и предпросмотр показывают то, что есть сейчас, и ждут ответа
+        с таймаутом 180 с: лишние полминуты повтора им ни к чему."""
+        ns, data, _text, _media, asked, sleeps = self._prepare(
+            [self._without_tp(), _snapshot()], retry_missing_tp=False)
+        self.assertEqual((len(asked), sleeps), (1, []))
+        self.assertIn('Страница очереди Binotel недоступна', ns['_tez_broadcast_deviations'](data)[0])
+        send = SOURCE[SOURCE.index('async def _tez_broadcast_send('):]
+        send = send[:send.index('\ndef ', 10)]
+        self.assertIn('_tez_broadcast_prepare(retry_missing_tp=False)', send)
+        preview = SOURCE[SOURCE.index('def _tez_broadcast_preview('):]
+        preview = preview[:preview.index('\nasync def ', 10)]
+        self.assertIn('_tez_broadcast_prepare(retry_missing_tp=False)', preview)
+        # А плановая отправка зовёт подготовку без аргументов — с повтором.
+        job = SOURCE[SOURCE.index('async def tez_broadcast_job('):]
+        job = job[:job.index('\n\n\n', 10)]
+        self.assertIn('prepare=_tez_broadcast_prepare,', job)
 
 
 # --- Общий обход получателей: группы и личные подписчики ----------------------------------------

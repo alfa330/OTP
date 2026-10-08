@@ -472,6 +472,14 @@ def _patched_source(state):
     stub.fetch_day_employees = fetch_day_employees
     stub.CabinetSession = _FakeCabinetSession
     stub.is_configured = lambda config=None: True
+    # «Сегодня» кабинета — день самого поддельного ответа: журнал заводится ДО обхода и
+    # обязан спрашивать те же сутки, что вернёт обход. С настоящими часами тест завёл бы
+    # выкачку за сегодняшнее число при ответе кабинета за 08.09.2026.
+    def cabinet_today(tz_name=None):
+        state.setdefault('today_asked_with', []).append(tz_name)
+        return datetime.strptime(state.get('today') or state['raw']['day'], '%Y-%m-%d').date()
+
+    stub.cabinet_today = cabinet_today
     previous = sys.modules.get('tez.wallboard_source')
     previous_attr = getattr(tez, 'wallboard_source', None)
     sys.modules['tez.wallboard_source'] = stub
@@ -649,12 +657,96 @@ class _RecordedThread:
         self.args = args
         self.name = name
         self.daemon = daemon
+        self.finished = False
 
     def start(self):
         self._state.setdefault('threads', []).append(self)
+        # Что уже случилось к моменту запуска потока: по этому видно, заведён ли журнал
+        # ДО обхода кабинета или после него.
+        self.cabinet_walks_before = self._state.get('calls', 0)
+        self.finished = False
 
     def run_now(self):
+        self.finished = True
         self.target(*self.args)
+
+
+class _RecordedEvent:
+    """Событие выкачки журнала без настоящего ожидания: тест сам решает, успела ли она.
+
+    `wait` запоминает, сколько его просили ждать, и — если тест так велел — выполняет
+    работу поставленных потоков, будто выкачка закончилась как раз за время ожидания."""
+
+    def __init__(self, state):
+        self._state = state
+        self._flag = False
+
+    def set(self):
+        self._flag = True
+
+    def is_set(self):
+        return self._flag
+
+    def wait(self, timeout=None):
+        self._state.setdefault('waits', []).append(timeout)
+        if self._state.get('journal_arrives_during_wait'):
+            for thread in list(self._state.get('threads') or []):
+                if not thread.finished:
+                    thread.run_now()
+        return self._flag
+
+
+@contextlib.contextmanager
+def _patched_binotel_api(*, calls=None, error=None, ready=True, crash=None, gate=None):
+    """Подменяет клиент Binotel API 4.0, за которым ходит поток журнала.
+
+    Подмена в двух местах — по той же причине, что у `_patched_source`: поток берёт модуль
+    через `from tez import binotel_calls`, то есть атрибут пакета. Без подмены `run_now`
+    ушёл бы в настоящий API с боевым ключом.
+
+    gate — событие, которого «API» ждёт перед ответом: так тест с настоящими потоками
+    изображает медленный ответ, не засыпая сам."""
+    import tez
+
+    asked = []
+
+    class _Client:
+        @classmethod
+        def from_config(cls, config=None):
+            return cls()
+
+        def list_calls_for_day(self, day):
+            asked.append(day)
+            if gate is not None:
+                gate.wait(10)
+            if error is not None:
+                raise error
+            return copy.deepcopy(calls)
+
+    def api_ready(config=None):
+        if crash is not None:
+            raise crash
+        return ready
+
+    stub = types.ModuleType('tez.binotel_calls')
+    stub.BinotelApiClient = _Client
+    stub.api_ready = api_ready
+    previous = sys.modules.get('tez.binotel_calls')
+    previous_attr = getattr(tez, 'binotel_calls', None)
+    sys.modules['tez.binotel_calls'] = stub
+    tez.binotel_calls = stub
+    try:
+        yield asked
+    finally:
+        if previous is None:
+            sys.modules.pop('tez.binotel_calls', None)
+        else:
+            sys.modules['tez.binotel_calls'] = previous
+        if previous_attr is None:
+            if hasattr(tez, 'binotel_calls'):
+                del tez.binotel_calls
+        else:
+            tez.binotel_calls = previous_attr
 
 
 class _SnapshotHarness:
@@ -662,12 +754,15 @@ class _SnapshotHarness:
 
     def _namespace(self, *, raw=None, db=None, error=None, journal=_UNSET_JOURNAL):
         state = {'calls': 0, 'kwargs': [], 'raw': raw if raw is not None else _raw_snapshot(),
-                 'error': error, 'threads': []}
+                 'error': error, 'threads': [], 'waits': []}
         # Потоки в стенде НЕ настоящие: фоновое обновление журнала иначе полезло бы в живой
-        # Binotel прямо из теста. Замки остаются настоящими — их в модуле два.
+        # Binotel прямо из теста. Замки остаются настоящими — их в модуле два. Событие
+        # выкачки тоже записывающее: настоящее заставило бы каждый тест без журнала спать
+        # весь срок ожидания.
         fake_threading = types.SimpleNamespace(
             Lock=threading.Lock,
             Thread=lambda **kwargs: _RecordedThread(state, **kwargs),
+            Event=lambda: _RecordedEvent(state),
         )
         ns = {
             'time': time,
@@ -712,9 +807,13 @@ class _SnapshotHarness:
             'TEZ_WALLBOARD_ABANDON_FROM_SECONDS',
             'TEZ_WALLBOARD_JOURNAL_TTL_SECONDS',
             'TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS',
+            'TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS',
+            'TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS',
+            'TEZ_WALLBOARD_JOURNAL_FAIL_QUIET_SECONDS',
             '_tez_wallboard_journal_cache',
             '_tez_wallboard_journal_lock',
             '_tez_wallboard_journal_worker',
+            '_tez_wallboard_journal_peek',
             '_tez_wallboard_journal',
             '_tez_wallboard_people',
             '_tez_wallboard_person',
@@ -755,7 +854,8 @@ class _SnapshotHarness:
         calls = _journal_calls() if journal is _UNSET_JOURNAL else journal
         ns['_tez_wallboard_journal_cache'].update(
             ts=time.time(), day=(state['raw'] or {}).get('day'), calls=calls,
-            error=None, fetching=False)
+            error=None, fetching=False, done=None, fetching_day=None,
+            started_at=0.0, failed_at=0.0, waited=None)
         ns['_state'] = state
         return ns
 
@@ -871,15 +971,16 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertEqual(tp_today['outgoing_total'], 5)
 
     def test_stale_journal_is_refreshed_outside_the_wall_step(self):
-        """Журнал качается своим потоком: шаг табло его не ждёт.
+        """Журнал качается своим потоком: шаг табло сам за ним не ходит.
 
         У API 4.0 лимит 5 запросов в минуту, и на «слишком часто» клиент честно спит по
-        подсказке сервера — до ~37 секунд. Дождись мы его под общим замком снимка, и стена
-        встала бы у всех зрителей разом."""
+        подсказке сервера — до ~37 секунд. Выполняй этот поход шаг табло под общим замком
+        снимка, и стена встала бы у всех зрителей разом. Шаг только заводит поток и ждёт
+        его КОРОТКО — и лишь когда показать нечего (отдельные тесты ниже)."""
         ns = self._namespace(journal=None)
         with _patched_source(ns['_state']):
             snapshot = ns['_tez_wallboard_fetch_snapshot']()
-        # Снимок собрался, хотя журнала не было, а поход за ним только поставлен в очередь.
+        # Снимок собрался, хотя журнал так и не приехал: поток в стенде не выполняется.
         self.assertIsNotNone(snapshot['tp'])
         started = ns['_state']['threads']
         self.assertEqual(len(started), 1)
@@ -890,6 +991,243 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         with _patched_source(ns['_state']):
             ns['_tez_wallboard_fetch_snapshot']()
         self.assertEqual(len(ns['_state']['threads']), 1)
+
+    def test_journal_is_started_before_the_cabinet_walk(self):
+        """Выкачка журнала заводится ДО обхода кабинета, а не после него.
+
+        Обход идёт две-шесть секунд — журнал за это время успевает сам, и ждать его потом
+        не приходится. Заведи его после обхода, и первый снимок после паузы либо уходил бы
+        с прочерками, либо весь срок ожидания ложился бы сверху на обход."""
+        ns = self._namespace(journal=None)
+        with _patched_source(ns['_state']):
+            ns['_tez_wallboard_fetch_snapshot']()
+        thread = ns['_state']['threads'][0]
+        self.assertEqual(thread.cabinet_walks_before, 0, 'журнал заведён уже после обхода кабинета')
+        # И спрашивает он те же сутки, что вернул обход.
+        self.assertEqual(thread.args[0], '2026-09-08')
+
+    def test_journal_day_is_taken_in_the_cabinet_timezone(self):
+        """Сутки для журнала — те же, что возьмёт обход: по часам кабинета в поясе сессии."""
+        ns = self._namespace(journal=None)
+        with _patched_source(ns['_state']):
+            ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(ns['_state']['today_asked_with'], ['Asia/Almaty'])
+
+    def test_first_snapshot_of_a_new_day_does_not_show_yesterdays_journal(self):
+        """Сменились сутки: в памяти свежий журнал за вчера. Вчерашние «Принято / Потеряно»
+        за сегодняшние не выдаются — шаг заводит выкачку за новые сутки и ждёт её."""
+        ns = self._namespace()
+        ns['_tez_wallboard_journal_cache'].update(day='2026-09-07', ts=time.time() - 30)
+        ns['_state']['journal_arrives_during_wait'] = True
+        today = [_call(number='901'), _call(number='902'),
+                 _call(number='Очередь', answered=False, waitsec=20)]
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=today) as asked:
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(asked, ['2026-09-08'])
+        tp_today = snapshot['tp']['today']
+        self.assertEqual((tp_today['served'], tp_today['lost'], tp_today['arrived']), (2, 1, 3))
+        self.assertEqual(ns['_tez_wallboard_journal_cache']['day'], '2026-09-08')
+
+    def test_first_snapshot_after_a_pause_comes_with_numbers_not_dashes(self):
+        """Вторая половина жалобы «табло слетает» (разбор 08.10.2026).
+
+        Раздел открыли после паузы: журнал в памяти старше предельного возраста. Раньше
+        такой снимок уходил с прочерками в «Принято / Потеряно / AR» и висел 20–40 секунд,
+        пока следующий шаг не подхватывал докачанный журнал. Теперь шаг дожидается выкачки,
+        заведённой перед обходом, и цифры стоят в первом же снимке."""
+        ns = self._namespace()
+        ns['_tez_wallboard_journal_cache']['ts'] = (
+            time.time() - ns['TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS'] - 60)
+        ns['_state']['journal_arrives_during_wait'] = True
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=_journal_calls()) as asked:
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        today = snapshot['tp']['today']
+        self.assertEqual((today['served'], today['lost'], today['arrived']), (12, 3, 15))
+        self.assertEqual(snapshot['diagnostics']['tp_line_number'], TP_LINE)
+        self.assertLess(snapshot['diagnostics']['journal_age_seconds'], 5)
+        # Один поход в API и одно ожидание — ровно на разрешённый срок.
+        self.assertEqual(asked, ['2026-09-08'])
+        self.assertEqual(ns['_state']['waits'], [ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS']])
+
+    def test_cold_start_waits_for_the_journal_too(self):
+        """После деплоя журнала в памяти нет вовсе — первый снимок ждёт его так же."""
+        ns = self._namespace(journal=None)
+        ns['_state']['journal_arrives_during_wait'] = True
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=_journal_calls()):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(snapshot['tp']['today']['arrived'], 15)
+
+    def test_journal_wait_is_short_and_bounded(self):
+        """Не успела выкачка за отведённые секунды — прочерк, как и раньше, а не стена,
+        вставшая за медленным API: на «too frequent» клиент спит до ~37 секунд."""
+        ns = self._namespace(journal=None)
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertIsNone(snapshot['tp']['today']['served'])
+        self.assertEqual(ns['_state']['waits'], [ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS']])
+        self.assertGreater(ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS'], 0)
+        # Срок ожидания обязан быть меньше шага опроса: иначе ждущий шаг перекрывал бы
+        # следующий, и зрители по очереди стояли бы за замком снимка.
+        self.assertLess(ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS'],
+                        ns['TEZ_WALLBOARD_CACHE_TTL_SECONDS'])
+
+    def test_wait_ceiling_stays_below_the_shortest_cache_ttl(self):
+        """Стенд берёт значения по умолчанию, а обещание комментария — про границы настройки:
+        наибольший срок ожидания журнала обязан быть меньше наименьшего срока кэша табло,
+        какие бы значения ни стояли в окружении."""
+        wait = re.search(r"TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS = _env_int\([^)]*?maximum=(\d+)\)",
+                         BOT_SOURCE, re.S)
+        ttl = re.search(r"TEZ_WALLBOARD_CACHE_TTL_SECONDS = _env_int\([^)]*?minimum=(\d+)",
+                        BOT_SOURCE, re.S)
+        self.assertLess(int(wait.group(1)), int(ttl.group(1)))
+
+    def test_usable_journal_is_never_waited_for(self):
+        """Пока есть что показать — пусть и пятиминутной давности, — шаг не ждёт вовсе:
+        обновление идёт фоном, а стена показывает то, что есть."""
+        ns = self._namespace()
+        ns['_tez_wallboard_journal_cache']['ts'] = time.time() - 300
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(ns['_state']['waits'], [])
+        self.assertEqual(len(ns['_state']['threads']), 1, 'устаревший журнал обязан обновляться')
+        self.assertEqual(snapshot['tp']['today']['served'], 12)
+
+    def test_fresh_journal_starts_nothing_and_waits_for_nothing(self):
+        ns = self._namespace()
+        with _patched_source(ns['_state']):
+            ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(ns['_state']['threads'], [])
+        self.assertEqual(ns['_state']['waits'], [])
+
+    def test_journal_wait_can_be_switched_off(self):
+        """Ноль в настройке возвращает прежнее поведение: шаг не ждёт никогда."""
+        ns = self._namespace(journal=None)
+        ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS'] = 0
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(ns['_state']['waits'], [])
+        self.assertIsNone(snapshot['tp']['today']['served'])
+
+    def test_plain_journal_read_never_waits(self):
+        """Отбивка читает журнал своим циклом и ждёт его асинхронно: вызов без срока
+        ожидания обязан возвращаться сразу, иначе он занял бы поток общего пула."""
+        ns = self._namespace(journal=None)
+        calls, age, error = ns['_tez_wallboard_journal']('2026-09-08')
+        self.assertIsNone(calls)
+        self.assertEqual(ns['_state']['waits'], [])
+        self.assertEqual(len(ns['_state']['threads']), 1)
+
+    def _raw_with_a_waiting_call(self):
+        """Ответ кабинета в кадре, где входящий ждёт ответа: строки не сошлись со счётчиком.
+
+        Строки нарочно спорят со счётчиками (по строкам свободен один и один разговаривает,
+        по счётчикам свободны двое и никто не говорит) — так видно, откуда взята ось."""
+        raw = _raw_snapshot()
+        queue = raw['queue']
+        queue['queue'] = 1
+        queue['counters'].update(talking=0, waiting=2)
+        queue['rows_mismatch'] = 'разобрано строк сотрудников 4, а с тел. линией 3'
+        raw['diagnostics']['queue_rows_mismatch'] = queue['rows_mismatch']
+        return raw
+
+    def test_waiting_call_does_not_take_tp_off_the_wall(self):
+        """Главная причина «табло слетает» (разбор 08.10.2026).
+
+        Пока входящий ждёт ответа, строк в таблице сотрудников на одну больше, чем в
+        счётчике. Раньше такой кадр отбраковывался целиком: ТП пропадало со стены ровно
+        тогда, когда в очереди кто-то был, а плитка «В очереди» не могла показать ничего,
+        кроме нуля. Теперь ТП остаётся, очередь видна, а ось считается по счётчикам."""
+        ns = self._namespace(raw=self._raw_with_a_waiting_call())
+        with _patched_source(ns['_state']):
+            payload = ns['_tez_wallboard_direction_payload']('tp')
+        now = payload['now']
+        self.assertEqual(now['queue'], 1)
+        self.assertEqual((now['operators_total'], now['operators_online'], now['operators_free'],
+                          now['operators_talking'], now['operators_on_break']), (3, 2, 2, 0, 1))
+        self.assertEqual(now['operators_other'], 0)
+        # Показатели дня и список людей при этом на месте — погасло бы всё направление.
+        self.assertEqual((payload['today']['served'], payload['today']['lost']), (12, 3))
+        self.assertEqual(payload['today']['sl_ratio'], 0.93)
+        self.assertEqual(len(payload['roster']), 3)
+        self.assertEqual([item['name'] for item in now['break_list']], ['Дана Ким'])
+
+    def test_waiting_call_frame_goes_through_the_real_parser_to_the_wall(self):
+        """Тот же случай без подделки разбора: настоящий fetch_snapshot читает страницу, где
+        в очереди клиент, а в таблице сотрудников лишняя строка с его именем и телефоном —
+        причём выше строки оператора и под его же внутренним номером. До стены доходит
+        ТП с осью по счётчикам, а из лишней строки — ничего."""
+        fixtures = ROOT / 'tests' / 'fixtures' / 'tez_wallboard'
+        phone, name = '77015550001', 'Клиентова Алия'
+        page = (fixtures / 'queue_busy.html').read_text(encoding='utf-8')
+        page = page.replace('Клиентов в очереди: 0', 'Клиентов в очереди: 1')
+        first_row = page.index('<tr class="employees__line">')
+        extra = ('<tr class="employees__line">'
+                 '<td class="employees__item employees__item--name">%s</td>'
+                 '<td class="employees__item">903</td>'
+                 '<td class="employees__item employees__item--status">'
+                 '<span class="employees__status-text--text">звонит %s</span></td>'
+                 '<td class="employees__item">0</td><td class="employees__item">%s</td>'
+                 '<td class="employees__item">00:07</td></tr>' % (name, phone, phone))
+        pages = {'queue': (fixtures / 'queue_busy.html').read_text(encoding='utf-8')}
+
+        class _Cabinet:
+            tz_name = 'Asia/Almaty'
+
+            def queue_id(self):
+                return '4242'
+
+            def get_text(self, path, timeout=None):
+                if 'module=stateOfQueues' in path:
+                    return pages['queue']
+                if 'module=analyticsEmployees' in path:
+                    return (fixtures / 'employees_day.json').read_text(encoding='utf-8')
+                if 'action=loadCalls' in path:
+                    return (fixtures / 'live_calls_empty.json').read_text(encoding='utf-8')
+                raise AssertionError(path)
+
+            def endpoints(self, ttl_seconds=None, force=False):
+                return tez_source_real.parse_endpoints(
+                    (fixtures / 'endpoints.html').read_text(encoding='utf-8')), 0
+
+        cabinet = _Cabinet()
+        ns = self._namespace()
+        with _patched_source(ns['_state']) as stub:
+            stub.fetch_snapshot = lambda session, day=None, **kwargs: (
+                tez_source_real.fetch_snapshot(cabinet, **kwargs))
+            before = ns['_tez_wallboard_fetch_snapshot']()
+            pages['queue'] = page[:first_row] + extra + page[first_row:]
+            during = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertIsNotNone(during['tp'])
+        self.assertIsNone(during.get('tp_error'))
+        self.assertEqual(during['diagnostics']['queue_rows_mismatch'],
+                         'разобрано строк сотрудников 12, а с тел. линией 11')
+        now = during['tp']['now']
+        self.assertEqual(now['queue'], 1)
+        for key in ('operators_total', 'operators_online', 'operators_free',
+                    'operators_talking', 'operators_on_break', 'operators_other'):
+            self.assertEqual(now[key], before['tp']['now'][key], key)
+        # Показатели дня считаются по тому же составу, что шаг назад.
+        self.assertEqual(during['tp']['today'], before['tp']['today'])
+        self.assertEqual(during['diagnostics']['unmatched_binotel_names'],
+                         before['diagnostics']['unmatched_binotel_names'])
+        dumped = json.dumps(during, ensure_ascii=False, default=str)
+        self.assertNotIn(phone, dumped)
+        self.assertNotIn('Клиентова', dumped)
+
+    def test_rows_mismatch_is_named_in_diagnostics(self):
+        """Расхождение уходит в диагностику снимка, а не на стену: по нему потом видно,
+        как часто кабинет отдаёт такие кадры."""
+        ns = self._namespace(raw=self._raw_with_a_waiting_call())
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(snapshot['diagnostics']['queue_rows_mismatch'],
+                         'разобрано строк сотрудников 4, а с тел. линией 3')
+        self.assertIsNone(snapshot.get('tp_error'))
+        # В обычном кадре пометки нет.
+        ns = self._namespace()
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertIsNone(snapshot['diagnostics'].get('queue_rows_mismatch'))
 
     def test_threshold_work_is_visible_in_diagnostics(self):
         """Сколько звонков вычеркнуло правило и где они обрывались — иначе на вопрос
@@ -1078,6 +1416,357 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
 
 
 # --- ПОИМЁННЫЙ СПИСОК -----------------------------------------------------------------------
+
+class TezWallboardJournalWorkerTests(_SnapshotHarness, unittest.TestCase):
+    """Поток журнала: чем бы поход ни кончился, ждущий шаг табло обязан проснуться, а флаг
+    выкачки — сняться. Иначе журнал не обновлялся бы до перезапуска процесса."""
+
+    DAY = '2026-09-08'
+
+    def _started(self, ns):
+        """Заводит выкачку так же, как её заводит шаг табло, и отдаёт (поток, событие)."""
+        self._rest(ns)
+        ns['_tez_wallboard_journal'](self.DAY)
+        return ns['_state']['threads'][-1], ns['_tez_wallboard_journal_cache']['done']
+
+    @staticmethod
+    def _rest(ns):
+        """Будто с прошлой попытки выкачки прошёл срок, раньше которого новую не заводят."""
+        ns['_tez_wallboard_journal_cache']['started_at'] = (
+            time.time() - ns['TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS'] - 1)
+
+    def test_success_stores_the_journal_and_wakes_the_waiter(self):
+        ns = self._namespace(journal=None)
+        thread, done = self._started(ns)
+        self.assertFalse(done.is_set())
+        self.assertTrue(ns['_tez_wallboard_journal_cache']['fetching'])
+        with _patched_binotel_api(calls=_journal_calls()) as asked:
+            thread.run_now()
+        cache = ns['_tez_wallboard_journal_cache']
+        self.assertEqual(asked, [self.DAY])
+        self.assertTrue(done.is_set())
+        self.assertFalse(cache['fetching'])
+        self.assertIsNone(cache['error'])
+        self.assertEqual((cache['day'], len(cache['calls'])), (self.DAY, len(_journal_calls())))
+
+    def test_api_failure_wakes_the_waiter_and_keeps_the_previous_journal(self):
+        """Отказ API не стирает то, что уже скачано: стена показывает прошлый журнал, пока
+        он не перевалит предельный возраст. А текст ошибки уходит в диагностику без адреса."""
+        ns = self._namespace()
+        ns['_tez_wallboard_journal_cache']['ts'] = time.time() - 120
+        thread, done = self._started(ns)
+        failure = RuntimeError('HTTPSConnectionPool(host=\'api.binotel.example\'): '
+                               'https://api.binotel.example/api/4.0/stats too frequent')
+        with _patched_binotel_api(error=failure):
+            with self.assertLogs(level='WARNING') as logs:
+                thread.run_now()
+        cache = ns['_tez_wallboard_journal_cache']
+        self.assertTrue(done.is_set())
+        self.assertFalse(cache['fetching'])
+        self.assertEqual(len(cache['calls']), len(_journal_calls()))
+        self.assertIn('too frequent', cache['error'])
+        self.assertNotIn('api.binotel.example', cache['error'])
+        self.assertTrue(any('журнал звонков' in line for line in logs.output))
+
+    def test_missing_api_key_is_named_and_wakes_the_waiter(self):
+        ns = self._namespace(journal=None)
+        thread, done = self._started(ns)
+        with _patched_binotel_api(ready=False) as asked:
+            thread.run_now()
+        cache = ns['_tez_wallboard_journal_cache']
+        self.assertEqual(asked, [], 'без ключа в API ходить нечем')
+        self.assertTrue(done.is_set())
+        self.assertFalse(cache['fetching'])
+        self.assertIn('Ключ Binotel API не задан', cache['error'])
+
+    def test_crash_outside_the_request_still_releases_the_flag(self):
+        """Упало не в самом запросе, а рядом (конфигурация, импорт) — флаг всё равно
+        снимается: следующий шаг заводит новую выкачку, а не ждёт перезапуска процесса."""
+        ns = self._namespace(journal=None)
+        thread, done = self._started(ns)
+        with _patched_binotel_api(crash=RuntimeError('конфигурация не читается')):
+            with self.assertRaises(RuntimeError):
+                thread.run_now()
+        self.assertTrue(done.is_set())
+        self.assertFalse(ns['_tez_wallboard_journal_cache']['fetching'])
+        # В диагностике снимка остаётся причина, а не пустое место.
+        self.assertEqual(ns['_tez_wallboard_journal_cache']['error'],
+                         'Сбой потока журнала: RuntimeError')
+        self._rest(ns)
+        ns['_tez_wallboard_journal'](self.DAY)
+        self.assertEqual(len(ns['_state']['threads']), 2, 'после падения выкачка не завелась снова')
+
+    def test_thread_that_cannot_start_does_not_freeze_the_journal(self):
+        """Поток не завёлся (процесс упёрся в лимит потоков): флаг выкачки снимать больше
+        некому. Снимок при этом обязан собраться — с прочерками, но без ожидания и без
+        исключения, — а следующий шаг пробует завести выкачку заново."""
+        ns = self._namespace(journal=None)
+        attempts = []
+
+        class _DeadThread:
+            def __init__(self, **kwargs):
+                attempts.append(kwargs.get('name'))
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        ns['threading'].Thread = _DeadThread
+        with _patched_source(ns['_state']):
+            with self.assertLogs(level='ERROR') as logs:
+                snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        cache = ns['_tez_wallboard_journal_cache']
+        self.assertIsNotNone(snapshot['tp'])
+        self.assertIsNone(snapshot['tp']['today']['served'])
+        self.assertFalse(cache['fetching'])
+        self.assertTrue(any('поток журнала звонков не запустился' in line for line in logs.output))
+        # Событие взведено и ждать его никто не стал: иначе шаг простоял бы весь срок под
+        # замком снимка на каждом заходе, пока потоки не заведутся.
+        self.assertTrue(cache['done'].is_set())
+        self.assertEqual(ns['_state']['waits'], [])
+        # Одна попытка на шаг, а не две (до обхода и после него).
+        self.assertEqual(attempts, ['tez-wallboard-journal'])
+        self._rest(ns)
+        with _patched_source(ns['_state']):
+            with self.assertLogs(level='ERROR'):
+                ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(len(attempts), 2, 'следующий шаг не попробовал завести выкачку снова')
+
+    def test_each_fetch_gets_its_own_event(self):
+        """Событие принадлежит одной выкачке: ждущий следующую не должен проснуться от
+        взведённого события прошлой и уйти с прочерками."""
+        ns = self._namespace(journal=None)
+        first_thread, first_done = self._started(ns)
+        with _patched_binotel_api(calls=_journal_calls()):
+            first_thread.run_now()
+        ns['_tez_wallboard_journal_cache']['ts'] = time.time() - 120
+        _second_thread, second_done = self._started(ns)
+        self.assertIsNot(second_done, first_done)
+        self.assertFalse(second_done.is_set())
+        self.assertIs(_second_thread.args[1], second_done)
+
+    def test_result_is_stored_before_the_waiter_is_woken(self):
+        """Порядок в потоке: сначала итог в кэш, потом событие. Наоборот — ждущий шаг
+        проснулся бы, прочёл пустой кэш и ушёл с прочерками: та самая жалоба."""
+        ns = self._namespace(journal=None)
+        thread, _done = self._started(ns)
+        cache = ns['_tez_wallboard_journal_cache']
+        seen = {}
+
+        class _OrderEvent:
+            def set(self):
+                # Важен ПЕРВЫЙ взвод: ждущий просыпается по нему, второй уже ничего не меняет.
+                if not seen:
+                    seen.update(calls=cache.get('calls'), fetching=cache.get('fetching'),
+                                day=cache.get('day'))
+
+        thread.args = (thread.args[0], _OrderEvent())
+        with _patched_binotel_api(calls=_journal_calls()):
+            thread.run_now()
+        self.assertEqual(len(seen['calls']), len(_journal_calls()))
+        self.assertFalse(seen['fetching'])
+        self.assertEqual(seen['day'], self.DAY)
+
+    def test_failed_fetch_is_not_restarted_within_the_same_step(self):
+        """Шаг табло обращается к журналу дважды — до обхода кабинета и после. Быстрый отказ
+        API не должен давать две попытки на шаг: шесть запросов в минуту при лимите пять, и
+        табло само загоняло бы соседей по ключу в «too frequent»."""
+        ns = self._namespace(journal=None)
+        thread, _done = self._started(ns)
+        with _patched_binotel_api(error=RuntimeError('Binotel HTTP 500')):
+            with self.assertLogs(level='WARNING'):
+                thread.run_now()
+        self.assertFalse(ns['_tez_wallboard_journal_cache']['fetching'])
+        ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertEqual(len(ns['_state']['threads']), 1, 'вторая попытка в том же шаге')
+        self.assertEqual(ns['_state']['waits'], [])
+        # А следующий шаг (он не раньше срока кэша табло) пробует снова.
+        self.assertLess(ns['TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS'],
+                        ns['TEZ_WALLBOARD_CACHE_TTL_SECONDS'])
+        self._rest(ns)
+        ns['_tez_wallboard_journal'](self.DAY)
+        self.assertEqual(len(ns['_state']['threads']), 2)
+
+    def test_step_does_not_wait_while_the_api_is_failing(self):
+        """Ожидание придумано для здорового API. После отказа шаг не ждёт следующую выкачку:
+        при медленном или отказывающем API он держал бы замок снимка лишние секунды на
+        каждом заходе."""
+        ns = self._namespace(journal=None)
+        thread, _done = self._started(ns)
+        with _patched_binotel_api(error=RuntimeError('too frequent')):
+            with self.assertLogs(level='WARNING'):
+                thread.run_now()
+        self._rest(ns)
+        calls, _age, error = ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertIsNone(calls)
+        self.assertEqual(error, 'too frequent')
+        self.assertEqual(len(ns['_state']['threads']), 2, 'новая выкачка обязана идти')
+        self.assertEqual(ns['_state']['waits'], [], 'шаг ждал выкачку при отказывающем API')
+        # Отказ остался в прошлом — ожидание возвращается.
+        cache = ns['_tez_wallboard_journal_cache']
+        cache['failed_at'] = time.time() - ns['TEZ_WALLBOARD_JOURNAL_FAIL_QUIET_SECONDS'] - 1
+        ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertEqual(ns['_state']['waits'], [4])
+
+    def test_successful_fetch_brings_the_wait_back(self):
+        """API отказал, потом ответил. Отметка отказа снимается удачной выкачкой: следующая
+        пауза в просмотре снова закрывается ожиданием, а не прочерками на две минуты."""
+        ns = self._namespace(journal=None)
+        cache = ns['_tez_wallboard_journal_cache']
+        thread, _done = self._started(ns)
+        with _patched_binotel_api(error=RuntimeError('Binotel HTTP 500')):
+            with self.assertLogs(level='WARNING'):
+                thread.run_now()
+        self.assertGreater(cache['failed_at'], 0)
+        thread, _done = self._started(ns)
+        with _patched_binotel_api(calls=_journal_calls()):
+            thread.run_now()
+        self.assertEqual(cache['failed_at'], 0.0)
+        # Журнал снова устарел сверх предела (раздел не смотрели): шаг ждёт новую выкачку.
+        cache['ts'] = time.time() - ns['TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS'] - 5
+        self._rest(ns)
+        ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertEqual(ns['_state']['waits'], [4])
+
+    def test_slow_fetch_is_waited_for_only_once(self):
+        """Выкачка тянется дольше одного шага (API спит на «too frequent»). Прождав её раз
+        впустую, следующие шаги ту же выкачку не ждут."""
+        ns = self._namespace(journal=None)
+        for _step in range(3):
+            calls, _age, _error = ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+            self.assertIsNone(calls)
+        self.assertEqual(len(ns['_state']['threads']), 1)
+        self.assertEqual(ns['_state']['waits'], [4])
+
+    def test_fetch_for_another_day_is_not_waited_for(self):
+        """Смена суток: вчерашняя выкачка ещё идёт. Её конец журнала за сегодня не принесёт —
+        ждать её под замком снимка незачем."""
+        ns = self._namespace(journal=None)
+        ns['_tez_wallboard_journal']('2026-09-07')
+        calls, _age, _error = ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertIsNone(calls)
+        self.assertEqual(ns['_state']['waits'], [])
+        self.assertEqual([thread.args[0] for thread in ns['_state']['threads']], ['2026-09-07'])
+
+    def test_journal_of_another_day_is_never_shown_as_todays(self):
+        """В кэше лежит свежий журнал за вчера. Сегодняшним он не считается ни до ожидания,
+        ни после: иначе первый снимок суток показал бы вчерашние «Принято / Потеряно»."""
+        ns = self._namespace()
+        cache = ns['_tez_wallboard_journal_cache']
+        cache.update(day='2026-09-07', ts=time.time() - 30)
+        self.assertEqual(ns['_tez_wallboard_journal_peek'](self.DAY)[0], None)
+        self.assertEqual(len(ns['_tez_wallboard_journal_peek']('2026-09-07')[0]),
+                         len(_journal_calls()))
+        ns['_state']['journal_arrives_during_wait'] = True
+        fresh = [_call(number='901')]
+        with _patched_binotel_api(calls=fresh) as asked:
+            calls, _age, _error = ns['_tez_wallboard_journal'](self.DAY, wait_seconds=4)
+        self.assertEqual(asked, [self.DAY])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(cache['day'], self.DAY)
+
+    def test_journal_error_reaches_the_snapshot_diagnostics(self):
+        """Причина, по которой журнала нет, обязана дойти до диагностики снимка: «журнала
+        нет» без причины искали бы долго. А после удачной выкачки старая причина уходит."""
+        ns = self._namespace(journal=None)
+        ns['_state']['journal_arrives_during_wait'] = True
+        with _patched_source(ns['_state']), _patched_binotel_api(ready=False):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertIn('Ключ Binotel API не задан', snapshot['diagnostics']['journal_error'])
+        self.assertIsNone(snapshot['tp']['today']['served'])
+
+        self._rest(ns)
+        ns['_tez_wallboard_journal_cache']['failed_at'] = 0.0
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=_journal_calls()):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertIsNone(snapshot['diagnostics']['journal_error'])
+        self.assertEqual(snapshot['tp']['today']['served'], 12)
+
+    def test_failure_during_the_wait_is_named_in_the_same_snapshot(self):
+        ns = self._namespace(journal=None)
+        ns['_state']['journal_arrives_during_wait'] = True
+        with _patched_source(ns['_state']), \
+                _patched_binotel_api(error=RuntimeError('Binotel HTTP 500')):
+            with self.assertLogs(level='WARNING'):
+                snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(snapshot['diagnostics']['journal_error'], 'Binotel HTTP 500')
+
+
+class TezWallboardJournalRealThreadTests(_SnapshotHarness, unittest.TestCase):
+    """То же ожидание журнала, но на НАСТОЯЩИХ потоке и событии.
+
+    Остальные тесты гоняют записывающие подделки — они проверяют, кого и на сколько просили
+    подождать. Здесь проверяется, что настоящий шаг табло действительно просыпается, когда
+    выкачка закончилась, и действительно не ждёт дольше отведённого."""
+
+    def _journal_threads(self):
+        return [item for item in threading.enumerate() if item.name == 'tez-wallboard-journal']
+
+    def _real(self, **kwargs):
+        ns = self._namespace(journal=None, **kwargs)
+        ns['threading'] = threading
+        return ns
+
+    def test_step_wakes_up_as_soon_as_the_journal_arrives(self):
+        """«API» отвечает через треть секунды после входа в шаг, обход кабинета к этому
+        времени уже кончился: шаг обязан дойти до ожидания, проснуться по событию и отдать
+        цифры в этом же снимке — задолго до конца отведённого срока."""
+        ns = self._real()
+        ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS'] = 5
+        gate = threading.Event()
+        timer = threading.Timer(0.3, gate.set)
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=_journal_calls(), gate=gate):
+            timer.start()
+            try:
+                started = time.time()
+                snapshot = ns['_tez_wallboard_fetch_snapshot']()
+                waited = time.time() - started
+            finally:
+                gate.set()
+                timer.cancel()
+            for thread in self._journal_threads():
+                thread.join(5)
+        self.assertEqual(snapshot['tp']['today']['arrived'], 15)
+        self.assertGreaterEqual(waited, 0.25, 'шаг не дошёл до ожидания журнала')
+        self.assertLess(waited, 3, 'шаг прождал весь срок, хотя журнал уже приехал')
+
+    def test_failing_api_gets_one_request_per_step(self):
+        """Быстрый отказ API на настоящих потоках: выкачка, заведённая до обхода, падает
+        раньше, чем шаг доходит до второго обращения к журналу. Второй попытки в том же
+        шаге быть не должно."""
+        ns = self._real()
+        with _patched_source(ns['_state']), \
+                _patched_binotel_api(error=RuntimeError('Binotel HTTP 500')) as asked:
+            for _step in range(3):
+                with self.assertLogs(level='WARNING'):
+                    ns['_tez_wallboard_fetch_snapshot']()
+                    for thread in self._journal_threads():
+                        thread.join(5)
+                # Следующий шаг табло приходит не раньше срока кэша — дольше паузы попыток.
+                ns['_tez_wallboard_journal_cache']['started_at'] -= (
+                    ns['TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS'] + 1)
+        self.assertEqual(len(asked), 3, 'на шаг табло ушло больше одного запроса к API')
+
+    def test_step_gives_up_after_the_allowed_time_and_the_next_one_picks_the_journal_up(self):
+        ns = self._real()
+        ns['TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS'] = 0.2
+        gate = threading.Event()
+        with _patched_source(ns['_state']), _patched_binotel_api(calls=_journal_calls(), gate=gate):
+            try:
+                started = time.time()
+                snapshot = ns['_tez_wallboard_fetch_snapshot']()
+                waited = time.time() - started
+                self.assertIsNone(snapshot['tp']['today']['served'])
+                self.assertGreaterEqual(waited, 0.15)
+                self.assertLess(waited, 3)
+                self.assertEqual(len(self._journal_threads()), 1, 'выкачка обязана идти дальше')
+            finally:
+                gate.set()
+            for thread in self._journal_threads():
+                thread.join(5)
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(snapshot['tp']['today']['arrived'], 15)
+        self.assertEqual(self._journal_threads(), [])
+
 
 class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
     """Строка на человека: статус из событий телефона, счётчики звонков из кабинета.
@@ -1829,6 +2518,58 @@ class TezArCeilingToneTests(unittest.TestCase):
 
 
 # --- РАЗВОДКА -------------------------------------------------------------------------------
+
+class TezQueueToneTests(unittest.TestCase):
+    """Тон плитки «В очереди». Проверяем НАСТОЯЩИЙ js через node."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tez = (MONITORING / "tezWallboardShared.js").read_text(encoding="utf-8-sig")
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("node недоступен")
+
+    def _tones(self, pairs):
+        blank = re.search(r"^const isBlank = .*;$", self.tez, flags=re.MULTILINE)
+        tone = re.search(r"^export const tezQueueTone = \(queue, free\) => \{.*?^\};$", self.tez,
+                         flags=re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(blank, "не нашли isBlank")
+        self.assertIsNotNone(tone, "не нашли tezQueueTone")
+        script = "\n".join([
+            blank.group(0), tone.group(0).replace("export const", "const"),
+            "const cases = %s;" % json.dumps(pairs),
+            # undefined в JSON не передать: третье значение пары — признак «поля нет вовсе».
+            "console.log(JSON.stringify(cases.map(([q, f, missing]) => "
+            "tezQueueTone(q, missing ? undefined : f))));",
+        ])
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
+            fh.write(script)
+            path = fh.name
+        try:
+            out = subprocess.run([shutil.which("node"), path], capture_output=True,
+                                 text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout.strip())
+        finally:
+            os.unlink(path)
+
+    def test_queue_tone(self):
+        """Пусто — хорошо; очередь при свободных операторах — внимание; очередь без
+        свободных — тревога; неизвестная очередь не красится вовсе."""
+        self.assertEqual(self._tones([[None, 3, False], [0, 0, False], [0, 5, False],
+                                      [2, 3, False], [2, 0, False]]),
+                         ["neutral", "good", "good", "warn", "bad"])
+
+    def test_unknown_free_count_is_not_zero_free(self):
+        """В кадре со ждущим звонком ось считается по счётчикам кабинета, и счётчика «в
+        ожидании» может не оказаться. `Number(null)` — это ноль: без отдельной проверки
+        плитка горела бы красным («никто не свободен»), хотя мы этого не знаем."""
+        self.assertEqual(self._tones([[1, None, False], [3, None, True]]), ["warn", "warn"])
+
+    def test_catalog_uses_the_named_tone(self):
+        metric = self.tez[self.tez.index("key: 'tp_queue',"):self.tez.index("key: 'tp_queue_max_wait',")]
+        self.assertIn("tone: tezQueueTone(now.queue, now.operators_free),", metric)
+        self.assertNotIn("Number(now.operators_free) === 0", self.tez)
+
 
 def _strip_js_comments(source):
     """Код без комментариев: пояснения про «Перезвон» — это объяснение, а не плитка."""

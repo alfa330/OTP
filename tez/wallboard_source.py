@@ -80,6 +80,11 @@ DEFAULT_SL_THRESHOLD_SECONDS = 20
 # (за всю разведку очередь не набиралась). Пока не увидим её живьём, разобранные
 # строки наружу не отдаём: пустой список честнее выдуманной колонки.
 QUEUE_CLIENT_ROWS_VERIFIED = False
+# Как часто писать в лог устройство кадра, где строки сотрудников не сошлись со счётчиком
+# (см. validate_queue_counters). Пока входящий ждёт ответа, такой кадр приходит на каждом
+# шаге опроса — раз в двадцать секунд; по строке на шаг лог утонул бы в одном и том же.
+ROWS_MISMATCH_LOG_INTERVAL_SECONDS = 600
+_ROWS_MISMATCH_LOG = {"at": 0.0}
 
 # Счётчики состояний раскладываем ПО ПОДПИСИ. Классы li.state-ul__item--one…
 # --eleven — это порядковые номера: вставят в кабинете новый счётчик, нумерация
@@ -301,9 +306,13 @@ def validate_queue_counters(parsed):
 
     Кабинет считает своих людей дважды — по статусу и по занятости, и обе суммы
     обязаны давать «сотрудников с тел. линией». Если не дают, значит разметку
-    поменяли и мы читаем не те числа: снимок отбраковываем целиком, наверх
-    уходит прошлый с пометкой «данные замерли». Это единственная защита от
-    тихого перекоса — цифру на стене никто не перепроверит."""
+    поменяли и мы читаем не те числа: страницу отбраковываем целиком, и ТП на этом
+    шаге остаётся без данных. Это единственная защита от тихого перекоса — цифру
+    на стене никто не перепроверит.
+
+    Строки сотрудников сверяются со счётчиками тут же. Лишние строки страницу НЕ
+    отбраковывают, а помечают (`rows_mismatch`): так выглядит кадр со ждущим звонком —
+    почему, сказано ниже у самой сверки."""
     counters = (parsed or {}).get("counters") or {}
     identities = (
         ("статус активен + работа в CRM + перерыв + не активен",
@@ -331,19 +340,86 @@ def validate_queue_counters(parsed):
     # а счётчики сойдутся как ни в чём не бывало — на стене будет «Онлайн 0» при
     # одиннадцати работающих людях. Ниже два тождества, связывающие эти две
     # половины; на всех шести снятых кадрах они держатся точно.
+    #
+    # Одно исключение — строк БОЛЬШЕ, чем сотрудников. Это не поломка разбора, а кадр,
+    # в котором входящий ждёт ответа: тождества выверены на кадрах с ПУСТОЙ очередью, а
+    # пока клиент на линии, в таблице на строку больше. До 08.10.2026 такой кадр бросал
+    # CabinetParseError, и именно из-за этого табло «слетало»: за неделю логов на звонок
+    # в ожидании попали два почасовых снимка (02.10 01:00:02 и 03.10 12:00:02), оба были
+    # отбракованы, и ни одного такого расхождения без ждущего звонка не нашлось. ТП
+    # пропадало со стены ровно тогда, когда в очереди кто-то был, а руководителю уходила
+    # тревога «страница очереди недоступна» при живом кабинете.
+    #
+    # Счётчики к этой строке уже сошлись между собой, поэтому в таком кадре верим им: ось
+    # «сейчас» считается по ним (summarize_queue_operators), а строки остаются источником
+    # статусов для известного состава (fetch_snapshot). Расхождение уходит в диагностику и
+    # в лог. Недостача строк и расхождение по занятости — по-прежнему отказ: их ждущий
+    # звонок не объясняет, а смена вёрстки объясняет.
     operators = (parsed or {}).get("operators") or []
-    if len(operators) != members:
+    mismatch = None
+    if len(operators) > members:
+        mismatch = ("разобрано строк сотрудников %d, а с тел. линией %d"
+                    % (len(operators), members))
+    elif len(operators) < members:
         raise CabinetParseError(
             "Страница очереди Binotel: разобрано строк сотрудников %d, а с тел. линией %d"
             % (len(operators), members))
-    working = counters.get("working")
-    if working is not None:
-        on_line = sum(1 for row in operators if row.get("status_key") in QUEUE_ONLINE_STATUSES)
-        if on_line != working:
-            raise CabinetParseError(
-                "Страница очереди Binotel: по строкам в работе %d, а по счётчику %d"
-                % (on_line, working))
+    else:
+        working = counters.get("working")
+        if working is not None:
+            on_line = sum(1 for row in operators
+                          if row.get("status_key") in QUEUE_ONLINE_STATUSES)
+            if on_line != working:
+                raise CabinetParseError(
+                    "Страница очереди Binotel: по строкам в работе %d, а по счётчику %d"
+                    % (on_line, working))
+    parsed["rows_mismatch"] = mismatch
     return parsed
+
+
+def describe_queue_page(html):
+    """Устройство страницы очереди без людей и телефонов — одной строкой для лога.
+
+    Нужна в единственном случае: строки сотрудников не сошлись со счётчиком, и надо
+    увидеть, что это за кадр, не снимая его руками (страницу с непустой очередью
+    живьём снять так и не удалось). Содержимое ячеек НЕ выводится: имя становится
+    словом «текст», номер и телефон — числом цифр (d3, d11), время — словом «время».
+    Дословно остаётся только статус из нашего же словаря. Этого хватает, чтобы узнать
+    лишнюю строку — у телефона клиента одиннадцать цифр, у внутреннего номера три, —
+    а персональных данных в логе нет: то же правило белого списка, что у парсеров."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    parts = []
+    heading = soup.select_one(".clients__heading-item--name")
+    if heading is not None:
+        parts.append("в очереди: %s" % parse_int(_node_text(heading).split(":")[-1]))
+    for table in soup.find_all("table"):
+        table_class = next((name for name in (table.get("class") or [])
+                            if name.startswith("queue-content__")), None)
+        if table_class is None:
+            continue
+        counts = {}
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
+            if not cells:
+                continue  # шапка таблицы: одни th, людей в ней нет
+            shapes = []
+            for cell in cells:
+                status = cell.select_one(".employees__status-text--text")
+                if status is None:
+                    shapes.append(_cell_shape(_node_text(cell)))
+                    continue
+                status_text = _node_text(status)
+                # Незнакомый статус дословно не пишем: в строке, которой мы ещё не
+                # видели, на месте статуса может стоять что угодно.
+                shapes.append(QUEUE_STATUS_KEYS.get(status_text.lower())
+                              or "?" + _cell_shape(status_text))
+            signature = "%s[%s]" % (_class_shape(row.get("class")) or "tr", "|".join(shapes))
+            counts[signature] = counts.get(signature, 0) + 1
+        # Одинаковые строки складываем: одиннадцать сотрудников — это две-три формы
+        # строки, и лишняя среди них видна сразу.
+        rows = "; ".join("%d× %s" % (count, signature) for signature, count in counts.items())
+        parts.append("%s: %s" % (_class_shape([table_class]), rows or "строк нет"))
+    return " / ".join(parts)[:1500]
 
 
 def summarize_queue_operators(parsed):
@@ -368,6 +444,26 @@ def summarize_queue_operators(parsed):
                 "since": None,
                 "seconds": row.get("in_state_seconds"),
             })
+    if (parsed or {}).get("rows_mismatch"):
+        # Строкам этого кадра верить нельзя (см. validate_queue_counters), поэтому ось
+        # берём из блока счётчиков — его кабинет считает сам, и между собой счётчики уже
+        # сошлись. На кадре, где строки сходятся, оба способа дают одно и то же: это
+        # сторожит тест на всех фикстурах. «В разговоре» и «в ожидании» в тождества не
+        # входят, так что их может не оказаться — тогда прочерк, а не ноль.
+        counters = parsed.get("counters") or {}
+        total = counters.get("members")
+        online = counters.get("working")
+        on_break = counters.get("status_break")
+        known = None not in (total, online, on_break)
+        return {
+            "operators_total": total,
+            "operators_online": online,
+            "operators_free": counters.get("waiting"),
+            "operators_talking": counters.get("talking"),
+            "operators_on_break": on_break,
+            "operators_other": max(0, total - online - on_break) if known else None,
+            "break_list": breaks,
+        }
     total = len(operators)
     free = by_key.get("free", 0)
     talking = by_key.get("talking", 0)
@@ -861,6 +957,9 @@ class CabinetSession:
         self._queue_id_at = 0.0
         self._endpoints = None
         self._endpoints_at = 0.0
+        # Состав очереди из последнего кадра, где строки сошлись со счётчиком: {номер: имя}.
+        # По нему разбирается кадр, в котором строкам верить нельзя (см. fetch_snapshot).
+        self._queue_roster = None
 
     @property
     def config(self):
@@ -1027,6 +1126,12 @@ def fetch_snapshot(session, day=None, *, with_endpoints=False,
         queue_html = session.get_text(QUEUE_PATH.format(queue_id=queue_id), timeout=timeout)
         queue = validate_queue_counters(parse_queue_page(queue_html))
         clients = parse_queue_clients(queue_html) if QUEUE_CLIENT_ROWS_VERIFIED else []
+        if queue.get("rows_mismatch"):
+            _report_rows_mismatch(queue["rows_mismatch"], queue_html)
+        else:
+            session._queue_roster = {
+                str(row["number"]): row.get("name")
+                for row in queue.get("operators") or [] if row.get("number")} or None
     except CabinetAuthError:
         # Вход не выполнен — это не беда одной страницы: следующие два запроса
         # тоже вернут форму логина. Пусть падает весь снимок.
@@ -1038,6 +1143,16 @@ def fetch_snapshot(session, day=None, *, with_endpoints=False,
     employees = parse_employees(session.get_text(
         EMPLOYEES_PATH.format(day=format_cabinet_date(day)), timeout=timeout))
     live_calls = parse_live_calls(session.get_text(LIVE_CALLS_PATH, timeout=timeout))
+
+    if queue and queue.get("rows_mismatch"):
+        # В таком кадре в таблице есть строка, которой нет в счётчике, и что в ней стоит,
+        # мы не знаем: страницу с непустой очередью живьём не снимали, там может быть и
+        # телефон клиента — в любой ячейке и под номером настоящего оператора. Поэтому
+        # текст из строк такого кадра наружу не идёт вовсе: состав и имена берём из
+        # последнего сошедшегося кадра, из строк — только статус из нашего словаря и числа.
+        queue["operators"] = _rows_of_known_members(
+            queue.get("operators"), _queue_members(session, employees))
+        queue["unknown_statuses"] = []
 
     endpoints, endpoints_age = None, None
     if with_endpoints:
@@ -1081,6 +1196,9 @@ def fetch_snapshot(session, day=None, *, with_endpoints=False,
             "unknown_queue_statuses": (queue or {}).get("unknown_statuses") or [],
             "binotel_now_source": now_source,
             "queue_error": queue_error,
+            # Строки сотрудников не сошлись со счётчиком: плитки в этом снимке посчитаны
+            # по счётчикам кабинета. Текст — два числа, людей в нём нет.
+            "queue_rows_mismatch": (queue or {}).get("rows_mismatch"),
         },
     }
 
@@ -1099,6 +1217,92 @@ def _safe_reason(exc):
     text = re.sub(r"host=['\"][^'\"]+['\"]", "host=кабинет", text)
     text = re.sub(r"url:\s*\S+", "url: кабинет", text)
     return text
+
+
+def _cell_shape(text):
+    """Форма содержимого ячейки вместо самого содержимого — для describe_queue_page."""
+    raw = _clean_text(text)
+    if not raw:
+        return "пусто"
+    if re.fullmatch(r"\d{1,2}(:\d{2}){1,2}", raw.replace(" ", "")):
+        return "время"
+    digits = sum(1 for char in raw if char.isdigit())
+    letters = any(char.isalpha() for char in raw)
+    if digits and letters:
+        return "текст+d%d" % digits
+    if digits:
+        return "d%d" % digits
+    return "текст" if letters else "знаки"
+
+
+def _class_shape(names):
+    """Имена CSS-классов для лога: серии цифр заменены их длиной.
+
+    Сами классы — разметка, а не данные, но в строке, которой мы ещё не видели, в класс
+    может быть вписан идентификатор звонка или телефон."""
+    return re.sub(r"\d{4,}", lambda match: "d%d" % len(match.group(0)), " ".join(names or []))
+
+
+def _report_rows_mismatch(reason, html):
+    """Не чаще раза в ROWS_MISMATCH_LOG_INTERVAL_SECONDS пишет в лог, как устроен кадр,
+    в котором строки сотрудников не сошлись со счётчиком."""
+    now = time.time()
+    if now - _ROWS_MISMATCH_LOG["at"] < ROWS_MISMATCH_LOG_INTERVAL_SECONDS:
+        return
+    _ROWS_MISMATCH_LOG["at"] = now
+    try:
+        structure = describe_queue_page(html)
+    except Exception:
+        # Лог — подсказка на будущее: ронять из-за него снимок нельзя.
+        structure = "не разобрано"
+    logger.warning(
+        "Табло Тез: строки очереди не сошлись со счётчиком (%s) — плитки считаем по "
+        "счётчикам кабинета; устройство страницы: %s", reason, structure)
+
+
+def _queue_members(session, employees):
+    """Кого считать сотрудниками очереди в кадре, где строкам верить нельзя: {номер: имя}.
+
+    Обычно это состав последнего сошедшегося кадра — те же люди, что были на стене шаг
+    назад, поэтому плитки дня от вида кадра не прыгают. Сразу после старта процесса его
+    ещё нет; тогда берём тех, кого сам кабинет в дневных итогах помечает обслуживающими
+    очередь (callCenterIsEnabled). Пусто и там — состав пуст, и плитки дня уходят в
+    прочерк: это честнее, чем посчитать их по всему кабинету вместе с отделом продаж."""
+    roster = getattr(session, "_queue_roster", None)
+    if roster:
+        return roster
+    people = (employees or {}).get("employees") if isinstance(employees, dict) else None
+    return {str(number): record.get("name") for number, record in (people or {}).items()
+            if isinstance(record, dict) and record.get("call_center_enabled")}
+
+
+def _rows_of_known_members(rows, members):
+    """Строки несошедшегося кадра, пересобранные по белому списку для известного состава.
+
+    Из строки берутся только статус из нашего словаря и числа; имя — из состава. Когда
+    один номер стоит в двух строках (лишняя строка кадра несёт номер оператора, которому
+    идёт вызов), своей считаем ту, где имя совпало с именем из состава, затем ту, чей
+    статус нам знаком."""
+    def rank(row, number):
+        return (row.get("name") == members.get(number), row.get("status_key") is not None)
+
+    best = {}
+    for row in rows or []:
+        number = str(row.get("number") or "")
+        if number not in members:
+            continue
+        if number not in best or rank(row, number) > rank(best[number], number):
+            best[number] = row
+    return [{
+        "name": members[number],
+        "number": number,
+        "status_text": row.get("status_text") if row.get("status_key") is not None else None,
+        "status_key": row.get("status_key"),
+        "received_calls": row.get("received_calls"),
+        "last_call_text": None,
+        "in_state_text": None,
+        "in_state_seconds": row.get("in_state_seconds"),
+    } for number, row in best.items()]
 
 
 def _to_flag(value):

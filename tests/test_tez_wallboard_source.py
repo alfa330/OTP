@@ -11,6 +11,7 @@
 
 import ast
 import json
+import logging
 import os
 import re
 import sys
@@ -33,6 +34,42 @@ SECRET_KEY_RE = re.compile(r"login|password|endpointdata|exthash|email|secret", 
 
 def fixture(name):
     return FIXTURES.joinpath(name).read_text(encoding="utf-8")
+
+
+# Телефон и имя «клиента» для кадров с непустой очередью — выдуманные, как и всё в фикстурах.
+CLIENT_PHONE = "77015550001"
+CLIENT_NAME = "Клиентова Алия"
+
+
+def extra_employee_row(number=CLIENT_PHONE, name=CLIENT_NAME, status="звонит %s" % CLIENT_PHONE,
+                       last_call="", row_class="employees__line"):
+    """Лишняя строка таблицы сотрудников. Как она выглядит на самом деле, неизвестно."""
+    return ('<tr class="%s">'
+            '<td class="employees__item employees__item--name">%s</td>'
+            '<td class="employees__item">%s</td>'
+            '<td class="employees__item employees__item--status"><article class="employees__wrapper">'
+            '<p class="employees__status-text"><span class="employees__status-text--text">'
+            '%s</span></p></article></td>'
+            '<td class="employees__item">0</td><td class="employees__item">%s</td>'
+            '<td class="employees__item">00:07</td></tr>' % (row_class, name, number, status, last_call))
+
+
+def waiting_call_page(base="queue_idle.html", extra_row=True, row=None, first=False):
+    """Кадр, в котором входящий ждёт ответа: в очереди один клиент.
+
+    Живьём такой кадр снять не удалось — известно только, что строк сотрудников в нём
+    на одну больше, чем в счётчике «с тел. линией» (логи 02.10 и 03.10.2026). Что стоит
+    в лишней строке, неизвестно, поэтому по умолчанию здесь худший случай: в ней имя и
+    телефон клиента. Разбор обязан пережить такой кадр и ничего из этой строки наружу не
+    отдать. row — своя форма лишней строки, first — поставить её ВЫШЕ строк сотрудников."""
+    html = fixture(base).replace("Клиентов в очереди: 0", "Клиентов в очереди: 1")
+    cut = html.index("</table>", html.index("queue-content__clients"))
+    html = (html[:cut] + '<tr class="clients__line"><td>%s</td><td>%s</td><td>00:07</td></tr>'
+            % (CLIENT_NAME, CLIENT_PHONE) + html[cut:])
+    if not extra_row:
+        return html
+    cut = html.index('<tr class="employees__line">') if first else html.rindex("</table>")
+    return html[:cut] + (row or extra_employee_row()) + html[cut:]
 
 
 def walk(node, path="$"):
@@ -161,6 +198,15 @@ class QueueCountersGuardTests(unittest.TestCase):
             source.validate_queue_counters(parsed)
         self.assertIn("разобрано строк сотрудников", str(ctx.exception))
 
+    def test_fewer_rows_than_members_reject_the_snapshot(self):
+        # Послабление — только для ЛИШНИХ строк (так выглядит ждущий звонок). Недостачу
+        # звонок не объясняет, а смена вёрстки объясняет: это по-прежнему отказ.
+        parsed = source.parse_queue_page(fixture("queue_idle.html"))
+        parsed["operators"] = parsed["operators"][:-1]
+        with self.assertRaises(source.CabinetParseError) as ctx:
+            source.validate_queue_counters(parsed)
+        self.assertIn("разобрано строк сотрудников 10, а с тел. линией 11", str(ctx.exception))
+
     def test_rows_must_agree_with_the_working_counter(self):
         # Второе тождество между теми же двумя половинами: сколько людей стоит
         # «в ожидании»/«разговаривает» в таблице, столько же кабинет насчитал
@@ -172,11 +218,75 @@ class QueueCountersGuardTests(unittest.TestCase):
                 break
         with self.assertRaises(source.CabinetParseError) as ctx:
             source.validate_queue_counters(parsed)
-        self.assertIn("по счётчику", str(ctx.exception))
+        self.assertIn("по строкам в работе 4, а по счётчику 5", str(ctx.exception))
 
     def test_busy_queue_passes_all_identities(self):
         parsed = source.parse_queue_page(fixture("queue_busy.html"))
         self.assertIs(parsed, source.validate_queue_counters(parsed))
+        self.assertIsNone(parsed["rows_mismatch"])
+
+    def test_consistent_frame_carries_no_mismatch_mark(self):
+        parsed = source.validate_queue_counters(source.parse_queue_page(fixture("queue_idle.html")))
+        self.assertIn("rows_mismatch", parsed)
+        self.assertIsNone(parsed["rows_mismatch"])
+
+    def test_waiting_call_frame_is_not_rejected(self):
+        # Главная причина «табло слетает» (разбор 08.10.2026). Пока входящий ждёт
+        # ответа, строк сотрудников на одну больше, чем в счётчике. Тождества писались
+        # по шести кадрам с ПУСТОЙ очередью, и такой кадр отбраковывался целиком: ТП
+        # пропадало со стены ровно тогда, когда в очереди кто-то был. Текст расхождения
+        # тот же, что стоял в логах прода 02.10 («…12, а с тел. линией 11»).
+        parsed = source.validate_queue_counters(source.parse_queue_page(waiting_call_page()))
+        self.assertEqual("разобрано строк сотрудников 12, а с тел. линией 11",
+                         parsed["rows_mismatch"])
+        # И очередь наконец видна: раньше плитка «В очереди» не могла показать не ноль.
+        self.assertEqual(1, parsed["queue"])
+        summary = source.summarize_queue_operators(parsed)
+        self.assertEqual({"operators_total": 11, "operators_online": 5, "operators_free": 5,
+                          "operators_talking": 0, "operators_on_break": 1, "operators_other": 5},
+                         {k: v for k, v in summary.items() if k != "break_list"})
+
+    def test_counters_axis_equals_rows_axis_on_consistent_frames(self):
+        # Обе половины страницы говорят об одних и тех же людях. Пока строки сходятся
+        # со счётчиками, ось по счётчикам обязана совпадать с осью по строкам цифра в
+        # цифру — иначе в кадре со ждущим звонком стена молча показала бы другое
+        # определение «свободен» или «на перерыве».
+        for name in ("queue_idle.html", "queue_busy.html"):
+            parsed = source.validate_queue_counters(source.parse_queue_page(fixture(name)))
+            by_rows = source.summarize_queue_operators(parsed)
+            by_counters = source.summarize_queue_operators(dict(parsed, rows_mismatch="для сверки"))
+            self.assertEqual(by_rows, by_counters, name)
+
+    def test_counters_outside_the_identities_may_be_missing(self):
+        # «В разговоре» и «в ожидании» в тождества не входят: пропади их подпись —
+        # прочерк, а не ноль. «Онлайн» и состав при этом известны.
+        parsed = source.parse_queue_page(waiting_call_page())
+        parsed["counters"].pop("talking")
+        parsed["counters"].pop("waiting")
+        summary = source.summarize_queue_operators(source.validate_queue_counters(parsed))
+        self.assertIsNone(summary["operators_talking"])
+        self.assertIsNone(summary["operators_free"])
+        self.assertEqual((11, 5, 5), (summary["operators_total"], summary["operators_online"],
+                                      summary["operators_other"]))
+
+    def test_other_statuses_never_go_negative(self):
+        # «Перерыв» в оси по счётчикам берётся из статусов, «онлайн» — из занятости: человек
+        # на перерыве с включённым телефоном может попасть в оба. Сумма тогда больше состава,
+        # и «прочие» обязаны остаться нулём, а не уйти в минус.
+        parsed = source.validate_queue_counters(source.parse_queue_page(waiting_call_page()))
+        parsed["counters"]["status_break"] = 8
+        summary = source.summarize_queue_operators(parsed)
+        self.assertEqual((8, 0), (summary["operators_on_break"], summary["operators_other"]))
+
+    def test_broken_counters_still_reject_a_waiting_call_frame(self):
+        # Послабление касается только строк. Если не сошлись сами счётчики, верить на
+        # странице нечему — такой кадр отбраковывается, как и раньше.
+        parsed = source.parse_queue_page(waiting_call_page())
+        parsed["counters"]["working"] = 0
+        parsed["counters"]["not_working"] = 0
+        with self.assertRaises(source.CabinetParseError) as ctx:
+            source.validate_queue_counters(parsed)
+        self.assertIn("в работе + не работают = 0", str(ctx.exception))
 
 
 class PresenceAxisTests(unittest.TestCase):
@@ -274,6 +384,71 @@ class QueueClientsTests(unittest.TestCase):
 
     def test_unverified_rows_do_not_reach_the_snapshot(self):
         self.assertFalse(source.QUEUE_CLIENT_ROWS_VERIFIED)
+
+
+class DescribeQueuePageTests(unittest.TestCase):
+    """Устройство страницы для лога: видно, какая строка лишняя, и нет ни одного человека."""
+
+    def test_extra_row_is_visible_by_its_shape(self):
+        text = source.describe_queue_page(waiting_call_page())
+        self.assertIn("в очереди: 1", text)
+        self.assertIn("queue-content__clients", text)
+        self.assertIn("queue-content__employees", text)
+        # Телефон клиента — одиннадцать цифр, внутренний номер — три: по числу цифр
+        # лишняя строка узнаётся сразу, а самих цифр в логе нет.
+        self.assertIn("1× employees__line[текст|d11|?текст+d11|d1|пусто|время]", text)
+        self.assertIn("1× clients__line[текст|d11|время]", text)
+
+    def test_known_statuses_are_named_and_rows_are_folded(self):
+        text = source.describe_queue_page(fixture("queue_busy.html"))
+        self.assertIn("в очереди: 0", text)
+        self.assertIn("queue-content__clients: строк нет", text)
+        for key in ("free", "talking", "break", "inactive", "phone_offline"):
+            self.assertIn("|%s|" % key, text)
+        # Одиннадцать сотрудников сворачиваются в несколько форм строки.
+        counts = [int(number) for number in re.findall(r"(\d+)× employees__line", text)]
+        self.assertEqual(11, sum(counts))
+        self.assertLess(len(counts), 11)
+
+    def test_no_people_and_no_phones_in_the_description(self):
+        html = waiting_call_page("queue_busy.html")
+        text = source.describe_queue_page(html)
+        self.assertNotIn(CLIENT_PHONE, text)
+        self.assertNotIn("Клиентова", text)
+        # Ни одного имени сотрудника из фикстуры и ни одного внутреннего номера.
+        parsed = source.parse_queue_page(html)
+        for row in parsed["operators"]:
+            for word in (row["name"] or "").split():
+                self.assertNotIn(word, text)
+        self.assertEqual([], re.findall(r"\d{3,}", text))
+
+    def test_digits_in_class_names_are_not_written(self):
+        # Классы — разметка, но в строке, которой мы не видели, в класс может быть вписан
+        # идентификатор звонка или телефон.
+        row = extra_employee_row(row_class="employees__line employees__line--%s" % CLIENT_PHONE)
+        text = source.describe_queue_page(waiting_call_page(row=row))
+        self.assertNotIn(CLIENT_PHONE, text)
+        self.assertIn("employees__line employees__line--d11[", text)
+
+    def test_description_is_cut_to_a_log_line(self):
+        rows = "".join(extra_employee_row(row_class="employees__line c%d" % index)
+                       for index in range(200))
+        self.assertLessEqual(len(source.describe_queue_page(waiting_call_page(row=rows))), 1500)
+
+    def test_foreign_page_gives_a_text_not_an_error(self):
+        # Лог пишется по чему угодно: упасть на нём — потерять снимок из-за подсказки.
+        self.assertEqual("", source.describe_queue_page("<html><body>SPA</body></html>"))
+        self.assertEqual("", source.describe_queue_page(""))
+
+    def test_cell_shapes(self):
+        self.assertEqual("пусто", source._cell_shape(" \n "))
+        self.assertEqual("время", source._cell_shape("00:27"))
+        self.assertEqual("время", source._cell_shape("07:55:45"))
+        self.assertEqual("d3", source._cell_shape("903"))
+        self.assertEqual("d11", source._cell_shape("+7 (701) 555-00-01"))
+        self.assertEqual("текст", source._cell_shape("Оспан Айгерим"))
+        self.assertEqual("текст+d11", source._cell_shape("звонит 77015550001"))
+        self.assertEqual("знаки", source._cell_shape("—"))
 
 
 class DurationTests(unittest.TestCase):
@@ -739,6 +914,243 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(source.CabinetParseError):
             source.validate_queue_counters(
                 source.parse_queue_page(fixture("queue_counters_skewed.html")))
+
+    def _snapshots_of(self, *queue_pages, employees=None):
+        """Обход кабинета по разу на каждую страницу очереди — одной и той же сессией, как
+        на проде: состав очереди из сошедшегося кадра сессия помнит до следующего."""
+        pages = list(queue_pages)
+
+        class _Queue(_FakeSession):
+            def get_text(self, path, timeout=None):
+                if "module=stateOfQueues" in path:
+                    self.paths.append(path)
+                    return pages.pop(0)
+                if employees is not None and "module=analyticsEmployees" in path:
+                    self.paths.append(path)
+                    return employees
+                return _FakeSession.get_text(self, path, timeout=timeout)
+
+        session = _Queue()
+        return [source.fetch_snapshot(session) for _page in queue_pages], session
+
+    def _snapshot_of(self, queue_html):
+        snapshots, session = self._snapshots_of(queue_html)
+        return snapshots[0], session
+
+    def test_waiting_call_keeps_the_queue_in_the_snapshot(self):
+        # Тот же кадр через весь обход: очередь в снимке остаётся, ошибки очереди нет,
+        # и страница не перезапрашивается.
+        snapshot, session = self._snapshot_of(waiting_call_page())
+        self.assertIsNone(snapshot["queue_error"])
+        self.assertEqual(1, snapshot["queue"]["queue"])
+        self.assertEqual("разобрано строк сотрудников 12, а с тел. линией 11",
+                         snapshot["diagnostics"]["queue_rows_mismatch"])
+        self.assertEqual(3, len(session.paths))
+
+    # Формы лишней строки, которые разбор обязан пережить. Какая из них настоящая,
+    # неизвестно, поэтому сторожим все: чужая строка с телефоном вместо номера; строка
+    # клиента под внутренним номером оператора, которому идёт вызов; она же с «перерывом»
+    # и телефоном на месте имени; строка под номером сотрудника кабинета вне очереди;
+    # телефон в ячейке последнего звонка.
+    EXTRA_ROWS = {
+        "телефон на месте номера": {},
+        "под номером оператора очереди": {"number": "915"},
+        "под номером оператора, статус из словаря": {
+            "number": "915", "name": CLIENT_PHONE, "status": "перерыв в работе"},
+        "под номером сотрудника вне очереди": {"number": "921"},
+        "телефон в ячейке последнего звонка": {
+            "number": "903", "status": "разговаривает", "last_call": CLIENT_PHONE},
+    }
+
+    def _assert_nothing_of_the_client(self, snapshot, label):
+        dumped = json.dumps(snapshot, ensure_ascii=False)
+        self.assertNotIn(CLIENT_PHONE, dumped, label)
+        self.assertNotIn("Клиентова", dumped, label)
+        self.assertEqual([], re.findall(r"\b7\d{10}\b", dumped), label)
+        self.assertEqual([], snapshot["diagnostics"]["unknown_queue_statuses"], label)
+
+    def test_row_of_an_unknown_kind_never_leaves_the_module(self):
+        # В лишней строке может стоять что угодно, в любой ячейке и на любом месте таблицы.
+        # Наружу из строк такого кадра идут только статус из нашего словаря и числа; имена
+        # и состав — из последнего сошедшегося кадра.
+        usual = source.parse_queue_page(fixture("queue_idle.html"))
+        roster = {row["number"]: row["name"] for row in usual["operators"]}
+        for title, shape in self.EXTRA_ROWS.items():
+            for first in (False, True):
+                for warm in (True, False):
+                    label = "%s; выше остальных: %s; состав известен: %s" % (title, first, warm)
+                    frame = waiting_call_page(row=extra_employee_row(**shape), first=first)
+                    pages = ([fixture("queue_idle.html")] if warm else []) + [frame]
+                    snapshot = self._snapshots_of(*pages)[0][-1]
+                    self.assertIsNotNone(snapshot["queue"], label)
+                    self._assert_nothing_of_the_client(snapshot, label)
+                    kept = {row["number"]: row["name"] for row in snapshot["queue"]["operators"]}
+                    self.assertEqual(roster, kept, label)
+
+    def test_unknown_row_standing_in_for_an_operator_gives_only_whitelisted_fields(self):
+        # Худший вид кадра: строки самого оператора в таблице нет, а под его внутренним
+        # номером стоит строка клиента — с его именем, телефоном в статусе и в ячейке
+        # последнего звонка. Выбирать не из чего, в состав идёт она, но только по белому
+        # списку: имя из запомненного состава, статус неизвестен, свободного текста нет
+        # ни в одном поле.
+        usual = fixture("queue_idle.html")
+        rows = re.findall(r'<tr class="employees__line">.*?</tr>', usual, flags=re.DOTALL)
+        own = next(row for row in rows if "extNumber=915" in row)
+        stand_in = extra_employee_row(number="915", last_call=CLIENT_PHONE)
+        frame = usual.replace(own, stand_in + extra_employee_row())
+        before, during = self._snapshots_of(usual, frame)[0]
+        self.assertEqual("разобрано строк сотрудников 12, а с тел. линией 11",
+                         during["diagnostics"]["queue_rows_mismatch"])
+        self._assert_nothing_of_the_client(during, "строка клиента на месте оператора")
+        name = {row["number"]: row["name"] for row in before["queue"]["operators"]}["915"]
+        kept = {row["number"]: row for row in during["queue"]["operators"]}["915"]
+        self.assertEqual(
+            {"name": name, "number": "915", "status_key": None, "status_text": None,
+             "last_call_text": None, "in_state_text": None},
+            {key: kept[key] for key in ("name", "number", "status_key", "status_text",
+                                        "last_call_text", "in_state_text")})
+        # Числа из строки идут как числа: в них человека нет.
+        self.assertEqual((0, 7), (kept["received_calls"], kept["in_state_seconds"]))
+
+    def test_real_row_of_an_operator_wins_over_the_extra_one(self):
+        # Лишняя строка стоит ВЫШЕ строки оператора, несёт его внутренний номер и статус
+        # из словаря. Своей считаем ту, где имя совпало с именем из состава: иначе
+        # оператор на линии оказался бы в списке «На перерыве» с чужими семью секундами.
+        frame = waiting_call_page(first=True, row=extra_employee_row(
+            number="903", name=CLIENT_PHONE, status="перерыв в работе"))
+        before, during = self._snapshots_of(fixture("queue_idle.html"), frame)[0]
+        usual = {row["number"]: row for row in before["queue"]["operators"]}
+        kept = {row["number"]: row for row in during["queue"]["operators"]}
+        self.assertEqual("free", usual["903"]["status_key"])
+        self.assertEqual("free", kept["903"]["status_key"])
+        self.assertEqual(usual["903"]["in_state_seconds"], kept["903"]["in_state_seconds"])
+        self.assertEqual(["906"], [row["number"] for row in during["queue"]["operators"]
+                                   if row["status_key"] == "break"])
+
+    def test_composition_of_a_mismatched_frame_is_the_last_consistent_one(self):
+        # Состав направления не должен зависеть от вида кадра: плитки дня считаются по
+        # тем же людям, что шаг назад, даже если кабинет в дневных итогах кого-то не отдал.
+        employees = json.loads(fixture("employees_day.json"))
+        employees["pageData"]["analyticsEmployees"].pop("915")
+        before, during = self._snapshots_of(
+            fixture("queue_idle.html"), waiting_call_page(),
+            employees=json.dumps(employees, ensure_ascii=False))[0]
+        self.assertEqual([row["number"] for row in before["queue"]["operators"]],
+                         [row["number"] for row in during["queue"]["operators"]])
+        self.assertIn("915", [row["number"] for row in during["queue"]["operators"]])
+
+    def test_cold_start_takes_queue_members_from_the_cabinet_flag(self):
+        # Сразу после старта процесса сошедшегося кадра ещё не было. Тогда состав — те,
+        # кого сам кабинет помечает обслуживающими очередь: продавец с номером 921 в
+        # дневных итогах есть, но в состав ТП не попадает, даже если его номер стоит в
+        # лишней строке.
+        frame = waiting_call_page(row=extra_employee_row(number="921"))
+        snapshot = self._snapshot_of(frame)[0]
+        numbers = [row["number"] for row in snapshot["queue"]["operators"]]
+        self.assertEqual(11, len(numbers))
+        self.assertNotIn("921", numbers)
+        employees = source.parse_employees(fixture("employees_day.json"))["employees"]
+        self.assertFalse(employees["921"]["call_center_enabled"])
+        self.assertEqual(sorted(numbers), sorted(
+            number for number, record in employees.items() if record["call_center_enabled"]))
+
+    def test_cold_start_without_the_flag_leaves_the_roster_empty(self):
+        # Ни сошедшегося кадра, ни пометки кабинета: состав пуст, и плитки дня уйдут в
+        # прочерк. Это честнее, чем посчитать ТП по всему кабинету вместе с отделом продаж.
+        employees = json.loads(fixture("employees_day.json"))
+        for record in employees["pageData"]["analyticsEmployees"].values():
+            record["callCenterIsEnabled"] = "0"
+        snapshot = self._snapshots_of(
+            waiting_call_page(), employees=json.dumps(employees, ensure_ascii=False))[0][0]
+        self.assertEqual([], snapshot["queue"]["operators"])
+        self.assertIsNone(snapshot["queue_error"])
+        self._assert_nothing_of_the_client(snapshot, "пустой состав")
+
+    def test_doubled_operator_row_enters_the_roster_once(self):
+        # Вторая догадка о лишней строке: оператор, которому идёт вызов, показан дважды.
+        # В состав направления он обязан войти один раз.
+        html = fixture("queue_idle.html")
+        start = html.index('<tr class="employees__line">')
+        end = html.index("</tr>", start) + len("</tr>")
+        cut = html.rindex("</table>")
+        snapshot, _session = self._snapshot_of(html[:cut] + html[start:end] + html[cut:])
+        numbers = [row["number"] for row in snapshot["queue"]["operators"]]
+        self.assertEqual(11, len(numbers))
+        self.assertEqual(len(set(numbers)), len(numbers))
+        self.assertIsNotNone(snapshot["diagnostics"]["queue_rows_mismatch"])
+
+    def test_mismatched_frame_does_not_overwrite_the_remembered_roster(self):
+        # Состав запоминается только из сошедшегося кадра: иначе лишняя строка одного
+        # кадра стала бы «сотрудником» для всех следующих.
+        frame = waiting_call_page(row=extra_employee_row(number="921"))
+        _snapshots, session = self._snapshots_of(fixture("queue_idle.html"), frame, frame)
+        self.assertEqual(11, len(session._queue_roster))
+        self.assertNotIn("921", session._queue_roster)
+
+    def test_consistent_frame_keeps_every_row_as_is(self):
+        # Отсев по списку сотрудников — только для несошедшегося кадра: в обычном строки
+        # идут как есть, и пометки расхождения в диагностике нет.
+        self.assertEqual(11, len(self.snapshot["queue"]["operators"]))
+        self.assertIsNone(self.snapshot["diagnostics"]["queue_rows_mismatch"])
+
+    def test_rows_mismatch_is_logged_with_the_page_structure_once_per_interval(self):
+        # Устройство такого кадра нужно увидеть, не снимая его руками, — но пока клиент
+        # ждёт, кадр приходит на каждом шаге опроса, и строка на шаг утопила бы лог.
+        records = []
+
+        class _Collector(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Collector(level=logging.WARNING)
+        previous_at = source._ROWS_MISMATCH_LOG["at"]
+        source._ROWS_MISMATCH_LOG["at"] = 0.0
+        source.logger.addHandler(handler)
+        try:
+            self._snapshot_of(waiting_call_page())
+            self._snapshot_of(waiting_call_page())
+            first_batch = list(records)
+            source._ROWS_MISMATCH_LOG["at"] -= source.ROWS_MISMATCH_LOG_INTERVAL_SECONDS + 1
+            self._snapshot_of(waiting_call_page())
+        finally:
+            source.logger.removeHandler(handler)
+            source._ROWS_MISMATCH_LOG["at"] = previous_at
+        self.assertEqual(1, len(first_batch), "второй кадр внутри интервала не должен писаться")
+        self.assertEqual(2, len(records), "после интервала кадр пишется снова")
+        line = first_batch[0]
+        self.assertIn("строки очереди не сошлись со счётчиком", line)
+        self.assertIn("разобрано строк сотрудников 12, а с тел. линией 11", line)
+        self.assertIn("устройство страницы", line)
+        self.assertNotIn(CLIENT_PHONE, line)
+        self.assertNotIn("Клиентова", line)
+
+    def test_log_failure_never_breaks_the_snapshot(self):
+        # Описание страницы пишется по кадру, которого никто не видел: упади оно на
+        # незнакомой разметке — снимок обязан собраться всё равно, оба табло из-за
+        # подсказки в логе гаснуть не должны.
+        records = []
+
+        class _Collector(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        def broken(html):
+            raise RuntimeError("незнакомая разметка")
+
+        handler = _Collector(level=logging.WARNING)
+        previous_at, previous_describe = source._ROWS_MISMATCH_LOG["at"], source.describe_queue_page
+        source._ROWS_MISMATCH_LOG["at"] = 0.0
+        source.describe_queue_page = broken
+        source.logger.addHandler(handler)
+        try:
+            snapshot, _session = self._snapshot_of(waiting_call_page())
+        finally:
+            source.logger.removeHandler(handler)
+            source.describe_queue_page = previous_describe
+            source._ROWS_MISMATCH_LOG["at"] = previous_at
+        self.assertIsNotNone(snapshot["queue"])
+        self.assertEqual(1, len(records))
+        self.assertIn("устройство страницы: не разобрано", records[0])
 
     def test_login_failure_kills_everything(self):
         # А вот вход — общая беда: следующие два запроса тоже вернут форму логина.

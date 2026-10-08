@@ -44490,6 +44490,26 @@ TEZ_WALLBOARD_JOURNAL_TTL_SECONDS = _env_int('TEZ_WALLBOARD_JOURNAL_TTL_SECONDS'
 # дальше этого возраста журнал считается пропавшим, и три плитки уходят в прочерк.
 TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS = _env_int('TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS', 600,
                                                  minimum=60, maximum=3600)
+# Сколько шаг табло ждёт уже идущую выкачку журнала, когда показать НЕЧЕГО: журнала за
+# сегодня нет вовсе либо он старше предельного возраста. Без ожидания первый снимок после
+# любой паузы (раздел открыли впервые за десять минут, прошёл деплой, сменились сутки)
+# уходил с прочерками в «Принято / Потеряно / AR» и висел так 20–40 секунд — это и есть
+# вторая половина жалобы «табло слетает» (разбор 08.10.2026). Выкачку заводим ДО обхода
+# кабинета, так что обычно она успевает сама и ждать не приходится вовсе.
+# Потолок короткий намеренно: на «too frequent» клиент API спит до ~37 с, и дождись мы его
+# под замком снимка целиком, стена встала бы у всех зрителей. Не успел — прочерк, как раньше.
+# Верхняя граница настройки ниже наименьшего срока кэша табло (10 с): ждущий шаг не должен
+# перекрывать следующий. Ноль выключает ожидание.
+TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS = _env_int('TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS', 4,
+                                              minimum=0, maximum=8)
+# Не чаще одной попытки выкачки за этот срок. Шаг табло обращается к журналу дважды (до
+# обхода кабинета и после него), и без паузы быстрый отказ API давал бы две попытки на шаг:
+# шесть запросов в минуту при лимите пять — табло само загоняло бы всех соседей по ключу в
+# «too frequent». Срок короче шага табло, так что следующий шаг пробует снова, как и раньше.
+TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS = 15
+# Сколько после отказа API шаг табло не ждёт журнал вовсе. Ожидание придумано для здорового
+# API (первый снимок после паузы); пока API подводит, оно только держало бы замок снимка.
+TEZ_WALLBOARD_JOURNAL_FAIL_QUIET_SECONDS = 120
 
 _TEZ_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
 _TEZ_WALLBOARD_DEPARTMENT_CACHE_TTL = 600
@@ -44500,8 +44520,13 @@ _tez_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': N
 _tez_wallboard_lock = threading.Lock()
 _tez_wallboard_session_holder = {'session': None}
 # Журнал звонков за сегодня: свой кэш, свой поток, свой последний удачный ответ.
+# 'done' — событие идущей выкачки: по нему шаг табло дожидается её конца (не дольше
+# TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS); 'fetching_day' — за какие сутки она идёт;
+# 'started_at' и 'failed_at' — когда выкачку последний раз заводили и когда она последний
+# раз не удалась; 'waited' — событие, которого уже прождали впустую.
 _tez_wallboard_journal_cache = {'ts': 0.0, 'day': None, 'calls': None, 'error': None,
-                                'fetching': False}
+                                'fetching': False, 'done': None, 'fetching_day': None,
+                                'started_at': 0.0, 'failed_at': 0.0, 'waited': None}
 _tez_wallboard_journal_lock = threading.Lock()
 # Состав отдела меняется кадровыми решениями, а не поминутно: держим его отдельным коротким
 # кэшем, чтобы каждый опрос табло не ходил в базу за одним и тем же списком из двадцати строк.
@@ -44881,68 +44906,124 @@ def _tez_wallboard_recall_list(roster):
     return out
 
 
-def _tez_wallboard_journal_worker(day_key):
-    """Один поход в Binotel API за журналом дня. Крутится в СВОЁМ потоке."""
-    from tez import binotel_calls as tez_binotel_calls
-    from tez import wallboard_source as tez_source
+def _tez_wallboard_journal_worker(day_key, done=None):
+    """Один поход в Binotel API за журналом дня. Крутится в СВОЁМ потоке.
 
+    done — событие этой выкачки: его ждёт шаг табло, которому нечего показать. Итог пишем
+    и событие взводим в finally: упади поход на чём угодно, ждущий обязан проснуться, а
+    флаг fetching — сняться, иначе журнал не обновлялся бы до перезапуска процесса."""
     calls, error = None, None
-    if not tez_binotel_calls.api_ready():
-        # Отдельная ветка ради внятного текста в диагностике: ключ API 4.0 — не тот же
-        # доступ, что логин кабинета, и «журнала нет» без причины искали бы долго.
+    try:
+        from tez import binotel_calls as tez_binotel_calls
+        from tez import wallboard_source as tez_source
+
+        if not tez_binotel_calls.api_ready():
+            # Отдельная ветка ради внятного текста в диагностике: ключ API 4.0 — не тот же
+            # доступ, что логин кабинета, и «журнала нет» без причины искали бы долго.
+            error = 'Ключ Binotel API не задан: TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET'
+        else:
+            try:
+                calls = tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)
+            except Exception as exc:
+                # Наружу текст ошибки уезжает в диагностику снимка, а requests пишет в него
+                # адрес API — чистим тем же правилом, что и ошибки кабинета.
+                error = tez_source._safe_reason(exc)[:200]
+                logging.warning("Табло Тез КЦ: журнал звонков за %s не прочитан: %s",
+                                day_key, error)
+    except Exception as exc:
+        # Упало не в самом запросе, а рядом с ним. В диагностике снимка должна остаться
+        # причина, а не пустое место, будто журнал просто ещё не докачался.
+        error = 'Сбой потока журнала: %s' % type(exc).__name__
+        raise
+    finally:
         with _tez_wallboard_journal_lock:
             _tez_wallboard_journal_cache['fetching'] = False
-            _tez_wallboard_journal_cache['error'] = (
-                'Ключ Binotel API не задан: TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET')
-        return
-    try:
-        calls = tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)
-    except Exception as exc:
-        # Наружу текст ошибки уезжает в диагностику снимка, а requests пишет в него адрес
-        # API — чистим тем же правилом, что и ошибки кабинета.
-        error = tez_source._safe_reason(exc)[:200]
-        logging.warning("Табло Тез КЦ: журнал звонков за %s не прочитан: %s", day_key, error)
-    with _tez_wallboard_journal_lock:
-        _tez_wallboard_journal_cache['fetching'] = False
-        _tez_wallboard_journal_cache['error'] = error
-        if calls is not None:
-            _tez_wallboard_journal_cache.update(ts=time.time(), day=day_key, calls=calls)
+            _tez_wallboard_journal_cache['error'] = error
+            if calls is not None:
+                _tez_wallboard_journal_cache.update(ts=time.time(), day=day_key, calls=calls,
+                                                    failed_at=0.0)
+            else:
+                _tez_wallboard_journal_cache['failed_at'] = time.time()
+        if done is not None:
+            done.set()
 
 
-def _tez_wallboard_journal(day_key):
-    """Журнал звонков за сегодня: (список звонков | None, возраст в секундах, ошибка).
+def _tez_wallboard_journal_peek(day_key):
+    """То, что лежит в кэше журнала прямо сейчас: (звонки | None, возраст, ошибка).
 
-    Возвращает то, что лежит в кэше, и при надобности заводит фоновое обновление. Шаг
-    табло этого потока НЕ ждёт: у API 4.0 лимит 5 запросов в минуту, и на «too frequent»
-    клиент честно спит по подсказке сервера — до ~37 секунд с ретраями. Дождись мы его в
-    общем замке снимка, и стена встала бы у всех зрителей разом.
-
-    Цена решения названа честно: первые секунды после старта процесса журнала ещё нет, и
-    три плитки ТП показывают прочерк. Это лучше, чем показать в них счётчик очереди —
-    у него другое определение (см. day_totals), и подмену никто бы не заметил.
-    """
-    now = time.time()
+    Ничего не заводит и не ждёт. Слишком старый журнал — это не «данные за сегодня», а
+    вчерашняя правда: день идёт, звонки приходят, а счётчики стоят. Лучше прочерк."""
     with _tez_wallboard_journal_lock:
         fresh = (_tez_wallboard_journal_cache.get('day') == day_key
                  and _tez_wallboard_journal_cache.get('calls') is not None)
-        age = (now - float(_tez_wallboard_journal_cache.get('ts') or 0.0)) if fresh else None
-        stale = (age is None) or (age > TEZ_WALLBOARD_JOURNAL_TTL_SECONDS)
-        if stale and not _tez_wallboard_journal_cache.get('fetching'):
-            _tez_wallboard_journal_cache['fetching'] = True
-            start = True
-        else:
-            start = False
+        age = ((time.time() - float(_tez_wallboard_journal_cache.get('ts') or 0.0))
+               if fresh else None)
         calls = _tez_wallboard_journal_cache.get('calls') if fresh else None
         error = _tez_wallboard_journal_cache.get('error')
+    if calls is not None and age is not None and age > TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS:
+        calls = None
+    return calls, age, error
+
+
+def _tez_wallboard_journal(day_key, wait_seconds=0):
+    """Журнал звонков за сегодня: (список звонков | None, возраст в секундах, ошибка).
+
+    Возвращает то, что лежит в кэше, и при надобности заводит фоновое обновление. Саму
+    выкачку шаг табло не выполняет: у API 4.0 лимит 5 запросов в минуту, и на «too
+    frequent» клиент честно спит по подсказке сервера — до ~37 секунд с ретраями. Дождись
+    мы его в общем замке снимка целиком, и стена встала бы у всех зрителей разом.
+
+    wait_seconds — сколько можно подождать уже идущую выкачку, когда показать нечего
+    (журнала нет или он слишком старый). Ждёт только сборка снимка и только коротко: это
+    убирает прочерки первого снимка после паузы, не отдавая стену на откуп медленному
+    API. Пока есть что показать — пусть и минутной давности, — не ждём вовсе.
+
+    Не успела выкачка — три плитки ТП показывают прочерк. Это лучше, чем подставить в них
+    счётчик очереди: у него другое определение (см. day_totals), и подмену никто бы не
+    заметил.
+    """
+    now = time.time()
+    with _tez_wallboard_journal_lock:
+        cache = _tez_wallboard_journal_cache
+        fresh = (cache.get('day') == day_key and cache.get('calls') is not None)
+        age = (now - float(cache.get('ts') or 0.0)) if fresh else None
+        stale = (age is None) or (age > TEZ_WALLBOARD_JOURNAL_TTL_SECONDS)
+        rested = (now - float(cache.get('started_at') or 0.0)
+                  >= TEZ_WALLBOARD_JOURNAL_RETRY_SECONDS)
+        start = bool(stale and not cache.get('fetching') and rested)
+        if start:
+            cache.update(fetching=True, fetching_day=day_key, started_at=now,
+                         done=threading.Event())
+        # Ждать имеет смысл только выкачку ЭТИХ суток: в полночь ещё может идти вчерашняя,
+        # и её конец нужного журнала не принесёт.
+        done = (cache.get('done')
+                if cache.get('fetching') and cache.get('fetching_day') == day_key else None)
+        # И только пока API не подводил и эту выкачку ещё не ждали впустую: иначе при
+        # медленном или отказывающем API каждый шаг держал бы замок снимка лишние секунды.
+        may_wait = (done is not None and cache.get('waited') is not done
+                    and now - float(cache.get('failed_at') or 0.0)
+                    >= TEZ_WALLBOARD_JOURNAL_FAIL_QUIET_SECONDS)
     if start:
         # Свой поток, а не общий пул: пул исполнителя бота делится с опросом Telegram, и
         # занимать в нём место ради минутного запроса нельзя (см. общий бюджет потоков).
-        threading.Thread(target=_tez_wallboard_journal_worker, args=(day_key,),
-                         name='tez-wallboard-journal', daemon=True).start()
-    # Слишком старый журнал — это не «данные за сегодня», а вчерашняя правда: день идёт,
-    # звонки приходят, а счётчики стоят. Лучше прочерк.
-    if calls is not None and age is not None and age > TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS:
-        calls = None
+        try:
+            threading.Thread(target=_tez_wallboard_journal_worker, args=(day_key, done),
+                             name='tez-wallboard-journal', daemon=True).start()
+        except Exception:
+            # Поток не завёлся (процесс упёрся в лимит потоков). Флаг снимаем сами — его
+            # больше некому снять, и журнал не качался бы до перезапуска; ждать тоже некого.
+            logging.exception("Табло Тез КЦ: поток журнала звонков не запустился")
+            with _tez_wallboard_journal_lock:
+                _tez_wallboard_journal_cache['fetching'] = False
+                _tez_wallboard_journal_cache['failed_at'] = time.time()
+            done.set()
+            may_wait = False
+    calls, age, error = _tez_wallboard_journal_peek(day_key)
+    if calls is None and may_wait and wait_seconds and wait_seconds > 0:
+        if not done.wait(wait_seconds):
+            with _tez_wallboard_journal_lock:
+                _tez_wallboard_journal_cache['waited'] = done
+        calls, age, error = _tez_wallboard_journal_peek(day_key)
     return calls, age, error
 
 
@@ -44951,6 +45032,12 @@ def _tez_wallboard_fetch_snapshot():
     from tez import wallboard_source as tez_source
 
     session = _tez_wallboard_session()
+    # Журнал заводим ДО обхода кабинета: обход идёт две-шесть секунд, и за это время
+    # выкачка обычно успевает сама. Тогда первый снимок после паузы выходит уже с
+    # «Принято / Потеряно / AR», а не с прочерками на 20–40 секунд. Сутки берём те же,
+    # что возьмёт обход, — по часам кабинета.
+    _tez_wallboard_journal(
+        tez_source.cabinet_today(getattr(session, 'tz_name', None)).strftime('%Y-%m-%d'))
     raw = tez_source.fetch_snapshot(
         session,
         with_endpoints=True,
@@ -45005,7 +45092,10 @@ def _tez_wallboard_fetch_snapshot():
         # очереди: счётчик не видит ни стадии обрыва, ни звонков, пришедших оператору мимо
         # очереди. Линию журнал не называет — её находим по своему же составу: линия ТП та,
         # на которой эти номера приняли больше всего входящих.
-        journal_calls, journal_age, journal_error = _tez_wallboard_journal(raw.get('day'))
+        # Показать нечего (журнала нет или он старше предельного возраста) — коротко ждём
+        # выкачку, заведённую перед обходом; есть что показать — не ждём вовсе.
+        journal_calls, journal_age, journal_error = _tez_wallboard_journal(
+            raw.get('day'), wait_seconds=TEZ_WALLBOARD_JOURNAL_WAIT_SECONDS)
         tp_line = tez_source.pick_line_number(journal_calls, tp_numbers)
         line_totals = tez_source.line_day_totals(
             journal_calls, tp_line, TEZ_WALLBOARD_ABANDON_FROM_SECONDS)
@@ -45226,6 +45316,13 @@ TEZ_BROADCAST_HOUR_MIN_CALLS = _env_int('TEZ_BROADCAST_HOUR_MIN_CALLS', 5, minim
 # спит по подсказке сервера — до ~37 с. Две минуты покрывают оба случая с запасом.
 TEZ_BROADCAST_JOURNAL_WAIT_SECONDS = _env_int('TEZ_BROADCAST_JOURNAL_WAIT_SECONDS', 120,
                                               minimum=10, maximum=600)
+# Через сколько отбивка переспрашивает снимок, если в первом не оказалось ТП. Строго больше
+# срока кэша табло: раньше него вернулся бы тот же самый снимок без ТП.
+TEZ_BROADCAST_TP_RETRY_SECONDS = TEZ_WALLBOARD_CACHE_TTL_SECONDS + 1
+# И через сколько — ещё раз, если на повтор пришёл не новый обход, а прежний снимок с
+# пометкой «устарел»: кабинет в эту секунду обходит зритель стены, и замок снимка занят.
+# Обход с ожиданием журнала укладывается в эти секунды, и ответ уже лежит в кэше.
+TEZ_BROADCAST_TP_RETRY_BUSY_SECONDS = 8
 # Сутки и часы отбивки — в поясе, в котором Binotel режет сутки журнала (list_calls_for_day).
 TEZ_BROADCAST_TIMEZONE = 'Asia/Almaty'
 
@@ -45656,8 +45753,13 @@ async def _tez_broadcast_journal(day_key, hour_end_ts):
         await asyncio.sleep(3)
 
 
-async def _tez_broadcast_prepare(now=None):
-    """Собрать отбивку целиком: данные, картинки и подпись. Один раз на всех получателей."""
+async def _tez_broadcast_prepare(now=None, retry_missing_tp=True):
+    """Собрать отбивку целиком: данные, картинки и подпись. Один раз на всех получателей.
+
+    retry_missing_tp — переспрашивать ли снимок, в котором не оказалось ТП. Плановой
+    отправке это нужно, чтобы не будить руководителя из-за одного кадра. Проверочная
+    отправка и предпросмотр показывают то, что есть сейчас, и ждут ответа с таймаутом:
+    им лишние полминуты ни к чему."""
     loop = asyncio.get_event_loop()
     now = now or datetime.now(ZoneInfo(TEZ_BROADCAST_TIMEZONE)).replace(tzinfo=None)
     hour_start, hour_end = _tez_broadcast_period(now)
@@ -45667,6 +45769,26 @@ async def _tez_broadcast_prepare(now=None):
     except Exception as exc:
         logging.error("Отбивка табло Тез КЦ: снимок Binotel не собрался: %s", exc)
         snapshot_error = str(exc)[:200]
+    if retry_missing_tp and snapshot is not None and not snapshot.get('tp'):
+        # Страница очереди не разобралась. Один кадр — ещё не «Binotel недоступен»: кабинет
+        # бывает пойман в момент пересчёта (07.10.2026 в 21:00:03 счётчики занятости пришли
+        # нулями), а отбивка снимает страницу раз в час и всегда в одну и ту же секунду.
+        # Прежде чем писать руководителю, что показателей ТП нет, спрашиваем ещё раз.
+        for pause in (TEZ_BROADCAST_TP_RETRY_SECONDS, TEZ_BROADCAST_TP_RETRY_BUSY_SECONDS):
+            logging.info("Отбивка табло Тез КЦ: в снимке нет ТП (%s), переспрашиваем через %s с",
+                         snapshot.get('tp_error'), pause)
+            await asyncio.sleep(pause)
+            try:
+                again = await loop.run_in_executor(executor_pool, _tez_wallboard_snapshot)
+            except Exception as exc:
+                logging.error("Отбивка табло Тез КЦ: повторный снимок Binotel не собрался: %s", exc)
+                break
+            if again.get('tp'):
+                snapshot = again
+                break
+            if not again.get('stale'):
+                # Новый обход, и ТП в нём снова нет — это уже не случайный кадр.
+                break
     calls, journal_error = None, None
     if snapshot is not None:
         hour_end_ts = hour_end.replace(tzinfo=ZoneInfo(TEZ_BROADCAST_TIMEZONE)).timestamp()
@@ -45697,7 +45819,7 @@ async def _tez_broadcast_send(chat_id):
 
     Пишет и в спокойный час (картинки есть всегда), а нарушения перерывов прочитанными НЕ
     помечает: проверка связи не должна отменять плановое предупреждение."""
-    data, text, media = await _tez_broadcast_prepare()
+    data, text, media = await _tez_broadcast_prepare(retry_missing_tp=False)
     await _szov_broadcast_deliver(chat_id, text, media)
     return data
 
@@ -45716,7 +45838,7 @@ def _tez_broadcast_preview():
         return jsonify({"error": "Бот не запущен"}), 503
     try:
         data, text, media = asyncio.run_coroutine_threadsafe(
-            _tez_broadcast_prepare(), loop).result(timeout=180)
+            _tez_broadcast_prepare(retry_missing_tp=False), loop).result(timeout=180)
     except Exception as exc:
         logging.error("Предпросмотр отбивки (Тез КЦ): данные не собрались: %s", exc)
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
