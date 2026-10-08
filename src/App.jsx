@@ -5,6 +5,7 @@ import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
 import ToastContainer from './components/common/ToastContainer';
+import { attachmentCache } from './components/wazzup/attachmentCache';
 // Смена «список ↔ страница сотрудника» — переходом браузера (View Transitions):
 // модуль крошечный и нужен до того, как ленивая страница загрузится.
 import { runPageTransition, usesViewTransitions } from './components/employees/pageTransition';
@@ -232,6 +233,9 @@ const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
+// Сторож смены верификатора в «Чатах ОП» — отдельным куском: он нужен полутора
+// десяткам людей и не должен ехать в общем бандле всему порталу.
+const WazzupShiftKeeper = lazyWithRetry(() => import('./components/wazzup/WazzupShiftKeeper'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
@@ -2100,16 +2104,29 @@ const canAccessAiQaForUser = (userLike) => (
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
+/* Верификатор отдела продаж: «Чаты ОП» ему открыты в режиме обработки — писать
+   клиентам, без показателей и второго аккаунта (решение владельца 08.10.2026).
+   Флаг считает сервер (_get_user_payload: wazzup_chat_operator): группа
+   верификаторов определяется моделью группы на сегодня, а не направлением, и
+   портал сам этого не выведет. Сам раздел у него закрыт, пока супервайзер не
+   отсканировал QR и не ввёл код из Telegram главы отдела — этот замок рисует
+   раздел (WazzupChatsView), а держит сервер (_wazzup_chat_reader_guard). */
+const isWazzupChatOperator = (userLike) => Boolean(
+    userLike?.wazzup_chat_operator ?? userLike?.wazzupChatOperator
+);
+
 /* «Чаты ОП» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
    отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
    переписку Wazzup, и по решению владельца её читают все глобальные админы;
    разборы ИИ им при этом не нужны и остаются закрытыми — иначе админ увидел бы
    и оценки операторов чужих отделов, и кнопки переоценки.
-   Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py. */
+   Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py, а для
+   верификатора — _wazzup_chat_access там же. */
 const canAccessVerifierChatsForUser = (userLike) => {
     // Наблюдатель «Маркетинга» вычитается ПЕРВЫМ: разбор звонков ему открыт, а
     // переписка Верификаторов в выданный ему перечень разделов не входит.
     if (isMarketingObserver(userLike)) return false;
+    if (isWazzupChatOperator(userLike)) return true;
     if (normalizeRole(userLike?.role) === 'super_admin') return true;
     // Глобальный админ — админ, не назначенный главой отдела: по решению
     // владельца переписку читают все такие админы. У главы с базовой
@@ -42727,6 +42744,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const [user, setUser] = useState(null);
+            useEffect(() => {
+                attachmentCache.setOwner(user?.id);
+                return () => attachmentCache.clear();
+            }, [user?.id]);
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isDepartmentHeadUser = isDepartmentHead(user);
@@ -62468,6 +62489,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         нет сам собой — тот уходит ранним return выше, и
                         предлагать установку до входа незачем. */}
                     <InstallAppPrompt />
+                    {/* Сторож смены верификатора. Здесь, а не в разделе «Чаты ОП»:
+                        смена идёт, пока открыт портал, а раздел размонтируется при
+                        уходе в «Вики» или «Мои смены». Ничего не рисует. */}
+                    {isWazzupChatOperator(user) && (
+                        <Suspense fallback={null}>
+                            <WazzupShiftKeeper
+                                userId={user.id}
+                                apiBaseUrl={API_BASE_URL}
+                                withAccessTokenHeader={withAccessTokenHeader}
+                            />
+                        </Suspense>
+                    )}
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
             );

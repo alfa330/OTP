@@ -1,8 +1,10 @@
-"""On-demand attachment preview and single-page OCR for the chat pilot.
+"""On-demand attachment preview and single-page OCR for chat processing.
 
 Only stored attachment URLs from Wazzup's media host are fetched. PDF rendering
 and normal text extraction happen in the browser; OCR receives one raster page.
-Neither files nor recognized text are persisted or logged here.
+Files are never stored. Recognized text is kept for a bounded time in process
+memory only (RecognizedTextCache), so that a page recognized once is not paid
+for again by the next operator; nothing is written to the database or logs.
 """
 import base64
 import binascii
@@ -20,10 +22,73 @@ from PIL import Image, UnidentifiedImageError
 MAX_FILE = 20 * 1024 * 1024
 MAX_IMAGE = 4 * 1024 * 1024
 MAX_BODY = 6 * 1024 * 1024
-_downloads = threading.BoundedSemaphore(2)
-_ocr_slots = threading.BoundedSemaphore(2)
+# Sized for a verifier shift rather than a single pilot user. Each download
+# holds a Waitress thread and up to MAX_FILE of memory while it runs.
+DOWNLOAD_SLOTS = 4
+OCR_SLOTS = 3
+_downloads = threading.BoundedSemaphore(DOWNLOAD_SLOTS)
+_ocr_slots = threading.BoundedSemaphore(OCR_SLOTS)
 _lock = threading.Lock()
 _usage = collections.OrderedDict()
+
+
+def _env_seconds(name, default):
+    try:
+        return max(0, int(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+class RecognizedTextCache:
+    """Recognized pages, kept in process memory for a bounded time.
+
+    The key is the page of a stored attachment, never the uploaded picture: the
+    question is "what does page N of this document say", and two operators
+    render the same page to slightly different pixels. Entries die with the
+    process, after `ttl` seconds, or when the size budget is exceeded.
+    """
+
+    def __init__(self, ttl=12 * 3600, max_items=600, max_chars=3_000_000, clock=time.monotonic):
+        self.ttl, self.max_items, self.max_chars, self.clock = ttl, max_items, max_chars, clock
+        self._items, self._chars, self._lock = collections.OrderedDict(), 0, threading.Lock()
+
+    def get(self, key):
+        """The stored text, or None. An empty string is a valid stored result."""
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if self.clock() - entry[0] > self.ttl:
+                self._drop(key)
+                return None
+            self._items.move_to_end(key)
+            return entry[1]
+
+    def put(self, key, text):
+        if self.ttl <= 0 or len(text) > self.max_chars:
+            return
+        with self._lock:
+            self._drop(key)
+            self._items[key] = (self.clock(), text)
+            self._chars += len(text)
+            while len(self._items) > self.max_items or self._chars > self.max_chars:
+                self._drop(next(iter(self._items)))
+
+    def _drop(self, key):
+        entry = self._items.pop(key, None)
+        if entry is not None:
+            self._chars -= len(entry[1])
+
+    def clear(self):
+        with self._lock:
+            self._items.clear()
+            self._chars = 0
+
+    def __len__(self):
+        return len(self._items)
+
+
+_ocr_cache = RecognizedTextCache(ttl=_env_seconds('WAZZUP_OCR_CACHE_SECONDS', 12 * 3600))
 
 
 class AttachmentError(Exception):
@@ -160,7 +225,9 @@ def _rate(user_id, action, limit):
 
 
 def register_attachment_routes(bp, actor, require_api_key, preflight, db, excluded_channels=(),
-                               fetch=None, recognize=None):
+                               fetch=None, recognize=None, ocr_cache=None):
+    ocr_cache = _ocr_cache if ocr_cache is None else ocr_cache
+
     def stored_attachment(data):
         if not isinstance(data, dict) or data.get('account') != 'op':
             raise AttachmentError('Недоступный аккаунт', 403)
@@ -221,10 +288,19 @@ def register_attachment_routes(bp, actor, require_api_key, preflight, db, exclud
             if request.content_length is None or request.content_length > MAX_BODY:
                 raise AttachmentError('Изображение страницы слишком большое', 413)
             body = request.get_json(silent=True)
-            stored_attachment(body)
+            url = stored_attachment(body)
             page = body.get('page', 1)
             if type(page) is not int or not 1 <= page <= 10000:
                 raise AttachmentError('Некорректный номер страницы')
+            # The lookup comes after the access checks above and before the
+            # limits below: a stored page costs neither a provider call nor a
+            # slot. refresh is the operator asking for a new attempt.
+            key = (body['channelId'], body['chatId'], body['messageId'], url, page)
+            if body.get('refresh') is not True:
+                stored = ocr_cache.get(key)
+                if stored is not None:
+                    return (jsonify(text=stored, source='ocr', page=page, cached=True), 200,
+                            {'Cache-Control': 'private, no-store'})
             _rate(user[0], 'ocr', 8)
             acquired = _ocr_slots.acquire(blocking=False)
             if not acquired:
@@ -233,6 +309,7 @@ def register_attachment_routes(bp, actor, require_api_key, preflight, db, exclud
             text = (recognize or recognize_page)(blob)
             if not isinstance(text, str) or len(text) > 32000:
                 raise AttachmentError('Не удалось распознать страницу', 502)
+            ocr_cache.put(key, text)
             return jsonify(text=text, source='ocr', page=page), 200, {'Cache-Control': 'private, no-store'}
         except AttachmentError as error:
             return jsonify(error=error.message), error.status

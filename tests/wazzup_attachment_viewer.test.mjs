@@ -30,6 +30,7 @@ await build({ entryPoints:[join(process.cwd(),'src/components/wazzup/ChatAttachm
     }}],
 });
 const {default:Viewer} = await import(pathToFileURL(output));
+const {createAttachmentCache} = await import('../src/components/wazzup/attachmentCache.js');
 const defer=()=>{let resolve,reject; const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const tick=()=>new Promise((resolve)=>setImmediate(resolve));
 const find=(node,predicate)=>{
@@ -42,12 +43,13 @@ const find=(node,predicate)=>{
 const label=(tree,value)=>find(tree,(node)=>node.props?.['aria-label']===value);
 const extractButton=(tree)=>find(tree,(node)=>node.type==='button'&&React.Children.toArray(node.props.children).includes(' Извлечь текст'));
 
-function fixture({get,post,getDocument}={}){
+function fixture({get,post,getDocument,cache}={}){
     const previous={document:globalThis.document,Image:globalThis.Image,create:URL.createObjectURL,revoke:URL.revokeObjectURL};
     const created=[],revoked=[],requests=[],posts=[],slots=[],listeners=new Map();
     let index=0,effects=[],unmounted=false,lateWrites=0;
     const props={apiBaseUrl:'/fixture',headers:()=>({Authorization:'fixture'}),
-        chat:{channelId:'channel',chatId:'chat'},message:{messageId:'message',contentUri:'https://store.wazzup24.com/a.pdf'},onClose:()=>{}};
+        chat:{channelId:'channel',chatId:'chat'},message:{messageId:'message',contentUri:'https://store.wazzup24.com/a.pdf'},onClose:()=>{},
+        cache:cache||createAttachmentCache()};
     globalThis.document={body:{},activeElement:null,addEventListener(name,handler){listeners.set(name,handler);},removeEventListener(name){listeners.delete(name);},
         createElement:(kind)=>kind==='canvas'?{width:0,height:0,getContext:()=>({fillRect(){},drawImage(){}}),toDataURL:()=> 'data:image/jpeg;base64,ZmFrZQ=='}:{} };
     globalThis.Image=class {naturalWidth=3000;naturalHeight=4000;async decode(){}};
@@ -270,5 +272,128 @@ test('PDF pages and attachment index are independent, and switching destroys pen
         assert.equal(selected,null,'PDF page controls must not select another attachment');
         assert.equal(find(tree,(node)=>node.props?.document?.numPages===7).props.number,2);
         assert.equal(label(tree,'Вложение 2: two.pdf').props['aria-pressed'],true);
+    }finally{h.restore();}
+});
+
+test('reopening an attachment reuses the downloaded file and the recognized text',async()=>{
+    const cache=createAttachmentCache();
+    let h=fixture({cache});
+    try{
+        h.render();await tick();
+        await extractButton(h.render()).props.onClick();
+        assert.equal(label(h.render(),'Извлечённый текст').props.value,'Recognized');
+        assert.equal(h.requests.length,1);assert.equal(h.posts.length,1);
+    }finally{h.restore();}
+    // The viewer was closed. Opening the same file again is a new component.
+    h=fixture({cache,get:()=>{throw new Error('must not download again');},
+        post:()=>{throw new Error('must not recognize again');}});
+    try{
+        let tree=h.render();
+        assert.equal(find(tree,(node)=>node.props?.role==='status'),null,'a cached image shows no progress indicator');
+        await tick();tree=h.render();
+        assert.equal(find(tree,(node)=>node.props?.role==='status'),null);
+        assert.equal(label(tree,'Извлечённый текст').props.value,'Recognized','stored recognition is shown without a request');
+        assert.equal(h.requests.length,0);assert.equal(h.posts.length,0);
+        assert.ok(find(tree,(node)=>node.type==='img'&&node.props.src==='blob:fixture-0'));
+        h.unmount();assert.deepEqual(h.revoked,['blob:fixture-0'],'the object URL is released, the cached file is not');
+        assert.equal(cache.stats().mediaItems,1);
+    }finally{h.restore();}
+});
+
+test('asking for recognition that is already on screen forces a new attempt',async()=>{
+    const answers=['First attempt','Second attempt'];
+    const h=fixture({post:()=>Promise.resolve({data:{text:answers.shift()}})});
+    try{
+        h.render();await tick();
+        await extractButton(h.render()).props.onClick();
+        assert.equal(h.posts[0][1].refresh,undefined,'the first request may be answered from the server cache');
+        await extractButton(h.render()).props.onClick();
+        assert.equal(h.posts.length,2);assert.equal(h.posts[1][1].refresh,true);
+        assert.equal(label(h.render(),'Извлечённый текст').props.value,'Second attempt');
+    }finally{h.restore();}
+});
+
+test('switching back to an attachment in the gallery does not download it twice',async()=>{
+    const h=fixture();
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>h.render({message})});await tick();
+        assert.equal(h.requests.length,1);
+        label(h.render(),'Следующее вложение').props.onClick();await tick();await tick();
+        const afterSecond=h.requests.length;
+        label(h.render(),'Предыдущее вложение').props.onClick();await tick();
+        assert.equal(h.requests.length,afterSecond,'the first photo comes from the cache');
+        assert.ok(find(h.render(),(node)=>node.type==='img'));
+    }finally{h.restore();}
+});
+
+test('a file the viewer cannot show is not kept',async()=>{
+    const cache=createAttachmentCache();
+    const h=fixture({cache,get:()=>Promise.resolve({data:new Blob(['PK'],{type:'application/zip'})})});
+    try{
+        h.render();await tick();await tick();
+        assert.ok(find(h.render(),(node)=>node.props?.role==='alert'));
+        assert.equal(cache.stats().mediaItems,0);
+    }finally{h.restore();}
+});
+
+test('a failed PDF parse is downloaded again when the operator retries',async()=>{
+    let parses=0;
+    const cache=createAttachmentCache();
+    const pdf={numPages:1};
+    const h=fixture({cache,get:()=>Promise.resolve({data:new Blob(['%PDF'],{type:'application/pdf'})}),
+        getDocument:()=>({promise:++parses===1?Promise.reject(new Error('Invalid PDF')):Promise.resolve(pdf),destroy:async()=>{}})});
+    try{
+        h.render();await tick();await tick();
+        const failed=h.render();
+        assert.ok(find(failed,(node)=>node.props?.role==='alert'));
+        assert.equal(cache.stats().mediaItems,0,'an unreadable download must not survive in the cache');
+        const retry=find(failed,(node)=>node.type==='button'&&node.props.children==='Повторить');
+        assert.ok(retry);retry.props.onClick();h.render();await tick();await tick();
+        assert.equal(h.requests.length,2);
+        assert.ok(find(h.render(),(node)=>node.props?.document===pdf));
+        assert.equal(cache.stats().mediaItems,1);
+    }finally{h.restore();}
+});
+
+test('a changed attachment URL or API cannot reuse the previous bytes or OCR',async()=>{
+    const h=fixture();
+    try{
+        h.render();await tick();
+        await extractButton(h.render()).props.onClick();
+        assert.equal(label(h.render(),'Извлечённый текст').props.value,'Recognized');
+        h.render({message:{messageId:'message',contentUri:'https://store.wazzup24.com/replacement.pdf'}});
+        await tick();
+        assert.equal(h.requests.length,2);
+        assert.equal(label(h.render(),'Извлечённый текст'),null);
+        await extractButton(h.render()).props.onClick();
+        h.render({apiBaseUrl:'/other-api'});await tick();
+        assert.equal(h.requests.length,3);
+        assert.equal(label(h.render(),'Извлечённый текст'),null);
+        assert.match(h.requests[2][0],/^\/other-api\//);
+    }finally{h.restore();}
+});
+
+test('a busy download slot is retried quietly before an error is shown',async()=>{
+    let calls=0;
+    const busy=Object.assign(new Error('busy'),{response:{status:429,data:{error:'Загрузка занята'}}});
+    const h=fixture({get:()=>{calls+=1;return calls===1?Promise.reject(busy):Promise.resolve({data:new Blob(['image'],{type:'image/png'})});}});
+    try{
+        h.render();await tick();
+        assert.equal(find(h.render(),(node)=>node.props?.role==='alert'),null);
+        await new Promise((resolve)=>setTimeout(resolve,750));await tick();
+        const tree=h.render();
+        assert.equal(calls,2);assert.equal(find(tree,(node)=>node.props?.role==='alert'),null);
+        assert.ok(find(tree,(node)=>node.type==='img'));
+    }finally{h.restore();}
+});
+
+test('a download cancelled during the quiet retry is not repeated',async()=>{
+    let calls=0;
+    const busy=Object.assign(new Error('busy'),{response:{status:429,data:{error:'Загрузка занята'}}});
+    const h=fixture({get:()=>{calls+=1;return Promise.reject(busy);}});
+    try{
+        h.render();await tick();h.unmount();
+        await new Promise((resolve)=>setTimeout(resolve,750));
+        assert.equal(calls,1);assert.equal(h.lateWrites,0);
     }finally{h.restore();}
 });

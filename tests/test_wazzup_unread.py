@@ -65,7 +65,7 @@ def body(seen='inbound-1', **updates):
 
 
 @pytest.mark.parametrize('actor', [user('other'), user(status='fired'), user(status='dismissal')])
-def test_unread_routes_remain_restricted_to_alfa330(actor):
+def test_unread_routes_remain_restricted_to_processing_users(actor):
     app, db, _, _ = fixture(db=MemoryDatabase(actor))
     with app.test_client() as client:
         assert client.get('/api/wazzup/pilot/unread').status_code == 403

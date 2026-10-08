@@ -18,10 +18,11 @@ from wazzup.realtime import EventBroker
 CHANNEL = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 
 
-def user(login='alfa330', active=True, status='working'):
+def user(role='super_admin', active=True, status='working'):
+    # Without an injected access policy only super admins may process chats.
     result = [None] * 20
-    result[0], result[2], result[7], result[10] = 42, 'Pilot Tester', login, active
-    result[11] = status
+    result[0], result[2], result[7], result[10] = 42, 'Pilot Tester', 'pilot-tester', active
+    result[3], result[11] = role, status
     return result
 
 
@@ -31,6 +32,7 @@ class MemoryDatabase:
     def __init__(self, actor=None):
         self.actor = user() if actor is None else actor
         self.outbox, self.messages, self.statements = {}, {}, []
+        self.outbox_authors, self.author_map = {}, {}
         self.lock, self.local = threading.RLock(), threading.local()
 
     def get_user(self, **_):
@@ -64,11 +66,18 @@ class MemoryCursor:
         elif sql.startswith('SELECT chat_type FROM wazzup_chats'):
             self.row = ('whatsapp',)
         elif sql.startswith('INSERT INTO wazzup_pilot_outbox'):
-            request_id, channel, chat, text, user_id, _name, reply_to, attachment_id = values
+            request_id, channel, chat, text, user_id, _name, reply_to, attachment_id, author_id = values
             if request_id not in self.db.outbox:
                 self.db.outbox[request_id] = ['op', channel, chat, text, user_id,
                                               'sending', None, None, None, reply_to, attachment_id]
+                self.db.outbox_authors[request_id] = author_id
                 self.row = (request_id,)
+        elif sql.startswith('INSERT INTO wazzup_operator_map'):
+            author_id, name, user_id, _updated_by = values
+            self.db.author_map.setdefault(author_id, (name, user_id))
+        elif sql.startswith('UPDATE wazzup_messages SET author_id='):
+            author_id, name, message_id = values
+            self.db.messages[message_id].update(authorId=author_id, authorName=name)
         elif sql.startswith('UPDATE wazzup_pilot_outbox SET state='):
             state, message_id, code, explanation, request_id = values
             self.db.outbox[request_id][5:9] = [state, message_id, code, explanation]
@@ -137,7 +146,7 @@ class RefreshDatabase:
         yield Cursor()
 
 
-def fixture(*, db=None, guard_denied=False, broker=None, transport=None, channels=None):
+def fixture(*, db=None, guard_denied=False, broker=None, transport=None, channels=None, access=None):
     db = db or MemoryDatabase()
     broker = broker or EventBroker()
     transport = transport or Mock()
@@ -152,7 +161,7 @@ def fixture(*, db=None, guard_denied=False, broker=None, transport=None, channel
         channels=channels or (lambda account: [{'channelId': CHANNEL, 'state': 'active',
                                                 'transport': 'whatsapp'}]),
         preflight=lambda: ('', 204), listen_connect=lambda: None,
-        transport=transport, event_broker=broker,
+        transport=transport, event_broker=broker, access=access,
     ))
     return app, db, broker, transport
 
@@ -167,8 +176,9 @@ class PilotRoutesTests(unittest.TestCase):
         self.body = dict(account='op', channelId=CHANNEL, chatId='77000000000',
                          text='Local fixture only', clientMessageId=str(uuid.uuid4()))
 
-    def test_only_active_alfa330_can_send_or_stream(self):
-        for actor in (user('someone-else'), user(status='fired'), user(status='dismissal')):
+    def test_only_active_super_admin_can_send_or_stream_without_a_policy(self):
+        for actor in (user('admin'), user('sv'), user('operator'),
+                      user(status='fired'), user(status='dismissal')):
             app, db, broker, transport = fixture(db=MemoryDatabase(actor))
             with app.test_client() as client:
                 for method, path in (('post', '/send'), ('get', '/stream'), ('post', '/refresh')):
@@ -187,13 +197,57 @@ class PilotRoutesTests(unittest.TestCase):
         self.assertEqual(201, self.client.post('/api/wazzup/pilot/send', json=self.body).status_code)
         self.transport.post.assert_called_once()
 
-    def test_existing_section_guard_is_required_even_for_alfa330(self):
+    def test_existing_section_guard_is_required_even_for_a_super_admin(self):
         app, db, _, transport = fixture(guard_denied=True)
         client = app.test_client()
         self.assertEqual(403, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
         self.assertEqual(403, client.get('/api/wazzup/pilot/stream').status_code)
         self.assertFalse(db.statements)
         transport.post.assert_not_called()
+
+    def test_injected_access_policy_decides_instead_of_the_role(self):
+        # The monolith's rule is the single source: a verifier with a confirmed
+        # session passes, a super admin the policy refuses does not.
+        for role, can_process, expected in (('operator', True, 201), ('super_admin', False, 403)):
+            app, db, _, transport = fixture(
+                db=MemoryDatabase(user(role)),
+                access=lambda can_process=can_process: {'mode': 'full', 'can_process': can_process})
+            with app.test_client() as client:
+                self.assertEqual(expected, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+                self.assertEqual(can_process, client.get('/api/wazzup/pilot').get_json()['enabled'])
+            self.assertEqual(1 if can_process else 0, transport.post.call_count)
+
+    def test_verifier_send_is_credited_to_the_sender(self):
+        # Wazzup echoes API sends as "Admin" with no author id; the reports would
+        # credit nobody. The claim carries our author key and binds it once.
+        app, db, _, _ = fixture(db=MemoryDatabase(user('operator')),
+                                access=lambda: {'mode': 'operator', 'can_process': True})
+        with app.test_client() as client:
+            self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        self.assertEqual('icore:42', db.outbox_authors[self.body['clientMessageId']])
+        self.assertEqual({'icore:42': ('Pilot Tester', 42)}, db.author_map)
+        stored = db.messages['vendor-message-1']
+        self.assertEqual(('icore:42', 'Pilot Tester'), (stored['authorId'], stored['authorName']))
+
+    def test_verifier_send_stamps_an_echo_that_arrived_first(self):
+        app, db, _, _ = fixture(db=MemoryDatabase(user('operator')),
+                                access=lambda: {'mode': 'operator', 'can_process': True})
+        db.messages['vendor-message-1'] = {'status': 'read', 'authorName': 'Admin', 'authorId': None}
+        with app.test_client() as client:
+            self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        stored = db.messages['vendor-message-1']
+        self.assertEqual(('icore:42', 'Pilot Tester', 'read'),
+                         (stored['authorId'], stored['authorName'], stored['status']))
+
+    def test_super_admin_send_stays_out_of_the_reports(self):
+        # As before the change: no author key, no mapping row, no stamp.
+        app, db, _, _ = fixture(access=lambda: {'mode': 'full', 'can_process': True})
+        db.messages['vendor-message-1'] = {'status': 'sent', 'authorName': 'Admin', 'authorId': None}
+        with app.test_client() as client:
+            self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        self.assertIsNone(db.outbox_authors[self.body['clientMessageId']])
+        self.assertFalse(db.author_map)
+        self.assertIsNone(db.messages['vendor-message-1']['authorId'])
 
     def test_global_and_other_account_are_rejected_before_database_or_http(self):
         for channel in pilot.EXCLUDED_CHANNELS:

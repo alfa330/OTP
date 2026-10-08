@@ -273,7 +273,7 @@ def register_template_routes(bp, actor, require_api_key, preflight, db,
                 except ValueError:
                     return jsonify(error='Некорректный канал'), 400
                 if channel_id in excluded_channels:
-                    return jsonify(error='Global исключён из пилота'), 403
+                    return jsonify(error='Global исключён из обработки'), 403
             with db._get_cursor() as cur:
                 cur.execute("SELECT id,title,body FROM wazzup_quick_templates "
                             "WHERE account='op' ORDER BY lower(title),id")

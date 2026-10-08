@@ -3,10 +3,13 @@ import axios from 'axios';
 import jsQR from 'jsqr';
 import {
     AlertCircle, Camera, CameraOff, CheckCircle2, Flashlight, FlashlightOff,
-    Keyboard, Loader2, QrCode, ShieldCheck, UserRound,
+    Keyboard, Loader2, MessagesSquare, QrCode, Send, ShieldCheck, UserRound,
 } from 'lucide-react';
 import { APPLE_FONT, IosModal, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
+import {
+    CHAT_ACCESS_CODE_DIGITS, cleanAccessCode, formatCountdown, isChatAccessQr,
+} from '../wazzup/workspaceStatus';
 import './qr-access.css';
 
 /**
@@ -31,6 +34,14 @@ import './qr-access.css';
  *
  * Ручной ввод кода остался, но ушёл вниз под кнопку: он нужен, когда камеры
  * нет вовсе (настольный браузер без веб-камеры) или в неё не дали доступ.
+ *
+ * ДВА ВИДА КОДА (08.10.2026). Обычный открывает «Обращения», «Вики» и оценки
+ * одним нажатием. Код верификатора из «Чатов ОП» (знак OTPW:) открывает
+ * обработку чатов, и одного нажатия ему мало: сам скан отправляет временный код
+ * в Telegram главе отдела, и доступ открывается, только когда подтверждающий
+ * этот код ввёл. Вид кода сканер узнаёт по знаку и идёт в свою ручку
+ * (/api/wazzup/workspace/*); экран при этом тот же — карточка с именем, только
+ * вместо «Открыть доступ» сразу под ней поле кода.
  */
 
 /* Как часто дёргаем кадр. Родной BarcodeDetector разбирает его за единицы
@@ -234,6 +245,15 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
     const [manualOpen, setManualOpen] = useState(false);
     const [manualValue, setManualValue] = useState('');
 
+    /* Код из Telegram — только у кода верификатора (см. шапку файла). */
+    const [accessCode, setAccessCode] = useState('');
+    const [codeError, setCodeError] = useState('');
+    /* Когда можно выслать код ещё раз (мс) и сколько до этого осталось секунд. */
+    const [resendAt, setResendAt] = useState(0);
+    const [resendLeft, setResendLeft] = useState(0);
+    const [resending, setResending] = useState(false);
+    const codeInputRef = useRef(null);
+
     const authHeaders = useCallback(
         () => ({ withCredentials: true, headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }),
         [withAccessTokenHeader, user?.id],
@@ -267,15 +287,23 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         stopScanner();
         setFailure('');
         setCandidate(null);
+        setAccessCode('');
+        setCodeError('');
         setChecking(true);
         try {
+            /* Код верификатора разбирает своя ручка: она же отправляет код в
+               Telegram главе отдела, поэтому отдельного «запросить код» нет. */
             const { data } = await axios.post(
-                `${apiBaseUrl}/api/sensitive-access/qr/preview`,
+                `${apiBaseUrl}${isChatAccessQr(pendingTokenRef.current)
+                    ? '/api/wazzup/workspace/scan' : '/api/sensitive-access/qr/preview'}`,
                 { token: pendingTokenRef.current },
                 authHeaders(),
             );
             if (!mountedRef.current) return;
-            if (data?.status === 'success') setCandidate(data);
+            if (data?.status === 'success') {
+                setResendAt(Date.now() + (Number(data.resendInSeconds) || 0) * 1000);
+                setCandidate(data);
+            }
             else setFailure(data?.error || 'Не удалось прочитать код');
         } catch (err) {
             if (!mountedRef.current) return;
@@ -428,13 +456,19 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         startScanner();
     }, [startScanner]);
 
-    const approve = useCallback(async () => {
+    /* typedCode — код, только что набранный в поле: подтверждение уходит само
+       на шестой цифре, а состояние к этому мигу ещё хранит пять. */
+    const approve = useCallback(async (typedCode) => {
         if (!candidate || granting) return;
+        const chat = candidate.scope === 'wazzup_chats';
+        const code = chat ? cleanAccessCode(typeof typedCode === 'string' ? typedCode : accessCode) : '';
+        if (chat && code.length !== CHAT_ACCESS_CODE_DIGITS) return;
         setGranting(true);
+        setCodeError('');
         try {
             const { data } = await axios.post(
-                `${apiBaseUrl}/api/sensitive-access/approve`,
-                { token: pendingTokenRef.current },
+                `${apiBaseUrl}${chat ? '/api/wazzup/workspace/approve' : '/api/sensitive-access/approve'}`,
+                chat ? { challengeId: candidate.challengeId, code } : { token: pendingTokenRef.current },
                 authHeaders(),
             );
             if (!mountedRef.current) return;
@@ -443,19 +477,79 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 /* Всплывающего уведомления здесь НЕТ намеренно: экран и так
                    говорит «Доступ открыт» с именем, а всплывашка садится ровно
                    на кнопку «Сканировать дальше» в подвале экрана. */
-                setGranted({ name: data.operator_name || candidate.operator_name });
+                setGranted({ name: data.operator_name || candidate.operator_name, chat });
             } else {
                 setCandidate(null);
                 setFailure(data?.error || 'Не удалось открыть доступ');
             }
         } catch (err) {
             if (!mountedRef.current) return;
+            const body = err.response?.data || {};
+            /* Ошибка в коде — не повод закрывать карточку: человек промахнулся
+               цифрой и вводит заново, а истёкший код заменяет новым тут же.
+               Карточку закрывает только отказ по существу (сессия завершена,
+               права сняли). */
+            if (chat && ['CODE_WRONG', 'CODE_EXPIRED', 'CODE_ATTEMPTS'].includes(body.code)) {
+                setAccessCode('');
+                setCodeError(body.error || 'Неверный код');
+                requestAnimationFrame(() => codeInputRef.current?.focus());
+                return;
+            }
             setCandidate(null);
-            setFailure(err.response?.data?.error || 'Не удалось открыть доступ');
+            setFailure(body.error || 'Не удалось открыть доступ');
         } finally {
             if (mountedRef.current) setGranting(false);
         }
-    }, [apiBaseUrl, authHeaders, candidate, granting]);
+    }, [apiBaseUrl, authHeaders, candidate, granting, accessCode]);
+
+    const resendCode = useCallback(async () => {
+        if (!candidate?.challengeId || resending) return;
+        setResending(true);
+        setCodeError('');
+        try {
+            const { data } = await axios.post(
+                `${apiBaseUrl}/api/wazzup/workspace/code`,
+                { challengeId: candidate.challengeId },
+                authHeaders(),
+            );
+            if (!mountedRef.current) return;
+            setAccessCode('');
+            setResendAt(Date.now() + (Number(data?.resendInSeconds) || 0) * 1000);
+            setCandidate((prev) => (prev ? { ...prev, ...data } : prev));
+            requestAnimationFrame(() => codeInputRef.current?.focus());
+        } catch (err) {
+            if (!mountedRef.current) return;
+            const wait = Number(err.response?.data?.resendInSeconds);
+            if (wait > 0) setResendAt(Date.now() + wait * 1000);
+            setCodeError(err.response?.data?.error || 'Не удалось отправить код');
+        } finally {
+            if (mountedRef.current) setResending(false);
+        }
+    }, [apiBaseUrl, authHeaders, candidate?.challengeId, resending]);
+
+    const onCodeInput = useCallback((event) => {
+        const value = cleanAccessCode(event.target.value);
+        setAccessCode(value);
+        setCodeError('');
+        if (value.length === CHAT_ACCESS_CODE_DIGITS) approve(value);
+    }, [approve]);
+
+    // Отсчёт до повторной отправки — только пока открыта карточка с кодом.
+    useEffect(() => {
+        if (!candidate?.challengeId) return undefined;
+        const tick = () => setResendLeft(Math.max(0, Math.ceil((resendAt - Date.now()) / 1000)));
+        tick();
+        const timer = setInterval(tick, 1000);
+        return () => clearInterval(timer);
+    }, [candidate?.challengeId, resendAt]);
+
+    // Поле кода получает фокус, когда карточка уже въехала: иначе клавиатура
+    // телефона поднимается посреди анимации и дёргает экран.
+    useEffect(() => {
+        if (!candidate?.challengeId) return undefined;
+        const timer = setTimeout(() => codeInputRef.current?.focus(), 320);
+        return () => clearTimeout(timer);
+    }, [candidate?.challengeId]);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -552,6 +646,10 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         : 'translate(-50%, -50%)';
     const sheetOpen = Boolean(checking || candidate || failure || granted);
     const closeSheet = granting ? () => {} : resumeScanning;
+    /* Код верификатора: подтверждение идёт с кодом из Telegram. Сессии, которой
+       доступ уже открыт, код не высылается — подтверждать там нечего. */
+    const chatCandidate = candidate?.scope === 'wazzup_chats';
+    const needsCode = chatCandidate && !candidate.already_granted;
 
     return (
         /* Внешняя обёртка только двигает колонку в центр ЭКРАНА мимо сайдбара
@@ -771,7 +869,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 open={sheetOpen}
                 onClose={closeSheet}
                 title={granted ? 'Доступ открыт' : (failure ? 'Код не принят' : 'Открыть доступ?')}
-                subtitle={granted || failure ? '' : 'Подтверждение по QR'}
+                subtitle={granted || failure ? '' : (chatCandidate ? 'Чаты ОП' : 'Подтверждение по QR')}
                 maxWidth="max-w-sm"
                 footer={granted ? (
                     <button type="button" onClick={scanAgain} className={`${iosBtnPrimary} w-full`}>
@@ -781,6 +879,10 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                     <button type="button" onClick={scanAgain} className={`${iosBtnPrimary} w-full`}>
                         <Camera size={16} />
                         Сканировать снова
+                    </button>
+                ) : candidate && chatCandidate && !needsCode ? (
+                    <button type="button" onClick={scanAgain} className={`${iosBtnPrimary} w-full`}>
+                        Сканировать дальше
                     </button>
                 ) : candidate ? (
                     <div className="flex w-full gap-2">
@@ -795,7 +897,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                         <button
                             type="button"
                             onClick={approve}
-                            disabled={granting}
+                            disabled={granting || (needsCode && accessCode.length !== CHAT_ACCESS_CODE_DIGITS)}
                             className={`${iosBtnPrimary} flex-1`}
                         >
                             {granting ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
@@ -828,7 +930,9 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                         </div>
                         <p className="text-[16px] font-semibold text-slate-900">{granted.name}</p>
                         <p className="max-w-xs text-[13px] leading-relaxed text-slate-500">
-                            Закрытые разделы у него откроются сами — обновлять страницу не нужно.
+                            {granted.chat
+                                ? 'Чаты у него откроются сами — обновлять страницу не нужно.'
+                                : 'Закрытые разделы у него откроются сами — обновлять страницу не нужно.'}
                         </p>
                     </div>
                 )}
@@ -861,10 +965,15 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
 
                         <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                             <div className="flex items-start gap-3 px-3.5 py-3">
-                                <ShieldCheck size={17} className="mt-0.5 shrink-0 text-blue-600" />
+                                {chatCandidate
+                                    ? <MessagesSquare size={17} className="mt-0.5 shrink-0 text-blue-600" />
+                                    : <ShieldCheck size={17} className="mt-0.5 shrink-0 text-blue-600" />}
                                 <p className="text-[13px] leading-relaxed text-slate-600">
-                                    Откроются «Обращения», «Вики» и «Посылки», а в оценках — полный номер
-                                    и записи разговоров.
+                                    {chatCandidate
+                                        ? 'Откроется обработка чатов в разделе «Чаты ОП»: сотрудник сможет '
+                                            + 'отвечать клиентам из портала.'
+                                        : 'Откроются «Обращения», «Вики» и «Посылки», а в оценках — полный номер '
+                                            + 'и записи разговоров.'}
                                 </p>
                             </div>
                             <div className="flex items-start gap-3 px-3.5 py-3">
@@ -876,9 +985,57 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                             </div>
                         </div>
 
+                        {needsCode && (
+                            <div>
+                                <label htmlFor="qr-access-code"
+                                    className="mb-2 block px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                    Код из Telegram
+                                </label>
+                                {/* Одно поле, а не шесть клеток: код вставляют из
+                                    сообщения целиком, и клетки ломают вставку на
+                                    половине телефонов. inputMode поднимает цифровую
+                                    клавиатуру, one-time-code — подсказку системы. */}
+                                <input
+                                    id="qr-access-code"
+                                    ref={codeInputRef}
+                                    value={accessCode}
+                                    onChange={onCodeInput}
+                                    disabled={granting}
+                                    inputMode="numeric"
+                                    autoComplete="one-time-code"
+                                    maxLength={CHAT_ACCESS_CODE_DIGITS + 2}
+                                    placeholder={'0'.repeat(CHAT_ACCESS_CODE_DIGITS)}
+                                    aria-invalid={Boolean(codeError)}
+                                    aria-describedby="qr-access-code-note"
+                                    className={`${iosInput} text-center text-[22px] font-semibold tracking-[0.35em] tabular-nums placeholder:font-normal placeholder:tracking-[0.35em] placeholder:text-slate-300 ${
+                                        codeError ? 'ring-2 ring-rose-400/70' : ''}`}
+                                />
+                                <p id="qr-access-code-note"
+                                    className={`mt-2 px-1 text-[12.5px] leading-relaxed ${codeError ? 'text-rose-600' : 'text-slate-500'}`}>
+                                    {/* Не пояснение к полю, а единственное, чего подтверждающий
+                                        не знает сам: у кого спросить код. */}
+                                    {codeError || `Отправлен главе отдела${candidate.codeSentTo ? `: ${candidate.codeSentTo}` : ''}`}
+                                </p>
+                                {candidate.canResend !== false && (
+                                    <div className="mt-1 flex justify-center">
+                                        <button type="button" onClick={resendCode}
+                                            disabled={resending || granting || resendLeft > 0}
+                                            className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium text-blue-600 transition hover:bg-blue-50 active:scale-[0.98] disabled:text-slate-400 disabled:hover:bg-transparent">
+                                            {resending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                                            {resendLeft > 0
+                                                ? `Отправить ещё раз через ${formatCountdown(resendLeft)}`
+                                                : 'Отправить код ещё раз'}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {candidate.already_granted && (
                             <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] leading-relaxed text-amber-700">
-                                Этой сессии доступ уже открыт — подтверждение ничего не изменит.
+                                {chatCandidate
+                                    ? 'Этой сессии доступ к чатам уже открыт — подтверждать нечего.'
+                                    : 'Этой сессии доступ уже открыт — подтверждение ничего не изменит.'}
                             </p>
                         )}
                     </div>

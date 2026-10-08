@@ -4,14 +4,16 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
-export default function useChatPilot({ apiBaseUrl, user, account, active, headers,
+export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, headers,
     selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
     const latest = useRef({});
     latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes };
-    const eligible = String(user?.login || '').trim().toLowerCase() === 'alfa330' && account === 'op';
+    // mayProcess is the caller's hint about who can process chats at all; it only
+    // spares everyone else the capability request. The server's answer decides.
+    const eligible = Boolean(mayProcess) && account === 'op';
     useEffect(() => {
         const change = () => setVisible(!document.hidden);
         document.addEventListener('visibilitychange', change);

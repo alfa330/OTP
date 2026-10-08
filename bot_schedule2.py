@@ -1297,6 +1297,25 @@ def _get_user_payload(user):
         except Exception:
             logging.exception("Не удалось определить модель направления пользователя %s", user_id)
 
+    # Верификатор отдела продаж: «Чаты ОП» ему открыты в режиме обработки, за
+    # сканом QR и кодом из Telegram главы отдела (wazzup/access.py). Группа
+    # верификаторов определяется моделью группы на сегодня, а не направлением,
+    # поэтому портал сам этого не выведет — пункт меню он рисует по флагу.
+    # Спрашиваем только у рядовых операторов продаж: остальным флаг не положен, и
+    # лишний запрос на каждый вход был бы платой ни за что. Отказ базы вход не
+    # роняет: без флага пункта просто не будет, а границу держит сервер.
+    wazzup_chat_operator = False
+    if (user_id is not None and str(role or '').strip().lower() == 'operator'
+            and (str(department_code or '').strip().lower() == 'op'
+                 or department_id == AI_QA_OP_DEPARTMENT_ID)):
+        try:
+            with db._get_cursor() as cursor:
+                wazzup_chat_operator = bool(wazzup_access.load_operator_state(
+                    cursor, user_id, None, datetime.now(ZoneInfo('Asia/Almaty')).date(),
+                    AI_QA_OP_DEPARTMENT_ID)['verifier'])
+        except Exception:
+            logging.exception("Не удалось определить режим «Чатов ОП» пользователя %s", user_id)
+
     # Сидит ли человек на линии удалённого КЦ, числясь в другом отделе (раздел
     # «Удаленный КЦ», вкладка «Линии»). По флагу портал показывает ему «Скачать
     # iCore Phone»; сам доступ к файлу проверяет _can_download_icore_phone.
@@ -1322,6 +1341,7 @@ def _get_user_payload(user):
         "department_code": department_code,
         "dial_list_line_member": dial_list_line_member,
         "baiga_access": baiga_access,
+        "wazzup_chat_operator": wazzup_chat_operator,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -5827,6 +5847,92 @@ def _verifier_chats_guard():
     return None, (jsonify({"error": "forbidden"}), 403)
 
 
+def _wazzup_chat_access():
+    """Режим раздела «Чаты ОП» для человека запроса: кто он в разделе и может
+    ли писать клиентам. Одно правило на ленту, отправку, статусы смены и флаг
+    профиля (wazzup/access.py; решения владельца 08.10.2026).
+
+        mode 'full'      прежняя аудитория раздела (_verifier_chats_guard):
+                         переписка, показатели, привязка. Писать клиентам из неё
+                         может только супер-админ («пока что суперадмины»);
+        mode 'operator'  верификатор: только аккаунт «op» в режиме обработки, и
+                         только пока его сессии подтверждён доступ — супервайзер
+                         отсканировал QR и ввёл код, пришедший главе отдела;
+                         до этого locked=True;
+        mode None        раздел закрыт.
+
+    Считается один раз на запрос: в одном запросе его спрашивают и гард ручки,
+    и отправка, и авторство сообщения."""
+    try:
+        cached = getattr(g, '_wazzup_chat_access', None)
+    except RuntimeError:
+        cached = None
+    if cached is not None:
+        return cached
+    requester_id = getattr(g, 'user_id', None)
+    state = {'user_id': requester_id, 'mode': None, 'locked': False, 'can_process': False}
+    if requester_id is not None:
+        full_id, _full_error = _verifier_chats_guard()
+        if full_id is not None:
+            user = db.get_user(id=requester_id)
+            state.update(
+                mode=wazzup_access.MODE_FULL,
+                can_process=bool(user and wazzup_access.processes_without_gate(
+                    _normalize_user_role(user[3]), user[11] if len(user) > 11 else None)))
+        else:
+            try:
+                with db._get_cursor() as cursor:
+                    operator = wazzup_access.load_operator_state(
+                        cursor, requester_id, _current_session_id_from_access_token(),
+                        datetime.now(ZoneInfo('Asia/Almaty')).date(), AI_QA_OP_DEPARTMENT_ID)
+            except Exception:
+                # Не узнали — считаем закрытым: раздел с перепиской не открывается «на всякий случай».
+                logging.exception("Чаты ОП: не удалось определить режим раздела для %s", requester_id)
+                operator = {'verifier': False, 'unlocked': False}
+            if operator['verifier']:
+                state.update(mode=wazzup_access.MODE_OPERATOR, locked=not operator['unlocked'],
+                             can_process=bool(operator['unlocked']))
+    try:
+        g._wazzup_chat_access = state
+    except RuntimeError:
+        pass
+    return state
+
+
+def _wazzup_chat_reader_guard():
+    """Каналы, список чатов и лента «Чатов ОП» — то, из чего состоит обработка.
+
+    Проходит прежняя аудитория раздела и верификатор с подтверждённым доступом.
+    Верификатору — только аккаунт «op»: «Поток» ведут другие люди, и в его
+    режиме раздела этого аккаунта нет вовсе. Показатели, привязка авторов и
+    список аккаунтов остаются под _verifier_chats_guard и ему закрыты."""
+    state = _wazzup_chat_access()
+    if state['mode'] == wazzup_access.MODE_FULL:
+        return state['user_id'], None
+    if state['mode'] == wazzup_access.MODE_OPERATOR:
+        if state['locked']:
+            return None, (jsonify({"error": "Доступ к чатам не подтверждён",
+                                   "code": "CHAT_ACCESS_LOCKED"}), 403)
+        if _wazzup_account_arg() != 'op':
+            return None, (jsonify({"error": "forbidden"}), 403)
+        return state['user_id'], None
+    return None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _wazzup_chat_approver_context(approver_id):
+    """Вправе ли человек вообще подтверждать доступ к чатам и какие у него отделы.
+
+    Круг тот же, что у обычного QR (_resolve_sensitive_qr_target): админ,
+    супервайзер или глава отдела — главу пускаем независимо от базовой роли.
+    Чей именно доступ он вправе открыть, решает _sensitive_access_approval_error."""
+    approver = db.get_user(id=approver_id)
+    headed_ids = [d['id'] for d in (db.get_headed_departments_for_user(approver_id) or [])]
+    if not approver or not (_is_privileged_role(approver[3]) or headed_ids):
+        return None, ("Подтвердить доступ может администратор, супервайзер или глава отдела", 403)
+    return {'approver': approver, 'headed_department_ids': headed_ids,
+            'department_id': db.get_user_department_id(approver_id)}, None
+
+
 def _ai_qa_direction_scope(requester_id):
     """Скоуп данных раздела ИИ-оценки ПО НАПРАВЛЕНИЯМ. None — без ограничений
     (супер-админ / глобальный админ / глава отдела / whitelist); список
@@ -8688,7 +8794,7 @@ def _wazzup_channels_from_api(account='op'):
 def api_wazzup_channels():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8728,7 +8834,7 @@ def api_wazzup_channels():
 def api_wazzup_chats():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8788,7 +8894,7 @@ def api_wazzup_chats():
 def api_wazzup_chat_messages():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8832,20 +8938,60 @@ def api_wazzup_chat_messages():
 # правилом забор истории «Потока» строит ключ автора (там id автора нет).
 from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
 from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
+from wazzup import access as wazzup_access  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
 
+# Обработка чатов (отправка, живые обновления, заметки, вложения). Гард — тот
+# же, что у ленты: пройти его мало, право писать решает _wazzup_chat_access.
+# Каждый живой поток держит нить waitress на всё время соединения, а нитей на
+# портал ~96 и из них же берут колокол и аукцион — отсюда потолок.
 app.register_blueprint(build_pilot_blueprint(
-    db=db, require_api_key=require_api_key, guard=_verifier_chats_guard,
+    db=db, require_api_key=require_api_key, guard=_wazzup_chat_reader_guard,
     channels=_wazzup_channels_from_api,
     preflight=_build_cors_preflight_response,
     listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
     gcs={'client': get_gcs_client, 'bucket_name': lambda: (
         os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()},
+    access=_wazzup_chat_access,
+    stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+
+# Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (скан QR + код из
+# Telegram главы отдела) и статусы смены. Статусы ложатся в operator_status_events
+# тем же append_operator_status_event, что события iCORE Phone, — часы, опоздания
+# и «Графики работы» считаются без второго источника. Сторож
+# (_wazzup_workspace_sweep) закрывает смену, чей портал замолчал.
+_wazzup_workspace_sweep = None
+try:
+    from wazzup import workspace_routes as wazzup_workspace_routes  # noqa: E402
+
+    _wazzup_workspace_bp = wazzup_workspace_routes.build_wazzup_workspace_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        chat_access=_wazzup_chat_access,
+        current_session_id=_current_session_id_from_access_token,
+        approver_context=_wazzup_chat_approver_context,
+        approval_perimeter_error=_sensitive_access_approval_error,
+        send_telegram=lambda chat_id, text: _send_telegram_text_message(
+            chat_id=chat_id, text=text, parse_mode='HTML'),
+        secret=SENSITIVE_QR_SECRET,
+        sales_department_id=AI_QA_OP_DEPARTMENT_ID,
+        role_label=lambda role: SENSITIVE_ACCESS_ROLE_LABELS.get(_normalize_user_role(role), ''),
+        avatar_url=lambda user: (_build_avatar_signed_url(user[15], user[16])
+                                 if len(user) > 16 else None),
+        presence_timeout_seconds=_env_int('WAZZUP_WORKSPACE_PRESENCE_TIMEOUT_SECONDS', 600,
+                                          minimum=180, maximum=3600),
+    )
+    _wazzup_workspace_sweep = _wazzup_workspace_bp.sweep
+    app.register_blueprint(_wazzup_workspace_bp)
+    logging.info("Чаты ОП: рабочее место подключено на /api/wazzup/workspace")
+except Exception:
+    logging.exception("Чаты ОП: рабочее место НЕ подключено")
 
 
 def _wazzup_account_arg():
@@ -68871,6 +69017,18 @@ async def run_wazzup_potok_sync_async():
         logging.exception("wazzup potok sync failed")
 
 
+async def run_wazzup_workspace_sweep_async():
+    # Сторож смен верификаторов в «Чатах ОП» — полтора десятка точечных чтений, но в пул
+    # бота не кладём: пул общий и маленький ([[shared-executor-pool-budget]]), а сторож не срочный.
+    if _wazzup_workspace_sweep is None:
+        return None
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _wazzup_workspace_sweep)
+    except Exception:
+        logging.exception("wazzup workspace sweep failed")
+
+
 async def run_user_sessions_retention_async():
     # Чистка давно протухших сессий (см. db.cleanup_expired_user_sessions).
     loop = asyncio.get_event_loop()
@@ -70041,6 +70199,18 @@ if __name__ == '__main__':
         CronTrigger(minute='3,13,23,33,43,53', timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_potok_sync_10min',
         misfire_grace_time=300,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Сторож смен верификаторов в «Чатах ОП»: смена, чей портал молчит дольше порога,
+    # закрывается моментом последней отметки (wazzup/shift.py). Каждая отметка проверяет то
+    # же самое сама, так что сторож нужен тем, кто закрыл вкладку и больше не вернулся.
+    scheduler.add_job(
+        run_wazzup_workspace_sweep_async,
+        CronTrigger(minute='*/2', timezone=ZoneInfo('Asia/Almaty')),
+        id='wazzup_workspace_sweep_2min',
+        misfire_grace_time=120,
         max_instances=1,
         coalesce=True
     )

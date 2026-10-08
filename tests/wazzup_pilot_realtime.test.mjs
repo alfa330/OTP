@@ -15,7 +15,7 @@ function harness(overrides = {}) {
     const slots = [], timers = new Map(), streams = [];
     let now = 0, timerId = 0, index = 0, dirty = true, mounted = true, effects = [], output;
     const calls = { capability: 0, thread: 0, list: 0 };
-    const options = { apiBaseUrl: '/fixture', user: { login: 'alfa330' }, account: 'op', active: true,
+    const options = { apiBaseUrl: '/fixture', mayProcess: true, account: 'op', active: true,
         headers: () => ({ Authorization: 'fixture' }), selected: { channelId: 'c', chatId: 'one' },
         refreshThread: async () => { calls.thread++; }, refreshList: async () => { calls.list++; }, ...overrides };
     let visibility;
@@ -92,7 +92,9 @@ function harness(overrides = {}) {
 }
 
 test('pilot opens no realtime or capability request for other users/accounts', async () => {
-    for (const options of [{ user: { login: 'operator' } }, { account: 'potok' }]) {
+    // mayProcess is the caller's hint (verifier or super admin); everyone else
+    // reads the archive and must not cost a capability request or a stream.
+    for (const options of [{ mayProcess: false }, { mayProcess: undefined }, { account: 'potok' }]) {
         const h = harness(options); await h.flush();
         assert.equal(h.calls.capability, 0); assert.equal(h.streams.length, 0);
         await h.close(); assert.equal(h.timers.size, 0);

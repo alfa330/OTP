@@ -30,7 +30,14 @@ import useInternalNotes from './useInternalNotes';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
+import ChatAccessGate from './ChatAccessGate';
+import ShiftStartScreen from './ShiftStartScreen';
+import ShiftStatusMenu from './ShiftStatusMenu';
+import { configureWorkspace, loadWorkspace, useWorkspace } from './workspaceStore';
+import { attachmentCache } from './attachmentCache';
+import { normalizeRole } from '../../utils/roles';
 import './chatThread.css';
+import './workspace.css';
 
 const ChatAttachmentViewer = lazy(() => import('./ChatAttachmentViewer'));
 
@@ -892,19 +899,36 @@ function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
     );
 }
 
-export default function WazzupChatsView(props) {
+/* Сам раздел: каналы, список чатов, лента и всё, что вокруг них.
+ *
+ * operator — раздел открыт верификатору в режиме обработки (OperatorWorkspace
+ * ниже). Ему оставлено только рабочее: чаты аккаунта «Верификаторы» и кнопка
+ * статуса смены (toolbar) рядом с «Обновить». Второго аккаунта, показателей с
+ * привязкой и ссылок в сам Wazzup в этом режиме нет — постановка владельца
+ * 08.10.2026, и сервер их верификатору тоже не отдаёт (_wazzup_chat_reader_guard).
+ * entering — окно только что открылось кнопкой «Начать смену» (workspace.css). */
+function ChatsWorkspace(props) {
     /* initialChat — цель перехода по ссылке (chatLink.js): либо пара
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
-    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user,
+        operator = false, toolbar = null, entering = false } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
+    /* Кому вообще есть смысл спрашивать сервер про обработку: верификатору и
+       супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
+       /api/wazzup/pilot; она лишь избавляет остальных от запроса и живого потока. */
+    const mayProcess = operator || normalizeRole(user?.role) === 'super_admin';
+    /* Открытые вложения и распознанный текст держатся в памяти вкладки
+       (attachmentCache.js) — и принадлежат одному человеку: вошёл другой, и
+       накопленное сбрасывается. */
+    useEffect(() => { attachmentCache.setOwner(user?.id); }, [user?.id]);
     const [mainTab, setMainTab] = useState('chats');
 
     /* Аккаунт Wazzup, в который смотрит раздел. Стартовый — из ссылки на чат
        (account=potok), иначе основной. Загрузчики читают аккаунт через ref, а
        не из state: переход по ссылке на чат «Потока» переключает аккаунт и в том
        же тике грузит чат — state к этому моменту ещё старый. */
-    const [account, setAccount] = useState(normalizeWazzupAccount(initialChat?.account));
+    const [account, setAccount] = useState(operator ? 'op' : normalizeWazzupAccount(initialChat?.account));
     const accountRef = useRef(account);
     accountRef.current = account;
     const [accounts, setAccounts] = useState(null);      // из /api/wazzup/accounts
@@ -973,7 +997,8 @@ export default function WazzupChatsView(props) {
         const row = [...(threadBox.current?.querySelectorAll('[data-message-id]') || [])]
             .find((node) => node.dataset.messageId === messageId);
         if (!row) {
-            showToast?.('Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
+            showToast?.(operator ? 'Исходное сообщение не загружено. Нажмите «Более ранние».'
+                : 'Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
             return;
         }
         clearTimeout(quoteHighlight.current.timer);
@@ -983,7 +1008,7 @@ export default function WazzupChatsView(props) {
         quoteHighlight.current = { node: row, timer: setTimeout(() => {
             row.removeAttribute('data-quote-highlight');
         }, 1400) };
-    }, [showToast]);
+    }, [showToast, operator]);
     useEffect(() => {
         setReplySelection(null);
         setAttachmentSelection(null);
@@ -1000,7 +1025,7 @@ export default function WazzupChatsView(props) {
     const liveChatSummaries = useRef({ seq: 0, items: new Map() });
     const [unreadOnly, setUnreadOnly] = useState(false);
     const unread = useSharedChatUnread({
-        enabled: account === 'op' && String(user?.login || '').toLowerCase() === 'alfa330',
+        enabled: account === 'op' && mayProcess,
         active: mainTab === 'chats', selected, thread, box: threadBox, apiBaseUrl, headers,
     });
 
@@ -1209,7 +1234,7 @@ export default function WazzupChatsView(props) {
             list: relevant.some((event) => event.affectsList !== false && !event.chat),
         };
     };
-    const pilot = useChatPilot({ apiBaseUrl, user, account, active: mainTab === 'chats', headers,
+    const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
         onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
@@ -1237,13 +1262,15 @@ export default function WazzupChatsView(props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pilot.enabled, pilotChatKey(account, selected), thread === null, threadLoadingMore]);
 
-    useEffect(() => { loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+    // Список аккаунтов нужен переключателю, а у верификатора его нет (и ручка ему закрыта).
+    useEffect(() => { if (!operator) loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
 
     /* Переключение аккаунта — это смена источника целиком: каналы, список,
        открытая переписка и поиск относятся к прошлому аккаунту и сбрасываются.
        Ref обновляем сразу, чтобы загрузчики этого же тика пошли в новый аккаунт. */
     const switchAccount = (next) => {
         const key = normalizeWazzupAccount(next);
+        if (operator && key !== 'op') return;
         if (key === accountRef.current) return;
         accountRef.current = key;
         setAccount(key);
@@ -1312,6 +1339,10 @@ export default function WazzupChatsView(props) {
         const target = initialChat;
         if (!target) return;
         const targetAccount = normalizeWazzupAccount(target.account);
+        if (operator && targetAccount !== 'op') {
+            onInitialChatConsumed?.();
+            return;
+        }
         const key = `${targetAccount}:${target.channelId ? `${target.channelId}/${target.chatId}` : target.phone}`;
         if (!target.channelId && !target.phone) return;
         if (initialChatDone.current === key) return;
@@ -1482,19 +1513,27 @@ export default function WazzupChatsView(props) {
         </SegButton>
     );
 
+    /* Связь с живыми обновлениями показываем, только когда с ней что-то не так:
+       «подключено» — обычное состояние, и строка о нём стояла бы в шапке весь
+       день ни о чём. Первые секунды подключения — тоже не новость. */
+    const connectionNote = pilot.enabled && mainTab === 'chats' ? ({
+        reconnecting: 'Восстанавливаем связь…',
+        unavailable: 'Живые обновления недоступны — нажмите «Обновить»',
+    })[pilot.connection] : '';
+
     return (
-        <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
+        <div className={`w-full ${entering ? 'wz-workspace-enter' : ''}`} style={{ fontFamily: APPLE_FONT }}>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
-                    <p className="text-xs text-slate-500">
-                        Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
-                    </p>
-                    {pilot.enabled && mainTab === 'chats' && (
-                        <p role="status" className={`mt-1 text-xs ${pilot.connection === 'live' ? 'text-emerald-600' : 'text-amber-600'}`}>
-                            Пилот alfa330 · {({ live: 'Живые обновления подключены', connecting: 'Подключение…',
-                                reconnecting: 'Восстанавливаем связь…', paused: 'Обновления на паузе',
-                                unavailable: 'Живые обновления недоступны — нажмите «Обновить»' })[pilot.connection]}
+                    {!operator && (
+                        <p className="text-xs text-slate-500">
+                            Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
+                        </p>
+                    )}
+                    {connectionNote && (
+                        <p role="status" className={`text-xs text-amber-600 ${operator ? '' : 'mt-1'}`}>
+                            {connectionNote}
                         </p>
                     )}
                 </div>
@@ -1502,6 +1541,7 @@ export default function WazzupChatsView(props) {
                     {/* Аккаунт Wazzup: «Верификаторы» и «Поток» — два разных аккаунта
                         с разной перепиской и своими показателями; переключатель
                         меняет источник всего раздела. Счётчик — чатов в окне хранения. */}
+                    {!operator && <>
                     <div className="flex rounded-xl bg-slate-100 p-1" data-testid="wazzup-account-switch">
                         {accountList.map((a) => (
                             <button key={a.key} onClick={() => switchAccount(a.key)}
@@ -1527,6 +1567,8 @@ export default function WazzupChatsView(props) {
                        className={iosBtnGhost}>
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
+                    </>}
+                    {toolbar}
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить
@@ -1540,8 +1582,10 @@ export default function WazzupChatsView(props) {
                               account={account} />
             )}
 
-            <div className={`${iosCard} flex overflow-hidden`}
-                 style={{ height: 'calc(100vh - 170px)', minHeight: 420,
+            {/* У верификатора шапка на строку ниже (нет подписи под заголовком) —
+                эта строка отдана окну. */}
+            <div className={`${iosCard} wz-columns flex overflow-hidden`}
+                 style={{ height: operator ? 'calc(100vh - 154px)' : 'calc(100vh - 170px)', minHeight: 420,
                           display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
                 <ChatChannelsSidebar channels={activeChannels} selectedChannelId={channelId}
@@ -1667,10 +1711,12 @@ export default function WazzupChatsView(props) {
                                 хранения в портале и осталась только в самом Wazzup. Стоит
                                 проверить номер и поискать вручную.
                             </span>
+                            {!operator && (
                             <a href={deepLinkChatUrl || workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
                                className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
                                 <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
                             </a>
+                            )}
                         </div>
                     )}
                     {!selected && !deepLinkResolving && !deepLinkMiss && !deepLinkMany && (
@@ -1722,7 +1768,7 @@ export default function WazzupChatsView(props) {
                                         неизвестен, а он стоит в адресе Wazzup: ссылка
                                         собралась бы наугад «как whatsapp» и у чата
                                         другого транспорта вела бы в пустоту. */}
-                                    {selected.chatType && (
+                                    {selected.chatType && !operator && (
                                         <a href={wazzupChatUrl(selected, accounts, account)} target="_blank" rel="noopener noreferrer"
                                            title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
                                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
@@ -1830,4 +1876,62 @@ export default function WazzupChatsView(props) {
                 </Suspense>}
         </div>
     );
+}
+
+/* Раздел у верификатора. Порядок экранов — порядок его рабочего дня:
+ *   1. доступ не подтверждён — код для супервайзера (ChatAccessGate);
+ *   2. доступ есть, смена не начата — одна кнопка «Начать смену» посередине;
+ *   3. смена идёт — рабочее окно с кнопкой статуса вместо всего остального.
+ * Само окно монтируется только на третьем шаге: до него ни одного запроса к
+ * чатам не уходит — сервер верификатору без подтверждения их и не отдаст.
+ *
+ * Состояние смены общее с WazzupShiftKeeper (workspaceStore.js): он грузит его
+ * при входе в портал, поэтому раздел обычно открывается без запроса. */
+function OperatorWorkspace(props) {
+    const { apiBaseUrl, withAccessTokenHeader, user } = props;
+    const workspace = useWorkspace(user?.id);
+    /* Окно открыто кнопкой «Начать смену» — играем открытие. Перезагрузка
+       страницы посреди смены его не играет: человек уже работал. Ref, а не
+       состояние: признак обязан быть готов к первому же кадру окна, иначе оно
+       мелькнуло бы целиком до начала анимации. */
+    const startedHere = useRef(false);
+    const headers = useRef(withAccessTokenHeader);
+    headers.current = withAccessTokenHeader;
+
+    useEffect(() => {
+        if (workspace.ready) return;
+        configureWorkspace({ apiBaseUrl, ownerId: user?.id, headers: () => headers.current?.() });
+        loadWorkspace();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiBaseUrl, user?.id]);
+
+    const onShift = Boolean(workspace.current?.onShift);
+    useEffect(() => { if (!onShift) startedHere.current = false; }, [onShift]);
+
+    if (!workspace.ready) {
+        return (
+            <div className="grid min-h-[320px] place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
+                {workspace.error ? (
+                    <div className="max-w-sm text-center">
+                        <AlertCircle size={22} className="mx-auto text-slate-400" />
+                        <p className="mt-2">{workspace.error}</p>
+                        <button type="button" onClick={loadWorkspace} className={`${iosBtnGhost} mt-2`}>
+                            <RefreshCw size={13} /> Повторить
+                        </button>
+                    </div>
+                ) : <Loader2 size={20} className="animate-spin text-slate-400" />}
+            </div>
+        );
+    }
+    if (workspace.locked) return <ChatAccessGate />;
+    if (!onShift) return <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />;
+    return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />} />;
+}
+
+/* Кому раздел открыт верификатором, сообщает сервер флагом профиля
+   (wazzup_chat_operator): группа верификаторов определяется моделью группы на
+   сегодня, и портал сам этого не выведет. */
+export default function WazzupChatsView(props) {
+    const operator = Boolean(props.user?.wazzup_chat_operator ?? props.user?.wazzupChatOperator);
+    return operator ? <OperatorWorkspace key={props.user?.id} {...props} /> : <ChatsWorkspace key={props.user?.id} {...props} />;
 }

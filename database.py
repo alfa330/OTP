@@ -6978,6 +6978,7 @@ class Database:
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
+            self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -8337,6 +8338,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT op_funnel_schema")
+
+    def _init_wazzup_workspace_schema_tx(self, cursor):
+        """Схема рабочего места верификатора в «Чатах ОП» (wazzup/workspace_schema.py):
+        подтверждённый доступ сессии, ожидание кода из Telegram, отметки портала.
+
+        Под SAVEPOINT, как соседи: упавший DDL раздела не вправе уронить
+        инициализацию всей схемы. Цена отката — раздел остаётся закрытым для
+        верификаторов (доступ подтвердить негде), остальной портал и просмотр
+        переписки работают как раньше."""
+        import logging
+
+        cursor.execute("SAVEPOINT wazzup_workspace_schema")
+        try:
+            from wazzup.workspace_schema import init_wazzup_workspace_schema
+            init_wazzup_workspace_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT wazzup_workspace_schema")
+            logging.exception(
+                "Схема рабочего места «Чатов ОП» не применилась — верификаторам раздел "
+                "не откроется, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT wazzup_workspace_schema")
 
     def _init_qa_marketing_schema_tx(self, cursor):
         """Схема модуля «Маркетинговый мониторинг» (ТЗ #317): таблицы qa_marketing_*.
@@ -24723,6 +24747,10 @@ class Database:
             'journal_marked': marked_journal_episodes,
         }
 
+    # Авторы сообщений, отправленных из iCORE: ключ 'icore:<id сотрудника>'
+    # (wazzup.access.ICORE_AUTHOR_PREFIX).
+    _WAZZUP_ICORE_AUTHOR_LIKE = 'icore:%'
+
     def list_wazzup_authors(self, account='op'):
         """Авторы исходящих сообщений Wazzup (по author_id) со статистикой
         и текущей привязкой из wazzup_operator_map. Привязки без сообщений
@@ -24747,8 +24775,12 @@ class Database:
                   FULL JOIN (SELECT * FROM wazzup_operator_map WHERE account = %s) map
                     ON map.author_id = a.author_id
                   LEFT JOIN users u ON u.id = map.user_id
+                 -- Автор сообщений из iCORE привязан к отправителю при отправке
+                 -- (wazzup/pilot.py): разбирать руками там нечего, и в списке он
+                 -- был бы второй строкой того же человека.
+                 WHERE COALESCE(a.author_id, map.author_id) NOT LIKE %s
                  ORDER BY COALESCE(a.messages_count, 0) DESC, author_name
-            """, (account, account))
+            """, (account, account, self._WAZZUP_ICORE_AUTHOR_LIKE))
             return [{'author_id': r[0], 'author_name': r[1], 'messages_count': r[2],
                      'last_message_at': r[3], 'chats_count': r[4],
                      'user_id': r[5], 'user_name': r[6], 'is_bot': r[7]}

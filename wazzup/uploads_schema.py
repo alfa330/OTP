@@ -1,4 +1,4 @@
-"""Private, immutable staging files for the alfa330 message outbox."""
+"""Private, immutable staging files for the chat processing outbox."""
 
 
 def init_schema(cursor):

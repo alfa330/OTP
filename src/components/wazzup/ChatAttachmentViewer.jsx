@@ -5,6 +5,7 @@ import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, Sc
 import { IosModal } from '../ui/ios';
 import { ATTACHMENT_MAX_BYTES, attachmentName, attachmentPreviewKind, boundedCanvasSize, pdfPageText, saveAttachment } from './chatAttachments';
 import ChatAttachmentStrip from './ChatAttachmentStrip';
+import { attachmentCache } from './attachmentCache';
 
 const iconButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-35';
 const actionButton = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40';
@@ -117,7 +118,28 @@ async function rasterPage(asset, currentPage, task) {
     } finally { target.width = 1; target.height = 1; }
 }
 
-export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, message, items = [], onSelect, onClose }) {
+// The download slots on the server are shared by the whole team: a busy answer
+// is retried quietly a couple of times before the operator is told about it.
+const BUSY_RETRY_DELAYS = [600, 1200];
+
+async function downloadAttachment(get, signal) {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            return await get();
+        } catch (failure) {
+            const delay = BUSY_RETRY_DELAYS[attempt];
+            if (failure?.response?.status !== 429 || delay === undefined || signal.aborted) throw failure;
+            await new Promise((resolve) => { setTimeout(resolve, delay); });
+            if (signal.aborted) throw failure;
+        }
+    }
+}
+
+// cache keeps downloaded files and recognized text for the tab's lifetime
+// (attachmentCache.js): reopening an attachment neither downloads it again nor
+// repeats the paid recognition.
+export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, message, items = [], onSelect, onClose,
+    cache = attachmentCache }) {
     const [loadedAsset, setAsset] = useState(null);
     const [loadedDownload, setDownload] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -130,7 +152,9 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const [copied, setCopied] = useState(false);
     const [retry, setRetry] = useState(0);
     const latest = useRef({});
-    const sourceKey = `${chat.channelId}:${chat.chatId}:${message.messageId}`;
+    // A replacement file or another API must not inherit the old file's bytes
+    // or recognized text, even if the message identifiers are unchanged.
+    const sourceKey = JSON.stringify([apiBaseUrl, chat.channelId, chat.chatId, message.messageId, message.contentUri]);
     latest.current = { headers, onClose, items, onSelect, sourceKey };
     const navigation = useRef({ sourceKey, messageId: message.messageId });
     if (navigation.current.sourceKey !== sourceKey) {
@@ -142,12 +166,14 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const asset = loadedAsset?.sourceKey === sourceKey ? loadedAsset : null;
     const download = loadedDownload?.sourceKey === sourceKey ? loadedDownload : null;
     const knownUnsupported = attachmentPreviewKind(message) === 'document' && Boolean(attachmentName(message));
+    // A cached image is on screen one frame after opening: showing the progress
+    // indicator for that frame would only make the viewer flicker.
+    const instant = !knownUnsupported && Boolean(cache.peekMedia(sourceKey)?.type.startsWith('image/'));
     const extraction = useRef(null);
     const copyTimer = useRef(null);
     const copyState = useRef({ mounted: false, version: 0 });
     const container = useRef(null);
     const resultBox = useRef(null);
-    const textCache = useRef(new Map());
     const ids = { account: 'op', channelId: chat.channelId, chatId: chat.chatId, messageId: message.messageId };
     const cancelExtraction = useCallback(() => {
         extraction.current?.controller.abort();
@@ -179,17 +205,24 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         contentSource.current = sourceKey;
         let loadingTask;
         let url;
-        setLoading(!knownUnsupported); setAsset(null); setDownload(null); setError(''); setExtracted(null); setPage(1); setZoom(1); setCurrentPage(null); setExtracting(false); setCopied(false);
-        textCache.current.clear();
+        const cached = knownUnsupported ? null : cache.getMedia(sourceKey);
+        // A cached image appears at once, without the progress indicator; a PDF
+        // still has to be parsed, so it keeps the indicator.
+        setLoading(!knownUnsupported && !(cached && cached.type.startsWith('image/')));
+        // Text recognized earlier for this page is shown again without a new request.
+        setAsset(null); setDownload(null); setError(''); setExtracted(cache.getText(sourceKey, 1)); setPage(1); setZoom(1); setCurrentPage(null); setExtracting(false); setCopied(false);
         (async () => {
             if (knownUnsupported) return;
-            const { data: blob } = await axios.get(`${apiBaseUrl}/api/wazzup/pilot/attachment`, {
-                headers: latest.current.headers(), params: ids, responseType: 'blob',
-                signal: controller.signal, timeout: 35000,
-            });
-            if (controller.signal.aborted) return;
-            if (!(blob instanceof Blob) || !blob.size || blob.size > ATTACHMENT_MAX_BYTES) {
-                throw new Error('Файл пустой или превышает 20 МБ.');
+            let blob = cached;
+            if (!blob) {
+                ({ data: blob } = await downloadAttachment(() => axios.get(`${apiBaseUrl}/api/wazzup/pilot/attachment`, {
+                    headers: latest.current.headers(), params: ids, responseType: 'blob',
+                    signal: controller.signal, timeout: 35000,
+                }), controller.signal));
+                if (controller.signal.aborted) return;
+                if (!(blob instanceof Blob) || !blob.size || blob.size > ATTACHMENT_MAX_BYTES) {
+                    throw new Error('Файл пустой или превышает 20 МБ.');
+                }
             }
             const mime = blob.type.split(';')[0].toLowerCase();
             const kind = mime === 'application/pdf' ? 'pdf' : /^image\/(jpeg|png|webp|gif|bmp)$/.test(mime) ? 'image' : null;
@@ -209,6 +242,9 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                 pdf = await loadingTask.promise;
                 if (controller.signal.aborted) return;
             }
+            // Parse a PDF before keeping it: otherwise a partial or broken
+            // download would make every retry reuse the same unreadable file.
+            if (blob !== cached) cache.putMedia(sourceKey, blob);
             setAsset({ kind, url, pdf, library, name, sourceKey });
         })().catch(async (failure) => {
             const message = failure?.name === 'PasswordException' ? 'PDF защищён паролем. Скачайте его для открытия.'
@@ -227,7 +263,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         };
         // headers is refreshed by SSE renders; it must not reload the document.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, chat.channelId, chat.chatId, message.messageId, retry, cancelExtraction, knownUnsupported]);
+    }, [sourceKey, retry, cancelExtraction, knownUnsupported, cache]);
     useEffect(() => {
         const previousFocus = document.activeElement;
         container.current?.focus();
@@ -253,17 +289,19 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const changePage = (value) => {
         copyState.current.version += 1;
         cancelExtraction(); setExtracting(false); setError(''); setCurrentPage(null);
-        setCopied(false); setPage(value); setExtracted(textCache.current.get(value) || null);
+        setCopied(false); setPage(value); setExtracted(cache.getText(sourceKey, value));
     };
     const extract = async (forceOcr = false) => {
         if (!asset || extraction.current || navigation.current.messageId !== message.messageId || (asset.kind === 'pdf' && !currentPage)) return;
         setError(''); setCopied(false);
         if (!forceOcr && currentPage?.text) {
             const result = { text: currentPage.text, source: 'pdf', page };
-            textCache.current.set(page, result);
-            if (textCache.current.size > 20) textCache.current.delete(textCache.current.keys().next().value);
+            cache.putText(sourceKey, page, result);
             setExtracted(result); return;
         }
+        // Recognition already on screen and asked for again: the operator wants a
+        // new attempt, not the stored one, so the server cache is bypassed too.
+        const refresh = extracted?.source === 'ocr' && extracted.page === page;
         const task = { controller: new AbortController(), render: null };
         extraction.current = task;
         setExtracting(true);
@@ -271,12 +309,11 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             const imageDataUrl = await rasterPage(asset, currentPage, task);
             if (!imageDataUrl || task.controller.signal.aborted) return;
             const { data } = await axios.post(`${apiBaseUrl}/api/wazzup/pilot/attachment-text`, {
-                ...ids, page, imageDataUrl,
+                ...ids, page, imageDataUrl, ...(refresh ? { refresh: true } : {}),
             }, { headers: latest.current.headers(), signal: task.controller.signal, timeout: 65000 });
             if (task.controller.signal.aborted || extraction.current !== task) return;
             const result = { text: typeof data.text === 'string' ? data.text : '', source: 'ocr', page };
-            textCache.current.set(page, result);
-            if (textCache.current.size > 20) textCache.current.delete(textCache.current.keys().next().value);
+            cache.putText(sourceKey, page, result);
             setExtracted(result);
         } catch (failure) {
             const detail = await requestError(failure, 'Не удалось распознать текст. Попробуйте ещё раз.');
@@ -340,7 +377,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             </div>}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
                 <div className="relative min-h-0 min-w-0 flex-1 bg-slate-200/70">
-                    {!knownUnsupported && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
+                    {!knownUnsupported && !instant && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
                     {knownUnsupported && <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-10 text-center">
                         <FileText size={42} className="text-slate-400" aria-hidden="true" />
                         <p className="max-w-full break-words text-sm font-medium text-slate-700">{attachmentName(message)}</p>
