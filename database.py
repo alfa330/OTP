@@ -18100,8 +18100,25 @@ class Database:
                 for r in cursor.fetchall()
             ]
 
+    # Порядок возглавляемых отделов. Глава не обязана числиться в отделе, который
+    # возглавляет, и отделов у неё может быть несколько (решение владельца
+    # 08.10.2026). «Первым» — а на него опирается всё, что работает с одним отделом
+    # главы: отдел нового сотрудника по умолчанию, её группы, учёт часов — идёт тот,
+    # в котором она числится сама, и только потом остальные по названию. Иначе
+    # назначение главой ещё одного отдела молча переключало бы её основной отдел,
+    # стоило новому названию оказаться раньше по алфавиту.
+    # Параметр — id пользователя (второй раз, после head_user_id). У человека без
+    # отдела сравнение даёт NULL у всех строк — остаётся порядок по названию.
+    _HEADED_DEPARTMENTS_ORDER_SQL = (
+        "(id = (SELECT u.department_id FROM users u WHERE u.id = %s)) DESC NULLS LAST, name, id"
+    )
+
     def headed_department_id_for_user(self, user_id):
-        """Вернуть id отдела, главой которого является пользователь, иначе None."""
+        """Вернуть id отдела, главой которого является пользователь, иначе None.
+
+        Отделов несколько — первый по _HEADED_DEPARTMENTS_ORDER_SQL: свой отдел
+        главы, а без него первый по названию.
+        """
         if not user_id:
             return None
         with self._get_cursor() as cursor:
@@ -18110,14 +18127,18 @@ class Database:
                 FROM departments
                 WHERE head_user_id = %s
                   AND COALESCE(is_active, TRUE) = TRUE
-                ORDER BY name, id
+                ORDER BY """ + self._HEADED_DEPARTMENTS_ORDER_SQL + """
                 LIMIT 1
-            """, (user_id,))
+            """, (user_id, user_id))
             r = cursor.fetchone()
             return r[0] if r else None
 
     def get_headed_departments_for_user(self, user_id):
-        """Вернуть id, название и код всех активных возглавляемых отделов."""
+        """Вернуть id, название и код всех активных возглавляемых отделов.
+
+        Порядок тот же, что у headed_department_id_for_user: первая строка —
+        тот самый «первый» отдел.
+        """
         if not user_id:
             return []
         with self._get_cursor() as cursor:
@@ -18126,8 +18147,8 @@ class Database:
                 FROM departments
                 WHERE head_user_id = %s
                   AND COALESCE(is_active, TRUE) = TRUE
-                ORDER BY name, id
-            """, (user_id,))
+                ORDER BY """ + self._HEADED_DEPARTMENTS_ORDER_SQL + """
+            """, (user_id, user_id))
             return [
                 {"id": int(row[0]), "name": row[1] or "", "code": row[2] or ""}
                 for row in (cursor.fetchall() or [])

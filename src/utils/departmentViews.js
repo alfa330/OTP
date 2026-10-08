@@ -259,6 +259,45 @@ const PERSONAL_VIEW_ALLOWLIST = {
     540: ['baiga'],
 };
 
+/* Тот же набор «только это», но выданный не человеку, а ОТДЕЛУ: рядовому
+   сотруднику отдела портал показывает только перечисленное. Решение владельца
+   08.10.2026 про удалённый КЦ: «у операторов отдела должны отображаться лишь
+   раздел профиль, мои смены и вики, который не доступен без сканирования QR».
+
+   Правила — те же, что у личного набора выше, слово в слово: строже карты
+   отдела (нет ни «Ивентов», ни «Библиотеки»), доступа не выдаёт, разделы со
+   своим кругом не прячет, действует на рядового, не возглавляющего отдел.
+   Личный набор человека сильнее набора его отдела. «Скачать iCore Phone» —
+   не раздел, а действие со своим предикатом (canDownloadIcorePhone в App.jsx):
+   на этом телефоне отдел и работает, набор его не касается.
+
+   'wiki' в наборе значит «не прятать», и только: сам раздел по-прежнему
+   выдаёт тумблер отдела вместе с пространством вики (wikiEnabledFor), а замок
+   QR держит должность — оператора спрашивают и портал
+   (sensitiveSectionQrRequiredFor в App.jsx), и сервер (QR_GATED_ROLES в
+   wiki/access.py). Стажёру QR не выдают вовсе, поэтому вики в его наборе
+   нет: иначе раздел открывался бы ему без подтверждения.
+
+   'profile' обязан остаться ПЕРВЫМ: firstAllowedView берёт allow[0], и это
+   раздел, в который человек попадает после входа.
+
+   Ключ верхнего уровня — departments.code, внутри — роль. Зеркало —
+   DEPARTMENT_ONLY_VIEWS в bot_schedule2.py (колокол); тест сверяет оба места. */
+const DEPARTMENT_ONLY_VIEWS = {
+    remote_cc: {
+        operator: ['profile', 'work_schedules', 'wiki'],
+        trainee: ['profile', 'work_schedules'],
+    },
+};
+
+/* Разделы, которые открывает не карта, а собственный флаг в App.jsx: «Вики» —
+   тумблер отдела вместе с пространством. В наборе «только это» такой раздел
+   значит «не прятать» (personalViewsAllow), но открыть его набор не может: на
+   вопрос departmentAllowsView о нём всегда отвечает «нет», как и карта отдела,
+   в которой его не бывает. Иначе гард «Этап 10» оставлял бы человека в вике,
+   которую его отделу выключили. */
+const OWN_FLAG_VIEWS = new Set(['wiki']);
+
 // Рядовой — как в ветке рядового сотрудника сайдбара (RANK_AND_FILE_ROLES в
 // App.jsx) и при том же условии «не глава отдела»; тест сверяет оба списка.
 const PERSONAL_VIEW_BASE_ROLES = ['operator', 'trainee'];
@@ -269,17 +308,30 @@ const personalViewsApplyTo = (user) => {
     return PERSONAL_VIEW_BASE_ROLES.includes(role) || isBackOfficeEmployeeRole(role);
 };
 
-// Личный набор разделов пользователя либо null (личного набора нет).
+// Набор отдела по коду и роли (или undefined). Код — без пробелов по краям,
+// как его читает сервер (_personal_views_for). Имя из прототипа вместо кода
+// («constructor») набором не становится: массива под ним нет, а вызывающий
+// принимает только массив.
+const departmentOnlyViewsOf = (user) => {
+    const code = normalizeDepartmentCodeValue(departmentCodeOf(user));
+    const byRole = code ? DEPARTMENT_ONLY_VIEWS[code] : null;
+    return byRole ? byRole[normalizeRole(user?.role)] : null;
+};
+
+// Набор «только это» пользователя — личный, а без него набор его отдела, —
+// либо null (набора нет).
 export const personalViewsOf = (user) => {
     if (!personalViewsApplyTo(user)) return null;
     // Number(): id в профиле бывает строкой, а имя из прототипа («constructor»)
     // превращается в NaN и ключом карты не становится.
-    const allow = PERSONAL_VIEW_ALLOWLIST[Number(user?.id)];
+    const personal = PERSONAL_VIEW_ALLOWLIST[Number(user?.id)];
     // Пустой набор — не «спрятать всё», а ошибка записи: набора нет.
+    if (Array.isArray(personal) && personal.length) return personal;
+    const allow = departmentOnlyViewsOf(user);
     return Array.isArray(allow) && allow.length ? allow : null;
 };
 
-// Не скрыт ли раздел личным набором. Нет набора — не скрыт ничем.
+// Не скрыт ли раздел набором «только это». Нет набора — не скрыт ничем.
 export const personalViewsAllow = (user, viewKey) => {
     const allow = personalViewsOf(user);
     return !allow || allow.includes(viewKey);
@@ -487,9 +539,17 @@ export const departmentHidesEmployeeSip = (user) => departmentCodeHidesEmployeeS
    departmentCodeHidesOperatorFields.
 
    Скрываем только ввод: уже сохранённое значение (человека перевели из
-   отдела с линией) остаётся как есть. */
+   отдела с линией) остаётся как есть.
+
+   Удалённый КЦ — в наборе «SIP номер» с 08.10.2026 (решение владельца: при
+   заведении сотрудника — «без sip номера, если это удалённый КЦ»). Номер у
+   отдела есть, но это линия Binotel, и выдают её в разделе «Удаленный КЦ» на
+   вкладке «Линии» вместе с учёткой линии: номер, вписанный в карточку руками,
+   учётки не получает, а линию в разделе показывает занятой.
+   Зеркало набора «SIP номер» — EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES в
+   bot_schedule2.py: сервер присланный номер при заведении не пишет. */
 const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
-const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'remote_cc']);
 const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 
@@ -566,12 +626,24 @@ export const departmentEmployeeRole = (user) => departmentCodeEmployeeRole(depar
 export const isBackOfficeEmployeeRole = (role) =>
     BACK_OFFICE_EMPLOYEE_ROLES.includes(String(role ?? '').trim().toLowerCase());
 
+/* Должность нового сотрудника после того, как в карточке выбрали отдел. Рядовая
+   должность следует за отделом: в бэк-офисе это должность отдела, в отделе с
+   линией — оператор. Стажёра, тренера, супервайзера и админа отдел не
+   переопределяет — то же правило, что у resolveEmployeeRoleForDepartment в
+   App.jsx при отправке. Нужна карточке сразу, а не только при отправке: поля
+   «Группа» и «Направление» показываются по должности черновика. */
+export const employeeRoleForDepartmentCode = (currentRole, code) => {
+    const role = String(currentRole ?? '').trim().toLowerCase() || 'operator';
+    if (role !== 'operator' && !isBackOfficeEmployeeRole(role)) return role;
+    return departmentCodeEmployeeRole(code) || 'operator';
+};
+
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
     // Глобальные админы — без ограничений по отделу; главы отделов идут по head-набору.
     if (normalizeRole(user?.role) === 'super_admin') return null;
     if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;
-    // Личный набор заменяет карту отдела целиком, а не пересекается с ней.
+    // Набор «только это» заменяет карту отдела целиком, а не пересекается с ней.
     const personal = personalViewsOf(user);
     if (personal) return personal;
     const code = departmentCodeOf(user);
@@ -586,9 +658,10 @@ export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(use
 
 // Разрешён ли раздел viewKey пользователю с учётом его отдела и роли.
 export const departmentAllowsView = (user, viewKey) => {
-    // Личный набор — раньше общих разделов: в нём нет и «Ивентов».
+    // Набор «только это» — раньше общих разделов: в нём нет и «Ивентов».
+    // Разделы со своим флагом (OWN_FLAG_VIEWS) набор не открывает.
     const personal = personalViewsOf(user);
-    if (personal) return personal.includes(viewKey);
+    if (personal) return personal.includes(viewKey) && !OWN_FLAG_VIEWS.has(viewKey);
     if (UNIVERSAL_VIEWS.has(viewKey)) return true;
     const allow = allowlistFor(user);
     if (!allow) return true; // нет ограничений

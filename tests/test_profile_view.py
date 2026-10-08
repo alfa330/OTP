@@ -49,7 +49,10 @@ class ProfileScopeTests(unittest.TestCase):
         self.assertIn("export const PROFILE_REDESIGN_DEPARTMENT_CODES = ['szov', 'op', 'tez'];", self.scope)
         block = self.app.partition("{view === 'profile' && (() => {")[2].partition('})()}')[0]
         self.assertIn('if (!usesRedesignedProfile(user)) {', block)
-        self.assertIn('return <LegacyProfileView {...profileViewProps} onOpenView={setView} />;', block)
+        # quickViews — «Быстрые действия» только в те разделы, что человеку выданы
+        # (tests/test_remote_cc_head_and_views.py); разметка прежнего вида та же.
+        self.assertIn('return <LegacyProfileView {...profileViewProps} onOpenView={setView}'
+                      ' quickViews={quickViews} />;', block)
         self.assertIn('<ProfileView\n', block)
         # «Мои данные» — только в новом виде (их отделы — те же три).
         legacy_branch = block.partition('if (!usesRedesignedProfile(user)) {')[2].partition('return (')[0]

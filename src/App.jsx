@@ -119,7 +119,7 @@ import { IosTimePicker } from './components/ui/TimePicker';
 import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
-import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
+import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId, headedDepartmentsOf } from './utils/roles';
 import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting, personalViewsAllow } from './utils/departmentViews';
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
@@ -496,8 +496,10 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     fleet_edm: [],
     driver_mailings: [],
     download_icore_phone: ['op', 'tez', 'remote_cc', 'szov'],
-    // Раздел удалённого колл-центра (DIAL_LIST_DEPARTMENT_CODES выше). Ограничений
-    // по разделам у отдела нет, поэтому в DEPARTMENT_VIEW_ALLOWLIST его код не значится.
+    // Раздел удалённого колл-центра (DIAL_LIST_DEPARTMENT_CODES выше). В
+    // DEPARTMENT_VIEW_ALLOWLIST кода отдела нет: главе и админам разделы не
+    // ограничены, а рядовым сотрудникам их задаёт набор «только это»
+    // (DEPARTMENT_ONLY_VIEWS в departmentViews.js).
     dial_list: ['remote_cc'],
     // Обучение
     trainings: ['szov', 'op'],
@@ -43190,6 +43192,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
             const [userModalGroups, setUserModalGroups] = useState([]);
+            // Группы остальных отделов главы нескольких отделов — только карточке
+            // сотрудника (fetchUserModalGroups); у всех прочих список пуст.
+            const [userModalOtherDepartmentGroups, setUserModalOtherDepartmentGroups] = useState([]);
             const [showUsersReportModal, setShowUsersReportModal] = useState(false);
             const [usersReportOptions, setUsersReportOptions] = useState(DEFAULT_USERS_REPORT_OPTIONS);
             const [svOperators, setSvOperators] = useState([]);
@@ -46897,14 +46902,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const resolveEmployeeRoleForDepartment = useCallback((draft) => {
                 const draftRole = String(draft?.role || '').trim().toLowerCase() || 'operator';
                 if (draftRole !== 'operator' && !isBackOfficeEmployeeRole(draftRole)) return draftRole;
+                // Справочник главе срезан до одного её отдела (fetchDepartments), а
+                // выбрать в карточке она может любой возглавляемый — его код берём
+                // из её профиля.
                 const deptCode = (departments || [])
-                    .find((d) => Number(d?.id) === Number(draft?.department_id))?.code;
+                    .find((d) => Number(d?.id) === Number(draft?.department_id))?.code
+                    ?? headedDepartmentsOf(user)
+                        .find((d) => d.id === Number(draft?.department_id))?.code;
                 const deptRole = departmentCodeEmployeeRole(deptCode);
                 if (deptRole) return deptRole;
                 // Отдел без своей роли (или ещё не выбран): бэк-офисную роль в нём
                 // оставлять нельзя — она бы сняла ограничения. Возвращаем оператора.
                 return isBackOfficeEmployeeRole(draftRole) ? 'operator' : draftRole;
-            }, [departments]);
+            }, [departments, user]);
 
             // Подстрочник в карточке дня рождения: у людей на линии это
             // направление, у бэк-офиса его нет вовсе — там человека определяет
@@ -48131,8 +48141,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                исключение: список сотрудников у него по всей компании,
                                и фильтр над ним обязан предлагать все отделы. Выбрать
                                чужой отдел это не даёт — поле «Отдел» в карточке главе
-                               заперто всегда (isDeptScoped), а сервер при создании
-                               сотрудника выбор клиента игнорирует. */
+                               заперто (isDeptScoped), а сервер при создании сотрудника
+                               выбор клиента игнорирует. Глава нескольких отделов
+                               выбирает между СВОИМИ, и список их карточка берёт из
+                               профиля (headed_departments), а не отсюда. */
                             const nextDepartments = (scopedDepartmentId != null && !isEmployeeAccountingManager)
                                 ? data.departments.filter((dept) => Number(dept?.id) === Number(scopedDepartmentId))
                                 : data.departments;
@@ -48146,10 +48158,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const fetchUserModalGroups = async () => {
                     if (!user || !user.id) return;
+                    const requestGroups = (departmentId = null) => axios.get(`${API_BASE_URL}/api/groups`, {
+                        headers: withAccessTokenHeader({ 'X-User-Id': user.id }),
+                        ...(departmentId != null ? { params: { department_id: departmentId } } : {}),
+                    });
                     try {
-                        const response = await axios.get(`${API_BASE_URL}/api/groups`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        });
+                        const response = await requestGroups();
                         const data = response.data;
                         if (data?.status === 'success' && Array.isArray(data.groups) && isMounted.current) {
                             setUserModalGroups(data.groups);
@@ -48157,6 +48171,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     } catch (err) {
                         // мягко игнорируем — селект группы просто будет пустым
                         console.error('Fetch groups error:', err);
+                    }
+                    /* Глава нескольких отделов выбирает в карточке, в какой из них
+                       завести сотрудника, и группа обязана быть из выбранного. Без
+                       параметра /api/groups отдаёт главе группы одного — первого —
+                       её отдела, поэтому остальные возглавляемые спрашиваем отдельно
+                       (чужой отдел в параметре сервер не примет). Их группы — только
+                       карточке: массовый перевод и перевод СВ в операторы работают
+                       с прежним списком. У всех остальных запрос по-прежнему один. */
+                    const otherDepartmentIds = (isScopedDepartmentHead && !isEmployeeAccountingManager)
+                        ? headedDepartmentsOf(user)
+                            .map((department) => department.id)
+                            .filter((departmentId) => departmentId !== Number(scopedDepartmentId))
+                        : [];
+                    if (!otherDepartmentIds.length) {
+                        // Следующему вошедшему в этом же окне чужие группы не достаются.
+                        setUserModalOtherDepartmentGroups((previous) => (previous.length ? [] : previous));
+                        return;
+                    }
+                    try {
+                        const responses = await Promise.all(otherDepartmentIds.map(requestGroups));
+                        if (!isMounted.current) return;
+                        setUserModalOtherDepartmentGroups(responses.flatMap((response) => (
+                            response.data?.status === 'success' && Array.isArray(response.data.groups)
+                                ? response.data.groups
+                                : []
+                        )));
+                    } catch (err) {
+                        console.error('Fetch groups of other headed departments error:', err);
                     }
                 };
 
@@ -51254,7 +51296,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    человека в ЕГО отдел (add_user: «выбор клиента игнорируем»),
                    а подставив отдел из фильтра, форма выбрала бы чужую роль по
                    чужому коду отдела. Кадровик — исключение: ему сервер отдел
-                   НЕ переписывает, он заводит людей по всей компании. */
+                   НЕ переписывает, он заводит людей по всей компании.
+                   Глава нескольких отделов выбирает отдел уже в самой карточке
+                   (UserEditModal: canPickHeadedDepartment); пустое значение
+                   здесь — отдел по умолчанию, первый из её отделов. */
                 const createDeptId = (isScopedDepartmentHead && !isEmployeeAccountingManager)
                     ? ""
                     : (manageUsersDeptFilter || "");
@@ -51385,6 +51430,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 directions,
                 departments,
                 groups: userModalGroups,
+                // Группы остальных отделов главы нескольких отделов: карточка
+                // показывает группы того отдела, в котором сотрудник.
+                otherDepartmentGroups: userModalOtherDepartmentGroups,
                 user,
                 onSave: saveUserChanges,
                 onOpenSipSettings: (canAccessSipSettingsFleet || canAccessSipSettingsTez) ? ((departmentId) => {
@@ -58475,7 +58523,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                   // Переделанный «Профиль» — только СЗоВ, ОП и Тез КЦ (владелец
                                   // 25.09.2026); остальным отделам — прежний вид.
                                   if (!usesRedesignedProfile(user)) {
-                                    return <LegacyProfileView {...profileViewProps} onOpenView={setView} />;
+                                    /* «Быстрые действия» прежнего вида ведут в «Мои часы» и
+                                       «Мои оценки». Кнопку раздела, которого человеку не выдали
+                                       (удалённый КЦ, фронт-офисы), не показываем: гард видимости
+                                       вернул бы его в профиль, и кнопка выглядела бы сломанной. */
+                                    const quickViews = ['hours', 'evaluation']
+                                      .filter((viewKey) => departmentAllowsView(user, viewKey));
+                                    return <LegacyProfileView {...profileViewProps} onOpenView={setView} quickViews={quickViews} />;
                                   }
                                   return (
                                     <ProfileView

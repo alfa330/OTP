@@ -3,8 +3,9 @@ import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
-import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
+import { headedDepartmentsOf, isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
 import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
@@ -245,7 +246,18 @@ const UemSection = ({ embedded, id, title, children }) => (
     ) : children
 );
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups: primaryGroups = [], otherDepartmentGroups = [], onSave, user, onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {
+    /* Группы карточки: общий список портала (у главы — группы её первого отдела)
+       и, у главы нескольких отделов, группы остальных её отделов. Вторые приходят
+       отдельным пропсом: массовый перевод в «Учете сотрудников» читает только
+       первый список, и сервер держит его в границе первого отдела. */
+    const groups = React.useMemo(() => {
+        const base = Array.isArray(primaryGroups) ? primaryGroups : [];
+        const extra = Array.isArray(otherDepartmentGroups) ? otherDepartmentGroups : [];
+        if (!extra.length) return base;
+        const known = new Set(base.map((group) => group?.id));
+        return [...base, ...extra.filter((group) => !known.has(group?.id))];
+    }, [primaryGroups, otherDepartmentGroups]);
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -328,6 +340,27 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         ? null
         : ((requesterHeadedDeptId != null ? requesterHeadedDeptId : requesterOwnDeptId) ?? null);
     const isDeptScoped = !isUnscopedRequester && requesterScopeDeptId != null;
+    /* Глава нескольких отделов заводит человека в любой из СВОИХ (решение
+       владельца 08.10.2026): при создании поле «Отдел» у неё открыто, а список
+       в нём — только возглавляемые. Сервер принимает выбор по тому же правилу
+       (add_user: _headed_department_choice) и чужой отдел не возьмёт.
+
+       Только при создании: перевод уже заведённого сотрудника между отделами
+       владелец не называл, и в правке поле главе заперто, как было.
+       Список приходит с профилем (headed_departments); у профиля, сохранённого
+       до появления поля, он пуст — тогда отдел один, и поле заперто. */
+    const requesterHeadedDepartments = (isScopedDepartmentHeadRequester && !isUnscopedRequester)
+        ? headedDepartmentsOf(user)
+        : [];
+    const canPickHeadedDepartment = isDeptScoped && !userToEdit?.id && requesterHeadedDepartments.length > 1;
+    // Пункты поля «Отдел» у того, кто ограничен отделом. У главы это её отделы
+    // из профиля — иначе в карточке сотрудника второго её отдела поле было бы
+    // пустым: справочник ей приходит срезанным до одного. У супервайзера и у
+    // профиля без списка — прежний справочник.
+    const scopedDepartmentOptions = (requesterHeadedDepartments.length
+        ? requesterHeadedDepartments
+        : (departments || []).filter((dep) => dep?.is_active !== false)
+    ).map((dep) => ({ value: dep.id, label: dep.name }));
     // Эффективный отдел сотрудника: выбранный в модалке, иначе — отдел создающего (для скоупа) или СЗоВ.
     const effectiveDeptId = (() => {
         const d = editedUser?.department_id;
@@ -342,8 +375,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const requesterScopeDeptCode = isScopedDepartmentHeadRequester
         ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
         : (user?.department_code ?? user?.departmentCode ?? null);
+    // Справочник главе режется до одного её отдела (App.jsx: fetchDepartments),
+    // поэтому код второго возглавляемого отдела берём из её же профиля — иначе
+    // у сотрудника этого отдела карточка собиралась бы как для «отдел неизвестен».
     const effectiveDeptCode = (departments || [])
         .find((d) => Number(d?.id) === Number(effectiveDeptId))?.code
+        ?? requesterHeadedDepartments.find((d) => d.id === Number(effectiveDeptId))?.code
         ?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId) ? requesterScopeDeptCode : null);
     const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
     // «Должность» — у бэк-офиса взамен направления и группы: там людей
@@ -396,6 +433,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // который выбирает отдел в модалке.
     const groupsForSelectedDept = (effectiveDeptId) => {
         const active = (groups || []).filter((g) => g?.status !== 'archived');
+        // Глава нескольких отделов получает группы всех своих отделов сразу
+        // (App.jsx: fetchUserModalGroups) — показываем группы выбранного.
+        if (requesterHeadedDepartments.length > 1 && effectiveDeptId != null) {
+            return active.filter((g) => Number(g?.department_id ?? g?.departmentId) === Number(effectiveDeptId));
+        }
         if (!isUnscopedRequester || effectiveDeptId == null) return active;
         return active.filter((g) => Number(g?.department_id ?? g?.departmentId) === Number(effectiveDeptId));
     };
@@ -409,6 +451,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setEditedUser((prev) => {
             const next = { ...prev, department_id: deptValue };
             const effDept = (deptValue !== '' && deptValue != null) ? Number(deptValue) : szovDeptId;
+            /* Глава нескольких отделов: должность нового сотрудника следует за
+               выбранным отделом. Черновик открывается с должностью её первого
+               отдела, а «Группа» и «Направление» показываются по должности: без
+               пересчёта после выбора отдела с линией вместо бэк-офисного этих
+               полей не было бы, и сервер отказал бы в создании. */
+            if (canPickHeadedDepartment) {
+                next.role = employeeRoleForDepartmentCode(
+                    prev?.role,
+                    requesterHeadedDepartments.find((d) => d.id === effDept)?.code,
+                );
+            }
             if (prev?.direction_id) {
                 const dir = (directions || []).find((d) => String(d.id) === String(prev.direction_id));
                 if (dir && effDept != null && Number(directionDeptOf(dir)) !== Number(effDept)) {
@@ -1812,10 +1865,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                         onChange={handleDepartmentChange}
-                        disabled={fieldsLocked || isDeptScoped}
+                        disabled={fieldsLocked || (isDeptScoped && !canPickHeadedDepartment)}
                         placeholder="По умолчанию (СЗоВ)"
                         options={isDeptScoped
-                            ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
+                            ? scopedDepartmentOptions
                             : [
                                 { value: "", label: "По умолчанию (СЗоВ)" },
                                 ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),
@@ -1823,7 +1876,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         }
                         />
                         <p className="mt-1 text-xs text-slate-500">
-                            {isDeptScoped ? 'Сотрудник создаётся в вашем отделе.' : 'Отдел определяет доступные сотруднику разделы.'}
+                            {isDeptScoped && !canPickHeadedDepartment ? 'Сотрудник создаётся в вашем отделе.' : 'Отдел определяет доступные сотруднику разделы.'}
                         </p>
                     </div>
                     )}
@@ -2531,7 +2584,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 disabled={fieldsLocked || isDeptScoped}
                                 placeholder="По умолчанию (СЗоВ)"
                                 options={isDeptScoped
-                                    ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
+                                    ? scopedDepartmentOptions
                                     : [
                                         { value: "", label: "По умолчанию (СЗоВ)" },
                                         ...(departments || []).filter(d => d.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name })),

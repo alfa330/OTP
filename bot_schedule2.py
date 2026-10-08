@@ -1211,6 +1211,10 @@ def _get_user_payload(user):
     headed_department_ids = []
     headed_department_code = None
     headed_department_codes = []
+    # Возглавляемые отделы с названиями — для карточки нового сотрудника: глава
+    # нескольких отделов выбирает в ней, в какой из своих завести человека.
+    # Порядок тот же, что у headed_department_id (первый — он).
+    headed_departments_payload = []
     if user_id is not None:
         try:
             department_id, department_code = db.get_user_department(user_id)
@@ -1227,6 +1231,15 @@ def _get_user_payload(user):
             headed_departments = db.get_headed_departments_for_user(user_id) or []
             headed_department_ids = [
                 int(item.get('id'))
+                for item in headed_departments
+                if isinstance(item, dict) and item.get('id') is not None
+            ]
+            headed_departments_payload = [
+                {
+                    'id': int(item.get('id')),
+                    'name': str(item.get('name') or ''),
+                    'code': str(item.get('code') or '').strip().lower() or None,
+                }
                 for item in headed_departments
                 if isinstance(item, dict) and item.get('id') is not None
             ]
@@ -1250,6 +1263,7 @@ def _get_user_payload(user):
             headed_department_ids = []
             headed_department_codes = []
             headed_department_code = None
+            headed_departments_payload = []
 
         # Раздел выдан отделу тумблером — но если отдел не включён НИ В ОДНО
         # пространство вики, показывать пункт меню не в чем: человек откроет
@@ -1310,6 +1324,7 @@ def _get_user_payload(user):
         "headed_department_ids": headed_department_ids,
         "headed_department_code": headed_department_code,
         "headed_department_codes": headed_department_codes,
+        "headed_departments": headed_departments_payload,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }
@@ -2336,6 +2351,29 @@ def _headed_department_ids(requester_id):
     if cache is not None:
         cache[requester_id] = department_ids
     return department_ids
+
+
+def _headed_department_choice(requester_id, requested_department_id):
+    """Возглавляемый отдел, названный в запросе, либо None.
+
+    Глава может возглавлять несколько отделов (и отдел, в котором сама не
+    числится) и тогда выбирает, с каким из СВОИХ работает: в какой завести
+    сотрудника, группы какого показать. Решение владельца 08.10.2026.
+
+    None — «выбора нет»: отдел не назван, назван не числом или назван чужой.
+    Вызывающий при этом остаётся при отделе по умолчанию, как и до появления
+    выбора, — чужой отдел в запросе главы не даёт ничего.
+
+    Разбор строгий: True и 1.0 — не id отдела (int(True) == 1, а отдел с
+    id 1 существует — СЗоВ).
+    """
+    if requested_department_id is None or isinstance(requested_department_id, (bool, float)):
+        return None
+    try:
+        department_id = int(str(requested_department_id).strip())
+    except (TypeError, ValueError):
+        return None
+    return department_id if department_id in _headed_department_ids(requester_id) else None
 
 
 def _is_department_manager_requester(requester_role, requester_id):
@@ -17049,6 +17087,9 @@ def admin_bulk_update_users():
                 return jsonify({"error": "Invalid direction_id"}), 400
 
         target_group = None
+        # Держит ли запросившего граница отдела при переводе в группу: всех, кроме
+        # глобального админа и кадровика.
+        group_bound_to_department = False
         if 'group_id' in changes_raw:
             # Массовый перевод — только админ и глава отдела. У СВ смена группы
             # есть точечно, в карточке сотрудника (/api/admin/groups/<id>/operators).
@@ -17070,6 +17111,7 @@ def admin_bulk_update_users():
             # у него в этом смысле нет: группы есть на линии, а он ведёт учёт
             # всей компании. Границу отдела проверяем всем остальным.
             if not _is_global_admin_requester(requester_role, requester_id) and not personnel_manager:
+                group_bound_to_department = True
                 scope_dept = headed_dept_id if headed_dept_id is not None else db.get_user_department_id(requester_id)
                 if scope_dept is None or target_group.get('department_id') != scope_dept:
                     return jsonify({"error": "Группа не из вашего отдела"}), 403
@@ -17130,6 +17172,15 @@ def admin_bulk_update_users():
                     continue
                 # Группа применима только к операторам/стажёрам.
                 if target_group is not None and target_role not in ('operator', 'trainee'):
+                    failed_user_ids.append(target_user_id)
+                    continue
+                # …и только сотруднику своего отдела. Глава нескольких отделов
+                # видит в списке людей всех своих отделов, а группа — одного:
+                # перевод дал бы сотруднику другого отдела группу, супервайзера и
+                # направление не его отдела. Глобального админа и кадровика
+                # граница отдела не касается — как и в проверке группы выше.
+                if (target_group is not None and group_bound_to_department
+                        and db.get_user_department_id(target_user_id) != target_group.get('department_id')):
                     failed_user_ids.append(target_user_id)
                     continue
                 if requester_role == 'sv' and headed_dept_id is None and 'rate' in updates:
@@ -17474,9 +17525,12 @@ def api_admin_set_department_head(department_id):
             head_user = db.get_user(id=new_head_id)
             if not head_user:
                 return jsonify({"error": "User not found"}), 404
-            # Глава должен принадлежать назначаемому отделу
-            if db.get_user_department_id(new_head_id) != department_id:
-                return jsonify({"error": "Head must belong to this department"}), 400
+            # Числиться в назначаемом отделе глава не обязана (решение владельца
+            # 08.10.2026): отдел может вести человек из другого отдела, в том
+            # числе тот, кто уже возглавляет свой. Назначение его собственный
+            # отдел (users.department_id) не трогает, а права главы считаются
+            # по departments.head_user_id: кто возглавляет несколько отделов,
+            # получает их объединение (_headed_department_ids).
 
         updated = db.set_department_head(department_id, new_head_id, changed_by=requester_id)
         return jsonify({"status": "success", "department": updated}), 200
@@ -22526,6 +22580,13 @@ def add_user():
         else:
             # СВ / глава отдела — отдел создающего (выбор клиента игнорируем)
             department_id = requester_dept_id
+            # Исключение одно: глава нескольких отделов выбирает, в какой из
+            # СВОИХ завести человека (решение владельца 08.10.2026). Чужой отдел
+            # по-прежнему не проходит: выбор вне возглавляемых — не выбор, и
+            # сотрудник уходит в отдел по умолчанию, как раньше.
+            chosen_headed_dept = _headed_department_choice(requester_id, data.get('department_id'))
+            if chosen_headed_dept is not None:
+                department_id = chosen_headed_dept
 
         # Отдел нужен ЗДЕСЬ, до разбора направления: у бэк-офиса (Бухгалтерия,
         # HR) направлений и групп нет вовсе, и обязательный direction_id не давал
@@ -22616,8 +22677,15 @@ def add_user():
 
         if requester_role == 'sv':
             # По умолчанию супервайзер — сам СВ, но он может выбрать другого СВ своего отдела.
+            # Себя он подставляет только сотруднику СВОЕГО отдела: супервайзер,
+            # возглавляющий отдел, в котором сам не числится, иначе упирался бы в
+            # проверку ниже («Супервайзер не из выбранного отдела») и не мог
+            # завести там никого без группы.
             if not supervisor_id:
-                supervisor_id = requester_id
+                own_dept_id = (requester_dept_id if requester_headed_dept is None
+                               else db.get_user_department_id(requester_id))
+                if department_id is None or own_dept_id is None or own_dept_id == department_id:
+                    supervisor_id = requester_id
             # Направление берём выбранное в модалке (оно ограничено отделом СВ);
             # если не выбрано — наследуем направление самого СВ.
             if role == 'operator' and not direction_id and not direction_skipped:
@@ -22818,6 +22886,14 @@ def add_user():
             if department_id is None and group_dept is not None:
                 department_id = int(group_dept)
             supervisor_id = db.get_group_active_supervisor_id(target_group['id'])
+
+        # Отделу без поля «SIP номер» в карточке номер при заведении не пишем,
+        # даже если его прислали (старая вкладка, запрос мимо формы). У удалённого
+        # КЦ номер — это линия Binotel: её выдают в разделе «Удаленный КЦ» вместе с
+        # учёткой линии, а номер, вписанный руками, учётки не получает и держит
+        # линию «занятой». Отдел уже окончательный — группа его больше не уточнит.
+        if sip_number is not None and _department_hides_employee_sip_input(department_id):
+            sip_number = None
 
         # Валидация принадлежности направления и супервайзера выбранному отделу
         # (когда отдел известен явно: для СВ/главы всегда, для админа — если выбрал отдел).
@@ -23117,7 +23193,8 @@ def _ensure_group_in_supervisor_scope(group_id, requester_id):
 
 
 def _ensure_group_in_requester_scope(group_id, requester_id, role):
-    """Изоляция отделов: глава отдела управляет только группами своего отдела.
+    """Изоляция отделов: глава отдела управляет только группами своего отдела
+    (глава нескольких отделов — группами любого из своих).
     Глобальный админ/супер-админ — любыми группами. Возвращает (resp, code) при
     отказе, иначе None."""
     # Кадровик — наравне с глобальным админом: он зачисляет людей в группы
@@ -23126,6 +23203,11 @@ def _ensure_group_in_requester_scope(group_id, requester_id, role):
         return None
     headed_dept = db.headed_department_id_for_user(requester_id)
     grp = db.get_group(group_id)
+    # Группа любого возглавляемого отдела — своя: карточка сотрудника даёт главе
+    # нескольких отделов группы каждого из них, и перевод обязан пройти.
+    if grp and grp.get('department_id') is not None \
+            and grp.get('department_id') in _headed_department_ids(requester_id):
+        return None
     if not grp or headed_dept is None or grp.get('department_id') != headed_dept:
         return jsonify({"error": "Forbidden: group is not in your department"}), 403
     return None
@@ -23154,6 +23236,13 @@ def _scoped_groups_for_requester(
         )
         return db.list_groups(include_archived=include_archived, department_id=department_id), None
     if headed_dept_id is not None and not _is_super_admin_role(role):
+        # Глава нескольких отделов может назвать, группы какого из СВОИХ ей
+        # нужны: карточка нового сотрудника даёт ей выбрать отдел, и группа
+        # обязана быть из него. Отдел не назван или назван чужой — как раньше,
+        # группы отдела по умолчанию.
+        chosen_headed_dept = _headed_department_choice(requester_id, department_id_arg)
+        if chosen_headed_dept is not None:
+            return db.list_groups(include_archived=include_archived, department_id=chosen_headed_dept), None
         return db.list_groups(include_archived=include_archived, department_id=headed_dept_id), None
     if _is_global_admin_requester(role, requester_id):
         department_id = (
@@ -29913,6 +30002,14 @@ EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_depa
 # Зеркалит EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS в src/utils/departmentViews.js.
 EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik'})
 
+# Отделы, у которых в карточке сотрудника нет поля «SIP номер». ООЗ на линию не
+# выходит вовсе (владелец, 25.09.2026). У удалённого КЦ номер есть, но это линия
+# Binotel, и выдают её в разделе «Удаленный КЦ» на вкладке «Линии» вместе с
+# учёткой линии (dial_list.service.assign_line) — решение владельца 08.10.2026:
+# при заведении сотрудника «без sip номера, если это удалённый КЦ».
+# Зеркалит EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
+EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'remote_cc'})
+
 # Рядовой сотрудник отдела без линии заводится не оператором: 'operator' в этой
 # системе означает человека на линии — с направлением, группой, часами и
 # оценками. «Маркетинг» добавлен по решению владельца (04.09.2026) — отдел
@@ -29986,6 +30083,19 @@ def _department_has_optional_employee_direction(department_id):
     except Exception:
         return False
     return str(department.get('code') or '').strip().lower() in EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES
+
+
+def _department_hides_employee_sip_input(department_id):
+    """Отдел, сотруднику которого SIP-номер в карточке не вводят (см.
+    EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES). Неизвестный отдел номер не
+    отбирает — как и у _department_hides_employee_direction."""
+    if department_id is None:
+        return False
+    try:
+        department = db.get_department_by_id(int(department_id)) or {}
+    except Exception:
+        return False
+    return str(department.get('code') or '').strip().lower() in EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES
 
 
 def _is_sip_settings_department_head(requester_id):
@@ -66395,26 +66505,49 @@ PERSONAL_VIEW_ALLOWLIST = {
 }
 PERSONAL_VIEW_BASE_ROLES = ('operator', 'trainee')
 
+# Тот же набор «только это», но выданный отделу: рядовому сотруднику удалённого
+# КЦ портал показывает «Профиль», «Мои смены» и «Вики» (решение владельца
+# 08.10.2026). Стажёру — без «Вики»: её запирает QR, а стажёру QR не выдают.
+# Смысл и правила — в src/utils/departmentViews.js (DEPARTMENT_ONLY_VIEWS); здесь
+# зеркало ради колокола. Ключ — departments.code, внутри — роль. Тест сверяет
+# оба места.
+DEPARTMENT_ONLY_VIEWS = {
+    'remote_cc': {
+        'operator': ('profile', 'work_schedules', 'wiki'),
+        'trainee': ('profile', 'work_schedules'),
+    },
+}
+
 
 def _personal_views_for(requester_id, role):
-    """Личный набор разделов человека или None.
+    """Набор разделов «только это» человека или None.
 
-    Набор — для рядового сотрудника, не возглавляющего отдел; на супервайзера,
-    тренера, админа и главу он не действует. То же правило, что во фронте
-    (personalViewsOf), — иначе колокол молчал бы у того, у кого меню полное.
+    Личный набор, а без него — набор его отдела. Набор — для рядового
+    сотрудника, не возглавляющего отдел; на супервайзера, тренера, админа и
+    главу он не действует. То же правило, что во фронте (personalViewsOf), —
+    иначе колокол молчал бы у того, у кого меню полное.
     """
     try:
-        views = PERSONAL_VIEW_ALLOWLIST.get(int(requester_id))
+        user_id = int(requester_id)
     except (TypeError, ValueError):
-        return None
-    if not views:
         return None
     role = _normalize_user_role(role)
     if role not in PERSONAL_VIEW_BASE_ROLES and role not in BACK_OFFICE_EMPLOYEE_ROLES:
         return None
     if _headed_department_id(requester_id) is not None:
         return None
-    return views
+    views = PERSONAL_VIEW_ALLOWLIST.get(user_id)
+    if views:
+        return views
+    # Отдел спрашиваем последним и только у рядового: остальным колокол собирается
+    # без лишнего похода в базу. Отказ базы — «набора нет»: лишнее уведомление
+    # дешевле пропавшего.
+    try:
+        _department_id, department_code = db.get_user_department(user_id)
+    except Exception:
+        return None
+    views = DEPARTMENT_ONLY_VIEWS.get(str(department_code or '').strip().lower(), {}).get(role)
+    return views or None
 
 
 def _notifications_viewer_context(requester_id, requester):

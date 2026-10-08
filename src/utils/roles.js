@@ -52,3 +52,22 @@ export const headedDepartmentId = (user) => {
     const dept = user.headed_department_id ?? user.headedDepartmentId;
     return dept != null && dept !== '' ? Number(dept) : null;
 };
+
+// Все возглавляемые отделы: [{ id, name, code }] в порядке сервера, первым —
+// тот же отдел, что в headed_department_id. Глава может возглавлять отдел, в
+// котором сама не числится, и несколько отделов сразу (departments.head_user_id
+// у каждого свой) — тогда в карточке нового сотрудника она выбирает, в какой из
+// своих его завести. У профиля, сохранённого до появления поля, списка нет:
+// возвращаем пустой, и вызывающий остаётся при одном отделе.
+export const headedDepartmentsOf = (user) => {
+    const list = user?.headed_departments ?? user?.headedDepartments;
+    if (!Array.isArray(list)) return [];
+    return list
+        .filter((item) => item && typeof item === 'object'
+            && item.id != null && item.id !== '' && Number.isFinite(Number(item.id)))
+        .map((item) => ({
+            id: Number(item.id),
+            name: String(item.name ?? ''),
+            code: item.code ? String(item.code).trim().toLowerCase() : null,
+        }));
+};

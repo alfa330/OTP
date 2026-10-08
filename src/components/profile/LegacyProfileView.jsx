@@ -16,6 +16,9 @@ import MobileScrollTitle from '../common/MobileScrollTitle';
  * копией — два расчёта одних и тех же часов разошлись бы на первой правке.
  */
 
+// Разделы, в которые ведут «Быстрые действия».
+const QUICK_VIEWS = ['hours', 'evaluation'];
+
 const SkPulse = ({ className = '' }) => <div className={`sk-shimmer ${className}`} />;
 
 const ProfilePageSkeleton = () => (
@@ -130,6 +133,9 @@ export default function LegacyProfileView({
     rateLabel = '',
     onChangeRate = null,
     onOpenView = null,
+    // Какие из «Быстрых действий» показывать: раздел, которого человеку не
+    // выдали, кнопкой не предлагаем. По умолчанию — обе, как было.
+    quickViews = QUICK_VIEWS,
 }) {
     const profileData = profile;
     const rateWindowOpen = typeof onChangeRate === 'function';
@@ -281,11 +287,14 @@ export default function LegacyProfileView({
 
                     {/* Quick actions. У бэк-офиса обе кнопки вели бы в разделы,
                         которых ему не выдали: гард видимости вернул бы его обратно
-                        в профиль, и кнопка выглядела бы сломанной. */}
-                    {!hidesOperatorBlocks && typeof onOpenView === 'function' && (
+                        в профиль, и кнопка выглядела бы сломанной. То же у отделов
+                        с набором разделов без «Моих часов» и «Моих оценок»
+                        (удалённый КЦ, фронт-офисы) — их кнопки отсекает quickViews. */}
+                    {!hidesOperatorBlocks && typeof onOpenView === 'function' && quickViews.length > 0 && (
                         <div className="pt-4 border-t border-gray-200">
                             <p className="text-xs uppercase tracking-wide text-gray-500 mb-3">Быстрые действия</p>
                             <div className="flex flex-wrap gap-2">
+                                {quickViews.includes('hours') && (
                                 <button
                                     onClick={() => onOpenView('hours')}
                                     className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-sm font-medium transition"
@@ -293,6 +302,8 @@ export default function LegacyProfileView({
                                     <FaIcon className="fas fa-clock"></FaIcon>
                                     <span>Мои часы</span>
                                 </button>
+                                )}
+                                {quickViews.includes('evaluation') && (
                                 <button
                                     onClick={() => onOpenView('evaluation')}
                                     className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg text-sm font-medium transition"
@@ -300,6 +311,7 @@ export default function LegacyProfileView({
                                     <FaIcon className="fas fa-chart-bar"></FaIcon>
                                     <span>Мои оценки</span>
                                 </button>
+                                )}
                             </div>
                         </div>
                     )}

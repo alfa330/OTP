@@ -91,10 +91,20 @@ def _server_namespace(heads=(), allowlist=None):
 
     allowlist — свой набор вместо боевого: в боевом один человек и один раздел,
     и правило «источник остаётся, пока открыт его раздел» иначе не исполнялось бы."""
+    class _Db:
+        """Отдел спрашивают у рядового без личного набора — ради набора отдела
+        (tests/test_remote_cc_head_and_views.py). Здесь все из отдела аналитики,
+        а у него набора нет."""
+
+        def get_user_department(self, _user_id):
+            return (2134, 'analytik')
+
     namespace = {
+        'db': _Db(),
         'PERSONAL_VIEW_ALLOWLIST': (allowlist if allowlist is not None
                                     else _module_literal('PERSONAL_VIEW_ALLOWLIST')),
         'PERSONAL_VIEW_BASE_ROLES': _module_literal('PERSONAL_VIEW_BASE_ROLES'),
+        'DEPARTMENT_ONLY_VIEWS': _module_literal('DEPARTMENT_ONLY_VIEWS'),
         'BACK_OFFICE_EMPLOYEE_ROLES': frozenset(
             _module_literal('BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE').values()),
         '_headed_department_id': lambda requester_id: 2134 if requester_id in heads else None,

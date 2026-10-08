@@ -6,14 +6,9 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosToggle, IosBadge, IosModal,
 } from '../ui/ios';
+import { mergePeople, pickHeadCandidates, roleLabel } from './headCandidates.js';
 
 const EMPTY_FORM = { code: '', name: '', description: '', is_active: true, wiki_enabled: true };
-
-const ROLE_LABELS = {
-    super_admin: 'Супер-админ', admin: 'Админ', sv: 'Супервайзер',
-    trainer: 'Тренер', operator: 'Оператор', trainee: 'Стажёр',
-};
-const roleLabel = (role) => ROLE_LABELS[normalizeRole(role)] || role || '—';
 
 const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const isSuperAdmin = normalizeRole(user?.role) === 'super_admin';
@@ -69,16 +64,30 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
         }
     }, [apiBaseUrl, authHeaders]);
 
+    /* Кандидаты в главы — не только сотрудники отдела: главой назначают и
+       человека, который в нём не числится (решение владельца 08.10.2026).
+       Супервайзеров /api/admin/users админу не отдаёт вовсе, поэтому их добираем
+       из /api/admin/sv_list: без этого руководителя с ролью «супервайзер» в
+       списке не найти. Админов та же ручка отдаёт только супер-админу — у
+       обычного админа их среди кандидатов нет. Ручки независимы: отказ одной
+       не отнимает ответ другой. */
     const fetchUsers = useCallback(async () => {
-        try {
-            const resp = await fetch(`${apiBaseUrl}/api/admin/users`, {
-                credentials: 'include',
-                headers: authHeaders(),
-            });
-            const data = await resp.json().catch(() => ({}));
-            const list = data.users || data.operators || (Array.isArray(data) ? data : []);
-            if (Array.isArray(list)) setUsers(list);
-        } catch { /* мягко игнорируем — селектор главы просто будет пустым */ }
+        const load = async (path, pick) => {
+            try {
+                const resp = await fetch(`${apiBaseUrl}${path}`, {
+                    credentials: 'include',
+                    headers: authHeaders(),
+                });
+                const data = await resp.json().catch(() => ({}));
+                const list = resp.ok ? pick(data) : [];
+                return Array.isArray(list) ? list : [];
+            } catch { return []; /* мягко игнорируем — селектор главы просто будет пустым */ }
+        };
+        const [employees, supervisors] = await Promise.all([
+            load('/api/admin/users', (data) => data.users || data.operators || (Array.isArray(data) ? data : [])),
+            load('/api/admin/sv_list', (data) => data.sv_list),
+        ]);
+        setUsers(mergePeople(employees, supervisors));
     }, [apiBaseUrl, authHeaders]);
 
     useEffect(() => { fetchDepartments(); fetchUsers(); }, [fetchDepartments, fetchUsers]);
@@ -141,19 +150,19 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
     };
 
     /* ─── head assignment ─── */
-    const headCandidates = useMemo(() => {
-        if (!headDept) return [];
-        const q = headQuery.trim().toLowerCase();
-        return users
-            .filter((u) => {
-                // если в payload есть department_id — ограничиваем отделом; иначе показываем всех (бэкенд проверит)
-                const dep = u.department_id ?? u.departmentId;
-                if (dep != null && Number(dep) !== Number(headDept.id)) return false;
-                if (!q) return true;
-                return (u.name || '').toLowerCase().includes(q) || roleLabel(u.role).toLowerCase().includes(q);
-            })
-            .slice(0, 60);
-    }, [users, headDept, headQuery]);
+    const departmentNameById = useMemo(
+        () => new Map(departments.map((d) => [Number(d.id), d.name || ''])),
+        [departments],
+    );
+    const departmentNameOf = useCallback((person) => {
+        const dep = person?.department_id ?? person?.departmentId;
+        return dep != null ? (departmentNameById.get(Number(dep)) || '') : '';
+    }, [departmentNameById]);
+
+    // Кого и в каком порядке показать — правила в headCandidates.js.
+    const { shown: headCandidates, total: headCandidatesTotal } = useMemo(() => pickHeadCandidates({
+        people: users, department: headDept, query: headQuery, departmentNameOf,
+    }), [users, headDept, headQuery, departmentNameOf]);
 
     const applyHead = async (userId) => {
         if (!headDept) return;
@@ -398,7 +407,11 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                                     </div>
                                     <div className="min-w-0">
                                         <div className="truncate text-[13.5px] font-medium text-slate-800">{u.name}</div>
-                                        <div className="text-[11.5px] text-slate-400">{roleLabel(u.role)}</div>
+                                        {/* Отдел — рядом с должностью: тёзок и вторые учётки
+                                            одного человека иначе не различить. */}
+                                        <div className="truncate text-[11.5px] text-slate-400">
+                                            {[roleLabel(u.role), departmentNameOf(u)].filter(Boolean).join(' · ')}
+                                        </div>
                                     </div>
                                 </div>
                                 {isCurrent
@@ -407,6 +420,11 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                             </button>
                         );
                     })}
+                    {headCandidatesTotal > headCandidates.length && (
+                        <p className="pt-2 text-center text-[12px] text-slate-400">
+                            Показаны первые {headCandidates.length} из {headCandidatesTotal} — уточните поиск
+                        </p>
+                    )}
                 </div>
             </IosModal>
 

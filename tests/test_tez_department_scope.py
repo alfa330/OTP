@@ -486,7 +486,10 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             class_name="Database",
         )
         self.assertIn("COALESCE(is_active, TRUE) = TRUE", resolver)
-        self.assertIn("ORDER BY name, id", resolver)
+        # Порядок общий у обоих запросов о возглавляемых отделах: свой отдел
+        # главы — первым, дальше по названию (tests/test_remote_cc_head_and_views.py).
+        self.assertIn('ORDER BY """ + self._HEADED_DEPARTMENTS_ORDER_SQL + """', resolver)
+        self.assertIn("DESC NULLS LAST, name, id", _read(DATABASE_PATH))
 
     def test_group_write_endpoints_are_department_scoped(self):
         scope_helper = _function_source(BOT_PATH, "_ensure_group_in_requester_scope")

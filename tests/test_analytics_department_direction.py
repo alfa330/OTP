@@ -58,14 +58,17 @@ _REAL_NAMES = {
     '_is_super_admin_role', '_is_admin_role', '_is_global_admin_requester',
     'KZ_PHONE_REGEX', '_is_valid_kz_phone', 'SENSITIVE_ACCESS_ROLE_LABELS',
     'OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES', 'EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES',
-    'EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES',
+    'EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES', 'EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES',
     'BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE', 'BACK_OFFICE_EMPLOYEE_ROLES',
     '_back_office_employee_role', '_department_hides_operator_line_fields',
     '_department_hides_employee_direction', '_department_has_optional_employee_direction',
+    # Выбор отдела главой нескольких отделов и SIP-номер удалённого КЦ
+    # (tests/test_remote_cc_head_and_views.py) — помощники те же, настоящие.
+    '_department_hides_employee_sip_input', '_headed_department_choice',
 }
 # Подменяем только то, что ходит в базу, в запрос и во вход.
 _STUBBED_FUNCTIONS = ('_get_authenticated_requester', '_is_employee_accounting_manager',
-                      '_headed_department_id')
+                      '_headed_department_id', '_headed_department_ids')
 
 
 def _segment(node, lines=_BOT_LINES):
@@ -180,6 +183,9 @@ def _add_user(payload, requester=SUPER_ADMIN):
         '_get_authenticated_requester': lambda: (requester['id'], requester_row, None),
         '_is_employee_accounting_manager': lambda _requester_id: False,
         '_headed_department_id': lambda _requester_id: requester.get('headed'),
+        # Здесь каждый глава возглавляет один отдел — тот же, что в 'headed'.
+        '_headed_department_ids': lambda _requester_id: frozenset(
+            [requester['headed']] if requester.get('headed') is not None else []),
     }
     exec(_PROXY_STATUS_SOURCE, namespace)
     exec(_REAL_DEFINITIONS, namespace)
