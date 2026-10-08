@@ -9,6 +9,9 @@
   Gemini от прогона к прогону слышит по-разному;
 * любой сбой второго прохода (ошибка модели, оборванный ответ, запись больше лимита,
   неправдоподобный объём текста) оставляет оценку на расшифровке Soniox;
+* Gemini не достаётся то, где слышать нечего, и её текст не бывает длиннее записи:
+  на секунде звука она сочиняет разговор целиком (звонок 7528), и такая расшифровка
+  не берётся ни свежей, ни из кэша, а сама секундная запись не оценивается вовсе;
 * расшифровка Gemini приходит в конвейер в той же форме, что у Soniox: «[S1] …» для
   оценщика, реплики с меткой голоса для карточки;
 * карточка помечает «распознано повторно» по той расшифровке, которая показана.
@@ -22,7 +25,7 @@ import unittest
 from contextlib import ExitStack, nullcontext
 from unittest import mock
 
-from call_qa import api, batch_eval, config, providers
+from call_qa import api, batch_eval, config, providers, subjects
 from call_qa.asr import gemini, second_pass
 from call_qa.evaluation import runtime_store
 from call_qa.evaluation.fingerprint import content_hash, transcript_fingerprint
@@ -48,6 +51,35 @@ SEGMENTS = [
     {"speaker": "S1", "role": "оператор", "lang": "kk", "start_ms": 14500, "end_ms": 16000,
      "text": "Қай қаладансыз?"},
 ]
+# Звонок 7528 от 06.10.2026, как он лежит на проде: оператор снял трубку и через секунду
+# положил. В записи 0,84 с, Soniox услышал одно слово с уверенностью 0,703 — а Gemini на
+# том же звуке написала 17 реплик на 49 секунд (здесь первые и последняя).
+SHORT_FIRST = {"mean_conf": 0.703, "text": "[S1] Жоқ.", "duration_ms": 840}
+FABRICATED = [
+    {"speaker": "S1", "role": "оператор", "lang": "ru", "start_ms": 0, "end_ms": 3700,
+     "text": "Здравствуйте, «Евроколёса». Чем могу помочь?"},
+    {"speaker": "S2", "role": "клиент", "lang": "ru", "start_ms": 6700, "end_ms": 15500,
+     "text": "заказывал диски и резину на Camry шестьдесят четвёртый стиль. Они пришли, нет?"},
+    {"speaker": "S1", "role": "оператор", "lang": "ru", "start_ms": 40100, "end_ms": 43700,
+     "text": "Так. Dunlop. Да, всё на складе, можете забирать."},
+    {"speaker": "S1", "role": "оператор", "lang": "ru", "start_ms": 48300, "end_ms": 49000,
+     "text": "Всего доброго."},
+]
+
+
+def spoken(words, end_ms):
+    """Одна реплика Gemini из стольких-то слов, кончается на такой-то миллисекунде."""
+    return [{"speaker": "S1", "role": "оператор", "lang": "ru", "start_ms": 0, "end_ms": end_ms,
+             "text": " ".join(["слово"] * words)}]
+
+
+def stored_second_pass(segments):
+    """Расшифровка второго прохода, как она лежит в кэше."""
+    assembled = gemini.assemble([dict(s) for s in segments])
+    return {"id": 77, "transcript_hash": content_hash(assembled["text"]), "text": assembled["text"],
+            "segments": assembled["lines"], "tokens": [], "languages": assembled["languages"],
+            "mean_conf": 0.703, "low_conf_spans": [],
+            "payload": {"asr_config": gemini.config_identity(MODEL), "first_pass": {"mean_conf": 0.703}}}
 
 
 def answer(segments, finish="STOP", extra_parts=()):
@@ -242,13 +274,20 @@ class SecondPassPolicyTests(unittest.TestCase):
         with open(dest, "wb") as audio:
             audio.write(b"\0" * size)
 
-    def _resolve(self, mean_conf=0.88, may=True, text=SONIOX_TEXT, download=None, kind=config.SUBJECT_IMPORTED_CALL):
+    def _resolve(self, mean_conf=0.88, may=True, text=SONIOX_TEXT, download=None, kind=config.SUBJECT_IMPORTED_CALL,
+                 duration_ms=52000):
         asked = mock.Mock(return_value=may)
         got = second_pass.resolve(
             call_id=7, subject_kind=kind, audio_path="bucket/uploads/a.wav", audio_fingerprint="f" * 64,
-            first={"mean_conf": mean_conf, "text": text, "duration_ms": 52000, "transcript_cache_id": 11},
+            first={"mean_conf": mean_conf, "text": text, "duration_ms": duration_ms, "transcript_cache_id": 11},
             may_transcribe=asked, download=download or self._download)
         return got, asked
+
+    def _answers(self, segments):
+        self.transcribe.reset_mock()
+        self.transcribe.return_value = {"segments": [dict(s) for s in segments], "meta": {}}
+        self.store.rows.clear()
+        self.store.puts.clear()
 
     def test_threshold(self):
         for mean_conf, weak in ((0.88, True), (0.899, True), (0.90, False), (0.95, False), (None, False)):
@@ -372,6 +411,112 @@ class SecondPassPolicyTests(unittest.TestCase):
         got, _ = self._resolve(text="[S1] Алло\n[S2] Да")
         self.assertIsNotNone(got)
 
+    def test_second_of_audio_never_reaches_gemini(self):
+        got, asked = self._resolve(**SHORT_FIRST)
+        self.assertIsNone(got)
+        asked.assert_not_called()                 # не «оценка не считается», а вовсе не кандидат
+        self.transcribe.assert_not_called()
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.store.puts, [])
+        # Граница — config.AI_QA_MIN_RECORDING_S, ровно на ней запись уже разговор.
+        for duration_ms, goes in ((4999, False), (5000, True)):
+            with self.subTest(duration_ms=duration_ms):
+                self._answers(spoken(3, 4000))
+                got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=duration_ms)
+                self.assertEqual(self.transcribe.call_count, int(goes))
+                self.assertEqual(got is not None, goes)
+        with mock.patch.object(config, "AI_QA_MIN_RECORDING_S", 0.0):       # 0 выключает правило
+            self._answers(spoken(3, 800))
+            got, _ = self._resolve(**SHORT_FIRST)
+            self.assertIsNotNone(got)
+
+    def test_stored_fabrication_of_a_short_recording_is_not_used(self):
+        # Звонок 7528 оценён до правки: выдуманный разговор уже лежит в кэше второго прохода.
+        self.store.rows[(config.SUBJECT_IMPORTED_CALL, 7, "gemini")] = stored_second_pass(FABRICATED)
+        for may in (False, True):
+            with self.subTest(may=may):
+                got, asked = self._resolve(may=may, **SHORT_FIRST)
+                self.assertIsNone(got)
+                asked.assert_not_called()
+                self.transcribe.assert_not_called()
+
+    def test_transcript_longer_than_the_recording_is_rejected(self):
+        # Запись шесть секунд, реплики — до сорок девятой: это не расшифровка этой записи.
+        self._answers(FABRICATED)
+        with self.assertLogs(level="WARNING") as logs:
+            got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=6000)
+        self.assertIsNone(got)
+        self.assertEqual(self.store.puts, [])                 # и в кэш выдумка не ложится
+        self.assertEqual(logs.records[-1].levelname, "WARNING")
+        self.assertIn("реплики до 49.0 с при записи в 6.0 с", logs.output[-1])
+        # Время конца у Gemini плавает — допуск 20 % и 2 с: 10 с записи → до 14,0 с.
+        # Последней по времени бывает и не последняя по счёту реплика.
+        for end_ms, fits in ((14000, True), (14001, False)):
+            with self.subTest(end_ms=end_ms):
+                self._answers(spoken(3, 1000) + spoken(3, end_ms) + spoken(3, 9000))
+                got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=10000)
+                self.assertEqual(got is not None, fits)
+                self.assertEqual(len(self.store.puts), int(fits))
+        # Реплика без времени длину не оценивает и проверку не роняет.
+        self._answers([{**spoken(3, 0)[0], "start_ms": None, "end_ms": None}])
+        got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=10000)
+        self.assertIsNotNone(got)
+
+    def test_more_words_than_the_recording_can_hold_is_rejected(self):
+        # Время уложено в запись, но столько за шесть секунд не сказать: до пяти слов в секунду.
+        self._answers(spoken(20, 2000) + spoken(10, 5500))
+        got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=6000)
+        self.assertIsNotNone(got)
+        self._answers(spoken(21, 2000) + spoken(10, 5500))
+        with self.assertLogs(level="WARNING") as logs:
+            got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=6000)
+        self.assertIsNone(got)
+        self.assertEqual(self.store.puts, [])
+        self.assertIn("31 слов при записи в 6.0 с", logs.output[-1])
+
+    def test_stored_transcript_that_does_not_fit_is_ignored(self):
+        # Мерка у расшифровки из кэша та же, что у свежей: запись 20 с, реплики до 49-й.
+        self.store.rows[(config.SUBJECT_IMPORTED_CALL, 7, "gemini")] = stored_second_pass(FABRICATED)
+        with self.assertLogs(level="WARNING") as logs:
+            got, asked = self._resolve(may=False, duration_ms=20000)
+        self.assertIsNone(got)
+        asked.assert_not_called()
+        self.transcribe.assert_not_called()
+        self.assertIn("реплики до 49.0 с при записи в 20.0 с", logs.output[-1])
+        # Та же строка при записи в 49 секунд — обычная готовая расшифровка.
+        got, _ = self._resolve(may=False, duration_ms=49000)
+        self.assertEqual(got["transcript_cache_id"], 77)
+
+    def test_racing_writer_that_does_not_fit_is_not_used(self):
+        # Обогнавший нас прогон положил выдумку (старый код при выкладке) — её не берём.
+        winner = stored_second_pass(FABRICATED)
+        real_put = self.store.put
+
+        def put_after_winner(**kw):
+            self.store.rows[(kw["subject_kind"], kw["call_id"], kw["asr_provider"])] = winner
+            return real_put(**kw)
+
+        self._answers(spoken(3, 4000))
+        with mock.patch.object(second_pass.runtime_store, "put_transcript",
+                               strict(REAL_PUT_TRANSCRIPT, put_after_winner)), \
+                self.assertLogs(level="WARNING"):
+            got, _ = self._resolve(text="[S1] Жоқ.", duration_ms=6000)
+        self.assertIsNone(got)
+
+    def test_without_recording_length_the_first_pass_must_be_substantial(self):
+        # Старые расшифровки звонков журнала хранят длину 0. Без длины вторую расшифровку
+        # проверить можно только объёмом первой — а на паре слов сверять нечего.
+        ten = "[S1] альфа бета гамма дельта эпсилон\n[S2] дзета ита тета йота каппа"
+        nine = "[S1] альфа бета гамма дельта эпсилон\n[S2] дзета ита тета йота 708163 семь"
+        for duration_ms in (None, 0):
+            for text, goes in (("[S1] Алло\n[S2] Да", False), (nine, False), (ten, True)):
+                with self.subTest(duration_ms=duration_ms, text=text):
+                    self._answers(spoken(8, 49000))          # время не проверить — и не проверяем
+                    got, asked = self._resolve(text=text, duration_ms=duration_ms)
+                    self.assertEqual(got is not None, goes)
+                    self.assertEqual(self.transcribe.call_count, int(goes))
+                    self.assertEqual(asked.call_count, int(goes))
+
     def test_doubtful_lines_are_where_the_two_passes_disagree(self):
         def line(text):
             return {"spk": "1", "seg": [{"t": text}]}
@@ -416,13 +561,13 @@ class SecondPassPolicyTests(unittest.TestCase):
                 self.assertIsNone(second_pass.card_note(payload))
 
 
-def _soniox_record(mean_conf):
+def _soniox_record(mean_conf, duration_ms=52000):
     return {"id": 11, "transcript_hash": content_hash(SONIOX_TEXT), "text": SONIOX_TEXT,
             "segments": [{"spk": "1", "speaker": "operator", "seg": [{"t": "Здравствуйте, я Тимур"}]},
                          {"spk": "2", "speaker": "client", "seg": [{"t": "моё такси привезло внука"}]}],
             "tokens": [], "payload": {"asr_config": {"provider": "soniox"}}, "languages": {"ru": 100},
             "mean_conf": mean_conf, "low_conf_spans": [{"text": "Тимур", "min_conf": 0.18}],
-            "duration_ms": 52000}
+            "duration_ms": duration_ms}
 
 
 class CallSourceTests(unittest.TestCase):
@@ -447,6 +592,8 @@ class CallSourceTests(unittest.TestCase):
         # Без явного разрешения источник Gemini не зовёт: умолчание — «оценка не считается».
         self.assertFalse(resolve.call_args.kwargs["may_transcribe"]())
         self.assertIs(resolve.call_args.kwargs["download"], api._download)
+        # Длину записи источник отдаёт дальше: по ней секундная запись не оценивается.
+        self.assertEqual(source["duration_ms"], 52000)
 
     def test_second_pass_replaces_the_source(self):
         second = {"asm": {"text": "[S1] есімім Алия", "languages": {"kk": 100}, "mean_conf": 0.88,
@@ -461,6 +608,7 @@ class CallSourceTests(unittest.TestCase):
         self.assertEqual(source["asm"]["text"], "[S1] есімім Алия")
         self.assertEqual(source["transcript_cache_id"], 77)
         self.assertEqual(source["asr"]["engine"], "gemini")
+        self.assertEqual(source["duration_ms"], 52000)           # длина — у записи, не у расшифровки
         # Запись та же, расшифровка другая — и отпечаток оценки обязан это видеть.
         self.assertEqual(source["source_identity"], "f" * 64)
         self.assertEqual(source["extra"], {"call_end_party": "client"})
@@ -497,9 +645,9 @@ class CardFlowTests(unittest.TestCase):
     CRITS = [{"idx": 0, "criterion_id": "c0", "name": "Приветствие", "source": "transcript",
               "ai": "Correct", "conf": 0.9, "evidence": "Здравствуйте, я Тимур", "comment": ""}]
 
-    def _open(self, *, refresh, has_run, mean_conf=0.88, second_pass_row=None):
+    def _open(self, *, refresh, has_run, mean_conf=0.88, second_pass_row=None, duration_ms=52000):
         kind = config.SUBJECT_IMPORTED_CALL
-        store = _Store({(kind, 7, "soniox"): _soniox_record(mean_conf)})
+        store = _Store({(kind, 7, "soniox"): _soniox_record(mean_conf, duration_ms)})
         if second_pass_row:
             store.rows[(kind, 7, "gemini")] = second_pass_row
         transcribe = mock.Mock(return_value={"segments": [dict(s) for s in SEGMENTS], "meta": {"model": MODEL}})
@@ -507,6 +655,8 @@ class CardFlowTests(unittest.TestCase):
             "per_criterion": [{"idx": 0, "name": "Приветствие", "source": "transcript", "verdict": "Correct",
                                "confidence": 0.9, "evidence_quote": "есімім Алия болады", "comment": ""}],
             "overall_comment": "", "retrieval_trace": {}, "_llm_meta": {}})
+        cache_put = mock.Mock()
+        self.mocks = {"transcribe": transcribe, "evaluate": evaluate, "cache_put": cache_put}
         run = {"id": "run-1", "is_latest": True, "evaluation_fingerprint": "fp",
                "transcript_cache_id": second_pass_row["id"] if second_pass_row else 11,
                "payload": {"id": 7, "subject_kind": kind, "criteria": list(self.CRITS)}}
@@ -515,6 +665,7 @@ class CardFlowTests(unittest.TestCase):
         conn = mock.MagicMock()
         conn.__enter__.return_value = conn
         saved = mock.Mock()
+        self.mocks["saved"] = saved
 
         def download(_audio_path, dest):
             with open(dest, "wb") as audio:
@@ -559,7 +710,7 @@ class CardFlowTests(unittest.TestCase):
             mock.patch.object(api, "_hydrate_cached_card_binding", return_value=True),
             mock.patch.object(api, "_normalise_legacy_ai_verdicts", return_value=False),
             mock.patch.object(api, "_cache_get", return_value={"cached": True}),
-            mock.patch.object(api, "_cache_put"),
+            mock.patch.object(api, "_cache_put", cache_put),
             mock.patch.object(api, "_meta_upsert"),
             mock.patch.object(api, "_signed_url", return_value=None),
             mock.patch.object(api, "_attach_human_review", side_effect=lambda p, reviewer_id=None: p),
@@ -633,6 +784,33 @@ class CardFlowTests(unittest.TestCase):
         transcribe.assert_not_called()
         self.assertIn("Тимур", evaluate.call_args.args[0])
         self.assertIsNone(payload["asr"])
+
+    def test_second_of_audio_is_not_evaluated(self):
+        # Звонок 7528: ни первой оценки, ни «Переоценить», ни готовой оценки из кэша —
+        # иначе убранная из очереди оценка вернулась бы первым же открытием карточки.
+        fabricated = stored_second_pass(FABRICATED)
+        for refresh, has_run, row in ((False, False, None), (True, True, None), (False, True, None),
+                                      (False, True, fabricated)):
+            with self.subTest(refresh=refresh, has_run=has_run, stored=bool(row)):
+                with self.assertRaises(subjects.SubjectNotEvaluable) as refused:
+                    self._open(refresh=refresh, has_run=has_run, mean_conf=0.703, duration_ms=840,
+                               second_pass_row=row)
+                self.assertEqual(str(refused.exception),
+                                 "запись длится 0,8 с — короче 5 с, оценивать нечего")
+                self.assertEqual(refused.exception.reason, subjects.REASON_SHORT_RECORDING)
+                self.assertEqual(refused.exception.detail, {"duration_ms": 840, "min_duration_s": 5.0})
+                for name in ("transcribe", "evaluate", "saved", "cache_put"):
+                    self.mocks[name].assert_not_called()
+
+    def test_recording_of_unknown_length_is_evaluated_as_before(self):
+        # Старые расшифровки звонков журнала хранят длину 0 — это «неизвестно», а не «ноль».
+        for duration_ms in (0, None, 5000):
+            with self.subTest(duration_ms=duration_ms):
+                payload, _, evaluate, saved = self._open(refresh=False, has_run=False, mean_conf=0.95,
+                                                         duration_ms=duration_ms)
+                evaluate.assert_called_once()
+                self.assertEqual(saved.call_args.kwargs["status"], "succeeded")
+                self.assertFalse(payload["_cached"])
 
 
 class BatchStageTests(unittest.TestCase):

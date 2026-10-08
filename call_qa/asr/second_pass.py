@@ -19,6 +19,15 @@ config.py. Первый проход при этом не выбрасывает
 (первая оценка звонка или «Переоценить»). Открытие карточки с готовой оценкой его не
 делает: иначе просмотр старых звонков тратил бы деньги и помечал их оценки
 «устаревшими» — расшифровка входит в отпечаток оценки.
+
+Там, где слышать нечего, Gemini не пишет «[неразборчиво]», а сочиняет разговор целиком.
+Звонок 7528 (06.10.2026): в записи 0,8 с и одно слово «Жоқ», во втором проходе —
+17 реплик на 49 секунд про магазин шин, оценка 94. Сверка объёма с Soniox этого не
+видела: на одном слове ей не с чем сравнивать. Поэтому вторую расшифровку берём, только
+когда её есть чем проверить, и только если она помещается в запись: короткая запись
+(config.AI_QA_MIN_RECORDING_S) во второй проход не идёт вовсе, а текст, который
+длиннее записи по времени или по числу слов, отбрасывается — и свежий, и уже лежащий
+в кэше.
 """
 from __future__ import annotations
 
@@ -42,6 +51,12 @@ _WORD_RE = re.compile(r"\w+")
 # десяти слов у Soniox) сравнивать нечего.
 _MIN_WORDS_TO_COMPARE = 10
 _PLAUSIBLE_RATIO = (0.5, 2.0)
+# Время последней реплики у Gemini плавает вокруг настоящего: на 27 записях 07.10.2026
+# оно уходило за конец записи не дальше чем на 9 % и 3,8 с. Выдумка уходит в разы.
+_TIMELINE_SLACK = 1.2
+_TIMELINE_SLACK_MS = 2000
+# Быстрее не говорят: в тех же записях выходило до 2,5 слова в секунду на двоих.
+_MAX_WORDS_PER_SECOND = 5
 # Реплика ненадёжна, если первый проход подтвердил меньше половины её слов. Короткие
 # («Алло», «Иә, иә») не сверяем: в них одно разночтение — уже половина.
 _DOUBT_MIN_WORDS = 4
@@ -87,6 +102,32 @@ def _check_plausible(second_text: str, first_text: str) -> None:
     ratio = len(_WORD_RE.findall(second_text or "")) / first_words
     if not _PLAUSIBLE_RATIO[0] <= ratio <= _PLAUSIBLE_RATIO[1]:
         raise SecondPassRejected(f"объём расшифровки {ratio:.2f} от первого прохода")
+
+
+def _check_fits_recording(lines: list[dict], duration_ms) -> None:
+    """Расшифровка не бывает длиннее записи — ни по времени реплик, ни по числу слов.
+    Длина записи неизвестна — проверять не по чему (см. _checkable)."""
+    if not duration_ms:
+        return
+    last_end = max((int(line.get("end_ms") or 0) for line in lines), default=0)
+    if last_end > duration_ms * _TIMELINE_SLACK + _TIMELINE_SLACK_MS:
+        raise SecondPassRejected(
+            f"реплики до {last_end / 1000:.1f} с при записи в {duration_ms / 1000:.1f} с")
+    words = sum(len(_WORD_RE.findall(_line_text(line))) for line in lines)
+    if words > duration_ms / 1000 * _MAX_WORDS_PER_SECOND:
+        raise SecondPassRejected(
+            f"{words} слов при записи в {duration_ms / 1000:.1f} с")
+
+
+def _checkable(first: dict) -> bool:
+    """Есть ли чем проверить вторую расшифровку. Запись короче нижней границы — не
+    разговор, повторно распознавать в ней нечего. Без длины записи (старые расшифровки
+    звонков журнала хранят 0) остаётся сверка объёма с первым проходом, а ей нужен
+    связный первый проход: иначе Gemini пришлось бы верить на слово."""
+    duration_ms = first.get("duration_ms")
+    if duration_ms:
+        return duration_ms >= config.AI_QA_MIN_RECORDING_S * 1000
+    return len(_comparable_words(first.get("text"))) >= _MIN_WORDS_TO_COMPARE
 
 
 def _comparable_words(text: str) -> list[str]:
@@ -154,6 +195,7 @@ def _transcribe_and_store(*, call_id, subject_kind, audio_path, audio_fingerprin
             raise SecondPassRejected(f"запись {size} байт больше лимита запроса")
         got = gemini.transcribe_file(path, model=model)
     assembled = gemini.assemble(got["segments"])
+    _check_fits_recording(assembled["lines"], first.get("duration_ms"))
     _check_plausible(assembled["text"], first.get("text"))
     lines, doubtful_spans = _mark_doubtful(assembled["lines"], first.get("text"))
     lines = speaker_roles.assign(lines, speaker_roles.resolve(lines))
@@ -186,8 +228,10 @@ def resolve(*, call_id, subject_kind, audio_path, audio_fingerprint, first: dict
     first — что дал Soniox: mean_conf, text, duration_ms, transcript_cache_id.
     may_transcribe() — будет ли сейчас считаться оценка; только тогда зовём Gemini.
     Уже сделанная расшифровка берётся из кэша всегда: её отпечаток — у прогона,
-    который по ней оценён. Любой сбой второго прохода оценку не роняет."""
-    if not is_weak(first.get("mean_conf")):
+    который по ней оценён. Исключение — та, что не помещается в запись: это выдумка,
+    и оценивать по ней нельзя, даже если прогон уже есть. Любой сбой второго прохода
+    оценку не роняет."""
+    if not is_weak(first.get("mean_conf")) or not _checkable(first):
         return None
     model = config.ASR_SECOND_PASS_MODEL
     identity = gemini.config_identity(model)
@@ -201,6 +245,8 @@ def resolve(*, call_id, subject_kind, audio_path, audio_fingerprint, first: dict
                 call_id=call_id, subject_kind=subject_kind, audio_path=audio_path,
                 audio_fingerprint=audio_fingerprint, first=first, model=model,
                 identity=identity, config_hash=config_hash, download=download)
+        # Из кэша или от обогнавшего нас прогона — мерка та же, что у свежей.
+        _check_fits_recording(record.get("segments") or [], first.get("duration_ms"))
     except (gemini.GeminiAsrError, SecondPassRejected, providers.VertexError) as exc:
         logging.warning("ai-qa: повторное распознавание %s %s не удалось, остаётся Soniox: %s",
                         subject_kind, call_id, exc)

@@ -197,6 +197,16 @@ ASR_SECOND_PASS_TIMEOUT = float(env("ASR_SECOND_PASS_TIMEOUT", "180"))
 # среди слабых звонков, и такой звонок остаётся на расшифровке Soniox.
 ASR_SECOND_PASS_MAX_BYTES = int(env("ASR_SECOND_PASS_MAX_BYTES", str(14 * 1024 * 1024)))
 
+# --- Слишком короткая запись ---
+# Запись короче этого — не разговор: её не оценивает ИИ (subjects.require_recording_length)
+# и не распознаёт повторно Gemini (asr/second_pass.py). Повод — звонок 7528 от 06.10.2026:
+# оператор снял трубку и через секунду положил, в записи 0,8 с и одно слово «Жоқ». Soniox
+# услышал его неуверенно, запись ушла во второй проход, и Gemini на этой секунде звука
+# написала разговор в 17 реплик на 49 секунд про магазин шин — оценщик поставил за него 94.
+# Пять секунд — нижняя граница ежедневной выборки (AI_QA_DAILY_SAMPLE_MIN_DURATION_S):
+# оценки по записям короче владелец 07.10.2026 велел убрать. 0 выключает правило.
+AI_QA_MIN_RECORDING_S = max(0.0, float(env("AI_QA_MIN_RECORDING_S", "5")))
+
 # --- Эмбеддинги / retrieval ---
 EMBEDDINGS_PROVIDER = str(env("EMBEDDINGS_PROVIDER", "vertex")).strip().lower()  # vertex | selfhost
 VERTEX_REGION = env("VERTEX_REGION", "asia-southeast1")

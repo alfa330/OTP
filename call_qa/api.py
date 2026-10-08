@@ -1228,6 +1228,21 @@ def _download(audio_path: str, dest: str):
     storage.Client(project=sa["project_id"], credentials=creds).bucket(bucket).blob(blob).download_to_filename(dest)
 
 
+def _audio_response_type(blob_name) -> str:
+    """Content-Type подписанной ссылки — по расширению файла, как у журнала
+    (bot_schedule2._signed_audio_response_type). Записи Oktell и Binotel лежат mp3,
+    записи отдела продаж (мост FreePBX) — WAV как есть; с зашитым audio/mpeg WAV часть
+    браузеров играть отказывается."""
+    lowered = str(blob_name or "").lower()
+    if lowered.endswith(".wav"):
+        return "audio/wav"
+    if lowered.endswith(".gsm"):
+        return "audio/gsm"
+    if lowered.endswith((".ogg", ".oga")):
+        return "audio/ogg"
+    return "audio/mpeg"
+
+
 def _signed_url(audio_path, minutes=30):
     """Подписанная ссылка на запись в GCS (для прослушивания в браузере)."""
     if not audio_path:
@@ -1241,7 +1256,7 @@ def _signed_url(audio_path, minutes=30):
         bucket, blob = audio_path.split("/", 1)
         b = storage.Client(project=sa["project_id"], credentials=creds).bucket(bucket).blob(blob)
         return b.generate_signed_url(version="v4", expiration=timedelta(minutes=minutes),
-                                     method="GET", response_type="audio/mpeg")
+                                     method="GET", response_type=_audio_response_type(blob))
     except Exception:
         return None
 
@@ -2270,6 +2285,7 @@ def _resolve_call_source(subject: dict, model: str, may_transcribe=None) -> dict
     source = {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
               "transcript_hash": transcript_hash, "source_identity": audio_fp,
               "source_model": config.SONIOX_MODEL, "source_config": asr_cfg, "asr": None,
+              "duration_ms": duration_ms,
               "extra": {"call_end_party": subject.get("call_end_party") or "unknown"}}
     second = second_pass.resolve(
         call_id=call_id, subject_kind=subject_kind, audio_path=audio_path,
@@ -2448,6 +2464,9 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         direction_id = subjects_mod.criteria_direction_id(direction_id)
     source = _SOURCE_RESOLVERS[subject_kind](
         subject, model, may_transcribe=lambda: _will_evaluate(call_id, subject_kind, refresh))
+    # До кэша оценок, а не только до модели: готовая оценка секундной записи тоже не
+    # показывается — иначе убранная из очереди вернулась бы первым же открытием карточки.
+    subjects_mod.require_recording_length(source.get("duration_ms"))
     asm, lines = source["asm"], source["lines"]
     transcript_cache_id = source["transcript_cache_id"]
     transcript_hash = source["transcript_hash"]
@@ -4866,12 +4885,21 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
             day_expr="(ic.datetime_raw AT TIME ZONE 'UTC')::date",
             direction_expr="COALESCE(d.canonical_id, d.id)")
         imported = imported + imported_pick
+        # Запись короче нижней границы карточка не оценит (subjects.require_recording_length),
+        # и предлагать такой звонок — тупик: вместо оценки человек получит отказ. Длину
+        # записи знает только её расшифровка, поэтому отсекается уже распознанное.
         cur.execute(imported + with_audio + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                                     WHERE rc.subject_kind = 'imported_call'
                                                       AND rc.call_id = ic.id
                                                       AND rc.model = %s)
+                                   AND NOT EXISTS (SELECT 1 FROM ai_transcript_cache tc
+                                                    WHERE tc.subject_kind = 'imported_call'
+                                                      AND tc.call_id = ic.id
+                                                      AND tc.duration_ms > 0
+                                                      AND tc.duration_ms < %s)
                                    ORDER BY random() LIMIT 1""",
-                    (id_family, *imported_pick_params, config.CLAUDE_MODEL))
+                    (id_family, *imported_pick_params, config.CLAUDE_MODEL,
+                     int(config.AI_QA_MIN_RECORDING_S * 1000)))
         row = cur.fetchone()
         if row:
             return {"id": row[0], "direction": row[1], "operator": row[2] or "—",

@@ -381,6 +381,20 @@ class EvaluationTests(_DbCase):
         self.assertEqual(self.status_of(4), (ds.STATUS_PICKED, 1))    # проекции нет — повтор
         self.assertEqual(sorted(self.evaluated), [1, 2, 3, 4])        # по разу за проход
 
+    def test_second_of_audio_frees_its_place_at_once(self):
+        # Запись оказалась секундной (в АТС звонок числился на 28 с): оценка отказывает
+        # по существу, и следующий проход берёт на это место другой звонок.
+        self.add(40, family=ds.FAMILY_CALLS, kind="imported_call")
+        self.audio = {40: ds.AUDIO_READY}
+        with self.assertRaises(subjects_mod.SubjectNotEvaluable) as refused:
+            subjects_mod.require_recording_length(840)
+        self.errors = {40: refused.exception}
+        self.run_pass()
+        self.assertEqual(self.status_of(40), (ds.STATUS_FAILED, 1))
+        self.assertEqual(self.db.samples[0]["last_error"],
+                         "запись длится 0,8 с — короче 5 с, оценивать нечего")
+        self.assertEqual(self.evaluated, [40])
+
     def test_attempts_run_out(self):
         self.add(5, attempts=config.AI_QA_DAILY_SAMPLE_MAX_ATTEMPTS - 1)
         self.errors = {5: RuntimeError("timeout")}

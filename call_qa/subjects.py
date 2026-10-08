@@ -41,6 +41,7 @@ REASON_FEW_MESSAGES = "few_operator_messages"
 REASON_KIND = "not_dialog"
 REASON_DIRECTION = "direction_not_eligible"
 REASON_NO_DIRECTION = "operator_without_direction"
+REASON_SHORT_RECORDING = "recording_too_short"
 
 
 class SubjectNotFound(ValueError):
@@ -610,6 +611,30 @@ def require_evaluable(subject: dict) -> dict:
         raise SubjectNotEvaluable(verdict["message"], reason=verdict["reason"],
                                   detail=verdict["detail"])
     return verdict
+
+
+def require_recording_length(duration_ms) -> None:
+    """Запись короче config.AI_QA_MIN_RECORDING_S не оценивается: разговора в ней нет.
+
+    Отдельно от eligibility(): длину записи знает только распознавание, а тот гейт
+    работает до обращения к моделям. Длина неизвестна (None; старые расшифровки
+    звонков журнала хранят 0) — не отказ: судить не по чему, а у переписки длины нет
+    вовсе.
+
+    В АТС такой звонок может числиться длинным. У входящего, чьё плечо оператора CDR
+    не выделил, длительность — это billsec плеча очереди вместе с автоинформатором и
+    ожиданием: звонок 7528 от 06.10.2026 значился на 28 с при разговоре в одну секунду
+    и так попал в ежедневную выборку."""
+    if not duration_ms or float(duration_ms) >= config.AI_QA_MIN_RECORDING_S * 1000:
+        return
+    # Десятые отбрасываем, а не округляем: «длится 5,0 с — короче 5 с» читалось бы ошибкой.
+    lasts = f"{float(duration_ms) // 100 / 10:.1f}".replace(".", ",")
+    floor = f"{config.AI_QA_MIN_RECORDING_S:g}".replace(".", ",")
+    raise SubjectNotEvaluable(
+        f"запись длится {lasts} с — короче {floor} с, оценивать нечего",
+        reason=REASON_SHORT_RECORDING,
+        detail={"duration_ms": int(duration_ms),
+                "min_duration_s": config.AI_QA_MIN_RECORDING_S})
 
 
 # ── транскрипт эпизода ───────────────────────────────────────────────────────

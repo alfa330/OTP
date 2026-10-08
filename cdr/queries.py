@@ -896,26 +896,32 @@ def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limi
     (cdr.touches.recording_belongs_to): это правило склейки, а не отбора.
 
     hangup_side — кто положил трубку (входящему — журнал очереди, исходящему — CEL
-    станции, cdr/hangups.py): его видит модель оценки (call_qa.call_end)."""
+    станции, cdr/hangups.py): его видит модель оценки (call_qa.call_end).
+
+    Разговор — точный, из журнала очередей (talk_measured_seconds), когда станция его
+    назвала. У входящего, чьё плечо оператора CDR не выделил, talk_seconds — это
+    billsec плеча очереди вместе с автоинформатором и ожиданием: звонок 7528 от
+    06.10.2026 значился на 28 с при разговоре в одну секунду и прошёл окно «от 5 с».
+    Под ключом talk_seconds уходит тот же точный разговор — им подписывается звонок."""
     exts = sorted({str(ext).strip() for ext in (exts or []) if str(ext or '').strip()})
     if not exts or not call_types:
         return []
     params = {'exts': exts, 'day': day, 'types': list(call_types),
               'min_talk': int(min_talk or 0), 'limit': int(limit)}
     sql = """
-        SELECT linkedid, ext, phone, started_at, call_type, talk_seconds, recording_url,
-               hangup_side
+        SELECT linkedid, ext, phone, started_at, call_type,
+               coalesce(talk_measured_seconds, talk_seconds), recording_url, hangup_side
           FROM cdr_touches
          WHERE ext = ANY(%(exts)s)
            AND call_day = %(day)s
            AND call_type = ANY(%(types)s)
-           AND talk_seconds > 0
-           AND talk_seconds >= %(min_talk)s
+           AND coalesce(talk_measured_seconds, talk_seconds) > 0
+           AND coalesce(talk_measured_seconds, talk_seconds) >= %(min_talk)s
            AND coalesce(recording_url, '') <> ''
     """
     if max_talk:
         params['max_talk'] = int(max_talk)
-        sql += " AND talk_seconds <= %(max_talk)s"
+        sql += " AND coalesce(talk_measured_seconds, talk_seconds) <= %(max_talk)s"
     sql += " ORDER BY random() LIMIT %(limit)s"
     cursor.execute(sql, params)
     return [{'linkedid': row[0], 'ext': row[1], 'phone': row[2], 'started_at': row[3],
