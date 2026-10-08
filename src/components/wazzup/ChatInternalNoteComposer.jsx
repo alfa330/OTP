@@ -53,6 +53,14 @@ export function InternalNoteDraft({ apiBaseUrl, headers, chat, onSaved, onCancel
         return () => { mountedRef.current = false; requestRef.current?.abort(); };
     }, []);
 
+    useEffect(() => {
+        const field = textareaRef.current;
+        if (!field) return;
+        field.style.height = 'auto';
+        field.style.height = `${Math.min(field.scrollHeight, 144)}px`;
+        field.style.overflowY = field.scrollHeight > 144 ? 'auto' : 'hidden';
+    }, [text]);
+
     const updateText = (value) => {
         if (requestRef.current || pendingRef.current) return;
         setText(value);
@@ -119,31 +127,38 @@ export function InternalNoteDraft({ apiBaseUrl, headers, chat, onSaved, onCancel
     };
 
     return (
-        <form onSubmit={submit} className="mx-auto w-full max-w-[1040px] rounded-2xl border border-amber-300 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/40">
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-amber-900 dark:text-amber-200">
-                <StickyNote size={16} aria-hidden="true" />
-                <span>Внутренний комментарий · виден только команде</span>
-                <button type="button" onClick={onCancel} className="ml-auto rounded-md p-1 hover:bg-amber-100 dark:hover:bg-amber-900" aria-label="Закрыть внутренний комментарий" title="Закрыть, сохранив черновик"><X size={16} /></button>
+        <form onSubmit={submit} className="shrink-0 border-t border-slate-200/70 bg-white p-2.5 sm:px-4">
+            <div className="mx-auto w-full max-w-[1040px]">
+            <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] text-slate-500">
+                <StickyNote size={13} aria-hidden="true" />
+                <span>Комментарий · только команде</span>
+                {length > 3500 && <span className={`ml-auto tabular-nums ${tooLong ? 'text-red-600' : ''}`}>{length}/4000</span>}
             </div>
-            <textarea ref={textareaRef} rows={2} value={text} readOnly={busy || uncertain}
-                onChange={(event) => updateText(event.target.value)}
-                onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing && !event.isComposing && event.keyCode !== 229) {
-                        event.preventDefault();
-                        submit();
-                    }
-                }}
-                aria-label="Текст внутреннего комментария" placeholder="Комментарий для коллег…"
-                className="w-full resize-none rounded-xl border border-amber-200 bg-white/80 px-3 py-2 text-[15px] leading-relaxed text-slate-900 outline-none focus:border-amber-400 dark:border-amber-800 dark:bg-slate-950/50 dark:text-slate-100" />
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className={`text-xs ${tooLong ? 'text-red-600' : 'text-amber-800 dark:text-amber-300'}`}>{length}/4000 · Shift + Enter — новая строка</span>
+            <div className="flex items-end gap-1 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm focus-within:border-slate-300">
+                <textarea ref={textareaRef} rows={1} value={text} readOnly={busy || uncertain}
+                    onChange={(event) => updateText(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing && !event.isComposing && event.keyCode !== 229) {
+                            event.preventDefault();
+                            submit();
+                        }
+                    }}
+                    aria-label="Текст внутреннего комментария" placeholder="Комментарий для коллег…"
+                    title="Enter — сохранить, Shift + Enter — новая строка"
+                    className="min-w-0 flex-1 resize-none border-0 bg-transparent px-2 py-1.5 text-[15px] leading-6 text-slate-900 outline-none placeholder:text-slate-400" />
+                <button type="button" onClick={onCancel}
+                    className="flex h-9 w-8 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                    aria-label="Закрыть внутренний комментарий" title="Закрыть, сохранив черновик"><X size={16} /></button>
                 <button type="submit" disabled={busy || !text.trim() || tooLong}
-                    className="ml-auto inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-3 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50">
-                    {busy ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                    {busy ? 'Сохранение…' : uncertain ? 'Повторить сохранение' : 'Сохранить комментарий'}
+                    aria-label={busy ? 'Сохранение комментария' : uncertain ? 'Повторить сохранение комментария' : 'Сохранить комментарий'}
+                    title={uncertain ? 'Повторить сохранение комментария' : 'Сохранить комментарий'}
+                    className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-slate-700 px-2.5 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
+                    {busy ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+                    <span className="hidden sm:inline">{busy ? 'Сохранение…' : uncertain ? 'Повторить' : 'Сохранить'}</span>
                 </button>
             </div>
-            {error && <p role="alert" className="mt-2 text-sm text-red-700 dark:text-red-300">{error}</p>}
+            {error && <p role="alert" className="mt-1.5 px-1 text-xs text-red-700">{error}</p>}
+            </div>
         </form>
     );
 }

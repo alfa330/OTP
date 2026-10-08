@@ -232,20 +232,22 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
     return (
         <div data-message-id={msg.messageId} data-message-date={msg.dt}
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
+            <div className={`flex min-w-0 max-w-[85%] flex-col sm:max-w-[min(78%,720px)] ${out ? 'items-end' : 'items-start'}`}>
+                {out && msg.authorName && (
+                    <div className="mb-1 max-w-full truncate px-1 text-[11px] font-medium leading-4 text-slate-500"
+                        title={msg.authorName}>
+                        {msg.authorName}
+                    </div>
+                )}
             <div onDoubleClick={(event) => {
                 if (onReply && !msg.isDeleted && canReplyOnDoubleClick(event)) {
                     event.preventDefault();
                     onReply(msg);
                 }
-            }} className={`wazzup-message-bubble min-w-0 max-w-[85%] rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] sm:max-w-[min(78%,720px)] ${
-                out ? 'rounded-br-md bg-[#dcf8c6] text-slate-900'
+            }} className={`wazzup-message-bubble min-w-0 max-w-full rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
+                out ? 'wazzup-message-outgoing rounded-br-md bg-[#dcf8c6] text-slate-900'
                     : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>
-                {out && msg.authorName && (
-                    <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-emerald-800">
-                        <Headset size={11} /> {msg.authorName}
-                    </div>
-                )}
                 {quote && <button type="button" onClick={() => onQuote?.(quote.messageId)}
                     title="Перейти к исходному сообщению"
                     className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
@@ -276,9 +278,10 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     {out && <MessageDeliveryStatus status={msg.status} />}
                 </div>
             </div>
+            </div>
             {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
                 aria-label="Ответить на сообщение" title="Ответить на сообщение"
-                className={`wazzup-message-reply mt-1 shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${out ? 'order-first' : ''}`}>
+                className={`wazzup-message-reply shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${out ? 'order-first' : ''} ${out && msg.authorName ? 'mt-6' : 'mt-1'}`}>
                 <Reply size={17} />
             </button>}
         </div>
@@ -1706,7 +1709,7 @@ export default function WazzupChatsView(props) {
                             <div className="relative min-h-0 flex-1">
                             <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
-                            <div className="w-full space-y-2">
+                            <div className="mx-auto w-full max-w-[1040px] space-y-2">
                                 {thread === null && (
                                     <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
                                         <Loader2 size={15} className="animate-spin" /> Загрузка переписки…

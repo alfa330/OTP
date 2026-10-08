@@ -18,9 +18,18 @@
 .wazzup-thin-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
 .wazzup-message-row { scroll-margin-block: 64px; }
-.wazzup-message-row[data-quote-highlight='true'] > .wazzup-message-bubble {
+.wazzup-message-row[data-quote-highlight='true'] .wazzup-message-bubble {
     outline: 2px solid #38bdf8;
     outline-offset: 3px;
+}
+
+/* Follow the portal theme, independently of the operating system setting. */
+html[data-otp-theme='dark'] .wazzup-message-outgoing {
+    background-color: #203b31;
+}
+html[data-otp-theme='dark'] .wazzup-internal-note {
+    background-color: #2b2923;
+    border-color: #494334;
 }
 
 .wazzup-message-reply {
