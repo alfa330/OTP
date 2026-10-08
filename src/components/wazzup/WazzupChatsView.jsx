@@ -21,6 +21,7 @@ import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
+import { buildAttachmentGroup } from './chatAttachmentGroups';
 import ChatMessageImage from './ChatMessageImage';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
@@ -948,8 +949,15 @@ export default function WazzupChatsView(props) {
     const threadBox = useRef(null);
     const quoteHighlight = useRef({ node: null, timer: null });
     const selectedKey = pilotChatKey(account, selected);
+    const attachmentThread = useRef([]);
     const openAttachment = useCallback((message) => {
-        setAttachmentSelection({ key: selectedKey, message: { ...message } });
+        const items = buildAttachmentGroup(attachmentThread.current, message);
+        setAttachmentSelection({ key: selectedKey, message: { ...message }, items });
+    }, [selectedKey]);
+    const selectAttachment = useCallback((message) => {
+        setAttachmentSelection((current) => current?.key === selectedKey
+            && current.items.some((item) => item.messageId === message.messageId)
+            ? { ...current, message } : current);
     }, [selectedKey]);
     const chooseReply = useCallback((message) => {
         setNoteComposerKey(null);
@@ -1437,6 +1445,8 @@ export default function WazzupChatsView(props) {
         });
         return out;
     }, [thread, notes.items]);
+    // Read the current displayed order without changing every bubble's click handler on SSE updates.
+    attachmentThread.current = threadWithDays;
     const threadQuotes = useMemo(() => {
         const byId = new Map((thread || []).map((message) => [message.messageId, message]));
         return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
@@ -1798,8 +1808,9 @@ export default function WazzupChatsView(props) {
                 <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
                     <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
                 </IosModal>}>
-                    <ChatAttachmentViewer key={`${selectedKey}:${attachmentSelection.message.messageId}`}
+                    <ChatAttachmentViewer key={selectedKey}
                         apiBaseUrl={apiBaseUrl} headers={headers} chat={selected} message={attachmentSelection.message}
+                        items={attachmentSelection.items} onSelect={selectAttachment}
                         onClose={() => setAttachmentSelection(null)} />
                 </Suspense>}
         </div>

@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, ScanText, ZoomIn, ZoomOut } from 'lucide-react';
 import { IosModal } from '../ui/ios';
-import { ATTACHMENT_MAX_BYTES, attachmentName, boundedCanvasSize, pdfPageText, saveAttachment } from './chatAttachments';
+import { ATTACHMENT_MAX_BYTES, attachmentName, attachmentPreviewKind, boundedCanvasSize, pdfPageText, saveAttachment } from './chatAttachments';
+import ChatAttachmentStrip from './ChatAttachmentStrip';
 
 const iconButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-35';
 const actionButton = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40';
@@ -116,9 +117,9 @@ async function rasterPage(asset, currentPage, task) {
     } finally { target.width = 1; target.height = 1; }
 }
 
-export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, message, onClose }) {
-    const [asset, setAsset] = useState(null);
-    const [download, setDownload] = useState(null);
+export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, message, items = [], onSelect, onClose }) {
+    const [loadedAsset, setAsset] = useState(null);
+    const [loadedDownload, setDownload] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [page, setPage] = useState(1);
@@ -129,7 +130,18 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const [copied, setCopied] = useState(false);
     const [retry, setRetry] = useState(0);
     const latest = useRef({});
-    latest.current = { headers, onClose };
+    const sourceKey = `${chat.channelId}:${chat.chatId}:${message.messageId}`;
+    latest.current = { headers, onClose, items, onSelect, sourceKey };
+    const navigation = useRef({ sourceKey, messageId: message.messageId });
+    if (navigation.current.sourceKey !== sourceKey) {
+        navigation.current = { sourceKey, messageId: message.messageId };
+    }
+    const request = useRef(null);
+    const contentSource = useRef(null);
+    const currentSource = contentSource.current === sourceKey;
+    const asset = loadedAsset?.sourceKey === sourceKey ? loadedAsset : null;
+    const download = loadedDownload?.sourceKey === sourceKey ? loadedDownload : null;
+    const knownUnsupported = attachmentPreviewKind(message) === 'document' && Boolean(attachmentName(message));
     const extraction = useRef(null);
     const copyTimer = useRef(null);
     const copyState = useRef({ mounted: false, version: 0 });
@@ -142,14 +154,35 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         extraction.current?.render?.cancel();
         extraction.current = null;
     }, []);
+    const select = useCallback((item) => {
+        if (!latest.current.onSelect || !item || item.messageId === navigation.current.messageId) return;
+        navigation.current.messageId = item.messageId;
+        copyState.current.version += 1;
+        clearTimeout(copyTimer.current);
+        request.current?.abort();
+        cancelExtraction();
+        setRetry((value) => value + 1);
+        setExtracting(false); setExtracted(null); setCopied(false);
+        latest.current.onSelect(item);
+    }, [cancelExtraction]);
+    const step = useCallback((offset) => {
+        const group = latest.current.items;
+        const index = group.findIndex((item) => item.messageId === navigation.current.messageId);
+        if (index >= 0 && group[index + offset]) select(group[index + offset]);
+    }, [select]);
     useEffect(() => {
         copyState.current.mounted = true;
+        copyState.current.version += 1;
+        clearTimeout(copyTimer.current);
         const controller = new AbortController();
+        request.current = controller;
+        contentSource.current = sourceKey;
         let loadingTask;
         let url;
-        setLoading(true); setAsset(null); setDownload(null); setError(''); setExtracted(null); setPage(1); setZoom(1); setCurrentPage(null);
+        setLoading(!knownUnsupported); setAsset(null); setDownload(null); setError(''); setExtracted(null); setPage(1); setZoom(1); setCurrentPage(null); setExtracting(false); setCopied(false);
         textCache.current.clear();
         (async () => {
+            if (knownUnsupported) return;
             const { data: blob } = await axios.get(`${apiBaseUrl}/api/wazzup/pilot/attachment`, {
                 headers: latest.current.headers(), params: ids, responseType: 'blob',
                 signal: controller.signal, timeout: 35000,
@@ -163,7 +196,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             if (!kind) throw new Error('Этот формат пока нельзя просмотреть в чате. Откройте оригинал.');
             url = URL.createObjectURL(blob);
             const name = attachmentName(message) || (kind === 'pdf' ? 'Документ.pdf' : `Изображение.${mime.split('/')[1]}`);
-            setDownload({ url, name });
+            setDownload({ url, name, sourceKey });
             let pdf;
             let library;
             if (kind === 'pdf') {
@@ -176,7 +209,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                 pdf = await loadingTask.promise;
                 if (controller.signal.aborted) return;
             }
-            setAsset({ kind, url, pdf, library, name });
+            setAsset({ kind, url, pdf, library, name, sourceKey });
         })().catch(async (failure) => {
             const message = failure?.name === 'PasswordException' ? 'PDF защищён паролем. Скачайте его для открытия.'
                 : await requestError(failure, failure?.response ? 'Не удалось загрузить вложение.'
@@ -185,6 +218,8 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => {
             copyState.current.mounted = false;
+            copyState.current.version += 1;
+            clearTimeout(copyTimer.current);
             controller.abort();
             cancelExtraction();
             loadingTask?.destroy()?.catch(() => {});
@@ -192,12 +227,19 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         };
         // headers is refreshed by SSE renders; it must not reload the document.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, chat.channelId, chat.chatId, message.messageId, retry, cancelExtraction]);
+    }, [apiBaseUrl, chat.channelId, chat.chatId, message.messageId, retry, cancelExtraction, knownUnsupported]);
     useEffect(() => {
         const previousFocus = document.activeElement;
-        container.current?.querySelector('button')?.focus();
+        container.current?.focus();
         const escape = (event) => {
             if (event.key === 'Escape') { event.stopPropagation(); latest.current.onClose(); }
+            if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+                && !event.defaultPrevented && !event.isComposing && !event.target?.isContentEditable
+                && !event.target?.closest?.('input, textarea, select, [contenteditable], [role="slider"], [role="textbox"]')
+                && (!event.target?.closest?.('button, a') || event.target?.closest?.('[data-attachment-navigation]'))
+                && latest.current.items.length > 1 && latest.current.onSelect) {
+                event.preventDefault(); step(event.key === 'ArrowLeft' ? -1 : 1);
+            }
         };
         document.addEventListener('keydown', escape);
         return () => {
@@ -205,16 +247,16 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             clearTimeout(copyTimer.current);
             if (previousFocus?.isConnected) previousFocus.focus();
         };
-    }, []);
-    const ready = useCallback((value) => { setCurrentPage(value); }, []);
-    const pageError = useCallback((value) => { setError(value); }, []);
+    }, [step]);
+    const ready = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setCurrentPage(value); }, [sourceKey, message.messageId]);
+    const pageError = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setError(value); }, [sourceKey, message.messageId]);
     const changePage = (value) => {
         copyState.current.version += 1;
         cancelExtraction(); setExtracting(false); setError(''); setCurrentPage(null);
         setCopied(false); setPage(value); setExtracted(textCache.current.get(value) || null);
     };
     const extract = async (forceOcr = false) => {
-        if (!asset || extraction.current || (asset.kind === 'pdf' && !currentPage)) return;
+        if (!asset || extraction.current || navigation.current.messageId !== message.messageId || (asset.kind === 'pdf' && !currentPage)) return;
         setError(''); setCopied(false);
         if (!forceOcr && currentPage?.text) {
             const result = { text: currentPage.text, source: 'pdf', page };
@@ -261,7 +303,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     return createPortal(<IosModal open onClose={onClose} title={download?.name || attachmentName(message) || 'Просмотр вложения'}
         subtitle={asset?.kind === 'pdf' ? `${asset.pdf.numPages} стр. · Текст можно выделять на странице` : undefined}
         maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
-        <div ref={container} className="flex min-h-0 flex-1 flex-col" style={{ height: 'min(78vh, 900px)' }}>
+        <div ref={container} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none" style={{ height: 'min(78vh, 900px)' }}>
             <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-2">
                 {asset?.kind === 'pdf' && <>
                     <button type="button" className={iconButton} disabled={page <= 1} aria-label="Предыдущая страница"
@@ -278,34 +320,42 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                         onClick={() => setZoom((value) => Math.min(3, value + 0.25))}><ZoomIn size={16} /></button>
                 </>}
                 <div className="ml-auto flex flex-wrap items-center gap-1">
-                    <button type="button" className={actionButton} disabled={!canExtract} onClick={() => extract(false)}>
+                    {!knownUnsupported && <button type="button" className={actionButton} disabled={!canExtract} onClick={() => extract(false)}>
                         {extracting ? <Loader2 size={15} className="animate-spin" /> : <FileText size={15} />} Извлечь текст
-                    </button>
+                    </button>}
                     {asset?.kind === 'pdf' && currentPage?.text && <button type="button" className={actionButton}
                         disabled={!canExtract} onClick={() => extract(true)} title="Распознать изображение текущей страницы с помощью ИИ">
                         <ScanText size={15} /> Распознать скан
                     </button>}
-                    <button type="button" className={iconButton} disabled={!download} aria-label="Скачать файл" title="Скачать файл"
-                        onClick={() => saveAttachment(download.url, download.name)}><Download size={16} /></button>
+                    {knownUnsupported ? <a href={message.contentUri} target="_blank" rel="noopener noreferrer" download={attachmentName(message)}
+                        className={iconButton} aria-label="Скачать оригинал" title="Скачать оригинал"><Download size={16} /></a>
+                        : <button type="button" className={iconButton} disabled={!download} aria-label="Скачать файл" title="Скачать файл"
+                            onClick={() => saveAttachment(download.url, download.name)}><Download size={16} /></button>}
                 </div>
             </div>
-            {error && <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+            {currentSource && error && <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
                 <span>{error}</span>
                 {!asset && !loading && <button type="button" className="font-semibold underline" onClick={() => setRetry((value) => value + 1)}>Повторить</button>}
                 {message.contentUri && <a href={message.contentUri} target="_blank" rel="noopener noreferrer" className="font-semibold underline">Открыть оригинал</a>}
             </div>}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
                 <div className="relative min-h-0 min-w-0 flex-1 bg-slate-200/70">
-                    {loading && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
-                    {asset?.kind === 'pdf' && <PdfPage document={asset.pdf} library={asset.library} number={page} zoom={zoom}
+                    {!knownUnsupported && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
+                    {knownUnsupported && <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-10 text-center">
+                        <FileText size={42} className="text-slate-400" aria-hidden="true" />
+                        <p className="max-w-full break-words text-sm font-medium text-slate-700">{attachmentName(message)}</p>
+                        <p className="text-xs text-slate-500">Предпросмотр этого формата пока недоступен.</p>
+                        <a href={message.contentUri} target="_blank" rel="noopener noreferrer" className="text-xs font-medium text-blue-600 hover:underline">Открыть оригинал</a>
+                    </div>}
+                    {asset?.kind === 'pdf' && <PdfPage key={sourceKey} document={asset.pdf} library={asset.library} number={page} zoom={zoom}
                         onReady={ready} onError={pageError} />}
                     {asset?.kind === 'image' && <div className="wazzup-scrollbar flex h-full overflow-auto p-3">
                         <img src={asset.url} alt="Вложение из сообщения" className="m-auto shrink-0 object-contain"
                             style={{ width: `${zoom * 100}%`, maxWidth: 'none', maxHeight: zoom === 1 ? '100%' : undefined }}
-                            onError={() => setError('Не удалось отобразить изображение. Скачайте файл.')} />
+                            onError={() => pageError('Не удалось отобразить изображение. Скачайте файл.')} />
                     </div>}
                 </div>
-                {(extracted || extracting) && <div className="flex max-h-[35vh] min-h-36 flex-col border-t border-slate-200 bg-white md:max-h-none md:w-80 md:border-l md:border-t-0">
+                {asset && (extracted || extracting) && <div className="flex max-h-[35vh] min-h-36 flex-col border-t border-slate-200 bg-white md:max-h-none md:w-80 md:border-l md:border-t-0">
                     <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
                         <span className="text-xs font-semibold text-slate-600">{asset?.kind === 'pdf' ? `Текст страницы ${page}` : 'Текст изображения'}</span>
                         <button type="button" className={iconButton} disabled={!extracted?.text || extracting} onClick={copyText}
@@ -317,6 +367,8 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                     {extracted?.source === 'ocr' && !extracting && <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400">Распознано с помощью ИИ. Проверьте текст перед использованием.</p>}
                 </div>}
             </div>
+            {onSelect && <ChatAttachmentStrip items={items} selectedId={message.messageId} onSelect={select}
+                onPrevious={() => step(-1)} onNext={() => step(1)} />}
         </div>
     </IosModal>, document.body);
 }

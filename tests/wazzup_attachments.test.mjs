@@ -6,12 +6,12 @@ import { join } from 'node:path';
 import { attachmentName, attachmentPreviewKind, boundedCanvasSize, pdfPageText } from '../src/components/wazzup/chatAttachments.js';
 import { createPdfResourceFactory } from '../src/components/wazzup/pdfResources.js';
 
-test('attachment viewer chooses PDF/images safely and leaves other documents alone', () => {
+test('attachment viewer identifies PDF/images and keeps other documents in the gallery as file cards', () => {
     const message = { type: 'document', contentUri: 'https://store.wazzup24.com/opaque/?filename=%D0%94%D0%BE%D0%B3%D0%BE%D0%B2%D0%BE%D1%80.PDF' };
     assert.equal(attachmentName(message), 'Договор.PDF');
     assert.equal(attachmentPreviewKind(message), 'pdf');
     assert.equal(attachmentPreviewKind({ ...message, isDeleted: true }), null);
-    assert.equal(attachmentPreviewKind({ ...message, contentUri: 'https://store.wazzup24.com/file.docx' }), null);
+    assert.equal(attachmentPreviewKind({ ...message, contentUri: 'https://store.wazzup24.com/file.docx' }), 'document');
     assert.equal(attachmentPreviewKind({ ...message, contentUri: 'https://store.wazzup24.com/opaque/' }), 'document');
     assert.equal(attachmentPreviewKind({ ...message, type: 'image', contentUri: 'https://store.wazzup24.com/photo' }), 'image');
     assert.equal(attachmentName({ fileName: '../../filename.pdf' }), '.._.._filename.pdf');

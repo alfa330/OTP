@@ -35,6 +35,7 @@ const tick=()=>new Promise((resolve)=>setImmediate(resolve));
 const find=(node,predicate)=>{
     if (!node || typeof node!=='object') return null;
     if(predicate(node))return node;
+    if (node.type?.name === 'ChatAttachmentStrip') return find(node.type(node.props), predicate);
     for(const child of React.Children.toArray(node.props?.children)){const result=find(child,predicate);if(result)return result;}
     return null;
 };
@@ -43,11 +44,11 @@ const extractButton=(tree)=>find(tree,(node)=>node.type==='button'&&React.Childr
 
 function fixture({get,post,getDocument}={}){
     const previous={document:globalThis.document,Image:globalThis.Image,create:URL.createObjectURL,revoke:URL.revokeObjectURL};
-    const created=[],revoked=[],requests=[],posts=[],slots=[];
+    const created=[],revoked=[],requests=[],posts=[],slots=[],listeners=new Map();
     let index=0,effects=[],unmounted=false,lateWrites=0;
     const props={apiBaseUrl:'/fixture',headers:()=>({Authorization:'fixture'}),
         chat:{channelId:'channel',chatId:'chat'},message:{messageId:'message',contentUri:'https://store.wazzup24.com/a.pdf'},onClose:()=>{}};
-    globalThis.document={body:{},activeElement:null,addEventListener(){},removeEventListener(){},
+    globalThis.document={body:{},activeElement:null,addEventListener(name,handler){listeners.set(name,handler);},removeEventListener(name){listeners.delete(name);},
         createElement:(kind)=>kind==='canvas'?{width:0,height:0,getContext:()=>({fillRect(){},drawImage(){}}),toDataURL:()=> 'data:image/jpeg;base64,ZmFrZQ=='}:{} };
     globalThis.Image=class {naturalWidth=3000;naturalHeight=4000;async decode(){}};
     URL.createObjectURL=(blob)=>{const url=`blob:fixture-${created.length}`;created.push({blob,url});return url;};
@@ -67,7 +68,7 @@ function fixture({get,post,getDocument}={}){
         unmount(){slots.forEach((slot)=>slot?.cleanup?.());unmounted=true;},
         restore(){if(!unmounted)this.unmount();globalThis.document=previous.document;globalThis.Image=previous.Image;
             URL.createObjectURL=previous.create;URL.revokeObjectURL=previous.revoke;delete globalThis.__attachmentHarness;},
-        requests,posts,created,revoked,get lateWrites(){return lateWrites;},
+        requests,posts,created,revoked,dispatch:(event)=>listeners.get('keydown')?.(event),get lateWrites(){return lateWrites;},
     };
     globalThis.__attachmentHarness=harness;
     return harness;
@@ -129,5 +130,145 @@ test('native PDF text stays local, switching page aborts OCR, and loading task i
         tree=h.render();assert.equal(label(tree,'Извлечённый текст'),null);
         assert.equal(find(tree,(node)=>node.props?.document===pdf).props.number,2);
         h.unmount();assert.equal(destroyed,1);assert.deepEqual(h.revoked,['blob:fixture-0']);
+    }finally{h.restore();}
+});
+
+const media = [
+    {messageId:'photo-one',type:'image',fileName:'one.jpg',contentUri:'https://store.wazzup24.com/one.jpg'},
+    {messageId:'document-two',type:'document',fileName:'two.pdf',contentUri:'https://store.wazzup24.com/two.pdf'},
+    {messageId:'photo-three',type:'image',fileName:'three.png',contentUri:'https://store.wazzup24.com/three.png'},
+];
+
+test('gallery downloads only the selected item; thumbnails are lazy and navigation has boundaries',async()=>{
+    const selected=[];const h=fixture();
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>selected.push(message)});await tick();let tree=h.render();
+        assert.equal(h.requests.length,1);assert.equal(h.requests[0][1].params.messageId,'photo-one');
+        assert.equal(label(tree,'Предыдущее вложение').props.disabled,true);
+        assert.equal(label(tree,'Следующее вложение').props.disabled,false);
+        const first=label(tree,'Вложение 1: one.jpg');assert.equal(first.props['aria-pressed'],true);
+        assert.equal(find(first,(node)=>node.type==='img').props.loading,'lazy');
+        assert.equal(find(label(tree,'Вложение 2: two.pdf'),(node)=>node.type==='img'),null);
+        label(tree,'Следующее вложение').props.onClick();label(tree,'Следующее вложение').props.onClick();
+        assert.deepEqual(selected.map((m)=>m.messageId),['document-two','photo-three'],'same-tick navigation uses most recently requested selection');
+        label(tree,'Следующее вложение').props.onClick();assert.equal(selected.length,2,'no wrap beyond last item');
+        h.render({message:selected.at(-1)});await tick();tree=h.render();
+        assert.equal(h.requests.length,2);assert.equal(h.requests[1][1].params.messageId,'photo-three');
+        assert.equal(label(tree,'Следующее вложение').props.disabled,true);
+        assert.equal(label(tree,'Предыдущее вложение').props.disabled,false);
+        assert.deepEqual(h.revoked,['blob:fixture-0']);
+        h.render({items:[media[2]]});assert.equal(label(h.render(),'Вложения из этой группы'),null);
+    }finally{h.restore();}
+});
+
+test('rapid selection aborts old download and ignores its later response',async()=>{
+    const first=defer(),second=defer();const h=fixture({get:(_url,options)=>options.params.messageId===media[0].messageId?first.promise:second.promise});
+    let selected;
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>{selected=message;}});
+        label(h.render(),'Вложение 3: three.png').props.onClick();assert.equal(h.requests[0][1].signal.aborted,true);
+        h.render({message:selected});
+        second.resolve({data:new Blob(['current'],{type:'image/png'})});await tick();
+        first.resolve({data:new Blob(['stale'],{type:'image/jpeg'})});await tick();
+        assert.equal(h.created.length,1);assert.equal(await h.created[0].blob.text(),'current');
+        assert.equal(find(h.render(),(node)=>node.type==='img'&&node.props.alt==='Вложение из сообщения').props.src,'blob:fixture-0');
+    }finally{h.restore();}
+});
+
+test('same-tick next then previous restarts aborted download even when final selection is unchanged',async()=>{
+    const pending=[defer(),defer()];let calls=0;let selected;
+    const h=fixture({get:()=>pending[calls++].promise});
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>{selected=message;}});
+        const tree=h.render();label(tree,'Следующее вложение').props.onClick();
+        label(tree,'Предыдущее вложение').props.onClick();
+        assert.equal(selected.messageId,'photo-one');assert.equal(h.requests[0][1].signal.aborted,true);
+        h.render({message:selected});assert.equal(h.requests.length,2);
+        pending[1].resolve({data:new Blob(['restarted'],{type:'image/png'})});await tick();
+        pending[0].resolve({data:new Blob(['aborted'],{type:'image/png'})});await tick();
+        assert.equal(h.created.length,1);assert.equal(await h.created[0].blob.text(),'restarted');
+        assert.ok(find(h.render(),(node)=>node.type==='img'&&node.props.alt==='Вложение из сообщения'));
+    }finally{h.restore();}
+});
+
+test('switching during OCR aborts it and clears prior text, zoom, and progress',async()=>{
+    const response=defer();const h=fixture({post:()=>response.promise});let selected;
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>{selected=message;}});await tick();let tree=h.render();
+        label(tree,'Увеличить').props.onClick();tree=h.render();
+        const work=extractButton(tree).props.onClick();await tick();assert.equal(h.posts.length,1);
+        label(h.render(),'Вложение 3: three.png').props.onClick();assert.equal(h.posts[0][2].signal.aborted,true);
+        tree=h.render({message:selected});assert.equal(label(tree,'Извлечённый текст'),null);
+        await tick();response.resolve({data:{text:'Text from previous file must not appear'}});await work;
+        tree=h.render();assert.equal(label(tree,'Извлечённый текст'),null);
+        assert.equal(find(tree,(node)=>node.type==='img'&&node.props.alt==='Вложение из сообщения').props.style.width,'100%');
+        assert.equal(extractButton(tree).props.disabled,false,'OCR button resets on new image');
+    }finally{h.restore();}
+});
+
+test('late clipboard completion from previous file does not mark the next file copied',async()=>{
+    const response=defer();const previous=Object.getOwnPropertyDescriptor(navigator,'clipboard');
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>response.promise}});
+    const h=fixture();let selected;
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>{selected=message;}});await tick();
+        await extractButton(h.render()).props.onClick();
+        const work=label(h.render(),'Копировать текст').props.onClick();
+        label(h.render(),'Вложение 3: three.png').props.onClick();h.render({message:selected});await tick();
+        await extractButton(h.render()).props.onClick();
+        response.resolve();await work;
+        assert.equal(label(h.render(),'Копировать текст').props.title,'Копировать текст');
+    }finally{
+        h.restore();
+        if(previous)Object.defineProperty(navigator,'clipboard',previous);else delete navigator.clipboard;
+    }
+});
+
+test('known office documents show original links without a GET; unknown names are MIME-detected',async()=>{
+    const office={messageId:'office',type:'document',fileName:'letter.docx',contentUri:'https://store.wazzup24.com/letter.docx'};
+    const h=fixture();
+    try{
+        h.render({message:office,items:[office,...media],onSelect:()=>{}});await tick();let tree=h.render();
+        assert.equal(h.requests.length,0);assert.equal(extractButton(tree),null);
+        assert.equal(label(tree,'Скачать оригинал').props.href,office.contentUri);
+        assert.equal(find(tree,(node)=>node.type==='a'&&node.props.children==='Открыть оригинал').props.href,office.contentUri);
+        h.render({message:{messageId:'opaque',type:'document',contentUri:'https://store.wazzup24.com/opaque-id'}});await tick();
+        assert.equal(h.requests.length,1);assert.equal(h.requests[0][1].params.messageId,'opaque');
+    }finally{h.restore();}
+});
+
+test('keyboard gallery arrows work on thumbnails but leave text, modified keys and PDF page controls alone',async()=>{
+    const selected=[];const h=fixture();
+    const event=(target,extra={})=>({key:'ArrowRight',target,preventDefault(){this.prevented=true;},...extra});
+    try{
+        h.render({message:media[0],items:media,onSelect:(message)=>selected.push(message)});await tick();
+        for(const target of [
+            {closest:(selector)=>selector.includes('input,')?{}:null},
+            {closest:(selector)=>selector==='button, a'?{}:null},
+            {isContentEditable:true},
+        ]){const e=event(target);h.dispatch(e);assert.equal(e.prevented,undefined);}
+        h.dispatch(event({}, {ctrlKey:true}));assert.equal(selected.length,0);
+        const thumb=event({closest:(selector)=>['button, a','[data-attachment-navigation]'].includes(selector)?{}:null});
+        h.dispatch(thumb);assert.equal(thumb.prevented,true);assert.equal(selected[0].messageId,'document-two');
+        const blank=event({});h.dispatch(blank);assert.equal(selected[1].messageId,'photo-three');
+    }finally{h.restore();}
+});
+
+test('PDF pages and attachment index are independent, and switching destroys pending PDF work',async()=>{
+    const pending=defer();let destroyed=0;let selected;
+    const h=fixture({get:(_url,options)=>Promise.resolve({data:new Blob(['fixture'],{type:options.params.messageId===media[1].messageId?'application/pdf':'image/png'})}),
+        getDocument:()=>({promise:pending.promise,destroy:async()=>{destroyed+=1;}})});
+    try{
+        h.render({message:media[1],items:media,onSelect:(message)=>{selected=message;}});await tick();await tick();
+        label(h.render(),'Следующее вложение').props.onClick();h.render({message:selected});await tick();
+        assert.equal(destroyed,1);pending.resolve({numPages:7});await tick();
+        let tree=h.render();assert.equal(label(tree,'Следующая страница'),null);assert.equal(label(tree,'Следующее вложение').props.disabled,true);
+        assert.deepEqual(h.revoked,['blob:fixture-0']);
+        h.render({message:media[1]});await tick();await tick();tree=h.render();
+        assert.equal(label(tree,'Следующая страница').props.disabled,false);
+        selected=null;label(tree,'Следующая страница').props.onClick();tree=h.render();
+        assert.equal(selected,null,'PDF page controls must not select another attachment');
+        assert.equal(find(tree,(node)=>node.props?.document?.numPages===7).props.number,2);
+        assert.equal(label(tree,'Вложение 2: two.pdf').props['aria-pressed'],true);
     }finally{h.restore();}
 });

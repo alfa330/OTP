@@ -21,9 +21,9 @@ export function attachmentPreviewKind(message) {
     if (mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'pdf';
     if (message.type === 'image' || /^image\/(?:jpeg|png|webp|gif|bmp)$/.test(mime)
         || /\.(?:jpe?g|png|webp|gif|bmp)$/i.test(name)) return 'image';
-    // Wazzup sometimes omits filenames; the authenticated endpoint determines
-    // the actual MIME before anything is rendered.
-    if (message.type === 'document' && !name) return 'document';
+    // All documents participate in a media group. Known unsupported formats get
+    // a file card; without a filename the authenticated endpoint checks the MIME.
+    if (message.type === 'document') return 'document';
     return null;
 }
 
