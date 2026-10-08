@@ -1,5 +1,6 @@
 import React from 'react';
 import { StickyNote } from 'lucide-react';
+import ChatMessageText from './ChatMessageText';
 
 export default function ChatInternalNote({ note }) {
     const created = new Date(note.createdAt);
@@ -13,7 +14,7 @@ export default function ChatInternalNote({ note }) {
                     <StickyNote size={11} aria-hidden="true" />
                     <span>Внутренний комментарий</span>
                 </div>
-                <div className="whitespace-pre-wrap break-words text-[15px] leading-relaxed [overflow-wrap:anywhere]">{note.text}</div>
+                <div className="whitespace-pre-wrap break-words text-[15px] leading-relaxed [overflow-wrap:anywhere]"><ChatMessageText text={note.text} /></div>
                 <div className="mt-0.5 text-right text-[11px] leading-4 text-slate-500"
                     title={validDate ? created.toLocaleString('ru-RU') : undefined}>
                     {validDate ? created.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : ''}

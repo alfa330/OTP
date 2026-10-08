@@ -14,6 +14,7 @@ const harnessPlugin = { name: 'internal-notes-harness', setup(builder) {
     builder.onResolve({ filter: /^(react|axios)$/ }, ({ path }) => ({ path, namespace: 'notes-fixture' }));
     builder.onLoad({ filter: /.*/, namespace: 'notes-fixture' }, ({ path }) => ({ loader: 'js', contents:
         path === 'react' ? `const h=()=>globalThis.__notesHarness;
+            export const memo=(component)=>component;
             export const useState=(...v)=>h().useState(...v);
             export const useRef=(...v)=>h().useRef(...v);
             export const useEffect=(...v)=>h().useEffect(...v);
@@ -198,6 +199,8 @@ test('composer is keyed by conversation and note renderer has no send, reply or 
         assert.notEqual(first.key, second.key);
         const tree = Note({ note: note('1', '<img src=x onerror=alert(1)>') });
         assert.equal(find(tree, (node) => node.props?.onDoubleClick || node.props?.onClick || node.props?.dangerouslySetInnerHTML), null);
-        assert.ok(find(tree, (node) => node.props?.children === '<img src=x onerror=alert(1)>'));
+        const rendered = require('react-dom/server').renderToStaticMarkup(tree);
+        assert.match(rendered, /&lt;img src=x onerror=alert\(1\)&gt;/);
+        assert.doesNotMatch(rendered, /<img src="x"/);
     } finally { h.restore(); }
 });

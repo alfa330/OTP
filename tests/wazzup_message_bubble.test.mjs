@@ -18,6 +18,7 @@ await build({ stdin: { contents: `
     import React from 'react';
     import { Headset, Ban, Clock3, Reply } from 'lucide-react';
     import MessageDeliveryStatus from './MessageDeliveryStatus';
+    import ChatMessageText from './ChatMessageText';
     import { canReplyOnDoubleClick } from './threadPresentation';
     const MEDIA_LABELS={image:'Фото'};
     const MediaContent=()=>null;
@@ -62,6 +63,17 @@ test('double click on a message chooses the reply without activating embedded me
     const deleted = Bubble.type({ msg: { ...msg, isDeleted: true }, onReply: (item) => replies.push(item) });
     find(deleted, (node) => node.props?.onDoubleClick).props.onDoubleClick({ target: {}, preventDefault() {} });
     assert.equal(replies.length, 1);
+});
+
+test('continuing an operator group hides only the author label and aligns the reply button with the bubble', () => {
+    const outgoing = { ...msg, isEcho: true, authorName: 'Ядигаров Руслан', status: 'read' };
+    const first = renderToStaticMarkup(React.createElement(Bubble, { msg: outgoing, onReply() {} }));
+    const continuation = renderToStaticMarkup(React.createElement(Bubble, { msg: outgoing, showAuthor: false, onReply() {} }));
+    assert.match(first, /Ядигаров Руслан/);
+    assert.doesNotMatch(continuation, /Ядигаров Руслан|mt-6/);
+    assert.match(continuation, /Тест/);
+    assert.match(continuation, /lucide-check-check/);
+    assert.match(continuation, /Ответить на сообщение/);
 });
 
 const imageOutput = join(cache, 'wazzup-stable-image.mjs');

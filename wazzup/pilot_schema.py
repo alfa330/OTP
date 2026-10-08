@@ -6,6 +6,7 @@ def init_schema(cursor):
     from .templates import init_template_schema
     from .syntony_schema import init_schema as init_syntony_schema
     from .notes_schema import init_schema as init_notes_schema
+    from .uploads_schema import init_schema as init_uploads_schema
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS wazzup_pilot_outbox (
             request_id UUID PRIMARY KEY, account TEXT NOT NULL,
@@ -88,3 +89,4 @@ def init_schema(cursor):
     init_template_schema(cursor)
     init_syntony_schema(cursor)
     init_notes_schema(cursor)
+    init_uploads_schema(cursor)

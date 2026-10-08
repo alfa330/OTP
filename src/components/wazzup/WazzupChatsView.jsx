@@ -19,13 +19,14 @@ import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
-import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote } from './threadPresentation';
+import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import ChatMessageImage from './ChatMessageImage';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
 import useInternalNotes from './useInternalNotes';
 import ChatInternalNote from './ChatInternalNote';
+import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
 import './chatThread.css';
 
@@ -225,7 +226,7 @@ function MediaContent({ msg, light, onAttachment }) {
 }
 
 /* Исходящие — мягко-зелёные справа, входящие — белые слева. */
-const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment }) {
+const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, showAuthor = true }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
@@ -233,7 +234,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
         <div data-message-id={msg.messageId} data-message-date={msg.dt}
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
             <div className={`flex min-w-0 max-w-[85%] flex-col sm:max-w-[min(78%,720px)] ${out ? 'items-end' : 'items-start'}`}>
-                {out && msg.authorName && (
+                {out && showAuthor && msg.authorName && (
                     <div className="mb-1 max-w-full truncate px-1 text-[11px] font-medium leading-4 text-slate-500"
                         title={msg.authorName}>
                         {msg.authorName}
@@ -253,10 +254,10 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
                         out ? 'border-emerald-600 bg-black/5 text-emerald-950' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
                     <span className="block truncate font-semibold">{quote.author}</span>
-                    <span className="line-clamp-2 whitespace-pre-wrap break-words">{quote.text}</span>
+                    <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} /></span>
                 </button>}
                 {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment} /></div>}
-                {msg.text && <div className="whitespace-pre-wrap break-words">{msg.text}</div>}
+                {msg.text && <div className="whitespace-pre-wrap break-words"><ChatMessageText text={msg.text} /></div>}
                 {!msg.text && !hasMedia && (
                     <div className="italic text-slate-500">
                         [{msg.type || 'сообщение'}]
@@ -281,7 +282,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
             </div>
             {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
                 aria-label="Ответить на сообщение" title="Ответить на сообщение"
-                className={`wazzup-message-reply shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${out ? 'order-first' : ''} ${out && msg.authorName ? 'mt-6' : 'mt-1'}`}>
+                className={`wazzup-message-reply shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${out ? 'order-first' : ''} ${out && showAuthor && msg.authorName ? 'mt-6' : 'mt-1'}`}>
                 <Reply size={17} />
             </button>}
         </div>
@@ -1580,7 +1581,7 @@ export default function WazzupChatsView(props) {
                                             </div>
                                             <div className="flex items-center gap-1 text-[12px] text-slate-500">
                                                 {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
-                                                <span className="truncate">{previewText(chat.lastMessageText)}</span>
+                                                <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} /></span>
                                                 {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
                                                     <span className="ml-auto rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white">
                                                         {unread.items[pilotChatKey('op', chat)].unreadCount}
@@ -1729,7 +1730,7 @@ export default function WazzupChatsView(props) {
                                     {notes.error} <button type="button" onClick={() => notes.refresh().catch(() => {})}
                                         className="font-semibold underline">Повторить</button>
                                 </div>}
-                                {threadWithDays.map((m) => m._day ? (
+                                {threadWithDays.map((m, index) => m._day ? (
                                     <div key={m.messageId} className="flex justify-center py-1.5">
                                         <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
                                             {m._day}
@@ -1742,6 +1743,7 @@ export default function WazzupChatsView(props) {
                                 ) : (
                                     <React.Fragment key={m.messageId}>
                                         <MessageBubble msg={m} quote={threadQuotes.get(m.messageId)}
+                                            showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
                                             onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
                                             onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
                                                 ? openAttachment : undefined} />
@@ -1779,6 +1781,7 @@ export default function WazzupChatsView(props) {
                                     }} />
                             ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
+                                    channelTransport={selectedChannel?.transport}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
                                     onCancelReply={cancelReply}

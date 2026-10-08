@@ -64,10 +64,10 @@ class MemoryCursor:
         elif sql.startswith('SELECT chat_type FROM wazzup_chats'):
             self.row = ('whatsapp',)
         elif sql.startswith('INSERT INTO wazzup_pilot_outbox'):
-            request_id, channel, chat, text, user_id, _name, reply_to = values
+            request_id, channel, chat, text, user_id, _name, reply_to, attachment_id = values
             if request_id not in self.db.outbox:
                 self.db.outbox[request_id] = ['op', channel, chat, text, user_id,
-                                              'sending', None, None, None, reply_to]
+                                              'sending', None, None, None, reply_to, attachment_id]
                 self.row = (request_id,)
         elif sql.startswith('UPDATE wazzup_pilot_outbox SET state='):
             state, message_id, code, explanation, request_id = values

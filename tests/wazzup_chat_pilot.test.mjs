@@ -9,6 +9,8 @@ import {
     pilotChatKey, pilotDraftStorageKey, splitPilotEvents,
 } from '../src/components/wazzup/chatPilot.js';
 import { prepareTemplate } from '../src/components/wazzup/chatTemplates.js';
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_IMAGE_BYTES, uploadedAttachment, uploadFileError } from '../src/components/wazzup/chatUploads.js';
+import { File } from 'node:buffer';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -24,8 +26,8 @@ buildSync({
 });
 const { default: ChatPilotComposer } = await import(pathToFileURL(output));
 const chat = { channelId: 'test-channel', chatId: '77770000000', chatType: 'whatsapp' };
-const render = () => renderToStaticMarkup(React.createElement(ChatPilotComposer, {
-    apiBaseUrl: 'https://example.invalid', headers: () => ({}), chat,
+const render = (props = {}) => renderToStaticMarkup(React.createElement(ChatPilotComposer, {
+    apiBaseUrl: 'https://example.invalid', headers: () => ({}), chat, ...props,
 }));
 
 test('webhook merge keeps loaded history, applies edits, deduplicates echo and never regresses read', () => {
@@ -87,6 +89,15 @@ test('empty composer has disabled send and does not perform requests on render',
     assert.doesNotMatch(html, /readOnly=""/);
 });
 
+test('WABA composer explains the last-incoming 24-hour window and approved templates without affecting ordinary WhatsApp', () => {
+    const html = render({ channelTransport: 'wapi' });
+    assert.match(html, /24 часов после последнего сообщения клиента/);
+    assert.match(html, /Чтобы написать первым или после 24 часов/);
+    assert.match(html, /одобренный шаблон WABA из Wazzup/);
+    assert.match(html, /aria-describedby="wazzup-pilot-message-help wazzup-waba-window-help"/);
+    assert.doesNotMatch(render({ channelTransport: 'whatsapp' }), /wazzup-waba-window-help/);
+});
+
 test('returning to a chat restores uncertain attempt with readonly text and check-only action', () => {
     const pending = { account: 'op', ...chat, text: 'Не потерять сообщение', clientMessageId: 'fixed-uuid' };
     const storage = new Map([[pilotDraftStorageKey(chat), JSON.stringify({ text: pending.text, pending })]]);
@@ -121,6 +132,7 @@ await build({
                export const useState=(...args)=>h().useState(...args);
                export const useRef=(...args)=>h().useRef(...args);
                export const useEffect=(...args)=>h().useEffect(...args);
+               export const memo=(component)=>component;
                export const lazy=()=>function LazyFixture(){return null;};
                export const Suspense=({children})=>children;
                export default {createElement:(...args)=>h().createElement(...args)};`
@@ -485,11 +497,194 @@ test('uncertain reply keeps its original target across new selection and remount
     await withHarness(post, async (h) => {
         let form = h.render();
         const preview = findElement(form, (el) => el.props?.['data-testid'] === 'wazzup-reply-preview');
-        assert.ok(findElement(preview, (el) => el.props?.children === 'Первый вопрос'));
+        assert.ok(findElement(preview, (el) => el.props?.text === 'Первый вопрос'));
         accepted = true;
         await form.props.onSubmit();
         assert.deepEqual(replies[2], replies[0]);
         assert.deepEqual(cleared, ['reply-original']);
         assert.equal(storage.size, 0);
     }, { storage, props: { replyTo: replacement, onCancelReply: (id) => cleared.push(id) } });
+});
+
+const fileInput = (form) => findElement(form, (el) => el.type === 'input' && el.props.type === 'file');
+const testFile = () => new File(['%PDF-1.7\nsynthetic test only'], 'test-only.pdf', { type: 'application/pdf' });
+const attachmentFixture = {
+    id: '8f49c2ce-349f-4e91-92dc-a32b0c4f04b5', name: 'test-only.pdf', size: 29,
+    mime: 'application/pdf', expiresAt: '2099-01-01T00:00:00Z',
+};
+const chooseTestFile = (h, file = testFile()) => fileInput(h.render()).props.onChange({ target: { files: [file], value: 'chosen' } });
+
+test('paperclip uploads a file without sending, locks conflicting tools, and stores only safe metadata', async () => {
+    const requests = [];
+    let finishUpload;
+    await withHarness((url, body, config) => {
+        requests.push({ url, body, config });
+        return new Promise((resolve) => { finishUpload = resolve; });
+    }, async (h) => {
+        assert.equal(requests.length, 0);
+        field(h.render()).props.onChange({ target: { value: 'Черновик после файла' } });
+        const originalForm = h.render();
+        const upload = chooseTestFile(h);
+        assert.equal(requests.length, 1);
+        const { url, body, config } = requests[0];
+        assert.match(url, /\/uploads$/);
+        assert.equal(body.get('account'), 'op');
+        assert.equal(body.get('channelId'), chat.channelId);
+        assert.equal(body.get('chatId'), chat.chatId);
+        assert.match(body.get('clientUploadId'), /^[0-9a-f-]{36}$/);
+        assert.equal(body.get('file').name, 'test-only.pdf');
+        assert.equal(config.headers['Content-Type'], undefined);
+        assert.equal(config.headers.Authorization, 'test');
+        assert.equal(field(h.render()).props.readOnly, true);
+        assert.equal(action(h.render(), 'Отправить').props.disabled, true);
+        assert.equal(action(h.render(), 'Перефразировать').props.disabled, true);
+        assert.equal(findElement(h.render(), (el) => typeof el.props?.onChoose === 'function').props.locked, true);
+        await originalForm.props.onSubmit();
+        await chooseTestFile(h);
+        assert.equal(requests.length, 1);
+        finishUpload({ data: { attachment: { ...attachmentFixture, contentUri: 'https://private.invalid/file', blob: 'not persisted' } } });
+        await upload;
+        const stored = JSON.parse(h.storage.get(pilotDraftStorageKey(chat)));
+        assert.deepEqual(stored.attachment, attachmentFixture);
+        assert.equal(stored.text, 'Черновик после файла');
+        assert.equal(stored.pending, null);
+        assert.equal(requests.length, 1);
+        assert.equal(action(h.render(), 'Отправить').props.disabled, false);
+        action(h.render(), 'Убрать файл').props.onClick();
+        assert.equal(field(h.render()).props.value, 'Черновик после файла');
+        assert.equal(field(h.render()).props.readOnly, false);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
+    }, { props: { headers: () => ({ 'Content-Type': 'application/json', Authorization: 'test' }) } });
+    const html = render();
+    assert.ok(html.indexOf('Прикрепить файл') < html.indexOf('Шаблоны'));
+});
+
+test('sending an attachment sends no caption or template text and preserves the independent text draft', async () => {
+    const requests = [];
+    const cleared = [];
+    await withHarness(async (url, body) => {
+        requests.push({ url, body });
+        return { data: url.endsWith('/uploads') ? { attachment: attachmentFixture } : { state: 'sent', messageId: 'accepted-file' } };
+    }, async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'Отдельное сообщение 🙂' } });
+        await chooseTestFile(h);
+        const form = h.render();
+        const tools = findElement(form, (el) => typeof el.props?.onChoose === 'function');
+        tools.props.onChoose({ text: '[[not-allowed]]', preview: 'Шаблон' });
+        tools.props.onEmoji('🙂');
+        field(form).props.onChange({ target: { value: 'Не заменять черновик' } });
+        assert.equal(field(h.render()).props.value, 'Отдельное сообщение 🙂');
+        await h.render().props.onSubmit();
+        assert.equal(requests.length, 2);
+        assert.match(requests[1].url, /\/send$/);
+        assert.equal(requests[1].body.attachmentId, attachmentFixture.id);
+        assert.equal(requests[1].body.text, '');
+        assert.equal(requests[1].body.contentUri, undefined);
+        assert.equal(requests[1].body.replyToMessageId, 'reply-file');
+        assert.deepEqual(cleared, ['reply-file']);
+        assert.equal(field(h.render()).props.value, 'Отдельное сообщение 🙂');
+        assert.equal(field(h.render()).props.readOnly, false);
+        assert.equal(findElement(h.render(), (el) => el.props?.['data-testid'] === 'wazzup-file-preview'), null);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Отдельное сообщение 🙂');
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).pending, null);
+    }, { props: { replyTo: { messageId: 'reply-file', text: 'Вопрос' }, onCancelReply: (id) => cleared.push(id) } });
+});
+
+test('uncertain file send survives remount with identical payload and no second upload, even after attachment expiry', async () => {
+    const requests = [];
+    let accepted = false;
+    let storage;
+    const post = async (url, body) => {
+        requests.push({ url, body });
+        if (url.endsWith('/uploads')) return { data: { attachment: attachmentFixture } };
+        if (!accepted) throw { code: 'ECONNABORTED' };
+        return { data: { state: 'sent', messageId: 'file-confirmed' } };
+    };
+    await withHarness(post, async (h) => {
+        storage = h.storage;
+        field(h.render()).props.onChange({ target: { value: 'Сохранить этот текст' } });
+        await chooseTestFile(h);
+        await h.render().props.onSubmit();
+        assert.equal(action(h.render(), 'Убрать файл').props.disabled, true);
+        action(h.render(), 'Убрать файл').props.onClick();
+        const saved = JSON.parse(storage.get(pilotDraftStorageKey(chat)));
+        assert.equal(saved.pending.attachmentId, attachmentFixture.id);
+        saved.attachment.expiresAt = '2020-01-01T00:00:00Z';
+        storage.set(pilotDraftStorageKey(chat), JSON.stringify(saved));
+    });
+    await withHarness(post, async (h) => {
+        assert.equal(field(h.render()).props.value, 'Сохранить этот текст');
+        assert.equal(field(h.render()).props.readOnly, true);
+        accepted = true;
+        await h.render().props.onSubmit();
+        assert.equal(requests.filter(({ url }) => url.endsWith('/uploads')).length, 1);
+        assert.deepEqual(requests[2].body, requests[1].body);
+        assert.equal(JSON.parse(storage.get(pilotDraftStorageKey(chat))).text, 'Сохранить этот текст');
+        assert.equal(JSON.parse(storage.get(pilotDraftStorageKey(chat))).attachment, null);
+    }, { storage });
+});
+
+test('removing a file or leaving a chat aborts upload and ignores late completion without overwriting the draft', async () => {
+    const uploads = [];
+    await withHarness((url, body, config) => new Promise((resolve) => { uploads.push({ config, resolve }); }), async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'Оставить текст' } });
+        const first = chooseTestFile(h);
+        action(h.render(), 'Убрать файл').props.onClick();
+        assert.equal(uploads[0].config.signal.aborted, true);
+        const second = chooseTestFile(h);
+        uploads[0].resolve({ data: { attachment: attachmentFixture } });
+        await first;
+        assert.equal(action(h.render(), 'Отправить').props.disabled, true);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
+        h.unmount();
+        assert.equal(uploads[1].config.signal.aborted, true);
+        uploads[1].resolve({ data: { attachment: attachmentFixture } });
+        await second;
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Оставить текст');
+    });
+});
+
+test('expired unsent attachment produces a clear error and never sends; ordinary failures keep it removable', async () => {
+    const storage = new Map([[pilotDraftStorageKey(chat), JSON.stringify({ text: 'Черновик',
+        attachment: { ...attachmentFixture, expiresAt: '2020-01-01T00:00:00Z' } })]]);
+    await withHarness(() => { throw new Error('Expired file must not be sent'); }, async (h) => {
+        await h.render().props.onSubmit();
+        assert.ok(findElement(h.render(), (el) => typeof el.props?.children?.[0] === 'string'
+            && el.props.children[0].includes('Срок хранения файла истёк')));
+        assert.equal(action(h.render(), 'Убрать файл').props.disabled, false);
+        action(h.render(), 'Убрать файл').props.onClick();
+        assert.equal(field(h.render()).props.value, 'Черновик');
+    }, { storage });
+    await withHarness(async (url) => {
+        if (url.endsWith('/uploads')) return { data: { attachment: attachmentFixture } };
+        throw { response: { status: 422, data: { state: 'failed', error: 'Окно WABA закрыто' } } };
+    }, async (h) => {
+        await chooseTestFile(h);
+        await h.render().props.onSubmit();
+        assert.equal(action(h.render(), 'Убрать файл').props.disabled, false);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment.id, attachmentFixture.id);
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).pending, null);
+    });
+});
+
+test('unsupported, empty and oversized files are rejected before upload; approved templates cannot accept files', async () => {
+    assert.equal(uploadFileError({ name: 'photo.PNG', size: MAX_UPLOAD_IMAGE_BYTES }), '');
+    assert.equal(uploadFileError({ name: 'report.PDF', size: MAX_UPLOAD_BYTES }), '');
+    assert.match(uploadFileError({ name: 'photo.jpg', size: MAX_UPLOAD_IMAGE_BYTES + 1 }), /5 МБ/);
+    assert.match(uploadFileError({ name: 'video.mp4', size: MAX_UPLOAD_BYTES + 1 }), /10 МБ/);
+    assert.equal(uploadedAttachment({ ...attachmentFixture, expiresAt: { secret: 'omit' } }).expiresAt, null);
+    let requests = 0;
+    await withHarness(() => { requests += 1; throw new Error('Must not upload'); }, async (h) => {
+        for (const file of [{ name: 'test.exe', size: 2 }, { name: 'empty.pdf', size: 0 },
+            { name: 'photo.jpg', size: MAX_UPLOAD_IMAGE_BYTES + 1 }, { name: 'file.pdf', size: MAX_UPLOAD_BYTES + 1 }]) {
+            await chooseTestFile(h, file);
+            assert.ok(findElement(h.render(), (el) => el.props?.role === 'alert'));
+        }
+        findElement(h.render(), (el) => typeof el.props?.onChoose === 'function').props.onChoose({ text: '[[approved]]', preview: 'Шаблон' });
+        assert.equal(action(h.render(), 'Прикрепить файл').props.disabled, true);
+        await chooseTestFile(h);
+        assert.equal(requests, 0);
+        assert.equal(field(h.render()).props.value, 'Шаблон');
+    });
 });

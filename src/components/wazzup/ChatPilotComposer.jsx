@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { AlertCircle, Check, Languages, Loader2, RefreshCw, Reply, Send, Sparkles, Undo2, X } from 'lucide-react';
+import { AlertCircle, Check, Clock3, FileText, Languages, Loader2, Paperclip, RefreshCw, Reply, Send, Sparkles, Undo2, X } from 'lucide-react';
 import { classifyPilotSendFailure, pilotChatKey, pilotDraftStorageKey } from './chatPilot.js';
 import ChatComposerTools from './ChatComposerTools';
+import ChatMessageText from './ChatMessageText';
+import { UPLOAD_ACCEPT, uploadedAttachment, uploadFileError, uploadSizeLabel } from './chatUploads.js';
 
 const readDraft = (key) => {
     try {
@@ -10,28 +12,30 @@ const readDraft = (key) => {
         if (!saved || typeof saved.text !== 'string') return { text: '', pending: null };
         const pending = saved.pending?.clientMessageId && typeof saved.pending?.text === 'string'
             ? saved.pending : null;
-        return { text: pending ? pending.text : saved.text, pending,
+        return { text: pending && !pending.attachmentId ? pending.text : saved.text, pending,
+            attachment: uploadedAttachment(saved.attachment),
             preview: typeof saved.preview === 'string' ? saved.preview : '', replyTo: saved.replyTo || null };
     } catch {
         return { text: '', pending: null };
     }
 };
 
-const writeDraft = (key, text, pending, preview = '', replyTo = null) => {
+const writeDraft = (key, text, pending, preview = '', replyTo = null, attachment = null) => {
     try {
-        if (text || pending) sessionStorage.setItem(key, JSON.stringify({ text, pending, preview, replyTo }));
+        if (text || pending || attachment) sessionStorage.setItem(key, JSON.stringify({ text, pending, preview, replyTo,
+            attachment: uploadedAttachment(attachment) }));
         else sessionStorage.removeItem(key);
     } catch { /* Private browsing can disable storage; the mounted draft still works. */ }
 };
 
-const settleDraft = (key, payload, text, pending, preview = '', replyTo = null) => {
+const settleDraft = (key, payload, text, pending, preview = '', replyTo = null, attachment = null) => {
     try {
         const current = JSON.parse(sessionStorage.getItem(key) || 'null');
         // An earlier mounted composer may finish after its replacement already
         // checked the send and started a new draft. Do not erase that new text.
         if (current?.pending?.clientMessageId !== payload.clientMessageId) return;
     } catch { /* Fall through when browser storage is unavailable. */ }
-    writeDraft(key, text, pending, preview, replyTo);
+    writeDraft(key, text, pending, preview, replyTo, attachment);
 };
 
 const newMessageId = () => {
@@ -43,11 +47,16 @@ const newMessageId = () => {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
-function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelReply, maxLength = 4096 }) {
+function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, onSent, replyTo, onCancelReply, maxLength = 4096 }) {
     const storageKey = pilotDraftStorageKey(chat);
     const [saved] = useState(() => readDraft(storageKey));
     const [text, setText] = useState(saved.text);
     const [preview, setPreview] = useState(saved.preview || '');
+    const [attachment, setAttachment] = useState(saved.attachment || null);
+    const [uploading, setUploading] = useState(null);
+    const attachmentRef = useRef(saved.attachment || null);
+    const uploadRef = useRef(null);
+    const fileInputRef = useRef(null);
     const textareaRef = useRef(null);
     const selectionRef = useRef({ start: saved.text.length, end: saved.text.length });
     const [state, setState] = useState(saved.pending ? 'unknown' : 'idle');
@@ -65,7 +74,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
 
     useEffect(() => {
         mountedRef.current = true;
-        return () => { mountedRef.current = false; assistRef.current?.abort(); };
+        return () => { mountedRef.current = false; assistRef.current?.abort(); uploadRef.current?.abort(); };
     }, []);
 
     useEffect(() => {
@@ -81,13 +90,15 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
     }, [replyTo?.messageId]);
 
     const locked = state === 'sending' || state === 'unknown';
+    const hasFile = Boolean(attachment || uploading);
     const length = Array.from(text).length;
     const tooLong = length > maxLength;
-    const canSubmit = state === 'unknown' || (Boolean(text.trim()) && !tooLong);
+    const canSubmit = !uploading && (state === 'unknown' || Boolean(attachment) || (Boolean(text.trim()) && !tooLong));
     const effectiveReply = pendingRef.current ? pendingReplyRef.current || (pendingRef.current.replyToMessageId
         ? { messageId: pendingRef.current.replyToMessageId, text: 'Сообщение из этой переписки' } : null) : replyTo;
-    const assistDisabled = locked || Boolean(preview) || !text.trim() || tooLong || Boolean(assistAction);
+    const assistDisabled = locked || hasFile || Boolean(preview) || !text.trim() || tooLong || Boolean(assistAction);
     const assistHint = preview ? 'Одобренный шаблон нельзя изменять. Уберите шаблон, чтобы написать обычное сообщение.' : '';
+    const isWaba = channelTransport === 'wapi';
 
     const cancelAssist = () => {
         editVersionRef.current += 1;
@@ -98,7 +109,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
     };
 
     const updateText = (value) => {
-        if (busyRef.current || pendingRef.current) return;
+        if (busyRef.current || pendingRef.current || attachmentRef.current || uploadRef.current) return;
         cancelAssist();
         setText(value);
         setPreview('');
@@ -107,8 +118,60 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
         writeDraft(storageKey, value, null, '', replyTo);
     };
 
+    const removeAttachment = () => {
+        if (busyRef.current || pendingRef.current) return;
+        uploadRef.current?.abort();
+        uploadRef.current = null;
+        attachmentRef.current = null;
+        setUploading(null); setAttachment(null); setError(''); setState('idle');
+        writeDraft(storageKey, text, null, preview, replyTo);
+    };
+
+    const chooseFile = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file || busyRef.current || pendingRef.current || preview || attachmentRef.current || uploadRef.current) return;
+        const validationError = uploadFileError(file);
+        if (validationError) { setError(validationError); return; }
+        const controller = new AbortController();
+        uploadRef.current = controller;
+        cancelAssist();
+        setUploading({ name: file.name, size: file.size });
+        setError(''); setState('idle');
+        try {
+            const body = new FormData();
+            body.append('account', 'op');
+            body.append('channelId', chat.channelId);
+            body.append('chatId', chat.chatId);
+            body.append('clientUploadId', newMessageId());
+            body.append('file', file);
+            const requestHeaders = { ...(typeof headers === 'function' ? headers() : headers) };
+            // The browser must add the multipart boundary itself.
+            for (const key of Object.keys(requestHeaders)) {
+                if (key.toLowerCase() === 'content-type') delete requestHeaders[key];
+            }
+            const { data } = await axios.post(`${apiBaseUrl}/api/wazzup/pilot/uploads`, body, {
+                headers: requestHeaders, signal: controller.signal, timeout: 90000,
+            });
+            if (!mountedRef.current || controller.signal.aborted || uploadRef.current !== controller) return;
+            const ready = uploadedAttachment(data?.attachment);
+            if (!ready) throw new Error('invalid_attachment');
+            attachmentRef.current = ready;
+            setAttachment(ready);
+            writeDraft(storageKey, text, null, '', replyTo, ready);
+        } catch (uploadError) {
+            if (!mountedRef.current || controller.signal.aborted || uploadRef.current !== controller) return;
+            setError(uploadError.response?.data?.error || 'Не удалось загрузить файл. Выберите его ещё раз.');
+        } finally {
+            if (uploadRef.current === controller) {
+                uploadRef.current = null;
+                if (mountedRef.current) setUploading(null);
+            }
+        }
+    };
+
     const assist = async (action) => {
-        if (assistDisabled || assistRef.current || busyRef.current || pendingRef.current) return;
+        if (assistDisabled || assistRef.current || busyRef.current || pendingRef.current || attachmentRef.current || uploadRef.current) return;
         const controller = new AbortController();
         const version = editVersionRef.current;
         const original = text;
@@ -146,14 +209,21 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
     const submit = async (event) => {
         event?.preventDefault();
         // Ref closes the same-tick window before React has disabled the button.
-        if (busyRef.current || assistRef.current || !canSubmit || !chat?.channelId || !chat?.chatId) return;
+        if (busyRef.current || assistRef.current || uploadRef.current || !canSubmit || !chat?.channelId || !chat?.chatId) return;
         const checkingPrevious = Boolean(pendingRef.current);
+        const selectedAttachment = attachmentRef.current;
         let payload = pendingRef.current;
         if (!payload) {
+            if (selectedAttachment?.expiresAt && Date.parse(selectedAttachment.expiresAt) <= Date.now()) {
+                setError('Срок хранения файла истёк. Уберите вложение и выберите файл ещё раз.');
+                setState('failed');
+                return;
+            }
             try {
                 payload = {
                     account: 'op', channelId: chat.channelId, chatId: chat.chatId,
-                    text: text.trim(), clientMessageId: newMessageId(),
+                    text: selectedAttachment ? '' : text.trim(), clientMessageId: newMessageId(),
+                    ...(selectedAttachment ? { attachmentId: selectedAttachment.id } : {}),
                     ...(replyTo?.messageId ? { replyToMessageId: replyTo.messageId } : {}),
                 };
                 pendingReplyRef.current = replyTo ? { messageId: replyTo.messageId, text: replyTo.text,
@@ -172,7 +242,8 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
         }
         pendingRef.current = payload;
         busyRef.current = true;
-        writeDraft(storageKey, payload.text, payload, preview, pendingReplyRef.current);
+        const draftText = payload.attachmentId ? text : payload.text;
+        writeDraft(storageKey, draftText, payload, preview, pendingReplyRef.current, selectedAttachment);
         setState('sending');
         setError('');
         setCheckedConversation(false);
@@ -187,9 +258,12 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                 } } };
             }
             pendingRef.current = null;
-            settleDraft(storageKey, payload, '', null);
+            const remainingText = payload.attachmentId ? draftText : '';
+            settleDraft(storageKey, payload, remainingText, null);
             if (!mountedRef.current) return;
-            setText('');
+            setText(remainingText);
+            attachmentRef.current = null;
+            setAttachment(null);
             setPreview('');
             setUndoText(null);
             setState('sent');
@@ -205,7 +279,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
             // nothing about whether that original message reached Wazzup.
             if (checkingPrevious && sendError.response?.data?.state !== 'failed') failure.state = 'unknown';
             if (failure.state === 'failed') pendingRef.current = null;
-            settleDraft(storageKey, payload, payload.text, pendingRef.current, preview, pendingReplyRef.current);
+            settleDraft(storageKey, payload, draftText, pendingRef.current, preview, pendingReplyRef.current, selectedAttachment);
             if (!mountedRef.current) return;
             setState(failure.state);
             setError(failure.message);
@@ -218,12 +292,20 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
         <form onSubmit={submit} className="shrink-0 border-t border-slate-200/70 bg-white p-2.5 sm:px-4"
               data-testid="wazzup-pilot-composer">
             <div className="relative mx-auto w-full max-w-[1040px]">
+            {isWaba && <div id="wazzup-waba-window-help"
+                className="mb-2 flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2 text-[12px] leading-[1.5] text-slate-500">
+                <Clock3 size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+                <div>
+                    <p>Обычные сообщения можно отправлять в течение 24 часов после последнего сообщения клиента.</p>
+                    <p>Чтобы написать первым или после 24 часов, выберите одобренный шаблон WABA из Wazzup через <span className="font-semibold text-slate-600">/</span>.</p>
+                </div>
+            </div>}
             {effectiveReply && <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-blue-400 bg-blue-50 px-3 py-2 text-sm"
                 data-testid="wazzup-reply-preview">
                 <Reply size={17} className="shrink-0 text-blue-500" />
                 <div className="min-w-0 flex-1">
                     <div className="truncate text-xs font-semibold text-blue-600">{effectiveReply.authorName || (effectiveReply.isEcho ? 'Вы' : 'Собеседник')}</div>
-                    <div className="truncate text-slate-600">{effectiveReply.text || 'Вложение'}</div>
+                    <div className="truncate text-slate-600"><ChatMessageText text={effectiveReply.text || 'Вложение'} /></div>
                 </div>
                 <button type="button" disabled={locked} aria-label="Отменить ответ" title="Отменить ответ"
                     onClick={() => onCancelReply?.()} className="rounded p-1 text-slate-500 hover:bg-blue-100 disabled:opacity-40"><X size={17} /></button>
@@ -232,11 +314,31 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                 <span>Одобренный шаблон Wazzup</span>
                 <button type="button" disabled={locked} onClick={() => updateText('')} className="text-blue-600">Убрать шаблон</button>
             </div>}
+            {hasFile && <div className="mb-2 flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
+                data-testid="wazzup-file-preview" aria-live="polite">
+                {uploading ? <Loader2 size={20} className="shrink-0 animate-spin text-slate-400" />
+                    : <FileText size={20} className="shrink-0 text-slate-500" />}
+                <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-slate-700">{(attachment || uploading).name}</div>
+                    <div className="text-xs text-slate-500">{uploadSizeLabel((attachment || uploading).size)} · {uploading ? 'Загружается…' : 'Готов к отправке'}</div>
+                    <div className="mt-0.5 text-xs text-slate-500">{text ? 'Файл отправится отдельно. Текст сохранён как черновик.' : 'Файл отправится отдельно, без подписи.'}</div>
+                </div>
+                <button type="button" disabled={locked} onClick={removeAttachment} aria-label="Убрать файл" title="Убрать файл"
+                    className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-200 disabled:opacity-40"><X size={17} /></button>
+            </div>}
             <div className="flex flex-wrap items-end gap-1.5 sm:flex-nowrap">
+                <input ref={fileInputRef} type="file" accept={UPLOAD_ACCEPT} onChange={chooseFile} tabIndex={-1}
+                    disabled={locked || Boolean(preview) || hasFile} className="hidden" aria-label="Выбрать файл" />
+                <button type="button" disabled={locked || Boolean(preview) || hasFile} aria-label="Прикрепить файл" title={preview ? 'Уберите шаблон, чтобы прикрепить файл' : 'Прикрепить файл'}
+                    onClick={() => {
+                        if (!busyRef.current && !pendingRef.current && !preview && !attachmentRef.current && !uploadRef.current) fileInputRef.current?.click();
+                    }} className="flex h-10 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 disabled:opacity-35">
+                    <Paperclip size={20} />
+                </button>
                 <ChatComposerTools apiBaseUrl={apiBaseUrl} headers={headers} channelId={chat.channelId}
-                    locked={locked} emojiDisabled={Boolean(preview)} slash={!preview && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}
+                    locked={locked || hasFile} emojiDisabled={Boolean(preview) || hasFile} slash={!preview && !hasFile && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}
                     onChoose={({ text: next, preview: nextPreview }) => {
-                        if (busyRef.current || pendingRef.current) return;
+                        if (busyRef.current || pendingRef.current || attachmentRef.current || uploadRef.current) return;
                         cancelAssist();
                         setText(next); setPreview(nextPreview); setError(''); setState('idle');
                         writeDraft(storageKey, next, null, nextPreview, replyTo);
@@ -244,7 +346,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                         textareaRef.current?.focus();
                     }}
                     onEmoji={(emoji) => {
-                        if (preview || locked) return;
+                        if (preview || locked || attachmentRef.current || uploadRef.current) return;
                         const { start, end } = selectionRef.current;
                         const next = text.slice(0, start) + emoji + text.slice(end);
                         updateText(next);
@@ -252,7 +354,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                         selectionRef.current = { start: position, end: position };
                         requestAnimationFrame(() => { textareaRef.current?.focus(); textareaRef.current?.setSelectionRange(position, position); });
                     }} />
-            <textarea ref={textareaRef} id="wazzup-pilot-message" rows={1} value={preview || text} readOnly={locked || Boolean(preview)}
+            <textarea ref={textareaRef} id="wazzup-pilot-message" rows={1} value={preview || text} readOnly={locked || Boolean(preview) || hasFile}
                       onChange={(event) => updateText(event.target.value)}
                       onSelect={(event) => { selectionRef.current = { start: event.target.selectionStart, end: event.target.selectionEnd }; }}
                       onKeyDown={(event) => {
@@ -260,9 +362,9 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                               && !event.nativeEvent?.isComposing && event.keyCode !== 229
                               && event.nativeEvent?.keyCode !== 229) submit(event);
                       }}
-                      placeholder="Сообщение…"
+                      placeholder={hasFile ? 'Сначала отправьте или уберите файл…' : 'Сообщение…'}
                       aria-label="Сообщение"
-                      aria-describedby="wazzup-pilot-message-help"
+                      aria-describedby={isWaba ? 'wazzup-pilot-message-help wazzup-waba-window-help' : 'wazzup-pilot-message-help'}
                       aria-invalid={tooLong || undefined}
                       className="wazzup-thin-scrollbar order-first block max-h-40 min-h-10 w-full min-w-0 resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[15px] leading-6 text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 read-only:opacity-70 sm:order-none sm:flex-1" />
                 <div className="ml-auto flex shrink-0 items-center gap-0.5">
@@ -302,9 +404,12 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                     <button type="button" disabled={!checkedConversation}
                             onClick={() => {
                                 if (!checkedConversation || busyRef.current) return;
+                                const remainingText = pendingRef.current?.attachmentId ? text : '';
                                 pendingRef.current = null;
-                                writeDraft(storageKey, '', null);
-                                setText(''); setPreview(''); setError(''); setState('idle');
+                                attachmentRef.current = null;
+                                setAttachment(null);
+                                writeDraft(storageKey, remainingText, null);
+                                setText(remainingText); setPreview(''); setError(''); setState('idle');
                                 setUndoText(null);
                                 onCancelReply?.();
                                 setCheckedConversation(false);
@@ -320,7 +425,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
                         <span className="inline-flex items-center gap-1 text-emerald-600"><Check size={12} /> Отправлено в Wazzup</span>
                     ) : <span className={tooLong ? 'text-rose-600' : ''}>{length > 0 && `${length}/${maxLength} · `}Enter — отправить · Shift+Enter — новая строка</span>}
                 </div>
-                {undoText !== null && !locked && <button type="button" aria-label="Вернуть исходный текст" title="Вернуть исходный текст"
+                {undoText !== null && !locked && !hasFile && <button type="button" aria-label="Вернуть исходный текст" title="Вернуть исходный текст"
                     onClick={() => updateText(undoText)} className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-100"><Undo2 size={14} /></button>}
             </div>
             </div>

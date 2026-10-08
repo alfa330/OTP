@@ -8777,6 +8777,8 @@ app.register_blueprint(build_pilot_blueprint(
     channels=_wazzup_channels_from_api,
     preflight=_build_cors_preflight_response,
     listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+    gcs={'client': get_gcs_client, 'bucket_name': lambda: (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()},
 ))
 wazzup_syntony.start_worker(db)
 

@@ -8,6 +8,19 @@ export function canReplyOnDoubleClick(event) {
     return !event.target?.closest?.('button, a, input, textarea, select, audio, video, [contenteditable="true"]');
 }
 
+const authorNameKey = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU');
+
+export function shouldShowMessageAuthor(message, previous) {
+    if (!message?.isEcho || !authorNameKey(message.authorName) || message._note || message._day) return false;
+    // Day separators and internal comments are real boundaries in the timeline.
+    if (!previous?.isEcho || previous._note || previous._day || !authorNameKey(previous.authorName)) return true;
+    const currentId = String(message.authorId ?? '').trim();
+    const previousId = String(previous.authorId ?? '').trim();
+    if (currentId && previousId) return currentId !== previousId;
+    // Imported messages do not always include an author ID.
+    return authorNameKey(message.authorName) !== authorNameKey(previous.authorName);
+}
+
 export function messageQuote(message, messagesById) {
     const messageId = message?.replyToMessageId;
     if (!messageId || messageId === message.messageId) return null;

@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { firstVisibleMessage, messageQuote } from '../src/components/wazzup/threadPresentation.js';
+import { firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from '../src/components/wazzup/threadPresentation.js';
+
+test('consecutive replies show one operator name, using stable IDs before names', () => {
+    const message = { isEcho: true, authorId: 'operator-1', authorName: 'Ядигаров Руслан' };
+    assert.equal(shouldShowMessageAuthor(message), true);
+    assert.equal(shouldShowMessageAuthor(message, { ...message, text: 'Предыдущий ответ' }), false);
+    assert.equal(shouldShowMessageAuthor(message, { ...message, authorName: 'Другое отображаемое имя' }), false);
+    assert.equal(shouldShowMessageAuthor(message, { ...message, authorId: 'operator-2' }), true);
+    assert.equal(shouldShowMessageAuthor(message, { isEcho: true, authorName: '  ядигаров   руслан ' }), false);
+    assert.equal(shouldShowMessageAuthor(message, { isEcho: true, authorName: 'Алия' }), true);
+});
+
+test('incoming messages, comments, unknown authors and day separators start a new author group', () => {
+    const message = { isEcho: true, authorName: 'Оператор' };
+    for (const previous of [null, { isEcho: false }, { isEcho: true },
+        { ...message, _note: { text: 'Комментарий' } }, { _day: 'Сегодня' }]) {
+        assert.equal(shouldShowMessageAuthor(message, previous), true);
+    }
+    for (const current of [{ isEcho: false }, { isEcho: true, authorName: '   ' },
+        { ...message, _note: {} }, { ...message, _day: 'Сегодня' }]) {
+        assert.equal(shouldShowMessageAuthor(current, message), false);
+    }
+});
 
 test('quote uses the current loaded original, including edits and deletions', () => {
     const answer = { messageId: 'answer', replyToMessageId: 'original', replyText: 'Old text' };

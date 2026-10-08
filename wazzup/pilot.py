@@ -1,4 +1,4 @@
-"""Text sending and event-driven refresh, explicitly restricted to alfa330.
+"""Message sending and event-driven refresh, explicitly restricted to alfa330.
 
 The outbox claims a client UUID before contacting Wazzup. Ambiguous outcomes
 are never automatically retried: the vendor deduplicates for only 60 seconds.
@@ -50,7 +50,7 @@ MESSAGE_SELECT = """
 
 
 def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
-                          listen_connect=None, transport=None, event_broker=None):
+                          listen_connect=None, transport=None, event_broker=None, gcs=None):
     bp = Blueprint('wazzup_pilot', __name__, url_prefix='/api/wazzup/pilot')
     transport = transport or requests
     broker = event_broker or realtime.broker
@@ -75,6 +75,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_attachment_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .notes import register_note_routes
     register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError
+    register_upload_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS,
+                           channels=channels, gcs=gcs)
 
     @bp.route('', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -171,6 +174,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                            code='REQUEST_CONFLICT', retryable=False), 409
         if (row[9] if len(row) > 9 else None) != body.get('replyToMessageId'):
             return jsonify(error='У этой отправки уже выбран другой ответ', code='REQUEST_CONFLICT', retryable=False), 409
+        attachment_id = str(row[10]) if len(row) > 10 and row[10] is not None else None
+        if attachment_id != body.get('attachmentId'):
+            return jsonify(error='Для этой отправки уже выбрано другое вложение',
+                           code='REQUEST_CONFLICT', retryable=False), 409
         state = row[5]
         if state == 'sent':
             return jsonify(status='success', state=state, messageId=row[6],
@@ -192,13 +199,25 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return jsonify(error='Некорректный запрос'), 400
         if body.get('account') != 'op':
             return jsonify(error='Пилот работает только в аккаунте Верификаторов'), 403
-        cid, chat, text = body.get('channelId'), body.get('chatId'), body.get('text')
+        cid, chat = body.get('channelId'), body.get('chatId')
+        attachment_id = body.get('attachmentId')
+        text = body.get('text', '' if attachment_id is not None else None)
+        if attachment_id is not None:
+            try:
+                attachment_id = str(uuid.UUID(str(attachment_id)))
+            except (ValueError, TypeError, AttributeError):
+                return jsonify(error='Некорректный идентификатор вложения'), 400
+            if text != '':
+                return jsonify(error='Файл и текст отправляются отдельными сообщениями.',
+                               code='ATTACHMENT_WITH_TEXT'), 400
+        body['text'], body['attachmentId'] = text, attachment_id
         reply_to = body.get('replyToMessageId')
         if reply_to is not None and (not isinstance(reply_to, str) or len(reply_to) > 200 or not reply_to.strip()):
             return jsonify(error='Некорректное сообщение для ответа'), 400
         body['replyToMessageId'] = reply_to
         if (not isinstance(cid, str) or not isinstance(chat, str) or not isinstance(text, str)
-                or not text.strip() or len(text) > MAX_TEXT or not chat.strip() or len(chat) > 100):
+                or (not attachment_id and not text.strip()) or len(text) > MAX_TEXT
+                or not chat.strip() or len(chat) > 100):
             return jsonify(error='Введите сообщение длиной до 4096 символов'), 400
         try:
             uuid.UUID(cid)
@@ -213,7 +232,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return jsonify(error='Ключ отправки не настроен'), 503
         # Replay before channel checks, even if it was subsequently disconnected.
         with db._get_cursor() as cur:
-            cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id "
+            cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id,attachment_id "
                         "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
             previous = cur.fetchone()
         if previous:
@@ -221,10 +240,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         channel = next((c for c in channels('op') if c.get('channelId') == cid), None)
         if not channel or channel.get('state') != 'active' or channel.get('transport') not in ('whatsapp', 'wapi'):
             return jsonify(error='Отправка доступна только в активных WhatsApp-каналах'), 400
-        template_error = validate_template_message('op', cid, text, excluded_channels=EXCLUDED_CHANNELS)
+        template_error = (validate_template_message('op', cid, text, excluded_channels=EXCLUDED_CHANNELS)
+                          if not attachment_id else None)
         if template_error:
             return jsonify(error=template_error), 400
-        display_text = render_template_preview('op', cid, text)
+        display_text = render_template_preview('op', cid, text) if not attachment_id else ''
         with db._get_cursor() as cur:
             cur.execute("SELECT chat_type FROM wazzup_chats WHERE account='op' AND channel_id=%s AND chat_id=%s",
                         (cid, chat))
@@ -236,14 +256,23 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                             "AND message_id=%s AND NOT is_deleted", (cid, chat, reply_to))
                 if not cur.fetchone():
                     return jsonify(error='Сообщение для ответа не найдено в этом чате'), 400
+        attachment = content_uri = None
+        if attachment_id:
+            try:
+                attachment = resolve_upload(db, user[0], cid, chat, attachment_id)
+                content_uri = sign_upload(gcs, attachment)
+            except UploadError as error:
+                # No outbox attempt or vendor POST exists at this point.
+                return jsonify(error=error.message, code=error.code, state='failed', retryable=False), error.status
+        with db._get_cursor() as cur:
             cur.execute("""INSERT INTO wazzup_pilot_outbox
-                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name,reply_to_message_id)
-                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s)
+                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name,reply_to_message_id,attachment_id)
+                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s,%s)
                 ON CONFLICT(request_id) DO NOTHING RETURNING request_id""",
-                (request_id, cid, chat, text, user[0], user[2], reply_to))
+                (request_id, cid, chat, text, user[0], user[2], reply_to, attachment_id))
             claimed = cur.fetchone()
             if not claimed:
-                cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id "
+                cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id,attachment_id "
                             "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
                 return replay(cur.fetchone(), body, user)
         # Transaction committed before network I/O. Never retry an ambiguous POST.
@@ -253,7 +282,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             response = transport.post('https://api.wazzup24.com/v3/message',
                 headers={'Authorization': 'Bearer ' + key}, timeout=(5, 20),
                 json={'channelId': cid, 'chatId': chat, 'chatType': 'whatsapp',
-                      'text': text, 'crmMessageId': request_id, 'clearUnanswered': True,
+                      **({'contentUri': content_uri} if attachment else {'text': text}),
+                      'crmMessageId': request_id, 'clearUnanswered': True,
                       **({'refMessageId': reply_to} if reply_to else {})})
             try:
                 data = response.json()
@@ -289,7 +319,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             if not exists:
                 db.store_wazzup_messages([{'messageId': message_id, 'channelId': cid,
                     'chatId': chat, 'chatType': 'whatsapp', 'dateTime': datetime.now(timezone.utc).isoformat(),
-                    'isEcho': True, 'type': 'text', 'text': display_text, 'status': 'pending'}], account='op')
+                    'isEcho': True, 'type': attachment['message_type'] if attachment else 'text',
+                    'text': attachment['original_name'] if attachment else display_text,
+                    'status': 'pending'}], account='op')
         except Exception:
             # Acceptance is durable in the outbox; echo will repair the archive.
             logging.exception('Wazzup pilot accepted message awaits webhook persistence')
