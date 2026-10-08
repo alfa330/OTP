@@ -13,6 +13,7 @@ import requests
 from flask import Blueprint, Response, jsonify, request
 
 from . import accounts, realtime
+from .window import last_inbound_at
 
 EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',  # Global Taxi
@@ -162,10 +163,12 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                         + "ORDER BY m.dt DESC,m.message_id DESC LIMIT %s",
                         [cid, chat] + ([since] if since else []) + [2001 if since else 51])
             rows = cur.fetchall()
+            last_inbound = last_inbound_at(cur, 'op', cid, chat)
         cap = 2000 if since else 50
         reset = len(rows) > cap
         return jsonify(items=[message_item(r) for r in reversed(rows[:cap])],
-                       reset=reset, hasMore=reset, serverTime=datetime.now(timezone.utc).isoformat())
+                       reset=reset, hasMore=reset, lastInboundAt=last_inbound,
+                       serverTime=datetime.now(timezone.utc).isoformat())
 
     def replay(row, body, user):
         # account, channel, chat, text, user, state, message_id, error_code, error_message

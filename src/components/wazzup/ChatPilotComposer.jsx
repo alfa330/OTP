@@ -3,6 +3,7 @@ import axios from 'axios';
 import { AlertCircle, Check, Clock3, FileText, Languages, Loader2, Paperclip, RefreshCw, Reply, Send, Sparkles, Undo2, X } from 'lucide-react';
 import { classifyPilotSendFailure, pilotChatKey, pilotDraftStorageKey } from './chatPilot.js';
 import ChatComposerTools from './ChatComposerTools';
+import useWabaWindowExpired from './useWabaWindowExpired';
 import ChatMessageText from './ChatMessageText';
 import { UPLOAD_ACCEPT, uploadedAttachment, uploadFileError, uploadSizeLabel } from './chatUploads.js';
 
@@ -47,7 +48,7 @@ const newMessageId = () => {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
-function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, onSent, replyTo, onCancelReply, maxLength = 4096 }) {
+function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInboundAt, onSent, replyTo, onCancelReply, maxLength = 4096 }) {
     const storageKey = pilotDraftStorageKey(chat);
     const [saved] = useState(() => readDraft(storageKey));
     const [text, setText] = useState(saved.text);
@@ -98,7 +99,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, onSent, r
         ? { messageId: pendingRef.current.replyToMessageId, text: 'Сообщение из этой переписки' } : null) : replyTo;
     const assistDisabled = locked || hasFile || Boolean(preview) || !text.trim() || tooLong || Boolean(assistAction);
     const assistHint = preview ? 'Одобренный шаблон нельзя изменять. Уберите шаблон, чтобы написать обычное сообщение.' : '';
-    const isWaba = channelTransport === 'wapi';
+    const showWabaHint = useWabaWindowExpired(channelTransport === 'wapi', lastInboundAt);
 
     const cancelAssist = () => {
         editVersionRef.current += 1;
@@ -292,7 +293,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, onSent, r
         <form onSubmit={submit} className="shrink-0 border-t border-slate-200/70 bg-white p-2.5 sm:px-4"
               data-testid="wazzup-pilot-composer">
             <div className="relative mx-auto w-full max-w-[1040px]">
-            {isWaba && <div id="wazzup-waba-window-help"
+            {showWabaHint && <div id="wazzup-waba-window-help"
                 className="mb-2 flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2 text-[12px] leading-[1.5] text-slate-500">
                 <Clock3 size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                 <div>
@@ -364,7 +365,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, onSent, r
                       }}
                       placeholder={hasFile ? 'Сначала отправьте или уберите файл…' : 'Сообщение…'}
                       aria-label="Сообщение"
-                      aria-describedby={isWaba ? 'wazzup-pilot-message-help wazzup-waba-window-help' : 'wazzup-pilot-message-help'}
+                      aria-describedby={showWabaHint ? 'wazzup-pilot-message-help wazzup-waba-window-help' : 'wazzup-pilot-message-help'}
                       aria-invalid={tooLong || undefined}
                       className="wazzup-thin-scrollbar order-first block max-h-40 min-h-10 w-full min-w-0 resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[15px] leading-6 text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 read-only:opacity-70 sm:order-none sm:flex-1" />
                 <div className="ml-auto flex shrink-0 items-center gap-0.5">

@@ -8749,15 +8749,18 @@ def api_wazzup_chat_messages():
     try:
         with db._get_cursor() as cursor:
             from wazzup.pilot import MESSAGE_SELECT, message_item
+            from wazzup.window import last_inbound_at
             cursor.execute(MESSAGE_SELECT + " WHERE " + ' AND '.join(where)
                            + " ORDER BY m.dt DESC, m.message_id DESC LIMIT %s", params + [limit + 1])
             rows = cursor.fetchall()
+            last_inbound = last_inbound_at(cursor, account, channel_id, chat_id)
         has_more = len(rows) > limit
         rows = rows[:limit]
         # wazzupDt — время отправки по WhatsApp у входящего, которое Wazzup
         # доставил с опозданием (dt у такого — минута доставки).
         items = [message_item(row) for row in reversed(rows)]
-        return jsonify({"status": "success", "items": items, "hasMore": has_more}), 200
+        return jsonify({"status": "success", "items": items, "hasMore": has_more,
+                        "lastInboundAt": last_inbound}), 200
     except Exception as error:
         logging.exception("wazzup chat messages failed")
         return jsonify({"error": str(error)}), 500

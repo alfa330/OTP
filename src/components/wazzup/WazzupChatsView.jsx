@@ -22,6 +22,7 @@ import { mergePilotMessages, pilotChatKey } from './chatPilot';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
+import { latestInboundTime } from './useWabaWindowExpired';
 import ChatMessageImage from './ChatMessageImage';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
@@ -923,6 +924,7 @@ export default function WazzupChatsView(props) {
     const [appliedSearch, setAppliedSearch] = useState('');
     const [selected, setSelected] = useState(null);       // {channelId, chatId, ...}
     const [thread, setThread] = useState(null);
+    const [inboundTime, setInboundTime] = useState(null);
     const [replySelection, setReplySelection] = useState(null);
     const [attachmentSelection, setAttachmentSelection] = useState(null);
     const [noteComposerKey, setNoteComposerKey] = useState(null);
@@ -1092,6 +1094,9 @@ export default function WazzupChatsView(props) {
                       account: accountRef.current },
         }).then((r) => {
             if (requestId !== threadRequest.current.id || requestAccount !== accountRef.current) return;
+            const key = pilotChatKey(requestAccount, chat);
+            setInboundTime((previous) => ({ key, at: latestInboundTime(r.data.items,
+                latestInboundTime([{ isEcho: false, dt: r.data.lastInboundAt }], previous?.key === key ? previous.at : null)) }));
             setThreadHasMore(Boolean(r.data.hasMore));
             setThreadLoadingMore(false);
             if (before) {
@@ -1132,6 +1137,8 @@ export default function WazzupChatsView(props) {
                 messageIds: snapshot.thread.slice(-2000).map((message) => message.messageId),
             }, { headers: headers(), signal: controller.signal });
             if (id !== pilotRefresh.current.id || snapshot.key !== pilotView.current.key) return;
+            setInboundTime((previous) => ({ key: snapshot.key, at: latestInboundTime(data.items,
+                latestInboundTime([{ isEcho: false, dt: data.lastInboundAt }], previous?.key === snapshot.key ? previous.at : null)) }));
             const box = threadBox.current;
             const atBottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80;
             setThread((prev) => data.reset ? data.items : mergePilotMessages(prev, data.items));
@@ -1152,6 +1159,11 @@ export default function WazzupChatsView(props) {
         noteChanges.forEach((event) => notes.apply(event));
         const relevant = changes.filter((event) => event.kind !== 'unread' && event.kind !== 'note');
         const current = relevant.filter((event) => pilotChatKey('op', event) === snapshot.key);
+        if (current.some((event) => event.message?.isEcho === false)) {
+            setInboundTime((previous) => ({ key: snapshot.key, at: latestInboundTime(
+                current.flatMap((event) => event.message ? [event.message] : []),
+                previous?.key === snapshot.key ? previous.at : null) }));
+        }
         const box = threadBox.current;
         const atBottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80;
         if (atBottom && noteChanges.some((event) => event.note)) requestAnimationFrame(() => {
@@ -1459,6 +1471,8 @@ export default function WazzupChatsView(props) {
         return null;
     }, [thread]);
     const selectedUnread = selected ? unread.items[pilotChatKey('op', selected)] : null;
+    const lastInboundAt = useMemo(() => latestInboundTime(thread,
+        inboundTime?.key === selectedKey ? inboundTime.at : null), [thread, inboundTime, selectedKey]);
 
     const activeChannels = (channels || []).filter((c) => (c.chatsCount || 0) > 0 || c.state === 'active');
 
@@ -1792,6 +1806,7 @@ export default function WazzupChatsView(props) {
                             ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
                                     channelTransport={selectedChannel?.transport}
+                                    lastInboundAt={lastInboundAt}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
                                     onCancelReply={cancelReply}

@@ -89,13 +89,16 @@ test('empty composer has disabled send and does not perform requests on render',
     assert.doesNotMatch(html, /readOnly=""/);
 });
 
-test('WABA composer explains the last-incoming 24-hour window and approved templates without affecting ordinary WhatsApp', () => {
-    const html = render({ channelTransport: 'wapi' });
+test('WABA composer shows the template hint only when the known last incoming message is at least 24 hours old', () => {
+    const lastInboundAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    const html = render({ channelTransport: 'wapi', lastInboundAt });
     assert.match(html, /24 часов после последнего сообщения клиента/);
     assert.match(html, /Чтобы написать первым или после 24 часов/);
     assert.match(html, /одобренный шаблон WABA из Wazzup/);
     assert.match(html, /aria-describedby="wazzup-pilot-message-help wazzup-waba-window-help"/);
-    assert.doesNotMatch(render({ channelTransport: 'whatsapp' }), /wazzup-waba-window-help/);
+    assert.doesNotMatch(render({ channelTransport: 'whatsapp', lastInboundAt }), /wazzup-waba-window-help/);
+    assert.doesNotMatch(render({ channelTransport: 'wapi' }), /wazzup-waba-window-help/);
+    assert.doesNotMatch(render({ channelTransport: 'wapi', lastInboundAt: new Date().toISOString() }), /wazzup-waba-window-help/);
 });
 
 test('returning to a chat restores uncertain attempt with readonly text and check-only action', () => {
