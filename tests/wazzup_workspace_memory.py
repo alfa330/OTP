@@ -34,6 +34,13 @@ class MemoryWorkspaceStore:
     def code_recipient(self, user_id):
         return self.recipients.get(user_id)
 
+    def grant_without_code(self, session_id, user_id, approver_id):
+        if not self.session_is_live(session_id, user_id):
+            return False
+        self.granted[str(session_id)] = {'user_id': user_id, 'granted_by': approver_id,
+                                         'code_recipient_id': None}
+        return True
+
     # ── скан, ждущий код ────────────────────────────────────────────────────
     def active_challenge(self, session_id, approver_id, user_id, moment, max_attempts):
         rows = [row for row in self.challenges.values()

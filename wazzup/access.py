@@ -3,9 +3,10 @@
 Постановка владельца 08.10.2026. Писать клиентам из iCORE могут двое:
 
 * верификатор — рядовой оператор отдела продаж, чья группа на сегодня считается
-  по модели «Верификатор». Раздел ему открывается только после двойного
-  подтверждения: супервайзер сканирует его QR, а временный код к этому скану
-  уходит в Telegram главе отдела. Доступ живёт, пока жива сессия портала на этом
+  по модели «Верификатор». Супервайзер сканирует его QR и вводит временный код,
+  который уходит в Telegram главе отдела. Админ, супер-админ и глава отдела
+  открывают доступ сканированием без Telegram-кода.
+  Доступ живёт, пока жива сессия портала на этом
   устройстве, — как у остальных разделов за QR;
 * супер-админ — без подтверждения.
 
@@ -86,6 +87,13 @@ def is_verifier(role, department_code, day_model, status=None):
 def processes_without_gate(role, status=None):
     """Кому обработка открыта без скана и кода. Пока — только супер-админам."""
     return normalize(role) == 'super_admin' and not is_dismissed(status)
+
+
+def approves_without_code(role, headed_department_ids, operator_department_id):
+    """Кто открывает доступ без Telegram-кода после проверки периметра подтверждения."""
+    return (normalize(role) in {'admin', 'super_admin'}
+            or (operator_department_id is not None
+                and operator_department_id in (headed_department_ids or ())))
 
 
 def clean_session_id(value):

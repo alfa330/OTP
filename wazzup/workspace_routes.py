@@ -2,16 +2,16 @@
 
     GET  /api/wazzup/workspace            режим раздела, закрыт ли он, статусы и текущий статус
     POST /api/wazzup/workspace/qr         верификатор: код для сканера
-    POST /api/wazzup/workspace/scan       подтверждающий: чей это код; глава отдела получает код в Telegram
+    POST /api/wazzup/workspace/scan       админ/глава: открыть доступ; СВ: отправить код главе отдела
     POST /api/wazzup/workspace/code       подтверждающий: выслать код ещё раз
     POST /api/wazzup/workspace/approve    подтверждающий: код из Telegram -> доступ открыт
     POST /api/wazzup/workspace/status     верификатор: поставить статус смены
     POST /api/wazzup/workspace/heartbeat  верификатор: портал открыт — продлить смену
 
 Подтверждает тот же круг, что и обычный QR-доступ (`_sensitive_access_approval_error`:
-супервайзер и глава отдела сотрудника, админ без отдела, супер-админ), но одного
-скана мало — нужен код, который уходит главе отдела сотрудника. Правило одно на
-всех подтверждающих, включая самого главу: «открытие только после скана и кода».
+супервайзер и глава отдела сотрудника, админ без отдела, супер-админ).
+Админ, супер-админ и глава отдела открывают доступ сканированием QR; супервайзер
+дополнительно вводит код, который уходит главе отдела сотрудника в Telegram.
 
 Зависимости приходят аргументами фабрики — проверки прав и авторизация живут в
 bot_schedule2, и обратный импорт был бы циклом (как у op_wallboard). SQL — в
@@ -186,17 +186,20 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
             return None, ('Этот код не открывает чаты: сотрудник не верификатор отдела продаж', 400)
         if not store.session_is_live(session_id, operator_id):
             return None, ('Сессия сотрудника уже завершена — пусть войдёт заново и покажет новый код', 410)
+        department_id = db.get_user_department_id(operator_id)
         perimeter_error = approval_perimeter_error(
             approver_role=context['approver'][3],
             approver_id=context['approver'][0],
             approver_department_id=context.get('department_id'),
             approver_headed_department_ids=context.get('headed_department_ids') or [],
-            operator_department_id=db.get_user_department_id(operator_id),
+            operator_department_id=department_id,
             operator_supervisor_id=operator[6] if len(operator) > 6 else None,
         )
         if perimeter_error:
             return None, perimeter_error
         return {'approver': context['approver'], 'operator': operator, 'session_id': session_id,
+                'without_code': access.approves_without_code(
+                    context['approver'][3], context.get('headed_department_ids'), department_id),
                 'already_granted': state['unlocked'],
                 'recipient': store.code_recipient(operator_id)}, None
 
@@ -312,7 +315,7 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
     @require_api_key
     def workspace_scan():
         """Скан кода сотрудника. В отличие от предпросмотра обычного QR, меняет
-        состояние: заводит ожидание кода и отправляет код главе отдела."""
+        состояние: админ/глава сразу открывает доступ, СВ запрашивает код."""
         if request.method == 'OPTIONS':
             return build_cors_preflight_response()
         approver_id = chat_access().get('user_id')
@@ -335,6 +338,12 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
                 return fail(error[0], error[1])
             if target['already_granted']:
                 return card(target), 200
+            if target['without_code']:
+                if not store.grant_without_code(claims['session_id'], claims['user_id'], approver_id):
+                    return fail('Сессия сотрудника уже завершена — пусть войдёт заново и покажет новый код', 410)
+                log.info("Чаты ОП: доступ сотруднику %s открыл %s без Telegram-кода",
+                         claims['user_id'], approver_id)
+                return card(target, already_granted=True, granted_now=True), 200
             recipient = target['recipient']
             no_recipient = recipient_error(recipient)
             if no_recipient:

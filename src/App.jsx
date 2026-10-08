@@ -2109,7 +2109,8 @@ const canAccessAiQaForUser = (userLike) => (
    Флаг считает сервер (_get_user_payload: wazzup_chat_operator): группа
    верификаторов определяется моделью группы на сегодня, а не направлением, и
    портал сам этого не выведет. Сам раздел у него закрыт, пока супервайзер не
-   отсканировал QR и не ввёл код из Telegram главы отдела — этот замок рисует
+   отсканировал QR и не ввёл код из Telegram главы отдела (админ/глава открывает
+   доступ одним сканом) — этот замок рисует
    раздел (WazzupChatsView), а держит сервер (_wazzup_chat_reader_guard). */
 const isWazzupChatOperator = (userLike) => Boolean(
     userLike?.wazzup_chat_operator ?? userLike?.wazzupChatOperator

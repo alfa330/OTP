@@ -37,11 +37,11 @@ import './qr-access.css';
  *
  * ДВА ВИДА КОДА (08.10.2026). Обычный открывает «Обращения», «Вики» и оценки
  * одним нажатием. Код верификатора из «Чатов ОП» (знак OTPW:) открывает
- * обработку чатов, и одного нажатия ему мало: сам скан отправляет временный код
- * в Telegram главе отдела, и доступ открывается, только когда подтверждающий
- * этот код ввёл. Вид кода сканер узнаёт по знаку и идёт в свою ручку
+ * обработку чатов. Администратор или глава отдела открывает доступ сканом,
+ * а супервайзеру нужен временный код из Telegram главы отдела. Вид кода
+ * сканер узнаёт по знаку и идёт в свою ручку
  * (/api/wazzup/workspace/*); экран при этом тот же — карточка с именем, только
- * вместо «Открыть доступ» сразу под ней поле кода.
+ * у супервайзера под ней поле кода, у администратора — сразу экран успеха.
  */
 
 /* Как часто дёргаем кадр. Родной BarcodeDetector разбирает его за единицы
@@ -291,8 +291,8 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setCodeError('');
         setChecking(true);
         try {
-            /* Код верификатора разбирает своя ручка: она же отправляет код в
-               Telegram главе отдела, поэтому отдельного «запросить код» нет. */
+            /* Сервер сразу открывает доступ администратору или главе отдела;
+               для супервайзера отправляет код в Telegram главе отдела. */
             const { data } = await axios.post(
                 `${apiBaseUrl}${isChatAccessQr(pendingTokenRef.current)
                     ? '/api/wazzup/workspace/scan' : '/api/sensitive-access/qr/preview'}`,
@@ -301,6 +301,10 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             );
             if (!mountedRef.current) return;
             if (data?.status === 'success') {
+                if (data.scope === 'wazzup_chats' && data.granted_now) {
+                    setGranted({ name: data.operator_name, chat: true });
+                    return;
+                }
                 setResendAt(Date.now() + (Number(data.resendInSeconds) || 0) * 1000);
                 setCandidate(data);
             }
@@ -646,8 +650,8 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         : 'translate(-50%, -50%)';
     const sheetOpen = Boolean(checking || candidate || failure || granted);
     const closeSheet = granting ? () => {} : resumeScanning;
-    /* Код верификатора: подтверждение идёт с кодом из Telegram. Сессии, которой
-       доступ уже открыт, код не высылается — подтверждать там нечего. */
+    /* Супервайзер подтверждает кодом из Telegram; администратор открывает
+       доступ уже при сканировании. Для открытой сессии повторный код не нужен. */
     const chatCandidate = candidate?.scope === 'wazzup_chats';
     const needsCode = chatCandidate && !candidate.already_granted;
 

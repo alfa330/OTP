@@ -52,6 +52,27 @@ class WorkspaceStore:
             return None
         return {'id': row[0], 'name': row[1], 'telegram_id': row[2], 'department_name': row[3]}
 
+    def grant_without_code(self, session_id, user_id, approver_id):
+        """Подтверждение админом/главой: получателя Telegram нет, автор выдачи есть.
+
+        Повторно проверяем живую сессию самой записью, чтобы выход между
+        проверкой QR и выдачей доступа не выглядел успешным подтверждением.
+        """
+        with self.db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO wazzup_chat_access
+                    (session_id, user_id, granted_by, code_recipient_id, granted_at, revoked_at)
+                SELECT session_id, user_id, %s, NULL, now(), NULL
+                  FROM user_sessions
+                 WHERE session_id = %s::uuid AND user_id = %s AND revoked_at IS NULL
+                   AND expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                ON CONFLICT (session_id) DO UPDATE
+                   SET user_id = EXCLUDED.user_id, granted_by = EXCLUDED.granted_by,
+                       code_recipient_id = NULL, granted_at = now(), revoked_at = NULL
+                RETURNING session_id
+            """, (int(approver_id), str(session_id), int(user_id)))
+            return cursor.fetchone() is not None
+
     # ── скан, ждущий код ────────────────────────────────────────────────────
     _CHALLENGE_COLUMNS = ('id', 'session_id', 'user_id', 'recipient_id', 'code_hash', 'attempts',
                           'sent_count', 'last_sent_at', 'expires_at', 'consumed_at')

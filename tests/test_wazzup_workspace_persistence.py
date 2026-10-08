@@ -256,6 +256,34 @@ def test_revoked_grant_row_closes_access(stand):
     assert stand['cursor'].fetchone() == (1, SV, HEAD)
 
 
+def test_admin_grant_without_code_is_session_bound_and_audited(stand):
+    store = stand['store']
+    session = new_session(stand)
+    other = new_session(stand)
+    assert store.grant_without_code(session, VERIFIER, HEAD) is True
+    assert state(stand, VERIFIER, session)['unlocked'] is True
+    assert state(stand, VERIFIER, other)['unlocked'] is False
+    assert store.grant_without_code(session, VERIFIER, HEAD) is True
+    stand['cursor'].execute('SELECT user_id, granted_by, code_recipient_id FROM wazzup_chat_access')
+    assert stand['cursor'].fetchall() == [(VERIFIER, HEAD, None)]
+    stand['cursor'].execute('SELECT COUNT(*) FROM wazzup_chat_access_challenges')
+    assert stand['cursor'].fetchone()[0] == 0
+    stand['cursor'].execute('UPDATE wazzup_chat_access SET revoked_at = now() WHERE session_id = %s', (session,))
+    stand['connection'].commit()
+    assert store.grant_without_code(session, VERIFIER, HEAD) is True
+    assert state(stand, VERIFIER, session)['unlocked'] is True
+
+
+def test_admin_grant_rechecks_live_session_and_owner(stand):
+    store = stand['store']
+    assert store.grant_without_code(new_session(stand, revoked=True), VERIFIER, HEAD) is False
+    assert store.grant_without_code(new_session(stand, expires_in_days=-1), VERIFIER, HEAD) is False
+    assert store.grant_without_code(new_session(stand, user_id=OSNOVA), VERIFIER, HEAD) is False
+    assert store.grant_without_code(str(uuid.uuid4()), VERIFIER, HEAD) is False
+    stand['cursor'].execute('SELECT COUNT(*) FROM wazzup_chat_access')
+    assert stand['cursor'].fetchone()[0] == 0
+
+
 def test_code_goes_to_the_working_head_of_the_employees_department(stand):
     cursor, connection, store = stand['cursor'], stand['connection'], stand['store']
     assert store.code_recipient(VERIFIER) == {'id': HEAD, 'name': 'Глава Продаж', 'telegram_id': 7001,

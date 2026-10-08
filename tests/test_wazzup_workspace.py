@@ -201,6 +201,7 @@ class AutoLogoutTests(unittest.TestCase):
 # ── ручки ────────────────────────────────────────────────────────────────────
 
 VERIFIER, OTHER_VERIFIER, SV, HEAD, ADMIN, SUPER, SZOV_SV, LINE_OPERATOR = 10, 11, 20, 30, 40, 50, 60, 70
+SECOND_SV = 21
 OP, SZOV = 367, 501
 
 
@@ -215,13 +216,14 @@ USERS = {
     VERIFIER: _user(VERIFIER, 'Сарсеке Мерей', 'operator', supervisor_id=SV),
     OTHER_VERIFIER: _user(OTHER_VERIFIER, 'Нуржан Перизат', 'operator', supervisor_id=SV),
     SV: _user(SV, 'Мухтар Адилет', 'sv'),
+    SECOND_SV: _user(SECOND_SV, 'Второй Супервайзер', 'sv'),
     HEAD: _user(HEAD, 'Глава Продаж', 'admin', telegram_id=7001),
     ADMIN: _user(ADMIN, 'Админ Портала', 'admin'),
     SUPER: _user(SUPER, 'Супер Админ', 'super_admin'),
     SZOV_SV: _user(SZOV_SV, 'СВ Заботы', 'sv'),
     LINE_OPERATOR: _user(LINE_OPERATOR, 'Оператор Основы', 'operator', supervisor_id=SV),
 }
-DEPARTMENTS = {VERIFIER: OP, OTHER_VERIFIER: OP, SV: OP, HEAD: OP, SZOV_SV: SZOV, LINE_OPERATOR: OP}
+DEPARTMENTS = {VERIFIER: OP, OTHER_VERIFIER: OP, SV: OP, SECOND_SV: OP, HEAD: OP, SZOV_SV: SZOV, LINE_OPERATOR: OP}
 HEADED = {HEAD: [OP]}
 PRIVILEGED = {'sv', 'admin', 'super_admin'}
 
@@ -419,9 +421,73 @@ class ScanRouteTests(unittest.TestCase):
 
     def test_another_approver_gets_his_own_code(self):
         first = self.env.scan(SV).get_json()
-        second = self.env.scan(HEAD).get_json()
+        second = self.env.scan(SECOND_SV).get_json()
         self.assertNotEqual(first['challengeId'], second['challengeId'])
         self.assertEqual(len(self.env.telegram.sent), 2)
+
+    def test_admin_super_admin_and_department_head_open_without_telegram(self):
+        for approver in (ADMIN, SUPER, HEAD):
+            with self.subTest(approver=approver):
+                self.env = Env()
+                # Нет главы/Telegram, а отправитель падает: всё это не мешает
+                # привилегированному подтверждению по QR.
+                self.env.store.recipients.clear()
+                self.env.telegram.raises = True
+                response = self.env.scan(approver)
+                self.assertEqual(response.status_code, 200, response.get_json())
+                body = response.get_json()
+                self.assertTrue(body['already_granted'])
+                self.assertTrue(body['granted_now'])
+                self.assertNotIn('challengeId', body)
+                self.assertNotIn('codeSentTo', body)
+                self.assertEqual(self.env.telegram.sent, [])
+                self.assertEqual(self.env.store.challenges, {})
+                self.assertEqual(self.env.store.granted[SESSION], {
+                    'user_id': VERIFIER, 'granted_by': approver, 'code_recipient_id': None})
+                self.assertFalse(self.env.as_user(VERIFIER).state().get_json()['locked'])
+                other = '99999999-2222-3333-4444-555555555555'
+                self.env.store.live_sessions.add((other, VERIFIER))
+                self.assertTrue(self.env.as_user(VERIFIER, other).state().get_json()['locked'])
+
+    def test_department_head_without_admin_role_also_needs_no_code(self):
+        HEADED[SECOND_SV] = [OP]
+        try:
+            self.assertTrue(self.env.scan(SECOND_SV).get_json()['granted_now'])
+            self.assertEqual(self.env.telegram.sent, [])
+        finally:
+            HEADED.pop(SECOND_SV)
+
+    def test_admin_who_heads_another_department_cannot_bypass_the_perimeter(self):
+        HEADED[ADMIN] = [SZOV]
+        try:
+            response = self.env.scan(ADMIN)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(self.env.store.granted, {})
+        finally:
+            HEADED.pop(ADMIN)
+
+    def test_privileged_scan_still_checks_qr_and_live_session(self):
+        payload = self.env.qr()
+        for approver in (ADMIN, SUPER, HEAD):
+            self.assertEqual(self.env.as_user(approver).post('/scan', {'token': 'OTPW:AAAA'}).status_code, 400)
+        self.env.store.live_sessions.clear()
+        for approver in (ADMIN, SUPER, HEAD):
+            self.assertEqual(self.env.scan(approver, payload).status_code, 410)
+        self.assertEqual(self.env.store.granted, {})
+
+    def test_session_ending_during_admin_grant_is_not_reported_as_success(self):
+        self.env.store.grant_without_code = lambda *args: False
+        self.assertEqual(self.env.scan(ADMIN).status_code, 410)
+
+    def test_supervisor_cannot_request_a_code_bypass(self):
+        token = self.env.qr()
+        body = self.env.as_user(SV).post('/scan', {
+            'token': token, 'without_code': True, 'role': 'admin', 'granted_now': True,
+        }).get_json()
+        self.assertIn('challengeId', body)
+        self.assertFalse(body['already_granted'])
+        self.assertEqual(self.env.store.granted, {})
+        self.assertEqual(len(self.env.telegram.sent), 1)
 
     def test_who_may_confirm(self):
         """Круг тот же, что у обычного QR: свой отдел, админ без отдела, супер-админ."""
@@ -563,12 +629,12 @@ class ApproveRouteTests(unittest.TestCase):
         self.assertTrue(self.env.as_user(VERIFIER).state().get_json()['locked'])
 
     def test_code_of_one_scan_does_not_fit_another(self):
-        other = self.env.scan(HEAD).get_json()['challengeId']
+        other = self.env.scan(SECOND_SV).get_json()['challengeId']
         other_code = self.env.telegram.code()
         self.assertNotEqual(other_code, self.code)
-        self.assertEqual(self.approve(self.code, approver=HEAD, challenge=other).get_json()['code'],
+        self.assertEqual(self.approve(self.code, approver=SECOND_SV, challenge=other).get_json()['code'],
                          'CODE_WRONG')
-        self.assertEqual(self.approve(other_code, approver=HEAD, challenge=other).status_code, 200)
+        self.assertEqual(self.approve(other_code, approver=SECOND_SV, challenge=other).status_code, 200)
 
     def test_refusal_on_the_merits_costs_no_attempt(self):
         """Сессию закрыли между сканом и вводом — отказ, и код при этом не сверяется."""
