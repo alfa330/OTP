@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, StickyNote, X } from 'lucide-react';
+import { Check, Loader2, MessageSquareText, X } from 'lucide-react';
 import { internalNotesKey } from './useInternalNotes';
 
 const storageKeyFor = (chat) => `icore.wazzup.internal-note.${internalNotesKey(chat)}`;
@@ -130,7 +130,7 @@ export function InternalNoteDraft({ apiBaseUrl, headers, chat, onSaved, onCancel
         <form onSubmit={submit} className="shrink-0 border-t border-slate-200/70 bg-white p-2.5 sm:px-4">
             <div className="mx-auto w-full max-w-[1040px]">
             <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] text-slate-500">
-                <StickyNote size={13} aria-hidden="true" />
+                <MessageSquareText size={13} aria-hidden="true" />
                 <span>Комментарий · только команде</span>
                 {length > 3500 && <span className={`ml-auto tabular-nums ${tooLong ? 'text-red-600' : ''}`}>{length}/4000</span>}
             </div>

@@ -45,7 +45,8 @@ const extractButton=(tree)=>find(tree,(node)=>node.type==='button'&&React.Childr
 
 function fixture({get,post,getDocument,cache}={}){
     const previous={document:globalThis.document,Image:globalThis.Image,create:URL.createObjectURL,revoke:URL.revokeObjectURL};
-    const created=[],revoked=[],requests=[],posts=[],slots=[],listeners=new Map();
+    const created=[],revoked=[],requests=[],posts=[],slots=[],listeners=new Map(),videos=[];
+    let videoKey;
     let index=0,effects=[],unmounted=false,lateWrites=0;
     const props={apiBaseUrl:'/fixture',headers:()=>({Authorization:'fixture'}),
         chat:{channelId:'channel',chatId:'chat'},message:{messageId:'message',contentUri:'https://store.wazzup24.com/a.pdf'},onClose:()=>{},
@@ -66,11 +67,18 @@ function fixture({get,post,getDocument,cache}={}){
         useCallback(fn,deps){const i=index++;if(!slots[i]||deps.some((v,k)=>!Object.is(v,slots[i].deps[k])))slots[i]={fn,deps};return slots[i].fn;},
         useEffect(fn,deps){const i=index++;const old=slots[i];if(old&&deps?.every((v,k)=>Object.is(v,old.deps[k])))return;
             slots[i]={deps};effects.push(()=>{old?.cleanup?.();slots[i].cleanup=fn();});},
-        render(next){Object.assign(props,next);index=0;const result=Viewer(props);const pending=effects;effects=[];pending.forEach((fn)=>fn());return result;},
+        render(next){Object.assign(props,next);index=0;const result=Viewer(props);
+            const video=find(result,(node)=>node.type==='video');
+            if(video){
+                if(videoKey!==video.key){videoKey=video.key;videos.push({src:video.props.src,pauseCalls:0,loadCalls:0,
+                    pause(){this.pauseCalls++;},load(){this.loadCalls++;},getAttribute(name){return this[name];},removeAttribute(name){delete this[name];}});}
+                video.ref.current=videos.at(-1);
+            }
+            const pending=effects;effects=[];pending.forEach((fn)=>fn());return result;},
         unmount(){slots.forEach((slot)=>slot?.cleanup?.());unmounted=true;},
         restore(){if(!unmounted)this.unmount();globalThis.document=previous.document;globalThis.Image=previous.Image;
             URL.createObjectURL=previous.create;URL.revokeObjectURL=previous.revoke;delete globalThis.__attachmentHarness;},
-        requests,posts,created,revoked,dispatch:(event)=>listeners.get('keydown')?.(event),get lateWrites(){return lateWrites;},
+        requests,posts,created,revoked,videos,dispatch:(event)=>listeners.get('keydown')?.(event),get lateWrites(){return lateWrites;},
     };
     globalThis.__attachmentHarness=harness;
     return harness;
@@ -83,6 +91,63 @@ test('closing before download completes aborts GET and ignores its late response
         assert.equal(h.requests[0][1].signal.aborted,true);
         response.resolve({data:new Blob(['late'],{type:'image/png'})});await tick();
         assert.equal(h.created.length,0);assert.equal(h.lateWrites,0);assert.equal(h.posts.length,0);
+    }finally{h.restore();}
+});
+
+test('video streams directly with native controls and has no proxy download, OCR or object URL',async()=>{
+    let closed=0;
+    const message={messageId:'movie',type:'video',contentUri:'https://example.invalid/video.mp4'};
+    const h=fixture();
+    try{
+        let tree=h.render({message,onClose:()=>{closed++;}});await tick();tree=h.render();
+        const video=find(tree,(node)=>node.type==='video');
+        assert.equal(video.props.src,message.contentUri);assert.equal(video.props.controls,true);
+        assert.equal(video.props.playsInline,true);assert.equal(video.props.autoPlay,true);
+        assert.equal(extractButton(tree),null);assert.equal(label(tree,'Увеличить'),null);
+        assert.equal(label(tree,'Скачать оригинал').props.href,message.contentUri);
+        assert.equal(h.requests.length,0);assert.equal(h.posts.length,0);assert.equal(h.created.length,0);
+        const media=h.videos[0];
+        // IosModal routes its backdrop, close button and mobile back action here.
+        tree.props.onClose();assert.equal(closed,1);assert.equal(media.pauseCalls,1);
+        h.dispatch({key:'Escape',stopPropagation(){}});assert.equal(closed,2);assert.equal(media.pauseCalls,2);
+        h.unmount();assert.equal(media.pauseCalls,3);assert.equal(media.src,undefined);assert.equal(media.loadCalls,1);
+        video.props.onError({currentTarget:media});assert.equal(h.lateWrites,0);
+    }finally{h.restore();}
+});
+
+test('video navigation stops the old stream, preserves native arrow controls and ignores old errors',async()=>{
+    const first={messageId:'v1',type:'video',contentUri:'https://example.invalid/one.mp4'};
+    const second={messageId:'v2',type:'video',contentUri:'https://example.invalid/two.mp4'};
+    let selected;
+    const h=fixture();
+    try{
+        let tree=h.render({message:first,items:[first,second],onSelect:(value)=>{selected=value;}});await tick();tree=h.render();
+        const previous=find(tree,(node)=>node.type==='video');const oldMedia=h.videos[0];
+        let prevented=false;
+        h.dispatch({key:'ArrowRight',target:{closest:(selector)=>selector.includes('video')?{}:null},preventDefault(){prevented=true;}});
+        assert.equal(prevented,false);assert.equal(selected,undefined);
+        label(tree,'Следующее вложение').props.onClick();assert.equal(oldMedia.pauseCalls,1);
+        tree=h.render({message:selected});await tick();tree=h.render();
+        assert.equal(oldMedia.src,undefined);assert.equal(oldMedia.loadCalls,1);
+        assert.equal(h.videos.length,2);assert.equal(h.videos[1].src,second.contentUri);
+        previous.props.onError({currentTarget:oldMedia});assert.equal(find(h.render(),(node)=>node.props?.role==='alert'),null);
+        assert.equal(h.requests.length,0);assert.equal(h.posts.length,0);
+    }finally{h.restore();}
+});
+
+test('video failure offers retry/original and replacement releases the failed media',async()=>{
+    const message={messageId:'video',type:'video',contentUri:'https://example.invalid/movie.mp4'};
+    const h=fixture();
+    try{
+        let tree=h.render({message});await tick();tree=h.render();
+        const oldVideo=find(tree,(node)=>node.type==='video'), oldMedia=h.videos[0];
+        oldVideo.props.onError({currentTarget:oldMedia});tree=h.render();
+        assert.ok(find(tree,(node)=>node.props?.role==='alert'));
+        find(tree,(node)=>node.type==='button'&&node.props.children==='Повторить').props.onClick();
+        h.render();await tick();tree=h.render();
+        assert.equal(oldMedia.src,undefined);assert.equal(h.videos.length,2);
+        oldVideo.props.onError({currentTarget:oldMedia});assert.equal(find(h.render(),(node)=>node.props?.role==='alert'),null);
+        assert.equal(h.requests.length,0);assert.equal(h.posts.length,0);
     }finally{h.restore();}
 });
 

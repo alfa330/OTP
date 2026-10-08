@@ -165,6 +165,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const currentSource = contentSource.current === sourceKey;
     const asset = loadedAsset?.sourceKey === sourceKey ? loadedAsset : null;
     const download = loadedDownload?.sourceKey === sourceKey ? loadedDownload : null;
+    const isVideo = attachmentPreviewKind(message) === 'video';
     const knownUnsupported = attachmentPreviewKind(message) === 'document' && Boolean(attachmentName(message));
     // A cached image is on screen one frame after opening: showing the progress
     // indicator for that frame would only make the viewer flicker.
@@ -174,6 +175,11 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const copyState = useRef({ mounted: false, version: 0 });
     const container = useRef(null);
     const resultBox = useRef(null);
+    const video = useRef(null);
+    const close = useCallback(() => {
+        video.current?.pause();
+        latest.current.onClose();
+    }, []);
     const ids = { account: 'op', channelId: chat.channelId, chatId: chat.chatId, messageId: message.messageId };
     const cancelExtraction = useCallback(() => {
         extraction.current?.controller.abort();
@@ -186,6 +192,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         copyState.current.version += 1;
         clearTimeout(copyTimer.current);
         request.current?.abort();
+        video.current?.pause();
         cancelExtraction();
         setRetry((value) => value + 1);
         setExtracting(false); setExtracted(null); setCopied(false);
@@ -205,14 +212,19 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         contentSource.current = sourceKey;
         let loadingTask;
         let url;
-        const cached = knownUnsupported ? null : cache.getMedia(sourceKey);
+        const cached = knownUnsupported || isVideo ? null : cache.getMedia(sourceKey);
+        const currentVideo = isVideo ? video.current : null;
+        // React StrictMode reruns setup after releasing the same media node.
+        if (currentVideo && !currentVideo.getAttribute('src')) currentVideo.src = message.contentUri;
         // A cached image appears at once, without the progress indicator; a PDF
         // still has to be parsed, so it keeps the indicator.
-        setLoading(!knownUnsupported && !(cached && cached.type.startsWith('image/')));
+        setLoading(!isVideo && !knownUnsupported && !(cached && cached.type.startsWith('image/')));
         // Text recognized earlier for this page is shown again without a new request.
         setAsset(null); setDownload(null); setError(''); setExtracted(cache.getText(sourceKey, 1)); setPage(1); setZoom(1); setCurrentPage(null); setExtracting(false); setCopied(false);
         (async () => {
-            if (knownUnsupported) return;
+            // Video uses the same native streaming URL already available in the
+            // authorized conversation. It never hits the image/PDF proxy or OCR.
+            if (knownUnsupported || isVideo) return;
             let blob = cached;
             if (!blob) {
                 ({ data: blob } = await downloadAttachment(() => axios.get(`${apiBaseUrl}/api/wazzup/pilot/attachment`, {
@@ -257,21 +269,24 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             copyState.current.version += 1;
             clearTimeout(copyTimer.current);
             controller.abort();
+            currentVideo?.pause();
+            currentVideo?.removeAttribute('src');
+            currentVideo?.load();
             cancelExtraction();
             loadingTask?.destroy()?.catch(() => {});
             if (url) URL.revokeObjectURL(url);
         };
         // headers is refreshed by SSE renders; it must not reload the document.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sourceKey, retry, cancelExtraction, knownUnsupported, cache]);
+    }, [sourceKey, retry, cancelExtraction, knownUnsupported, isVideo, cache]);
     useEffect(() => {
         const previousFocus = document.activeElement;
         container.current?.focus();
         const escape = (event) => {
-            if (event.key === 'Escape') { event.stopPropagation(); latest.current.onClose(); }
+            if (event.key === 'Escape') { event.stopPropagation(); close(); }
             if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
                 && !event.defaultPrevented && !event.isComposing && !event.target?.isContentEditable
-                && !event.target?.closest?.('input, textarea, select, [contenteditable], [role="slider"], [role="textbox"]')
+                && !event.target?.closest?.('input, textarea, select, video, [contenteditable], [role="slider"], [role="textbox"]')
                 && (!event.target?.closest?.('button, a') || event.target?.closest?.('[data-attachment-navigation]'))
                 && latest.current.items.length > 1 && latest.current.onSelect) {
                 event.preventDefault(); step(event.key === 'ArrowLeft' ? -1 : 1);
@@ -283,7 +298,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             clearTimeout(copyTimer.current);
             if (previousFocus?.isConnected) previousFocus.focus();
         };
-    }, [step]);
+    }, [step, close]);
     const ready = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setCurrentPage(value); }, [sourceKey, message.messageId]);
     const pageError = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setError(value); }, [sourceKey, message.messageId]);
     const changePage = (value) => {
@@ -337,7 +352,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         }
     };
     const canExtract = Boolean(asset) && !loading && !extracting && (asset.kind !== 'pdf' || Boolean(currentPage));
-    return createPortal(<IosModal open onClose={onClose} title={download?.name || attachmentName(message) || 'Просмотр вложения'}
+    return createPortal(<IosModal open onClose={close} title={download?.name || attachmentName(message) || (isVideo ? 'Видео' : 'Просмотр вложения')}
         subtitle={asset?.kind === 'pdf' ? `${asset.pdf.numPages} стр. · Текст можно выделять на странице` : undefined}
         maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
         <div ref={container} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none" style={{ height: 'min(78vh, 900px)' }}>
@@ -357,14 +372,14 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                         onClick={() => setZoom((value) => Math.min(3, value + 0.25))}><ZoomIn size={16} /></button>
                 </>}
                 <div className="ml-auto flex flex-wrap items-center gap-1">
-                    {!knownUnsupported && <button type="button" className={actionButton} disabled={!canExtract} onClick={() => extract(false)}>
+                    {!knownUnsupported && !isVideo && <button type="button" className={actionButton} disabled={!canExtract} onClick={() => extract(false)}>
                         {extracting ? <Loader2 size={15} className="animate-spin" /> : <FileText size={15} />} Извлечь текст
                     </button>}
                     {asset?.kind === 'pdf' && currentPage?.text && <button type="button" className={actionButton}
                         disabled={!canExtract} onClick={() => extract(true)} title="Распознать изображение текущей страницы с помощью ИИ">
                         <ScanText size={15} /> Распознать скан
                     </button>}
-                    {knownUnsupported ? <a href={message.contentUri} target="_blank" rel="noopener noreferrer" download={attachmentName(message)}
+                    {knownUnsupported || isVideo ? <a href={message.contentUri} target="_blank" rel="noopener noreferrer" download={attachmentName(message)}
                         className={iconButton} aria-label="Скачать оригинал" title="Скачать оригинал"><Download size={16} /></a>
                         : <button type="button" className={iconButton} disabled={!download} aria-label="Скачать файл" title="Скачать файл"
                             onClick={() => saveAttachment(download.url, download.name)}><Download size={16} /></button>}
@@ -377,7 +392,15 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             </div>}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
                 <div className="relative min-h-0 min-w-0 flex-1 bg-slate-200/70">
-                    {!knownUnsupported && !instant && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
+                    {!knownUnsupported && !isVideo && !instant && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
+                    {isVideo && <div className="flex h-full items-center justify-center bg-slate-950 p-1 sm:p-3">
+                        <video key={`${sourceKey}:${retry}`} ref={video} src={message.contentUri} controls playsInline autoPlay preload="metadata"
+                            aria-label="Видео из сообщения" className="h-full max-h-full w-full object-contain"
+                            onError={(event) => {
+                                if (event.currentTarget === video.current && copyState.current.mounted && !request.current?.signal.aborted)
+                                    pageError('Не удалось воспроизвести видео. Попробуйте ещё раз или откройте оригинал.');
+                            }} />
+                    </div>}
                     {knownUnsupported && <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-10 text-center">
                         <FileText size={42} className="text-slate-400" aria-hidden="true" />
                         <p className="max-w-full break-words text-sm font-medium text-slate-700">{attachmentName(message)}</p>

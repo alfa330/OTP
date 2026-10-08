@@ -33,6 +33,14 @@ test('text, internal comments, day separators and deleted messages interrupt a g
     }
 });
 
+test('videos share the photo/document group but do not cross chat or author boundaries', () => {
+    const thread = [media('photo'), media('video', 1, { type: 'video', contentUri: 'https://example.invalid/movie.mp4' }),
+        media('pdf', 2, { type: 'document', contentUri: 'https://example.invalid/file.pdf' })];
+    for (const item of thread) assert.deepEqual(buildAttachmentGroup(thread, item), thread);
+    const other = { ...thread[1], chatId: 'different-chat' };
+    assert.deepEqual(buildAttachmentGroup([thread[0], other, thread[2]], other), [other]);
+});
+
 test('scope and message direction boundaries prevent mixing chats, channels, accounts or senders', () => {
     for (const changed of [{ account: 'other' }, { channelId: 'other' }, { chatId: 'other' }, { isEcho: true }]) {
         const thread = [media('first'), media('other', 1, changed), media('last', 2)];

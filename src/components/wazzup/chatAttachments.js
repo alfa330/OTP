@@ -18,6 +18,7 @@ export function attachmentPreviewKind(message) {
     if (!message?.contentUri || message.isDeleted) return null;
     const mime = String(message.mimeType || message.contentType || '').split(';')[0].toLowerCase();
     const name = attachmentName(message);
+    if (message.type === 'video' || /^video\//.test(mime) || /\.(?:mp4|webm|mov|m4v|ogv)$/i.test(name)) return 'video';
     if (mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'pdf';
     if (message.type === 'image' || /^image\/(?:jpeg|png|webp|gif|bmp)$/.test(mime)
         || /\.(?:jpe?g|png|webp|gif|bmp)$/i.test(name)) return 'image';

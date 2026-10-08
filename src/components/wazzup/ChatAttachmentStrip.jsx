@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronLeft, ChevronRight, FileText, Image } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, Image, Video } from 'lucide-react';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 
 const arrowClass = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-30';
@@ -15,8 +15,10 @@ export default function ChatAttachmentStrip({ items, selectedId, onSelect, onPre
             <div className="wazzup-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-1 py-1">
                 {items.map((item, itemIndex) => {
                     const active = item.messageId === selectedId;
-                    const photo = attachmentPreviewKind(item) === 'image';
-                    const name = attachmentName(item) || (photo ? 'Фото' : 'Документ');
+                    const kind = attachmentPreviewKind(item);
+                    const photo = kind === 'image';
+                    const name = attachmentName(item) || (photo ? 'Фото' : kind === 'video' ? 'Видео' : 'Документ');
+                    const Icon = kind === 'video' ? Video : FileText;
                     return <button key={item.messageId} type="button" ref={active ? showActiveThumbnail : null}
                         onClick={() => onSelect(item)} aria-pressed={active} aria-label={`Вложение ${itemIndex + 1}: ${name}`}
                         title={name} className={`relative flex h-14 w-16 shrink-0 flex-col items-center justify-center overflow-hidden rounded-lg border bg-slate-100 ${active ? 'border-blue-500 ring-2 ring-blue-500/40' : 'border-slate-200 hover:border-slate-400'}`}>
@@ -25,7 +27,7 @@ export default function ChatAttachmentStrip({ items, selectedId, onSelect, onPre
                             <img src={item.contentUri} alt="" loading="lazy" decoding="async" width="64" height="56"
                                 className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.hidden = true; }} />
                         </> : <>
-                            <FileText size={20} className="text-slate-500" aria-hidden="true" />
+                            <Icon size={20} className="text-slate-500" aria-hidden="true" />
                             <span className="mt-1 w-full truncate px-1 text-[9px] leading-3 text-slate-600">{name}</span>
                         </>}
                     </button>;

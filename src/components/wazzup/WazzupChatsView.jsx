@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, StickyNote,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -24,6 +24,7 @@ import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
 import { latestInboundTime } from './useWabaWindowExpired';
 import ChatMessageImage from './ChatMessageImage';
+import ChatMessageVideo from './ChatMessageVideo';
 import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
@@ -180,13 +181,13 @@ const Avatar = ({ name, size = 'h-9 w-9', muted = false, icon: Icon = null }) =>
 /* Медиа-содержимое пузыря: фото с лайтбоксом, аудио/видео плееры,
  * для остального — аккуратный чип со ссылкой. Битая ссылка → чип. */
 function MediaContent({ msg, light, onAttachment }) {
-    const [failed, setFailed] = useState(false);
     const [zoom, setZoom] = useState(false);
     const uri = msg.contentUri;
     const previewKind = onAttachment ? attachmentPreviewKind(msg) : null;
 
     if (previewKind) {
-        const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : 'Документ');
+        const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : previewKind === 'video' ? 'Видео' : 'Документ');
+        if (previewKind === 'video') return <ChatMessageVideo src={uri} label={label} onOpen={() => onAttachment(msg)} />;
         if (previewKind === 'image') return <ChatMessageImage src={uri} label={label} light={light}
             onOpen={() => onAttachment(msg)} />;
         return <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
@@ -215,10 +216,6 @@ function MediaContent({ msg, light, onAttachment }) {
                 </IosModal>
             </>
         );
-    }
-    if (uri && !failed && msg.type === 'video') {
-        return <video controls preload="metadata" src={uri} onError={() => setFailed(true)}
-                      className="max-h-64 w-auto max-w-full rounded-xl" />;
     }
     if (uri && msg.type === 'audio') {
         return <ChatAudioPlayer src={uri} />;
@@ -976,8 +973,9 @@ function ChatsWorkspace(props) {
     const quoteHighlight = useRef({ node: null, timer: null });
     const selectedKey = pilotChatKey(account, selected);
     const attachmentThread = useRef([]);
-    const openAttachment = useCallback((message) => {
-        const items = buildAttachmentGroup(attachmentThread.current, message);
+    const openAttachment = useCallback((message, videoOnly = false) => {
+        const items = buildAttachmentGroup(attachmentThread.current, message)
+            .filter((item) => !videoOnly || attachmentPreviewKind(item) === 'video');
         setAttachmentSelection({ key: selectedKey, message: { ...message }, items });
     }, [selectedKey]);
     const selectAttachment = useCallback((message) => {
@@ -1743,12 +1741,12 @@ function ChatsWorkspace(props) {
                                 <div className="flex flex-wrap items-center gap-2">
                                     {notesEnabled && <button type="button"
                                         onClick={() => setNoteComposerKey((key) => key === selectedKey ? null : selectedKey)}
-                                        aria-label="Внутренний комментарий" title="Оставить внутренний комментарий"
+                                        aria-label="Внутренняя заметка" title="Внутренняя заметка"
                                         aria-pressed={noteComposerKey === selectedKey}
-                                        className={`inline-flex h-9 w-9 items-center justify-center rounded-full transition ${
+                                        className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-semibold transition ${
                                             noteComposerKey === selectedKey ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300'
-                                                : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700'}`}>
-                                        <StickyNote size={17} />
+                                                : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}>
+                                        <MessageSquareText size={17} aria-hidden="true" /> Заметка
                                     </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
@@ -1816,7 +1814,7 @@ function ChatsWorkspace(props) {
                                             showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
                                             onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
                                             onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
-                                                ? openAttachment : undefined} />
+                                                ? openAttachment : attachmentPreviewKind(m) === 'video' ? (message) => openAttachment(message, true) : undefined} />
                                         {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&
                                             <div className="flex justify-start px-3 sm:px-4">
                                                 <button type="button" onClick={() => unread.markRead(selected, selectedUnread.lastInboundId)}
@@ -1865,13 +1863,14 @@ function ChatsWorkspace(props) {
                     )}
                 </div>
             </div>
-            {attachmentSelection?.key === selectedKey && selected && pilot.enabled &&
+            {attachmentSelection?.key === selectedKey && selected && (pilot.enabled || attachmentPreviewKind(attachmentSelection.message) === 'video') &&
                 <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
                     <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
                 </IosModal>}>
                     <ChatAttachmentViewer key={selectedKey}
                         apiBaseUrl={apiBaseUrl} headers={headers} chat={selected} message={attachmentSelection.message}
-                        items={attachmentSelection.items} onSelect={selectAttachment}
+                        items={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                            ? attachmentSelection.items : attachmentSelection.items.filter((item) => attachmentPreviewKind(item) === 'video')} onSelect={selectAttachment}
                         onClose={() => setAttachmentSelection(null)} />
                 </Suspense>}
         </div>
