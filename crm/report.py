@@ -28,7 +28,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import scenarios
+from . import scenarios, schema
 
 HEADER_FILL = PatternFill('solid', fgColor='1F2937')
 HEADER_FONT = Font(bold=True, color='FFFFFF')
@@ -86,8 +86,38 @@ COLUMNS = [
     ('Текст обращения', 'body', 70),
 ]
 
+# Проверка супервайзером до группы (schema.REVIEW_*, задача #297). Колонки
+# появляются только когда в периоде есть хоть одно такое обращение: проходят
+# её единицы, и четыре пустые колонки в каждой остальной выгрузке — шум.
+REVIEW_TITLES = {
+    schema.REVIEW_PENDING: 'Ждёт проверки',
+    schema.REVIEW_SENT: 'Отправлено в группу',
+    schema.REVIEW_RESOLVED: 'Решено супервайзером',
+}
+
+REVIEW_COLUMNS = [
+    ('Проверка супервайзера', 'review_title', 22),
+    ('Кто проверил', 'review_by_name', 24),
+    ('Когда проверил', 'review_at', 17),
+    ('Итог проверки', 'review_note', 50),
+]
+
+# Обращение, которое в группу не уходило: ждёт проверки или решено самим
+# супервайзером. У него нет ни группы, ни доставки — и писать их в файл нельзя.
+_NEVER_SENT = (schema.REVIEW_PENDING, schema.REVIEW_RESOLVED)
+
 TEXT_COLUMNS = ('client_phone', 'iin')
-DATE_KEYS = ('created_at', 'first_reply_at', 'resolved_at')
+DATE_KEYS = ('created_at', 'first_reply_at', 'resolved_at', 'review_at')
+WRAP_KEYS = ('body', 'review_note')
+
+
+def columns_for(items):
+    """Колонки листа для этого набора обращений: колонки проверки встают перед
+    «Метками», если проверку проходило хоть одно."""
+    if not any((item or {}).get('review_state') for item in items or ()):
+        return COLUMNS
+    at = [key for _title, key, _width in COLUMNS].index('flags_title')
+    return COLUMNS[:at] + REVIEW_COLUMNS + COLUMNS[at:]
 
 
 def _clean(value):
@@ -119,7 +149,7 @@ def _answer(answers, keys):
     return ''
 
 
-def row_values(item):
+def row_values(item, columns=COLUMNS):
     """Обращение → значения строки листа. Отдельной функцией, чтобы тест
     проверял содержимое, не разбирая готовый xlsx."""
     answers = item.get('answers') or {}
@@ -129,22 +159,30 @@ def row_values(item):
     minutes = None
     if isinstance(created, datetime) and isinstance(replied, datetime) and replied >= created:
         minutes = int((replied - created).total_seconds() // 60)
+    review = item.get('review_state')
+    never_sent = review in _NEVER_SENT
     values = dict(item)
     values.update({
         'topic': scenario.get('title') or item.get('topic_title') or '',
-        'status_title': STATUS_TITLES.get(item.get('status'), item.get('status') or ''),
+        # «Отправлено» про обращение, которое ждёт супервайзера, — неправда.
+        'status_title': ('На проверке' if review == schema.REVIEW_PENDING
+                         else STATUS_TITLES.get(item.get('status'), item.get('status') or '')),
         'iin': _answer(answers, ('iin',)),
         'city': _answer(answers, CITY_KEYS),
         'park': _answer(answers, PARK_KEYS),
         # Куда обращение ушло на самом деле: у уведённой темы это не чат
-        # тематики (crm_tickets.tg_chat_title — снимок при создании).
-        'group_title': item.get('tg_chat_title') or item.get('queue_chat_title') or '',
-        'delivery_title': DELIVERY_TITLES.get(item.get('delivery_status'), ''),
+        # тематики (crm_tickets.tg_chat_title — снимок при создании). Не
+        # уходившему в группу чат тематики не подставляем: его там не было.
+        'group_title': '' if never_sent else (
+            item.get('tg_chat_title') or item.get('queue_chat_title') or ''),
+        'delivery_title': '' if never_sent else DELIVERY_TITLES.get(
+            item.get('delivery_status'), ''),
         'reply_minutes': minutes,
         'flags_title': ', '.join(scenarios.FLAG_LABELS.get(flag, flag)
                                  for flag in (item.get('flags') or [])),
+        'review_title': REVIEW_TITLES.get(review, ''),
     })
-    return [values.get(key) for _title, key, _width in COLUMNS]
+    return [values.get(key) for _title, key, _width in columns]
 
 
 def _header(sheet, titles):
@@ -183,9 +221,14 @@ def build_workbook(items, *, date_from, date_to, generated_by, generated_at=None
     ]
     if truncated:
         rows.append(('Внимание', 'В выгрузку вошли не все обращения периода — сократите период.'))
+    columns = columns_for(items)
+    reviewed = columns is not COLUMNS
     rows.append(('Что в листе «Обращения»',
                  'Каждая строка — одно обращение. «Группа» — куда оно ушло на самом деле. '
-                 'Жалобы сюда не входят: их выгрузка — в разделе «Жалобы».'))
+                 'Жалобы сюда не входят: их выгрузка — в разделе «Жалобы».'
+                 + (' «Проверка супервайзера» — у обращений, которые сначала проверяет '
+                    'супервайзер: он решает их сам или отправляет в группу; у остальных '
+                    'колонка пустая.' if reviewed else '')))
     for label, value in rows:
         head = WriteOnlyCell(context, value=label)
         head.font = LABEL_FONT
@@ -194,13 +237,13 @@ def build_workbook(items, *, date_from, date_to, generated_by, generated_at=None
         context.append([head, body])
 
     sheet = book.create_sheet('Обращения')
-    for index, (_title, _key, width) in enumerate(COLUMNS, start=1):
+    for index, (_title, _key, width) in enumerate(columns, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = 'B2'
-    _header(sheet, [title for title, _key, _width in COLUMNS])
+    _header(sheet, [title for title, _key, _width in columns])
     for item in items:
         cells = []
-        for (_title, key, _width), value in zip(COLUMNS, row_values(item)):
+        for (_title, key, _width), value in zip(columns, row_values(item, columns)):
             if key in DATE_KEYS:
                 value = _as_datetime(value)
             cell = WriteOnlyCell(sheet, value=_clean(value if value is not None else ''))
@@ -208,18 +251,18 @@ def build_workbook(items, *, date_from, date_to, generated_by, generated_at=None
                 cell.number_format = DATE_FORMAT
             if key in TEXT_COLUMNS:
                 cell.number_format = '@'
-            if key == 'body':
+            if key in WRAP_KEYS:
                 cell.alignment = WRAP
             cells.append(cell)
         sheet.append(cells)
     if items:
-        sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(COLUMNS)), len(items) + 1)
+        sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(columns)), len(items) + 1)
 
     stream = BytesIO()
     book.save(stream)
     stream.seek(0)
     if text_warning_patch and items:
-        keys = [key for _t, key, _w in COLUMNS]
+        keys = [key for _t, key, _w in columns]
         first = get_column_letter(1 + keys.index('client_phone'))
         last = get_column_letter(1 + keys.index('iin'))
         try:

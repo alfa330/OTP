@@ -882,12 +882,20 @@ class ListContractTest(unittest.TestCase):
         self.assertIn('LIMIT', cursor.queries[0])
 
     def test_counters_left_only_what_is_displayed(self):
-        """Считать то, что не показывают, — прямая плата за ничего."""
+        """Считать то, что не показывают, — прямая плата за ничего.
+
+        Чисел два, и оба на экране: непрочитанное — бейдж раздела, «ждут моей
+        проверки» — тот же бейдж и сегмент «На проверку» (задача #297).
+        """
         cursor = RecordingCursor()
         result = queries.counters(cursor, ctx(role='super_admin'))
-        self.assertEqual(set(result), {'unread'})
+        self.assertEqual(set(result), {'unread', 'review'})
         # Условие «мой автор» в WHERE — иначе частичный индекс не включится.
         self.assertIn('t.created_by = %(viewer_id)s', cursor.queries[0])
+        # Оба числа — одним запросом: второй поход в базу ради второго числа
+        # удвоил бы цену каждого открытия раздела.
+        self.assertEqual(len(cursor.queries), 1)
+        self.assertIn("t.review_state = 'pending'", cursor.queries[0])
 
 
 class SqlComposesTest(unittest.TestCase):

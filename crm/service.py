@@ -17,7 +17,19 @@ import io
 import logging
 from datetime import datetime, timedelta
 
-from . import card, queries, scenarios, telegram, transport
+from . import card, files, queries, scenarios, schema, telegram, transport
+
+# Потолок итога проверки — как у текста обращения в жалобах: это несколько
+# фраз о том, что выяснили, а не переписка.
+REVIEW_NOTE_LIMIT = 4000
+
+
+class ReviewError(Exception):
+    """Решение по обращению на проверке принять нельзя. status — код ответа."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
 
 
 def _due_text(due_at):
@@ -55,17 +67,27 @@ def _office_mentions(db, payload):
                                        space_ids=queries.section_space_ids(cursor))
 
 
-def deliver_ticket(db, ticket_id, *, attachment=None):
+def deliver_ticket(db, ticket_id, *, attachment=None, gcs=None):
     """Отправляет обращение в Telegram-группу очереди. Возвращает (ok, error).
 
     Вызывается сразу после создания и повторно кнопкой «Отправить ещё раз».
     Повторная отправка защищена: если сообщение уже ушло, второй раз в группу
     ничего не летит — иначе кнопка «повторить» плодила бы дубли в чужом чате.
+
+    gcs — хранилище файлов, ждавших проверки супервайзера (crm/files.py):
+    с ним такой файл уходит в группу следом за обращением.
     """
     with db._get_cursor() as cursor:
         payload = queries.delivery_payload(cursor, ticket_id)
     if not payload:
         return False, 'Обращение не найдено'
+    # Обращение на проверке в группу не уходит НИКАКИМ путём — ни при создании,
+    # ни кнопкой «Отправить ещё раз»: отправляет его только решение
+    # супервайзера (review_send), и оно сначала снимает это состояние. Запрет
+    # стоит здесь, а не в роутах: отправка одна на все входы, и роут, забывший
+    # проверку, отнёс бы в группу то, что туда отправлять не велено.
+    if payload.get('review_state') == schema.REVIEW_PENDING:
+        return False, 'Обращение ждёт проверки супервайзера'
     if payload['delivery_status'] == 'sent' and payload['tg_message_id']:
         return True, None
     if not payload['chat_id']:
@@ -173,7 +195,40 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
         _send_attachment(db, ticket_id, payload['chat_id'], message_id, attachment,
                          author_user_id=payload['created_by'],
                          author_name=payload['created_by_name'])
+    # Файл, который ждал решения супервайзера у нас, уходит следом точно так же.
+    if gcs is not None:
+        _forward_stored(db, ticket_id, payload['chat_id'], message_id, gcs)
     return True, None
+
+
+def _forward_stored(db, ticket_id, chat_id, reply_to_message_id, gcs):
+    """Файлы обращения из нашего хранилища — в Telegram, следом за обращением.
+
+    У обращения на проверке группы не было, и приложенный к нему файл лежал у
+    нас (crm/files.py). Теперь группа есть: файл уходит реплаем на обращение и
+    получает обычную строку нити с file_id Telegram, а прежняя строка и сам
+    файл в хранилище стираются — иначе он стоял бы в переписке дважды.
+
+    Отказ здесь обращения не отменяет, как и у _send_attachment: файл остаётся
+    у нас и по-прежнему открывается из карточки.
+    """
+    with db._get_cursor() as cursor:
+        stored = queries.stored_attachments(cursor, ticket_id)
+    for item in stored:
+        data = files.load(gcs, item['ref'])
+        if data is None:
+            logging.warning('crm: файл обращения %s не найден в хранилище: %s',
+                            ticket_id, item['ref'])
+            continue
+        sent, _error = _send_attachment(
+            db, ticket_id, chat_id, reply_to_message_id,
+            {'filename': item['name'], 'stream': io.BytesIO(data), 'mimetype': item['mime']},
+            author_user_id=item['author_user_id'], author_name=item['author_name'])
+        if not sent:
+            continue
+        with db._get_cursor() as cursor:
+            queries.drop_message(cursor, ticket_id, item['id'])
+        files.drop(gcs, [item['ref']])
 
 
 def _client_line(payload, data_rows):
@@ -405,3 +460,75 @@ def change_status_from_system(db, ticket_id, status, *, actor_user_id, actor_nam
             reply_to_message_id=message_id,
         )
     return True, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Проверка супервайзером до группы
+#
+# «Сотрудничество с Яндексом не нужно отправлять в группу, это обращение должен
+# проверить СВ» (возврат задачи #297). Обращение ждёт супервайзера оператора, и
+# он решает одно из двух — как у жалоб на Яндекс (владелец, 07.10.2026):
+# стоит внимания — «Отправить в группу», нет — «Решено» с итогом.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def review_send(db, ticket_id, *, ctx, gcs=None):
+    """Супервайзер проверил обращение, и оно стоит внимания — в группу.
+
+    Возвращает (доставлено, ошибка доставки). Решение записывается ДО отправки
+    и отдельно от неё: Telegram может не принять сообщение (бота выгнали из
+    группы), и тогда обращение уже «отправлено супервайзером», но «не
+    доставлено» — повтор идёт обычной кнопкой «Отправить ещё раз», как у любого
+    другого обращения.
+
+    Адрес берётся у темы СЕЙЧАС, а не тот, что был при создании: обращение
+    ждало проверки, и маршрут за это время могли поменять. Нет адреса — нет и
+    решения: отправлять некуда, обращение остаётся ждать.
+    """
+    with db._get_cursor() as cursor:
+        ticket = queries.get_ticket(cursor, ticket_id)
+        if not ticket:
+            raise ReviewError('Обращение не найдено', 404)
+        scenario = scenarios.get(ticket.get('scenario_key')) or {}
+        route = queries.resolve_route(queries.routing_context(cursor),
+                                      ticket.get('scenario_key'), scenario.get('queue_code'))
+        if not route['is_ready']:
+            # 400, а не 409: «уже не ждёт проверки» (409) закрывает у
+            # проверяющего окно решения, а здесь обращение ждёт как ждало.
+            raise ReviewError(
+                ('Тема отправляется в группу «%s», но бот в ней больше не состоит'
+                 % (route['chat_title'] or '—')) if route['routed']
+                else 'К тематике не привязана Telegram-группа — отправить некуда')
+        queue = route['home'] or {}
+        if not queries.set_review(
+                cursor, ticket_id, state=schema.REVIEW_SENT,
+                actor_id=ctx['user_id'], actor_name=ctx.get('name'),
+                chat_id=route['chat_id'], chat_title=route['chat_title'],
+                due_at=compute_due_at(queue.get('sla_minutes'))):
+            raise ReviewError('Обращение уже не ждёт проверки — обновите карточку', 409)
+        queries.add_event(cursor, ticket_id=ticket_id, kind='review_sent',
+                          actor_user_id=ctx['user_id'], actor_name=ctx.get('name'),
+                          payload={'chat': route['chat_title'], 'routed': route['routed']})
+    return deliver_ticket(db, ticket_id, gcs=gcs)
+
+
+def review_resolve(db, ticket_id, note, *, ctx):
+    """Супервайзер проверил обращение и решил его сам: «Решено» с итогом.
+
+    Итог — то, что он пишет словами, и без него решение не принимается:
+    оператор должен узнать, чем кончилось. Итог ложится в обращение
+    (review_note — для выгрузки) и строкой в его переписку: автор видит его
+    там же, где увидел бы ответ группы, и получает уведомление. В группу не
+    уходит ничего — обращение там не было, и отбивать нечего.
+    """
+    note = str(note or '').strip()[:REVIEW_NOTE_LIMIT]
+    if not note:
+        raise ReviewError('Напишите итог — что выяснили и что сделали')
+    with db._get_cursor() as cursor:
+        if not queries.set_review(
+                cursor, ticket_id, state=schema.REVIEW_RESOLVED,
+                actor_id=ctx['user_id'], actor_name=ctx.get('name'), note=note):
+            raise ReviewError('Обращение уже не ждёт проверки — обновите карточку', 409)
+        queries.add_message(cursor, ticket_id=ticket_id, direction='note', body=note,
+                            author_user_id=ctx['user_id'], author_name=ctx.get('name'))
+        queries.add_event(cursor, ticket_id=ticket_id, kind='review_resolved',
+                          actor_user_id=ctx['user_id'], actor_name=ctx.get('name'))

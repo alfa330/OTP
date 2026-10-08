@@ -25,6 +25,10 @@
 периметр отделом (так же считают задачи, «Бот опозданий» и ИИ-оценка).
 """
 
+# schema — такой же чистый модуль (одни константы и DDL строками), поэтому
+# правило «ни базы, ни Flask» импорт не нарушает.
+from .schema import REVIEW_PENDING, REVIEW_RESOLVED
+
 # Роли, которые вообще существуют в портале.
 _KNOWN_ROLES = ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee')
 
@@ -229,10 +233,15 @@ def can_reply(ctx, ticket):
     и создаёт.
 
     Закрытое обращение не отвечают: сначала вернуть в работу.
+
+    В обращение на проверке у супервайзера писать некуда: в группу оно ещё не
+    ушло, и нити в Telegram у него нет.
     """
     if not can_view_ticket(ctx, ticket):
         return False
     if ticket.get('status') in ('resolved', 'cancelled'):
+        return False
+    if ticket.get('review_state') == REVIEW_PENDING:
         return False
     return True
 
@@ -242,8 +251,46 @@ def can_change_status(ctx, ticket):
 
     То же правило, что у ответа, но без запрета на закрытые: снять «решено»
     (вернуть в работу) — это как раз действие над закрытым обращением.
+
+    Проверка супервайзером эти кнопки снимает. Пока обращение её ждёт,
+    «Вопрос решён» закрыл бы его в обход проверки — решает проверяющий
+    (can_review). А решённое им в группу не уходило вовсе: «Вернуть в работу»
+    сделало бы из него открытое обращение, которое никто не получал и на
+    которое некому ответить.
     """
+    if ticket.get('review_state') in (REVIEW_PENDING, REVIEW_RESOLVED):
+        return False
     return can_view_ticket(ctx, ticket)
+
+
+def can_review(ctx, ticket):
+    """Решить по обращению на проверке: «Решено» с итогом или «Отправить в
+    группу» (возврат задачи #297; владелец, 07.10.2026 — как у жалоб на Яндекс).
+
+    Проверяет супервайзер группы автора, а когда такой группы у автора нет —
+    глава его отдела: по этому правилу считаются счётчик раздела и колокол
+    (queries.reviewer_sql). Нажать может и тот, кто стоит над ними — глава
+    отдела автора и глобальный админ: иначе обращение оператора, чей
+    супервайзер в отпуске, ждало бы его возвращения. То же деление у жалоб
+    (complaints/access.can_review).
+
+    Оператор не проверяет никогда — ни своё, ни чужое.
+    """
+    if ticket.get('review_state') != REVIEW_PENDING:
+        return False
+    if not can_view_ticket(ctx, ticket):
+        return False
+    if is_global_admin(ctx):
+        return True
+    department = ticket.get('department_id')
+    headed = {int(x) for x in (ctx.get('headed_department_ids') or [])}
+    if department is not None and int(department) in headed:
+        return True
+    if is_supervisor(ctx):
+        groups = {int(x) for x in (ctx.get('group_ids') or [])}
+        author_groups = {int(x) for x in (ticket.get('author_group_ids') or [])}
+        return bool(groups & author_groups)
+    return False
 
 
 def can_delete_ticket(ctx, ticket):

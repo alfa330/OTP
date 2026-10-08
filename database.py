@@ -7143,6 +7143,30 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by];
                     END IF;
+                    -- Исключение — обращение на проверке у супервайзера (задача
+                    -- #297, «Сотрудничество с Яндексом»): это уже не чужая
+                    -- переписка, а его задача. Будим супервайзеров текущих
+                    -- групп автора и главу его отдела
+                    -- (crm/queries.py::reviewer_sql) — и когда обращение встало
+                    -- на проверку, и когда по нему решили: задача должна
+                    -- погаснуть у всех проверяющих. Круг шире точного — лишний
+                    -- тычок стоит одной перечитки сводки.
+                    IF NEW.review_state IS NOT NULL THEN
+                        targets := targets || ARRAY(
+                            SELECT gsm.supervisor_id
+                              FROM group_operator_memberships gom
+                              JOIN group_supervisor_memberships gsm
+                                ON gsm.group_id = gom.group_id
+                             WHERE gom.operator_id = NEW.created_by
+                               AND gom.start_date <= CURRENT_DATE
+                               AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
+                               AND gsm.start_date <= CURRENT_DATE
+                               AND (gsm.end_date IS NULL OR gsm.end_date >= CURRENT_DATE)
+                        ) || ARRAY(
+                            SELECT d.head_user_id FROM departments d
+                             WHERE d.id = NEW.department_id
+                               AND d.head_user_id IS NOT NULL);
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'complaints' THEN
                     -- Жалоба будит двоих: автора (пришёл ответ для водителя или
                     -- вопрос группы) и того, кому поставлена работа с
@@ -7351,16 +7375,26 @@ class Database:
             # Обращения. INSERT не будим намеренно: в момент создания автору
             # ещё нечего читать — он сам его и завёл. А вот WHEN обязателен,
             # иначе каждое исходящее сообщение в нить (last_message_at) слало
-            # бы тычок, не меняя ничего в сводке.
+            # бы тычок, не меняя ничего в сводке. review_state — решение
+            # супервайзера по обращению на проверке: оно гасит задачу у всех
+            # проверяющих.
             (
                 'trg_bell_crm_tickets',
                 'crm_tickets',
-                'AFTER UPDATE OF author_unread_at, status, delivery_status',
+                'AFTER UPDATE OF author_unread_at, status, delivery_status, review_state',
                 """WHEN (
                     OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
                     OR OLD.status IS DISTINCT FROM NEW.status
                     OR OLD.delivery_status IS DISTINCT FROM NEW.delivery_status
+                    OR OLD.review_state IS DISTINCT FROM NEW.review_state
                 )""",
+            ),
+            # Единственная вставка, о которой колоколу есть что сказать, —
+            # обращение, вставшее на проверку: у супервайзера появилась задача.
+            # Отдельным триггером: WHEN у INSERT не может ссылаться на OLD.
+            (
+                'trg_bell_crm_tickets_review', 'crm_tickets', 'AFTER INSERT',
+                """WHEN (NEW.review_state IS NOT NULL)""",
             ),
             # Жалобы (задача #297). INSERT будит ответственного сразу: сотрудника
             # мог определить уже оператор, и задача «проведите ОС» появляется в

@@ -9,6 +9,7 @@ import {
     IosBadge, IosModal,
 } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
+import { ReviewPanel, ReviewResolveModal } from '../common/SupervisorReview';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosTimePicker } from '../ui/TimePicker';
@@ -338,38 +339,8 @@ const WorkModal = ({ code: liveCode, onClose, complaint, apiBaseUrl, headers, sh
     );
 };
 
-/* ─── Жалоба на проверке: «Решено» с итогом ─────────────────────────────────── */
-
-const ResolveModal = ({ open, onClose, onResolve, busy }) => {
-    const [note, setNote] = useState('');
-    const [touched, setTouched] = useState(false);
-    useEffect(() => { if (!open) { setNote(''); setTouched(false); } }, [open]);
-    const empty = !note.trim();
-    return (
-        <IosModal open={open} onClose={onClose} title="Решено" maxWidth="max-w-md"
-                  subtitle="Жалоба закроется с вашим итогом и в группу не уйдёт"
-                  footer={(
-                      <>
-                          <button type="button" onClick={onClose} className={iosBtnSecondary} disabled={busy}>
-                              Отмена
-                          </button>
-                          <button type="button" disabled={busy} className={iosBtnPrimary}
-                                  onClick={() => { setTouched(true); if (!empty) onResolve(note.trim()); }}>
-                              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                              Сохранить
-                          </button>
-                      </>
-                  )}>
-            <div>
-                <div className={`${iosGroupLabel} mb-1.5`}>Итог</div>
-                <textarea value={note} rows={4} onChange={(e) => setNote(e.target.value)}
-                          placeholder="Что выяснили и что сделали"
-                          className={`${iosInput} resize-y`} />
-                <Problem text={touched && empty ? 'Напишите итог' : null} />
-            </div>
-        </IosModal>
-    );
-};
+/* Жалоба на проверке: панель решения и окно «Решено» с итогом — общие с
+   обращениями (common/SupervisorReview.jsx): проверка у них одна и та же. */
 
 /* ─── Сотрудник: определить или поправить ──────────────────────────────────── */
 
@@ -984,28 +955,12 @@ export default function ComplaintCard({
                 внимания — в группу, нет — «Решено» с итогом. Внизу, на месте поля
                 ответа: это главное, что здесь можно сделать. */}
             {permissions.can_review && (
-                <div className="shrink-0 border-t border-slate-100 px-4 py-3">
-                    <div className="mb-2 flex items-center gap-1.5">
-                        <span className="text-[12.5px] font-medium text-slate-600">Проверка супервайзером</span>
-                        <InfoHint side="left">
-                            Стоит внимания — отправьте в группу: дальше она пойдёт как любая жалоба.
-                            Нет — «Решено» с итогом: жалоба закроется и в группу не уйдёт.
-                        </InfoHint>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                        <button type="button" onClick={() => setResolveOpen(true)} disabled={reviewBusy}
-                                className={iosBtnSecondary}>
-                            <CheckCircle2 size={14} /> Решено
-                        </button>
-                        <button type="button" onClick={() => review('send')}
-                                disabled={reviewBusy || (meta?.group && !meta.group.ready)}
-                                title={meta?.group && !meta.group.ready ? 'Telegram-группа для жалоб не выбрана' : undefined}
-                                className={iosBtnPrimary}>
-                            {reviewBusy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                            Отправить в группу
-                        </button>
-                    </div>
-                </div>
+                <ReviewPanel busy={reviewBusy}
+                             hint="Стоит внимания — отправьте в группу: дальше она пойдёт как любая жалоба. Нет — «Решено» с итогом: жалоба закроется и в группу не уйдёт."
+                             sendBlocked={meta?.group && !meta.group.ready
+                                 ? 'Telegram-группа для жалоб не выбрана' : null}
+                             onResolve={() => setResolveOpen(true)}
+                             onSend={() => review('send')} />
             )}
 
             {/* Ответ в группу: на открытый вопрос — или дополнение. */}
@@ -1044,8 +999,10 @@ export default function ComplaintCard({
             <WorkModal code={workCode} onClose={() => setWorkCode(null)} complaint={item}
                        apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
                        onSaved={(next) => applyItem(next)} />
-            <ResolveModal open={resolveOpen} onClose={() => setResolveOpen(false)} busy={reviewBusy}
-                          onResolve={(note) => review('resolve', note)} />
+            <ReviewResolveModal open={resolveOpen} onClose={() => setResolveOpen(false)}
+                                busy={reviewBusy}
+                                subtitle="Жалоба закроется с вашим итогом и в группу не уйдёт"
+                                onResolve={(note) => review('resolve', note)} />
             <EmployeeModal open={employeeOpen} onClose={() => setEmployeeOpen(false)} complaint={item}
                            meta={meta} apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
                            onSaved={(next) => { applyItem(next); load(true); }} />

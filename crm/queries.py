@@ -11,7 +11,7 @@
 
 import json
 
-from . import access
+from . import access, files, schema
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
@@ -422,8 +422,13 @@ _TICKET_COLUMNS = """
     t.resolved_at, t.resolved_by_name,
     t.created_at, t.updated_at, q.department_id,
     t.scenario_key, t.answers, t.flags, t.author_unread_count,
-    t.tg_chat_title
+    t.tg_chat_title,
+    t.review_state, t.review_by_name, t.review_at, t.review_note
 """
+
+# Сколько столбцов в _TICKET_COLUMNS: запросы дописывают свои следом и читают
+# их по этому смещению, а не по числу, которое сдвигается с каждым новым полем.
+_TICKET_WIDTH = 39
 
 
 def _iso(value):
@@ -476,11 +481,60 @@ def _ticket_row(row, viewer_id=None):
         # Куда обращение ушло на самом деле. У обращений по уведённой теме это
         # не чат тематики, и в списке надо показывать именно его.
         'tg_chat_title': row[34],
+        # Проверка супервайзером до группы (schema.REVIEW_*); None — обращение
+        # её не проходит. review_note — итог, с которым он закрыл обращение.
+        'review_state': row[35],
+        'review_by_name': row[36],
+        'review_at': _iso(row[37]),
+        'review_note': row[38],
     }
 
 
+def reviewer_sql(param='viewer_id'):
+    """Условие «зритель проверяет это обращение до группы» (schema.REVIEW_*).
+
+    Проверяет супервайзер текущей группы автора; у автора нет группы с
+    супервайзером — глава отдела автора, иначе обращение не увидел бы никто.
+    Правило то же, что у жалоб на Яндекс (complaints/queries.reviewer_sql), и
+    так же адресное: счётчик, колокол и бейдж строки будят того, чья это
+    задача, а не каждого, кому обращение видно. Триггер колокола
+    (database.py) будит этот же круг шире — лишний тычок стоит одной перечитки
+    сводки, а недобуженный стоил бы пропущенной задачи.
+
+    Нажать «Решено» или «В группу» вправе круг пошире (access.can_review): там
+    ещё глава отдела при живом супервайзере и глобальный админ.
+    """
+    current = ('{alias}.start_date <= CURRENT_DATE AND ({alias}.end_date IS NULL '
+               'OR {alias}.end_date >= CURRENT_DATE)')
+    supervised = """
+        SELECT 1 FROM group_operator_memberships gom
+          JOIN group_supervisor_memberships gsm ON gsm.group_id = gom.group_id
+          JOIN groups g ON g.id = gom.group_id AND g.status = 'active'
+         WHERE gom.operator_id = t.created_by
+           AND {gom} AND {gsm}""".format(gom=current.format(alias='gom'),
+                                         gsm=current.format(alias='gsm'))
+    return """(
+        EXISTS ({supervised} AND gsm.supervisor_id = %({param})s)
+        OR (NOT EXISTS ({supervised})
+            AND t.department_id IN (
+                SELECT d.id FROM departments d
+                 WHERE d.head_user_id = %({param})s AND d.is_active))
+    )""".format(supervised=supervised, param=param)
+
+
+def review_task_sql(param='viewer_id'):
+    """Условие «обращение ждёт проверки ИМЕННО этого человека».
+
+    Одна строка на счётчик раздела, колокол, фильтр «На проверку» и бейдж
+    строки — чтобы число в меню и список за ним не разошлись. Своё обращение
+    задачей не считается: о нём автор и так знает.
+    """
+    return ("(t.review_state = 'pending' AND t.created_by IS DISTINCT FROM %%(%s)s AND %s)"
+            % (param, reviewer_sql(param)))
+
+
 def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_only=False,
-                 search=None, limit=50, offset=0):
+                 search=None, limit=50, offset=0, review_only=False):
     """Порция обращений в периметре + есть ли ещё. Возвращает (items, has_more).
 
     Точного «всего N» здесь нет намеренно. И отдельный COUNT(*), и COUNT(*) OVER ()
@@ -513,6 +567,14 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     """
     where, params = visibility_sql(ctx)
     clauses = [where]
+
+    # «На проверку» — обращения, которые ждут решения ЭТОГО человека
+    # (review_task_sql). Они чужие по определению и все в одном состоянии,
+    # поэтому «Мои», статус и «непрочитанные» здесь не применяются: с любым из
+    # них список был бы пуст всегда.
+    if review_only:
+        clauses.append(review_task_sql('viewer_id'))
+        mine, status, unread_only = False, None, False
 
     # Поиск идёт по ВСЕМ обращениям, а не по «моим» (просьба СЗоВ 18.08.2026).
     # Смысл поиска здесь ровно один: проверить, не заведено ли обращение по
@@ -589,21 +651,33 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     params['limit'] = page + 1
     params['offset'] = max(0, int(offset))
 
+    # «Ждёт МОЕЙ проверки» — тем же правилом, что счётчик и колокол: бейдж
+    # строки горит ровно у того, чья это задача, а не у каждого, кому обращение
+    # видно. CASE — чтобы подзапросы правила считались только у обращений на
+    # проверке, а их единицы.
+    review_mine = ("CASE WHEN t.review_state = 'pending' THEN %s ELSE FALSE END"
+                   % review_task_sql('viewer_id'))
+
     cursor.execute(
         """
-        SELECT %s
+        SELECT %s,
+               %s AS review_mine
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
          WHERE %s
          ORDER BY %s
          LIMIT %%(limit)s OFFSET %%(offset)s
-        """ % (_TICKET_COLUMNS, ' AND '.join(clauses), order),
+        """ % (_TICKET_COLUMNS, review_mine, ' AND '.join(clauses), order),
         params,
     )
     rows = cursor.fetchall()
     has_more = len(rows) > page
-    items = [_ticket_row(row, ctx['user_id']) for row in rows[:page]]
+    items = []
+    for row in rows[:page]:
+        item = _ticket_row(row, ctx['user_id'])
+        item['review_mine'] = bool(row[_TICKET_WIDTH])
+        items.append(item)
     attach_previews(cursor, items)
     return items, has_more
 
@@ -644,8 +718,8 @@ def export_tickets(cursor, ctx, *, date_from, date_to, limit=EXPORT_LIMIT):
     items = []
     for row in rows[:int(limit)]:
         item = _ticket_row(row, ctx['user_id'])
-        item['queue_chat_title'] = row[35]
-        item['department_name'] = row[36]
+        item['queue_chat_title'] = row[_TICKET_WIDTH]
+        item['department_name'] = row[_TICKET_WIDTH + 1]
         items.append(item)
     return items, truncated
 
@@ -721,22 +795,27 @@ def get_ticket(cursor, ticket_id, viewer_id=None):
 def create_ticket(cursor, *, queue_id, topic_id, subject, body, priority, source,
                   client_name, client_phone, created_by, created_by_name,
                   department_id, due_at=None, scenario_key=None, answers=None, flags=None,
-                  tg_chat_id=None, tg_chat_title=None):
+                  tg_chat_id=None, tg_chat_title=None, review_state=None):
     """Заводит обращение. tg_chat_id — адрес, посчитанный при создании.
 
     Адрес пишется В САМО ОБРАЩЕНИЕ, а не вычисляется при отправке: маршрут темы
     завтра поменяют, а нить этого обращения останется в том чате, куда ушла.
     Вычисляй мы адрес каждый раз заново, «Отправить ещё раз» после смены
     маршрута отправило бы продолжение разговора в другую группу.
+
+    У обращения на проверке (review_state) адреса при создании нет: оно никуда
+    не ушло. Адрес и срок ответа группы ставит set_review, когда супервайзер
+    решит его отправить.
     """
     cursor.execute(
         """
         INSERT INTO crm_tickets (queue_id, topic_id, subject, body, priority, source,
                                  client_name, client_phone, created_by, created_by_name,
                                  department_id, due_at, last_message_at,
-                                 scenario_key, answers, flags, tg_chat_id, tg_chat_title)
+                                 scenario_key, answers, flags, tg_chat_id, tg_chat_title,
+                                 review_state)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, {now},
-                %s, %s::jsonb, %s::jsonb, %s, %s)
+                %s, %s::jsonb, %s::jsonb, %s, %s, %s)
         RETURNING id
         """.format(now=_NOW),
         (int(queue_id), topic_id, subject, body, priority, source,
@@ -744,9 +823,63 @@ def create_ticket(cursor, *, queue_id, topic_id, subject, body, priority, source
          scenario_key,
          json.dumps(answers or {}, ensure_ascii=False),
          json.dumps(list(flags or []), ensure_ascii=False),
-         tg_chat_id, tg_chat_title),
+         tg_chat_id, tg_chat_title, review_state),
     )
     return cursor.fetchone()[0]
+
+
+def set_review(cursor, ticket_id, *, state, actor_id, actor_name, note=None,
+               chat_id=None, chat_title=None, due_at=None):
+    """Решение супервайзера по обращению на проверке. True — решение легло.
+
+    Меняется только обращение, которое ЕЩЁ ждёт проверки: два супервайзера,
+    нажавшие разное одновременно, не должны перезаписать решение друг друга, а
+    нажавший вторым получает «уже не ждёт проверки».
+
+    sent      Адрес и срок ответа ставятся здесь, а не при создании: обращение
+              уходит в тот чат, который назначен теме СЕЙЧАС, и срок группе
+              считается от отправки, а не от звонка. Саму отправку делает
+              сервис следом — отказ Telegram решения не отменяет.
+    resolved  Обращение закрывается итогом супервайзера, в группу не уходит.
+              Автору зажигается уведомление — итог и есть ответ, которого он
+              ждал; себе (автор сам и проверял) звонить не о чем.
+    """
+    resolved = state == schema.REVIEW_RESOLVED
+    cursor.execute(
+        """
+        UPDATE crm_tickets
+           SET review_state = %(state)s,
+               review_by = %(actor_id)s,
+               review_by_name = %(actor_name)s,
+               review_at = {now},
+               review_note = %(note)s,
+               tg_chat_id = COALESCE(%(chat_id)s, tg_chat_id),
+               tg_chat_title = COALESCE(%(chat_title)s, tg_chat_title),
+               due_at = COALESCE(%(due_at)s, due_at),
+               status = CASE WHEN %(resolved)s THEN 'resolved' ELSE status END,
+               resolved_at = CASE WHEN %(resolved)s THEN {now} ELSE resolved_at END,
+               resolved_by = CASE WHEN %(resolved)s THEN %(actor_id)s ELSE resolved_by END,
+               resolved_by_name = CASE WHEN %(resolved)s THEN %(actor_name)s
+                                       ELSE resolved_by_name END,
+               author_unread_at = CASE WHEN %(resolved)s
+                                        AND created_by IS DISTINCT FROM %(actor_id)s
+                                       THEN {now} ELSE author_unread_at END,
+               author_unread_kind = CASE WHEN %(resolved)s
+                                          AND created_by IS DISTINCT FROM %(actor_id)s
+                                         THEN %(kind)s ELSE author_unread_kind END,
+               author_unread_count = author_unread_count
+                   + CASE WHEN %(resolved)s AND created_by IS DISTINCT FROM %(actor_id)s
+                          THEN 1 ELSE 0 END,
+               last_message_at = {now},
+               updated_at = {now}
+         WHERE id = %(id)s AND review_state = 'pending'
+        """.format(now=_NOW),
+        {'id': int(ticket_id), 'state': state, 'actor_id': actor_id,
+         'actor_name': actor_name, 'note': note, 'chat_id': chat_id,
+         'chat_title': chat_title, 'due_at': due_at, 'resolved': resolved,
+         'kind': UNREAD_REVIEWED},
+    )
+    return cursor.rowcount > 0
 
 
 def scenario_breakdown(cursor, ctx, days=30):
@@ -924,6 +1057,8 @@ def list_events(cursor, ticket_id, limit=100):
 UNREAD_REPLY = 'reply'
 UNREAD_DONE = 'done'
 UNREAD_PROGRESS = 'progress'
+# Супервайзер проверил обращение и закрыл его своим итогом (set_review).
+UNREAD_REVIEWED = 'reviewed'
 
 
 def touch_inbound(cursor, ticket_id, *, unread_kind=UNREAD_REPLY, mark_answered=True):
@@ -1061,6 +1196,34 @@ def find_message_attachment(cursor, ticket_id, message_id):
     return {'file_id': row[0], 'name': row[1], 'mime': row[2], 'kind': row[3]}
 
 
+def stored_attachments(cursor, ticket_id):
+    """Файлы обращения, которые лежат у нас, а не в Telegram (crm/files.py).
+
+    Такими бывают только файлы обращения на проверке: приложены при создании,
+    а группы, куда их отправить, у обращения ещё нет.
+    """
+    cursor.execute(
+        """
+        SELECT id, attachment_file_id, attachment_name, attachment_mime,
+               author_user_id, author_name
+          FROM crm_ticket_messages
+         WHERE ticket_id = %s AND attachment_file_id LIKE %s
+         ORDER BY created_at, id
+        """,
+        (int(ticket_id), files.STORED_PREFIX + '%'),
+    )
+    return [{'id': row[0], 'ref': row[1], 'name': row[2], 'mime': row[3],
+             'author_user_id': row[4], 'author_name': row[5]}
+            for row in cursor.fetchall()]
+
+
+def drop_message(cursor, ticket_id, message_id):
+    """Убирает строку нити — файл, который переехал из хранилища в Telegram:
+    там у него новая строка, с настоящим номером сообщения."""
+    cursor.execute('DELETE FROM crm_ticket_messages WHERE id = %s AND ticket_id = %s',
+                   (int(message_id), int(ticket_id)))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Сводки
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1084,6 +1247,25 @@ def unread_for_bell(cursor, user_id, limit):
     return int(total), rows
 
 
+def review_for_bell(cursor, user_id, limit):
+    """Обращения, которые ждут проверки зрителя, — для колокола. Возвращает
+    (всего, строки). Условие — дословно как у counters()['review']."""
+    cursor.execute(
+        """
+        SELECT t.id, t.subject, t.created_at, t.created_by_name,
+               COUNT(*) OVER () AS total
+          FROM crm_tickets t
+         WHERE """ + review_task_sql('user_id') + """
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT %(limit)s
+        """,
+        {'user_id': int(user_id), 'limit': int(limit)},
+    )
+    rows = cursor.fetchall()
+    total = rows[0][4] if rows else 0
+    return int(total), rows
+
+
 def counters(cursor, ctx):
     """Одно число для раздела: сколько обращений ждут ЛИЧНО этого человека.
 
@@ -1102,17 +1284,28 @@ def counters(cursor, ctx):
     Осталось непрочитанное — оно нужно бейджу раздела и читается по частичному
     индексу за десятые доли миллисекунды при любом объёме, потому что условие
     «мой автор» отсекает всё остальное сразу.
+
+    Второе число — «ждут моей проверки» (review_task_sql): обращения, по
+    которым зритель как супервайзер должен решить, «Решено» или «в группу». Оно
+    той же цены: частичный индекс idx_crm_tickets_review_pending держит только
+    обращения на проверке, а их единицы. Бейдж раздела — сумма обоих чисел, и
+    колокол считает её так же (notifications/sources.py: crm).
     """
     cursor.execute(
         """
-        SELECT COUNT(*)
-          FROM crm_tickets t
-         WHERE t.created_by = %(viewer_id)s
-           AND t.author_unread_at IS NOT NULL
+        SELECT
+            (SELECT COUNT(*)
+               FROM crm_tickets t
+              WHERE t.created_by = %(viewer_id)s
+                AND t.author_unread_at IS NOT NULL),
+            (SELECT COUNT(*)
+               FROM crm_tickets t
+              WHERE """ + review_task_sql('viewer_id') + """)
         """,
         {'viewer_id': ctx['user_id']},
     )
-    return {'unread': cursor.fetchone()[0]}
+    row = cursor.fetchone()
+    return {'unread': int(row[0] or 0), 'review': int(row[1] or 0)}
 
 
 def delivery_payload(cursor, ticket_id):
@@ -1134,7 +1327,7 @@ def delivery_payload(cursor, ticket_id):
                t.delivery_status, t.tg_message_id,
                COALESCE(t.tg_chat_id, q.chat_id), q.title, tp.title, d.name,
                t.answers ->> 'iin', t.scenario_key, t.answers, t.flags,
-               q.mention_usernames
+               q.mention_usernames, t.review_state
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
@@ -1167,6 +1360,9 @@ def delivery_payload(cursor, ticket_id):
         # читаются В МОМЕНТ ОТПРАВКИ, как и ники офисов: сменили ответственного —
         # «Отправить ещё раз» отметит уже нового.
         'queue_mentions': [{'username': name} for name in _split_usernames(row[19])],
+        # Ждёт ли обращение проверки супервайзера: такое в группу не уходит
+        # никаким путём, пока он не решит (service.deliver_ticket).
+        'review_state': row[20],
     }
 
 

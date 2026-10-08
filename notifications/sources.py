@@ -456,10 +456,17 @@ def crm(cursor, viewer, limit):
 
     Сюда же — ответ для водителя и вопрос группы по СВОИМ жалобам: автор
     работает с жалобами в «Обращениях» (решение владельца 29.09.2026), и
-    бейдж, пульс и переход у них общие с обращениями. Обе части сливаются по
-    времени и режутся одним limit; всего — сумма двух счётчиков.
+    бейдж, пульс и переход у них общие с обращениями.
+
+    Единственное чужое здесь — обращение, которое ждёт проверки зрителя
+    (задача #297: «Сотрудничество с Яндексом» сначала проверяет супервайзер).
+    Это уже не «звонить по чужой переписке», а задача: пока он не решит,
+    обращение не уйдёт никуда. Гаснет она действием — «Решено» или «в группу».
+
+    Все части сливаются по времени и режутся одним limit; всего — сумма счётчиков.
     """
-    total, rows = _crm_queries().unread_for_bell(cursor, viewer['user_id'], limit)
+    crm_queries = _crm_queries()
+    total, rows = crm_queries.unread_for_bell(cursor, viewer['user_id'], limit)
     items = [{
         'source': 'crm',
         'id': row[0],
@@ -472,6 +479,19 @@ def crm(cursor, viewer, limit):
         # новость, а не просрочка. Цветом в колоколе помечается горящее.
         'tone': 'default',
     } for row in rows]
+    review_total, review_rows = crm_queries.review_for_bell(cursor, viewer['user_id'], limit)
+    review_items = [{
+        'source': 'crm',
+        # Не голый номер: у автора строка того же обращения — «проверено»,
+        # и два разных события не должны делить один ключ.
+        'id': 'review:%s' % row[0],
+        'title': row[1],
+        'body': 'Проверьте: отправить в группу или решено',
+        'at': _iso(row[2]),
+        'view': 'crm_tickets',
+        'target': row[0],
+        'tone': 'default',
+    } for row in review_rows]
     # Своя точка сохранения: жалобы — другой пакет со своей миграцией, и его
     # сбой не должен обнулять обращения (collect откатил бы весь источник).
     cursor.execute('SAVEPOINT notif_crm_complaints')
@@ -483,10 +503,10 @@ def crm(cursor, viewer, limit):
         cursor.execute('RELEASE SAVEPOINT notif_crm_complaints')
         logging.exception('Уведомления: ответы по жалобам не посчитаны')
         complaint_total, complaint_items = 0, []
-    if complaint_items:
-        items = sorted(items + complaint_items, key=lambda item: item['at'] or '',
-                       reverse=True)[:limit]
-    return int(total or 0) + int(complaint_total or 0), items
+    if review_items or complaint_items:
+        items = sorted(items + review_items + complaint_items,
+                       key=lambda item: item['at'] or '', reverse=True)[:limit]
+    return int(total or 0) + int(review_total or 0) + int(complaint_total or 0), items
 
 
 # Что именно ждёт автора. Подписи короткие: в колоколе строка — не место для
@@ -495,6 +515,8 @@ _CRM_UNREAD_LABELS = {
     'reply': 'Пришёл ответ',
     'done': 'Обращение выполнено',
     'progress': 'Взяли в работу',
+    # Супервайзер проверил обращение и закрыл его своим итогом (задача #297).
+    'reviewed': 'Супервайзер проверил: решено',
 }
 
 

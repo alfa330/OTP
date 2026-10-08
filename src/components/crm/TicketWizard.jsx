@@ -17,6 +17,7 @@ import {
 import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
     attachmentAccept, blockedLabel, carryOver, checksAreComplete, checksPayload,
+    createdToast, deliveryWording,
     describeSnapshot, entryCategories, entryIsComplete, groupCatalog, groupHeading,
     groupIsComplete, groupsOf, hasChecks,
     localVerdict, lookupKey, missingGroup, needsLookup, needsSaparCheck, nextStop,
@@ -1002,7 +1003,9 @@ export default function TicketWizard({
             );
             const data = response.data;
             if (data.outcome === OUTCOME.READY) {
-                setPreview(data.preview);
+                // review — обращение уйдёт не в группу, а на проверку
+                // супервайзеру: это решает сервер, мастер только называет.
+                setPreview({ ...data.preview, review: Boolean(data.review) });
                 setMissing({});
                 setPhase('preview');
             } else if (data.outcome === OUTCOME.INCOMPLETE) {
@@ -1048,11 +1051,8 @@ export default function TicketWizard({
             const response = await axios.post(`${apiBaseUrl}/api/crm/tickets`, form,
                 { headers: headers() });
             const created = response.data;
-            showToast?.(created.delivered
-                ? `Обращение №${created.item.id} отправлено в «${
-                    created.item.tg_chat_title || created.item.queue_title}»`
-                : `Обращение №${created.item.id} сохранено, но не ушло в Telegram: ${created.delivery_error}`,
-            created.delivered ? 'success' : 'error');
+            const toast = createdToast(created);
+            showToast?.(toast.text, toast.tone);
             onCreated?.(created.item.id);
             onClose();
         } catch (error) {
@@ -1061,6 +1061,9 @@ export default function TicketWizard({
             setBusy(false);
         }
     };
+
+    // Слова последнего экрана: в группу обращение уйдёт или на проверку.
+    const wording = deliveryWording(Boolean(preview?.review));
 
     const footer = (() => {
         if (phase === 'pick' || phase === 'closed' || phase === 'handoff') {
@@ -1138,7 +1141,7 @@ export default function TicketWizard({
                     </button>
                     <button type="button" onClick={submit} disabled={busy} className={iosBtnPrimary}>
                         {busy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                        Подтвердить и отправить
+                        {wording.submit}
                     </button>
                 </>
             );
@@ -1169,7 +1172,7 @@ export default function TicketWizard({
         : phase === 'entry' ? 'Данные водителя — проверим документы за период'
             : phase === 'category' ? 'Выберите категорию обращения'
                 : phase === 'checks' ? 'Проверьте это до обращения'
-                    : phase === 'preview' ? 'Так обращение увидят в группе'
+                    : phase === 'preview' ? wording.subtitle
                         : (phase === 'closed' || phase === 'handoff') ? null
                             // Экраны, заполненные на входе, оператор не видел —
                             // и в счётчике их быть не должно: «шаг 2 из 2»
@@ -1521,14 +1524,18 @@ export default function TicketWizard({
                             </div>
                         </div>
                         <div>
-                            <div className={iosGroupLabel}>Сообщение в группу</div>
+                            <div className={iosGroupLabel}>{wording.label}</div>
                             <div className="mt-1.5 rounded-xl bg-slate-100 px-3.5 py-3">
                                 {/* Первая строка карточки в группе — просьба тематики
                                     (group_title). Раньше её в предпросмотре не было, и
                                     оператор видел не то, что увидят коллеги: у «Статуса
                                     работы офиса» именно она несёт сам вопрос из ТЗ
-                                    («Уточнение — работает офис или нет?»). */}
-                                {scenario?.group_title && (
+                                    («Уточнение — работает офис или нет?»).
+
+                                    У обращения на проверке её нет: супервайзер
+                                    читает само обращение, а просьба к группе
+                                    появится, только если он его туда отправит. */}
+                                {scenario?.group_title && !preview.review && (
                                     <div className="mb-2 text-[13.5px] font-semibold leading-snug text-slate-900">
                                         {scenario.group_title}
                                     </div>

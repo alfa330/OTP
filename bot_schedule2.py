@@ -66001,6 +66001,19 @@ except Exception:
 # ── Раздел «Обращения» (CRM поверх Telegram-групп) ───────────────────────────
 # Тот же приём, что у вики: Blueprint вместо десятка плоских роутов, зависимости
 # приходят аргументами (обратный импорт из crm.routes сюда был бы циклом).
+#
+# Файлы раздел у себя не хранит — они живут в Telegram-группе обращения. Бакет
+# нужен одному случаю: обращение ждёт проверки супервайзера (задача #297), в
+# группу ещё не ушло, а оператор приложил к нему файл. Лежит он в бакете
+# вложений задач (свой env GOOGLE_CLOUD_STORAGE_BUCKET_CRM перекрывает его).
+def _crm_bucket_name():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_CRM')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or ''
+    ).strip()
+
+
 try:
     from crm.routes import build_crm_blueprint  # noqa: E402
 
@@ -66014,6 +66027,7 @@ try:
         sensitive_access_granted=_sensitive_access_granted_for_user,
         # <ignoredErrors> для выгрузки: ИИН и телефоны лежат в ней текстом.
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        gcs={'bucket_name': _crm_bucket_name, 'client': get_gcs_client},
     ))
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:

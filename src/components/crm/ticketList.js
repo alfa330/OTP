@@ -137,6 +137,80 @@ export const rowAlert = (ticket, now = Date.now()) => {
     return null;
 };
 
+/* ─── Проверка супервайзером до группы ────────────────────────────────────── */
+
+/* Состояния проверки — те же слова, что на сервере (crm/schema.py: REVIEW_*) и
+ * у жалоб на Яндекс. Проходят её не все обращения, а те, которым это объявила
+ * тематика: сейчас «Сотрудничество с Яндексом» (возврат задачи #297). */
+export const REVIEW_PENDING = 'pending';
+export const REVIEW_SENT = 'sent';
+export const REVIEW_RESOLVED = 'resolved';
+
+export const isUnderReview = (ticket) => Boolean(
+    ticket && ticket.review_state === REVIEW_PENDING);
+
+/* Как назвать состояние обращения в шапке карточки.
+ *
+ * Обращение на проверке в группу не уходило, и штатное «Отправлено» про него —
+ * неправда. Тон нейтральный: автору здесь делать нечего, а проверяющему о его
+ * задаче говорят бейдж строки и панель решения в карточке. */
+export const statusView = (ticket, status) => (
+    isUnderReview(ticket) ? { label: 'На проверке', tone: null } : status
+);
+
+/* Подпись внизу карточки, когда писать в обращение нельзя.
+ *
+ * Три разных «нельзя», и объяснять их одной фразой значило бы не объяснить:
+ * на проверке — в группу ещё не ушло, и писать некуда (слова те же, что у
+ * жалобы на проверке); решено супервайзером — в группу не уходило вовсе;
+ * остальное закрытое — обычное «закрыто».
+ *
+ * У решённого супервайзером фраза говорит только то, чего на экране ещё нет:
+ * что оно решено и кем — уже стоит плашкой под итогом, строкой выше. */
+export const lockedReplyText = (ticket) => {
+    if (isUnderReview(ticket)) {
+        return 'Ждёт проверки супервайзером — в группу уйдёт, только если он решит';
+    }
+    if (ticket && ticket.review_state === REVIEW_RESOLVED) {
+        return 'В группу это обращение не уходило';
+    }
+    if (ticket && (ticket.status === 'resolved' || ticket.status === 'cancelled')) {
+        return 'Обращение закрыто';
+    }
+    return 'Писать в это обращение нельзя';
+};
+
+/* Сегмент «На проверку» в фильтре состояния: обращения, которые ждут решения
+ * ИМЕННО этого человека (на сервере — review=1, queries.review_task_sql).
+ *
+ * Сегмента нет, пока проверять нечего: у оператора и у супервайзера без задач
+ * фильтр остаётся прежним, четыре сегмента. Появляется он вместе с первой
+ * задачей и стоит в КОНЦЕ — остальные сегменты от этого не сдвигаются. И не
+ * исчезает из-под руки: пока он выбран, он на месте, даже когда последнее
+ * обращение решено, — иначе человек остался бы в фильтре, которого на экране
+ * уже нет. */
+export const REVIEW_FILTER = 'review';
+
+export const stateFilters = (base, { reviewCount = 0, selected = '' } = {}) => {
+    const count = Math.max(0, Math.trunc(Number(reviewCount) || 0));
+    if (!count && selected !== REVIEW_FILTER) return base;
+    return [...base, { key: REVIEW_FILTER, label: 'На проверку', statuses: '', count }];
+};
+
+/* Что сказать проверяющему после решения. { text, tone }.
+ *
+ * «В группу» — это решение плюс доставка, и второе может не случиться (бота
+ * выгнали из группы): решение при этом принято, а повтор отправки — обычной
+ * кнопкой в шапке карточки. Поэтому ошибка говорит ровно про доставку. */
+export const reviewToast = (decision, result) => {
+    if (decision === 'resolve') return { tone: 'success', text: 'Решено — обращение закрыто' };
+    if (result && result.delivered) return { tone: 'success', text: 'Обращение отправлено в группу' };
+    return {
+        tone: 'error',
+        text: `В группу не ушло: ${(result && result.delivery_error) || 'ошибка Telegram'}`,
+    };
+};
+
 /* Склейка страниц ленты по id.
  *
  * Простая конкатенация здесь стала неверной, и виноват как раз новый порядок
@@ -212,6 +286,13 @@ export const rowBadges = (ticket, meta = {}, now = Date.now()) => {
         badges.push({ key: 'failed', tone: 'red', label: 'Не доставлено' });
     } else if (alert === 'overdue') {
         badges.push({ key: 'overdue', tone: 'amber', label: 'Просрочено' });
+    } else if (isUnderReview(ticket)) {
+        // «Ждёт проверки» горит только у того, чья это задача (review_mine
+        // считает сервер тем же правилом, что счётчик и колокол). Автору и
+        // всем остальным — спокойное «На проверке»: им тут делать нечего.
+        badges.push(ticket.review_mine
+            ? { key: 'review', tone: 'amber', label: 'Ждёт проверки' }
+            : { key: 'review', tone: 'slate', label: 'На проверке' });
     } else if (!ticket.unread && meta.status && meta.status.tone) {
         badges.push({ key: 'status', tone: meta.status.tone, label: meta.status.label });
     }

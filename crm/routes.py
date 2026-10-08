@@ -24,7 +24,8 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, queries, report, sapar, scenarios, schema, service, telegram, transport
+from . import (access, files, queries, report, sapar, scenarios, schema, service, telegram,
+               transport)
 
 # Вложение к обращению. Предел Telegram для загрузки ботом — 20 МБ, больше не
 # примет ни при каких условиях, поэтому отсекаем на входе с понятным текстом.
@@ -32,7 +33,8 @@ ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
 def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                        resolve_requester, sensitive_access_granted, excel_text_warning=None):
+                        resolve_requester, sensitive_access_granted, excel_text_warning=None,
+                        gcs=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ
@@ -41,6 +43,11 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
     импорт оттуда был бы циклом. Аргумент обязательный, без значения по
     умолчанию: забытая зависимость должна уронить сборку блюпринта на старте
     (раздел тогда просто не поднимется), а не тихо открыть раздел всем.
+
+    gcs — {'bucket_name': fn, 'client': fn}: хранилище для файла обращения,
+    которое ждёт проверки супервайзера и в Telegram ещё не ушло (crm/files.py).
+    Без него раздел работает, но файл к такому обращению приложить нельзя —
+    сервер откажет до создания, а не потеряет файл молча.
     """
     bp = Blueprint('crm', __name__, url_prefix='/api/crm')
 
@@ -411,6 +418,8 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 search=(args.get('q') or '').strip() or None,
                 limit=_int_or_none(args.get('limit')) or 50,
                 offset=_int_or_none(args.get('offset')) or 0,
+                # «На проверку»: обращения, которые ждут решения зрителя.
+                review_only=args.get('review') in ('1', 'true', 'yes'),
             )
         return jsonify({
             "items": items,
@@ -488,6 +497,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 'subject': scenarios.render_subject(key, answers),
                 'body': scenarios.render_body(key, answers, flags=verdict.get('flags', [])),
             }
+            # Куда обращение пойдёт: в группу или на проверку супервайзеру.
+            # Мастер по этому признаку называет предпросмотр и кнопку —
+            # оператор подтверждает то, что произойдёт на самом деле.
+            verdict['review'] = scenarios.needs_review(key, answers)
         return jsonify(verdict)
 
     def _with_lookup_snapshot(scenario_key, answers):
@@ -726,65 +739,108 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 "verdict": verdict,
             }), 409
 
-        with db._get_cursor() as cursor:
-            # Адрес берём у ТЕМЫ, а не у тематики: её могли увести в другой чат.
-            route = queries.resolve_route(queries.routing_context(cursor),
-                                          scenario_key, scenario['queue_code'])
-            queue = route['home']
-            if not queue:
-                return jsonify({
-                    "error": "Тематика «%s» не настроена — обратитесь к администратору"
-                             % scenario['queue_code'],
-                }), 400
-            if not route['is_ready']:
-                # Недоступный чат маршрута НЕ подменяем чатом тематики: тему
-                # уводили ровно для того, чтобы её там больше не получали.
-                return jsonify({
-                    "error": ("Тема «%s» отправляется в группу «%s», но бот в ней "
-                              "больше не состоит — обратитесь к администратору"
-                              % (scenario['title'], route['chat_title'] or '—'))
-                    if route['routed'] else
-                    ("К тематике «%s» не привязана Telegram-группа" % queue['title']),
-                }), 400
-            flags = verdict.get('flags', [])
-            ticket_id = queries.create_ticket(
-                cursor,
-                queue_id=queue['id'], topic_id=None,
-                # Адрес фиксируется в обращении: маршрут потом поменяют, а нить
-                # этого обращения останется в том чате, куда ушла.
-                tg_chat_id=route['chat_id'], tg_chat_title=route['chat_title'],
-                subject=scenarios.render_subject(scenario_key, answers)[:300],
-                body=scenarios.render_body(scenario_key, answers, flags=flags),
-                priority='normal', source='manual',
-                # ФИО и телефон водителя — то, чем обращение ищут. У тематик
-                # регионов ИИН не спрашивают (его нет в ТЗ), и без этих двух
-                # полей обращение находилось бы только по своему номеру.
-                #
-                # У «Сотрудничества» водителя нет, зато есть компания и номер для
-                # обратного звонка — ими такое обращение и ищут.
-                client_name=_answer_text(answers, 'driver_name', 'coop_company'),
-                client_phone=_answer_text(answers, 'contact_number', 'driver_phone',
-                                          'coop_phone'),
-                created_by=ctx['user_id'], created_by_name=ctx['name'],
-                department_id=ctx.get('department_id'),
-                due_at=service.compute_due_at(queue.get('sla_minutes')),
-                scenario_key=scenario_key, answers=answers, flags=flags,
-            )
-            queries.add_event(cursor, ticket_id=ticket_id, kind='created',
-                              actor_user_id=ctx['user_id'], actor_name=ctx['name'],
-                              payload={'queue': queue['title'], 'scenario': scenario['title'],
-                                       'flags': flags,
-                                       # Чат пишем в историю всегда: через месяц
-                                       # по одному названию тематики уже не
-                                       # понять, куда обращение на самом деле
-                                       # ушло и почему ответ пришёл оттуда.
-                                       'chat': route['chat_title'],
-                                       'routed': route['routed']})
+        # Обращение, которое сначала проверяет супервайзер (сейчас это
+        # «Сотрудничество с Яндексом» — scenarios.needs_review), в группу само
+        # не уходит: ни адреса, ни срока ответа группы у него при создании нет.
+        review = scenarios.needs_review(scenario_key, answers)
 
-        # Отправка — уже вне транзакции: сеть не должна держать соединение пула.
-        # Обращение существует в любом случае, отказ Telegram лишь помечает
-        # доставку как неудачную и оставляет кнопку «Отправить ещё раз».
-        sent, send_error = service.deliver_ticket(db, ticket_id, attachment=attachment)
+        # Файл к обращению на проверке в Telegram не уйдёт — кладём его к себе
+        # (crm/files.py). Сеть — до курсора, как и у Sapar. И ДО создания: не
+        # сохранился файл — не заводим и обращение, иначе оператор считал бы,
+        # что приложил его.
+        stored = None
+        if review and attachment is not None:
+            stored, problem = _store_attachment(attachment)
+            if problem:
+                return jsonify({"error": problem, "code": 'CRM_FILE_NOT_STORED'}), 503
+
+        flags = verdict.get('flags', [])
+        created = False
+        try:
+            with db._get_cursor() as cursor:
+                # Адрес берём у ТЕМЫ, а не у тематики: её могли увести в другой чат.
+                route = queries.resolve_route(queries.routing_context(cursor),
+                                              scenario_key, scenario['queue_code'])
+                queue = route['home']
+                if not queue:
+                    return jsonify({
+                        "error": "Тематика «%s» не настроена — обратитесь к администратору"
+                                 % scenario['queue_code'],
+                    }), 400
+                # Группа нужна и обращению на проверке: супервайзер вправе его
+                # туда отправить, а мастер тему без группы и не предлагает.
+                if not route['is_ready']:
+                    # Недоступный чат маршрута НЕ подменяем чатом тематики: тему
+                    # уводили ровно для того, чтобы её там больше не получали.
+                    return jsonify({
+                        "error": ("Тема «%s» отправляется в группу «%s», но бот в ней "
+                                  "больше не состоит — обратитесь к администратору"
+                                  % (scenario['title'], route['chat_title'] or '—'))
+                        if route['routed'] else
+                        ("К тематике «%s» не привязана Telegram-группа" % queue['title']),
+                    }), 400
+                ticket_id = queries.create_ticket(
+                    cursor,
+                    queue_id=queue['id'], topic_id=None,
+                    # Адрес фиксируется в обращении: маршрут потом поменяют, а
+                    # нить этого обращения останется в том чате, куда ушла. У
+                    # обращения на проверке его ещё нет — оно никуда не ушло.
+                    tg_chat_id=None if review else route['chat_id'],
+                    tg_chat_title=None if review else route['chat_title'],
+                    subject=scenarios.render_subject(scenario_key, answers)[:300],
+                    body=scenarios.render_body(scenario_key, answers, flags=flags),
+                    priority='normal', source='manual',
+                    # ФИО и телефон водителя — то, чем обращение ищут. У тематик
+                    # регионов ИИН не спрашивают (его нет в ТЗ), и без этих двух
+                    # полей обращение находилось бы только по своему номеру.
+                    #
+                    # У «Сотрудничества» водителя нет, зато есть компания и номер
+                    # для обратного звонка — ими такое обращение и ищут.
+                    client_name=_answer_text(answers, 'driver_name', 'coop_company'),
+                    client_phone=_answer_text(answers, 'contact_number', 'driver_phone',
+                                              'coop_phone'),
+                    created_by=ctx['user_id'], created_by_name=ctx['name'],
+                    department_id=ctx.get('department_id'),
+                    # Срок ответа — срок ГРУППЫ. Пока обращение у супервайзера,
+                    # считать его не от чего; он ставится при отправке.
+                    due_at=None if review else service.compute_due_at(queue.get('sla_minutes')),
+                    scenario_key=scenario_key, answers=answers, flags=flags,
+                    review_state=schema.REVIEW_PENDING if review else None,
+                )
+                if stored:
+                    # Файл встаёт в переписку строкой автора — супервайзер
+                    # открывает его из карточки, как любое вложение.
+                    queries.add_message(
+                        cursor, ticket_id=ticket_id, direction='out',
+                        author_user_id=ctx['user_id'], author_name=ctx['name'],
+                        attachment=stored)
+                queries.add_event(
+                    cursor, ticket_id=ticket_id, kind='created',
+                    actor_user_id=ctx['user_id'], actor_name=ctx['name'],
+                    payload={'queue': queue['title'], 'scenario': scenario['title'],
+                             'flags': flags,
+                             # Чат пишем в историю всегда: через месяц по одному
+                             # названию тематики уже не понять, куда обращение на
+                             # самом деле ушло и почему ответ пришёл оттуда. У
+                             # обращения на проверке чата нет — есть сама проверка.
+                             'chat': None if review else route['chat_title'],
+                             'routed': route['routed'],
+                             'review': review})
+            created = True
+        finally:
+            # Обращение не завелось (отказ выше или сбой базы) — файл, уже
+            # лежащий в хранилище, при нём не нужен.
+            if stored and not created:
+                files.drop(gcs, [stored['file_id']])
+
+        if review:
+            sent, send_error = False, None
+        else:
+            # Отправка — уже вне транзакции: сеть не должна держать соединение
+            # пула. Обращение существует в любом случае, отказ Telegram лишь
+            # помечает доставку как неудачную и оставляет кнопку «Отправить
+            # ещё раз».
+            sent, send_error = service.deliver_ticket(db, ticket_id, attachment=attachment)
 
         with db._get_cursor() as cursor:
             ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
@@ -792,7 +848,33 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "item": ticket,
             "delivered": sent,
             "delivery_error": None if sent else send_error,
+            # Обращение ушло не в группу, а на проверку супервайзеру: мастер
+            # говорит оператору именно это, а не «не ушло в Telegram».
+            "review": review,
         }), 201
+
+    def _store_attachment(attachment):
+        """Файл обращения на проверке → наше хранилище.
+
+        Возвращает (описание вложения для строки переписки, ошибка). Вид
+        («фото» или «файл») берём по типу: Telegram, который решает это у
+        остальных вложений, этот файл ещё не видел.
+        """
+        try:
+            data = attachment['stream'].read()
+            ref = files.store(gcs, data=data, filename=attachment.get('filename'),
+                              content_type=attachment.get('mimetype'))
+        except files.StorageError as error:
+            return None, ('%s. Отправьте обращение без файла или попробуйте ещё раз'
+                          % error)
+        mimetype = str(attachment.get('mimetype') or '')
+        return {
+            'kind': 'photo' if mimetype.startswith('image/') else 'document',
+            'file_id': ref,
+            'name': files.safe_name(attachment.get('filename')),
+            'mime': mimetype or None,
+            'size': len(data),
+        }, None
 
     def _answer_text(answers, *keys):
         """Первый непустой ответ из перечисленных ключей. None — ни одного.
@@ -842,11 +924,64 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return jsonify({
             "item": ticket,
             "messages": messages,
-            "permissions": {
-                "can_reply": access.can_reply(ctx, ticket),
-                "can_change_status": access.can_change_status(ctx, ticket),
-                "can_delete": access.can_delete_ticket(ctx, ticket),
-            },
+            "permissions": _permissions(ctx, ticket),
+        })
+
+    def _permissions(ctx, ticket):
+        """Что зритель может сделать с обращением — карточка рисует кнопки по
+        этому ответу, а не по роли."""
+        return {
+            "can_reply": access.can_reply(ctx, ticket),
+            "can_change_status": access.can_change_status(ctx, ticket),
+            "can_delete": access.can_delete_ticket(ctx, ticket),
+            # Решить по обращению на проверке: «Решено» или «в группу».
+            "can_review": access.can_review(ctx, ticket),
+        }
+
+    @crm_route('/tickets/<int:ticket_id>/review', methods=('POST',))
+    def crm_ticket_review(ticket_id, ctx):
+        """Решение супервайзера по обращению на проверке: «Отправить в группу»
+        или «Решено» с итогом (возврат задачи #297; владелец, 07.10.2026).
+
+        Отвечает тем же, чем карточка: обращение, переписка и права — после
+        решения у обращения меняется всё сразу, и второй запрос за карточкой
+        был бы платой за то, что уже на руках.
+        """
+        data = _payload()
+        with db._get_cursor() as cursor:
+            ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
+            if not ticket:
+                return jsonify({"error": "Обращение не найдено"}), 404
+            if not access.can_view_ticket(ctx, ticket):
+                return jsonify({"error": "Обращение вне вашего доступа"}), 403
+        if ticket.get('review_state') != schema.REVIEW_PENDING:
+            return jsonify({"error": "Обращение уже не ждёт проверки — обновите карточку"}), 409
+        if not access.can_review(ctx, ticket):
+            return jsonify({"error": "Проверяет обращение супервайзер оператора"}), 403
+
+        decision = str(data.get('decision') or '')
+        delivered, delivery_error = None, None
+        try:
+            if decision == 'send':
+                delivered, delivery_error = service.review_send(db, ticket_id, ctx=ctx, gcs=gcs)
+            elif decision == 'resolve':
+                service.review_resolve(db, ticket_id, data.get('note'), ctx=ctx)
+            else:
+                return jsonify({"error": "Выберите: в группу или «Решено»"}), 400
+        except service.ReviewError as error:
+            return jsonify({"error": str(error)}), error.status
+
+        with db._get_cursor() as cursor:
+            ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
+            messages = queries.list_messages(cursor, ticket_id)
+        return jsonify({
+            "item": ticket,
+            "messages": messages,
+            "permissions": _permissions(ctx, ticket),
+            # Только у «в группу»: решение принято в любом случае, а дошло ли
+            # сообщение до Telegram — отдельный вопрос с кнопкой повтора.
+            "delivered": delivered,
+            "delivery_error": None if delivered else delivery_error,
         })
 
     @crm_route('/tickets/<int:ticket_id>/events')
@@ -924,7 +1059,9 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if ticket['delivery_status'] == 'sent':
                 return jsonify({"error": "Обращение уже доставлено"}), 409
 
-        ok, error = service.deliver_ticket(db, ticket_id)
+        # gcs — на случай обращения, отправленного супервайзером после проверки:
+        # файл, ждавший у нас, уйдёт в группу вместе с повтором.
+        ok, error = service.deliver_ticket(db, ticket_id, gcs=gcs)
         if not ok:
             return jsonify({"error": error}), 502
         with db._get_cursor() as cursor:
@@ -936,6 +1073,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
         Файл не хранится у нас: Telegram отдаёт его по file_id, и ссылка
         короткоживущая — поэтому прокси, а не сохранённый адрес в базе.
+
+        Исключение — файл обращения на проверке у супервайзера: в Telegram оно
+        не уходило, и файл лежит в нашем хранилище (crm/files.py). Откуда
+        доставать, видно по самой ссылке.
         """
         with db._get_cursor() as cursor:
             ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
@@ -947,9 +1088,14 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not found:
             return jsonify({"error": "Вложение не найдено"}), 404
 
-        content, error = transport.fetch_file(found['file_id'])
-        if content is None:
-            return jsonify({"error": "Telegram не отдал файл: %s" % error}), 502
+        if files.is_stored(found['file_id']):
+            content = files.load(gcs, found['file_id'])
+            if content is None:
+                return jsonify({"error": "Файл не найден в хранилище"}), 502
+        else:
+            content, error = transport.fetch_file(found['file_id'])
+            if content is None:
+                return jsonify({"error": "Telegram не отдал файл: %s" % error}), 502
         return send_file(
             BytesIO(content),
             mimetype=found.get('mime') or 'application/octet-stream',
@@ -985,7 +1131,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 return jsonify({"error": "Обращение не найдено"}), 404
             if not access.can_delete_ticket(ctx, ticket):
                 return jsonify({"error": "Удалять обращения может только администратор"}), 403
+            # Файлы, которые лежат у нас (обращение ждало проверки и в Telegram
+            # не уходило), каскад не сотрёт: в базе от них только ссылка.
+            stored = [item['ref'] for item in queries.stored_attachments(cursor, ticket_id)]
             cursor.execute('DELETE FROM crm_tickets WHERE id = %s', (ticket_id,))
+        # После коммита и вне курсора: сеть, и стирать файл обращения, которое
+        # из-за сбоя осталось в базе, нельзя.
+        files.drop(gcs, stored)
         logging.info(
             'crm: обращение №%s удалено (%s, автор %s, тема %r) — %s [id %s]',
             ticket_id, ticket.get('status'), ticket.get('created_by_name') or '—',
