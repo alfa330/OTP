@@ -24,6 +24,7 @@ import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
 import { latestInboundTime } from './useWabaWindowExpired';
 import ChatMessageImage from './ChatMessageImage';
+import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
 import useInternalNotes from './useInternalNotes';
@@ -219,9 +220,8 @@ function MediaContent({ msg, light, onAttachment }) {
         return <video controls preload="metadata" src={uri} onError={() => setFailed(true)}
                       className="max-h-64 w-auto max-w-full rounded-xl" />;
     }
-    if (uri && !failed && msg.type === 'audio') {
-        return <audio controls preload="none" src={uri} onError={() => setFailed(true)}
-                      className="h-10 w-64 max-w-full" />;
+    if (uri && msg.type === 'audio') {
+        return <ChatAudioPlayer src={uri} />;
     }
     const label = MEDIA_LABELS[msg.type] || msg.type || 'Вложение';
     const Icon = MEDIA_ICONS[msg.type] || FileText;
@@ -263,7 +263,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
                         out ? 'border-emerald-600 bg-black/5 text-emerald-950' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
                     <span className="block truncate font-semibold">{quote.author}</span>
-                    <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} /></span>
+                    <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} links={false} /></span>
                 </button>}
                 {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words"><ChatMessageText text={msg.text} /></div>}
@@ -1649,7 +1649,7 @@ function ChatsWorkspace(props) {
                                             </div>
                                             <div className="flex items-center gap-1 text-[12px] text-slate-500">
                                                 {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
-                                                <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} /></span>
+                                                <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>
                                                 {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
                                                     <span className="ml-auto rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white">
                                                         {unread.items[pilotChatKey('op', chat)].unreadCount}

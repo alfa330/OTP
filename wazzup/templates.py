@@ -27,8 +27,6 @@ EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
 })
-QUICK_WARNING = ('Обычные шаблоны Wazzup недоступны с текущим API-ключом. '
-                 'Здесь доступны шаблоны WABA и общие быстрые ответы iCORE.')
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)
 _cache_condition = threading.Condition()
@@ -176,7 +174,7 @@ def list_templates(account='op', channel_id=None, *, excluded_channels=EXCLUDED_
             continue
         result.append(item)
     result.sort(key=lambda item: item['title'].casefold())
-    return dict(items=result, stale=stale, sourceWarnings=[QUICK_WARNING] + ([error] if error else []))
+    return dict(items=result, stale=stale, sourceWarnings=[error] if error else [])
 
 
 def validate_template_message(account, channel_id, text, *, excluded_channels=EXCLUDED_CHANNELS):

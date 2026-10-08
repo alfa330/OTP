@@ -43,7 +43,7 @@ class VendorTemplatesTests(unittest.TestCase):
         self.assertEqual(result['items'][0]['variables'], ['bodyVar1'])
         self.assertEqual(result['items'][0]['source'], 'wazzup')
         self.assertTrue(result['items'][0]['supported'])
-        self.assertTrue(result['sourceWarnings'])
+        self.assertEqual(result['sourceWarnings'], [])
         self.assertEqual(self.transport.get.call_args.kwargs['params'], {'limit': 100, 'offset': 0})
 
     def test_preview_renders_wire_values_without_another_vendor_request(self):
@@ -108,7 +108,7 @@ class VendorTemplatesTests(unittest.TestCase):
         result = self.listing()
         self.assertTrue(result['stale'])
         self.assertEqual(len(result['items']), 1)
-        self.assertEqual(len(result['sourceWarnings']), 2)
+        self.assertEqual(len(result['sourceWarnings']), 1)
         self.listing()
         self.assertEqual(self.transport.get.call_count, 2)
 
@@ -126,7 +126,7 @@ class VendorTemplatesTests(unittest.TestCase):
         self.transport.get.return_value.status_code = 403
         result = self.listing()
         self.assertEqual(result['items'], [])
-        self.assertEqual(len(result['sourceWarnings']), 2)
+        self.assertEqual(len(result['sourceWarnings']), 1)
         self.assertNotIn('test-private-key', str(result))
 
     def test_key_rotation_discards_previous_key_cache(self):
@@ -223,7 +223,7 @@ class TemplateRoutesTests(unittest.TestCase):
         app.register_blueprint(bp)
         self.client = app.test_client()
         self.vendor = patch.object(templates, 'list_templates', return_value=dict(
-            items=[], stale=False, sourceWarnings=[templates.QUICK_WARNING]))
+            items=[], stale=False, sourceWarnings=[]))
         self.vendor.start()
         self.addCleanup(self.vendor.stop)
 

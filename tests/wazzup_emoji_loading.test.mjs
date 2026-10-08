@@ -149,7 +149,7 @@ await build({
         build.onResolve({ filter: /^react$/ }, () => ({ path: 'react', namespace: 'tools-fixture' }));
         build.onResolve({ filter: /chatEmojiLoading$/ }, () => ({ path: 'loading', namespace: 'tools-fixture' }));
         build.onLoad({ filter: /.*/, namespace: 'tools-fixture' }, ({ path }) => ({ contents: path === 'react'
-            ? 'const h=()=>globalThis.__emojiToolsHarness; export const useState=(...x)=>h().useState(...x); export const useEffect=(...x)=>h().useEffect(...x); export default {createElement:(...x)=>h().createElement(...x)};'
+            ? 'const h=()=>globalThis.__emojiToolsHarness; export const useState=(...x)=>h().useState(...x); export const useRef=(...x)=>h().useRef(...x); export const useEffect=(...x)=>h().useEffect(...x); export default {createElement:(...x)=>h().createElement(...x)};'
             : 'export const loadChatEmojiPicker=()=>globalThis.__emojiToolsHarness.load(); export const scheduleEmojiWarmup=()=>()=>{}; export const warmChatEmojiPicker=loadChatEmojiPicker;', loader: 'js' }));
     } }],
 });
@@ -169,6 +169,7 @@ test('closing and reopening emoji preserves its mounted picker and does not relo
     const harness = {
         createElement: React.createElement,
         useState(initial) { const i = index++; slots[i] ??= { value: initial }; return [slots[i].value, (v) => { slots[i].value = typeof v === 'function' ? v(slots[i].value) : v; }]; },
+        useRef(initial) { const i = index++; return slots[i] ??= { current: initial }; },
         useEffect(effect, deps) {
             const i = index++; const old = slots[i];
             if (old && deps.every((v, k) => Object.is(v, old.deps[k]))) return;

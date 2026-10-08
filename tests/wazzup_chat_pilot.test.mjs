@@ -315,6 +315,9 @@ test('emoji replaces the selected text and uses UTF-16 cursor position without a
 
 test('local templates are editable text; unsupported or incomplete Wazzup templates cannot be prepared', () => {
     assert.deepEqual(prepareTemplate({ source: 'icore', text: 'Обычный ответ 🙂' }), { text: 'Обычный ответ 🙂', preview: '' });
+    assert.deepEqual(prepareTemplate({ source: 'wazzup', kind: 'text', supported: true,
+        text: 'Здравствуйте!\nОбычный ответ {{1}}', variables: [], channels: [] }),
+    { text: 'Здравствуйте!\nОбычный ответ {{1}}', preview: '' });
     assert.throws(() => prepareTemplate({ source: 'wazzup', supported: false, unsupportedReason: 'Media unsupported' }), /Media unsupported/);
     const item = { source: 'wazzup', supported: true, templateCode: '[[code]][[bodyVar1]]',
         variables: ['bodyVar1'], text: 'Здравствуйте, {{1}}!' };
