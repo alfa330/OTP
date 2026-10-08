@@ -2617,6 +2617,68 @@ def _filter_operators_for_requester_scope(requester, requester_id, operators):
     return []
 
 
+def _work_schedule_operator_ids(requester, requester_id):
+    """id операторов и стажёров, чьи тренинги requester ведёт в «Графиках работы».
+
+    None — всех (границы нет). Состав решает _filter_operators_for_requester_scope —
+    та же функция, что режет список операторов самого раздела. Поэтому «кого вижу
+    в графике» и «чьи тренинги мне отдали» не могут разойтись.
+
+    Стажёры — потому что их строки в разделе тоже есть и тренинг им супервайзер
+    записать может. Коллеги-супервайзеры и тренеры сюда не входят: их тренинги
+    (в том числе дисциплинарные) рядовому супервайзеру раздел не открывает.
+    """
+    role = _normalize_user_role(requester[3])
+    if _is_global_admin_requester(role, requester_id):
+        return None
+    if not _headed_department_ids(requester_id):
+        if not _is_supervisor_role(role):
+            # Раздел у него либо закрыт, либо только на просмотр (тренер): подтверждать
+            # ему нечего, и его круг остаётся прежним.
+            return []
+        if db.get_user_department_id(requester_id) is None:
+            # СВ без отдела раздел по старой памяти показывает всех операторов.
+            # Чужие тренинги это ему не открывает: записать занятие он может
+            # только прямому подчинённому, их и видит.
+            return []
+    with db._get_cursor() as cursor:
+        cursor.execute("SELECT id, role FROM users WHERE role IN ('operator', 'trainee')")
+        staff = [{'id': row[0], 'role': row[1]} for row in cursor.fetchall()]
+    return sorted(
+        _operator_item_id(item)
+        for item in _filter_operators_for_requester_scope(requester, requester_id, staff)
+    )
+
+
+def _work_schedule_scope_requested(group_id):
+    """Просит ли запрос тренинги периметром «Графиков работы» (scope=work_schedules).
+
+    Адресные запросы — ?group_id= и ?id= — уже сказали, чьи тренинги им нужны.
+    """
+    if group_id is not None or request.args.get('id'):
+        return False
+    return (request.args.get('scope') or '').strip().lower() == 'work_schedules'
+
+
+def _widen_to_work_schedule_scope(requester, requester_id, boundary_sql):
+    """Граница видимости тренингов для «Графиков работы»: прежняя + операторы раздела.
+
+    Супервайзеру раздел показывает всех операторов отдела и даёт подтвердить
+    интервал «Тренинг» любому из них, а список тренингов отдавал только по его
+    подчинённым. Запись создавалась, флаг дня менялся, но в список не
+    возвращалась: интервал оставался «Ожидает», повторное подтверждение
+    упиралось в «пересекается по времени».
+
+    Расширяется только на операторов и стажёров раздела. Всё, что requester
+    видел и без этого (свой отдел у главы, подчинённые у СВ), остаётся как
+    было. Возвращает (sql, дополнительные параметры).
+    """
+    operator_ids = _work_schedule_operator_ids(requester, requester_id)
+    if not operator_ids:
+        return boundary_sql, []
+    return "(" + boundary_sql + " OR t.operator_id = ANY(%s))", [operator_ids]
+
+
 def _resolve_management_requester():
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
@@ -32455,6 +32517,8 @@ def get_trainings():
             where_clauses.append("TO_CHAR(t.training_date, 'YYYY-MM') = %s")
             params.append(month)
 
+        # Всё, что добавится ниже, — граница видимости requester.
+        boundary_from = len(where_clauses)
         if group_id is not None:
             group = db.get_group(group_id)
             if not group:
@@ -32555,6 +32619,12 @@ def get_trainings():
                 else:
                     where_clauses.append("u.department_id = %s")
                     params.append(int(trainer_dept))
+
+        if _work_schedule_scope_requested(group_id) and len(where_clauses) > boundary_from:
+            boundary_sql, boundary_params = _widen_to_work_schedule_scope(
+                requester, requester_id, " AND ".join(where_clauses[boundary_from:]))
+            where_clauses[boundary_from:] = [boundary_sql]
+            params.extend(boundary_params)
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -33290,6 +33360,8 @@ def get_training_rejections():
             where_clauses.append("TO_CHAR(t.rejection_date, 'YYYY-MM') = %s")
             params.append(month)
 
+        # Всё, что добавится ниже, — граница видимости requester.
+        boundary_from = len(where_clauses)
         if group_id is not None:
             group = db.get_group(group_id)
             if not group:
@@ -33388,6 +33460,13 @@ def get_training_rejections():
                 else:
                     where_clauses.append("u.department_id = %s")
                     params.append(int(trainer_dept))
+
+        # Граница — как у /api/trainings: интервал решён либо тренингом, либо отклонением.
+        if _work_schedule_scope_requested(group_id) and len(where_clauses) > boundary_from:
+            boundary_sql, boundary_params = _widen_to_work_schedule_scope(
+                requester, requester_id, " AND ".join(where_clauses[boundary_from:]))
+            where_clauses[boundary_from:] = [boundary_sql]
+            params.extend(boundary_params)
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)

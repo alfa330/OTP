@@ -75,6 +75,7 @@ import {
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { buildMyShiftsTrackLayout, describeMyShiftsTrack, formatTrackDuration, formatTrackTime } from './components/schedule/myShiftsTrackLayout';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
+import { replaceMonthRows, trackMonthRequest } from './components/schedule/trainingMonthRows';
 import TrainingNewsLine from './components/schedule/TrainingNewsLine';
 import {
     NEWS_TRAINING_REASON, buildNewsComment, newsForSegment, normalizeNewsWindows, planTrainingSaves
@@ -16170,8 +16171,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerTrainingModalError, setPlannerTrainingModalError] = useState('');
             const [plannerTrainingsByOperator, setPlannerTrainingsByOperator] = useState({});
             const plannerLoadedTrainingMonthKeysRef = useRef(new Set());
+            const plannerTrainingMonthRequestsRef = useRef({});
             const [plannerTrainingRejectionsByOperator, setPlannerTrainingRejectionsByOperator] = useState({});
             const plannerLoadedRejectionMonthKeysRef = useRef(new Set());
+            const plannerRejectionMonthRequestsRef = useRef({});
             // Объявления Oktell за интервалами «Тренинг» (задача #382): окна по ключу
             // «оператор|день». Грузятся при открытии дня, у которого такие интервалы есть.
             const [plannerTrainingNewsByKey, setPlannerTrainingNewsByKey] = useState({});
@@ -16967,28 +16970,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                 }
             }, [user?.id, user?.role, plannerMonthBoundsByKey, mergePlannerOperatorsFromServer]);
-            const mergePlannerTrainingRows = useCallback((rows = []) => {
-                setPlannerTrainingsByOperator(prev => {
-                    const next = { ...(prev || {}) };
-                    for (const row of (Array.isArray(rows) ? rows : [])) {
-                        const operatorId = Number(row?.operator_id);
-                        if (!Number.isFinite(operatorId) || operatorId <= 0) continue;
-                        const key = String(operatorId);
-                        const existing = Array.isArray(next[key]) ? next[key].slice() : [];
-                        const byId = new Map(existing.map(item => [normalizeTrainingId(item?.id), item]));
-                        const rowId = normalizeTrainingId(row?.id);
-                        if (rowId) byId.set(rowId, row);
-                        else existing.push(row);
-                        next[key] = rowId ? Array.from(byId.values()) : existing;
-                    }
-                    return next;
-                });
-            }, []);
+            // Тренинги и отклонения месяца. scope=work_schedules — по всем, кого раздел
+            // показывает строкой, а не только по подчинённым: иначе интервал,
+            // подтверждённый оператору другого супервайзера, оставался «Ожидает».
+            // Месяц заменяется целиком (trainingMonthRows.js), удалённое с экрана уходит.
             const fetchPlannerTrainingsForMonth = useCallback(async (monthKey, { force = false } = {}) => {
                 const normalizedMonth = String(monthKey || '').trim();
                 if (!user?.id || !/^\d{4}-\d{2}$/.test(normalizedMonth)) return;
                 if (!force && plannerLoadedTrainingMonthKeysRef.current.has(normalizedMonth)) return;
-                const response = await fetch(`${API_BASE_URL}/api/trainings?month=${encodeURIComponent(normalizedMonth)}`, {
+                const acceptAnswer = trackMonthRequest(plannerTrainingMonthRequestsRef.current, normalizedMonth);
+                const response = await fetch(`${API_BASE_URL}/api/trainings?month=${encodeURIComponent(normalizedMonth)}&scope=work_schedules`, {
                     credentials: 'include',
                     headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) })
                 });
@@ -16997,32 +16988,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
                 const rows = Array.isArray(payload?.trainings) ? payload.trainings : (Array.isArray(payload) ? payload : []);
-                mergePlannerTrainingRows(rows);
+                if (!acceptAnswer()) return rows;
+                setPlannerTrainingsByOperator(prev => replaceMonthRows(prev, rows, normalizedMonth));
                 plannerLoadedTrainingMonthKeysRef.current.add(normalizedMonth);
                 return rows;
-            }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRows]);
-            const mergePlannerTrainingRejectionRows = useCallback((rows = []) => {
-                setPlannerTrainingRejectionsByOperator(prev => {
-                    const next = { ...(prev || {}) };
-                    for (const row of (Array.isArray(rows) ? rows : [])) {
-                        const operatorId = Number(row?.operator_id);
-                        if (!Number.isFinite(operatorId) || operatorId <= 0) continue;
-                        const key = String(operatorId);
-                        const existing = Array.isArray(next[key]) ? next[key].slice() : [];
-                        const byId = new Map(existing.map(item => [normalizeTrainingId(item?.id), item]));
-                        const rowId = normalizeTrainingId(row?.id);
-                        if (rowId) byId.set(rowId, row);
-                        else existing.push(row);
-                        next[key] = rowId ? Array.from(byId.values()) : existing;
-                    }
-                    return next;
-                });
-            }, []);
+            }, [API_BASE_URL, user?.id, withAccessTokenHeader]);
             const fetchPlannerTrainingRejectionsForMonth = useCallback(async (monthKey, { force = false } = {}) => {
                 const normalizedMonth = String(monthKey || '').trim();
                 if (!user?.id || !/^\d{4}-\d{2}$/.test(normalizedMonth)) return;
                 if (!force && plannerLoadedRejectionMonthKeysRef.current.has(normalizedMonth)) return;
-                const response = await fetch(`${API_BASE_URL}/api/training_rejections?month=${encodeURIComponent(normalizedMonth)}`, {
+                const acceptAnswer = trackMonthRequest(plannerRejectionMonthRequestsRef.current, normalizedMonth);
+                const response = await fetch(`${API_BASE_URL}/api/training_rejections?month=${encodeURIComponent(normalizedMonth)}&scope=work_schedules`, {
                     credentials: 'include',
                     headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) })
                 });
@@ -17031,9 +17007,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
                 const rows = Array.isArray(payload?.rejections) ? payload.rejections : (Array.isArray(payload) ? payload : []);
-                mergePlannerTrainingRejectionRows(rows);
+                if (!acceptAnswer()) return;
+                setPlannerTrainingRejectionsByOperator(prev => replaceMonthRows(prev, rows, normalizedMonth));
                 plannerLoadedRejectionMonthKeysRef.current.add(normalizedMonth);
-            }, [API_BASE_URL, user?.id, withAccessTokenHeader, mergePlannerTrainingRejectionRows]);
+            }, [API_BASE_URL, user?.id, withAccessTokenHeader]);
             // Какие объявления Oktell показывались оператору в этот день. Спрашиваем при
             // каждом открытии дня: подтверждение объявления приходит позже показа, а
             // прежний ответ тем временем остаётся на экране.
@@ -22650,7 +22627,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         const payload = await response.json().catch(() => ({}));
                         if (!response.ok) {
-                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                            throw new Error(payload?.overlap ? 'У оператора уже есть тренинг, который пересекается по времени.' : (payload?.error || `HTTP ${response.status}`));
                         }
                     } else {
                         for (const interval of payloadIntervals) {
@@ -22672,7 +22649,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             });
                             const payload = await response.json().catch(() => ({}));
                             if (!response.ok) {
-                                throw new Error(payload?.error || `HTTP ${response.status}`);
+                                throw new Error(payload?.overlap ? 'У оператора уже есть тренинг, который пересекается по времени.' : (payload?.error || `HTTP ${response.status}`));
                             }
                         }
                     }
@@ -22700,6 +22677,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     console.error('Error saving planner training:', error);
                     setPlannerTrainingModalError(String(error?.message || error || 'Не удалось сохранить тренинг.'));
                     emitAppToast(`Ошибка сохранения тренинга: ${error?.message || error}`, 'error');
+                    // Часть записей могла сохраниться, а «пересекается» значит, что интервал уже
+                    // решён не здесь. Без перезапроса экран показывал бы «Ожидает» и дальше.
+                    fetchPlannerTrainingsForMonth(dayKey.slice(0, 7), { force: true }).catch(() => {});
                 } finally {
                     setPlannerTrainingActionLoading(false);
                 }
@@ -23873,6 +23853,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     console.error('Error loading planner training news:', error);
                 });
             }, [modalTrainingNewsKey, modalHasTrainingSegments, fetchPlannerTrainingNews]);
+            // Решения по дню принимают и не здесь — другой супервайзер, вторая вкладка. Месяц
+            // тренингов грузится один раз, и интервал, подтверждённый не в этой вкладке,
+            // оставался «Ожидает», а подтверждение упиралось в «пересекается по времени».
+            // У дня с интервалами тренинга оба списка при открытии спрашиваются заново.
+            useEffect(() => {
+                if (!modalTrainingNewsKey || !modalHasTrainingSegments) return;
+                const monthKey = modalTrainingNewsKey.split('|')[1].slice(0, 7);
+                fetchPlannerTrainingsForMonth(monthKey, { force: true }).catch(error => {
+                    console.error('Error refreshing planner trainings:', error);
+                });
+                fetchPlannerTrainingRejectionsForMonth(monthKey, { force: true }).catch(error => {
+                    console.error('Error refreshing planner training rejections:', error);
+                });
+            }, [modalTrainingNewsKey, modalHasTrainingSegments, fetchPlannerTrainingsForMonth, fetchPlannerTrainingRejectionsForMonth]);
             const modalTrainingNewsWindows = useMemo(
                 () => (modalTrainingNewsKey ? (plannerTrainingNewsByKey[modalTrainingNewsKey] || []) : []),
                 [modalTrainingNewsKey, plannerTrainingNewsByKey]
@@ -24010,6 +24004,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } catch (error) {
                     console.error('Error rejecting training intervals:', error);
                     emitAppToast(`Ошибка отклонения тренинга: ${error?.message || error}`, 'error');
+                    // Отклонения, записанные до сбоя, уже в базе — показываем их.
+                    fetchPlannerTrainingRejectionsForMonth(dayKey.slice(0, 7), { force: true }).catch(() => {});
                 } finally {
                     setPlannerTrainingActionLoading(false);
                     setPlannerAutoFlagActionLoading('');
@@ -32520,7 +32516,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     startTime: t?.start_time,
                                                                     endTime: t?.end_time,
                                                                     reason: t?.reason,
-                                                                    comment: t?.comment
+                                                                    comment: t?.comment,
+                                                                    countInHours: t?.count_in_hours !== false
                                                                 })}
                                                                 disabled={plannerTrainingActionLoading || !t?.id}
                                                                 className="grid h-8 w-8 place-items-center rounded-full bg-slate-100 text-slate-600 active:opacity-60 disabled:opacity-50"
@@ -35345,7 +35342,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         startTime: t?.start_time,
                                                         endTime: t?.end_time,
                                                         reason: t?.reason,
-                                                        comment: t?.comment
+                                                        comment: t?.comment,
+                                                        countInHours: t?.count_in_hours !== false
                                                     })}
                                                     disabled={plannerTrainingActionLoading || !t?.id}
                                                     className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
