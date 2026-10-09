@@ -34,6 +34,7 @@ const timeLabel = (value) => {
 };
 
 function AudioPlayer({ src, label = 'Аудиосообщение' }) {
+    const playerRef = useRef(null);
     const audioRef = useRef(null);
     const alive = useRef(true);
     const playAttempt = useRef(0);
@@ -52,18 +53,40 @@ function AudioPlayer({ src, label = 'Аудиосообщение' }) {
     useEffect(() => {
         alive.current = true;
         const audio = audioRef.current;
+        let disposed = false;
+        const preloadMetadata = () => {
+            if (disposed || audio.getAttribute('src')) return;
+            audio.preload = 'metadata';
+            audio.src = src;
+        };
+        const observer = typeof IntersectionObserver === 'function'
+            ? new IntersectionObserver((entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    preloadMetadata();
+                    observer.disconnect();
+                }
+            }, { rootMargin: '200px' }) : null;
+        if (observer) observer.observe(playerRef.current);
+        else preloadMetadata();
         return () => {
+            disposed = true;
+            observer?.disconnect();
             alive.current = false;
             playAttempt.current += 1;
             requested.current = false;
-            seekableCopy.current.controller?.abort();
-            clearTimeout(seekableCopy.current.timer);
+            const copy = seekableCopy.current;
+            copy.controller?.abort();
+            clearTimeout(copy.timer);
+            seekableCopy.current = { attempted: false, controller: null, url: null, timer: null };
+            replacement.current = null;
+            scrub.current = null;
+            pendingSeek.current = false;
             if (activeAudio === audio) activeAudio = null;
             audio.pause();
             // Release the request and decoded media when changing conversations.
             audio.removeAttribute('src');
             audio.load();
-            if (seekableCopy.current.url) URL.revokeObjectURL(seekableCopy.current.url);
+            if (copy.url) URL.revokeObjectURL(copy.url);
         };
     }, []);
 
@@ -178,7 +201,7 @@ function AudioPlayer({ src, label = 'Аудиосообщение' }) {
             replacement.current.resume = true;
             return;
         }
-        // Assign the source only on demand: opening a thread downloads no audio.
+        // Play also works before the visibility observer has loaded metadata.
         if (!audio.getAttribute('src')) audio.src = src;
         else if (error || audio.error) audio.load();
         if (audio.ended) audio.currentTime = 0;
@@ -251,7 +274,7 @@ function AudioPlayer({ src, label = 'Аудиосообщение' }) {
             : playing ? 'Приостановить аудио' : 'Воспроизвести аудио';
     const progress = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
 
-    return <div className="wazzup-audio" role="group" aria-label={label}
+    return <div ref={playerRef} className="wazzup-audio" role="group" aria-label={label}
         onDoubleClick={(event) => event.stopPropagation()}>
         <audio ref={audioRef} preload="none" className="hidden" aria-hidden="true"
             onLoadedMetadata={syncTime} onDurationChange={syncTime} onTimeUpdate={syncTime}

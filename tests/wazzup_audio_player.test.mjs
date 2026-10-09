@@ -24,6 +24,20 @@ await build({ entryPoints: ['src/components/wazzup/ChatAudioPlayer.jsx'], outfil
 const { default: Player } = await import(pathToFileURL(output));
 // Media failures in unit tests never contact a real audio host.
 mock.method(globalThis, 'fetch', () => Promise.reject(new TypeError('CORS denied')));
+const nativeIntersectionObserver = globalThis.IntersectionObserver;
+globalThis.IntersectionObserver = class {
+    constructor(callback, options) {
+        this.callback = callback; this.options = options; this.disconnected = false;
+        globalThis.__audioHarness.observers.push(this);
+    }
+    observe(target) { this.target = target; }
+    disconnect() { this.disconnected = true; }
+    emit(isIntersecting) { this.callback([{ target: this.target, isIntersecting }]); }
+};
+test.after(() => {
+    if (nativeIntersectionObserver) globalThis.IntersectionObserver = nativeIntersectionObserver;
+    else delete globalThis.IntersectionObserver;
+});
 const find = (node, predicate) => {
     if (!node || typeof node !== 'object') return null;
     if (predicate(node)) return node;
@@ -78,7 +92,7 @@ function fixture({ play, realisticLoad = false } = {}) {
         set(value) { currentTime = value; audio.seekCalls.push(value); },
     });
     const h = {
-        audio, createElement: React.createElement,
+        audio, observers: [], wrapper: {}, createElement: React.createElement,
         playbackTime(value) { currentTime = value; },
         useState(initial) { const i = cursor++; slots[i] ??= { value: initial };
             return [slots[i].value, (value) => {
@@ -88,12 +102,13 @@ function fixture({ play, realisticLoad = false } = {}) {
         useRef(initial) { const i = cursor++; slots[i] ??= { current: initial }; return slots[i]; },
         useEffect(effect, deps) { const i = cursor++, old = slots[i];
             if (old && deps.every((v, k) => Object.is(v, old.deps[k]))) return;
-            slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); },
+            slots[i] = { deps, effect }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); },
         render() {
             globalThis.__audioHarness = h;
             cursor = 0;
             const element = Player({ src: 'https://example.invalid/voice.ogg' });
             const tree = element.type(element.props);
+            tree.ref.current = h.wrapper;
             const media = find(tree, (node) => node.type === 'audio');
             media.ref.current = audio;
             handlers = media.props;
@@ -101,6 +116,12 @@ function fixture({ play, realisticLoad = false } = {}) {
             return tree;
         },
         event(name) { handlers[name](); },
+        intersect(visible = true) { h.observers.at(-1).emit(visible); },
+        restartEffects() {
+            globalThis.__audioHarness = h;
+            slots.forEach((slot) => slot?.cleanup?.());
+            slots.forEach((slot) => { if (slot?.effect) slot.cleanup = slot.effect(); });
+        },
         unmount() { if (!unmounted) { unmounted = true; slots.forEach((slot) => slot?.cleanup?.()); } },
         restore() { h.unmount(); delete globalThis.__audioHarness; },
         get lateWrites() { return writesAfterUnmount; },
@@ -108,7 +129,7 @@ function fixture({ play, realisticLoad = false } = {}) {
     return h;
 }
 
-test('a thread does not load audio before play, and speed cycles 1 / 1.5 / 2 without downloads', () => {
+test('offscreen audio does not load before play, and speed cycles 1 / 1.5 / 2 without downloads', () => {
     const h = fixture();
     try {
         let tree = h.render();
@@ -127,6 +148,92 @@ test('a thread does not load audio before play, and speed cycles 1 / 1.5 / 2 wit
         assert.equal(h.audio.playCalls, 0);
         assert.equal(h.audio.src, undefined);
     } finally { h.restore(); }
+});
+
+test('visible audio loads metadata once and displays its duration before play', async () => {
+    const h = fixture();
+    try {
+        h.render();
+        const observer = h.observers[0];
+        assert.equal(observer.target, h.wrapper);
+        assert.equal(observer.options.rootMargin, '200px');
+        h.intersect(false);
+        assert.equal(h.audio.src, undefined);
+        h.intersect();
+        assert.equal(h.audio.src, 'https://example.invalid/voice.ogg');
+        assert.equal(h.audio.preload, 'metadata');
+        assert.equal(observer.disconnected, true);
+        h.audio.duration = 30; h.event('onLoadedMetadata');
+        const tree = h.render();
+        assert.equal(byClass(tree, 'wazzup-audio-seek').props['aria-valuetext'], '0:00 из 0:30');
+        assert.equal(h.audio.playCalls, 0);
+        assert.equal(h.audio.paused, true);
+        h.intersect();
+        await byClass(tree, 'wazzup-audio-play').props.onClick();
+        assert.equal(h.audio.loadCalls, 0, 'visibility and play reuse loaded metadata');
+        assert.equal(h.audio.playCalls, 1);
+    } finally { h.restore(); }
+});
+
+test('pre-play OGG metadata recovery stays paused and does not interrupt another message', async (t) => {
+    const copy = copyFixture(t), first = fixture(), second = fixture({ realisticLoad: true });
+    try {
+        await byClass(first.render(), 'wazzup-audio-play').props.onClick();
+        second.render(); second.intersect(); indefinite(second, 0);
+        copy.pending.resolve(audioResponse()); await flush();
+        assert.equal(second.audio.src, 'blob:audio-copy');
+        second.audio.duration = 30; second.event('onLoadedMetadata');
+        assert.equal(byClass(second.render(), 'wazzup-audio-seek').props['aria-valuetext'], '0:00 из 0:30');
+        second.intersect(); second.render();
+        assert.equal(second.audio.src, 'blob:audio-copy', 'rerender and observer must preserve the seekable source');
+        assert.equal(second.audio.playCalls, 0);
+        assert.equal(second.audio.paused, true);
+        assert.equal(first.audio.paused, false);
+        assert.equal(first.audio.pauseCalls, 0);
+    } finally { first.restore(); second.restore(); }
+});
+
+test('StrictMode effect restart cancels stale loading and can preload and recover metadata again', async (t) => {
+    const copy = copyFixture(t), h = fixture({ realisticLoad: true });
+    try {
+        h.render(); h.intersect(); indefinite(h, 0);
+        const previousObserver = h.observers[0];
+        h.restartEffects();
+        assert.equal(previousObserver.disconnected, true);
+        assert.equal(copy.calls[0].signal.aborted, true);
+        previousObserver.emit(true);
+        assert.equal(h.audio.src, undefined, 'a stale callback must not reload the discarded source');
+        const resumed = deferred();
+        t.mock.method(globalThis, 'fetch', (url, options) => {
+            copy.calls.push({ url, ...options }); return resumed.promise;
+        });
+        h.intersect(); indefinite(h, 0);
+        assert.equal(copy.calls.length, 2, 'new effect can recover OGG metadata after cleanup');
+        copy.pending.resolve(audioResponse()); await flush();
+        assert.equal(copy.created.length, 0, 'aborted first response cannot create a stale copy');
+        resumed.resolve(audioResponse()); await flush();
+        assert.equal(copy.created.length, 1, 'aborted first response cannot create a stale copy');
+        h.audio.duration = 30; h.event('onLoadedMetadata');
+        assert.equal(byClass(h.render(), 'wazzup-audio-seek').props['aria-valuetext'], '0:00 из 0:30');
+        assert.equal(h.audio.playCalls, 0);
+        h.unmount();
+        assert.equal(h.observers[1].disconnected, true);
+        assert.deepEqual(copy.revoked, ['blob:audio-copy']);
+    } finally { h.restore(); }
+});
+
+test('browsers without IntersectionObserver preload metadata without starting playback', () => {
+    const Observer = globalThis.IntersectionObserver, h = fixture();
+    try {
+        delete globalThis.IntersectionObserver;
+        h.render();
+        assert.equal(h.audio.src, 'https://example.invalid/voice.ogg');
+        assert.equal(h.audio.preload, 'metadata');
+        h.audio.duration = 30; h.event('onLoadedMetadata');
+        assert.equal(byClass(h.render(), 'wazzup-audio-seek').props['aria-valuetext'], '0:00 из 0:30');
+        assert.equal(h.audio.playCalls, 0);
+        assert.equal(h.audio.loadCalls, 0);
+    } finally { h.restore(); globalThis.IntersectionObserver = Observer; }
 });
 
 test('dragging an already playing message previews locally and seeks once when the pointer is released', async () => {
