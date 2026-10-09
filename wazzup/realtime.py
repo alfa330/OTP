@@ -10,6 +10,7 @@ from datetime import datetime
 
 from .chat_list import last_message_columns
 from .notes import note_item
+from .typing import normalize_event as normalize_typing_event
 
 CHANNEL = 'wazzup_pilot_events'
 HEARTBEAT_SECONDS = 20
@@ -55,6 +56,9 @@ _HYDRATE_NOTES_SQL = """
 
 
 def _change_key(event):
+    if event.get('kind') == 'typing':
+        return ('typing', event.get('account'), event.get('channelId'), event.get('chatId'),
+                event.get('userId'), event.get('clientId'))
     return (event.get('account'), event.get('channelId'), event.get('chatId'), event['messageId'])
 
 
@@ -62,6 +66,12 @@ def merge_changes(previous, current):
     """Keep an INSERT/edit when a later status arrives before a subscriber reads it."""
     if previous is None:
         return current
+    if current.get('kind') == 'typing':
+        # Across worker processes NOTIFY transactions can commit out of order.
+        field = 'sequence' if 'sequence' in previous and 'sequence' in current else 'emittedAt'
+        if current.get(field, 0) == previous.get(field, 0):
+            return current if current.get('typing') is False else previous
+        return current if current.get(field, 0) > previous.get(field, 0) else previous
     merged = dict(previous, **current)
     merged['affectsList'] = previous.get('affectsList', True) or current.get('affectsList', True)
     merged['statusOnly'] = previous.get('statusOnly') is True and current.get('statusOnly') is True
@@ -104,7 +114,8 @@ def broadcast_changes(cursor, changes, event_broker):
         pending.clear()
         with event_broker.condition:
             subscribed = event_broker.streams > 0
-        full = [e for e in events if e.get('statusOnly') is not True and e.get('kind') != 'note']
+        full = [e for e in events if e.get('statusOnly') is not True
+                and e.get('kind') not in ('note', 'typing')]
         notes = [e for e in events if e.get('kind') == 'note' and e.get('noteId')]
         rows = {}
         note_rows = {}
@@ -115,6 +126,9 @@ def broadcast_changes(cursor, changes, event_broker):
             cursor.execute(_HYDRATE_NOTES_SQL, ([e['noteId'] for e in notes],))
             note_rows = {(str(row[0]), row[5], row[6]): row for row in cursor.fetchall()}
         for event in events:
+            if event.get('kind') == 'typing':
+                event_broker.publish(event)
+                continue
             if event.get('kind') == 'note':
                 row = note_rows.get((event.get('noteId'), event.get('channelId'), event.get('chatId')))
                 if row is not None:
@@ -129,6 +143,10 @@ def broadcast_changes(cursor, changes, event_broker):
             event_broker.publish(event)
 
     for event in changes:
+        if event.get('kind') == 'typing':
+            event = normalize_typing_event(event)
+            if event is None:
+                continue
         key = _change_key(event)
         pending[key] = merge_changes(pending.get(key), event)
         if len(pending) >= HYDRATE_BATCH_SIZE:
@@ -214,7 +232,9 @@ class EventBroker:
                         return [{'reload': True} if self.ready else {'unavailable': True}], self.seq
                     key = _change_key(event)
                     latest[key] = merge_changes(latest.get(key), event)
-            return list(latest.values()), self.seq
+            now_ms = int(time.time() * 1000)
+            return [event for event in latest.values() if event.get('kind') != 'typing'
+                    or event.get('expiresAt', 0) > now_ms], self.seq
 
     def acquire(self, limit=8):
         with self.condition:
@@ -258,7 +278,8 @@ def _listen(connect):
                             for notification in notifications:
                                 try:
                                     event = json.loads(notification.payload)
-                                    if event.get('account') == 'op' and event.get('messageId'):
+                                    if (event.get('account') == 'op'
+                                            and (event.get('messageId') or event.get('kind') == 'typing')):
                                         yield event
                                 except (ValueError, AttributeError):
                                     logging.warning('Invalid Wazzup pilot notification')

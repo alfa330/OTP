@@ -131,6 +131,43 @@ test('hydrated/status changes apply directly without any pane HTTP refresh; meta
     await h.close();
 });
 
+test('typing frames share the stream without refreshing any pane or entering message handling', async () => {
+    const typed = [], messages = [];
+    let resets = 0;
+    const h = harness({ onTyping: (events, serverTime) => typed.push({ events, serverTime }),
+        clearTyping: () => resets++, onChanges: (events) => {
+            messages.push(...events); return { list: false, thread: false };
+        } });
+    await h.flush(); await h.emit('connected', { ready: true, epoch: 'e1', seq: 0 }); await h.tick(1000);
+    const baseline = { ...h.calls };
+    const typing = { kind: 'typing', channelId: 'c', chatId: 'one', typing: true };
+    for (let i = 0; i < 20; i++) await h.emit('typing', { typing: [typing], serverTime: 1000 + i }, i + 1);
+    await h.tick(2000);
+    assert.deepEqual(h.calls, baseline);
+    assert.equal(h.streams.length, 1);
+    assert.equal(messages.length, 0);
+    assert.equal(typed.length, 20);
+    assert.equal(typed.at(-1).serverTime, 1019);
+    await h.emit('change', { changes: [{ messageId: 'real' }] }, 21);
+    assert.deepEqual(messages, [{ messageId: 'real' }]);
+    // Typing frames advance the resume point like any other frame.
+    await h.emit('typing', { typing: [typing], serverTime: 1030 }, 22);
+    await h.tick(5000); await h.end(); await h.tick(1);
+    assert.match(h.streams.at(-1).url, /epoch=e1&after=22$/);
+    const beforeHide = resets;
+    await h.visible(false); assert.equal(resets, beforeHide + 1);
+    await h.close();
+});
+
+test('typing never triggers fallback reloads when message handlers are absent', async () => {
+    const h = harness();
+    await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);
+    const baseline = { ...h.calls };
+    await h.emit('typing', { typing: [{ kind: 'typing', channelId: 'c', chatId: 'one' }] });
+    await h.tick(2000); assert.deepEqual(h.calls, baseline);
+    await h.close();
+});
+
 test('a buffered frame from a closing stream cannot update the next account view', async () => {
     const applied = [];
     const h = harness({ onChanges: (changes) => { applied.push(...changes); return { thread: false, list: false }; } });

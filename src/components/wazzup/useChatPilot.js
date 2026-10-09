@@ -5,12 +5,12 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
 export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, headers,
-    selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes }) {
+    selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
     const latest = useRef({});
-    latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes };
+    latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping };
     /* Где оборвался прошлый поток: эпоха процесса сервера и номер последнего
        кадра. Переподключение продолжает с этого места — сервер досылает всё,
        что вышло за разрыв, и перечитывать ленту, список, счётчик и заметки не
@@ -128,6 +128,7 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                             if (/^\d+$/.test(frame.id || '')) resume.current.seq = Number(frame.id);
                             const payload = JSON.parse(frame.data || '{}');
                             if (frame.event === 'unavailable') {
+                                latest.current.clearTyping?.();
                                 setConnection('reconnecting');
                             } else if (frame.event === 'connected' || frame.event === 'reload') {
                                 failures = 0;
@@ -137,7 +138,13 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                                     seq: Number.isInteger(payload.seq) ? payload.seq : null,
                                 };
                                 // Continued where the last stream stopped: the gap was replayed.
-                                if (!(frame.event === 'connected' && payload.resumed === true)) reconcile();
+                                if (!(frame.event === 'connected' && payload.resumed === true)) {
+                                    latest.current.clearTyping?.();
+                                    reconcile();
+                                }
+                            } else if (frame.event === 'typing') {
+                                // Presence has its own frame and never reaches message handling.
+                                latest.current.onTyping?.(payload.typing || [], payload.serverTime);
                             } else if (frame.event === 'change') {
                                 setConnection('live');
                                 const fallback = latest.current.onChanges?.(payload.changes || []);
@@ -165,6 +172,7 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                     const replan = !denied && ended && Date.now() - openedAt >= 5000;
                     if (replan) reconnectTimer = setTimeout(() => connect(true), 0);
                     else {
+                        latest.current.clearTyping?.();
                         setConnection(denied ? 'unavailable' : 'reconnecting');
                         if (!denied) reconnectTimer = setTimeout(connect,
                             Math.min(15000, 1000 * 2 ** Math.min(failures++, 4)) + Math.random() * 300);
@@ -175,6 +183,7 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
         connect();
         return () => {
             stopped = true;
+            latest.current.clearTyping?.();
             controller?.abort();
             clearTimeout(reconnectTimer);
             // A re-read that was asked for and has not finished (the tab was hidden

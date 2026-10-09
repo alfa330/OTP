@@ -19,6 +19,8 @@ import { lateDeliveryNote, localDayKey } from './messageTime';
 import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
+import ChatTypingIndicator from './ChatTypingIndicator';
+import { createChatTypingStore } from './chatTypingPresence';
 import { mergePilotMessages, outboxMessages, pilotChatKey } from './chatPilot';
 import {
     chatKeyOf, configureSendQueue, discardMessage, enqueueMessage, outboxProblems, retryMessage, settleOutbox,
@@ -962,6 +964,8 @@ function ChatsWorkspace(props) {
        супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
        /api/wazzup/pilot; она лишь избавляет остальных от запроса и живого потока. */
     const mayProcess = operator || normalizeRole(user?.role) === 'super_admin';
+    const typing = useMemo(() => createChatTypingStore({ ownerId: user?.id }), [user?.id]);
+    useEffect(() => () => typing.clear(), [typing]);
     /* Открытые вложения и распознанный текст держатся в памяти вкладки
        (attachmentCache.js) — и принадлежат одному человеку: вошёл другой, и
        накопленное сбрасывается. */
@@ -1343,7 +1347,8 @@ function ChatsWorkspace(props) {
     };
     const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
-        onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
+        onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh(),
+        onTyping: typing.apply, clearTyping: typing.hide });
     /* Принятое сервером сообщение приходит строкой архива по живому потоку за
        доли секунды, поэтому после отправки лента и список больше не
        перечитываются. Страховка — только если строки нет: без потока сразу,
@@ -1848,12 +1853,12 @@ function ChatsWorkspace(props) {
                                                     <AlertCircle size={12} className="shrink-0 text-rose-600"
                                                         role="img" aria-label="Есть неотправленное сообщение"
                                                         data-testid="wazzup-chat-send-problem" />}
-                                                {draftText ? <>
+                                                <ChatTypingIndicator store={typing} chatKey={pilotChatKey(account, chat)} fallback={draftText ? <>
                                                     <span className="shrink-0 text-rose-600">Черновик:</span>
                                                     <span className="truncate" data-testid="wazzup-chat-draft">
                                                         <ChatMessageText text={draftText} links={false} />
                                                     </span>
-                                                </> : <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>}
+                                                </> : <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>} />
                                                 {/* Справа под временем, как в мессенджерах: черновик, иначе
                                                     галочки своего последнего сообщения; счётчик ждущих — следом. */}
                                                 <span className="ml-auto flex shrink-0 items-center gap-1 pl-1">
@@ -2060,6 +2065,7 @@ function ChatsWorkspace(props) {
                             </div>
                             </div>
                             </div>
+                            <ChatTypingIndicator store={typing} chatKey={selectedKey} threadBox={threadBox} bubble />
                             {notesEnabled && noteComposerKey === selectedKey ? (
                                 <ChatInternalNoteComposer key={selectedKey} chat={selected}
                                     apiBaseUrl={apiBaseUrl} headers={headers}
@@ -2075,6 +2081,7 @@ function ChatsWorkspace(props) {
                                     }} />
                             ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
+                                    typingEnabled={pilotCanSend && mainTab === 'chats'}
                                     channelTransport={selectedChannel?.transport}
                                     lastInboundAt={lastInboundAt}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}

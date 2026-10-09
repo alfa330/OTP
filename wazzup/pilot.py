@@ -180,6 +180,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_attachment_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .notes import register_note_routes
     register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .typing import register_typing_routes
+    register_typing_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError
     register_upload_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS,
                            channels=channels, gcs=gcs)
@@ -234,9 +236,19 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 elif any(e.get('reload') for e in events):
                     yield f'id: {cursor}\nevent: reload\ndata: ' + json.dumps({'ready': broker.ready}) + '\n\n'
                 elif events:
+                    # Presence goes in its own frame: tabs opened before it existed
+                    # skip unknown events, but would re-read the list and the
+                    # thread for every typing pulse found among `changes`.
+                    changes = [e for e in events if e.get('kind') != 'typing']
+                    typing = [e for e in events if e.get('kind') == 'typing']
                     # Raw UTF-8: Cyrillic as \uXXXX made frames ~2.5 times larger.
-                    yield (f'id: {cursor}\nevent: change\ndata: '
-                           + json.dumps({'changes': events}, ensure_ascii=False) + '\n\n')
+                    if changes:
+                        yield (f'id: {cursor}\nevent: change\ndata: '
+                               + json.dumps({'changes': changes}, ensure_ascii=False) + '\n\n')
+                    if typing:
+                        yield (f'id: {cursor}\nevent: typing\ndata: '
+                               + json.dumps({'typing': typing, 'serverTime': int(time.time() * 1000)},
+                                            ensure_ascii=False) + '\n\n')
                 else:
                     yield ': heartbeat\n\n'
 

@@ -18,6 +18,24 @@
 .wazzup-thin-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
 .wazzup-message-row { scroll-margin-block: 64px; }
+
+.wazzup-chat-typing { color: #047857; }
+html[data-otp-theme='dark'] .wazzup-chat-typing,
+.wz-workspace[data-chat-theme='night'] .wazzup-chat-typing { color: #6ee7b7; }
+
+.wazzup-typing-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: wazzup-typing-dot 1.2s ease-in-out infinite;
+}
+.wazzup-typing-dot:nth-child(2) { animation-delay: .15s; }
+.wazzup-typing-dot:nth-child(3) { animation-delay: .3s; }
+@keyframes wazzup-typing-dot {
+    0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+    30% { transform: translateY(-3px); opacity: 1; }
+}
 .wazzup-message-row[data-quote-highlight='true'] .wazzup-message-bubble {
     outline: 2px solid #38bdf8;
     outline-offset: 3px;
@@ -46,4 +64,5 @@ html[data-otp-theme='dark'] .wazzup-internal-note {
 
 @media (prefers-reduced-motion: reduce) {
     .wazzup-message-reply { transition: none; }
+    .wazzup-typing-dot { animation: none; opacity: .7; }
 }

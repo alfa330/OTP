@@ -7,6 +7,7 @@ import useWabaWindowExpired from './useWabaWindowExpired';
 import ChatMessageText from './ChatMessageText';
 import { UPLOAD_ACCEPT, uploadedAttachment, uploadFileError, uploadSizeLabel } from './chatUploads.js';
 import { notifyChatDrafts, readChatDraft, writeChatDraft } from './chatDrafts.js';
+import useChatTypingSender from './useChatTypingSender.js';
 
 const EMPTY_DRAFT = { text: '', preview: '', attachment: null };
 
@@ -51,7 +52,9 @@ const writeDraft = (slot, text, preview = '', replyTo = null, attachment = null)
 const FILE_SUBMIT_GUARD_MS = 1000;
 
 function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInboundAt, onSend, onSent, replyTo,
-    onCancelReply, restore = null, onRestored, draftOwner = null, authorName = '', maxLength = 4096 }) {
+    onCancelReply, restore = null, onRestored, draftOwner = null, authorName = '', maxLength = 4096,
+    typingEnabled = false }) {
+    const typing = useChatTypingSender({ apiBaseUrl, headers, chat, enabled: typingEnabled });
     const storageKey = { owner: draftOwner, chatKey: pilotChatKey('op', chat), legacyKey: pilotDraftStorageKey(chat) };
     const [saved] = useState(() => readDraft(storageKey));
     const [text, setText] = useState(saved.text);
@@ -141,6 +144,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
 
     const updateText = (value) => {
         if (attachmentRef.current || uploadRef.current) return;
+        typing.activity(value);
         cancelAssist();
         setDraft(value);
         setError('');
@@ -161,6 +165,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
         if (!file || previewRef.current || attachmentRef.current || uploadRef.current) return;
         const validationError = uploadFileError(file);
         if (validationError) { setError(validationError); return; }
+        typing.stop();
         const controller = new AbortController();
         uploadRef.current = controller;
         cancelAssist();
@@ -262,6 +267,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
             setError('Сообщение не отправлено: обновите страницу и попробуйте ещё раз. Текст сохранён.');
             return;
         }
+        typing.stop();
         if (file) {
             attachmentRef.current = null;
             fileSentAtRef.current = Date.now();
@@ -333,6 +339,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                     locked={hasFile} emojiDisabled={Boolean(preview) || hasFile} slash={!preview && !hasFile && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}
                     onChoose={({ text: next, preview: nextPreview }) => {
                         if (attachmentRef.current || uploadRef.current) return;
+                        typing.activity(next);
                         cancelAssist();
                         setDraft(next, nextPreview); setError('');
                         writeDraft(storageKey, next, nextPreview, replyTo);
@@ -351,6 +358,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                     }} />
             <textarea ref={textareaRef} id="wazzup-pilot-message" rows={1} value={preview || text} readOnly={Boolean(preview) || hasFile}
                       onChange={(event) => updateText(event.target.value)}
+                      onBlur={typing.stop}
                       onSelect={(event) => { selectionRef.current = { start: event.target.selectionStart, end: event.target.selectionEnd }; }}
                       onKeyDown={(event) => {
                           if (composerKeyDownRef.current?.(event)) return;
