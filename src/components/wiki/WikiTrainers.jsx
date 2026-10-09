@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import {
     BarChart3, FileText, Gamepad2, Layers, Loader2, PlayCircle, Smartphone, Users,
@@ -9,7 +10,7 @@ import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
 import { PHONE_TILTED } from '../../assets/phoneTilted';
 import WikiTrainerStats from './WikiTrainerStats';
 
-const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
+const TrainerModal = lazyWithRetry(() => import('./trainers/TrainerPlayer'));
 
 /* Третья половина вкладки «Статьи»: тренажёры.
  *

@@ -9,6 +9,7 @@ export const HISTORY_FIELD_LABELS = {
     name: 'Имя',
     role: 'Роль',
     status: 'Статус',
+    blacklist: 'ЧС',
     rate: 'Ставка',
     department_id: 'Отдел',
     direction_id: 'Направление',

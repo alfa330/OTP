@@ -1,9 +1,10 @@
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
-    ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, StickyNote,
+    ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -18,21 +19,64 @@ import { lateDeliveryNote, localDayKey } from './messageTime';
 import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
-import { mergePilotMessages, pilotChatKey } from './chatPilot';
+import { mergePilotMessages, outboxMessages, pilotChatKey } from './chatPilot';
+import {
+    chatKeyOf, configureSendQueue, discardMessage, enqueueMessage, outboxProblems, retryMessage, settleOutbox,
+    takeBackMessage, useChatOutbox, useOutbox,
+} from './sendQueue';
+import { chatListDraft, useChatDrafts } from './chatDrafts';
+import { applyDeliveryToRows, mergeChatRow, orderChatList, waitingCount } from './chatListOrder';
+import ChatThemeMenu from './ChatThemeMenu';
+import ChatChannelsOfNumber from './ChatChannelsOfNumber';
+import { chatThemeStyle, useChatTheme, useNightMenus, usePortalDark } from './chatThemes';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
 import { latestInboundTime } from './useWabaWindowExpired';
 import ChatMessageImage from './ChatMessageImage';
+import ChatMessageVideo from './ChatMessageVideo';
+import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import ChatChannelsSidebar from './ChatChannelsSidebar';
 import useInternalNotes from './useInternalNotes';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
+import ChatAccessGate from './ChatAccessGate';
+import ShiftStartScreen from './ShiftStartScreen';
+import ShiftStatusMenu from './ShiftStatusMenu';
+import { configureWorkspace, loadWorkspace, useWorkspace } from './workspaceStore';
+import { attachmentCache } from './attachmentCache';
+import { normalizeRole } from '../../utils/roles';
 import './chatThread.css';
+import './chatThemes.css';
+import './workspace.css';
 
-const ChatAttachmentViewer = lazy(() => import('./ChatAttachmentViewer'));
+let attachmentViewerModule;
+const loadAttachmentViewer = () => {
+    attachmentViewerModule ||= import('./ChatAttachmentViewer').catch((error) => {
+        attachmentViewerModule = null;
+        throw error;
+    });
+    return attachmentViewerModule;
+};
+const warmAttachmentViewer = (kind) => {
+    // Intent loads code only; private files remain on-demand after opening.
+    loadAttachmentViewer().catch(() => {});
+    if (kind === 'pdf') import('./pdfRuntime').catch(() => {});
+};
+const ChatAttachmentViewer = lazyWithRetry(loadAttachmentViewer);
+
+function AttachmentViewerFallback({ message, onClose }) {
+    const image = attachmentPreviewKind(message) === 'image';
+    return <IosModal open onClose={onClose} title={attachmentName(message) || 'Просмотр вложения'}
+        maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
+        <div className="flex items-center justify-center overflow-auto bg-slate-200/70 p-3" style={{ height: 'min(78vh, 900px)' }}>
+            {image ? <img src={message.contentUri} alt="Вложение из сообщения" className="m-auto max-h-full max-w-full object-contain" />
+                : <div className="flex items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>}
+        </div>
+    </IosModal>;
+}
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -172,16 +216,18 @@ const Avatar = ({ name, size = 'h-9 w-9', muted = false, icon: Icon = null }) =>
 /* Медиа-содержимое пузыря: фото с лайтбоксом, аудио/видео плееры,
  * для остального — аккуратный чип со ссылкой. Битая ссылка → чип. */
 function MediaContent({ msg, light, onAttachment }) {
-    const [failed, setFailed] = useState(false);
     const [zoom, setZoom] = useState(false);
     const uri = msg.contentUri;
     const previewKind = onAttachment ? attachmentPreviewKind(msg) : null;
 
     if (previewKind) {
-        const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : 'Документ');
-        if (previewKind === 'image') return <ChatMessageImage src={uri} label={label} light={light}
+        const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : previewKind === 'video' ? 'Видео' : 'Документ');
+        const warm = () => warmAttachmentViewer(previewKind);
+        let content;
+        if (previewKind === 'video') content = <ChatMessageVideo src={uri} label={label} onOpen={() => onAttachment(msg)} />;
+        else if (previewKind === 'image') content = <ChatMessageImage src={uri} label={label} light={light}
             onOpen={() => onAttachment(msg)} />;
-        return <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
+        else content = <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
             className={`inline-flex max-w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] font-medium ${
                 light ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
             <FileText size={20} className="shrink-0" />
@@ -189,6 +235,7 @@ function MediaContent({ msg, light, onAttachment }) {
                 <span className={`block text-[11px] font-normal ${light ? 'text-blue-100' : 'text-slate-500'}`}>Просмотреть в чате</span>
             </span>
         </button>;
+        return <div className="contents" onPointerEnter={warm} onFocus={warm}>{content}</div>;
     }
 
     if (uri && msg.type === 'image') {
@@ -208,13 +255,8 @@ function MediaContent({ msg, light, onAttachment }) {
             </>
         );
     }
-    if (uri && !failed && msg.type === 'video') {
-        return <video controls preload="metadata" src={uri} onError={() => setFailed(true)}
-                      className="max-h-64 w-auto max-w-full rounded-xl" />;
-    }
-    if (uri && !failed && msg.type === 'audio') {
-        return <audio controls preload="none" src={uri} onError={() => setFailed(true)}
-                      className="h-10 w-64 max-w-full" />;
+    if (uri && msg.type === 'audio') {
+        return <ChatAudioPlayer src={uri} />;
     }
     const label = MEDIA_LABELS[msg.type] || msg.type || 'Вложение';
     const Icon = MEDIA_ICONS[msg.type] || FileText;
@@ -227,11 +269,15 @@ function MediaContent({ msg, light, onAttachment }) {
         : <span className={chip}><Icon size={13} /> {label}</span>;
 }
 
-/* Исходящие — мягко-зелёные справа, входящие — белые слева. */
-const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, showAuthor = true }) {
+/* Исходящие — мягко-зелёные справа, входящие — белые слева.
+ * Своё ещё не подтверждённое сообщение (msg.local, sendQueue.js) рисуется тем
+ * же пузырём; сбой отправки — строкой под ним с действиями. */
+const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, onRetry, onDiscard,
+    onEdit, showAuthor = true }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
+    const stuck = msg.local && (msg.local.state === 'failed' || msg.local.state === 'unknown') ? msg.local.state : null;
     return (
         <div data-message-id={msg.messageId} data-message-date={msg.dt}
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
@@ -249,14 +295,14 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                 }
             }} className={`wazzup-message-bubble min-w-0 max-w-full rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
                 out ? 'wazzup-message-outgoing rounded-br-md bg-[#dcf8c6] text-slate-900'
-                    : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
+                    : 'wazzup-message-incoming rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>
                 {quote && <button type="button" onClick={() => onQuote?.(quote.messageId)}
                     title="Перейти к исходному сообщению"
-                    className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
+                    className={`wazzup-message-quote mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
                         out ? 'border-emerald-600 bg-black/5 text-emerald-950' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
                     <span className="block truncate font-semibold">{quote.author}</span>
-                    <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} /></span>
+                    <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} links={false} /></span>
                 </button>}
                 {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words"><ChatMessageText text={msg.text} /></div>}
@@ -265,7 +311,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                         [{msg.type || 'сообщение'}]
                     </div>
                 )}
-                <div className="mt-0.5 flex flex-wrap items-center justify-end gap-1 text-[11px] text-slate-500">
+                <div className="wazzup-message-meta mt-0.5 flex flex-wrap items-center justify-end gap-1 text-[11px] text-slate-500">
                     {msg.isDeleted && (
                         <span className="flex items-center gap-0.5 text-rose-600">
                             <Ban size={10} /> удалено
@@ -281,6 +327,24 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     {out && <MessageDeliveryStatus status={msg.status} />}
                 </div>
             </div>
+            {stuck && <div role="alert" data-testid="wazzup-send-problem"
+                className="mt-1 flex max-w-full flex-wrap items-center justify-end gap-x-2.5 gap-y-0.5 px-1 text-[12px] leading-4">
+                <span className={stuck === 'failed' ? 'text-rose-600' : 'text-amber-700'}>
+                    {msg.local.error || (stuck === 'failed' ? 'Не отправлено' : 'Отправка не подтверждена')}
+                </span>
+                <button type="button" onClick={() => onRetry?.(msg.clientMessageId)}
+                    title={stuck === 'failed' ? 'Отправить это сообщение ещё раз'
+                        : 'Спросить сервер об этой же отправке — второй раз сообщение не уйдёт'}
+                    className="font-semibold text-blue-600 hover:underline">
+                    {stuck === 'failed' ? 'Повторить' : 'Проверить'}
+                </button>
+                {msg.local.editable
+                    ? <button type="button" onClick={() => onEdit?.(msg.clientMessageId)}
+                        title="Вернуть текст в поле ввода, чтобы исправить его"
+                        className="font-semibold text-slate-500 hover:underline">Изменить</button>
+                    : <button type="button" onClick={() => onDiscard?.(msg.clientMessageId)}
+                        className="font-semibold text-slate-500 hover:underline">Убрать</button>}
+            </div>}
             </div>
             {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
                 aria-label="Ответить на сообщение" title="Ответить на сообщение"
@@ -328,7 +392,7 @@ function ThreadScrollDate({ box, chatKey }) {
     useEffect(() => { setVisible(false); setDate(''); }, [chatKey]);
     return <div aria-hidden="true"
         className={`pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center transition-opacity duration-200 motion-reduce:transition-none ${visible ? 'opacity-100' : 'opacity-0'}`}>
-        {date && <span className="rounded-full bg-white/95 px-3 py-1 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/80 backdrop-blur-sm">{date}</span>}
+        {date && <span className="wz-day-pill rounded-full bg-white/95 px-3 py-1 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/80 backdrop-blur-sm">{date}</span>}
     </div>;
 }
 
@@ -892,19 +956,45 @@ function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
     );
 }
 
-export default function WazzupChatsView(props) {
+/* Сам раздел: каналы, список чатов, лента и всё, что вокруг них.
+ *
+ * operator — раздел открыт верификатору в режиме обработки (OperatorWorkspace
+ * ниже). Ему оставлено только рабочее: чаты аккаунта «Верификаторы» и кнопка
+ * статуса смены (toolbar) рядом с «Обновить». Второго аккаунта, показателей с
+ * привязкой и ссылок в сам Wazzup в этом режиме нет — постановка владельца
+ * 08.10.2026, и сервер их верификатору тоже не отдаёт (_wazzup_chat_reader_guard).
+ * entering — окно только что открылось кнопкой «Начать смену» (workspace.css). */
+function ChatsWorkspace(props) {
     /* initialChat — цель перехода по ссылке (chatLink.js): либо пара
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
-    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user,
+        operator = false, toolbar = null, entering = false } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
+    /* Кому вообще есть смысл спрашивать сервер про обработку: верификатору и
+       супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
+       /api/wazzup/pilot; она лишь избавляет остальных от запроса и живого потока. */
+    const mayProcess = operator || normalizeRole(user?.role) === 'super_admin';
+    /* Открытые вложения и распознанный текст держатся в памяти вкладки
+       (attachmentCache.js) — и принадлежат одному человеку: вошёл другой, и
+       накопленное сбрасывается. */
+    useEffect(() => { attachmentCache.setOwner(user?.id); }, [user?.id]);
+    /* Очередь исходящих (sendQueue.js) одна на вкладку и принадлежит человеку:
+       вошёл другой — неотправленное прежнего под его учёткой не уйдёт. */
+    const tokenHeaders = useRef(withAccessTokenHeader);
+    tokenHeaders.current = withAccessTokenHeader;
+    useEffect(() => {
+        if (!mayProcess) return;
+        configureSendQueue({ apiBaseUrl, ownerId: user?.id ?? null, authorName: user?.name || '',
+            headers: () => (tokenHeaders.current ? tokenHeaders.current() : {}) });
+    }, [mayProcess, apiBaseUrl, user?.id, user?.name]);
     const [mainTab, setMainTab] = useState('chats');
 
     /* Аккаунт Wazzup, в который смотрит раздел. Стартовый — из ссылки на чат
        (account=potok), иначе основной. Загрузчики читают аккаунт через ref, а
        не из state: переход по ссылке на чат «Потока» переключает аккаунт и в том
        же тике грузит чат — state к этому моменту ещё старый. */
-    const [account, setAccount] = useState(normalizeWazzupAccount(initialChat?.account));
+    const [account, setAccount] = useState(operator ? 'op' : normalizeWazzupAccount(initialChat?.account));
     const accountRef = useRef(account);
     accountRef.current = account;
     const [accounts, setAccounts] = useState(null);      // из /api/wazzup/accounts
@@ -952,15 +1042,26 @@ export default function WazzupChatsView(props) {
     const quoteHighlight = useRef({ node: null, timer: null });
     const selectedKey = pilotChatKey(account, selected);
     const attachmentThread = useRef([]);
-    const openAttachment = useCallback((message) => {
-        const items = buildAttachmentGroup(attachmentThread.current, message);
-        setAttachmentSelection({ key: selectedKey, message: { ...message }, items });
-    }, [selectedKey]);
+    const openAttachment = useCallback((message, videoOnly = false) => {
+        if (!selected) return;
+        warmAttachmentViewer(attachmentPreviewKind(message));
+        const items = buildAttachmentGroup(attachmentThread.current, message)
+            .filter((item) => !videoOnly || attachmentPreviewKind(item) === 'video');
+        setAttachmentSelection((current) => ({ key: selectedKey, chat: { ...selected }, account,
+            ownerId: user?.id, apiBaseUrl, videoOnly, message: { ...message }, items,
+            detached: current?.key === selectedKey && Boolean(current.detached) }));
+    }, [selectedKey, selected, account, user?.id, apiBaseUrl]);
     const selectAttachment = useCallback((message) => {
-        setAttachmentSelection((current) => current?.key === selectedKey
-            && current.items.some((item) => item.messageId === message.messageId)
-            ? { ...current, message } : current);
-    }, [selectedKey]);
+        setAttachmentSelection((current) => {
+            if (!current || current.key !== attachmentSelection?.key) return current;
+            const item = current.items.find((item) => item.messageId === message.messageId);
+            return item ? { ...current, message: item } : current;
+        });
+    }, [attachmentSelection?.key]);
+    const setAttachmentDetached = useCallback((detached) => {
+        setAttachmentSelection((current) => current && current.key === attachmentSelection?.key
+            ? { ...current, detached } : current);
+    }, [attachmentSelection?.key]);
     const chooseReply = useCallback((message) => {
         setNoteComposerKey(null);
         setReplySelection({ key: selectedKey, message: { ...message } });
@@ -973,7 +1074,8 @@ export default function WazzupChatsView(props) {
         const row = [...(threadBox.current?.querySelectorAll('[data-message-id]') || [])]
             .find((node) => node.dataset.messageId === messageId);
         if (!row) {
-            showToast?.('Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
+            showToast?.(operator ? 'Исходное сообщение не загружено. Нажмите «Более ранние».'
+                : 'Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
             return;
         }
         clearTimeout(quoteHighlight.current.timer);
@@ -983,10 +1085,12 @@ export default function WazzupChatsView(props) {
         quoteHighlight.current = { node: row, timer: setTimeout(() => {
             row.removeAttribute('data-quote-highlight');
         }, 1400) };
-    }, [showToast]);
+    }, [showToast, operator]);
     useEffect(() => {
         setReplySelection(null);
-        setAttachmentSelection(null);
+        // A floating attachment keeps the original conversation snapshot.
+        // Returning it to a modal does not change the chat open behind it.
+        setAttachmentSelection((current) => current?.detached ? current : null);
         setNoteComposerKey(null);
         return () => {
             clearTimeout(quoteHighlight.current.timer);
@@ -994,13 +1098,45 @@ export default function WazzupChatsView(props) {
         };
     }, [selectedKey]);
     const searchDebounce = useRef(null);
+    // Личные черновики (chatDrafts.js): «Черновик: …» в списке видит только их автор.
+    const draftOwner = account === 'op' && mayProcess ? user?.id ?? null : null;
+    const drafts = useChatDrafts(draftOwner);
+    // Тема окна (chatThemes.js) — личная; в тёмном режиме портала окно и так тёмное.
+    const portalDark = usePortalDark();
+    const chatTheme = useChatTheme(user?.id ?? null);
+    const themed = !portalDark && chatTheme.applied.id !== 'standard';
+    useNightMenus(themed && chatTheme.applied.id === 'night');
+    const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
+    // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
+    const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
+    // Строка архива пришла — локальная копия больше не нужна.
+    useEffect(() => { if (thread && outbox.length) settleOutbox(thread); }, [thread, outbox]);
+    /* Сбой отправки виден не только в своём чате: оператор, нажав Enter, уже в
+       следующем. Отметка в списке держится, пока сбой не решён, и одно
+       уведомление — на каждый новый сбой не в открытом чате. */
+    const allOutbox = useOutbox();
+    const sendProblems = useMemo(() => (mayProcess ? outboxProblems(allOutbox) : []), [allOutbox, mayProcess]);
+    const problemChats = useMemo(() => new Set(sendProblems.map(chatKeyOf)), [sendProblems]);
+    const toastRef = useRef(showToast);
+    toastRef.current = showToast;
+    const chatsRef = useRef(chats);
+    chatsRef.current = chats;
+    const notifiedProblems = useRef(null);
+    // «Изменить» у отклонённого сообщения: его текст возвращается в поле этого чата.
+    const [draftRestore, setDraftRestore] = useState(null);
+    const editFailed = useCallback((clientMessageId) => {
+        const text = takeBackMessage(clientMessageId);
+        if (text !== null) setDraftRestore({ key: selectedKey, id: clientMessageId, text });
+    }, [selectedKey]);
     const pilotView = useRef({});
     pilotView.current = { key: pilotChatKey(account, selected), thread, selected, account, mainTab };
     const pilotRefresh = useRef({ id: 0, controller: null });
     const liveChatSummaries = useRef({ seq: 0, items: new Map() });
     const [unreadOnly, setUnreadOnly] = useState(false);
+    // Строка, у которой раскрыты «Чаты по каналам» (одна за раз).
+    const [channelsOpen, setChannelsOpen] = useState('');
     const unread = useSharedChatUnread({
-        enabled: account === 'op' && String(user?.login || '').toLowerCase() === 'alfa330',
+        enabled: account === 'op' && mayProcess,
         active: mainTab === 'chats', selected, thread, box: threadBox, apiBaseUrl, headers,
     });
 
@@ -1050,7 +1186,7 @@ export default function WazzupChatsView(props) {
                 const chat = event.chat;
                 const query = q.trim().toLowerCase();
                 if ((!channel || chat.channelId === channel) && (!query || [chat.contactName, chat.contactPhone, chat.chatId]
-                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, chat);
+                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, mergeChatRow(responseItems.get(key), chat));
                 else responseItems.delete(key);
             }
             r.data.items = [...responseItems.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
@@ -1062,7 +1198,10 @@ export default function WazzupChatsView(props) {
             setChats((prev) => {
                 if (!silent && reset) return r.data.items || [];
                 const byId = new Map((prev || []).map((chat) => [pilotChatKey(accountRef.current, chat), chat]));
-                (r.data.items || []).forEach((chat) => byId.set(pilotChatKey(accountRef.current, chat), chat));
+                (r.data.items || []).forEach((chat) => {
+                    const key = pilotChatKey(accountRef.current, chat);
+                    byId.set(key, mergeChatRow(byId.get(key), chat));
+                });
                 return [...byId.values()].sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
             });
             return r.data.items || [];
@@ -1197,32 +1336,99 @@ export default function WazzupChatsView(props) {
                     const q = appliedSearch.trim().toLowerCase();
                     const matches = (!channelId || chat.channelId === channelId)
                         && (!q || [chat.contactName, chat.contactPhone, chat.chatId].some((s) => String(s || '').toLowerCase().includes(q)));
-                    if (matches) byId.set(pilotChatKey('op', chat), chat);
+                    if (matches) byId.set(pilotChatKey('op', chat), mergeChatRow(byId.get(pilotChatKey('op', chat)), chat));
                     else byId.delete(pilotChatKey('op', chat));
                 }
                 return [...byId.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
             });
         }
+        // Доставлено/прочитано последнего сообщения — сразу в галочки строки списка.
+        const deliveries = relevant.filter((event) => event.statusOnly === true && event.status);
+        if (deliveries.length) setChats((prev) => applyDeliveryToRows(prev, deliveries));
         return {
             notes: noteChanges.some((event) => !event.note),
             thread: current.some((event) => !event.statusOnly && (!event.message || snapshot.thread === null)),
             list: relevant.some((event) => event.affectsList !== false && !event.chat),
         };
     };
-    const pilot = useChatPilot({ apiBaseUrl, user, account, active: mainTab === 'chats', headers,
+    const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
         onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
+    /* Принятое сервером сообщение приходит строкой архива по живому потоку за
+       доли секунды, поэтому после отправки лента и список больше не
+       перечитываются. Страховка — только если строки нет: без потока сразу,
+       с потоком — если событие всё же потерялось. */
+    const acceptedIds = localMessages.filter((message) => message.local.state === 'sent')
+        .map((message) => message.clientMessageId).join('|');
+    const live = pilot.connection === 'live';
+    const refreshers = useRef({});
+    refreshers.current = { thread: refreshPilotThread, list: () => loadChats({ silent: true }) };
+    useEffect(() => {
+        if (!acceptedIds) return undefined;
+        // Каждое новое принятое сообщение заводит свою проверку: сверка, ушедшая
+        // раньше ответа на него, его строку принести не могла.
+        let attempts = 0;
+        let timer = setTimeout(function check() {
+            attempts += 1;
+            refreshers.current.thread().catch(() => {});
+            if (!live) Promise.resolve(refreshers.current.list()).catch(() => {});
+            if (attempts < 3) timer = setTimeout(check, 3000);
+        }, live ? 4000 : 600);
+        // Строка так и не пришла — локальная копия всё равно уходит по сроку.
+        const expiry = setTimeout(() => settleOutbox(pilotView.current.thread || []), 2 * 60 * 1000 + 1000);
+        return () => { clearTimeout(timer); clearTimeout(expiry); };
+    }, [acceptedIds, live]);
+    useEffect(() => {
+        const seen = notifiedProblems.current;
+        if (seen === null) {
+            // Сбои, которые были до открытия раздела, уже отмечены в списке.
+            notifiedProblems.current = new Set(sendProblems.map((item) => item.clientMessageId));
+            return;
+        }
+        for (const item of sendProblems) {
+            if (seen.has(item.clientMessageId)) continue;
+            seen.add(item.clientMessageId);
+            const key = chatKeyOf(item);
+            if (key === pilotView.current.key && pilotView.current.mainTab === 'chats') continue;
+            const chat = (chatsRef.current || []).find((row) => pilotChatKey('op', row) === key);
+            const who = chat?.contactName || chat?.contactPhone || item.chatId;
+            toastRef.current?.(item.state === 'failed'
+                ? `Сообщение для ${who} не отправлено — откройте этот чат`
+                : `Сообщение для ${who} не подтверждено — откройте этот чат`, 'error');
+        }
+    }, [sendProblems]);
+    /* Своё новое сообщение всегда видно: лента прокручивается к нему. Строка
+       сбоя под пузырём появляется позже — её докручиваем, только если человек
+       и так внизу, а не читает историю выше. */
+    const localSignature = localMessages.map((message) => `${message.messageId}:${message.local.state}`).join('|');
+    const lastLocalCount = useRef(0);
+    useEffect(() => {
+        const box = threadBox.current;
+        const grew = localMessages.length > lastLocalCount.current;
+        lastLocalCount.current = localMessages.length;
+        if (!box || !localSignature) return;
+        if (grew || box.scrollHeight - box.scrollTop - box.clientHeight < 200) requestAnimationFrame(() => {
+            box.scrollTop = box.scrollHeight;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [localSignature]);
+    const attachmentAllowed = Boolean(attachmentSelection
+        && attachmentSelection.account === account && attachmentSelection.ownerId === user?.id
+        && attachmentSelection.apiBaseUrl === apiBaseUrl
+        && (attachmentSelection.videoOnly || (pilot.enabled
+            && !pilot.capability?.excludedChannelIds?.includes(attachmentSelection.chat.channelId))));
+    useEffect(() => {
+        if (!attachmentAllowed) setAttachmentSelection(null);
+    }, [attachmentAllowed]);
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
-    const loadedChatsByKey = useMemo(() => new Map((chats || []).map((chat) => [pilotChatKey('op', chat), chat])), [chats]);
-    const visibleChats = unreadOnly && pilot.enabled
-        ? Object.values(unread.items).filter((item) => item.unreadCount > 0)
-            .map((item) => loadedChatsByKey.get(pilotChatKey('op', item)) || item.chat)
-            .filter((chat) => chat && (!channelId || chat.channelId === channelId)
-                && (!appliedSearch || [chat.contactName, chat.contactPhone, chat.chatId].some((v) => String(v || '').toLowerCase().includes(appliedSearch.toLowerCase()))))
-            .sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0))
-        : chats;
+    // Ждущие ответа — вверху списка (chatListOrder.js); счётчик ведётся только у «op».
+    const waiting = useMemo(() => (account === 'op' ? { items: unread.items, ready: unread.ready } : null),
+        [account, unread.items, unread.ready]);
+    const visibleChats = useMemo(() => orderChatList(chats, waiting, {
+        unreadOnly: unreadOnly && pilot.enabled, channelId, search: appliedSearch,
+    }), [chats, waiting, unreadOnly, pilot.enabled, channelId, appliedSearch]);
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
     const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
@@ -1237,13 +1443,15 @@ export default function WazzupChatsView(props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pilot.enabled, pilotChatKey(account, selected), thread === null, threadLoadingMore]);
 
-    useEffect(() => { loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+    // Список аккаунтов нужен переключателю, а у верификатора его нет (и ручка ему закрыта).
+    useEffect(() => { if (!operator) loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
 
     /* Переключение аккаунта — это смена источника целиком: каналы, список,
        открытая переписка и поиск относятся к прошлому аккаунту и сбрасываются.
        Ref обновляем сразу, чтобы загрузчики этого же тика пошли в новый аккаунт. */
     const switchAccount = (next) => {
         const key = normalizeWazzupAccount(next);
+        if (operator && key !== 'op') return;
         if (key === accountRef.current) return;
         accountRef.current = key;
         setAccount(key);
@@ -1312,6 +1520,10 @@ export default function WazzupChatsView(props) {
         const target = initialChat;
         if (!target) return;
         const targetAccount = normalizeWazzupAccount(target.account);
+        if (operator && targetAccount !== 'op') {
+            onInitialChatConsumed?.();
+            return;
+        }
         const key = `${targetAccount}:${target.channelId ? `${target.channelId}/${target.chatId}` : target.phone}`;
         if (!target.channelId && !target.phone) return;
         if (initialChatDone.current === key) return;
@@ -1447,22 +1659,24 @@ export default function WazzupChatsView(props) {
         if (!thread) return [];
         const out = [];
         let lastDay = null;
-        const entries = [...thread, ...notes.items.map((note) => ({
+        // Сообщения в пути — в конце ленты; сбой — на своём времени (chatPilot.js).
+        const entries = [...thread, ...localMessages.filter((m) => !m.local.pinned), ...notes.items.map((note) => ({
             _note: note, messageId: `note:${note.id}`, dt: note.createdAt,
         }))].sort((a, b) => new Date(a.dt) - new Date(b.dt) || a.messageId.localeCompare(b.messageId));
-        entries.forEach((m) => {
+        [...entries, ...localMessages.filter((m) => m.local.pinned)].forEach((m) => {
             const day = localDayKey(m.dt);
             if (day && day !== lastDay) { out.push({ _day: fmtDay(m.dt), messageId: `day-${day}` }); lastDay = day; }
             out.push(m);
         });
         return out;
-    }, [thread, notes.items]);
+    }, [thread, notes.items, localMessages]);
     // Read the current displayed order without changing every bubble's click handler on SSE updates.
     attachmentThread.current = threadWithDays;
     const threadQuotes = useMemo(() => {
         const byId = new Map((thread || []).map((message) => [message.messageId, message]));
-        return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
-    }, [thread]);
+        return new Map([...(thread || []), ...localMessages]
+            .map((message) => [message.messageId, messageQuote(message, byId)]));
+    }, [thread, localMessages]);
     const lastIncomingMessageId = useMemo(() => {
         for (let index = (thread?.length || 0) - 1; index >= 0; index -= 1) {
             const message = thread[index];
@@ -1482,19 +1696,30 @@ export default function WazzupChatsView(props) {
         </SegButton>
     );
 
+    /* Связь с живыми обновлениями показываем, только когда с ней что-то не так:
+       «подключено» — обычное состояние, и строка о нём стояла бы в шапке весь
+       день ни о чём. Первые секунды подключения — тоже не новость. */
+    const connectionNote = pilot.enabled && mainTab === 'chats' ? ({
+        reconnecting: 'Восстанавливаем связь…',
+        unavailable: 'Живые обновления недоступны — нажмите «Обновить»',
+    })[pilot.connection] : '';
+
     return (
-        <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+        <div className={`wz-workspace flex h-full min-h-0 w-full flex-col ${entering ? 'wz-workspace-enter' : ''}`}
+             data-chat-theme={themed ? chatTheme.applied.id : undefined}
+             style={{ fontFamily: APPLE_FONT, '--wz-mobile-header-space': operator ? '154px' : '170px',
+                      ...(themed ? chatThemeStyle(chatTheme.applied) : {}) }}>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:pl-11 sm:pr-6">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
-                    <p className="text-xs text-slate-500">
-                        Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
-                    </p>
-                    {pilot.enabled && mainTab === 'chats' && (
-                        <p role="status" className={`mt-1 text-xs ${pilot.connection === 'live' ? 'text-emerald-600' : 'text-amber-600'}`}>
-                            Пилот alfa330 · {({ live: 'Живые обновления подключены', connecting: 'Подключение…',
-                                reconnecting: 'Восстанавливаем связь…', paused: 'Обновления на паузе',
-                                unavailable: 'Живые обновления недоступны — нажмите «Обновить»' })[pilot.connection]}
+                    {!operator && (
+                        <p className="text-xs text-slate-500">
+                            Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
+                        </p>
+                    )}
+                    {connectionNote && (
+                        <p role="status" className={`text-xs text-amber-600 ${operator ? '' : 'mt-1'}`}>
+                            {connectionNote}
                         </p>
                     )}
                 </div>
@@ -1502,6 +1727,7 @@ export default function WazzupChatsView(props) {
                     {/* Аккаунт Wazzup: «Верификаторы» и «Поток» — два разных аккаунта
                         с разной перепиской и своими показателями; переключатель
                         меняет источник всего раздела. Счётчик — чатов в окне хранения. */}
+                    {!operator && <>
                     <div className="flex rounded-xl bg-slate-100 p-1" data-testid="wazzup-account-switch">
                         {accountList.map((a) => (
                             <button key={a.key} onClick={() => switchAccount(a.key)}
@@ -1527,6 +1753,10 @@ export default function WazzupChatsView(props) {
                        className={iosBtnGhost}>
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
+                    </>}
+                    {toolbar}
+                    {mainTab === 'chats' && !portalDark &&
+                        <ChatThemeMenu selected={chatTheme.selected} onChoose={chatTheme.choose} />}
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить
@@ -1536,13 +1766,16 @@ export default function WazzupChatsView(props) {
             </div>
 
             {mainTab === 'authors' && (
-                <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                              account={account} />
+                <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+                    <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                  account={account} />
+                </div>
             )}
 
-            <div className={`${iosCard} flex overflow-hidden`}
-                 style={{ height: 'calc(100vh - 170px)', minHeight: 420,
-                          display: mainTab === 'chats' ? undefined : 'none' }}>
+            {/* Колонки занимают весь остаток после шапки, в том числе когда
+                кнопки переносятся на вторую строку или окно меняет высоту. */}
+            <div className="wz-columns flex min-h-0 flex-1 overflow-hidden border-t border-slate-200/70 bg-white"
+                 style={{ display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
                 <ChatChannelsSidebar channels={activeChannels} selectedChannelId={channelId}
                     onSelect={pickChannel} apiBaseUrl={apiBaseUrl} headers={headers}
@@ -1590,9 +1823,18 @@ export default function WazzupChatsView(props) {
                         )}
                         {(visibleChats || []).map((chat) => {
                             const isSel = selected && selected.chatId === chat.chatId && selected.channelId === chat.channelId;
+                            const draftText = chatListDraft(drafts, pilotChatKey('op', chat), { owner: draftOwner, open: isSel });
+                            const waitingReplies = waitingCount(chat, waiting);
+                            const rowKey = `${chat.channelId}:${chat.chatId}`;
+                            // «Чаты по каналам» — только если номер писал больше чем в один канал.
+                            const byNumber = chat.channelsCount > 1;
+                            const byNumberOpen = byNumber && channelsOpen === rowKey;
+                            const byNumberId = `wz-by-number-${chat.channelId}-${chat.chatId}`;
                             return (
-                                <button key={`${chat.channelId}:${chat.chatId}`} onClick={() => openChat(chat)}
-                                        className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl px-2.5 py-2 text-left transition ${
+                                <div key={rowKey}>
+                                <div className="relative">
+                                <button onClick={() => openChat(chat)}
+                                        className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl py-2 pl-2.5 pr-8 text-left transition ${
                                             isSel ? 'bg-blue-500/10 ring-1 ring-blue-200/60' : 'hover:bg-slate-50'}`}>
                                     <div className="flex items-center gap-2.5">
                                         <Avatar name={chat.contactName || chat.contactPhone || chat.chatId} />
@@ -1604,21 +1846,47 @@ export default function WazzupChatsView(props) {
                                                 <span className="shrink-0 text-[11px] text-slate-400">{fmtListDate(chat.lastMessageAt)}</span>
                                             </div>
                                             <div className="flex items-center gap-1 text-[12px] text-slate-500">
-                                                {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
-                                                <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} /></span>
-                                                {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
-                                                    <span className="ml-auto rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white">
-                                                        {unread.items[pilotChatKey('op', chat)].unreadCount}
-                                                    </span>}
+                                                {problemChats.has(pilotChatKey('op', chat)) && account === 'op' &&
+                                                    <AlertCircle size={12} className="shrink-0 text-rose-600"
+                                                        role="img" aria-label="Есть неотправленное сообщение"
+                                                        data-testid="wazzup-chat-send-problem" />}
+                                                {draftText ? <>
+                                                    <span className="shrink-0 text-rose-600">Черновик:</span>
+                                                    <span className="truncate" data-testid="wazzup-chat-draft">
+                                                        <ChatMessageText text={draftText} links={false} />
+                                                    </span>
+                                                </> : <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>}
+                                                {/* Справа под временем, как в мессенджерах: черновик, иначе
+                                                    галочки своего последнего сообщения; счётчик ждущих — следом. */}
+                                                <span className="ml-auto flex shrink-0 items-center gap-1 pl-1">
+                                                    {draftText
+                                                        ? <FilePen size={13} className="text-slate-400" role="img" aria-label="Черновик" />
+                                                        : chat.lastMessageIsEcho && <MessageDeliveryStatus status={chat.lastMessageStatus} size={15} />}
+                                                    {waitingReplies > 0 &&
+                                                        <span className="rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white"
+                                                            title="Ждут ответа" data-testid="wazzup-chat-waiting">
+                                                            {waitingReplies}
+                                                        </span>}
+                                                </span>
                                             </div>
-                                            {!channelId && (
-                                                <div className="truncate text-[10px] text-slate-400">
-                                                    {channelName[chat.channelId] || chat.channelId}
-                                                </div>
-                                            )}
                                         </div>
                                     </div>
                                 </button>
+                                {byNumber && (
+                                    <button type="button" onClick={() => setChannelsOpen(byNumberOpen ? '' : rowKey)}
+                                        aria-expanded={byNumberOpen} aria-controls={byNumberOpen ? byNumberId : undefined}
+                                        aria-label="Чаты по каналам" title="Чаты по каналам"
+                                        className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-600">
+                                        <ChevronDown size={15} className={`transition-transform ${byNumberOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                )}
+                                </div>
+                                {byNumberOpen && (
+                                    <ChatChannelsOfNumber id={byNumberId} chat={chat} account={account}
+                                        apiBaseUrl={apiBaseUrl} headers={headers} channelName={channelName}
+                                        selected={selected} onOpen={openChat} formatTime={fmtListDate} />
+                                )}
+                                </div>
                             );
                         })}
                         {!unreadOnly && chats !== null && chats.length < chatsTotal && (
@@ -1631,7 +1899,7 @@ export default function WazzupChatsView(props) {
                 </div>
 
                 {/* Лента переписки */}
-                <div className="flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
+                <div className="wz-chat-pane flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
                     {/* Пришли по ссылке с одним номером: пока он разрешается в чат,
                         «Выберите чат слева» читалось бы как «ссылка не работает». */}
                     {!selected && deepLinkResolving && (
@@ -1667,10 +1935,12 @@ export default function WazzupChatsView(props) {
                                 хранения в портале и осталась только в самом Wazzup. Стоит
                                 проверить номер и поискать вручную.
                             </span>
+                            {!operator && (
                             <a href={deepLinkChatUrl || workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
                                className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
                                 <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
                             </a>
+                            )}
                         </div>
                     )}
                     {!selected && !deepLinkResolving && !deepLinkMiss && !deepLinkMany && (
@@ -1697,12 +1967,12 @@ export default function WazzupChatsView(props) {
                                 <div className="flex flex-wrap items-center gap-2">
                                     {notesEnabled && <button type="button"
                                         onClick={() => setNoteComposerKey((key) => key === selectedKey ? null : selectedKey)}
-                                        aria-label="Внутренний комментарий" title="Оставить внутренний комментарий"
+                                        aria-label="Внутренняя заметка" title="Внутренняя заметка"
                                         aria-pressed={noteComposerKey === selectedKey}
-                                        className={`inline-flex h-9 w-9 items-center justify-center rounded-full transition ${
+                                        className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-semibold transition ${
                                             noteComposerKey === selectedKey ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300'
-                                                : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700'}`}>
-                                        <StickyNote size={17} />
+                                                : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}>
+                                        <MessageSquareText size={17} aria-hidden="true" /> Заметка
                                     </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
@@ -1722,7 +1992,7 @@ export default function WazzupChatsView(props) {
                                         неизвестен, а он стоит в адресе Wazzup: ссылка
                                         собралась бы наугад «как whatsapp» и у чата
                                         другого транспорта вела бы в пустоту. */}
-                                    {selected.chatType && (
+                                    {selected.chatType && !operator && (
                                         <a href={wazzupChatUrl(selected, accounts, account)} target="_blank" rel="noopener noreferrer"
                                            title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
                                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
@@ -1756,7 +2026,7 @@ export default function WazzupChatsView(props) {
                                 </div>}
                                 {threadWithDays.map((m, index) => m._day ? (
                                     <div key={m.messageId} className="flex justify-center py-1.5">
-                                        <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
+                                        <span className="wz-day-pill rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
                                             {m._day}
                                         </span>
                                     </div>
@@ -1768,9 +2038,10 @@ export default function WazzupChatsView(props) {
                                     <React.Fragment key={m.messageId}>
                                         <MessageBubble msg={m} quote={threadQuotes.get(m.messageId)}
                                             showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
-                                            onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
-                                            onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
-                                                ? openAttachment : undefined} />
+                                            onReply={pilotCanSend && !m.local ? chooseReply : undefined} onQuote={jumpToQuote}
+                                            onRetry={retryMessage} onDiscard={discardMessage} onEdit={editFailed}
+                                            onAttachment={m.local ? undefined : pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                                                ? openAttachment : attachmentPreviewKind(m) === 'video' ? (message) => openAttachment(message, true) : undefined} />
                                         {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&
                                             <div className="flex justify-start px-3 sm:px-4">
                                                 <button type="button" onClick={() => unread.markRead(selected, selectedUnread.lastInboundId)}
@@ -1784,7 +2055,7 @@ export default function WazzupChatsView(props) {
                                             </div>}
                                     </React.Fragment>
                                 ))}
-                                {thread !== null && thread.length === 0 && notes.items.length === 0 && (
+                                {thread !== null && thread.length === 0 && notes.items.length === 0 && localMessages.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
                                 )}
                             </div>
@@ -1810,24 +2081,85 @@ export default function WazzupChatsView(props) {
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
                                     onCancelReply={cancelReply}
-                                    onSent={() => {
-                                        refreshPilotThread().catch(() => showToast?.('Обновите переписку для проверки отправки', 'error'));
-                                        loadChats({ silent: true }).catch(() => {});
-                                    }} />
+                                    authorName={user?.name || ''}
+                                    draftOwner={draftOwner}
+                                    restore={draftRestore?.key === selectedKey ? draftRestore : null}
+                                    onRestored={(id) => setDraftRestore((current) => (current?.id === id ? null : current))}
+                                    onSend={enqueueMessage} />
                             )}
                         </>
                     )}
                 </div>
             </div>
-            {attachmentSelection?.key === selectedKey && selected && pilot.enabled &&
-                <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
-                    <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
-                </IosModal>}>
-                    <ChatAttachmentViewer key={selectedKey}
-                        apiBaseUrl={apiBaseUrl} headers={headers} chat={selected} message={attachmentSelection.message}
-                        items={attachmentSelection.items} onSelect={selectAttachment}
+            {attachmentAllowed &&
+                <Suspense fallback={<AttachmentViewerFallback message={attachmentSelection.message} onClose={() => setAttachmentSelection(null)} />}>
+                    <ChatAttachmentViewer key={attachmentSelection.key}
+                        apiBaseUrl={apiBaseUrl} headers={headers} chat={attachmentSelection.chat} message={attachmentSelection.message}
+                        items={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(attachmentSelection.chat.channelId)
+                            ? attachmentSelection.items : attachmentSelection.items.filter((item) => attachmentPreviewKind(item) === 'video')} onSelect={selectAttachment}
+                        onDetachedChange={setAttachmentDetached}
                         onClose={() => setAttachmentSelection(null)} />
                 </Suspense>}
         </div>
     );
+}
+
+/* Раздел у верификатора. Порядок экранов — порядок его рабочего дня:
+ *   1. доступ не подтверждён — код для супервайзера (ChatAccessGate);
+ *   2. доступ есть, смена не начата — одна кнопка «Начать смену» посередине;
+ *   3. смена идёт — рабочее окно с кнопкой статуса вместо всего остального.
+ * Само окно монтируется только на третьем шаге: до него ни одного запроса к
+ * чатам не уходит — сервер верификатору без подтверждения их и не отдаст.
+ *
+ * Состояние смены общее с WazzupShiftKeeper (workspaceStore.js): он грузит его
+ * при входе в портал, поэтому раздел обычно открывается без запроса. */
+function OperatorWorkspace(props) {
+    const { apiBaseUrl, withAccessTokenHeader, user } = props;
+    const workspace = useWorkspace(user?.id);
+    /* Окно открыто кнопкой «Начать смену» — играем открытие. Перезагрузка
+       страницы посреди смены его не играет: человек уже работал. Ref, а не
+       состояние: признак обязан быть готов к первому же кадру окна, иначе оно
+       мелькнуло бы целиком до начала анимации. */
+    const startedHere = useRef(false);
+    const headers = useRef(withAccessTokenHeader);
+    headers.current = withAccessTokenHeader;
+
+    useEffect(() => {
+        if (workspace.ready) return;
+        configureWorkspace({ apiBaseUrl, ownerId: user?.id, headers: () => headers.current?.() });
+        loadWorkspace();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiBaseUrl, user?.id]);
+
+    const onShift = Boolean(workspace.current?.onShift);
+    useEffect(() => { if (!onShift) startedHere.current = false; }, [onShift]);
+
+    if (!workspace.ready) {
+        return (
+            <div className="grid h-full overflow-y-auto px-4 py-8 place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
+                {workspace.error ? (
+                    <div className="max-w-sm text-center">
+                        <AlertCircle size={22} className="mx-auto text-slate-400" />
+                        <p className="mt-2">{workspace.error}</p>
+                        <button type="button" onClick={loadWorkspace} className={`${iosBtnGhost} mt-2`}>
+                            <RefreshCw size={13} /> Повторить
+                        </button>
+                    </div>
+                ) : <Loader2 size={20} className="animate-spin text-slate-400" />}
+            </div>
+        );
+    }
+    if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
+    if (!onShift) return <div className="wazzup-scrollbar h-full overflow-y-auto">
+        <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />
+    </div>;
+    return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />} />;
+}
+
+/* Кому раздел открыт верификатором, сообщает сервер флагом профиля
+   (wazzup_chat_operator): группа верификаторов определяется моделью группы на
+   сегодня, и портал сам этого не выведет. */
+export default function WazzupChatsView(props) {
+    const operator = Boolean(props.user?.wazzup_chat_operator ?? props.user?.wazzupChatOperator);
+    return operator ? <OperatorWorkspace key={props.user?.id} {...props} /> : <ChatsWorkspace key={props.user?.id} {...props} />;
 }

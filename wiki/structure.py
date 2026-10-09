@@ -998,7 +998,7 @@ AUDIT_GROUPS = {
                  'article.restore', 'article.adopt', 'article.fork',
                  'article.move', 'article.detach',
                  'article.import', 'article.ai_draft', 'article.ai_update',
-                 'article.ai_edit',
+                 'article.ai_edit', 'article.export',
                  'article.migrate', 'article.migrate_review',
                  'article.yandex_preview', 'article.yandex_import',
                  'article.yandex_link', 'article.yandex_unlink',

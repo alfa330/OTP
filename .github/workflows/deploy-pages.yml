@@ -38,12 +38,44 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build
+        # These checks exercise the recovery and retention used by this release.
+        # A broken recovery path must not be published while the full test
+        # workflow is still running independently.
+        run: |
+          node --test tests/stale_bundle_recovery.test.mjs tests/service_worker.test.mjs tests/pages_asset_retention.test.mjs
+          npm run build
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
 
       - name: Setup Pages
+        id: pages
         uses: actions/configure-pages@v5
+
+      - name: Restore optional asset download cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/otp-pages-assets
+          key: pages-assets-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            pages-assets-v1-${{ github.ref_name }}-
+
+      - name: Preserve recently deployed build assets
+        # Open tabs and cached HTML still import old hashed chunks after a
+        # deployment. Pages replaces dist atomically, so carry those files in
+        # every release for 24 hours after retirement. Failure must stop
+        # publication, not remove old assets still inside that window.
+        run: node scripts/preserve_pages_assets.mjs dist
+        env:
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+          PAGES_ASSET_CACHE_DIR: ${{ runner.temp }}/otp-pages-assets
+
+      - name: Save optional asset download cache
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/otp-pages-assets
+          key: pages-assets-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

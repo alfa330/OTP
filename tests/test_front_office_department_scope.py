@@ -463,6 +463,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
 
         self.assertIn(
             "import { departmentCodeHasOptionalEmployeeDirection,"
+            " departmentCodeHasOptionalEmployeeGroup,"
             " departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
             " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"

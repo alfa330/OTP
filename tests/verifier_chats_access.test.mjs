@@ -61,6 +61,8 @@ const NAMES = [
     'MARKETING_OBSERVER_DEPARTMENT_CODE',
     'isMarketingObserver',
     'canAccessAiQaForUser',
+    // Верификатор: раздел ему открывает флаг профиля, который считает сервер.
+    'isWazzupChatOperator',
     'canAccessVerifierChatsForUser',
 ];
 
@@ -104,6 +106,18 @@ const PEOPLE = [
     ['СВ чужого отдела', { id: 8, role: 'sv', department_id: 900 }, false, false],
     ['тренер', { id: 9, role: 'trainer' }, false, false],
     ['оператор', { id: 10, role: 'operator' }, false, false],
+    // Оператор отдела продаж сам по себе раздел не получает — только тот, кого
+    // сервер назвал верификатором (группа с моделью «Верификатор» на сегодня).
+    ['оператор отдела продаж', { id: 16, role: 'operator', department_code: 'op' }, false, false],
+    ['верификатор (флаг профиля)', {
+        id: 17, role: 'operator', department_code: 'op', wazzup_chat_operator: true,
+    }, true, false],
+    ['верификатор (флаг в camelCase)', {
+        id: 18, role: 'operator', department_code: 'op', wazzupChatOperator: true,
+    }, true, false],
+    ['флаг выключен явно', {
+        id: 19, role: 'operator', department_code: 'op', wazzup_chat_operator: false,
+    }, false, false],
     // 183 стоит в ОБОИХ поимённых списках — исторически, до их разделения.
     ['оператор из обоих поимённых списков', { id: 183, role: 'operator' }, true, true],
     // А вот поимённый доступ к «ИИ-оценке» переписку ОП НЕ открывает: ради

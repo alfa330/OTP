@@ -2,6 +2,13 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import axios from 'axios';
 import { createPortal } from 'react-dom';
 import ResourceSchedulePlanner from './ResourceSchedulePlanner';
+import {
+  EngineForecastCard,
+  EnginePhoneForecast,
+  EnginePhoneSettings,
+  EngineSettingsSection,
+  useForecastEngine,
+} from './ResourceForecastEngine';
 import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
 import MobileActionSheet from '../common/MobileActionSheet';
@@ -3591,7 +3598,7 @@ const ResourceFteView = ({
     [userId],
   );
 
-  const fetchOverview = useCallback(async () => {
+  const fetchOverview = useCallback(async ({ keepSettingsDraft = false } = {}) => {
     if (!apiRoot) return;
     const requestId = overviewRequestRef.current + 1;
     overviewRequestRef.current = requestId;
@@ -3610,7 +3617,7 @@ const ResourceFteView = ({
       const payload = cfg.adaptOverview(response.data || {});
       setOverview(payload);
       setOperatorAvailabilityDetailsByKey({});
-      setSettingsDraft(payload.settings || null);
+      if (!keepSettingsDraft) setSettingsDraft(payload.settings || null);
       setLoadedDateCache((current) => {
         const next = new Set(current);
         (payload.loaded_report_dates || []).forEach((reportDate) => {
@@ -3657,6 +3664,19 @@ const ResourceFteView = ({
     },
     [apiRoot, buildHeaders, cfg, notify],
   );
+
+  // Движок прогноза линии (TimesFM + цикл месяца, люди по Erlang A). У чата своя модель.
+  // После пересчёта обновляется обзор текущего периода; несохранённые правки настроек
+  // при этом остаются.
+  const forecastEngine = useForecastEngine({
+    enabled: !isChat,
+    apiRoot,
+    apiPrefix: cfg.apiPrefix,
+    buildHeaders,
+    notify,
+    onChanged: () => fetchOverview({ keepSettingsDraft: true }),
+  });
+  const engineMode = overview?.settings?.forecast_engine || 'timesfm';
 
   const fetchChatAnalytics = useCallback(async (from, to) => {
     if (!apiRoot) return;
@@ -4721,6 +4741,13 @@ const ResourceFteView = ({
   const forecastPeriodEnd = selectedForecastPeriodEnd || nextWeekForecast.period_end || nextWeekForecast.week_end;
   const forecastPeriodComplete = Boolean(nextWeekForecast.historyComplete) ||
     isForecastPeriodHistoryComplete(forecastPeriodStart, forecastPeriodEnd, loadedReportDateSet);
+  const engineSummary = isChat ? null : nextWeekForecast.forecastEngine;
+  let lineForecastText = cfg.forecastText;
+  if (engineSummary) {
+    lineForecastText = Number(engineSummary.days) < Number(engineSummary.period_days)
+      ? `Дни с прогнозом ${engineSummary.method === 'calendar' ? 'календарной модели' : 'TimesFM'}: люди по часам — Erlang A под цели SL и AR. Остальные дни — по двум историческим датам (−21 и −14 дней).`
+      : `Звонки — ${engineSummary.method_label}, люди по часам — Erlang A под цели SL и AR.`;
+  }
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
@@ -5240,7 +5267,9 @@ const ResourceFteView = ({
       ? (forecastHistoryPeriods || []).map((period) => formatPhoneRange(period.start, period.end)).join(' и ')
       : chatBaseWeekStarts.map((item) => formatPhoneShortDate(item)).join(', ');
     let periodHint = historyText ? `${cfg.hasHistoryPairs ? 'История' : 'Базовые недели'}: ${historyText}` : null;
-    if (cfg.hasHistoryPairs && !forecastPeriodComplete) {
+    if (engineSummary && Number(engineSummary.days) >= Number(engineSummary.period_days)) {
+      periodHint = `${engineSummary.method_label} · Erlang A`;
+    } else if (cfg.hasHistoryPairs && !forecastPeriodComplete) {
       periodHint = <span className="text-amber-700">Периоду не хватает истории · {historyText}</span>;
     } else if (!cfg.hasHistoryPairs && chatSkippedBaseWeeks.length) {
       periodHint = (
@@ -5337,7 +5366,9 @@ const ResourceFteView = ({
     const peakForecastLabel = selectedForecastPeakHours[0] ? formatPhoneHour(selectedForecastPeakHours[0].hour) : '—';
     const peakActualLabel = selectedActualPeakHours[0] ? formatPhoneHour(selectedActualPeakHours[0].hour) : '—';
     let dayHint = null;
-    if (day && cfg.hasHistoryPairs) {
+    if (day?.engine) {
+      dayHint = `${day.engine.method_label} · SL ${formatPercent(day.engine.day_sl)} · AR ${formatPercent(day.engine.day_ar)}`;
+    } else if (day && cfg.hasHistoryPairs) {
       dayHint = day.insufficient_history
         ? <span className="text-amber-700">Для дня не хватает истории · {day.history_count}/2</span>
         : `История ${day.history_count}/2${showForecastActualLoad ? ` · ${selectedForecastHasActualLoad ? 'факт отчёта загружен' : 'факта отчёта нет'}` : ''}`;
@@ -5364,6 +5395,18 @@ const ResourceFteView = ({
           prevLabel="Неделя назад"
           nextLabel="Неделя вперёд"
         />
+
+        {!isChat ? (
+          <EnginePhoneForecast
+            summary={engineSummary}
+            engine={forecastEngine.info}
+            mode={engineMode}
+            busy={forecastEngine.busy}
+            deletingIds={forecastEngine.deletingIds}
+            onRun={forecastEngine.run}
+            onDelete={forecastEngine.deleteAdjustment}
+          />
+        ) : null}
 
         {displayOptions.forecastKpiFteHours ? (
           <RfPhoneTiles
@@ -6349,6 +6392,7 @@ const ResourceFteView = ({
 
       {!isChat && settingsDraft ? (
         <>
+          <EnginePhoneSettings draft={settingsDraft} setDraft={setSettingsDraft} engine={forecastEngine.info} />
           <RfPhoneGroup label="Настройки расчета">
             {[
               ['answer_rate', 'Принято'],
@@ -8821,8 +8865,9 @@ const ResourceFteView = ({
                 <Settings size={16} />
                 Настройки расчета
               </div>
+              <EngineSettingsSection draft={settingsDraft} setDraft={setSettingsDraft} engine={forecastEngine.info} inputClass={inputClass} />
               {settingsDraft ? (
-                <div className="grid grid-cols-2 gap-3">
+                <div className="mt-4 grid grid-cols-2 gap-3">
                   {[
                     ['answer_rate', 'Принято'],
                     ['occ', 'OCC'],
@@ -8943,12 +8988,25 @@ const ResourceFteView = ({
               </section>
             )}
 
+            {activeDashboardView === 'next_week' && !isChat && (
+              <EngineForecastCard
+                summary={nextWeekForecast.forecastEngine}
+                engine={forecastEngine.info}
+                mode={engineMode}
+                busy={forecastEngine.busy}
+                deletingIds={forecastEngine.deletingIds}
+                onRun={forecastEngine.run}
+                onAdd={forecastEngine.addAdjustment}
+                onDelete={forecastEngine.deleteAdjustment}
+                inputClass={inputClass}
+              />
+            )}
             {activeDashboardView === 'next_week' && (
               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-slate-950">{cfg.forecastTitle}</h2>
-                    <p className="text-sm text-slate-500">{cfg.forecastText}</p>
+                    <p className="text-sm text-slate-500">{lineForecastText}</p>
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                     {isChat ? (
@@ -9216,7 +9274,14 @@ const ResourceFteView = ({
                                   <b className="text-slate-900 tabular-nums">{formatInt(profile.forecast_calls)}</b>
                                   <span className="text-slate-400">{cfg.unit.short}</span>
                                 </span>
-                                {cfg.hasHistoryPairs ? (
+                                {profile.engine ? (
+                                  <span
+                                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-semibold text-blue-700 ring-1 ring-inset ring-blue-200"
+                                    title={`${profile.engine.method_label}; коридор ${formatInt(profile.engine.calls_low)}–${formatInt(profile.engine.calls_high)}`}
+                                  >
+                                    {profile.engine.method === 'calendar' ? 'Календарь' : 'TimesFM'}
+                                  </span>
+                                ) : cfg.hasHistoryPairs ? (
                                   <span
                                     className={`ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
                                       profile.insufficient_history
@@ -9299,11 +9364,18 @@ const ResourceFteView = ({
                               <p className="text-sm text-slate-500">
                                 {isChat
                                   ? `Час считается как чаты часа ÷ ${formatNumber(chatCapacityPerHourValue, 1)} чатов в час на человека.`
-                                  : `Разбивка использует AHT дня ${formatSeconds(selectedForecastDay.forecast_aht_seconds)} и единые коэффициенты.`}
+                                  : selectedForecastDay.engine
+                                    ? `Звонки — ${selectedForecastDay.engine.method_label}; люди по часам — Erlang A под цели SL и AR, AHT ${formatSeconds(selectedForecastDay.engine.aht_seconds)}.`
+                                    : `Разбивка использует AHT дня ${formatSeconds(selectedForecastDay.forecast_aht_seconds)} и единые коэффициенты.`}
                               </p>
                             </div>
                             <div className="flex flex-wrap gap-2">
-                              {cfg.hasHistoryPairs ? (
+                              {selectedForecastDay.engine ? (
+                                <span className="inline-flex w-fit items-center gap-1 rounded-md bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">
+                                  <CheckCircle2 size={13} />
+                                  {`SL ${formatPercent(selectedForecastDay.engine.day_sl)} · AR ${formatPercent(selectedForecastDay.engine.day_ar)}`}
+                                </span>
+                              ) : cfg.hasHistoryPairs ? (
                                 <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
                                   {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
                                   История {selectedForecastDay.history_count}/2

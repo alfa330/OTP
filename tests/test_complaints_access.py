@@ -164,6 +164,63 @@ class HandleTest(unittest.TestCase):
         self.assertFalse(access.can_delete(SZOV_HEAD))
 
 
+class DepartmentReviewTest(unittest.TestCase):
+    """Жалобу на Яндекс проверяет любой супервайзер отдела оператора, а не
+    только супервайзер его группы (владелец, 09.10.2026) — значит, любой из
+    них её видит, разбирает и решает. Остальные жалобы без отдела — как были."""
+
+    @staticmethod
+    def yandex(**overrides):
+        fields = dict(target='yandex', target_department_id=None, employee_id=None,
+                      responsible_id=None, review_state='pending')
+        fields.update(overrides)
+        return complaint(**fields)
+
+    def test_supervisor_of_a_neighbouring_group_reviews(self):
+        for me in (SZOV_SV, SZOV_SV_OTHER, ctx(role='sv', user_id=22)):
+            self.assertTrue(access.can_view(me, self.yandex()), me['user_id'])
+            self.assertTrue(access.can_handle(me, self.yandex()), me['user_id'])
+            self.assertTrue(access.can_review(me, self.yandex()), me['user_id'])
+
+    def test_decided_complaint_stays_in_sight_of_the_department(self):
+        """Решивший не теряет её из виду: review_state остаётся и после решения."""
+        decided = self.yandex(review_state='resolved', status='closed')
+        self.assertTrue(access.can_view(SZOV_SV_OTHER, decided))
+        self.assertFalse(access.can_review(SZOV_SV_OTHER, decided))
+
+    def test_other_departments_and_operators_do_not(self):
+        for me in (TEZ_SV, OP_SV, NEIGHBOUR):
+            self.assertFalse(access.can_review(me, self.yandex()), me['user_id'])
+        self.assertFalse(access.can_view(TEZ_SV, self.yandex()))
+
+    def test_supervisor_does_not_review_his_own(self):
+        own = self.yandex(created_by=21, creator_group_ids=[])
+        self.assertTrue(access.can_view(SZOV_SV_OTHER, own), 'своё видит как автор')
+        self.assertFalse(access.can_review(SZOV_SV_OTHER, own))
+
+    def test_complaints_without_review_keep_the_group_rule(self):
+        """Аренда авто проверку не проходит: её по-прежнему разбирает СВ группы."""
+        rental = complaint(target='car_rental', target_department_id=None, employee_id=None,
+                           responsible_id=None)
+        self.assertFalse(access.can_view(SZOV_SV_OTHER, rental))
+        self.assertFalse(access.can_handle(SZOV_SV_OTHER, rental))
+
+    def test_list_and_work_queue_say_the_same(self):
+        rule = ('(c.review_state IS NOT NULL AND c.creator_department_id = %(viewer_department)s'
+                ' AND c.created_by IS DISTINCT FROM %(viewer_id)s)')
+        sql, params = queries.visibility_sql(SZOV_SV_OTHER)
+        self.assertIn(rule, sql)
+        self.assertEqual(params['viewer_department'], 1)
+        sql, _params = queries.handling_sql(SZOV_SV_OTHER)
+        self.assertIn('(c.target_department_id IS NULL AND %s)' % rule, sql)
+
+    def test_task_rule_is_the_one_of_the_cooperation_tickets(self):
+        rule = ' '.join(queries.reviewer_sql('viewer_id').split())
+        self.assertIn('rv.department_id = c.creator_department_id', rule)
+        self.assertIn('rv.id IS DISTINCT FROM c.created_by', rule)
+        self.assertNotIn('group_operator_memberships', rule)
+
+
 class VisibilitySqlTest(unittest.TestCase):
     """Вторая форма того же правила — для списка."""
 

@@ -23,7 +23,7 @@ def history_app(db):
     route.decorator_list = []
     module = ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[]))
     namespace = dict(db=db, jsonify=jsonify, request=request, logging=logging,
-                     _verifier_chats_guard=lambda: (1, None),
+                     _wazzup_chat_reader_guard=lambda: (1, None),
                      _wazzup_account_arg=lambda: request.args.get('account', 'op'))
     exec(compile(module, str(path), 'exec'), namespace)
     app = Flask(__name__)

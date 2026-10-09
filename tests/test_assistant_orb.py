@@ -170,7 +170,7 @@ class MountTests(unittest.TestCase):
     def test_панель_ленивая_а_шарик_нет(self):
         """Шарик на первом экране у всех — он обязан быть в основном коде.
         Мини-чат тянет markdown с DOMPurify, и его платит только тот, кто открыл."""
-        self.assertRegex(self.orb, r'lazy\(\(\) => import\(.\./AssistantPanel')
+        self.assertRegex(self.orb, r'lazyWithRetry\(\(\) => import\(.\./AssistantPanel')
         self.assertNotIn('lazy', self.app[self.app.index('import AssistantOrb'):]
                          .split('\n')[0])
 
@@ -186,38 +186,60 @@ class MountTests(unittest.TestCase):
         self.assertIn('onRequestQr', panel)
         self.assertIn('locked={sensitiveSectionsLocked}', self.app)
 
+    def test_открытая_панель_сама_спрашивает_статус_qr(self):
+        """Верификатор открыл шарик в «Чатах ОП» и видел «Проверяем доступ…»
+        без конца (09.10.2026).
+
+        У рядового оператора портал спрашивает статус QR только при входе в
+        закрытый раздел: при входе в портал запрос снят ради нагрузки в час
+        аукциона. Шарик висит на любой странице, и из раздела вне списка ответа,
+        которого ждёт панель, не запрашивал никто. Спрашивает сама панель — на
+        открытие и один раз на ожидание.
+        """
+        self.assertIn('lockChecking={sensitiveSectionsChecking}', self.app)
+        self.assertIn('onCheckAccess={fetchSensitiveAccessStatus}', self.app)
+        begin = self.orb.index('const accessAskedRef = useRef(false);')
+        effect = self.orb[begin:self.orb.index(']);', begin) + 3]
+        deps = re.search(r'\}, \[([^\]]*)\]\);$', effect)
+        self.assertIsNotNone(deps, 'запрос статуса больше не эффект с зависимостями')
+        self.assertEqual(sorted(dep.strip() for dep in deps.group(1).split(',')),
+                         ['detached', 'lockChecking', 'onCheckAccess', 'open'])
+        # Спрашивает только открытая панель — встроенная или откреплённая.
+        self.assertIn('if (!(open || detached) || accessAskedRef.current) return;', effect)
+        self.assertIn('onCheckAccess?.();', effect)
+        # Ответ пришёл — признак сброшен: следующее ожидание снова спросит.
+        reset = effect[effect.index('if (!lockChecking) {'):]
+        self.assertIn('accessAskedRef.current = false;', reset[:reset.index('}')])
+        self.assertLess(effect.index('accessAskedRef.current = true;'),
+                        effect.index('onCheckAccess?.();'))
+
 
 class VisualTests(unittest.TestCase):
-    """Рисунок пузыря: что именно нельзя потерять при правке стилей."""
+    """Прозрачный знак iCORE: контур, движение и оформление тем."""
 
     def setUp(self):
-        self.css = CSS.read_text(encoding='utf-8')
+        self.css = CSS.read_text(encoding='utf-8') + (
+            CSS.parent / 'icore-assistant-mark.css').read_text(encoding='utf-8')
 
-    def test_нет_contain_который_обрежет_ореол(self):
-        """`contain: paint` и `contain: size` клипают потомков по границе бокса.
-
-        Ореол задан тенью на слое во всю величину шарика и выходит за круг —
-        под paint-containment он исчезнет, а вместе с ним и мягкое свечение,
-        ради которого пузырь читается пузырём, а не кружком.
-        """
+    def test_нет_contain_который_обрежет_контур(self):
+        """Контур масштабируется за исходный viewBox и должен остаться целым."""
         for forbidden in ('contain: paint', 'contain: size', 'contain: strict',
                           'contain: layout paint'):
             self.assertNotIn(forbidden, self.css)
 
-    def test_движение_только_на_transform(self):
+    def test_движение_только_на_transform_и_opacity(self):
         """Анимировать filter, box-shadow или background-position значит гонять
         перерисовку в основном потоке — на виджете, который висит всегда."""
         for block in re.findall(r'@keyframes[^{]+\{(.*?)\n\}', self.css, re.S):
             for prop in re.findall(r'\n\s+([a-z-]+):', block):
-                self.assertEqual(prop, 'transform',
-                                 f'в keyframes анимируется {prop}, а не transform')
+                self.assertIn(prop, ('transform', 'opacity'),
+                              f'в keyframes анимируется дорогое свойство {prop}')
 
-    def test_тёмная_тема_гасит_белое_ядро_и_блик(self):
-        """На тёмном молочное ядро даёт серое пятно, а белый блик — царапину.
-        Пузырь в темноте держит светящаяся кромка, и только она."""
+    def test_тёмная_тема_подсвечивает_контур_прозрачного_знака(self):
         dark = self.css[self.css.index('html[data-otp-theme="dark"]'):]
-        self.assertIn('.aorb__spec { background: none; }', dark)
-        self.assertIn('.aorb__rim', dark)
+        self.assertIn('--icore-mark-edge', dark)
+        self.assertIn('--icore-mark-light', dark)
+        self.assertIn('mask: var(--icore-mark-mask)', self.css)
 
     def test_уважает_настройку_меньше_движения(self):
         self.assertIn('@media (prefers-reduced-motion: reduce)', self.css)
@@ -333,7 +355,7 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertNotIn('assistantThread', self.hook)
         self.assertIn("from './errText'", self.hook)
         # Ленивая загрузка панели при этом обязана остаться.
-        self.assertRegex(self.orb, r'lazy\(\(\) => import\(.\./AssistantPanel')
+        self.assertRegex(self.orb, r'lazyWithRetry\(\(\) => import\(.\./AssistantPanel')
 
     def test_окно_переживает_смену_раздела(self):
         """Уйдя в «Вики», человек теряет шарик — так и задумано (там свой

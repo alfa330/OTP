@@ -734,11 +734,26 @@ class OperatorProgressTests(unittest.TestCase):
         operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
         self.assertIn("/api/operator/dial_list/progress", operator_part)
         progress = inspect.getsource(dial_service.DialListService.operator_progress)
+        # Единственное разрешённое упоминание лида — исключение «Реестра тестовых номеров»:
+        # номер там только сравнивается с реестром и наружу не уходит.
+        from test_numbers import keys as test_keys
+        registry = (test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, test_keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL)
+
+        def without_registry(sql):
+            for fragment in registry:
+                sql = sql.replace(fragment, '')
+            return sql
+
+        svc = dial_service.DialListService
+        self.assertIn('AND ' + registry[0], svc._PROGRESS_SQL)
+        self.assertIn('AND ' + registry[1], svc._PROGRESS_SQL)
+        self.assertIn('AND ' + registry[0], svc._PROGRESS_OUTCOMES_SQL)
+        self.assertIn('AND ' + registry[0], svc._PROGRESS_SUBTYPES_SQL)
         for forbidden in ('phone_norm', 'full_name', 'dial_list_leads'):
             self.assertNotIn(forbidden, progress)
-            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_SQL)
-            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_OUTCOMES_SQL)
-            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_SUBTYPES_SQL)
+            self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SQL))
+            self.assertNotIn(forbidden, without_registry(svc._PROGRESS_OUTCOMES_SQL))
+            self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SUBTYPES_SQL))
         # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
         self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
         self.assertIn('disp IN %(answered)s', dial_service.DialListService._PROGRESS_SQL)

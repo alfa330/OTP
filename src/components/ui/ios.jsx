@@ -402,7 +402,8 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
    (карточка водителя «Обзвона»). Не передано — всё как было. */
 const MODAL_BODY_CLASS = 'thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5';
 
-export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS }) => {
+export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS,
+    embedded = false, headerActions = null }) => {
     /* НА ТЕЛЕФОНЕ ЭТО НЕ ОКНО, А ЭКРАН. Решение владельца 10.09.2026: «убрать
        все модалки и вместо них сделать плавное переключение 1 в 1 как в
        телеграмме — модалка на мобильном выглядит не очень». Карточка посреди
@@ -419,18 +420,20 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
        проявляется, панель приподнимается по кривой macOS, при закрытии —
        обратное движение короче (window-* в tailwind.config.cjs). При «Уменьшить
        движение» в системе — как раньше, мгновенно. */
-    const isNarrow = useIsMobileShell();
+    const mobileShell = useIsMobileShell();
+    // A detached document has its own window frame. Keep the same React tree
+    // while removing the overlay and the main page's mobile navigation.
+    const isNarrow = mobileShell && !embedded;
     /* Системное «назад» (свайп от края в iOS, кнопка в Android) закрывает
        экран. Только на телефоне: на компьютере «назад» означает «предыдущая
        страница», и закрывать им окно значило бы менять поведение браузера. */
     useScreenBackGesture(isNarrow && open, onClose);
     /* Пока идёт анимация ухода, разметка обязана оставаться в дереве — иначе
-       анимировать нечего. Держим её только на телефоне: на компьютере лишний
-       кадр жизни закрытого окна ничем не оправдан. */
+       анимировать нечего. В отдельном окне затемнения и анимации ухода нет. */
     const [leavingState, setLeaving] = React.useState(false);
     const wasOpen = React.useRef(open);
     // Телефон — уход экраном (SCREEN_LEAVE_MS), компьютер — угасание окна.
-    const delay = isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS);
+    const delay = embedded ? 0 : (isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS));
     React.useEffect(() => {
         if (open) { wasOpen.current = true; setLeaving(false); return undefined; }
         if (!wasOpen.current || !delay) { wasOpen.current = false; setLeaving(false); return undefined; }
@@ -452,6 +455,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
     if (open) kept.current = { title, subtitle, children, footer, onBack };
     const shown = !open && kept.current ? kept.current : { title, subtitle, children, footer, onBack };
 
+    if (embedded && !open) return null;
     if (!open && !leaving) return null;
     /* Движение окна — только на компьютере: на телефоне окно едет экраном
        (mobile-shell.css), и второе движение полотна внутри него — дёрганость. */
@@ -463,12 +467,15 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                поднимается над баром разделов и угловым колоколом, колокол
                на это время прячется, а само окно превращается в экран
                (см. mobile-shell.css). */
-            className={`otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}${dimMotion}`}
+            className={embedded ? 'flex h-full min-h-0 w-full flex-col overflow-hidden'
+                : `otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}${dimMotion}`}
             style={{ fontFamily: APPLE_FONT }}
-            onMouseDown={(e) => { if (!leaving && e.target === e.currentTarget) onClose?.(); }}
+            onMouseDown={(e) => { if (!embedded && !leaving && e.target === e.currentTarget) onClose?.(); }}
         >
-            <div className={`otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl${panelMotion}`}>
-                <div className="otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
+            <div className={embedded ? 'flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-slate-50'
+                : `otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl${panelMotion}`}>
+                <div className={embedded ? 'relative flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/80 px-3 py-2'
+                    : 'otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5'}>
                     {/* Шеврон «назад» слева — на телефоне он и закрывает экран:
                         крестик в правом углу читается как «отменить», а уход с
                         экрана в мессенджере делают именно им. Внутренний onBack
@@ -495,6 +502,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{shown.title}</h3>
                         {shown.subtitle && <p className="truncate text-[12px] text-slate-500">{shown.subtitle}</p>}
                     </div>
+                    {headerActions}
                     {/* Крестик на телефоне не нужен: уход с экрана уже сделан
                         шевроном слева, а две кнопки «закрыть» в одной шапке —
                         лишний шум ровно там, где место дороже всего. */}
@@ -544,11 +552,16 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
  * с overflow-hidden, и вложенное меню она бы обрезала. Механика позиционирования
  * повторяет CustomSelect — общий приём раздела, а не второй способ делать то же.
  *
- * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore? }]
+ * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore?, checked? }]
+ *
+ * checked — меню выбора одного из нескольких (тема чатов): у пунктов с этим
+ * полем роль menuitemradio, у выбранного синяя галочка справа.
  */
-/* trigger — необязательная видимая подпись кнопки ({ icon, text }): рядом с
-   другими кнопками два одинаковых «···» не различить («Пресеты» и «Выгрузить»
-   в панели фильтров). Без неё — прежняя круглая кнопка «···». */
+/* trigger — необязательная видимая подпись кнопки ({ icon, text, className? }):
+   рядом с другими кнопками два одинаковых «···» не различить («Пресеты» и
+   «Выгрузить» в панели фильтров). Без неё — прежняя круглая кнопка «···».
+   className — вид кнопки вместо iosBtnSecondary, когда она стоит в ряду
+   кнопок другого вида (iosBtnGhost в шапке раздела). */
 export const IosMenu = ({ items = [], label = 'Действия', align = 'right', disabled = false, trigger = null }) => {
     const [open, setOpen] = React.useState(false);
     const [coords, setCoords] = React.useState(null);
@@ -622,7 +635,9 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                 aria-expanded={open}
                 onClick={() => setOpen((v) => !v)}
                 className={trigger
-                    ? `${iosBtnSecondary} shrink-0 ${open ? '!bg-slate-200' : ''}`
+                    ? (trigger.className
+                        ? `${trigger.className} shrink-0 ${open ? 'bg-slate-100 text-slate-900' : ''}`
+                        : `${iosBtnSecondary} shrink-0 ${open ? '!bg-slate-200' : ''}`)
                     : `grid h-8 w-8 shrink-0 place-items-center rounded-full transition active:scale-95 disabled:opacity-40 ${
                         open ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
                     }`}
@@ -654,12 +669,13 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                     }}
                     className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl motion-safe:animate-popover-in"
                 >
-                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore }) => (
+                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore, checked }) => (
                         <React.Fragment key={key}>
                             {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
                             <button
                                 type="button"
-                                role="menuitem"
+                                role={checked === undefined ? 'menuitem' : 'menuitemradio'}
+                                aria-checked={checked === undefined ? undefined : checked}
                                 onClick={() => { setOpen(false); onSelect?.(); }}
                                 className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition ${
                                     danger
@@ -670,6 +686,11 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                                 {Icon && <Icon size={15} className={danger ? 'text-rose-500' : 'text-slate-400'} />}
                                 <span className="min-w-0 flex-1 truncate">{text}</span>
                                 {hint && <span className="shrink-0 text-[11.5px] text-slate-400">{hint}</span>}
+                                {checked && (
+                                    <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true" className="shrink-0 text-blue-600">
+                                        <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                )}
                             </button>
                         </React.Fragment>
                     ))}

@@ -32,6 +32,10 @@ nh3==0.3.6
 # pdf-parse. XLSX/CSV разбираем уже имеющимся openpyxl.
 mammoth==1.12.0
 pypdf==6.15.0
+# Раздел «Вики», выгрузка статьи файлом Word (wiki/docx_export.py): mammoth
+# умеет только читать DOCX, писать его нечем — python-docx и есть писатель.
+# Пакет тянет lxml; на Python 3.11 для Linux есть готовые колёса.
+python-docx==1.2.0
 # call_qa (ИИ-оценка звонков): Claude и Soniox вызываются по HTTP через httpx/requests,
 # отдельные SDK не нужны. google-cloud-aiplatform (эмбеддинги/RAG) добавим вместе с pgvector.
 

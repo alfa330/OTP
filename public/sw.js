@@ -26,11 +26,10 @@
  *   * не-GET и запросы с Range — так тянутся записи разговоров, кусками.
  */
 
-/* Версию поднимаем руками, когда меняется стратегия: старые кэши чистятся в
-   activate по несовпадению имени. */
-const VERSION = 'v1';
-const SHELL_CACHE = 'icore-shell-' + VERSION;
-const ASSET_CACHE = 'icore-assets-' + VERSION;
+/* Оболочка обновляется отдельно. Исправные хэшированные файлы нужны вкладкам
+   предыдущей сборки даже после обновления воркера. */
+const SHELL_CACHE = 'icore-shell-v2';
+const ASSET_CACHE = 'icore-assets-v1';
 const KEEP_CACHES = [SHELL_CACHE, ASSET_CACHE];
 
 /* Порталу отведён путь установки: '/' на своём домене, '/OTP/' на GitHub Pages.
@@ -50,6 +49,16 @@ const NAVIGATION_TIMEOUT_MS = 7000;
    бы с каждым деплоем до конца жизни устройства. */
 const ASSET_CACHE_LIMIT = 220;
 
+/* CacheStorage может быть недоступен или повреждён. Его ошибка не должна
+   превращать доступный по сети JS-модуль в Failed to fetch. */
+const matchSafely = async (cacheName, request) => {
+    try {
+        return await caches.match(request, { cacheName });
+    } catch (error) {
+        return undefined;
+    }
+};
+
 /* Ответ сюда передаётся УЖЕ КЛОНИРОВАННЫМ, на месте получения. Клон, снятый
    позже (внутри async-функции, после первого await), может опоздать: страница к
    этому моменту уже читает тело, а у прочитанного ответа clone() бросает
@@ -58,27 +67,32 @@ const putSafely = async (cacheName, request, response) => {
     /* Кладём только полноценные ответы. opaque (cross-origin без CORS) кладётся
        молча, но читается как ошибка сети, а 4xx/5xx закрепили бы поломку. */
     if (!response || !response.ok || response.type === 'opaque') return;
-    const cache = await caches.open(cacheName);
-    await cache.put(request, response);
+    try {
+        const cache = await caches.open(cacheName);
+        await cache.put(request, response);
+    } catch (error) {
+        /* Квота и запрет хранилища не мешают отдать сетевой ответ. */
+    }
 };
 
 const trimCache = async (cacheName, limit) => {
-    const cache = await caches.open(cacheName);
-    const keys = await cache.keys();
-    if (keys.length <= limit) return;
-    /* keys() отдаёт записи в порядке добавления — вычищаем самые давние. */
-    await Promise.all(keys.slice(0, keys.length - limit).map((key) => cache.delete(key)));
+    try {
+        const cache = await caches.open(cacheName);
+        const keys = await cache.keys();
+        if (keys.length <= limit) return;
+        /* keys() отдаёт записи в порядке добавления — вычищаем самые давние. */
+        await Promise.all(keys.slice(0, keys.length - limit).map((key) => cache.delete(key)));
+    } catch (error) {
+        /* Уборка кэша — необязательная фоновая работа. */
+    }
 };
 
-/* Гонка, а не AbortController: чтобы отменять, запрос пришлось бы пересобрать
-   (`new Request(request, { signal })`), а пересборка запроса-навигации по
-   спецификации меняет ему mode с "navigate" на "same-origin" — вместе с этим
-   теряется штатная обработка перенаправлений, а GitHub Pages перенаправляет
-   `/OTP` на `/OTP/`. Проигравший гонку fetch дозагрузится сам и никому не
-   помешает. */
+/* Обычный fetch(request) тоже читает HTTP-кэш браузера. Документ всегда
+   запрашиваем заново, иначе он может ссылаться на уже удалённые чанки.
+   Проигравший таймауту запрос дозагрузится сам. */
 const fetchWithTimeout = (request, timeoutMs) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('network timeout')), timeoutMs);
-    fetch(request).then(resolve, reject).finally(() => clearTimeout(timer));
+    fetch(request, { cache: 'no-store' }).then(resolve, reject).finally(() => clearTimeout(timer));
 });
 
 /* Документ: сеть → свежая копия в кэш → при обрыве кэш → страница «нет связи».
@@ -101,9 +115,9 @@ const handleNavigation = async (event) => {
         })());
         return response;
     } catch (error) {
-        const cached = await caches.match(shellKey);
+        const cached = await matchSafely(SHELL_CACHE, shellKey);
         if (cached) return cached;
-        const offline = await caches.match(OFFLINE_URL);
+        const offline = await matchSafely(SHELL_CACHE, OFFLINE_URL);
         if (offline) return offline;
         throw error;
     }
@@ -113,12 +127,37 @@ const handleNavigation = async (event) => {
    его можно отдавать из кэша не спрашивая сеть. */
 const isBuildAsset = (url) => url.pathname.startsWith(SCOPE_PATH + 'assets/');
 
+const isValidBuildAsset = (request, response) => {
+    if (!response || !response.ok || response.type === 'opaque') return false;
+    const path = new URL(request.url).pathname;
+    const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (/\.(?:m?js)$/i.test(path)) {
+        return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)$/.test(type);
+    }
+    if (/\.css$/i.test(path)) return type === 'text/css';
+    return true;
+};
+
 const cacheFirst = async (event) => {
-    const cached = await caches.match(event.request);
-    if (cached) return cached;
-    const response = await fetch(event.request);
-    const copy = response.ok ? response.clone() : null;
-    event.waitUntil(putSafely(ASSET_CACHE, event.request, copy));
+    const request = event.request;
+    const bypassCache = ['reload', 'no-cache', 'no-store'].includes(request.cache);
+    const cached = bypassCache ? null : await matchSafely(ASSET_CACHE, request);
+    if (isValidBuildAsset(request, cached)) return cached;
+    if (cached) {
+        /* Например, HTML-заглушка с кодом 200 попала в старый кэш под именем
+           .js. Не закрепляем её навсегда и обходим также HTTP-кэш. */
+        event.waitUntil((async () => {
+            try {
+                const cache = await caches.open(ASSET_CACHE);
+                await cache.delete(request);
+            } catch (error) { /* Сеть должна работать и без хранилища. */ }
+        })());
+    }
+    const response = cached
+        ? await fetch(request, { cache: 'no-store' })
+        : await fetch(request);
+    const copy = isValidBuildAsset(request, response) ? response.clone() : null;
+    event.waitUntil(putSafely(ASSET_CACHE, request, copy));
     return response;
 };
 
@@ -134,7 +173,7 @@ const isPublicAsset = (url) => PUBLIC_ASSET_RE.test(url.pathname);
 /* Отдаём из кэша сразу, а копию обновляем в фоне — так файл после публикации
    обновится к следующему открытию, но не задержит текущее. */
 const staleWhileRevalidate = async (event) => {
-    const cached = await caches.match(event.request);
+    const cached = await matchSafely(ASSET_CACHE, event.request);
     const network = fetch(event.request)
         .then((response) => {
             const copy = response.ok ? response.clone() : null;
@@ -153,13 +192,12 @@ const staleWhileRevalidate = async (event) => {
 
 self.addEventListener('install', (event) => {
     event.waitUntil((async () => {
-        const cache = await caches.open(SHELL_CACHE);
         /* Поштучно, а не addAll: тот падает целиком из-за одного неудачного
            файла, и установка воркера сорвалась бы вся. */
         await Promise.all([SHELL_URL, OFFLINE_URL].map(async (url) => {
             try {
                 const response = await fetch(url, { cache: 'reload' });
-                if (response.ok) await cache.put(url, response);
+                await putSafely(SHELL_CACHE, url, response);
             } catch (error) {
                 /* Нет сети в момент установки — не беда, оболочка положится
                    в кэш при первом же удачном открытии. */
@@ -171,12 +209,16 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
     event.waitUntil((async () => {
-        const names = await caches.keys();
-        await Promise.all(
-            names
-                .filter((name) => name.startsWith('icore-') && !KEEP_CACHES.includes(name))
-                .map((name) => caches.delete(name))
-        );
+        try {
+            const names = await caches.keys();
+            await Promise.all(
+                names
+                    .filter((name) => name.startsWith('icore-') && !KEEP_CACHES.includes(name))
+                    .map((name) => caches.delete(name))
+            );
+        } catch (error) {
+            /* Заблокированное хранилище не должно удерживать старый воркер. */
+        }
         await self.clients.claim();
     })());
 });

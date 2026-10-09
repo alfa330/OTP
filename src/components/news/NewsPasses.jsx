@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import { AlertCircle, Check, Loader2, PlayCircle } from 'lucide-react';
 import useIsMobileShell from '../common/useIsMobileShell';
@@ -20,7 +21,7 @@ import useScreenBackGesture from '../common/useScreenBackGesture';
  * вошедшему — а тренажёр прикреплён к единицам новостей.
  */
 
-const TrainerModal = lazy(() => import('../wiki/trainers/TrainerPlayer'));
+const TrainerModal = lazyWithRetry(() => import('../wiki/trainers/TrainerPlayer'));
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 

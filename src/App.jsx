@@ -5,6 +5,7 @@ import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
 import ToastContainer from './components/common/ToastContainer';
+import { attachmentCache } from './components/wazzup/attachmentCache';
 // Смена «список ↔ страница сотрудника» — переходом браузера (View Transitions):
 // модуль крошечный и нужен до того, как ленивая страница загрузится.
 import { runPageTransition, usesViewTransitions } from './components/employees/pageTransition';
@@ -143,6 +144,7 @@ import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTarg
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
+import { recoverFromStaleBundle } from './staleBundleRecovery';
 
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
 const PROXY_STATUS_LABELS = {
@@ -233,6 +235,9 @@ const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
+// Сторож смены верификатора в «Чатах ОП» — отдельным куском: он нужен полутора
+// десяткам людей и не должен ехать в общем бандле всему порталу.
+const WazzupShiftKeeper = lazyWithRetry(() => import('./components/wazzup/WazzupShiftKeeper'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
@@ -240,6 +245,7 @@ const ComplaintsView = lazyWithRetry(() => import('./components/complaints/Compl
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
 const ThermoboxesView = lazyWithRetry(() => import('./components/thermoboxes/ThermoboxesView'));
+const TestNumbersView = lazyWithRetry(() => import('./components/test_numbers/TestNumbersView'));
 const BaigaView = lazyWithRetry(() => import('./components/baiga/BaigaView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
@@ -796,6 +802,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     parcels: 'Unclaimed parcels',
     water: 'Water accounting',
     thermoboxes: 'Thermoboxes',
+    test_numbers: 'Test numbers',
     baiga: 'Baiga lists',
     sign_links: 'Signing links',
     driver_chats: 'Driver chats',
@@ -2106,16 +2113,30 @@ const canAccessAiQaForUser = (userLike) => (
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
+/* Верификатор отдела продаж: «Чаты ОП» ему открыты в режиме обработки — писать
+   клиентам, без показателей и второго аккаунта (решение владельца 08.10.2026).
+   Флаг считает сервер (_get_user_payload: wazzup_chat_operator): группа
+   верификаторов определяется моделью группы на сегодня, а не направлением, и
+   портал сам этого не выведет. Сам раздел у него закрыт, пока супервайзер не
+   отсканировал QR и не ввёл код из Telegram главы отдела (админ/глава открывает
+   доступ одним сканом) — этот замок рисует
+   раздел (WazzupChatsView), а держит сервер (_wazzup_chat_reader_guard). */
+const isWazzupChatOperator = (userLike) => Boolean(
+    userLike?.wazzup_chat_operator ?? userLike?.wazzupChatOperator
+);
+
 /* «Чаты ОП» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
    отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
    переписку Wazzup, и по решению владельца её читают все глобальные админы;
    разборы ИИ им при этом не нужны и остаются закрытыми — иначе админ увидел бы
    и оценки операторов чужих отделов, и кнопки переоценки.
-   Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py. */
+   Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py, а для
+   верификатора — _wazzup_chat_access там же. */
 const canAccessVerifierChatsForUser = (userLike) => {
     // Наблюдатель «Маркетинга» вычитается ПЕРВЫМ: разбор звонков ему открыт, а
     // переписка Верификаторов в выданный ему перечень разделов не входит.
     if (isMarketingObserver(userLike)) return false;
+    if (isWazzupChatOperator(userLike)) return true;
     if (normalizeRole(userLike?.role) === 'super_admin') return true;
     // Глобальный админ — админ, не назначенный главой отдела: по решению
     // владельца переписку читают все такие админы. У главы с базовой
@@ -2528,6 +2549,19 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
     return THERMOBOXES_SECTION_DEPARTMENT_CODES.includes(
         normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
     );
+};
+
+/* «Реестр тестовых номеров» — номера, с которых сотрудники проверяют линии и
+   чаты; их звонки и чаты не входят ни в один расчёт (test_numbers/keys.py).
+
+   Ведут админы и главы отделов (решение владельца 09.10.2026). Супервайзеру не
+   даём: номером в реестре можно было бы спрятать звонок своего оператора.
+   Здесь решается только «показывать ли пункт меню»; сервер проверяет то же
+   правило на каждой ручке (test_numbers/access.py: can_open_section). */
+const canAccessTestNumbersSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin' || role === 'admin') return true;
+    return isDepartmentHead(userLike);
 };
 
 /* «Списки Байги» (#356) — итоги еженедельной акции Байга.
@@ -3342,6 +3376,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             componentDidCatch(error, errorInfo) {
                 console.error('ErrorBoundary caught:', error, errorInfo);
+                // React catches lazy rejections before unhandledrejection sees them.
+                recoverFromStaleBundle(error);
                 // Технические детали храним в состоянии: пользователи присылают
                 // фото экрана, и без места падения такую ошибку не найти.
                 // Отдельно фиксируем окружение: встроенный переводчик Chromium
@@ -3371,11 +3407,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                     if (typeof window === 'undefined') {
                         return;
-                    }
-
-                    if ('caches' in window) {
-                        const cacheKeys = await window.caches.keys();
-                        await Promise.all(cacheKeys.map((key) => window.caches.delete(key)));
                     }
 
                     const url = new URL(window.location.href);
@@ -16020,6 +16051,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
             const plannerViewerIsPlainSupervisor = isSupervisorRole(user?.role) && !isDepartmentHead(user);
+            // Убрать из ЧС может глава отдела, админ и супер-админ — то же правило
+            // на сервере (_can_remove_dismissal_blacklist). Рядовой СВ ЧС только ставит.
+            const plannerViewerCanRemoveBlacklist = isAdminLikeRoleFn(user?.role) || isDepartmentHead(user);
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
@@ -19033,6 +19067,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     console.error('Error deleting status period:', error);
                     emitAppToast(`Ошибка удаления статуса: ${error?.message || error}`, 'error');
                     setModalState(m => ({ ...m, statusDeleting: false }));
+                }
+            };
+
+            // Увольнение остаётся, но перестаёт быть ЧС: его можно прервать сменой
+            // или удалить, как обычное.
+            const removeScheduleDismissalBlacklist = async () => {
+                if (!modalState.opId) return;
+                if (typeof window !== 'undefined' && !window.confirm('Убрать сотрудника из ЧС? Увольнение останется обычным — его можно будет прервать сменой или удалить.')) return;
+                // Окно могут закрыть и открыть на другом человеке, пока идёт запрос:
+                // ответ касается только того окна, из которого нажали.
+                const targetOpId = modalState.opId;
+                const targetDate = modalState.date;
+                const isSameModal = (m) => m.opId === targetOpId && m.date === targetDate;
+
+                try {
+                    setModalState(m => ({ ...m, statusUnblacklisting: true }));
+
+                    const rangeStart = visibleRange?.[0];
+                    const rangeEnd = visibleRange?.[visibleRange.length - 1];
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_period/blacklist`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: targetOpId,
+                            range_start: rangeStart || null,
+                            range_end: rangeEnd || null
+                        })
+                    });
+
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    if (payload?.operator) {
+                        applyOperatorScheduleSnapshot(payload.operator);
+                    } else {
+                        const unflagged = new Set((payload?.status_periods || []).map(p => Number(p?.id)));
+                        const unflag = (period) => (unflagged.has(Number(period?.id))
+                            ? { ...period, isBlacklist: false, is_blacklist: false }
+                            : period);
+                        setOperators(prev => prev.map(op => {
+                            if (op.id !== targetOpId) return op;
+                            return clonePlannerOperator({
+                                ...op,
+                                scheduleStatusPeriods: (op.scheduleStatusPeriods || []).map(unflag),
+                                scheduleStatusDays: Object.fromEntries(
+                                    Object.entries(op.scheduleStatusDays || {}).map(([day, v]) => [day, unflag(v)])
+                                )
+                            });
+                        }));
+                    }
+                    // Галочку ЧС в форме снимаем явно: иначе «Сохранить статус» вернул бы ЧС.
+                    setModalState(m => (isSameModal(m) ? { ...m, dismissalIsBlacklist: false, statusUnblacklisting: false } : m));
+                    emitAppToast('Сотрудник убран из ЧС', 'success');
+                } catch (error) {
+                    console.error('Error removing dismissal blacklist:', error);
+                    emitAppToast(`Не удалось убрать из ЧС: ${error?.message || error}`, 'error');
+                    setModalState(m => (isSameModal(m) ? { ...m, statusUnblacklisting: false } : m));
                 }
             };
 
@@ -32049,7 +32145,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             type="button"
                                             className={WS_PHONE_BUTTON.blue}
                                             onClick={saveScheduleStatusPeriod}
-                                            disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                            disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
                                         >
                                             {modalState.statusSaving ? 'Сохраняем…' : 'Сохранить статус'}
                                         </button>
@@ -32283,7 +32379,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     subtitle={`${modalActiveScheduleStatus.startDate || '—'}${modalActiveScheduleStatus.endDate ? ` — ${modalActiveScheduleStatus.endDate}` : ''}`}
                                                     note={modalActiveScheduleStatus.comment || null}
                                                 />
-                                                {modalActiveScheduleStatus.id && !plannerReadOnly ? (
+                                                {modalActiveScheduleStatus.id && modalActiveScheduleStatus.statusCode === 'dismissal'
+                                                    && modalActiveScheduleStatus.isBlacklist && plannerViewerCanRemoveBlacklist && !plannerReadOnly ? (
+                                                    <WsPhoneRow
+                                                        title="Убрать из ЧС"
+                                                        subtitle="Увольнение останется обычным"
+                                                        trailing={(
+                                                            <WsPhonePill
+                                                                label={modalState.statusUnblacklisting ? '…' : 'Убрать'}
+                                                                onClick={removeScheduleDismissalBlacklist}
+                                                                disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
+                                                            />
+                                                        )}
+                                                    />
+                                                ) : modalActiveScheduleStatus.id && !plannerReadOnly ? (
                                                     <WsPhoneRow
                                                         title="Удалить статус"
                                                         trailing={(
@@ -34857,7 +34966,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                             </div>
                             <div className="flex items-center gap-2">
-                                {modalActiveScheduleStatus?.id && (
+                                {modalActiveScheduleStatus?.id && modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist && plannerViewerCanRemoveBlacklist ? (
+                                    <button
+                                        type="button"
+                                        onClick={removeScheduleDismissalBlacklist}
+                                        disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
+                                        className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                    >
+                                        <FaIcon className={`fas ${modalState.statusUnblacklisting ? 'fa-spinner fa-spin' : 'fa-user-check'}`}></FaIcon>
+                                        {modalState.statusUnblacklisting ? 'Убираем...' : 'Убрать из ЧС'}
+                                    </button>
+                                ) : modalActiveScheduleStatus?.id && (
                                     <button
                                         type="button"
                                         onClick={() => deleteScheduleStatusPeriod(modalActiveScheduleStatus)}
@@ -34872,7 +34991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     type="button"
                                     onClick={saveScheduleStatusPeriod}
-                                    disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                    disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
                                     className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                 >
                                     <FaIcon className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -42733,6 +42852,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             const [user, setUser] = useState(null);
+            useEffect(() => {
+                attachmentCache.setOwner(user?.id);
+                return () => attachmentCache.clear();
+            }, [user?.id]);
             const currentUserRole = normalizeRole(user?.role);
             const isSuperAdmin = currentUserRole === 'super_admin';
             const isDepartmentHeadUser = isDepartmentHead(user);
@@ -42787,6 +42910,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
+            const canAccessTestNumbersSection = canAccessTestNumbersSectionForUser(user);
             const canAccessBaigaSection = canAccessBaigaSectionForUser(user);
             // «Библиотека» (#282): ведут СВ и выше и тренер, читают все остальные
             // сотрудники (canAccessLibrarySectionForUser). Сервер закрыт тем же
@@ -43494,6 +43618,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
             const [promotingUserId, setPromotingUserId] = useState(null);
+            const [unblacklistingUserId, setUnblacklistingUserId] = useState(null);
             // Понижение СВ до оператора: в отличие от повышения одним confirm-ом не
             // обойтись — надо выбрать группу, иначе у человека не будет ни
             // супервайзера, ни учёта часов.
@@ -51293,9 +51418,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : (manageUsersDeptFilter || "");
                 const createDeptCode = createDeptId
                     ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
-                    : (isScopedDepartmentHead
+                    : (isScopedDepartmentHead && !isEmployeeAccountingManager
                         ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
-                        : (user?.department_code ?? user?.departmentCode ?? null));
+                        : 'szov');
                 setUserToEdit({
                     name: "",
                     rate: 1.0,
@@ -51393,6 +51518,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 },
             });
 
+            // Убрать из ЧС — главе отдела, админу и супер-админу; сервер проверяет то же
+            // (_can_remove_dismissal_blacklist) и границу отдела главы. Увольнение
+            // остаётся обычным: человека можно вернуть сменой или снять статус.
+            const canRemoveEmployeeBlacklist = isAdminLikeRoleFn(currentUserRole) || isDepartmentHeadUser;
+            const removeEmployeeBlacklist = async (employee) => {
+                const targetUserId = Number(employee?.id);
+                if (!Number.isFinite(targetUserId)) return;
+                setUnblacklistingUserId(targetUserId);
+                try {
+                    await axios.delete(`${API_BASE_URL}/api/work_schedules/status_period/blacklist`, {
+                        data: { operator_id: targetUserId },
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        })
+                    });
+                    showToast(`«${employee?.name || ''}» больше не в ЧС`, 'success');
+                    await fetchUsers();
+                } catch (err) {
+                    console.error('Remove dismissal blacklist error:', err);
+                    showToast(err.response?.data?.error || 'Не удалось убрать из ЧС', 'error');
+                } finally {
+                    if (isMounted.current) setUnblacklistingUserId(null);
+                }
+            };
+            const employeeUnblacklistAction = (employee) => canRemoveEmployeeBlacklist
+                && isEmployeeBlacklistDismissal(employee) && {
+                key: 'unblacklist',
+                label: unblacklistingUserId === Number(employee?.id) ? 'Убираю из ЧС…' : 'Убрать из ЧС',
+                short: 'Убрать из ЧС',
+                icon: 'unblacklist',
+                disabled: unblacklistingUserId === Number(employee?.id),
+                confirm: {
+                    note: `Убрать «${employee?.name || ''}» из ЧС? Увольнение останется обычным — человека можно будет вернуть на работу.`,
+                    label: 'Убрать',
+                },
+                onClick: () => removeEmployeeBlacklist(employee),
+            };
+
             const manageUsersActionsFor = (employee) => [
                 employeeEditAction(employee),
                 employeeHistoryAction(employee),
@@ -51410,6 +51574,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     confirm: { note: `Повысить «${employee?.name || ''}» до супервайзера?`, label: 'Повысить' },
                     onClick: () => promoteUserToSupervisor(employee, { skipConfirm: true }),
                 },
+                employeeUnblacklistAction(employee),
             ].filter(Boolean);
 
             // Пропсы формы правки — общие у отдельного окна и у экрана в карточке.
@@ -51770,6 +51935,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             confirm: { note: `Уволить админа «${name}»?`, label: 'Уволить' },
                             onClick: () => dismissAdminUser(employee, { skipConfirm: true }),
                         },
+                        employeeUnblacklistAction(employee),
                     ].filter(Boolean);
                 };
                 if (isMobileShell) {
@@ -52461,6 +52627,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'water' && canAccessWaterSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
+                // «Реестр тестовых номеров» — свой предикат: раздел общефирменный,
+                // в allowlist отделов его нет.
+                if (view === 'test_numbers' && canAccessTestNumbersSection) return;
                 // «Списки Байги» — свой предикат: раздел открыт ОП, СЗоВ и
                 // «Маркетингу», а у ОП и «Маркетинга» есть allowlist, и проверка
                 // ниже выбросила бы их из раздела сразу после входа.
@@ -52496,7 +52665,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -54844,6 +55013,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {renderDividerIfInner(
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
+                                                canAccessTestNumbersSection,
                                                 canAccessDialListSection && deptAllowsInner('dial_list'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
@@ -54862,6 +55032,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
+                                            )}
+                                            {/* «Реестр тестовых номеров» — без SidebarDeptScope: номер
+                                                не принадлежит отделу, раздел виден при любом выбранном.
+                                                Пункт продублирован в ветке глав отделов. */}
+                                            {canAccessTestNumbersSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'test_numbers')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'test_numbers' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-flask"></FaIcon> <span className="sidebar-text">Реестр тестовых номеров</span>
+                                                    </button>
+                                                </li>
                                             )}
                                             {canAccessDialListSection && (
                                                 <SidebarDeptScope section="dial_list" activeCode={activeDeptCode}>
@@ -54937,7 +55120,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
-                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessFleetEdm, canAccessDriverMailings)}
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessTestNumbersSection, canAccessFleetEdm, canAccessDriverMailings)}
 
                                             {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                                             <li>
@@ -54946,6 +55129,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* Ветка открыта и супервайзерам — пункт только главе
+                                                (canAccessTestNumbersSectionForUser). */}
+                                            {canAccessTestNumbersSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'test_numbers')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'test_numbers' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-flask"></FaIcon> <span className="sidebar-text">Реестр тестовых номеров</span>
                                                 </button>
                                             </li>
                                             )}
@@ -55334,6 +55529,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessParcelsSection,
                 canAccessWaterSection,
                 canAccessThermoboxesSection,
+                canAccessTestNumbersSection,
                 canAccessBaigaSection,
                 canAccessLibrarySection,
                 eventsSectionShown,
@@ -55678,6 +55874,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         className={`main-content w-full ${
                             isCallEvaluationView
                                 ? 'p-0 h-screen overflow-hidden'
+                                : view === 'wazzup_chats'
+                                    ? 'wz-main-content p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
@@ -55844,6 +56042,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "thermoboxes" && canAccessThermoboxesSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <ThermoboxesView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {/* «Реестр тестовых номеров» — без QR-замка: раздел только у админов и глав. */}
+                        {view === 'test_numbers' && canAccessTestNumbersSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <TestNumbersView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
@@ -57630,7 +57838,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     actionsFor: isManageOperatorsReadOnly ? null : (op) => [
                                         { key: 'edit', label: 'Изменить', onClick: () => openManagedOperatorEditor(op) },
                                         employeeHistoryAction(op),
-                                    ],
+                                        employeeUnblacklistAction(op),
+                                    ].filter(Boolean),
                                 })}
                                 {view === 'manage_operators' && !isMobileShell && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
@@ -62498,6 +62707,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         wikiEnabled={wikiSectionEnabled}
                         locked={sensitiveSectionsLocked}
                         lockChecking={sensitiveSectionsChecking}
+                        // Шарик открывают и из раздела, где статус QR не спрашивали.
+                        onCheckAccess={fetchSensitiveAccessStatus}
                         onRequestQr={requestSensitiveQrAccess}
                         onOpenWikiArticle={(slug) => {
                             // Тот же плумбинг, что у колокола: слаг кладём в
@@ -62521,6 +62732,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         нет сам собой — тот уходит ранним return выше, и
                         предлагать установку до входа незачем. */}
                     <InstallAppPrompt />
+                    {/* Сторож смены верификатора. Здесь, а не в разделе «Чаты ОП»:
+                        смена идёт, пока открыт портал, а раздел размонтируется при
+                        уходе в «Вики» или «Мои смены». Ничего не рисует. */}
+                    {isWazzupChatOperator(user) && (
+                        <Suspense fallback={null}>
+                            <WazzupShiftKeeper
+                                userId={user.id}
+                                apiBaseUrl={API_BASE_URL}
+                                withAccessTokenHeader={withAccessTokenHeader}
+                            />
+                        </Suspense>
+                    )}
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
             );

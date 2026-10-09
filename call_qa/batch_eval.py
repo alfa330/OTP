@@ -48,6 +48,7 @@ from .evaluation import evaluator
 from .evaluation import runtime_store
 from .evaluation.fingerprint import content_hash, transcript_fingerprint
 from .rag import knowledge
+from test_numbers import keys as test_keys
 from .api import (_download, _lines_from_tokens, _ai_score, _cache_put, _meta_upsert,
                   _audio_object_fingerprint, _evaluation_identity, _score_breakdown,
                   _direction_department_code)
@@ -166,6 +167,8 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
                   AND c.audio_path IS NOT NULL AND c.audio_path <> ''
                   AND COALESCE(c.is_draft, FALSE) = FALSE
                   AND c.created_at >= %s AND c.created_at < %s
+                  -- Номер из «Реестра тестовых номеров» — проверка линии, не разговор.
+                  AND """ + test_keys.sql_not_test('c.phone_number') + """
                 ORDER BY c.created_at""",
             (config.department_direction_id_family(cur, department), lo, hi))
         rows = cur.fetchall(); cur.close(); conn.close()
@@ -251,9 +254,11 @@ def _select_episode_rows(cur, family, lo, hi, subject_kind) -> list[dict]:
     # у которых текст ещё есть откуда собрать. Фрагмент ОБЩИЙ с выборкой раздела
     # (api.CA_TEXT_AVAILABLE_SQL): своя копия приняла бы только сырые сообщения и
     # молча теряла бы эпизоды, у которых остался лишь снапшот.
-    from .api import CA_TEXT_AVAILABLE_SQL
+    from .api import CA_TEXT_AVAILABLE_SQL, _CA_NOT_TEST, _WZ_NOT_TEST
     text_available = "" if is_wz else (
         " AND " + CA_TEXT_AVAILABLE_SQL.format(alias="e"))
+    # Переписка с номером из «Реестра тестовых номеров» — тот же гейт, что у пула раздела.
+    text_available += " AND " + (_WZ_NOT_TEST if is_wz else _CA_NOT_TEST).format(alias="e")
     cur.execute(
         """SELECT e.id, u.direction_id, d.name, u.name,
                   TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM.YYYY, HH24:MI'),
@@ -278,7 +283,7 @@ def _select_c2d_snapshots(cur, family, lo, hi) -> list[dict]:
 
     Гейты те же, что у выборки одной случайной заявки в разделе, — переиспользуем
     ровно те же куски SQL, чтобы пакетный прогон и кнопка не расходились."""
-    from .api import _C2D_OPERATOR_MESSAGES_SQL, _C2D_SPLIT_SQL
+    from .api import _C2D_NOT_TEST, _C2D_OPERATOR_MESSAGES_SQL, _C2D_SPLIT_SQL
     cur.execute(
         """SELECT t.id, u.direction_id, d.name, COALESCE(u.name, t.c2d_operator_name),
                   TO_CHAR(t.day,'DD.MM.YYYY'),
@@ -290,6 +295,7 @@ def _select_c2d_snapshots(cur, family, lo, hi) -> list[dict]:
               AND t.day >= %s::date AND t.day < %s::date
               AND """ + _C2D_OPERATOR_MESSAGES_SQL + """ >= %s
               AND NOT """ + _C2D_SPLIT_SQL + """
+              AND """ + _C2D_NOT_TEST.format(alias="t") + """
             ORDER BY t.day""",
         (family, lo, hi, config.C2D_MIN_OPERATOR_MESSAGES))
     return [{"id": r[0], "subject_kind": config.SUBJECT_C2D_SNAPSHOT,

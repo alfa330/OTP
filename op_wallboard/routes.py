@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, jsonify, request, send_file
 
 from cdr import directory as directory_mod, leads as cdr_leads_mod, queries, touches as touches_mod
+from test_numbers import keys as test_keys
 from . import (chat as chat_mod, chat_export as chat_export_mod, lead_speed as lead_speed_mod,
                snapshot as snapshot_mod)
 
@@ -114,6 +115,7 @@ def load_queue_answers(cursor, day, days=snapshot_mod.QUEUE_OWNER_LOOKBACK_DAYS)
            AND talk_seconds > 0
            AND queue <> ''
            AND ext <> ''
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
          GROUP BY 1, 2
     """, (day - timedelta(days=days), day, snapshot_mod.touches_mod.TYPE_IN))
     return [(row[0], row[1], int(row[2])) for row in cursor.fetchall()]
@@ -139,6 +141,7 @@ def load_announcement_deltas(cursor, day, days=ANNOUNCEMENT_LOOKBACK_DAYS):
            AND call_type LIKE 'Входящий%%'
            AND queue <> ''
            AND linkedid ~ '^[0-9]+\\.[0-9]+$'
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
          GROUP BY 1, 2
     """, (day - timedelta(days=days), day))
     return [(row[0], int(row[1]), int(row[2])) for row in cursor.fetchall()]
@@ -150,15 +153,21 @@ def load_lead_deals(cursor, day, direction=lead_speed_mod.LEAD_DIRECTION,
 
     Сутки сделки amoCRM в снимке — дата её создания (`op_funnel.sources.amo_rows`), поэтому
     `work_day` отбирает ровно созданные сегодня, по индексу (direction_code, work_day). Около
-    тысячи строк в сутки."""
+    тысячи строк в сутки.
+
+    Сделка, все номера которой — из реестра тестовых (test_numbers), в плитку не идёт:
+    её завёл робот пропущенных по тестовому звонку или сам тестировщик."""
     cursor.execute("""
         SELECT lead_key, created_at, phones, phone
           FROM op_funnel_leads
          WHERE direction_code = %s AND source = %s AND work_day = %s
            AND created_at IS NOT NULL
     """, (direction, source, day))
-    return [{'lead_key': row[0], 'created_at': row[1], 'phones': row[2] or '', 'phone': row[3] or ''}
-            for row in cursor.fetchall()]
+    deals = [{'lead_key': row[0], 'created_at': row[1], 'phones': row[2] or '', 'phone': row[3] or ''}
+             for row in cursor.fetchall()]
+    test_numbers = test_keys.load_keys(cursor)
+    return [deal for deal in deals
+            if not test_keys.all_test(cdr_leads_mod.lead_phones(deal), test_numbers)]
 
 
 def load_lead_touches(cursor, day, grace=cdr_leads_mod.GRACE):
@@ -175,6 +184,7 @@ def load_lead_touches(cursor, day, grace=cdr_leads_mod.GRACE):
          WHERE call_day BETWEEN %s AND %s
            AND started_at >= %s
            AND (call_type = %s OR (call_type = %s AND talk_seconds > 0))
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
     """, (day - timedelta(days=1), day, day_start - grace, touches_mod.TYPE_OUT, touches_mod.TYPE_IN))
     return [{'started_at': row[0], 'phone': row[1] or '', 'ext': row[2] or '', 'call_type': row[3],
              'talk_seconds': int(row[4] or 0), 'dial_seconds': int(row[5] or 0),
@@ -225,6 +235,7 @@ def load_chat_messages(cursor, since, until, account=CHAT_ACCOUNT):
            AND NOT w.is_deleted
            AND w.dt >= (%s::timestamp AT TIME ZONE 'Asia/Almaty')
            AND w.dt < (%s::timestamp AT TIME ZONE 'Asia/Almaty')
+           AND """ + test_keys.sql_not_test(test_keys.wazzup_phone_sql('w'), digits=True) + """
     """, (account, since, until))
     return [{'channel_id': row[0], 'chat_id': row[1], 'at': row[2], 'is_echo': bool(row[3]),
              'user_id': row[4], 'is_bot': bool(row[5]), 'message_id': row[6],

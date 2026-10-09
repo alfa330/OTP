@@ -52,6 +52,15 @@ test('outgoing delivery uses gray/blue double checks, accessible labels and no v
     assert.doesNotMatch(incoming, /lucide-check-check/);
 });
 
+test('a message still in the queue or just accepted by Wazzup shows one gray check, not a clock', () => {
+    for (const [status, label] of [['queued', 'Отправляется'], ['pending', 'Принято Wazzup'], ['sent', 'Отправлено']]) {
+        const markup = renderToStaticMarkup(React.createElement(Bubble, { msg: { ...msg, isEcho: true, status } }));
+        assert.match(markup, /lucide-check(?!-)/, status);
+        assert.doesNotMatch(markup, /lucide-clock|lucide-check-check/, status);
+        assert.ok(markup.includes(`aria-label="${label}"`) && markup.includes('text-slate-500'), status);
+    }
+});
+
 test('double click on a message chooses the reply without activating embedded media or deleted messages', () => {
     const replies = [];
     const tree = Bubble.type({ msg, onReply: (item) => replies.push(item) });
@@ -74,6 +83,41 @@ test('continuing an operator group hides only the author label and aligns the re
     assert.match(continuation, /Тест/);
     assert.match(continuation, /lucide-check-check/);
     assert.match(continuation, /Ответить на сообщение/);
+});
+
+const buttonsOf = (node, found = []) => {
+    if (!node || typeof node !== 'object') return found;
+    if (node.type === 'button') found.push(node);
+    React.Children.toArray(node.props?.children).forEach((child) => buttonsOf(child, found));
+    return found;
+};
+const label = (button) => React.Children.toArray(button.props.children).join('');
+
+test('a failed or unconfirmed own message offers one fix and one way out under the bubble, wired to the right action', () => {
+    const local = (state, editable) => ({ ...msg, messageId: 'local:x', clientMessageId: 'x', isEcho: true,
+        status: state, local: { state, error: 'Причина от сервера', pinned: false, editable } });
+    for (const [state, editable, expected] of [
+        ['failed', true, { Повторить: 'retry', Изменить: 'edit' }],
+        ['failed', false, { Повторить: 'retry', Убрать: 'discard' }],
+        ['unknown', false, { Проверить: 'retry', Убрать: 'discard' }]]) {
+        const calls = [];
+        const tree = Bubble.type({ msg: local(state, editable), onRetry: (id) => calls.push(['retry', id]),
+            onEdit: (id) => calls.push(['edit', id]), onDiscard: (id) => calls.push(['discard', id]) });
+        const row = find(tree, (node) => node.props?.['data-testid'] === 'wazzup-send-problem');
+        assert.ok(row, `${state}: a problem row`);
+        assert.equal(row.props.role, 'alert');
+        const buttons = buttonsOf(row);
+        assert.deepEqual(buttons.map(label), Object.keys(expected));
+        buttons.forEach((button) => button.props.onClick());
+        assert.deepEqual(calls, Object.values(expected).map((action) => [action, 'x']));
+        assert.match(renderToStaticMarkup(React.createElement(Bubble, { msg: local(state, editable) })), /Причина от сервера/);
+    }
+    for (const state of ['queued', 'sending', 'sent']) {
+        const tree = Bubble.type({ msg: { ...local(state, false), status: 'queued' } });
+        assert.equal(find(tree, (node) => node.props?.['data-testid'] === 'wazzup-send-problem'), null, `${state}: no row`);
+    }
+    const queued = renderToStaticMarkup(React.createElement(Bubble, { msg: { ...local('sending', false), status: 'queued' } }));
+    assert.match(queued, /aria-label="Отправляется"/);
 });
 
 const imageOutput = join(cache, 'wazzup-stable-image.mjs');

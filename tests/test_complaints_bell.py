@@ -25,11 +25,15 @@ class FakeCursor:
 
 
 class FakeCrmQueries:
-    def __init__(self, rows):
+    def __init__(self, rows, reviews=()):
         self.rows = rows
+        self.reviews = list(reviews)
 
     def unread_for_bell(self, cursor, user_id, limit):
         return len(self.rows), self.rows[:limit]
+
+    def review_for_bell(self, cursor, user_id, limit):
+        return len(self.reviews), self.reviews[:limit]
 
 
 def complaint_row(complaint_id, at, kind='answer'):
@@ -49,8 +53,8 @@ class BellSplitTest(unittest.TestCase):
         complaint_queries.author_bell_items = self._author
         complaint_queries.work_bell_items = self._work
 
-    def wire(self, tickets=(), complaints=(), work=()):
-        fake = FakeCrmQueries(list(tickets))
+    def wire(self, tickets=(), complaints=(), work=(), reviews=()):
+        fake = FakeCrmQueries(list(tickets), reviews)
         sources._crm_queries = lambda: fake
         complaint_queries.author_bell_items = (
             lambda cursor, user_id, limit: (len(complaints), list(complaints)[:limit]))
@@ -95,6 +99,42 @@ class BellSplitTest(unittest.TestCase):
             total, items = sources.crm(cursor, {'user_id': 10}, 5)
         self.assertEqual((total, [item['id'] for item in items]), (1, [7]))
         self.assertIn('ROLLBACK', cursor.commands)
+
+    def test_ticket_waiting_for_my_review_is_a_task_in_the_crm_source(self):
+        """Задача #297: «Сотрудничество с Яндексом» сначала проверяет
+        супервайзер. Его задача приходит строкой «Обращений» — там он её и
+        решает; своего раздела у проверки обращений нет."""
+        self.wire(
+            tickets=[(7, 'Термокороб', 'reply', datetime(2026, 10, 7, 10, 0), 'Яндекс Доставка')],
+            reviews=[(110, 'Сотрудничество с Яндексом', datetime(2026, 10, 7, 11, 7),
+                      'Оператор', 1)],
+        )
+        total, items = sources.crm(FakeCursor(), {'user_id': 55}, 5)
+        self.assertEqual(total, 2, 'бейдж раздела — ответы и задачи проверки вместе')
+        self.assertEqual([item['id'] for item in items], ['review:110', 7], 'свежее сверху')
+        task = items[0]
+        self.assertEqual((task['source'], task['view'], task['target']),
+                         ('crm', 'crm_tickets', 110), 'переход открывает само обращение')
+        self.assertEqual(task['title'], 'Сотрудничество с Яндексом')
+        self.assertIn('отправить в группу или решено', task['body'])
+
+    def test_review_tasks_share_the_limit_and_the_counter(self):
+        self.wire(
+            tickets=[(i, 'Т', 'reply', datetime(2026, 10, 7, 9, i), 'Q') for i in range(1, 4)],
+            reviews=[(100 + i, 'Сотрудничество с Яндексом', datetime(2026, 10, 7, 10, i),
+                      'Оператор', 3) for i in range(1, 4)],
+        )
+        total, items = sources.crm(FakeCursor(), {'user_id': 55}, 4)
+        self.assertEqual(total, 6, 'счётчик считает всё')
+        self.assertEqual(len(items), 4, 'а порция — одна на источник')
+
+    def test_reviewed_ticket_tells_the_author_so(self):
+        """Супервайзер закрыл обращение своим итогом — автору это и есть ответ."""
+        self.wire(tickets=[(110, 'Сотрудничество с Яндексом', 'reviewed',
+                            datetime(2026, 10, 7, 11, 30), 'Сотрудничество')])
+        _total, items = sources.crm(FakeCursor(), {'user_id': 158}, 5)
+        self.assertEqual(items[0]['body'], 'Супервайзер проверил: решено')
+        self.assertEqual(items[0]['id'], 110)
 
     def test_complaints_source_is_only_the_work(self):
         self.wire(work=[{'id': 5, 'role': 'work', 'kind': 'work',

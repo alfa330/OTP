@@ -52,6 +52,21 @@ TICKET_SOURCES = ('manual', 'chat', 'call', 'api')
 # Направление сообщения в нити.
 MESSAGE_DIRECTIONS = ('out', 'in', 'note')
 
+# Проверка супервайзером ДО группы (возврат задачи #297, 06.10.2026). Проходят
+# её не все обращения, а только те, которым это объявила тематика
+# (scenarios.needs_review), — сейчас это «Сотрудничество с Яндексом».
+#
+#   pending   — ждёт супервайзера: в группу обращение не уходило;
+#   sent      — супервайзер отправил его в группу, дальше обычный путь;
+#   resolved  — супервайзер решил сам, итог записан, в группу не уходило.
+#
+# NULL — обращение проверки не проходит. Слова те же, что у жалоб на Яндекс
+# (complaints/catalog.REVIEW_*): это одна и та же проверка у двух видов
+# обращений, и интерфейс читает оба одинаково.
+REVIEW_PENDING = 'pending'
+REVIEW_SENT = 'sent'
+REVIEW_RESOLVED = 'resolved'
+
 _STATEMENTS = [
 
     # ──────────────────────────────────────────────────────────────────────
@@ -292,6 +307,14 @@ _STATEMENTS = [
         ON crm_tickets(created_by, (author_unread_at IS NULL),
                        last_message_at DESC, id DESC)
     """,
+    # Очередь проверки у супервайзера — единицы строк среди всех обращений.
+    # Счётчик раздела, колокол и фильтр «На проверку» спрашивают ровно это, а
+    # условие «автор из моей группы» (queries.reviewer_sql) идёт от автора.
+    """
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_review_pending
+        ON crm_tickets(created_by, created_at DESC)
+        WHERE review_state = 'pending'
+    """,
 
     # Поиск по тексту (ТЗ #29: «поиск по тексту»). ILIKE '%%слово%%' обычным
     # индексом не ускоряется вообще — нужен триграммный GIN. В боевой базе
@@ -456,6 +479,18 @@ _MIGRATIONS = [
     # кодом. На ОЧЕРЕДИ, а не у тематики: ответственный — это человек на той
     # стороне, в группе, и он один на всю группу, сколько бы тем туда ни уходило.
     "ALTER TABLE crm_queues ADD COLUMN IF NOT EXISTS mention_usernames TEXT",
+
+    # Проверка супервайзером до группы (REVIEW_*). Кто и когда решил — для
+    # карточки и выгрузки; review_note — итог, с которым он закрыл обращение
+    # («Решено»). Без CHECK: набор значений держит код, как у жалоб.
+    """
+    ALTER TABLE crm_tickets
+        ADD COLUMN IF NOT EXISTS review_state   VARCHAR(16),
+        ADD COLUMN IF NOT EXISTS review_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS review_by_name VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS review_at      TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS review_note    TEXT
+    """,
 ]
 
 # Очереди, которые нужны сценариям. Заводятся сами и БЕЗ Telegram-группы:

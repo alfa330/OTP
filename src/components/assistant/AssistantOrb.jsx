@@ -1,9 +1,11 @@
 import React, {
-    Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+    Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import Orb from './Orb.jsx';
+import useAssistantAppearance from './useAssistantAppearance.js';
 import useAssistantChat from './useAssistantChat';
 import {
     PANEL_SIZE, clampPosition, defaultPosition, movedEnough, normalizePanelSize, panelAnchor,
@@ -14,7 +16,7 @@ import {
 } from '../../utils/pipWindow';
 import './assistant-orb.css';
 
-const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
+const AssistantPanel = lazyWithRetry(() => import('./AssistantPanel.jsx'));
 
 /* Плавающий помощник: шарик поверх портала и мини-чат из него.
  *
@@ -133,10 +135,11 @@ const viewportSize = () => ({
 export default function AssistantOrb({
     user, view, apiBaseUrl, withAccessTokenHeader, showToast,
     wikiEnabled = true, locked = false, lockChecking = false,
-    onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
+    onCheckAccess, onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
     onOpenWikiTarget = null,
 }) {
     const userId = user?.id;
+    const [appearance, setAppearance] = useAssistantAppearance(userId);
     const [position, setPosition] = useState(null);   // null — ещё не примерились к окну
     const [open, setOpen] = useState(false);
     const [dragging, setDragging] = useState(false);
@@ -233,6 +236,25 @@ export default function AssistantOrb({
     const chat = useAssistantChat({
         base, headers, spaceId, enabled: started && !locked, withSuggestions: true,
     });
+
+    /* Статус QR панель спрашивает САМА, когда её открыли, а статус ещё не известен.
+       У рядового оператора портал узнаёт его только при входе в закрытый раздел
+       («Вики», «Обращения»…): при входе в портал этот запрос у операторов снят
+       ради нагрузки в час аукциона смен. Шарик же открывают с любой страницы, и
+       верификатор в «Чатах ОП» видел «Проверяем доступ…» без конца (09.10.2026):
+       ответа, которого ждала панель, никто не запрашивал. Спрашиваем на открытие,
+       а не при появлении шарика: шарик висит у всех, панель открывает меньшинство.
+       Ref держит один запрос на ожидание — тычок, пока ответ в пути, второго не шлёт. */
+    const accessAskedRef = useRef(false);
+    useEffect(() => {
+        if (!lockChecking) {
+            accessAskedRef.current = false;
+            return;
+        }
+        if (!(open || detached) || accessAskedRef.current) return;
+        accessAskedRef.current = true;
+        onCheckAccess?.();
+    }, [lockChecking, open, detached, onCheckAccess]);
 
     /* Первая примерка к окну. Позицию сохранял, возможно, широкий монитор —
        на ноутбуке те же координаты означают шарик за краем экрана, которого
@@ -680,6 +702,8 @@ export default function AssistantOrb({
             </div>
         )}>
             <AssistantPanel
+                appearance={appearance}
+                onAppearanceChange={setAppearance}
                 chat={chat}
                 locked={locked}
                 lockChecking={lockChecking}
@@ -717,7 +741,7 @@ export default function AssistantOrb({
                         ? 'Помощник открыт в отдельном окне'
                         : 'Помощник — вопрос по базе знаний'}
                 >
-                    <Orb animated={!hidden} />
+                    <Orb effect={appearance} animated={!hidden} />
                 </button>
             )}
 

@@ -1,8 +1,8 @@
-"""Shared iCORE quick replies and the documented Wazzup WABA template API.
+"""Shared iCORE replies, imported Wazzup replies and the WABA template API.
 
-Ordinary Wazzup quick replies require a partner client_access_token, not the
-account's v3/sidecar key. Do not probe private endpoints or silently substitute
-an empty list for that limitation.
+The v3 key supplies WABA only. Ordinary templates are imported from an authorized
+browser export into a separate catalogue, shared across all processing channels.
+They never enter the WABA code validator and are not polled through private APIs.
 """
 import copy
 import hashlib
@@ -23,12 +23,13 @@ MAX_STALE = 3600
 MAX_TEXT = 4096
 MAX_TITLE = 100
 MAX_LOCAL = 250
+MAX_IMPORTED = 1000
+MAX_EXTERNAL_ID = 200
+MAX_IMPORT_BYTES = 8 * 1024 * 1024
 EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
 })
-QUICK_WARNING = ('Обычные шаблоны Wazzup недоступны с текущим API-ключом. '
-                 'Здесь доступны шаблоны WABA и общие быстрые ответы iCORE.')
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)
 _cache_condition = threading.Condition()
@@ -49,6 +50,17 @@ def init_template_schema(cursor):
         );
         CREATE INDEX IF NOT EXISTS idx_wazzup_quick_templates_account
             ON wazzup_quick_templates(account, title);
+        CREATE TABLE IF NOT EXISTS wazzup_imported_templates (
+            id UUID PRIMARY KEY,
+            account TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            attachment_count INTEGER NOT NULL DEFAULT 0,
+            imported_by BIGINT NOT NULL,
+            imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(account, external_id)
+        );
     """)
 
 
@@ -176,7 +188,7 @@ def list_templates(account='op', channel_id=None, *, excluded_channels=EXCLUDED_
             continue
         result.append(item)
     result.sort(key=lambda item: item['title'].casefold())
-    return dict(items=result, stale=stale, sourceWarnings=[QUICK_WARNING] + ([error] if error else []))
+    return dict(items=result, stale=stale, sourceWarnings=[error] if error else [])
 
 
 def validate_template_message(account, channel_id, text, *, excluded_channels=EXCLUDED_CHANNELS):
@@ -216,6 +228,58 @@ def _local_item(row):
     return dict(id=str(row[0]), source='icore', kind='text', title=row[1], text=row[2],
                 templateCode=None, channels=[], variables=[], supported=True,
                 unsupportedReason=None, buttons=[])
+
+
+def _imported_item(row):
+    """Imported attachments stay visibly unsupported, never truncated to text."""
+    item = _local_item(row)
+    item.update(source='wazzup', supported=not row[3], attachmentCount=row[3],
+                unsupportedReason=('Шаблон содержит вложения. Отправьте его из Wazzup.'
+                                   if row[3] else None))
+    return item
+
+
+def normalize_import(body):
+    """Validate a complete package before touching the catalogue.
+
+    Only attachment counts are kept: source URLs/tokens and browser metadata
+    are neither necessary for unsupported files nor safe to expose in listings.
+    Error messages identify the row number without echoing imported content.
+    """
+    if not isinstance(body, dict) or body.get('account') != 'op':
+        raise ValueError('Для импорта укажите account: op')
+    if set(body) - {'account', 'items', 'dryRun'}:
+        raise ValueError('Неизвестные поля пакета импорта')
+    dry_run = body.get('dryRun', True)
+    if not isinstance(dry_run, bool):
+        raise ValueError('dryRun должен быть true или false')
+    items = body.get('items')
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_IMPORTED:
+        raise ValueError(f'Передайте от 1 до {MAX_IMPORTED} шаблонов')
+    normalized, ids = [], set()
+    for number, item in enumerate(items, 1):
+        if not isinstance(item, dict) or set(item) - {'externalId', 'title', 'text', 'files'}:
+            raise ValueError(f'Шаблон {number}: некорректные поля')
+        external_id, title, text = item.get('externalId'), item.get('title'), item.get('text')
+        files = item.get('files', [])
+        if (not isinstance(external_id, str) or not 1 <= len(external_id.strip()) <= MAX_EXTERNAL_ID
+                or any(ord(char) < 32 for char in external_id)):
+            raise ValueError(f'Шаблон {number}: некорректный externalId')
+        external_id = external_id.strip()
+        if external_id in ids:
+            raise ValueError(f'Шаблон {number}: externalId повторяется')
+        if (not isinstance(title, str) or not 1 <= len(title.strip()) <= MAX_TITLE
+                or '\x00' in title):
+            raise ValueError(f'Шаблон {number}: название должно быть от 1 до {MAX_TITLE} символов')
+        if (not isinstance(files, list) or len(files) > 100
+                or any(not isinstance(file, (str, dict)) or not file for file in files)):
+            raise ValueError(f'Шаблон {number}: files должен быть списком вложений')
+        if (not isinstance(text, str) or len(text) > MAX_TEXT or '\x00' in text
+                or (not text.strip() and not files)):
+            raise ValueError(f'Шаблон {number}: укажите текст до {MAX_TEXT} символов или вложение')
+        ids.add(external_id)
+        normalized.append((external_id, title.strip(), text, len(files)))
+    return normalized, dry_run
 
 
 def render_template_preview(account, channel_id, text):
@@ -273,13 +337,16 @@ def register_template_routes(bp, actor, require_api_key, preflight, db,
                 except ValueError:
                     return jsonify(error='Некорректный канал'), 400
                 if channel_id in excluded_channels:
-                    return jsonify(error='Global исключён из пилота'), 403
+                    return jsonify(error='Global исключён из обработки'), 403
             with db._get_cursor() as cur:
                 cur.execute("SELECT id,title,body FROM wazzup_quick_templates "
                             "WHERE account='op' ORDER BY lower(title),id")
                 local = [_local_item(row) for row in cur.fetchall()]
+                cur.execute("SELECT id,title,body,attachment_count FROM wazzup_imported_templates "
+                            "WHERE account='op' ORDER BY lower(title),id")
+                imported = [_imported_item(row) for row in cur.fetchall()]
             result = dict(list_templates('op', channel_id, excluded_channels=excluded_channels))
-            result['items'] = local + result['items']
+            result['items'] = local + imported + result['items']
             result['canManage'] = True
             return jsonify(result)
         body = validated_body()
@@ -296,6 +363,50 @@ def register_template_routes(bp, actor, require_api_key, preflight, db,
                         (str(uuid.uuid4()), *body, user[0], user[0]))
             item = _local_item(cur.fetchone())
         return jsonify(item=item), 201
+
+    @bp.route('/templates/import', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def import_templates():
+        if request.method == 'OPTIONS':
+            return preflight()
+        user, error = context()
+        if error:
+            return error
+        if len(user) <= 3 or str(user[3] or '').strip().lower() != 'super_admin':
+            return jsonify(error='Импорт шаблонов доступен только супер-администратору'), 403
+        if request.content_length is not None and request.content_length > MAX_IMPORT_BYTES:
+            return jsonify(error='Пакет импорта слишком большой'), 413
+        try:
+            rows, dry_run = normalize_import(request.get_json(silent=True))
+        except ValueError as error:
+            return jsonify(error=str(error)), 400
+        result = dict(created=0, updated=0, unchanged=0,
+                      unsupported=sum(bool(row[3]) for row in rows))
+        with db._get_cursor() as cur:
+            # Serialize capacity checks and upserts across all API workers.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('wazzup-imported-templates'),hashtext('op'))")
+            cur.execute("SELECT external_id,title,body,attachment_count FROM wazzup_imported_templates "
+                        "WHERE account='op'")
+            existing = {row[0]: tuple(row[1:]) for row in cur.fetchall()}
+            if len(set(existing) | {row[0] for row in rows}) > MAX_IMPORTED:
+                return jsonify(error=f'Достигнут лимит {MAX_IMPORTED} импортированных шаблонов'), 409
+            for external_id, title, text, attachments in rows:
+                previous = existing.get(external_id)
+                if previous == (title, text, attachments):
+                    result['unchanged'] += 1
+                    continue
+                result['created' if previous is None else 'updated'] += 1
+                if dry_run:
+                    continue
+                cur.execute("INSERT INTO wazzup_imported_templates "
+                            "(id,account,external_id,title,body,attachment_count,imported_by) "
+                            "VALUES(%s,'op',%s,%s,%s,%s,%s) "
+                            "ON CONFLICT(account,external_id) DO UPDATE SET "
+                            "title=EXCLUDED.title,body=EXCLUDED.body,"
+                            "attachment_count=EXCLUDED.attachment_count,imported_by=EXCLUDED.imported_by,"
+                            "imported_at=NOW()",
+                            (str(uuid.uuid4()), external_id, title, text, attachments, user[0]))
+        return jsonify(status='success', dryRun=dry_run, total=len(rows), **result)
 
     @bp.route('/templates/<template_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
     @require_api_key

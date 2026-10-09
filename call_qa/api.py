@@ -13,6 +13,8 @@ from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 
+from test_numbers import keys as test_keys
+
 from . import call_end
 from . import config
 from . import human_review as human_review_mod
@@ -239,8 +241,24 @@ _SUBJECT_JOIN = """
                                            ui.direction_id, us.direction_id,
                                            ua.direction_id)
 """
+# Номер разговора по виду субъекта — чтобы разговоры с номерами «Реестра тестовых
+# номеров» (test_numbers) не попадали ни в один список, счётчик и сводку раздела.
+# Алиасы те же, что у _SUBJECT_JOIN и _RAW_BENCHMARK_SQL. У звонка журнала номер —
+# свободный текст, у остальных — цифры; у заявки Chat2Desk клиента WhatsApp с
+# идентификатором «[wa_…] KZ.…» номер лежит в assigned_phone исходного обращения.
+_SUBJECT_PHONE_KEYS = (
+    test_keys.sql_key('c.phone_number'),
+    test_keys.sql_digits_key(test_keys.wazzup_phone_sql('e')),
+    test_keys.sql_key("COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)"),
+    test_keys.sql_digits_key('cs.client_phone'),
+    test_keys.sql_digits_key('(SELECT r.assigned_phone FROM c2d_requests r'
+                             ' WHERE r.request_id = cs.request_id)'),
+    test_keys.sql_digits_key('ce.contact_phone'),
+)
+_SUBJECT_NOT_TEST = test_keys.sql_not_test_keys(*_SUBJECT_PHONE_KEYS)
 _SUBJECT_EXISTS = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT NULL"
-                   " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)")
+                   " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)"
+                   " AND " + _SUBJECT_NOT_TEST)
 _SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
                       " us.direction_id, ua.direction_id)")
 # У звонка из АТС оператор может быть не привязан к учётной записи — тогда
@@ -4874,7 +4892,9 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                          AND COALESCE(ic.status, '') <> 'evaluated'
                          AND NOT EXISTS (SELECT 1 FROM calls c
                                           WHERE c.imported_call_id = ic.id
-                                            AND COALESCE(c.is_draft, FALSE) = FALSE)"""
+                                            AND COALESCE(c.is_draft, FALSE) = FALSE)
+                         AND """ + test_keys.sql_not_test(
+                             "COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)")
         with_audio = " AND ic.audio_path IS NOT NULL AND ic.audio_path <> ''"
         without_audio = " AND (ic.audio_path IS NULL OR ic.audio_path = '')"
         # Отбор панели сужает и подбор: кнопка «Оценить случайный звонок» при
@@ -4916,6 +4936,7 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                    WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL
                      AND c.audio_path <> ''
                      AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
+        base += " AND " + test_keys.sql_not_test('c.phone_number')
         journal_pick, journal_pick_params = _pick_filters_predicate(
             filters, operator_col="c.operator_id",
             # Тот же перевод, что в подписи и в фильтре списка: у calls время
@@ -5336,6 +5357,18 @@ def random_chat_episode(allowed_direction_ids=None, department=None, filters=Non
             "in_journal": False}
 
 
+# Переписка с номером из «Реестра тестовых номеров» (test_numbers) в пулы не идёт:
+# ни в ежедневную выборку, ни в «Случайный чат», ни в счётчики пригодности. Номера
+# Wazzup и ChatApp — одни цифры (сверено на проде 09.10.2026). Шаблоны с {alias}:
+# у пула и у счётчиков алиасы разные.
+_WZ_NOT_TEST = test_keys.sql_not_test(test_keys.wazzup_phone_sql('{alias}'), digits=True)
+_CA_NOT_TEST = test_keys.sql_not_test('{alias}.contact_phone', digits=True)
+_C2D_NOT_TEST = test_keys.sql_not_test_any(
+    '{alias}.client_phone',
+    '(SELECT r.assigned_phone FROM c2d_requests r WHERE r.request_id = {alias}.request_id)',
+    digits=True)
+
+
 def _wz_candidates(family):
     """Кандидаты-эпизоды Wazzup. Алиас t — общий для всех источников: постфикс
     запроса (исключение уже оценённых) один на всех."""
@@ -5346,7 +5379,8 @@ def _wz_candidates(family):
                  JOIN users u ON u.id = t.operator_user_id
                  LEFT JOIN directions d ON d.id = u.direction_id
                 WHERE t.kind = 'dialog' AND u.direction_id = ANY(%s)
-                  AND t.operator_share >= %s AND t.human_outbound_count >= %s""",
+                  AND t.operator_share >= %s AND t.human_outbound_count >= %s
+                  AND """ + _WZ_NOT_TEST.format(alias='t'),
             (family, config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_MESSAGES))
 
 
@@ -5393,7 +5427,8 @@ def _ca_candidates(family):
                 WHERE t.kind = 'dialog' AND u.direction_id = ANY(%s)
                   AND t.operator_share >= %s AND t.human_outbound_count >= %s
                   AND """ + CA_TEXT_AVAILABLE_SQL.format(alias="t") + """
-                  AND NOT """ + CA_IN_JOURNAL_SQL.format(alias="t") + """""",
+                  AND NOT """ + CA_IN_JOURNAL_SQL.format(alias="t") + """
+                  AND """ + _CA_NOT_TEST.format(alias='t'),
             (family, config.CA_MIN_OPERATOR_SHARE, config.CA_MIN_OPERATOR_MESSAGES))
 
 
@@ -5417,7 +5452,8 @@ def _c2d_candidates(family):
                   AND NOT """ + _C2D_SPLIT_SQL + """
                   AND NOT EXISTS (SELECT 1 FROM calls c
                                    WHERE c.c2d_snapshot_id = t.id
-                                     AND COALESCE(c.is_draft, FALSE) = FALSE)""",
+                                     AND COALESCE(c.is_draft, FALSE) = FALSE)
+                  AND """ + _C2D_NOT_TEST.format(alias='t'),
             (family, config.C2D_MIN_OPERATOR_MESSAGES))
 
 
@@ -5513,7 +5549,8 @@ def _episode_eligibility_counts(cur, family, subject_kind) -> dict:
              FROM """ + table + """ e
              LEFT JOIN users u ON u.id = e.operator_user_id
             WHERE e.kind = 'dialog'
-              AND (u.direction_id = ANY(%s) OR e.operator_user_id IS NULL)""",
+              AND (u.direction_id = ANY(%s) OR e.operator_user_id IS NULL)
+              AND """ + (_WZ_NOT_TEST if is_wz else _CA_NOT_TEST).format(alias='e'),
         (min_share, min_share, min_messages, min_share, min_messages,
          subject_kind, config.CLAUDE_MODEL, family))
     row = cur.fetchone() or (0, 0, 0, 0, 0)
@@ -5583,6 +5620,7 @@ def _c2d_eligibility_counts(cur, family) -> dict:
                  LEFT JOIN users u ON u.id = t.operator_id
                 WHERE t.source = 'chat2desk'
                   AND (u.direction_id = ANY(%s) OR t.operator_id IS NULL)
+                  AND """ + _C2D_NOT_TEST.format(alias='t') + """
              ) s""",
         (config.C2D_MIN_OPERATOR_MESSAGES, config.C2D_MIN_OPERATOR_MESSAGES,
          config.CLAUDE_MODEL, family))
@@ -6103,9 +6141,16 @@ def _reviewed_metrics(cur, subject_keys=None):
                 "alarm_precision": None}
     try:
         if subject_keys is None:
+            # Без отбора — без разговоров с номерами «Реестра тестовых номеров» (отбор
+            # панели собран через _SUBJECT_EXISTS и их уже не содержит).
             cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
-                             FROM ai_evaluation_meta
-                            WHERE review_outcome IS NOT NULL AND model = %s""",
+                             FROM ai_evaluation_meta m
+                            WHERE review_outcome IS NOT NULL AND model = %s
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
+                                   WHERE rc.subject_kind = COALESCE(m.subject_kind, 'call')
+                                     AND rc.call_id = m.call_id
+                                     AND NOT """ + _SUBJECT_NOT_TEST + """)""",
                         (config.CLAUDE_MODEL,))
         else:
             # Отбор — в самом запросе: per_criterion тяжёлый, и тащить его по
@@ -6123,6 +6168,7 @@ def _reviewed_metrics(cur, subject_keys=None):
         # Совместимость с БД до миграции subject_kind: строка без типа = звонок.
         rows = [tuple(r) + (config.SUBJECT_CALL,) if len(r) == 3 else tuple(r)
                 for r in cur.fetchall()]
+
     except Exception:
         return None  # колонок ещё нет — появятся после деплоя (миграция на старте)
     out = {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0, "alarm_precision": None}
@@ -6313,7 +6359,8 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                       ORDER BY hr.updated_at DESC LIMIT 1
                  ) hrv ON true
                 WHERE COALESCE(c.scores, hwz.scores, himp.scores,
-                               hc2d.scores, hca.scores, hrv.scores) IS NOT NULL"""
+                               hc2d.scores, hca.scores, hrv.scores) IS NOT NULL
+                  AND """ + _SUBJECT_NOT_TEST
 
 
 def _fill_verdict_stats(cur, out, m):
@@ -6450,8 +6497,9 @@ def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
                             + _SUBJECT_EXISTS + f" AND {_SUBJECT_DIRECTION} = ANY(%s)",
                             (config.CLAUDE_MODEL, scope_family or [-1]))
             else:
-                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + meta_join
-                            + " WHERE rc.model = %s AND m.review_outcome IS NULL",
+                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + meta_join
+                            + " WHERE rc.model = %s AND m.review_outcome IS NULL AND "
+                            + _SUBJECT_NOT_TEST,
                             (config.CLAUDE_MODEL,))
             out["queue"] = cur.fetchone()[0]
         except Exception:

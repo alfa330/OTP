@@ -46,6 +46,7 @@ from datetime import date, datetime, timedelta
 # складываются в cdr_touches. Своя копия здесь однажды разошлась бы, и лид с
 # «+7 705…» перестал бы находить свои же звонки с «7705…».
 from cdr.touches import norm_phone
+from test_numbers import keys as test_keys
 
 from . import metrics
 from .schema import (SOURCE_AMO, SOURCE_CRM_PAID_HIRE, SOURCE_CRM_STREAM,
@@ -695,6 +696,8 @@ def wazzup_daily(cursor, day_from, day_to, operator_map=None):
                         - %(cutoff)s * INTERVAL '1 hour')::date AS local_day
             FROM wazzup_messages m, bounds b
             WHERE m.dt >= b.from_ts AND m.dt < b.to_ts
+              -- Переписка с номерами реестра тестовых (test_numbers) — не работа.
+              AND """ + test_keys.sql_not_test(test_keys.wazzup_phone_sql('m'), digits=True) + """
         ),
         -- Ответ оператора и ближайшее входящее до него в том же чате.
         replies AS (

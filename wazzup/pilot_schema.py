@@ -1,4 +1,4 @@
-"""Additive schema for the alfa330 chat pilot; no changes to archive retention."""
+"""Additive schema for the chat processing mode; no changes to archive retention."""
 
 
 def init_schema(cursor):
@@ -20,6 +20,27 @@ def init_schema(cursor):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_wazzup_pilot_account_message
             ON wazzup_pilot_outbox(account, message_id) WHERE message_id IS NOT NULL;
         ALTER TABLE wazzup_pilot_outbox ADD COLUMN IF NOT EXISTS reply_to_message_id TEXT;
+        -- Author key of a verifier's send (wazzup.access.icore_author_id); NULL
+        -- for senders who are not credited in the reports.
+        ALTER TABLE wazzup_pilot_outbox ADD COLUMN IF NOT EXISTS author_id TEXT;
+        CREATE OR REPLACE FUNCTION wazzup_pilot_stamp_author()
+        RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        DECLARE sender RECORD;
+        BEGIN
+            -- Wazzup echoes API sends as "Admin" without an author id. Keep the
+            -- real sender on every write of such a row, whichever arrives first:
+            -- our own archive copy, the echo, or a later delivery status.
+            IF NEW.account = 'op' AND NEW.is_echo THEN
+                SELECT o.author_id, o.author_name INTO sender FROM wazzup_pilot_outbox o
+                    WHERE o.account = NEW.account AND o.message_id = NEW.message_id
+                      AND o.author_id IS NOT NULL;
+                IF FOUND THEN
+                    NEW.author_id := sender.author_id;
+                    NEW.author_name := COALESCE(sender.author_name, NEW.author_name);
+                END IF;
+            END IF;
+            RETURN NEW;
+        END $$;
         CREATE TABLE IF NOT EXISTS wazzup_status_receipts (
             account TEXT NOT NULL, message_id TEXT NOT NULL, status TEXT NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -78,6 +99,9 @@ def init_schema(cursor):
                 'emittedAt', EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::text);
             RETURN NEW;
         END $$;
+        DROP TRIGGER IF EXISTS wazzup_pilot_author ON wazzup_messages;
+        CREATE TRIGGER wazzup_pilot_author BEFORE INSERT OR UPDATE ON wazzup_messages
+            FOR EACH ROW EXECUTE FUNCTION wazzup_pilot_stamp_author();
         DROP TRIGGER IF EXISTS wazzup_receipt_insert ON wazzup_messages;
         CREATE TRIGGER wazzup_receipt_insert BEFORE INSERT ON wazzup_messages
             FOR EACH ROW EXECUTE FUNCTION wazzup_message_receipt_before_insert();

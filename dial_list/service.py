@@ -49,6 +49,7 @@ from common.kz_phone import normalize_kz_phone  # noqa: F401 — нормали�
 # цифра. Чистая логика без базы и сети, двойник на фронте сторожит её тест.
 from sign_links import iin as iin_rules
 from crm import sapar as sapar_api
+from test_numbers import keys as test_keys
 
 from . import signing
 from .sign_check import SignChecker
@@ -2504,7 +2505,8 @@ class DialListService:
 
     # Счётчики оператора для вкладки «Мой прогресс»: за месяц (первый день — %(month)s)
     # и за сегодня (%(today)s), дни — по Алматы. Отменённые оператором попытки в
-    # попытки не входят (они не в счёт). Только числа: ни ФИО, ни номеров.
+    # попытки не входят (они не в счёт). Только числа: ни ФИО, ни номеров. Работа по
+    # лиду с номером «Реестра тестовых номеров» — проверка обзвона, не показатель.
     _PROGRESS_SQL = """
         WITH att AS (
             SELECT t.state, UPPER(t.disposition) AS disp, t.billsec, t.cancelled,
@@ -2512,6 +2514,7 @@ class DialListService:
             FROM dial_list_attempts t
             WHERE t.operator_id = %(operator_id)s
               AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
         ), asg AS (
             SELECT a.state,
                    (a.created_at AT TIME ZONE 'Asia/Almaty')::date AS day,
@@ -2519,6 +2522,7 @@ class DialListService:
             FROM dial_list_assignments a
             WHERE a.operator_id = %(operator_id)s
               AND a.created_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND """ + test_keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL + """
         )
         SELECT
             (SELECT COUNT(*) FROM asg)                                                    AS issued,
@@ -2541,6 +2545,7 @@ class DialListService:
         JOIN dial_list_outcomes o ON o.id = t.outcome_id
         WHERE t.operator_id = %(operator_id)s
           AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
         GROUP BY o.id, o.name, o.color, o.position
         ORDER BY cnt DESC, o.position, o.name
     """
@@ -2554,6 +2559,7 @@ class DialListService:
         JOIN dial_list_outcome_subtypes s ON s.id = t.outcome_subtype_id
         WHERE t.operator_id = %(operator_id)s
           AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
         GROUP BY t.outcome_id, s.id, s.name
         ORDER BY cnt DESC, s.name
     """
@@ -3329,9 +3335,11 @@ class DialListService:
         # Отбор — по отделу БАЗЫ, которую обзванивали, а не по отделу человека: на линии
         # отдела может сидеть сотрудник другого отдела, и его звонки — показатели отдела
         # линии. Отбор по users.department_id такого оператора из сводки терял.
-        lead_filter = ""
+        # Лид с номером «Реестра тестовых номеров» — проверка обзвона: ни попыток, ни
+        # выдачи, ни успешки по нему в сводке нет.
+        lead_filter = "AND " + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL
         if department_ids is not None:
-            lead_filter = "AND l.department_id = ANY(%(departments)s)"
+            lead_filter += " AND l.department_id = ANY(%(departments)s)"
             params["departments"] = [int(d) for d in department_ids]
         with self.db._get_cursor() as cur:
             cur.execute(f"""

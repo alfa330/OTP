@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from tez import binotel_calls as tez_binotel_calls
+from test_numbers import keys as test_keys
 
 try:
     from zoneinfo import ZoneInfo
@@ -207,17 +208,27 @@ def aggregate_calls(
     end_day: date,
     *,
     tz_name: str = DEFAULT_TZ,
+    test_numbers: Iterable[str] = (),
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Агрегирует уникальные звонки в строки ``operator/day``."""
+    """Агрегирует уникальные звонки в строки ``operator/day``.
+
+    ``test_numbers`` — ключи «Реестра тестовых номеров»: звонок с таким номером не
+    входит ни в число звонков оператора, ни в время набора и разговора.
+    """
     buckets: Dict[Tuple[int, date], Dict[str, Any]] = {}
+    test_numbers = frozenset(test_numbers or ())
     counters = {
         "matched_calls": 0,
         "skipped_no_date": 0,
         "skipped_out_of_range": 0,
         "skipped_unknown_operator": 0,
+        "skipped_test_number": 0,
     }
 
     for call in calls_by_id.values():
+        if test_numbers and test_keys.is_test_phone(call.get("external_number"), test_numbers):
+            counters["skipped_test_number"] += 1
+            continue
         call_day = _call_local_date(call, tz_name)
         if call_day is None:
             counters["skipped_no_date"] += 1
@@ -277,6 +288,14 @@ def _base_summary(start: str, end: str, started_at: float) -> Dict[str, Any]:
         "days": 0,
         "_started_at": started_at,
     }
+
+
+def _test_numbers(db: Any) -> frozenset:
+    """Ключи реестра тестовых номеров; у заглушки базы без курсора — пусто."""
+    get_cursor = getattr(db, "_get_cursor", None)
+    if get_cursor is None:
+        return frozenset()
+    return test_keys.cached_keys(get_cursor)
 
 
 def _finish_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -391,6 +410,7 @@ def run_sync(
                 start_day,
                 end_day,
                 tz_name=tz_name,
+                test_numbers=_test_numbers(db),
             )
         except Exception as exc:
             sync_log.error(

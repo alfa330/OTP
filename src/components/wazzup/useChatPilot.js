@@ -4,14 +4,21 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
-export default function useChatPilot({ apiBaseUrl, user, account, active, headers,
+export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, headers,
     selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
     const latest = useRef({});
     latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes };
-    const eligible = String(user?.login || '').trim().toLowerCase() === 'alfa330' && account === 'op';
+    /* Где оборвался прошлый поток: эпоха процесса сервера и номер последнего
+       кадра. Переподключение продолжает с этого места — сервер досылает всё,
+       что вышло за разрыв, и перечитывать ленту, список, счётчик и заметки не
+       нужно. Не узнал сервер место (рестарт, деплой, слишком давно) — сверка. */
+    const resume = useRef({ epoch: null, seq: null });
+    // mayProcess is the caller's hint about who can process chats at all; it only
+    // spares everyone else the capability request. The server's answer decides.
+    const eligible = Boolean(mayProcess) && account === 'op';
     useEffect(() => {
         const change = () => setVisible(!document.hidden);
         document.addEventListener('visibilitychange', change);
@@ -74,11 +81,15 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
             }, lane.delay);
         };
         const reconcile = () => { enqueue('thread'); enqueue('list'); enqueue('unread'); enqueue('notes'); };
-        const connect = async () => {
+        const connect = async (planned = false) => {
             if (stopped) return;
             controller = new AbortController();
-            setConnection('connecting');
+            // A planned reconnect (the server re-checks access every ~2 minutes)
+            // is not news: the connection note stays hidden through it.
+            if (!planned) setConnection('connecting');
             let denied = false;
+            let ended = false;
+            let openedAt = 0;
             let watchdog;
             const handshake = setTimeout(() => controller.abort(), 20000);
             try {
@@ -87,7 +98,9 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                     params: { account: 'op' }, headers: latest.current.headers(), signal: controller.signal, timeout: 15000,
                 });
                 if (!data.enabled) { denied = true; setCapability(data); return; }
-                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op`, {
+                const { epoch, seq } = resume.current;
+                const from = epoch && Number.isInteger(seq) ? `&epoch=${encodeURIComponent(epoch)}&after=${seq}` : '';
+                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op${from}`, {
                     headers: { ...latest.current.headers(), Accept: 'text/event-stream' },
                     credentials: 'include', signal: controller.signal, cache: 'no-store',
                 });
@@ -97,6 +110,7 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 }
                 const reader = response.body.getReader();
                 clearTimeout(handshake);
+                openedAt = Date.now();
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let lastByteAt = Date.now();
@@ -106,18 +120,24 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 try {
                     while (!stopped) {
                         const { done, value } = await reader.read();
-                        if (done || stopped) break;
+                        if (done || stopped) { ended = done; break; }
                         lastByteAt = Date.now();
                         const parsed = splitPilotEvents(buffer + decoder.decode(value, { stream: true }));
                         buffer = parsed.buffer;
                         for (const frame of parsed.frames) {
+                            if (/^\d+$/.test(frame.id || '')) resume.current.seq = Number(frame.id);
                             const payload = JSON.parse(frame.data || '{}');
                             if (frame.event === 'unavailable') {
                                 setConnection('reconnecting');
                             } else if (frame.event === 'connected' || frame.event === 'reload') {
                                 failures = 0;
                                 setConnection(payload.ready === false ? 'reconnecting' : 'live');
-                                reconcile();
+                                if (frame.event === 'connected') resume.current = {
+                                    epoch: typeof payload.epoch === 'string' ? payload.epoch : null,
+                                    seq: Number.isInteger(payload.seq) ? payload.seq : null,
+                                };
+                                // Continued where the last stream stopped: the gap was replayed.
+                                if (!(frame.event === 'connected' && payload.resumed === true)) reconcile();
                             } else if (frame.event === 'change') {
                                 setConnection('live');
                                 const fallback = latest.current.onChanges?.(payload.changes || []);
@@ -140,9 +160,15 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 clearInterval(watchdog);
                 clearTimeout(handshake);
                 if (!stopped) {
-                    setConnection(denied ? 'unavailable' : 'reconnecting');
-                    if (!denied) reconnectTimer = setTimeout(connect,
-                        Math.min(15000, 1000 * 2 ** Math.min(failures++, 4)) + Math.random() * 300);
+                    // The server closed a healthy stream itself: reconnect at once and
+                    // quietly. A stream that dies young is a fault and backs off.
+                    const replan = !denied && ended && Date.now() - openedAt >= 5000;
+                    if (replan) reconnectTimer = setTimeout(() => connect(true), 0);
+                    else {
+                        setConnection(denied ? 'unavailable' : 'reconnecting');
+                        if (!denied) reconnectTimer = setTimeout(connect,
+                            Math.min(15000, 1000 * 2 ** Math.min(failures++, 4)) + Math.random() * 300);
+                    }
                 }
             }
         };
@@ -151,6 +177,11 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
             stopped = true;
             controller?.abort();
             clearTimeout(reconnectTimer);
+            // A re-read that was asked for and has not finished (the tab was hidden
+            // within its delay) must not be skipped by the next, resumed stream.
+            if (Object.values(lanes).some((lane) => lane.dirty || lane.running || lane.timer)) {
+                resume.current = { epoch: null, seq: null };
+            }
             Object.values(lanes).forEach((lane) => clearTimeout(lane.timer));
         };
     }, [enabled, active, visible, apiBaseUrl]);

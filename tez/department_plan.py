@@ -5,6 +5,8 @@ import math
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from test_numbers import keys as test_keys
+
 
 COEFFICIENT = 0.8
 SNAPSHOT_VERSION = 2
@@ -184,11 +186,13 @@ def summary(db, department_id, year, month, plan_per_fte=None, norm_hours_fte=No
     # formula is undefined. A new hire must not create an opening-month target.
     actual_plan = monthly / fte * actual_fte if fte and actual_fte is not None else None
     with db._get_cursor() as cursor:
+        # Успешка с номера «Реестра тестовых номеров» в факт плана не входит.
         cursor.execute("""
             SELECT COUNT(*) FROM tez_lead_successes s
             JOIN tez_leads l ON l.id = s.lead_id
             JOIN tez_lead_batches b ON b.id = l.first_batch_id
             WHERE s.year = %s AND s.month = %s AND b.department_id = %s
+              AND """ + test_keys.sql_not_test('s.phone_norm', digits=True) + """
         """, (int(year), int(month), int(department_id)))
         successes = int(cursor.fetchone()[0] or 0)
     return {

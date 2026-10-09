@@ -11,6 +11,7 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { ReviewPanel, ReviewResolveModal } from '../common/SupervisorReview';
 import TicketWizard from './TicketWizard';
 import TicketsExport from './TicketsExport';
 import {
@@ -18,11 +19,12 @@ import {
 } from './ticketBody';
 import {
     attachmentKind, authorBadge, continuesRun, groupByDay, indexByTgId, messageSnippet, quoteOf,
-    shortAuthorName,
+    shortAuthorName, threadBubble,
 } from './threadView';
 import {
-    isOverdue, markTicketSeen, mergeTicketsById, pluralTickets, previewAuthor, previewText,
-    queueMonogram, queueTile, rowBadges, unreadLabel,
+    REVIEW_FILTER, REVIEW_RESOLVED, isOverdue, lockedReplyText, markTicketSeen,
+    mergeTicketsById, pluralTickets, previewAuthor, previewText, queueMonogram, queueTile,
+    reviewToast, rowBadges, stateFilters, statusView as ticketStatusView, unreadLabel,
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
 import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds, withSortRank } from './feedMerge';
@@ -72,7 +74,8 @@ const PRIORITY_META = {
 };
 
 // Фильтр по состоянию. «Активные» — то, что ещё не закрыто; это рабочий
-// экран по умолчанию, архив открывается отдельным сегментом.
+// экран по умолчанию, архив открывается отдельным сегментом. Пятый сегмент,
+// «На проверку», появляется только у того, кого ждёт проверка (stateFilters).
 const STATE_FILTERS = [
     { key: 'active', label: 'В работе', statuses: 'open,in_progress,answered' },
     { key: 'answered', label: 'Ответили', statuses: 'answered' },
@@ -90,6 +93,8 @@ const EVENT_LABELS = {
     reply_received: 'Ответ из группы',
     reply_sent: 'Сообщение в группу',
     status: 'Статус изменён',
+    review_sent: 'Супервайзер проверил: в группу',
+    review_resolved: 'Супервайзер проверил: решено',
 };
 
 const statusMeta = (code) => STATUS_META[code] || { label: code || '—', tone: null };
@@ -764,6 +769,9 @@ const TicketCard = ({
     // не читает — оно выглядит как формальность.
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    // Решение по обращению на проверке: идёт ли запрос и открыто ли окно итога.
+    const [reviewBusy, setReviewBusy] = useState(false);
+    const [resolveOpen, setResolveOpen] = useState(false);
     const fileRef = useRef(null);
     const threadRef = useRef(null);
 
@@ -977,6 +985,44 @@ const TicketCard = ({
         }
     };
 
+    /* Решение по обращению на проверке (возврат задачи #297): «Решено» с итогом
+       или «в группу». Сервер отвечает карточкой целиком — после решения у
+       обращения меняется всё сразу: состояние, права, переписка.
+
+       «В группу» — это решение плюс доставка, и доставка может не случиться
+       (бота выгнали из группы): тогда обращение уже отправлено супервайзером, а
+       повтор — обычной «Отправить ещё раз» в шапке. */
+    const review = async (decision, note = '') => {
+        setReviewBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/crm/tickets/${ticketId}/review`,
+                { decision, note }, { headers: headers() });
+            setData({
+                item: response.data.item,
+                messages: response.data.messages,
+                permissions: response.data.permissions,
+            });
+            setResolveOpen(false);
+            const toast = reviewToast(decision, response.data);
+            showToast?.(toast.text, toast.tone);
+            setAtBottom(true);
+            // Задача проверки закрыта — число «На проверку» надо пересчитать.
+            onChanged?.({ counters: true });
+        } catch (err) {
+            showToast?.(errorText(err, 'Не удалось сохранить решение'), 'error');
+            // Решение уже принял другой: окно «Решено» закрываем — его
+            // «Сохранить» отдало бы тот же отказ ещё раз.
+            if (err?.response?.status === 409) {
+                setResolveOpen(false);
+                load(true);
+                onChanged?.({ counters: true });
+            }
+        } finally {
+            setReviewBusy(false);
+        }
+    };
+
     if (loading) return <LoadingBlock />;
     if (error) {
         const gone = error === TICKET_GONE;
@@ -990,7 +1036,8 @@ const TicketCard = ({
     }
     if (!ticket) return null;
 
-    const status = statusMeta(ticket.status);
+    // У обращения на проверке своё слово: «Отправлено» про него — неправда.
+    const status = ticketStatusView(ticket, statusMeta(ticket.status));
     const priority = priorityMeta(ticket.priority);
     const closed = ticket.status === 'resolved' || ticket.status === 'cancelled';
     const overdue = isOverdue(ticket);
@@ -1151,22 +1198,34 @@ const TicketCard = ({
                     {days.map((day) => (
                         <div key={day.key}>
                             <DayChip>{day.label}</DayChip>
-                            {day.items.map((message, index) => (
-                                <MessageBubble key={message.id} message={message} ticketId={ticket.id}
-                                               quote={quoteOf(message, quoteIndex)}
-                                               grouped={continuesRun(day.items[index - 1], message)}
-                                               apiBaseUrl={apiBaseUrl} headers={headers}
-                                               showToast={showToast}
-                                               onReply={permissions.can_reply ? setReplyTo : null}
-                                               onJumpTo={jumpToMessage} />
-                            ))}
+                            {day.items.map((message, index) => {
+                                // Итог супервайзера встаёт в переписку как
+                                // ответ — с меткой, чей он (threadView.js).
+                                const bubble = threadBubble(message);
+                                return (
+                                    <MessageBubble key={message.id} message={bubble.message}
+                                                   tag={bubble.tag} ticketId={ticket.id}
+                                                   quote={quoteOf(message, quoteIndex)}
+                                                   grouped={continuesRun(day.items[index - 1], message)}
+                                                   apiBaseUrl={apiBaseUrl} headers={headers}
+                                                   showToast={showToast}
+                                                   onReply={permissions.can_reply ? setReplyTo : null}
+                                                   onJumpTo={jumpToMessage} />
+                                );
+                            })}
                         </div>
                     ))}
                     {ticket.resolved_at && (
                         <div className="mt-3 flex items-center justify-center gap-1.5 text-[11.5px] font-medium text-emerald-700">
                             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 ring-1 ring-emerald-100">
                                 <CheckCircle2 size={13} />
-                                Решено{ticket.resolved_by_name ? ` · ${ticket.resolved_by_name}` : ''} · {fmtDateTime(ticket.resolved_at)}
+                                {/* Кто решил при проверке — подписано на самом
+                                    итоге строкой выше; здесь имя было бы вторым
+                                    разом о том же человеке и той же минуте. */}
+                                {ticket.review_state === REVIEW_RESOLVED
+                                    ? 'Решено супервайзером'
+                                    : `Решено${ticket.resolved_by_name ? ` · ${ticket.resolved_by_name}` : ''}`}
+                                {' · '}{fmtDateTime(ticket.resolved_at)}
                             </span>
                         </div>
                     )}
@@ -1229,7 +1288,15 @@ const TicketCard = ({
 
             {/* Ответ и действия */}
             <div className="shrink-0 border-t border-slate-200/70 bg-white px-4 py-3">
-                {permissions.can_reply ? (
+                {permissions.can_review ? (
+                    /* Обращение на проверке (возврат задачи #297): на месте
+                       поля ответа — решение супервайзера. Писать в группу
+                       здесь некуда, а это главное, что он может сделать. */
+                    <ReviewPanel className="" busy={reviewBusy}
+                                 hint="Стоит внимания — отправьте в группу: дальше оно пойдёт как любое обращение. Нет — «Решено» с итогом: обращение закроется, в группу не уйдёт, а оператор увидит ваш итог."
+                                 onResolve={() => setResolveOpen(true)}
+                                 onSend={() => review('send')} />
+                ) : permissions.can_reply ? (
                     <div className="flex items-end gap-2">
                         <button type="button" onClick={() => fileRef.current?.click()}
                                 title="Прикрепить файл"
@@ -1289,11 +1356,16 @@ const TicketCard = ({
                     </div>
                 ) : (
                     <div className="text-center text-[12px] text-slate-400">
-                        {closed ? 'Обращение закрыто' : 'Писать в это обращение нельзя'}
+                        {lockedReplyText(ticket)}
                     </div>
                 )}
 
-                {(permissions.can_change_status || permissions.can_delete) && (
+                {/* Строка стоит за правом менять статус — оно есть у каждого,
+                    кто видит обращение. У обращения на проверке и у решённого
+                    супервайзером этого права нет ни у кого, а «История» нужна
+                    и там: в ней видно, кто и что по нему решил. */}
+                {(permissions.can_change_status || permissions.can_delete
+                    || Boolean(ticket.review_state)) && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         <button type="button" onClick={toggleEvents} className={iosBtnGhost}>
                             {eventsLoading ? <Loader2 size={13} className="animate-spin" /> : <History size={13} />}
@@ -1373,6 +1445,11 @@ const TicketCard = ({
             >
                 <DeleteWarning />
             </IosModal>
+
+            <ReviewResolveModal open={resolveOpen} onClose={() => setResolveOpen(false)}
+                                busy={reviewBusy}
+                                subtitle="Обращение закроется с вашим итогом и в группу не уйдёт"
+                                onResolve={(note) => review('resolve', note)} />
         </div>
     );
 };
@@ -2256,10 +2333,16 @@ export default function CrmTicketsView({
         };
     }, [tab, selectedAny]);
 
+    /* «На проверку» — обращения, которые ждут решения этого человека как
+       супервайзера (возврат задачи #297). Они чужие по определению, поэтому ни
+       «Мои», ни фильтр статуса к ним не применяются, а своих жалоб в этом
+       списке нет: проверка жалоб — в разделе «Жалобы». */
+    const reviewing = stateFilter === REVIEW_FILTER;
+
     // Во время поиска выборка не сужается до «моих», поэтому и сегмент показывает
     // «Все»: подсвеченные «Мои» над списком с чужими обращениями — это не фильтр,
-    // а неверная подпись к тому, что человек видит.
-    const searching = mine && !searchApplied;
+    // а неверная подпись к тому, что человек видит. То же — в «На проверку».
+    const searching = mine && !searchApplied && !reviewing;
 
     // Поиск не дёргает сервер на каждую букву: печатают быстрее, чем отвечает база.
     useEffect(() => {
@@ -2312,9 +2395,15 @@ export default function CrmTicketsView({
             const statuses = STATE_FILTERS.find((f) => f.key === stateFilter)?.statuses;
             if (statuses) params.set('status', statuses);
             if (queueFilter) params.set('queue_id', queueFilter);
-            // Поиск сквозной: ищем по всем обращениям, иначе сотрудник не увидит,
-            // что по этому водителю обращение уже завёл кто-то другой.
-            if (mine && !searchApplied) params.set('mine', '1');
+            if (reviewing) {
+                // Что именно «ждёт моей проверки», считает сервер — тем же
+                // правилом, что число на сегменте и колокол.
+                params.set('review', '1');
+            } else if (mine && !searchApplied) {
+                // Поиск сквозной: ищем по всем обращениям, иначе сотрудник не
+                // увидит, что по этому водителю обращение уже завёл кто-то другой.
+                params.set('mine', '1');
+            }
             if (searchApplied) params.set('q', searchApplied);
             params.set('limit', String(PAGE_SIZE));
             params.set('offset', String(nextOffset));
@@ -2338,13 +2427,14 @@ export default function CrmTicketsView({
         } finally {
             setLoading(false);
         }
-    }, [apiBaseUrl, headers, stateFilter, queueFilter, mine, searchApplied]);
+    }, [apiBaseUrl, headers, stateFilter, queueFilter, mine, searchApplied, reviewing]);
 
     /* Порядок ленты — как у обращений на сервере: в «Моих» без поиска
        непрочитанное наверху. Жалобам его передаём явно, иначе при склейке
        строки встали бы вперемешку (см. feedMerge.js). */
-    const unreadFirst = mine && !searchApplied;
-    const complaintsShown = complaintsEnabled && (!queueFilter || queueFilter === COMPLAINTS_FILTER);
+    const unreadFirst = searching;
+    const complaintsShown = complaintsEnabled && !reviewing
+        && (!queueFilter || queueFilter === COMPLAINTS_FILTER);
 
     /* Свои жалобы — всегда только свои, и в «Все» и в поиске: жалобы коллег
        оператору не видны (сотрудник, на которого жалуются, может сидеть рядом). */
@@ -2429,6 +2519,9 @@ export default function CrmTicketsView({
     useEffect(() => {
         if (!realtimePulse) return;
         loadTickets(0, true);
+        // Числа шапки — тоже по тычку: «На проверку» появляется у супервайзера
+        // в ту минуту, когда оператор завёл обращение, а не при следующем входе.
+        refreshCounters();
         if (complaintsEnabled) {
             loadComplaints(0, true);
             refreshComplaintCounters();
@@ -2436,11 +2529,21 @@ export default function CrmTicketsView({
     }, [realtimePulse]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Бейдж раздела в сайдбаре ведёт сервер — здесь только передаём наверх:
-    // непрочитанное по обращениям и по своим жалобам, как считает колокол.
+    // непрочитанное по обращениям и по своим жалобам плюс обращения, которые
+    // ждут проверки этого человека, — ровно как считает колокол
+    // (notifications/sources.py: crm). Разойдись суммы, число в меню прыгало бы
+    // между двумя значениями: его ставят и колокол, и раздел.
     useEffect(() => {
         if (counters.unread === undefined) return;
-        onUnreadChange?.((Number(counters.unread) || 0) + complaintsUnread);
-    }, [counters.unread, complaintsUnread, onUnreadChange]);
+        onUnreadChange?.((Number(counters.unread) || 0) + (Number(counters.review) || 0)
+            + complaintsUnread);
+    }, [counters.unread, counters.review, complaintsUnread, onUnreadChange]);
+
+    // Сегменты состояния: «На проверку» есть только у того, кого она ждёт.
+    const filters = useMemo(
+        () => stateFilters(STATE_FILTERS, { reviewCount: counters.review, selected: stateFilter }),
+        [counters.review, stateFilter],
+    );
 
     /* Переход из колокола: открываем именно то обращение, о котором уведомили.
        Карточка грузится по своему id, поэтому фильтр списка её не прячет —
@@ -2467,10 +2570,6 @@ export default function CrmTicketsView({
         [scenarioCatalog],
     );
 
-    const refreshAfterChange = useCallback(() => {
-        loadTickets(0, true);
-    }, [loadTickets]);
-
     /* Пересчитать числа шапки. Тот же /ping, что при входе, но без разбора
        «схема развернулась»: к моменту удаления раздел давно открыт.
        Нужен именно после удаления: counters.unread ведёт бейдж раздела в
@@ -2484,6 +2583,16 @@ export default function CrmTicketsView({
             setCounters(response.data.counters || {});
         } catch (err) { /* числа в шапке — не повод показывать отказ */ }
     }, [apiBaseUrl, headers]);
+
+    /* В карточке что-то сделали: ответили, закрыли, решили при проверке — лента
+       перечитывается. Числа шапки — только когда карточка об этом попросила:
+       решение супервайзера гасит его задачу и цифру на сегменте «На проверку»,
+       а ответ в группу или смена статуса чисел не трогают, и ходить за ними на
+       каждую реплику было бы платой за ничего. */
+    const refreshAfterChange = useCallback((changed) => {
+        loadTickets(0, true);
+        if (changed?.counters) refreshCounters();
+    }, [loadTickets, refreshCounters]);
 
     const exitSelect = useCallback(() => {
         setSelectMode(false);
@@ -2697,15 +2806,30 @@ export default function CrmTicketsView({
                              selectedAny ? 'hidden' : 'flex'
                          }`}>
                         <div className="flex rounded-xl bg-slate-100 p-1">
-                            {STATE_FILTERS.map((item) => (
+                            {filters.map((item) => (
                                 <button key={item.key} type="button"
-                                        onClick={() => { setStateFilter(item.key); clearSelection(); }}
+                                        onClick={() => {
+                                            setStateFilter(item.key);
+                                            // Очередь проверки — вся, а не «в выбранной
+                                            // группе»: число на сегменте считает все
+                                            // обращения, и список за ним обязан их показать.
+                                            if (item.key === REVIEW_FILTER) setQueueFilter('');
+                                            clearSelection();
+                                        }}
                                         className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
                                             stateFilter === item.key
                                                 ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                                                 : 'text-slate-500 hover:text-slate-700'
-                                        }`}>
+                                        } ${item.count ? 'inline-flex items-center gap-1.5' : ''}`}>
                                     {item.label}
+                                    {/* Число — только у «На проверку»: это
+                                        очередь задач, а не отбор. Жёлтое, как
+                                        бейдж «Ждёт проверки» у самих строк. */}
+                                    {!!item.count && (
+                                        <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-amber-100 px-1 text-[10.5px] font-semibold tabular-nums leading-none text-amber-700">
+                                            {unreadLabel(item.count)}
+                                        </span>
+                                    )}
                                 </button>
                             ))}
                         </div>
@@ -2717,14 +2841,16 @@ export default function CrmTicketsView({
                                     { key: false, label: 'Все' },
                                 ].map((item) => (
                                     <button key={String(item.key)} type="button"
-                                            disabled={Boolean(searchApplied)}
-                                            title={searchApplied ? 'Поиск идёт по всем обращениям' : undefined}
+                                            disabled={Boolean(searchApplied) || reviewing}
+                                            title={searchApplied ? 'Поиск идёт по всем обращениям'
+                                                : reviewing ? 'На проверку приходят обращения операторов вашего отдела'
+                                                    : undefined}
                                             onClick={() => { setMine(item.key); clearSelection(); }}
                                             className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
                                                 searching === item.key
                                                     ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                                                     : 'text-slate-500 hover:text-slate-700'
-                                            } ${searchApplied ? 'cursor-not-allowed opacity-60' : ''}`}>
+                                            } ${searchApplied || reviewing ? 'cursor-not-allowed opacity-60' : ''}`}>
                                         {item.label}
                                     </button>
                                 ))}
@@ -2732,7 +2858,10 @@ export default function CrmTicketsView({
                         )}
 
                         {/* «Жалобы» — отдельной строкой в конце: у них своя
-                            группа, и так их можно посмотреть без обращений. */}
+                            группа, и так их можно посмотреть без обращений.
+                            В «На проверку» этой строки нет: жалоб в очереди
+                            проверки не бывает, и выбор оставил бы пустой
+                            список под сегментом с числом. */}
                         {queues.length + (complaintsEnabled ? 1 : 0) > 1 && (
                             <CustomSelect
                                 className="w-48"
@@ -2741,7 +2870,8 @@ export default function CrmTicketsView({
                                 onChange={(value) => { setQueueFilter(value); clearSelection(); }}
                                 options={[{ value: '', label: 'Все группы' }].concat(
                                     queues.map((q) => ({ value: String(q.id), label: q.title })),
-                                    complaintsEnabled ? [{ value: COMPLAINTS_FILTER, label: 'Жалобы' }] : [],
+                                    complaintsEnabled && !reviewing
+                                        ? [{ value: COMPLAINTS_FILTER, label: 'Жалобы' }] : [],
                                 )}
                                 placeholder="Все группы"
                                 ariaLabel="Фильтр по очереди"
@@ -2813,10 +2943,13 @@ export default function CrmTicketsView({
                                     )}
                                     {!loading && !error && !feed.items.length && (
                                         <EmptyBlock
-                                            hint={mine
-                                                ? 'Создайте обращение — оно уйдёт в рабочую группу, а ответ вернётся сюда.'
-                                                : 'В этом фильтре пусто.'}>
-                                            {queueFilter === COMPLAINTS_FILTER ? 'Жалоб нет' : 'Обращений нет'}
+                                            hint={reviewing
+                                                ? 'Сюда приходят обращения операторов вашего отдела, которые сначала проверяет супервайзер.'
+                                                : mine
+                                                    ? 'Создайте обращение — оно уйдёт в рабочую группу, а ответ вернётся сюда.'
+                                                    : 'В этом фильтре пусто.'}>
+                                            {reviewing ? 'Проверять нечего'
+                                                : queueFilter === COMPLAINTS_FILTER ? 'Жалоб нет' : 'Обращений нет'}
                                         </EmptyBlock>
                                     )}
                                     {/* Волосяная линия между обращениями. Она

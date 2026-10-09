@@ -1221,7 +1221,7 @@ class ModalScreenTests(unittest.TestCase):
         """Телефон — уход экраном (SCREEN_LEAVE_MS), компьютер — короткое угасание
         окна (WINDOW_LEAVE_MS; просьба владельца 09.10.2026 — «слишком резкое
         закрытие и открытие»). При «Уменьшить движение» окно снимается сразу."""
-        self.assertIn("const delay = isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS);", self.IOS)
+        self.assertIn("const delay = embedded ? 0 : (isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS));", self.IOS)
         self.assertIn('if (!wasOpen.current || !delay)', self.IOS)
 
     def test_desktop_window_motion_matches_the_unmount_delay(self):

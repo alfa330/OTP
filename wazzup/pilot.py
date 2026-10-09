@@ -1,17 +1,24 @@
-"""Message sending and event-driven refresh, explicitly restricted to alfa330.
+"""Message sending and event-driven refresh for the chat processing mode.
+
+Who may process chats is decided in wazzup/access.py: verifiers after the
+QR + Telegram-code confirmation, super admins without it. The monolith passes
+that decision in as `access`; without it only super admins are admitted.
 
 The outbox claims a client UUID before contacting Wazzup. Ambiguous outcomes
 are never automatically retried: the vendor deduplicates for only 60 seconds.
 """
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 
 import requests
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request
+from requests.adapters import HTTPAdapter
 
+from . import access as access_rules
 from . import accounts, realtime
 from .window import last_inbound_at
 
@@ -20,29 +27,110 @@ EXCLUDED_CHANNELS = frozenset({
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',  # old Global
 })
 MAX_TEXT = 4096
-STREAM_LIMIT = 8
+# Every stream holds a Waitress thread for its whole lifetime, and the bell and
+# the shift auction draw on the same ~96 threads. Sized for one verifier shift
+# (nine people at most in the schedule) plus the super admins.
+STREAM_LIMIT = 24
+# api.wazzup24.com closes an idle connection after 65–90 s (measured 09.10.2026).
+WAZZUP_IDLE_REUSE_SECONDS = 45
+WAZZUP_API_ORIGIN = 'https://api.wazzup24.com'
+
+
+class _OneSlotPoolFilter(logging.Filter):
+    """Concurrent sends open a second connection that the one-slot pool then
+    drops on purpose (see wazzup_session); that is not worth a warning."""
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return not (message.startswith('Connection pool is full') and 'api.wazzup24.com' in message)
+
+
+logging.getLogger('urllib3.connectionpool').addFilter(_OneSlotPoolFilter())
+
+
+def wazzup_session():
+    """At most ONE idle connection is kept: its idle time is the pool's idle
+    time, so the reuse window below covers every reused connection, not only
+    the most recently used one (urllib3 hands pooled connections out LIFO)."""
+    session = requests.Session()
+    session.mount(WAZZUP_API_ORIGIN, HTTPAdapter(pool_connections=1, pool_maxsize=1))
+    return session
+
+
+class KeepAliveTransport:
+    """Sends to api.wazzup24.com over a reused HTTPS connection pool.
+
+    A fresh connection pays TCP + TLS round trips before every send. A pool idle
+    longer than idle_seconds is replaced instead of reused: a request must never
+    be written into a connection the vendor is already closing, which would turn
+    an ordinary send into an ambiguous one. The replaced pool is not closed under
+    a request still running on another thread; it goes when that request ends."""
+
+    def __init__(self, idle_seconds=WAZZUP_IDLE_REUSE_SECONDS, factory=wazzup_session):
+        self._lock = threading.Lock()
+        self._idle = idle_seconds
+        self._factory = factory
+        self._session = None
+        self._last_used = 0.0
+
+    def post(self, url, **kwargs):
+        with self._lock:
+            now = time.monotonic()
+            if self._session is None or now - self._last_used > self._idle:
+                self._session = self._factory()
+            session = self._session
+            self._last_used = now
+        return session.post(url, **kwargs)
+
+
+wazzup_transport = KeepAliveTransport()
+
+
+def _server_timing(name, started):
+    # Read by the monolith's after_request into the Server-Timing header.
+    try:
+        timings = getattr(g, 'server_timings', None)
+        if timings is None:
+            timings = g.server_timings = []
+        timings.append((name, (time.perf_counter() - started) * 1000))
+    except RuntimeError:
+        pass
 
 
 def eligible_user(user):
-    # is_active (index 10) is the operator's on-shift flag, not account access.
-    # Match the session principal guard; an admin need not be on an operator shift.
+    # The rule without an injected access policy: super admins only.
+    # is_active (index 10) is the operator's on-shift flag, not account access;
+    # an admin need not be on an operator shift.
     return bool(user and len(user) > 11
-                and str(user[7] or '').strip().lower() == 'alfa330'
-                and str(user[11] or '').strip().lower() not in ('fired', 'dismissal'))
+                and access_rules.processes_without_gate(user[3], user[11]))
+
+
+MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
+                  'authorName', 'authorId', 'status', 'isEdited', 'isDeleted',
+                  'wazzupDt', 'replyToMessageId', 'replyText', 'replyAuthorName',
+                  # The sending browser's id of an iCORE send: lets the sender's own
+                  # optimistic bubble meet the archive row before the POST returns.
+                  'clientMessageId')
+
+
+def json_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if isinstance(value, uuid.UUID) else value
 
 
 def message_item(row):
-    return dict(zip(('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
-                     'authorName', 'authorId', 'status', 'isEdited', 'isDeleted',
-                     'wazzupDt', 'replyToMessageId', 'replyText', 'replyAuthorName'),
-                    [v.isoformat() if isinstance(v, datetime) else v for v in row]))
+    return dict(zip(MESSAGE_FIELDS, [json_value(v) for v in row]))
 
 
 MESSAGE_SELECT = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
            m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
-           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name
+           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,o.request_id
       FROM wazzup_messages m
       LEFT JOIN wazzup_pilot_outbox o ON o.message_id=m.message_id AND o.account=m.account
       LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
@@ -51,18 +139,34 @@ MESSAGE_SELECT = """
 
 
 def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
-                          listen_connect=None, transport=None, event_broker=None, gcs=None):
+                          listen_connect=None, transport=None, event_broker=None, gcs=None,
+                          access=None, stream_limit=STREAM_LIMIT):
+    """access() -> {'mode', 'can_process', ...} for the requesting user (the
+    monolith's _wazzup_chat_access). It is the single rule shared with the
+    section guard and the shift routes; None keeps the standalone rule above."""
     bp = Blueprint('wazzup_pilot', __name__, url_prefix='/api/wazzup/pilot')
-    transport = transport or requests
+    transport = transport or wazzup_transport
     broker = event_broker or realtime.broker
+
+    def may_process(user):
+        if access is None:
+            return eligible_user(user)
+        return bool(user) and bool(access().get('can_process'))
+
+    def sender_author_id(user):
+        # Only a verifier's reply is credited to an operator in the reports; a
+        # super admin stays out of them, as before.
+        if access is not None and access().get('mode') == access_rules.MODE_OPERATOR:
+            return access_rules.icore_author_id(user[0])
+        return None
 
     def actor():
         user_id, error = guard()
         if error:
             return None, error
         user = db.get_user(id=user_id)
-        if not eligible_user(user):
-            return None, (jsonify(error='Пилот доступен только alfa330'), 403)
+        if not may_process(user):
+            return None, (jsonify(error='Обработка чатов вам не открыта'), 403)
         return user, None
 
     from .unread import register_unread_routes
@@ -89,7 +193,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if error:
             return error
         enabled = (request.args.get('account', 'op') == 'op'
-                   and eligible_user(db.get_user(id=user_id)))
+                   and may_process(db.get_user(id=user_id)))
         return jsonify(enabled=enabled, canSend=enabled and bool(accounts.api_key('op')),
                        excludedChannelIds=sorted(EXCLUDED_CHANNELS), maxTextLength=MAX_TEXT)
 
@@ -102,10 +206,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if error:
             return error
         if request.args.get('account', 'op') != 'op':
-            return jsonify(error='Пилот работает только в аккаунте Верификаторов'), 403
+            return jsonify(error='Обработка чатов работает только в аккаунте Верификаторов'), 403
         if listen_connect is None:
             return jsonify(error='Живые обновления недоступны'), 503
-        if not broker.acquire(STREAM_LIMIT):
+        if not broker.acquire(stream_limit):
             return jsonify(error='Достигнут лимит живых подключений'), 503, {'Retry-After': '5'}
         try:
             if event_broker is None:
@@ -113,20 +217,26 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         except Exception:
             broker.release()
             raise
+        # A reconnect continues after the last frame its client saw (`id:`), so
+        # nothing published during the gap is lost and no reconciliation is needed.
+        epoch, after = request.args.get('epoch'), request.args.get('after')
 
         def generate():
-            cursor = broker.current_seq()
+            cursor, resumed = broker.resume_from(epoch, after)
             started = time.monotonic()
-            yield 'event: connected\ndata: ' + json.dumps({'ready': broker.ready}) + '\n\n'
+            yield 'event: connected\ndata: ' + json.dumps({
+                'ready': broker.ready, 'epoch': broker.epoch, 'seq': cursor, 'resumed': resumed}) + '\n\n'
             # Re-authenticate on reconnect; revoked access cannot hold a stream forever.
             while time.monotonic() - started < 120:
                 events, cursor = broker.wait(cursor)
                 if any(e.get('unavailable') for e in events):
-                    yield 'event: unavailable\ndata: {}\n\n'
+                    yield f'id: {cursor}\nevent: unavailable\ndata: {{}}\n\n'
                 elif any(e.get('reload') for e in events):
-                    yield 'event: reload\ndata: ' + json.dumps({'ready': broker.ready}) + '\n\n'
+                    yield f'id: {cursor}\nevent: reload\ndata: ' + json.dumps({'ready': broker.ready}) + '\n\n'
                 elif events:
-                    yield 'event: change\ndata: ' + json.dumps({'changes': events}) + '\n\n'
+                    # Raw UTF-8: Cyrillic as \uXXXX made frames ~2.5 times larger.
+                    yield (f'id: {cursor}\nevent: change\ndata: '
+                           + json.dumps({'changes': events}, ensure_ascii=False) + '\n\n')
                 else:
                     yield ': heartbeat\n\n'
 
@@ -194,14 +304,17 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     def send():
         if request.method == 'OPTIONS':
             return preflight()
+        stage = time.perf_counter()
         user, error = actor()
         if error:
             return error
+        _server_timing('wz-access', stage)
+        stage = time.perf_counter()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify(error='Некорректный запрос'), 400
         if body.get('account') != 'op':
-            return jsonify(error='Пилот работает только в аккаунте Верификаторов'), 403
+            return jsonify(error='Обработка чатов работает только в аккаунте Верификаторов'), 403
         cid, chat = body.get('channelId'), body.get('chatId')
         attachment_id = body.get('attachmentId')
         text = body.get('text', '' if attachment_id is not None else None)
@@ -232,7 +345,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return jsonify(error='Global обрабатывается отдельно и исключён из отправки'), 403
         key = accounts.api_key('op')
         if not key:
-            return jsonify(error='Ключ отправки не настроен'), 503
+            # Nothing was attempted: a definite failure, not a lost answer to re-check.
+            return jsonify(error='Ключ отправки не настроен', code='SEND_KEY_MISSING', state='failed',
+                           retryable=False), 503
         # Replay before channel checks, even if it was subsequently disconnected.
         with db._get_cursor() as cur:
             cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id,attachment_id "
@@ -267,22 +382,33 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             except UploadError as error:
                 # No outbox attempt or vendor POST exists at this point.
                 return jsonify(error=error.message, code=error.code, state='failed', retryable=False), error.status
+        author_id = sender_author_id(user)
         with db._get_cursor() as cur:
             cur.execute("""INSERT INTO wazzup_pilot_outbox
-                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name,reply_to_message_id,attachment_id)
-                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s,%s)
+                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name,reply_to_message_id,attachment_id,author_id)
+                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(request_id) DO NOTHING RETURNING request_id""",
-                (request_id, cid, chat, text, user[0], user[2], reply_to, attachment_id))
+                (request_id, cid, chat, text, user[0], user[2], reply_to, attachment_id, author_id))
             claimed = cur.fetchone()
             if not claimed:
                 cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id,attachment_id "
                             "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
                 return replay(cur.fetchone(), body, user)
+            if author_id:
+                # The vendor echoes API sends as "Admin" with no author id, so the
+                # reports credit nobody. Our own author key is bound to the sender
+                # once; a supervisor's later manual choice in the mapping wins.
+                cur.execute("""INSERT INTO wazzup_operator_map
+                    (author_id,author_name,user_id,is_bot,updated_by,updated_at,account)
+                    VALUES (%s,%s,%s,FALSE,%s,now(),'op') ON CONFLICT(author_id) DO NOTHING""",
+                    (author_id, user[2], user[0], user[0]))
         # Transaction committed before network I/O. Never retry an ambiguous POST.
+        _server_timing('wz-checks', stage)
+        stage = time.perf_counter()
         started = time.monotonic()
         state, code, explanation, message_id = 'unknown', 'SEND_UNKNOWN', '', None
         try:
-            response = transport.post('https://api.wazzup24.com/v3/message',
+            response = transport.post(WAZZUP_API_ORIGIN + '/v3/message',
                 headers={'Authorization': 'Bearer ' + key}, timeout=(5, 20),
                 json={'channelId': cid, 'chatId': chat, 'chatType': 'whatsapp',
                       **({'contentUri': content_uri} if attachment else {'text': text}),
@@ -305,6 +431,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             pass
         if state == 'unknown':
             explanation = 'Подтверждение не получено. Сообщение могло уйти: проверьте чат перед новой отправкой.'
+        _server_timing('wz-post', stage)
+        stage = time.perf_counter()
         with db._get_cursor() as cur:
             cur.execute("""UPDATE wazzup_pilot_outbox SET state=%s,message_id=%s,
                 error_code=%s,error_message=%s,updated_at=now() WHERE request_id=%s""",
@@ -324,10 +452,19 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                     'chatId': chat, 'chatType': 'whatsapp', 'dateTime': datetime.now(timezone.utc).isoformat(),
                     'isEcho': True, 'type': attachment['message_type'] if attachment else 'text',
                     'text': attachment['original_name'] if attachment else display_text,
-                    'status': 'pending'}], account='op')
+                    'status': 'pending',
+                    **({'authorId': author_id, 'authorName': user[2]} if author_id else {})}],
+                    account='op')
+            elif author_id:
+                # The echo was archived before the outbox learned its message id:
+                # the author trigger had nothing to match then, so stamp it now.
+                with db._get_cursor() as cur:
+                    cur.execute("UPDATE wazzup_messages SET author_id=%s,author_name=%s "
+                                "WHERE account='op' AND message_id=%s", (author_id, user[2], message_id))
         except Exception:
             # Acceptance is durable in the outbox; echo will repair the archive.
             logging.exception('Wazzup pilot accepted message awaits webhook persistence')
+        _server_timing('wz-store', stage)
         return jsonify(status='success', state='sent', messageId=message_id,
                        clientMessageId=request_id), 201
 

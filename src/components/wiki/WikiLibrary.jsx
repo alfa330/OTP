@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import { FileText, Loader2, Search, Sparkles, User, X } from 'lucide-react';
 import { iosCard, iosGroupLabel, IosBadge } from '../ui/ios';
@@ -23,7 +24,7 @@ import { typeBadge } from './articleTypes';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
-const WikiEditor = lazy(() => import('./WikiEditor'));
+const WikiEditor = lazyWithRetry(() => import('./WikiEditor'));
 
 /* Витрина статей — три колонки, как в макете десктопа.
  *

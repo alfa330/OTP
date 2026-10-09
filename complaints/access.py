@@ -21,7 +21,9 @@
   он супервайзер или глава (жалоба бывает и на них). Исключение одно —
   глобальный админ: выше него жалобу разбирать некому;
 * супервайзер видит жалобы на людей своего отдела (их он и разбирает) и
-  жалобы, заведённые операторами его групп (за приёмом он тоже отвечает);
+  жалобы, заведённые операторами его групп (за приёмом он тоже отвечает).
+  Жалобу, которая проходит проверку (Яндекс), — у любого оператора своего
+  отдела: проверяет её любой СВ отдела (владелец, 09.10.2026);
 * глава — то же по всем своим отделам.
 
 Две формы одного правила — can_view здесь и queries.visibility_sql для
@@ -119,6 +121,22 @@ def _same(a, b):
     return a is not None and b is not None and int(a) == int(b)
 
 
+def reviews_for_department(ctx, complaint):
+    """Супервайзер отдела автора по жалобе, которая проходит проверку (Яндекс).
+
+    Такую жалобу проверяет любой супервайзер отдела, а не только супервайзер
+    группы оператора (владелец, 09.10.2026), — значит, любой из них её и
+    видит, и разбирает. Свою жалобу супервайзер не проверяет: её решает
+    коллега. review_state у жалобы остаётся и после решения, поэтому решивший
+    не теряет её из виду. Та же граница — в queries.visibility_sql,
+    handling_sql и reviewer_sql.
+    """
+    return (is_supervisor(ctx)
+            and complaint.get('review_state') is not None
+            and _same(complaint.get('creator_department_id'), ctx.get('department_id'))
+            and not _same(complaint.get('created_by'), _me(ctx)))
+
+
 def can_view(ctx, complaint):
     """Видит ли пользователь конкретную жалобу (карточка по прямой ссылке)."""
     if is_global_admin(ctx):
@@ -140,6 +158,8 @@ def can_view(ctx, complaint):
                 return True
     if is_supervisor(ctx):
         if _same(complaint.get('target_department_id'), ctx.get('department_id')):
+            return True
+        if reviews_for_department(ctx, complaint):
             return True
         groups = {int(x) for x in (ctx.get('group_ids') or [])}
         creator_groups = {int(x) for x in (complaint.get('creator_group_ids') or [])}
@@ -173,6 +193,8 @@ def can_handle(ctx, complaint):
     creator_department = complaint.get('creator_department_id')
     if creator_department is not None and int(creator_department) in headed:
         return True
+    if reviews_for_department(ctx, complaint):
+        return True
     if is_supervisor(ctx):
         groups = {int(x) for x in (ctx.get('group_ids') or [])}
         creator_groups = {int(x) for x in (complaint.get('creator_group_ids') or [])}
@@ -182,9 +204,9 @@ def can_handle(ctx, complaint):
 
 def can_review(ctx, complaint):
     """Решить по жалобе на проверке (Яндекс): «Отправить в группу» или
-    «Решено». Решает тот, кто её разбирает (can_handle: для жалоб без отдела
-    это супервайзер группы оператора и глава его отдела), и только пока она
-    ждёт проверки."""
+    «Решено». Решает тот, кто её разбирает (can_handle: для такой жалобы это
+    любой супервайзер отдела оператора, глава отдела и админ), и только пока
+    она ждёт проверки."""
     return (complaint.get('review_state') == catalog.REVIEW_PENDING
             and can_handle(ctx, complaint))
 

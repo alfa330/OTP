@@ -1,5 +1,5 @@
 export function prepareTemplate(item, values = {}) {
-    if (item.source !== 'wazzup') return { text: item.text, preview: '' };
+    if (item.source !== 'wazzup' || item.kind === 'text') return { text: item.text, preview: '' };
     if (!item.supported || !item.templateCode) throw new Error(item.unsupportedReason || 'Этот шаблон пока не поддерживается');
     let text = item.templateCode;
     let preview = item.text;

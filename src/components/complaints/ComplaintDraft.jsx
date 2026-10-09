@@ -393,7 +393,7 @@ export function ComplaintFields({ draft, meta }) {
 
             {needsReview(target) && (
                 <div className="px-1 text-[12px] leading-snug text-slate-500">
-                    Жалобу на Яндекс сначала проверит ваш супервайзер: в группу она уйдёт,
+                    Жалобу на Яндекс сначала проверит супервайзер отдела: в группу она уйдёт,
                     только если он решит, что она того стоит.
                 </div>
             )}

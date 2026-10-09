@@ -4,7 +4,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { headedDepartmentsOf, isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
@@ -394,12 +394,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // завести сотрудника вовсе. Отдел берём у СОТРУДНИКА, не у того, кто его
     // заводит.
     const showOperatorLineFields = !departmentCodeHidesOperatorFields(effectiveDeptCode);
+    // IT: группу при заведении можно не выбирать (EMPLOYEE_GROUP_OPTIONAL_DEPARTMENTS).
+    // Поле остаётся, выбранная группа сохраняется как обычно.
+    const groupMayStayEmpty = departmentCodeHasOptionalEmployeeGroup(effectiveDeptCode);
+    const emptyGroupLabel = groupMayStayEmpty ? 'Без группы' : 'Выберите группу';
     // ООЗ: группа у сотрудника есть, а направления, SIP-номера, практики и
     // ID таксипро — нет (см. EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS). Направление
     // гасит и свою обязательность в handleSave: у отдела нет ни одного.
     const showDirectionField = showOperatorLineFields && !departmentCodeHidesEmployeeDirection(effectiveDeptCode);
-    // Отдел аналитики: поле «Направление» есть, но выбирать его необязательно — у
-    // отдела нет ни одного (см. EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS). Пустым
+    // Отдел аналитики и IT: поле «Направление» есть, но выбирать его необязательно
+    // (см. EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS). Пустым
     // оно может остаться при создании и у сотрудника, у которого направления и
     // так нет. Записанное направление стереть нельзя, как и в других отделах:
     // пустое значение карточка на сервер не отправляет, и проверка не должна
@@ -451,15 +455,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setEditedUser((prev) => {
             const next = { ...prev, department_id: deptValue };
             const effDept = (deptValue !== '' && deptValue != null) ? Number(deptValue) : szovDeptId;
-            /* Глава нескольких отделов: должность нового сотрудника следует за
-               выбранным отделом. Черновик открывается с должностью её первого
-               отдела, а «Группа» и «Направление» показываются по должности: без
-               пересчёта после выбора отдела с линией вместо бэк-офисного этих
-               полей не было бы, и сервер отказал бы в создании. */
-            if (canPickHeadedDepartment) {
+            // При создании роль и обязательные поля должны следовать за отделом
+            // сразу: смена роли только при отправке оставляла HR без полей
+            // «Группа» и «Направление», которые сервер требует для оператора.
+            if (!userToEdit?.id) {
                 next.role = employeeRoleForDepartmentCode(
                     prev?.role,
-                    requesterHeadedDepartments.find((d) => d.id === effDept)?.code,
+                    (departments || []).find((d) => Number(d.id) === effDept)?.code
+                        ?? requesterHeadedDepartments.find((d) => d.id === effDept)?.code,
                 );
             }
             if (prev?.direction_id) {
@@ -504,7 +507,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // Глава отдела (scoped head) — админ-подобная роль, но исключена из isAdminLikeRequester
     // ради скоупа отдела. Ставку сотрудника ей менять можно (бэкенд разрешает как админу),
     // поэтому явно включаем её в право показать контрол ставки в режиме редактирования.
-    const canShowOperatorRateControls = isOperatorDraft(editedUser) && (isAdminLikeRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);
+    const canShowOperatorRateControls = isOperatorDraft(editedUser) && (isUnscopedRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);
     const normalizeModalStatusValue = (value) => {
         const status = String(value ?? '').trim();
         if (status === 'unpaid_leave') return 'bs';
@@ -550,7 +553,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         rate: base.rate ?? 1.0,
         direction_id: isTrainerBase ? "" : (base.direction_id ?? ""),
         department_id: base.department_id ?? (isDeptScoped ? requesterScopeDeptId : ""),
-        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? ""))),
+        supervisor_id: isTrainerBase ? "" : (base.supervisor_id ?? ((isUnscopedRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? ""))),
         group_id: isTrainerBase ? "" : (base.group_id ?? ""),
         status: initialStatus,
         gender: base.gender ?? "",
@@ -831,7 +834,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
 
     const resetForCreate = () => {
-        const createRole = userToEdit?.role || editedUser?.role || "operator";
+        const createRole = employeeRoleForDepartmentCode(
+            userToEdit?.role || editedUser?.role || "operator", effectiveDeptCode,
+        );
         const isTrainerCreateRole = String(createRole || '').trim().toLowerCase() === 'trainer';
         revokeAvatarPreviewUrl();
         closeAvatarCropEditor();
@@ -842,9 +847,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         birth_date: "",
         gender: "",
         direction_id: "",
-        department_id: "",
+        department_id: editedUser?.department_id ?? (isDeptScoped ? requesterScopeDeptId : ""),
         group_id: "",
-        supervisor_id: isTrainerCreateRole ? "" : ((isAdminLikeRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? "")),
+        supervisor_id: isTrainerCreateRole ? "" : ((isUnscopedRequester || isScopedDepartmentHeadRequester) ? "" : (user?.id ?? "")),
         status: "working",
         role: createRole,
         status_period_start_date: todayInputDate(),
@@ -909,7 +914,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isCreateMode && isOperatorUser && showOperatorLineFields && !editedUser.group_id) {
+        if (isCreateMode && isOperatorUser && showOperatorLineFields && !groupMayStayEmpty && !editedUser.group_id) {
         setModalError("Группа обязательна: супервайзер назначается по группе.");
         return;
         }
@@ -1859,7 +1864,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {(isAdminLikeRequester || isDeptScoped) && (
+                    {(isUnscopedRequester || isDeptScoped) && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Отдел</label>
                         <CustomSelect
@@ -1888,9 +1893,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.group_id || ""}
                         onChange={handleGroupChange}
                         disabled={fieldsLocked}
-                        placeholder="Выберите группу"
+                        placeholder={emptyGroupLabel}
                         options={[
-                            { value: "", label: "Выберите группу" },
+                            { value: "", label: emptyGroupLabel },
                             ...groupsForSelectedDept(effectiveDeptId).map((g) => ({
                                 value: g.id,
                                 label: (g.supervisors || []).length
@@ -1904,7 +1909,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 ? (selectedGroupSupervisorName
                                     ? `Супервайзер назначится автоматически: ${selectedGroupSupervisorName}`
                                     : 'У группы сейчас нет супервайзера — он проставится, когда его назначат группе.')
-                                : 'Оператор зачисляется в группу, супервайзер наследуется от группы.'}
+                                : (groupMayStayEmpty
+                                    ? 'Группу можно не выбирать.'
+                                    : 'Оператор зачисляется в группу, супервайзер наследуется от группы.')}
                         </p>
                     </div>
                     )}
@@ -2575,7 +2582,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
                         )}
 
-                            {(isAdminLikeRequester || isDeptScoped) && (
+                            {(isUnscopedRequester || isDeptScoped) && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Отдел</label>
                                 <CustomSelect

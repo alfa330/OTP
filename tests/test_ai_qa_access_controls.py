@@ -259,12 +259,19 @@ class AiQaAccessControlTests(unittest.TestCase):
         не открывается. Гард у них остаётся _ai_qa_guard.
         """
         section_names = {
-            "api_wazzup_channels",
-            "api_wazzup_chats",
-            "api_wazzup_chat_messages",
             "api_wazzup_authors",
             "api_wazzup_authors_map",
             "api_wazzup_analytics",
+            "api_wazzup_accounts",
+        }
+        # Каналы, список чатов и лента — то, из чего состоит обработка: их читает
+        # ещё и верификатор с подтверждённым доступом (решение владельца
+        # 08.10.2026). Показатели, привязка и список аккаунтов ему закрыты —
+        # они остались под прежним гардом.
+        reader_names = {
+            "api_wazzup_channels",
+            "api_wazzup_chats",
+            "api_wazzup_chat_messages",
         }
         ai_qa_only_names = {
             "api_wazzup_episodes",
@@ -275,11 +282,19 @@ class AiQaAccessControlTests(unittest.TestCase):
             node.name: ast.get_source_segment(self.api_source, node)
             for node in source_cache.parse(self.api_source).body
             if isinstance(node, ast.FunctionDef)
-            and node.name in (section_names | ai_qa_only_names)
+            and node.name in (section_names | reader_names | ai_qa_only_names
+                              | {"_wazzup_chat_access"})
         }
         for function_name in section_names:
             with self.subTest(function_name=function_name):
                 self.assertIn("_verifier_chats_guard()", functions[function_name])
+                self.assertNotIn("_wazzup_chat_reader_guard()", functions[function_name])
+        for function_name in reader_names:
+            with self.subTest(function_name=function_name):
+                self.assertIn("_wazzup_chat_reader_guard()", functions[function_name])
+                self.assertNotIn("_verifier_chats_guard()", functions[function_name])
+        # Прежняя аудитория в новом гарде — тем же правилом, а не его копией.
+        self.assertIn("_verifier_chats_guard()", functions["_wazzup_chat_access"])
         # Эпизоды — единица ИИ-оценки, поэтому у них СВОЙ гард: аудитория
         # «ИИ-оценки» И отдел продаж. Раньше хватало _ai_qa_guard, пока в
         # разделе жил один отдел; после расширения на СЗоВ и Тез КЦ он стал

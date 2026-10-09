@@ -1297,6 +1297,25 @@ def _get_user_payload(user):
         except Exception:
             logging.exception("Не удалось определить модель направления пользователя %s", user_id)
 
+    # Верификатор отдела продаж: «Чаты ОП» ему открыты в режиме обработки, за
+    # сканом QR (у СВ ещё и кодом из Telegram главы отдела, wazzup/access.py). Группа
+    # верификаторов определяется моделью группы на сегодня, а не направлением,
+    # поэтому портал сам этого не выведет — пункт меню он рисует по флагу.
+    # Спрашиваем только у рядовых операторов продаж: остальным флаг не положен, и
+    # лишний запрос на каждый вход был бы платой ни за что. Отказ базы вход не
+    # роняет: без флага пункта просто не будет, а границу держит сервер.
+    wazzup_chat_operator = False
+    if (user_id is not None and str(role or '').strip().lower() == 'operator'
+            and (str(department_code or '').strip().lower() == 'op'
+                 or department_id == AI_QA_OP_DEPARTMENT_ID)):
+        try:
+            with db._get_cursor() as cursor:
+                wazzup_chat_operator = bool(wazzup_access.load_operator_state(
+                    cursor, user_id, None, datetime.now(ZoneInfo('Asia/Almaty')).date(),
+                    AI_QA_OP_DEPARTMENT_ID)['verifier'])
+        except Exception:
+            logging.exception("Не удалось определить режим «Чатов ОП» пользователя %s", user_id)
+
     # Сидит ли человек на линии удалённого КЦ, числясь в другом отделе (раздел
     # «Удаленный КЦ», вкладка «Линии»). По флагу портал показывает ему «Скачать
     # iCore Phone»; сам доступ к файлу проверяет _can_download_icore_phone.
@@ -1322,6 +1341,7 @@ def _get_user_payload(user):
         "department_code": department_code,
         "dial_list_line_member": dial_list_line_member,
         "baiga_access": baiga_access,
+        "wazzup_chat_operator": wazzup_chat_operator,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -5827,6 +5847,93 @@ def _verifier_chats_guard():
     return None, (jsonify({"error": "forbidden"}), 403)
 
 
+def _wazzup_chat_access():
+    """Режим раздела «Чаты ОП» для человека запроса: кто он в разделе и может
+    ли писать клиентам. Одно правило на ленту, отправку, статусы смены и флаг
+    профиля (wazzup/access.py; решения владельца 08.10.2026).
+
+        mode 'full'      прежняя аудитория раздела (_verifier_chats_guard):
+                         переписка, показатели, привязка. Писать клиентам из неё
+                         может только супер-админ («пока что суперадмины»);
+        mode 'operator'  верификатор: только аккаунт «op» в режиме обработки, и
+                         только пока его сессии подтверждён доступ — супервайзер
+                         отсканировал QR и ввёл код, пришедший главе отдела,
+                         либо админ/глава открыл доступ сканом без кода;
+                         до этого locked=True;
+        mode None        раздел закрыт.
+
+    Считается один раз на запрос: в одном запросе его спрашивают и гард ручки,
+    и отправка, и авторство сообщения."""
+    try:
+        cached = getattr(g, '_wazzup_chat_access', None)
+    except RuntimeError:
+        cached = None
+    if cached is not None:
+        return cached
+    requester_id = getattr(g, 'user_id', None)
+    state = {'user_id': requester_id, 'mode': None, 'locked': False, 'can_process': False}
+    if requester_id is not None:
+        full_id, _full_error = _verifier_chats_guard()
+        if full_id is not None:
+            user = db.get_user(id=requester_id)
+            state.update(
+                mode=wazzup_access.MODE_FULL,
+                can_process=bool(user and wazzup_access.processes_without_gate(
+                    _normalize_user_role(user[3]), user[11] if len(user) > 11 else None)))
+        else:
+            try:
+                with db._get_cursor() as cursor:
+                    operator = wazzup_access.load_operator_state(
+                        cursor, requester_id, _current_session_id_from_access_token(),
+                        datetime.now(ZoneInfo('Asia/Almaty')).date(), AI_QA_OP_DEPARTMENT_ID)
+            except Exception:
+                # Не узнали — считаем закрытым: раздел с перепиской не открывается «на всякий случай».
+                logging.exception("Чаты ОП: не удалось определить режим раздела для %s", requester_id)
+                operator = {'verifier': False, 'unlocked': False}
+            if operator['verifier']:
+                state.update(mode=wazzup_access.MODE_OPERATOR, locked=not operator['unlocked'],
+                             can_process=bool(operator['unlocked']))
+    try:
+        g._wazzup_chat_access = state
+    except RuntimeError:
+        pass
+    return state
+
+
+def _wazzup_chat_reader_guard():
+    """Каналы, список чатов и лента «Чатов ОП» — то, из чего состоит обработка.
+
+    Проходит прежняя аудитория раздела и верификатор с подтверждённым доступом.
+    Верификатору — только аккаунт «op»: «Поток» ведут другие люди, и в его
+    режиме раздела этого аккаунта нет вовсе. Показатели, привязка авторов и
+    список аккаунтов остаются под _verifier_chats_guard и ему закрыты."""
+    state = _wazzup_chat_access()
+    if state['mode'] == wazzup_access.MODE_FULL:
+        return state['user_id'], None
+    if state['mode'] == wazzup_access.MODE_OPERATOR:
+        if state['locked']:
+            return None, (jsonify({"error": "Доступ к чатам не подтверждён",
+                                   "code": "CHAT_ACCESS_LOCKED"}), 403)
+        if _wazzup_account_arg() != 'op':
+            return None, (jsonify({"error": "forbidden"}), 403)
+        return state['user_id'], None
+    return None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _wazzup_chat_approver_context(approver_id):
+    """Вправе ли человек вообще подтверждать доступ к чатам и какие у него отделы.
+
+    Круг тот же, что у обычного QR (_resolve_sensitive_qr_target): админ,
+    супервайзер или глава отдела — главу пускаем независимо от базовой роли.
+    Чей именно доступ он вправе открыть, решает _sensitive_access_approval_error."""
+    approver = db.get_user(id=approver_id)
+    headed_ids = [d['id'] for d in (db.get_headed_departments_for_user(approver_id) or [])]
+    if not approver or not (_is_privileged_role(approver[3]) or headed_ids):
+        return None, ("Подтвердить доступ может администратор, супервайзер или глава отдела", 403)
+    return {'approver': approver, 'headed_department_ids': headed_ids,
+            'department_id': db.get_user_department_id(approver_id)}, None
+
+
 def _ai_qa_direction_scope(requester_id):
     """Скоуп данных раздела ИИ-оценки ПО НАПРАВЛЕНИЯМ. None — без ограничений
     (супер-админ / глобальный админ / глава отдела / whitelist); список
@@ -6873,6 +6980,10 @@ def api_ai_qa_pull_call():
         phone = _qa_phone_suffix(body.get('phone'))
         if body.get('phone') and len(phone) < 4:
             return jsonify({"error": "Укажите не меньше четырёх цифр номера"}), 400
+        from test_numbers import keys as test_keys
+        if phone and test_keys.is_test_phone(phone, test_keys.current_keys()):
+            return jsonify({"error": "Это номер из реестра тестовых номеров — такие звонки "
+                                     "в оценку не берутся"}), 400
         incoming = bool(body.get('incoming', True))
         outgoing = bool(body.get('outgoing', True))
         if not incoming and not outgoing:
@@ -7441,6 +7552,7 @@ def _ai_qa_sample_binotel_candidates(day):
     """Тез КЦ: весь день компании ОДНИМ запросом к Binotel (list_calls_for_day), а
     не по запросу на оператора: у Binotel лимит частоты. Звонок сопоставляется с
     оператором по имени сотрудника — sip у Binotel переходит от человека к человеку."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     from call_qa import daily_sample as qa_sample
     cfg = tez_binotel_calls.get_config()
@@ -7452,7 +7564,7 @@ def _ai_qa_sample_binotel_candidates(day):
     lookup = _status_import_build_operator_lookup(exclude_chat_managers=True, exclude_fired=True)
     call_types = {tez_binotel_calls.CALL_TYPE_INCOMING, tez_binotel_calls.CALL_TYPE_OUTGOING}
     picked = []
-    for call in client.list_calls_for_day(day):
+    for call in test_keys.drop_test_calls(client.list_calls_for_day(day)):
         billsec = call['billsec']
         if call['call_type'] not in call_types or billsec <= 0 or not call['general_call_id']:
             continue
@@ -7542,6 +7654,8 @@ def _ai_qa_sample_c2d_candidates(day):
             cursor, OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
         if not family:
             return []
+        from test_numbers import keys as test_keys
+        not_test = test_keys.sql_not_test_any('r.client_phone', 'r.assigned_phone', digits=True)
         cursor.execute(f"""
             SELECT {db._C2D_REQUEST_COLUMNS}, COALESCE(d.canonical_id, d.id)
               FROM c2d_requests r
@@ -7551,6 +7665,7 @@ def _ai_qa_sample_c2d_candidates(day):
                AND COALESCE(r.outgoing_messages, 0) >= %s
                AND NOT EXISTS (SELECT 1 FROM c2d_chat_snapshots s
                                 WHERE s.request_id = r.request_id)
+               AND {not_test}
         """, (day, list(family), qa_config.C2D_MIN_OPERATOR_MESSAGES))
         rows = cursor.fetchall()
     candidates = []
@@ -8688,7 +8803,7 @@ def _wazzup_channels_from_api(account='op'):
 def api_wazzup_channels():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8728,7 +8843,7 @@ def api_wazzup_channels():
 def api_wazzup_chats():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8736,6 +8851,8 @@ def api_wazzup_chats():
         return jsonify({"error": "unknown account"}), 400
     channel_id = (request.args.get('channel_id') or '').strip() or None
     q = (request.args.get('q') or '').strip()
+    # Точный номер — «Чаты по каналам»: чаты этого номера во всех каналах.
+    chat_id = (request.args.get('chat_id') or '').strip()[:200] or None
     try:
         limit = min(max(int(request.args.get('limit', 30)), 1), 100)
     except (TypeError, ValueError):
@@ -8744,39 +8861,15 @@ def api_wazzup_chats():
         offset = max(int(request.args.get('offset', 0)), 0)
     except (TypeError, ValueError):
         offset = 0
-    where, params = ["account = %s"], [account]
-    if channel_id:
-        where.append("channel_id = %s")
-        params.append(channel_id)
-    if q:
-        # Экранируем метасимволы LIKE. Без этого '_' в запросе означал «любой
-        # один символ», а '%' — «что угодно»: поиск «7_78423714» притягивал
-        # чужие чаты, и переход по ссылке на такой чат решал «не найден» по
-        # разбавленной первой странице. Инъекции здесь не было (значение всегда
-        # шло параметром), а вот выдача врала.
-        where.append("(contact_name ILIKE %s ESCAPE '\\' OR contact_phone ILIKE %s ESCAPE '\\'"
-                     " OR chat_id ILIKE %s ESCAPE '\\')")
-        escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        like = f"%{escaped}%"
-        params.extend([like, like, like])
+    # Ждущие ответа — первыми (wazzup/chat_list.py).
+    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset, chat_id)
     try:
         with db._get_cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM wazzup_chats WHERE {' AND '.join(where)}",
-                           params)
+            cursor.execute(*count)
             total = cursor.fetchone()[0]
-            cursor.execute(f"""
-                SELECT channel_id, chat_id, chat_type, contact_name, contact_phone,
-                       last_message_at, last_message_text, last_message_is_echo,
-                       messages_count, inbound_count, outbound_count
-                  FROM wazzup_chats WHERE {' AND '.join(where)}
-                 ORDER BY last_message_at DESC NULLS LAST
-                 LIMIT %s OFFSET %s""", params + [limit, offset])
-            items = [{'channelId': r[0], 'chatId': r[1], 'chatType': r[2],
-                      'contactName': r[3], 'contactPhone': r[4],
-                      'lastMessageAt': r[5].isoformat() if r[5] else None,
-                      'lastMessageText': r[6], 'lastMessageIsEcho': r[7],
-                      'messagesCount': r[8], 'inboundCount': r[9], 'outboundCount': r[10]}
-                     for r in cursor.fetchall()]
+            cursor.execute(*page)
+            items = [wazzup_chat_list.chat_list_item(r) for r in cursor.fetchall()]
+            wazzup_chat_list.attach_channel_counts(cursor, account, items)
         return jsonify({"status": "success", "items": items, "total": total}), 200
     except Exception as error:
         logging.exception("wazzup chats failed")
@@ -8788,7 +8881,7 @@ def api_wazzup_chats():
 def api_wazzup_chat_messages():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _verifier_chats_guard()
+    _, err = _wazzup_chat_reader_guard()
     if err:
         return err
     account = _wazzup_account_arg()
@@ -8832,20 +8925,61 @@ def api_wazzup_chat_messages():
 # правилом забор истории «Потока» строит ключ автора (там id автора нет).
 from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
 from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
+from wazzup import access as wazzup_access  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
+from wazzup import chat_list as wazzup_chat_list  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
 
+# Обработка чатов (отправка, живые обновления, заметки, вложения). Гард — тот
+# же, что у ленты: пройти его мало, право писать решает _wazzup_chat_access.
+# Каждый живой поток держит нить waitress на всё время соединения, а нитей на
+# портал ~96 и из них же берут колокол и аукцион — отсюда потолок.
 app.register_blueprint(build_pilot_blueprint(
-    db=db, require_api_key=require_api_key, guard=_verifier_chats_guard,
+    db=db, require_api_key=require_api_key, guard=_wazzup_chat_reader_guard,
     channels=_wazzup_channels_from_api,
     preflight=_build_cors_preflight_response,
     listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
     gcs={'client': get_gcs_client, 'bucket_name': lambda: (
         os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()},
+    access=_wazzup_chat_access,
+    stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+
+# Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (скан QR, у СВ ещё
+# и код из Telegram главы отдела) и статусы смены. Статусы ложатся в operator_status_events
+# тем же append_operator_status_event, что события iCORE Phone, — часы, опоздания
+# и «Графики работы» считаются без второго источника. Сторож
+# (_wazzup_workspace_sweep) закрывает смену, чей портал замолчал.
+_wazzup_workspace_sweep = None
+try:
+    from wazzup import workspace_routes as wazzup_workspace_routes  # noqa: E402
+
+    _wazzup_workspace_bp = wazzup_workspace_routes.build_wazzup_workspace_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        chat_access=_wazzup_chat_access,
+        current_session_id=_current_session_id_from_access_token,
+        approver_context=_wazzup_chat_approver_context,
+        approval_perimeter_error=_sensitive_access_approval_error,
+        send_telegram=lambda chat_id, text: _send_telegram_text_message(
+            chat_id=chat_id, text=text, parse_mode='HTML'),
+        secret=SENSITIVE_QR_SECRET,
+        sales_department_id=AI_QA_OP_DEPARTMENT_ID,
+        role_label=lambda role: SENSITIVE_ACCESS_ROLE_LABELS.get(_normalize_user_role(role), ''),
+        avatar_url=lambda user: (_build_avatar_signed_url(user[15], user[16])
+                                 if len(user) > 16 else None),
+        presence_timeout_seconds=_env_int('WAZZUP_WORKSPACE_PRESENCE_TIMEOUT_SECONDS', 600,
+                                          minimum=180, maximum=3600),
+    )
+    _wazzup_workspace_sweep = _wazzup_workspace_bp.sweep
+    app.register_blueprint(_wazzup_workspace_bp)
+    logging.info("Чаты ОП: рабочее место подключено на /api/wazzup/workspace")
+except Exception:
+    logging.exception("Чаты ОП: рабочее место НЕ подключено")
 
 
 def _wazzup_account_arg():
@@ -13235,6 +13369,191 @@ def api_resource_fte_recalculate():
         return jsonify({"status": "success", **overview}), 200
     except Exception as error:
         return _resource_fte_error_response(error)
+
+
+# ── Прогноз звонков по отделам (TimesFM в BigQuery) и люди по Erlang A ─────────────────
+# Движок — resource_fte/forecast_engine.py: ночной прогон на 42 дня вперёд по СЗоВ, ОП и
+# Тез КЦ, ручной запуск, поправки «исключить дни» / «событие +N %».
+# Свой поток: в прогоне паузы между запросами к Oktell и ожидание BigQuery, общему пулу
+# бота (4 потока) их держать незачем.
+resource_forecast_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='resource-forecast')
+
+
+def _resource_engine_oktell_query():
+    return _oktell_query if _oktell_api_ready() else None
+
+
+def _resource_engine_run(departments, triggered_by):
+    from resource_fte import forecast_engine
+    started = time.time()
+    results = forecast_engine.run_all(db, oktell_query=_resource_engine_oktell_query(),
+                                      triggered_by=triggered_by,
+                                      departments=tuple(departments or forecast_engine.DEPARTMENTS))
+    logging.info(
+        "Resource forecast run (%s) in %.0fs: %s", triggered_by, time.time() - started,
+        ", ".join(f"{item.get('department')}={item.get('status')}"
+                  + (f"/{item.get('method')}" if item.get('method') else "")
+                  + (f" ({item.get('error')})" if item.get('error') else "")
+                  for item in results),
+    )
+    return results
+
+
+def _resource_engine_run_in_background(departments, user_id):
+    """Ставит прогон и возвращает, что с ним: 'started' или 'queued' (идёт другой прогон —
+    этот отдел пересчитается сразу за ним, запрос не теряется)."""
+    from resource_fte import forecast_engine
+    status = "queued" if forecast_engine.run_state()["running"] else "started"
+    triggered_by = f'user:{user_id}' if user_id else 'manual'
+
+    def _run():
+        try:
+            _resource_engine_run(departments, triggered_by)
+        except Exception:
+            logging.exception("resource forecast manual run failed")
+
+    threading.Thread(target=_run, name='resource-forecast-run', daemon=True).start()
+    return status
+
+
+def _resource_engine_schema_response():
+    from resource_fte import forecast_engine
+    if forecast_engine.ensure_schema_db(db):
+        return None
+    return jsonify({"error": "Таблицы прогноза ещё не созданы — повторите через несколько минут"}), 503
+
+
+@app.route('/api/resource_fte/engine', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    from resource_fte.common import _parse_report_date
+    department = (request.args.get('department') or 'szov').strip().lower()
+    if department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    today = datetime.now().date()
+    try:
+        date_from = _parse_report_date(request.args.get('date_from')) if request.args.get('date_from') else today
+        date_to = _parse_report_date(request.args.get('date_to')) if request.args.get('date_to') else today + timedelta(days=27)
+    except ValueError:
+        return jsonify({"error": "Некорректная дата — нужен формат ГГГГ-ММ-ДД"}), 400
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    if (date_to - date_from).days > 62:
+        return jsonify({"error": "Период не длиннее 63 дней"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            forecast = forecast_engine.daily_forecast(cursor, department, date_from, date_to)
+            cursor.execute(
+                "SELECT day, offered, answered FROM resource_daily_volume WHERE department = %s AND day BETWEEN %s AND %s",
+                (department, date_from, date_to),
+            )
+            actual = {row[0].isoformat(): {"offered": row[1], "answered": row[2]} for row in cursor.fetchall()}
+            payload = {
+                "department": department,
+                "departments": [{"key": key, "label": cfg["label"], "method": cfg["method"],
+                                 "method_label": forecast_engine.METHOD_LABELS[cfg["method"]]}
+                                for key, cfg in forecast_engine.DEPARTMENTS.items()],
+                "last_run": forecast_engine.latest_run(cursor, department, successful=False),
+                "last_success": forecast_engine.latest_run(cursor, department, successful=True),
+                "params": forecast_engine.latest_params(cursor, department),
+                "adjustments": forecast_engine.list_adjustments(cursor, department),
+                "days": [{**item, "actual": actual.get(day.isoformat())} for day, item in sorted(forecast.items())],
+            }
+        run_state = forecast_engine.run_state()
+        payload["run_state"] = {
+            "running": run_state["running"],
+            "department_busy": run_state["current"] == department or department in run_state["pending"],
+        }
+        return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/engine/run', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_run():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    payload = request.get_json(silent=True) or {}
+    department = str(payload.get('department') or '').strip().lower()
+    if department and department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    departments = [department] if department else list(forecast_engine.DEPARTMENTS)
+    status = _resource_engine_run_in_background(departments, requester_id)
+    return jsonify({"status": status, "departments": departments}), 202
+
+
+@app.route('/api/resource_fte/engine/adjustments', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_adjustments():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    payload = request.get_json(silent=True) or {}
+    department = str(payload.get('department') or 'szov').strip().lower()
+    if department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            created = forecast_engine.add_adjustment(cursor, department, payload, requester_id)
+    except ValueError as error:
+        # add_adjustment поднимает ValueError только с текстом для человека.
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+    # Исключённые дни меняют вход модели — прогноз отдела пересчитывается сразу.
+    # Поправка «событие» применяется при чтении, пересчёт ей не нужен.
+    run_status = None
+    if created["kind"] == "exclude":
+        run_status = _resource_engine_run_in_background([department], requester_id)
+    return jsonify({"status": "success", "adjustment": created, "run": run_status}), 200
+
+
+@app.route('/api/resource_fte/engine/adjustments/<int:adjustment_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_adjustment_delete(adjustment_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            removed = forecast_engine.delete_adjustment(cursor, adjustment_id)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+    if removed is None:
+        return jsonify({"error": "Поправка не найдена"}), 404
+    run_status = None
+    if removed["kind"] == "exclude":
+        run_status = _resource_engine_run_in_background([removed["department"]], requester_id)
+    return jsonify({"status": "success", "run": run_status}), 200
 
 
 @app.route('/api/shift_auction/test_access', methods=['GET', 'PUT', 'OPTIONS'])
@@ -22668,8 +22987,9 @@ def add_user():
         line_fields_hidden = _department_hides_operator_line_fields(department_id)
         # У ООЗ группа есть, а направления нет — только его и снимаем.
         direction_hidden = line_fields_hidden or _department_hides_employee_direction(department_id)
-        # У отдела аналитики направление необязательно: не выбрали — у сотрудника
-        # его не будет; выбрали — проверяется и сохраняется как у любого оператора.
+        # У отдела аналитики и у IT направление необязательно: не выбрали — у
+        # сотрудника его не будет (или придёт из выбранной группы); выбрали —
+        # проверяется и сохраняется как у любого оператора.
         # Отдел спрашиваем, только когда направления в запросе нет: остальным
         # лишний поход в базу не нужен.
         direction_skipped = direction_hidden or (
@@ -27403,6 +27723,7 @@ def get_task_photo_previews(task_id):
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
 def handle_monthly_report():
+    from test_numbers import keys as test_keys
     try:
         month = request.args.get('month')
         if not month:
@@ -27817,6 +28138,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                              AND """ + test_keys.sql_calls_not_test() + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -27835,6 +28157,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
+                              AND """ + test_keys.sql_calls_not_test() + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -29071,6 +29394,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     Период ограничен 7 днями: тогда список тянется одним запросом к Binotel и не
     упирается в его лимит частоты (см. также ретрай в tez_binotel_calls._post)."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
@@ -29118,7 +29442,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
     try:
-        calls = client.list_calls_by_internal_number(sip, start_ts, stop_ts)
+        calls = test_keys.drop_test_calls(client.list_calls_by_internal_number(sip, start_ts, stop_ts))
     except Exception:
         logging.exception("binotel random_call: list calls failed (sip=%s)", sip)
         return jsonify({"error": "Не удалось обратиться к Binotel, попробуйте ещё раз"}), 502
@@ -30068,10 +30392,14 @@ EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_depa
 # Отделы, где направление оператору выбирать необязательно. Отдел аналитики —
 # решение владельца 06.10.2026 («именно у отдела аналитики»): направлений у
 # отдела нет ни одного (прод, 06.10.2026), и обязательный direction_id не давал
-# завести в нём никого. В отличие от набора выше, поле в карточке остаётся и
-# присланное направление сохраняется как обычно — снята только обязательность.
+# завести в нём никого. IT — решение владельца 09.10.2026: при заведении
+# сотрудника в IT не обязательны ни группа, ни направление. Группу add_user не
+# требует ни у кого — обязательной её делала только карточка
+# (EMPLOYEE_GROUP_OPTIONAL_DEPARTMENTS в src/utils/departmentViews.js).
+# В отличие от набора выше, поле в карточке остаётся и присланное направление
+# сохраняется как обычно — снята только обязательность.
 # Зеркалит EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS в src/utils/departmentViews.js.
-EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik'})
+EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik', 'it'})
 
 # Отделы, у которых в карточке сотрудника нет поля «SIP номер». ООЗ на линию не
 # выходит вовсе (владелец, 25.09.2026). У удалённого КЦ номер есть, но это линия
@@ -37634,7 +37962,16 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
                                                   request_stats_rows=None,
                                                   prev_request_stats_rows=None,
                                                   next_request_stats_rows=None,
-                                                  next_rating_rows=None):
+                                                  next_rating_rows=None,
+                                                  test_numbers=None):
+    # test_numbers — ключи «Реестра тестовых номеров» (test_numbers/keys.py). Обращения
+    # с такими номерами не входят ни во время ответа, ни в оценки и их разбор, а из
+    # «Чатов» оператора (сводный отчёт вендора, номеров в нём нет) вычитаются.
+    from test_numbers import keys as test_keys
+    test_numbers = frozenset(test_numbers or ())
+    test_request_ids = test_keys.c2d_test_request_ids(
+        test_numbers, request_stats_rows, prev_request_stats_rows, next_request_stats_rows)
+    excluded_test = 0
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
         try:
@@ -37693,6 +38030,9 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if _chat_report_in_surge(start_dt, windows):
             excluded_surge += 1
             continue
+        if test_keys.c2d_row_is_test(row, test_numbers):
+            excluded_test += 1
+            continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
             note_unmatched(raw_name, f"response:{row_index}")
@@ -37750,6 +38090,12 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if metric_day != target_day:
             foreign_day_rating_rows += 1
             continue
+        # Оценка тестового обращения: у клиента WhatsApp с идентификатором номер есть
+        # только в request_stats, поэтому — и по номеру строки, и по её заявке.
+        if (test_keys.c2d_row_is_test(row, test_numbers)
+                or test_keys.c2d_request_id(row) in test_request_ids):
+            excluded_test += 1
+            continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
             note_unmatched(raw_name, f"rating:{row_index}")
@@ -37793,10 +38139,28 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         bucket = chat_count_agg.setdefault((op_id, metric_day), {'chats_count': 0})
         bucket['chats_count'] += int(round(chats_value))
 
+    # «Чаты» оператора — сводный отчёт вендора, номеров в нём нет: тестовые обращения
+    # дня, которые request_stats приписал оператору, вычитаются из его числа.
+    test_chats = {}
+    for row in request_stats_rows or []:
+        if not isinstance(row, dict) or not test_keys.c2d_row_is_test(row, test_numbers):
+            continue
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        start_dt = _chat2desk_parse_datetime(
+            _chat2desk_row_first(row, 'request_start', 'reply_start', 'created_at'), target_tz=target_tz)
+        if not raw_name or start_dt is None:
+            continue
+        op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        if op_id is None:
+            continue
+        key = (op_id, start_dt.date().strftime('%Y-%m-%d'))
+        test_chats[key] = test_chats.get(key, 0) + 1
+
     update_fields = set()
     for (op_id, metric_day), bucket in chat_count_agg.items():
         metric = metric_for(op_id, metric_day)
-        metric['chats_count'] = int(bucket.get('chats_count') or 0)
+        metric['chats_count'] = max(
+            0, int(bucket.get('chats_count') or 0) - test_chats.get((op_id, metric_day), 0))
     if chat_count_agg:
         update_fields.add('chats_count')
 
@@ -37877,6 +38241,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'low_ratings': low_ratings,
         'low_rating_count': len(low_ratings),
         'excluded_surge_rows': int(excluded_surge),
+        'excluded_test_number_rows': int(excluded_test),
         # Сколько копий одной и той же оценки вендор положил в один ответ —
         # молча их отбрасывать нельзя, иначе «всё сошлось» скроет поломку API.
         'duplicate_rating_rows': int(duplicate_rating_rows),
@@ -37908,6 +38273,7 @@ def _chat2desk_saved_surge_windows_for_day(day_obj):
 def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_index, surge_windows=None):
     # Время ответа берём из request_stats (см. _chat2desk_build_metrics_from_statistics_rows).
     # operator_replies больше не тянем — он давал завышенное среднее.
+    from test_numbers import keys as test_keys
     request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
@@ -37956,7 +38322,8 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
         request_stats_rows=request_stats_rows,
         prev_request_stats_rows=prev_request_stats_rows,
         next_request_stats_rows=next_request_stats_rows,
-        next_rating_rows=next_rating_rows
+        next_rating_rows=next_rating_rows,
+        test_numbers=test_keys.current_keys(),
     )
     # Те же строки идут в c2d_requests (раздел «Оценка чатов ЧМ») — без
     # дополнительных запросов к API.
@@ -38895,6 +39262,7 @@ def _oktell_resource_target_days(day=None, date_from=None, date_to=None):
 
 
 def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     return (
@@ -38913,6 +39281,7 @@ def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
         "FROM oktell.dbo.Call_Systems_hst t "
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), DATEPART(HOUR, t.dt_insert)"
     )
 
@@ -39163,6 +39532,7 @@ _OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"
 
 
 def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds, group_by='park'):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39230,6 +39600,7 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), {key_group}{line_group}"
     )
 
@@ -39435,6 +39806,7 @@ def _oktell_billing_grouping_report(params, raw_rows):
 # между страницами, чтобы новые звонки текущего дня не сдвигали уже просмотренные строки.
 def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
                                       minute_from, minute_to, max_call_id=None):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39445,6 +39817,7 @@ def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"AND (t.result_call = N'{grt}' OR (t.result_call <> N'{grt}' AND t.call_result IN (5,13,19))) "
         f"{id_filter}{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
     )
 
 
@@ -39643,6 +40016,7 @@ def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, 
     У исходящих момент ответа водителя станция не пишет, поэтому там обе величины —
     одна и та же длина коммутации (гудки внутри).
     """
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39664,6 +40038,7 @@ def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, 
         "AND t.route IN ('incoming', 'outgoing') "
         f"AND t.result_call NOT IN (N'{grt}', N'{fail}') AND t.call_result IN (5) "
         f"{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), oi.Name"
     )
 
@@ -40653,6 +41028,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
     выражением — прокси Oktell просит не распараллеливать и не частить. «Сегодня» берём по
     часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток совпадала с
     источником, а не с нашим сервером."""
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     # Цепочки, которые прямо сейчас ждут ответа: открытый лег в IVR/очереди и ни одного лега
@@ -40662,6 +41038,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "FROM oktell.dbo.A_Stat_Connections_1x1 a "
         "WHERE a.ConnectionType = 4 AND a.BLineNum = N'IVR' AND a.TimeStop IS NULL "
         f"AND a.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS}, GETDATE()) "
+        f"{test_keys.tsql_and_not_test('a.AOutNumber')}"
         "AND NOT EXISTS (SELECT 1 FROM oktell.dbo.A_Stat_Connections_1x1 d "
         "WHERE d.IdChain = a.IdChain AND d.ConnectionType = 5) "
         "GROUP BY a.IdChain"
@@ -40679,7 +41056,8 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "SELECT COUNT(DISTINCT c.IdChain) AS talking_now "
         "FROM oktell.dbo.A_Stat_Connections_1x1 c "
         "WHERE c.ConnectionType = 5 AND c.TimeStop IS NULL "
-        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE())"
+        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE()) "
+        f"{test_keys.tsql_and_not_test('c.AOutNumber')}"
         ") k CROSS JOIN ("
         "SELECT "
         f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
@@ -40695,6 +41073,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "FROM oktell.dbo.Call_Systems_hst x "
         "WHERE x.route = 'incoming' AND x.taxi_park <> '' "
         f"AND x.result_call <> N'{fail}' "
+        f"{test_keys.tsql_and_not_test('x.[number]')}"
         "AND x.dt_insert >= CONVERT(date, GETDATE()) "
         "AND x.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE()))"
         ") t"
@@ -41170,6 +41549,7 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
     served_sl — принятые с ожиданием в очереди не дольше порога SL, тем же правилом, что у
     снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить.
     wait_served_seconds — ожидание принятых, числитель ASA; тоже правило снимка табло."""
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
@@ -41197,6 +41577,7 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
         f"AND t.dt_insert >= {day_start} "
         f"AND t.dt_insert < {day_end} "
         f"{cutoff}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY DATEPART(HOUR, t.dt_insert) ORDER BY hh"
     )
 
@@ -42533,8 +42914,12 @@ def _chat_hourly_fetch_requests(day_str, *, cache=None):
     else:
         logging.warning("Отчёт по чатам: остановился на CHAT2DESK_API_MAX_PAGES=%s", max_pages)
 
+    # Обращения с номерами «Реестра тестовых номеров» — не чаты: ни в отчёте, ни на табло.
+    from test_numbers import keys as test_keys
+    test_numbers = test_keys.current_keys()
     return [row for row in known.values()
-            if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
+            if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE
+            and not test_keys.c2d_row_is_test(row, test_numbers)]
 
 
 # === Chat2Desk: вебхуки вместо опроса ==========================================================
@@ -44048,8 +44433,11 @@ def _szov_chat_wallboard_day_requests(day_str):
         fresh = (cache.get('day') == day_str
                  and time.time() - float(cache.get('ts') or 0.0) < SZOV_CHAT_WALLBOARD_REQUESTS_TTL_SECONDS)
         if fresh and _chat_hourly_requests_cache.get('day') == day_str and _chat_hourly_requests_cache.get('rows'):
+            from test_numbers import keys as test_keys
+            test_numbers = test_keys.current_keys()
             return [row for row in _chat_hourly_requests_cache['rows'].values()
-                    if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
+                    if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE
+                    and not test_keys.c2d_row_is_test(row, test_numbers)]
     # Саму выкачку ведём БЕЗ лока: она листает страницы Chat2Desk минутами, а на этом же локе
     # стоит почасовой отчёт в Telegram — иначе команда `/chats` ждала бы обновления табло.
     rows = _chat_hourly_fetch_requests(day_str)
@@ -44991,6 +45379,7 @@ def _tez_wallboard_journal_worker(day_key, done=None):
     done — событие этой выкачки: его ждёт шаг табло, которому нечего показать. Итог пишем
     и событие взводим в finally: упади поход на чём угодно, ждущий обязан проснуться, а
     флаг fetching — сняться, иначе журнал не обновлялся бы до перезапуска процесса."""
+    from test_numbers import keys as test_keys
     calls, error = None, None
     try:
         from tez import binotel_calls as tez_binotel_calls
@@ -45002,7 +45391,8 @@ def _tez_wallboard_journal_worker(day_key, done=None):
             error = 'Ключ Binotel API не задан: TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET'
         else:
             try:
-                calls = tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)
+                calls = test_keys.drop_test_calls(
+                    tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key))
             except Exception as exc:
                 # Наружу текст ошибки уезжает в диагностику снимка, а requests пишет в него
                 # адрес API — чистим тем же правилом, что и ошибки кабинета.
@@ -45808,6 +46198,7 @@ async def _tez_broadcast_journal(day_key, hour_end_ts):
     Вчерашних суток (отбивка в 00:00 судит 23:00–24:00) в кэше табло нет: их качаем
     напрямую, в своём потоке, чтобы не выбить у табло сегодняшний журнал.
     Возвращает (звонки | None, ошибка | None)."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     loop = asyncio.get_event_loop()
     today_key = datetime.now(ZoneInfo(TEZ_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
@@ -45816,7 +46207,8 @@ async def _tez_broadcast_journal(day_key, hour_end_ts):
             return None, 'Ключ Binotel API не задан'
         try:
             calls = await loop.run_in_executor(
-                None, lambda: tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key))
+                None, lambda: test_keys.drop_test_calls(
+                    tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)))
             return calls, None
         except Exception as exc:
             logging.error("Отбивка табло Тез КЦ: журнал за %s не прочитан: %s", day_key, exc)
@@ -49004,6 +49396,7 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
     # по операторской стороне заодно отсеивает внешнюю линию/IVR (их Id нет в каталоге).
     # conn_types — фильтр исход/вход для «Случайного звонка»; по умолчанию оба типа (как в синке).
+    from test_numbers import keys as test_keys
     return (
         "SELECT t.auserid, t.operator_name, COUNT(*) AS available FROM ("
         f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, oi.Name AS operator_name "
@@ -49011,13 +49404,15 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
         f"JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = {_OKTELL_EVAL_OPERATOR_UID_EXPR} "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
         f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
-        + _oktell_eval_duration_clause(min_d, max_d) +
+        + _oktell_eval_duration_clause(min_d, max_d)
+        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
         ") t GROUP BY t.auserid, t.operator_name"
     )
 
 
 def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES,
                             phone_digits=None):
+    from test_numbers import keys as test_keys
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     # Точечный подбор по номеру клиента («ИИ-оценка» → найти звонок по телефону):
     # хвост цифр сравнивается прямо в SQL, иначе случайная выборка в 60 строк
@@ -49038,7 +49433,8 @@ def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_typ
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
         f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
-        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause +
+        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause
+        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
         f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
     )
 
@@ -49377,6 +49773,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
     Binotel обслуживает именно его). force=True игнорирует флаг enabled в настройках.
     progress — колбэк фонового прогона (stage/progress уходят в состояние job'а).
     """
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
 
     def _report(**fields):
@@ -49452,7 +49849,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                 _report(stage=f'Binotel: {day.isoformat()}',
                         progress={'done': idx, 'total': len(days)})
                 try:
-                    day_calls = client.list_calls_for_day(day)
+                    day_calls = test_keys.drop_test_calls(client.list_calls_for_day(day))
                 except Exception:
                     logging.exception("binotel distribution: день %s не прочитан", day)
                     days_failed += 1
@@ -52446,6 +52843,71 @@ def delete_work_schedule_status_period():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting status period: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _can_remove_dismissal_blacklist(requester, requester_id):
+    """Убрать из ЧС: главы отделов, админы и супер-админы, а не рядовой СВ.
+
+    Поставить ЧС может любой, кто ведёт график, снять — только уровнем выше.
+    Чьих людей — решает та же граница, что у остальных правок графика
+    (_resolve_scoped_operator_for_requester): глава — свой отдел.
+    """
+    return _is_admin_role(requester[3]) or bool(_headed_department_ids(requester_id))
+
+
+@app.route('/api/work_schedules/status_period/blacklist', methods=['DELETE'])
+@require_api_key
+def remove_work_schedule_dismissal_blacklist():
+    """
+    Убрать сотрудника из ЧС: ЧС-увольнение становится обычным увольнением.
+    Body: {
+        "operator_id": int,
+        "range_start": "YYYY-MM-DD",   # optional: вернуть снимок графика оператора
+        "range_end": "YYYY-MM-DD"
+    }
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _can_remove_dismissal_blacklist(user_data, requester_id):
+            return jsonify({"error": "Убрать из ЧС может глава отдела или администратор"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        range_start = data.get('range_start')
+        range_end = data.get('range_end')
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        status_periods = db.remove_schedule_dismissal_blacklist(
+            int(target_operator[0]),
+            actor_id=requester_id
+        )
+        if not status_periods:
+            return jsonify({"error": "Сотрудник не в ЧС"}), 404
+
+        operator_snapshot = None
+        if range_start and range_end:
+            operator_snapshot = db.get_operator_with_shifts(int(target_operator[0]), range_start, range_end)
+
+        return jsonify({
+            "message": "Removed from blacklist",
+            "status_periods": status_periods,
+            "operator": operator_snapshot
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error removing dismissal blacklist: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -57539,6 +58001,7 @@ async def back_from_evaluations(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('eval_'), state=sv.view_evaluations)
 async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
+    from test_numbers import keys as test_keys
     sv_id = int(callback.data.split('_')[1])
     user = db.get_user(id=sv_id)
     
@@ -57571,6 +58034,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
                 SELECT COUNT(*) FILTER (WHERE survey_response_id IS NULL), AVG(score)
                 FROM calls
                 WHERE operator_id = %s AND month=%s
+                  AND """ + test_keys.sql_calls_not_test() + """
             """, (op_id, datetime.now().strftime('%Y-%m')))
             result = cursor.fetchone()
         
@@ -65854,6 +66318,19 @@ except Exception:
 # ── Раздел «Обращения» (CRM поверх Telegram-групп) ───────────────────────────
 # Тот же приём, что у вики: Blueprint вместо десятка плоских роутов, зависимости
 # приходят аргументами (обратный импорт из crm.routes сюда был бы циклом).
+#
+# Файлы раздел у себя не хранит — они живут в Telegram-группе обращения. Бакет
+# нужен одному случаю: обращение ждёт проверки супервайзера (задача #297), в
+# группу ещё не ушло, а оператор приложил к нему файл. Лежит он в бакете
+# вложений задач (свой env GOOGLE_CLOUD_STORAGE_BUCKET_CRM перекрывает его).
+def _crm_bucket_name():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_CRM')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or ''
+    ).strip()
+
+
 try:
     from crm.routes import build_crm_blueprint  # noqa: E402
 
@@ -65867,6 +66344,7 @@ try:
         sensitive_access_granted=_sensitive_access_granted_for_user,
         # <ignoredErrors> для выгрузки: ИИН и телефоны лежат в ней текстом.
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        gcs={'bucket_name': _crm_bucket_name, 'client': get_gcs_client},
     ))
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:
@@ -65964,6 +66442,102 @@ try:
     logging.info("Раздел «Термокороба»: Blueprint подключён на /api/thermoboxes")
 except Exception:
     logging.exception("Раздел «Термокороба»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
+# Номера, с которых сотрудники проверяют линии и чаты; их звонки и чаты не входят
+# ни в один расчёт (test_numbers/keys.py). Реестр ведут админы и главы отделов.
+#
+# Живые источники (Oktell, Binotel, отчёты Chat2Desk) читают ключи реестра через
+# test_numbers.keys.current_keys(): здесь пакету один раз отдаётся курсор базы.
+# Наша база исключает номера условием в SQL (keys.sql_not_test) сама.
+from test_numbers import keys as _test_numbers_keys  # noqa: E402
+
+_test_numbers_keys.configure(db._get_cursor)
+
+# Справочники линий для «Тестов по дням»: на какой наш номер и в какой таксопарк был
+# тест. Каналы и лицензии меняются редко, а экран открывают часто — кеш на 10 минут;
+# справочник не ответил — прежний ответ ещё годится, а без него повтор не раньше чем
+# через минуту, иначе каждое открытие экрана ждало бы тайм-аут API.
+_TEST_NUMBERS_LINES_CACHE = {}
+_TEST_NUMBERS_LINES_TTL = 600
+_TEST_NUMBERS_LINES_RETRY = 60
+
+
+def _test_numbers_cached(name, load):
+    now = time.time()
+    cached = _TEST_NUMBERS_LINES_CACHE.get(name)
+    if cached and now < cached[0]:
+        if cached[1] is None:
+            raise RuntimeError(f'справочник линий {name} недавно не ответил')
+        return cached[1]
+    try:
+        value = load()
+    except Exception:
+        previous = cached[1] if cached else None
+        _TEST_NUMBERS_LINES_CACHE[name] = (now + _TEST_NUMBERS_LINES_RETRY, previous)
+        if previous is None:
+            raise
+        logging.warning("Реестр тестовых номеров: справочник линий %s не обновился", name, exc_info=True)
+        return previous
+    _TEST_NUMBERS_LINES_CACHE[name] = (now + _TEST_NUMBERS_LINES_TTL, value)
+    return value
+
+
+def _test_numbers_c2d_channels():
+    """{id канала Chat2Desk: его номер} — GET /v1/channels."""
+    def load():
+        response = requests.get(f"{_chat2desk_api_base_url()}/v1/channels",
+                                headers={'Authorization': _chat2desk_authorization_header(),
+                                         'Accept': 'application/json'},
+                                params={'limit': 200}, timeout=10)
+        response.raise_for_status()
+        payload = response.json() or {}
+        rows = payload.get('data') if isinstance(payload, dict) else payload
+        return {int(ch['id']): str(ch.get('phone') or '') for ch in rows or [] if ch.get('id') is not None}
+    return _test_numbers_cached('c2d', load)
+
+
+def _test_numbers_chatapp_lines():
+    """{(licenseId, messengerType): (название лицензии, номер)} — лицензии ChatApp."""
+    def load():
+        client, _cfg, _company_id = _chatapp_client()
+        if client is None:
+            return {}
+        return {(int(lic), str(messenger)): (name, phone)
+                for lic, messenger, name, phone in client.active_messenger_licenses()}
+    return _test_numbers_cached('chatapp', load)
+
+
+def _test_numbers_binotel_lines(phones):
+    """{generalCallID: номер линии} по истории номеров клиентов в Binotel Тез КЦ:
+    зеркало tez_lead_calls линию не хранит, а журнал Binotel её знает."""
+    calls = _tez_leads_binotel_client().list_calls_by_external_numbers(phones)
+    return {str(call['general_call_id']): call.get('line_number')
+            for call in calls or [] if call.get('general_call_id')}
+
+
+try:
+    from test_numbers.routes import build_test_numbers_blueprint  # noqa: E402
+
+    app.register_blueprint(build_test_numbers_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        oktell_query=_oktell_query,
+        lines={
+            'oktell_line_key': _oktell_billing_line_key,
+            'oktell_park_label': _oktell_billing_park_label,
+            'wazzup_channels': _wazzup_channels_from_api,
+            'c2d_channels': _test_numbers_c2d_channels,
+            'chatapp_lines': _test_numbers_chatapp_lines,
+            'binotel_lines': _test_numbers_binotel_lines,
+        },
+    ))
+    logging.info("Раздел «Реестр тестовых номеров»: Blueprint подключён на /api/test_numbers")
+except Exception:
+    logging.exception("Раздел «Реестр тестовых номеров»: Blueprint НЕ подключён")
 
 
 # ── Раздел «Списки Байги» (итоги еженедельной акции Байга, #356) ──────────────
@@ -68908,6 +69482,18 @@ async def run_wazzup_potok_sync_async():
         logging.exception("wazzup potok sync failed")
 
 
+async def run_wazzup_workspace_sweep_async():
+    # Сторож смен верификаторов в «Чатах ОП» — полтора десятка точечных чтений, но в пул
+    # бота не кладём: пул общий и маленький ([[shared-executor-pool-budget]]), а сторож не срочный.
+    if _wazzup_workspace_sweep is None:
+        return None
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _wazzup_workspace_sweep)
+    except Exception:
+        logging.exception("wazzup workspace sweep failed")
+
+
 async def run_user_sessions_retention_async():
     # Чистка давно протухших сессий (см. db.cleanup_expired_user_sessions).
     loop = asyncio.get_event_loop()
@@ -70082,6 +70668,18 @@ if __name__ == '__main__':
         coalesce=True
     )
 
+    # Сторож смен верификаторов в «Чатах ОП»: смена, чей портал молчит дольше порога,
+    # закрывается моментом последней отметки (wazzup/shift.py). Каждая отметка проверяет то
+    # же самое сама, так что сторож нужен тем, кто закрыл вкладку и больше не вернулся.
+    scheduler.add_job(
+        run_wazzup_workspace_sweep_async,
+        CronTrigger(minute='*/2', timezone=ZoneInfo('Asia/Almaty')),
+        id='wazzup_workspace_sweep_2min',
+        misfire_grace_time=120,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Сверка ограничителя «Перезвона» каждые полчаса: смотрит историю самой АТС
     # и записывает пересиженное, о котором программа не доложила. Это и есть
     # страховка на все случаи, когда правило до человека не доехало.
@@ -70389,6 +70987,33 @@ if __name__ == '__main__':
         )
     else:
         logging.info("Oktell resource sync is disabled by OKTELL_RESOURCE_SYNC_ENABLED")
+
+    # Прогноз звонков отделов на 42 дня (TimesFM в BigQuery) — после ночной синхронизации
+    # Oktell (05:40) и после того, как мост и зеркало Binotel закрыли вчерашние сутки.
+    if _env_bool('RESOURCE_FORECAST_ENABLED', True):
+        def _resource_forecast_schema():
+            from resource_fte import forecast_engine
+            forecast_engine.ensure_schema_db(db)
+
+        # Таблицы движка — при старте, своей транзакцией и не задерживая запуск.
+        resource_forecast_pool.submit(_resource_forecast_schema)
+
+        async def run_resource_forecast_job():
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(resource_forecast_pool, _resource_engine_run, None, 'scheduler')
+
+        scheduler.add_job(
+            run_resource_forecast_job,
+            CronTrigger(
+                hour=_env_int('RESOURCE_FORECAST_NIGHTLY_HOUR', 6, minimum=0, maximum=23),
+                minute=_env_int('RESOURCE_FORECAST_NIGHTLY_MINUTE', 20, minimum=0, maximum=59),
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='resource_forecast_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;

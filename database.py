@@ -3012,6 +3012,13 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_last
                 ON wazzup_chats(account, last_message_at DESC);
             """)
+            # «Чаты по каналам»: чаты одного номера во всех каналах аккаунта
+            # (wazzup/chat_list.py) — без него каждый список просматривал бы
+            # всю таблицу ради стрелки в строке.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_chat
+                ON wazzup_chats(account, chat_id);
+            """)
             # Пилот обработки чатов и ранние статусы доставки Wazzup.
             from wazzup.pilot_schema import init_schema as init_wazzup_pilot_schema
             init_wazzup_pilot_schema(cursor)
@@ -6977,7 +6984,9 @@ class Database:
             self._init_complaints_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
+            self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
+            self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -7142,6 +7151,26 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by];
                     END IF;
+                    -- Исключение — обращение на проверке у супервайзера (задача
+                    -- #297, «Сотрудничество с Яндексом»): это уже не чужая
+                    -- переписка, а его задача. Проверяет любой супервайзер
+                    -- отдела автора, а без них — глава отдела
+                    -- (crm/queries.py::department_reviewer_sql). Будим всех
+                    -- работающих СВ отдела и главу — и когда обращение встало
+                    -- на проверку, и когда по нему решили: задача должна
+                    -- погаснуть у всех проверяющих. Глава при живых СВ — круг
+                    -- шире точного, лишний тычок стоит одной перечитки сводки.
+                    IF NEW.review_state IS NOT NULL THEN
+                        targets := targets || ARRAY(
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                        ) || ARRAY(
+                            SELECT d.head_user_id FROM departments d
+                             WHERE d.id = NEW.department_id
+                               AND d.head_user_id IS NOT NULL);
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'complaints' THEN
                     -- Жалоба будит двоих: автора (пришёл ответ для водителя или
                     -- вопрос группы) и того, кому поставлена работа с
@@ -7159,21 +7188,17 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by, OLD.responsible_id];
                     END IF;
-                    -- Жалоба на проверке (Яндекс): решают супервайзеры текущих
-                    -- групп автора, а без них — глава его отдела
-                    -- (complaints/queries.py::reviewer_sql). Будим круг шире
-                    -- точного — лишний тычок стоит одной перечитки сводки.
+                    -- Жалоба на проверке (Яндекс): решает любой супервайзер
+                    -- отдела автора, а без них — глава отдела
+                    -- (crm/queries.py::department_reviewer_sql). Будим всех
+                    -- работающих СВ отдела и главу — круг шире точного, лишний
+                    -- тычок стоит одной перечитки сводки.
                     IF NEW.review_state IS NOT NULL THEN
                         targets := targets || ARRAY(
-                            SELECT gsm.supervisor_id
-                              FROM group_operator_memberships gom
-                              JOIN group_supervisor_memberships gsm
-                                ON gsm.group_id = gom.group_id
-                             WHERE gom.operator_id = NEW.created_by
-                               AND gom.start_date <= CURRENT_DATE
-                               AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
-                               AND gsm.start_date <= CURRENT_DATE
-                               AND (gsm.end_date IS NULL OR gsm.end_date >= CURRENT_DATE)
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.creator_department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')
                         ) || ARRAY(
                             SELECT d.head_user_id FROM departments d
                              WHERE d.id = NEW.creator_department_id
@@ -7356,16 +7381,26 @@ class Database:
             # Обращения. INSERT не будим намеренно: в момент создания автору
             # ещё нечего читать — он сам его и завёл. А вот WHEN обязателен,
             # иначе каждое исходящее сообщение в нить (last_message_at) слало
-            # бы тычок, не меняя ничего в сводке.
+            # бы тычок, не меняя ничего в сводке. review_state — решение
+            # супервайзера по обращению на проверке: оно гасит задачу у всех
+            # проверяющих.
             (
                 'trg_bell_crm_tickets',
                 'crm_tickets',
-                'AFTER UPDATE OF author_unread_at, status, delivery_status',
+                'AFTER UPDATE OF author_unread_at, status, delivery_status, review_state',
                 """WHEN (
                     OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
                     OR OLD.status IS DISTINCT FROM NEW.status
                     OR OLD.delivery_status IS DISTINCT FROM NEW.delivery_status
+                    OR OLD.review_state IS DISTINCT FROM NEW.review_state
                 )""",
+            ),
+            # Единственная вставка, о которой колоколу есть что сказать, —
+            # обращение, вставшее на проверку: у супервайзера появилась задача.
+            # Отдельным триггером: WHEN у INSERT не может ссылаться на OLD.
+            (
+                'trg_bell_crm_tickets_review', 'crm_tickets', 'AFTER INSERT',
+                """WHEN (NEW.review_state IS NOT NULL)""",
             ),
             # Жалобы (задача #297). INSERT будит ответственного сразу: сотрудника
             # мог определить уже оператор, и задача «проведите ОС» появляется в
@@ -8352,6 +8387,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT op_funnel_schema")
+
+    def _init_wazzup_workspace_schema_tx(self, cursor):
+        """Схема рабочего места верификатора в «Чатах ОП» (wazzup/workspace_schema.py):
+        подтверждённый доступ сессии, ожидание кода из Telegram, отметки портала.
+
+        Под SAVEPOINT, как соседи: упавший DDL раздела не вправе уронить
+        инициализацию всей схемы. Цена отката — раздел остаётся закрытым для
+        верификаторов (доступ подтвердить негде), остальной портал и просмотр
+        переписки работают как раньше."""
+        import logging
+
+        cursor.execute("SAVEPOINT wazzup_workspace_schema")
+        try:
+            from wazzup.workspace_schema import init_wazzup_workspace_schema
+            init_wazzup_workspace_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT wazzup_workspace_schema")
+            logging.exception(
+                "Схема рабочего места «Чатов ОП» не применилась — верификаторам раздел "
+                "не откроется, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT wazzup_workspace_schema")
 
     def _init_qa_marketing_schema_tx(self, cursor):
         """Схема модуля «Маркетинговый мониторинг» (ТЗ #317): таблицы qa_marketing_*.
@@ -18739,6 +18797,14 @@ class Database:
             start_obj, end_obj = end_obj, start_obj
 
         human_out = self._CHATAPP_HUMAN_OUT
+        # Чат с номером из «Реестра тестовых номеров» (test_numbers) оператору не
+        # засчитывается. Номер — у чата, не у сообщения.
+        from test_numbers import keys as test_keys
+        not_test_chat = (
+            "NOT EXISTS (SELECT 1 FROM chatapp_chats tc"
+            " WHERE tc.license_id = m.license_id AND tc.messenger_type = m.messenger_type"
+            " AND tc.chat_id = m.chat_id AND "
+            + test_keys.sql_is_test("COALESCE(NULLIF(tc.phone, ''), tc.chat_id)", digits=True) + ")")
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
@@ -18802,6 +18868,7 @@ class Database:
                   AND COALESCE(map.is_bot, FALSE) = FALSE
                   AND COALESCE(m.is_deleted, FALSE) = FALSE
                   AND ({human_out})
+                  AND {not_test_chat}
                   AND (m.dt AT TIME ZONE 'Asia/Almaty')::date >= %s
                   AND (m.dt AT TIME ZONE 'Asia/Almaty')::date <= %s
                   AND LOWER(COALESCE(
@@ -23581,10 +23648,15 @@ class Database:
         return stats
 
     def count_tez_successes(self, year, month):
-        """Сколько успешек сейчас засчитано за период (для контроля убыли)."""
+        """Сколько успешек сейчас засчитано за период (для контроля убыли).
+
+        Без номеров «Реестра тестовых номеров»: их успешки пересчёт снимает намеренно,
+        и сторож убыли сравнивал бы несопоставимые числа."""
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             cursor.execute(
-                "SELECT COUNT(*) FROM tez_lead_successes WHERE year = %s AND month = %s",
+                "SELECT COUNT(*) FROM tez_lead_successes s WHERE s.year = %s AND s.month = %s AND "
+                + test_keys.sql_not_test('s.phone_norm', digits=True),
                 (int(year), int(month))
             )
             return int((cursor.fetchone() or [0])[0] or 0)
@@ -23592,6 +23664,8 @@ class Database:
     def get_tez_lead_funnel(self, year, month):
         """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
         from tez.op_leads import ALMATY_TZ, call_window_for_period
+        from test_numbers import keys as test_keys
+        not_test = test_keys.sql_not_test('l.phone_norm', digits=True)
         window_start, window_end = call_window_for_period(year, month)
         # Границы считаем в Python готовыми aware-датами, а не приведением даты
         # к зоне прямо в SQL: у Postgres тип date неявно приводится и к
@@ -23616,6 +23690,7 @@ class Database:
                     COUNT(*) FILTER (WHERE l.prev_month_first_order_at IS NOT NULL) AS active_prev_month
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
+                  AND """ + not_test + """
                 """,
                 (int(year), int(month))
             )
@@ -23639,6 +23714,7 @@ class Database:
                       AND c.started_at >= %s
                       AND c.started_at < %s
                 WHERE l.year = %s AND l.month = %s
+                  AND """ + not_test + """
                 """,
                 (window_from, window_to, int(year), int(month))
             )
@@ -23647,6 +23723,9 @@ class Database:
             # Успешки периода — по месяцу ПОЕЗДКИ, вместе с перенесёнными, плюс
             # отдельно сколько из них дал перенос: для владельца это ответ на
             # вопрос «что дало правило», а не строчка мелким шрифтом.
+            # Лиды с номерами «Реестра тестовых номеров» не входят ни в базу, ни в
+            # успешки: пересчёт закрытых месяцев не идёт, и снятая им успешка
+            # осталась бы в числителе при уже очищенном знаменателе.
             prev_year, prev_month = (int(year) - 1, 12) if int(month) == 1 else (int(year), int(month) - 1)
             cursor.execute(
                 """
@@ -23655,6 +23734,7 @@ class Database:
                 FROM tez_lead_successes s
                 JOIN tez_leads l ON l.id = s.lead_id
                 WHERE s.year = %s AND s.month = %s
+                  AND """ + not_test + """
                 """,
                 (prev_year, prev_month, int(year), int(month))
             )
@@ -23663,8 +23743,9 @@ class Database:
             # Сколько лидов ЭТОГО месяца сейчас дорабатываются в следующем.
             cursor.execute(
                 """
-                SELECT COUNT(*) FROM tez_leads
-                WHERE year = %s AND month = %s AND status <> 'success'
+                SELECT COUNT(*) FROM tez_leads l
+                WHERE l.year = %s AND l.month = %s AND l.status <> 'success'
+                  AND """ + not_test + """
                 """,
                 (int(year), int(month))
             )
@@ -23718,6 +23799,7 @@ class Database:
 
     def get_tez_operator_successes(self, year, month, group_id=None):
         """Рейтинг операторов по успешкам месяца (месяц берётся по дате поездки)."""
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23734,6 +23816,7 @@ class Database:
                 FROM tez_lead_successes s
                 LEFT JOIN users u ON u.id = s.operator_id
                 WHERE s.year = %s AND s.month = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 GROUP BY s.operator_id, COALESCE(u.name, s.operator_name)
                 ORDER BY successes DESC, operator_name
@@ -23750,6 +23833,7 @@ class Database:
 
     def get_tez_successes_by_day(self, year, month, group_id=None):
         """Успешки по дням — дата = день выполнения первой поездки."""
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23761,6 +23845,7 @@ class Database:
                 SELECT s.success_date, COUNT(*)
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 GROUP BY s.success_date
                 ORDER BY s.success_date
@@ -23777,6 +23862,7 @@ class Database:
         детализации лидов: тут выборка идёт от успешки, поэтому и группа, и день
         применяются без риска молча отрезать лиды без успешки.
         """
+        from test_numbers import keys as test_keys
         params = [int(year), int(month), success_date]
         group_sql = ''
         if group_id:
@@ -23796,6 +23882,7 @@ class Database:
                 LEFT JOIN tez_lead_calls c ON c.general_call_id = s.call_general_id
                 LEFT JOIN tez_lead_batches batch ON batch.id = l.first_batch_id
                 WHERE s.year = %s AND s.month = %s AND s.success_date = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 ORDER BY s.call_at
                 """,
@@ -23824,6 +23911,7 @@ class Database:
         operator_id сужает выборку до одного оператора — так «Мои часы» получают
         свои успешки без доступа к статистике всей группы.
         """
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23842,6 +23930,7 @@ class Database:
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
                   AND s.operator_id IS NOT NULL
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}{operator_sql}
                 GROUP BY s.operator_id, EXTRACT(DAY FROM s.success_date)
                 """,
@@ -23855,8 +23944,12 @@ class Database:
     @staticmethod
     def _tez_leads_detail_filters(status=None, operator_id=None, search=None):
         """Общий фрагмент WHERE + параметры для детализации/подсчёта лидов —
-        чтобы страница и её total считались по одинаковым условиям."""
-        sql = ''
+        чтобы страница и её total считались по одинаковым условиям.
+
+        Лид с номером «Реестра тестовых номеров» — не в периметре воронки: ни в
+        странице, ни в total."""
+        from test_numbers import keys as test_keys
+        sql = ' AND ' + test_keys.sql_not_test('l.phone_norm', digits=True)
         params = []
         if status:
             sql += " AND l.status = %s"
@@ -23984,6 +24077,7 @@ class Database:
         других вариантов в tez_lead_successes нет), то есть ровно на строках
         этой выборки. Считать успешки в отчёте и в разделе теперь одно и то же.
         """
+        from test_numbers import keys as test_keys
         year, month = int(year), int(month)
         prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
         sql = """
@@ -24083,6 +24177,8 @@ class Database:
                 LIMIT 1
             ) lc ON TRUE
             LEFT JOIN users lu ON lu.id = lc.operator_id
+            -- Номер «Реестра тестовых номеров» не в периметре воронки — и не в отчёте.
+            WHERE """ + test_keys.sql_not_test('r.phone_norm', digits=True) + """
             -- Своя база месяца идёт первой, перенос — за ней: у листа одна
             -- шапка, и блоками он читается так же, как раньше читались два листа.
             ORDER BY r.is_carried, r.trip_at DESC NULLS LAST, r.full_name
@@ -24121,16 +24217,18 @@ class Database:
 
     def get_tez_success_counts_for_operators(self, operator_ids, year, month):
         """{operator_id: успешек за месяц} — для подстановки факта в план ОП."""
+        from test_numbers import keys as test_keys
         ids = [int(v) for v in (operator_ids or []) if v is not None]
         if not ids:
             return {}
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT operator_id, COUNT(*)
-                FROM tez_lead_successes
-                WHERE year = %s AND month = %s AND operator_id = ANY(%s)
-                GROUP BY operator_id
+                SELECT s.operator_id, COUNT(*)
+                FROM tez_lead_successes s
+                WHERE s.year = %s AND s.month = %s AND s.operator_id = ANY(%s)
+                  AND """ + test_keys.sql_not_test('s.phone_norm', digits=True) + """
+                GROUP BY s.operator_id
                 """,
                 (int(year), int(month), ids)
             )
@@ -24738,6 +24836,10 @@ class Database:
             'journal_marked': marked_journal_episodes,
         }
 
+    # Авторы сообщений, отправленных из iCORE: ключ 'icore:<id сотрудника>'
+    # (wazzup.access.ICORE_AUTHOR_PREFIX).
+    _WAZZUP_ICORE_AUTHOR_LIKE = 'icore:%'
+
     def list_wazzup_authors(self, account='op'):
         """Авторы исходящих сообщений Wazzup (по author_id) со статистикой
         и текущей привязкой из wazzup_operator_map. Привязки без сообщений
@@ -24762,8 +24864,12 @@ class Database:
                   FULL JOIN (SELECT * FROM wazzup_operator_map WHERE account = %s) map
                     ON map.author_id = a.author_id
                   LEFT JOIN users u ON u.id = map.user_id
+                 -- Автор сообщений из iCORE привязан к отправителю при отправке
+                 -- (wazzup/pilot.py): разбирать руками там нечего, и в списке он
+                 -- был бы второй строкой того же человека.
+                 WHERE COALESCE(a.author_id, map.author_id) NOT LIKE %s
                  ORDER BY COALESCE(a.messages_count, 0) DESC, author_name
-            """, (account, account))
+            """, (account, account, self._WAZZUP_ICORE_AUTHOR_LIKE))
             return [{'author_id': r[0], 'author_name': r[1], 'messages_count': r[2],
                      'last_message_at': r[3], 'chats_count': r[4],
                      'user_id': r[5], 'user_name': r[6], 'is_bot': r[7]}
@@ -24889,8 +24995,13 @@ class Database:
         медиану времени ответа усреднением строк не получить. Диалоги и там, и
         в общем итоге считаются ВМЕСТЕ с grp, поэтому итог направления — ровно
         сумма его строк, как и показывает подвал таблицы.
+
+        Переписка с номерами «Реестра тестовых номеров» (test_numbers) в показатели
+        не входит; номер Wazzup — цифры (contact_phone или сам chat_id).
         """
-        window, params = ["m.account = %s"], [account]
+        from test_numbers import keys as test_keys
+        window, params = ["m.account = %s",
+                          test_keys.sql_not_test(test_keys.wazzup_phone_sql('m'), digits=True)], [account]
         if date_from:
             # Явный timestamp обязателен. Для date PostgreSQL выбирает другую
             # перегрузку AT TIME ZONE и при UTC-сессии сдвигает границу на +10 ч.
@@ -25224,8 +25335,12 @@ class Database:
 
     def list_wazzup_episodes(self, day=None, kind=None, operator_user_id=None,
                              limit=50, offset=0):
-        """Список эпизодов для проверки/оценки. day — локальная дата Алматы по ended_at."""
-        where, params = ["TRUE"], []
+        """Список эпизодов для проверки/оценки. day — локальная дата Алматы по ended_at.
+
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) в список не идут.
+        Колонки условия — без алиаса: оно стоит и в счёте без алиаса, и в выборке с ним."""
+        from test_numbers import keys as test_keys
+        where, params = ["TRUE", test_keys.sql_not_test(test_keys.wazzup_phone_sql(), digits=True)], []
         if day:
             where.append("(ended_at AT TIME ZONE 'Asia/Almaty')::date = %s")
             params.append(day)
@@ -25410,7 +25525,11 @@ class Database:
 
         Порядок задан здесь, а не у вызывающего: и первый ответ, и ответ внутри
         чата считаются проходом по ленте обращения, и на неупорядоченной выборке
-        обе величины молча поедут."""
+        обе величины молча поедут.
+
+        Обращения с номерами «Реестра тестовых номеров» (test_numbers) выпадают целиком,
+        со всеми событиями: номер приходит не в каждом событии обращения."""
+        from test_numbers import keys as test_keys
         day_to = day_to or day_from
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -25419,6 +25538,8 @@ class Database:
                        message_type, request_type, is_new_request
                 FROM c2d_webhook_events
                 WHERE day BETWEEN %s AND %s
+                  AND (request_id IS NULL OR request_id NOT IN ("""
+                           + test_keys.C2D_WEBHOOK_TEST_REQUESTS_SQL + """))
                 ORDER BY event_at, id
             """, (day_from, day_to))
             columns = [description[0] for description in cursor.description]
@@ -25475,7 +25596,10 @@ class Database:
         Открытый чат — обращение, по которому были сообщения и не приходило
         `close_request`. Считаем в SQL, а не строками: открытым может быть и
         позавчерашний чат, а тянуть ради счётчика всю неделю событий в память
-        значит платить памятью за одну цифру на плитке."""
+        значит платить памятью за одну цифру на плитке.
+
+        Тестовые обращения (номер из «Реестра тестовых номеров») открытыми не считаются."""
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             cursor.execute("""
                 WITH messages AS (
@@ -25487,6 +25611,7 @@ class Database:
                     WHERE request_id IS NOT NULL
                       AND hook_type IN ('inbox', 'outbox', 'imported_message', 'comment',
                                         'dialog_transferred', 'new_request')
+                      AND request_id NOT IN (""" + test_keys.C2D_WEBHOOK_TEST_REQUESTS_SQL + """)
                     GROUP BY request_id
                 )
                 SELECT m.operator_id, COUNT(*)::int
@@ -25593,8 +25718,14 @@ class Database:
     def _c2d_requests_where(date_from=None, date_to=None, operator_id=None,
                             channel_id=None, transport=None, min_messages=None,
                             max_messages=None, rating_filter=None, department_id=None):
-        """Общий WHERE по c2d_requests (алиас r, users — алиас u)."""
-        where = ["r.operator_id IS NOT NULL"]
+        """Общий WHERE по c2d_requests (алиас r, users — алиас u).
+
+        Обращения с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются
+        и не считаются: номер клиента — в client_phone или, у клиента WhatsApp с
+        идентификатором, в assigned_phone; оба поля — цифры."""
+        from test_numbers import keys as test_keys
+        where = ["r.operator_id IS NOT NULL",
+                 test_keys.sql_not_test_any('r.client_phone', 'r.assigned_phone', digits=True)]
         params = []
         if date_from:
             where.append("r.day >= %s")
@@ -25914,8 +26045,11 @@ class Database:
         кем-либо (calls -> снапшот с ключами эпизода), 'mine' — оценённых этим
         проверяющим, 'none' — без исключений. exclude_episode_ids — эпизоды,
         отсеянные в этом же запросе (переписку съел ретеншн).
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются.
         Возвращает (episode|None, candidates_count)."""
-        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL"]
+        from test_numbers import keys as test_keys
+        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL",
+                 test_keys.sql_not_test(test_keys.wazzup_phone_sql('e'), digits=True)]
         params = []
         if operator_id is not None:
             where.append("e.operator_user_id = %s")
@@ -26397,8 +26531,11 @@ class Database:
                              exclude='any', evaluator_id=None, department_id=None,
                              exclude_episode_ids=None):
         """Случайный эпизод ChatApp по фильтрам — как pick_wazzup_episode.
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются.
         Возвращает (episode|None, candidates_count)."""
-        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL"]
+        from test_numbers import keys as test_keys
+        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL",
+                 test_keys.sql_not_test('e.contact_phone', digits=True)]
         params = []
         if operator_id is not None:
             where.append("e.operator_user_id = %s")
@@ -29397,6 +29534,9 @@ class Database:
         errors = []
         missing_operators = set()
 
+        # Звонки с номерами «Реестра тестовых номеров» в пул не идут (test_numbers).
+        from test_numbers import keys as test_keys
+        test_numbers = test_keys.cached_keys(self._get_cursor)
         with self._get_cursor() as cur:
             for op in payload.get('distribution', []):
                 op_name = op.get('operator')
@@ -29410,6 +29550,8 @@ class Database:
                     missing_operators.add(op_name)
 
                 for c in op.get('calls', []):
+                    if test_keys.is_test_phone(c.get('phone'), test_numbers):
+                        continue
                     external_id = c.get('id')
                     dt_raw_str = c.get('datetimeRaw')
                     parsed_dt = _parse_datetime_raw(dt_raw_str)
@@ -29478,7 +29620,15 @@ class Database:
         через set_imported_call_audio_path после создания строки.
 
         status — только для ежедневной выборки «ИИ-оценки» ('ai_sample'): такая строка
-        субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает."""
+        субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает.
+
+        Звонок с номером из «Реестра тестовых номеров» (test_numbers) в пул не кладётся
+        вовсе — None, как у дубля: и для журнала, и для ИИ это не работа с водителем.
+        Это страховка: выборки и деление отсеивают такие звонки раньше, до скачивания
+        записи."""
+        from test_numbers import keys as test_keys
+        if test_keys.is_test_phone(phone, test_keys.cached_keys(self._get_cursor)):
+            return None
         parsed_dt = _parse_datetime_raw(datetime_raw)
         phone_norm = _normalize_phone(phone)
         with self._get_cursor() as cur:
@@ -31925,6 +32075,9 @@ class Database:
         прослушки не входят: это субъекты оценки ИИ, и «всего в пуле» с ними
         выводило бы в таблицу операторов, у которых нормы нет вовсе."""
         out = {}
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT operator_id,
@@ -31934,6 +32087,8 @@ class Database:
                        COUNT(*) FILTER (WHERE status = 'skipped') AS skipped
                 FROM imported_calls
                 WHERE month = %s AND operator_id IS NOT NULL
+                  AND """ + test_keys.sql_not_test(
+                      "COALESCE(NULLIF(phone_normalized, ''), phone_number)") + """
                 GROUP BY operator_id
             """, (month,))
             for r in cur.fetchall():
@@ -32639,13 +32794,19 @@ class Database:
             # 4) Количество оценённых звонков и средняя оценка (как раньше).
             # Оценка «Тестирование знаний» входит в среднюю, но звонком не
             # считается — план прослушки от неё не уменьшается.
+            # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+            # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+            from test_numbers import keys as test_keys
+            not_test_calls = test_keys.sql_calls_not_test()
             cursor.execute("""
                 SELECT
                     (SELECT COUNT(*) FROM calls
                       WHERE operator_id = %s AND month = %s AND is_draft = FALSE
-                        AND survey_response_id IS NULL) AS call_count,
+                        AND survey_response_id IS NULL
+                        AND """ + not_test_calls + """) AS call_count,
                     (SELECT AVG(score) FROM calls
-                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                        AND """ + not_test_calls + """) AS avg_score
             """, (operator_id, current_month, operator_id, current_month))
             calls_row = cursor.fetchone()
             call_count = int(calls_row[0] or 0)
@@ -34358,7 +34519,11 @@ class Database:
         Последняя версия оценки определяется по ключу
         (operator_id, phone_number, month, appeal_date).
         Для calls.duration -> NULL, для imported_calls.duration -> ic.duration_sec.
+
+        Оценки и звонки с номерами «Реестра тестовых номеров» (test_numbers) в журнал не
+        идут: средний балл оператора браузер считает по этому же списку.
         """
+        from test_numbers import keys as test_keys
         query = """
             WITH latest_versions AS (
                 SELECT 
@@ -34369,6 +34534,7 @@ class Database:
                     MAX(created_at) AS latest_date
                 FROM calls
                 WHERE operator_id = %s
+                  AND """ + test_keys.sql_calls_not_test() + """
                 GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
@@ -34535,6 +34701,8 @@ class Database:
                 NULL::boolean AS knowledge_test_auto_submitted
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
+              AND """ + test_keys.sql_not_test(
+                  "COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)") + """
         """
         params.append(operator_id)
 
@@ -34867,7 +35035,10 @@ class Database:
                 return {}
 
         params = [month]
-        filter_clause = "month = %s AND is_draft = FALSE"
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
+        filter_clause = "month = %s AND is_draft = FALSE AND " + test_keys.sql_calls_not_test()
         if normalized_ids is not None:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
@@ -35076,6 +35247,10 @@ class Database:
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
+        not_test_calls = test_keys.sql_calls_not_test()
         query = f"""
             WITH latest_versions AS (
                 SELECT
@@ -35088,6 +35263,7 @@ class Database:
                 WHERE month = %s
                   AND is_draft = FALSE
                   AND score IS NOT NULL
+                  AND {not_test_calls}
                 GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
@@ -35360,7 +35536,10 @@ class Database:
         Последние версии определяются как MAX(created_at) для каждой комбинации:
         (phone_number, operator_id, month, appeal_date)
         Если supervisor_id задан — фильтрует операторов по этому SV и включает самого SV.
+
+        Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в сводку не входят.
         """
+        from test_numbers import keys as test_keys
         query = """
         WITH latest_versions AS (
             -- для каждой пары (phone_number, operator_id, month, appeal_date) берем последний created_at
@@ -35372,6 +35551,7 @@ class Database:
                 MAX(created_at) AS latest_date
             FROM calls
             WHERE month = %s
+              AND """ + test_keys.sql_calls_not_test() + """
             GROUP BY phone_number, operator_id, month, appeal_date
         ),
         latest_calls AS (
@@ -36004,6 +36184,8 @@ class Database:
             return cursor.fetchall()
 
     def get_week_call_stats(self, operator_id, start_date, end_date):
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) не считаются.
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             query = """
                 WITH latest_versions AS (
@@ -36018,6 +36200,7 @@ class Database:
                     AND created_at >= %s
                     AND created_at <= %s
                     AND is_draft = FALSE
+                    AND """ + test_keys.sql_calls_not_test() + """
                     GROUP BY operator_id, phone_number, month, appeal_date
                 ),
                 latest_calls AS (
@@ -36070,6 +36253,8 @@ class Database:
         sd = start_date
         ed = end_date
         params = [sd, ed]
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) не считаются.
+        from test_numbers import keys as test_keys
 
         query = """
             WITH latest_versions AS (
@@ -36077,6 +36262,7 @@ class Database:
                 FROM calls
                 WHERE is_draft = FALSE
                   AND created_at >= %s AND created_at <= %s
+                  AND """ + test_keys.sql_calls_not_test() + """
                 GROUP BY phone_number, operator_id, month, appeal_date
             )
             SELECT
@@ -47438,7 +47624,10 @@ class Database:
                 'startDate': period_payload['startDate'],
                 'endDate': period_payload['endDate'],
                 'dismissalReason': period_payload['dismissalReason'],
-                'comment': period_payload['comment']
+                'comment': period_payload['comment'],
+                # Окно дня в «Графиках» берёт статус отсюда: без признака ЧС-увольнение
+                # выглядело обычным — без плашки «ЧС» и кнопки «Убрать из ЧС».
+                'isBlacklist': period_payload['isBlacklist']
             }
             cur_day = overlap_start
             while cur_day <= overlap_end:
@@ -64398,6 +64587,48 @@ class Database:
                      result['messages'], result['chats'], result['episodes_deleted'],
                      len(result['episodes_kept']), result['outside_episodes'])
         return result
+
+    def _init_test_numbers_schema_tx(self, cursor):
+        """Схема «Реестра тестовых номеров» — БЕЗ своего SAVEPOINT, намеренно.
+
+        Таблица реестра стоит в условиях исключения десятков расчётов (табло,
+        отчёты, ИИ-оценка — test_numbers/keys.py: sql_not_test). Не развернись она
+        тихо, как раздел, — упали бы все эти запросы сразу. Пусть лучше не
+        стартует новая версия: старая продолжит работать, а ошибка будет видна в
+        логе деплоя. DDL простой и зависит только от `users`.
+        """
+        from test_numbers.schema import init_test_numbers_schema
+        init_test_numbers_schema(cursor)
+
+    def remove_schedule_dismissal_blacklist(self, operator_id, actor_id=None):
+        """Убрать сотрудника из ЧС: снять флаг is_blacklist с его ЧС-увольнений.
+
+        Само увольнение остаётся — с той же датой, причиной и комментарием, — но
+        становится обычным: его можно прервать сменой, закрыть датой или удалить.
+        Кому это можно (главы отделов, админы, супер-админы), решает роут.
+        В «Истории изменений» сотрудника остаётся запись, кто снял ЧС.
+
+        Возвращает снятые периоды; пустой список — человек не в ЧС.
+        """
+        operator_id = int(operator_id)
+        actor_id_norm = int(actor_id) if actor_id is not None else None
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE operator_schedule_status_periods
+                SET is_blacklist = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE operator_id = %s
+                  AND status_code = 'dismissal'
+                  AND COALESCE(is_blacklist, FALSE) = TRUE
+                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
+            """, (operator_id,))
+            rows = cursor.fetchall() or []
+            if not rows:
+                return []
+            cursor.execute("""
+                INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (operator_id, actor_id_norm, 'blacklist', 'Да', 'Нет'))
+            return [self._serialize_schedule_status_period(row) for row in rows]
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

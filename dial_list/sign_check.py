@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from psycopg2.extras import execute_values
 
 from crm import sapar
+from test_numbers import keys as test_keys
 from . import signing
 
 log = logging.getLogger(__name__)
@@ -255,6 +256,7 @@ class SignChecker:
             FROM dial_list_leads l
             WHERE l.signed_at IS NOT NULL AND l.success_resolved_at IS NULL
               {lead_filter}
+              {test_filter}
               AND NOT EXISTS (
                   SELECT 1 FROM dial_list_assignments a
                   JOIN dial_list_attempts t ON t.assignment_id = a.id
@@ -295,8 +297,12 @@ class SignChecker:
         if lead_ids is not None:
             params["lead_ids"] = [str(x) for x in lead_ids]
             lead_filter = "AND l.id = ANY(%(lead_ids)s::uuid[])"
+        # Успешка за номер из реестра тестовых (test_numbers) не засчитывается: это
+        # проверка обзвона, а не водитель.
+        test_filter = "AND " + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL
         with self.db._get_cursor() as cur:
-            cur.execute(self._RESOLVE_SQL.format(lead_filter=lead_filter), params)
+            cur.execute(self._RESOLVE_SQL.format(lead_filter=lead_filter, test_filter=test_filter),
+                        params)
             rows = cur.fetchall()
         credited = sum(1 for r in rows if r[1] is not None)
         if rows:

@@ -16,6 +16,10 @@ test('attachment viewer identifies PDF/images and keeps other documents in the g
     assert.equal(attachmentPreviewKind({ ...message, type: 'image', contentUri: 'https://store.wazzup24.com/photo' }), 'image');
     assert.equal(attachmentName({ fileName: '../../filename.pdf' }), '.._.._filename.pdf');
     assert.equal(attachmentName({ contentUri: 'invalid' }), '');
+    assert.equal(attachmentPreviewKind({ type: 'video', contentUri: 'https://example.invalid/opaque' }), 'video');
+    assert.equal(attachmentPreviewKind({ type: 'document', fileName: 'clip.MP4', contentUri: 'https://example.invalid/opaque' }), 'video');
+    assert.equal(attachmentPreviewKind({ mimeType: 'video/webm', contentUri: 'https://example.invalid/opaque' }), 'video');
+    assert.equal(attachmentPreviewKind({ type: 'video', isDeleted: true, contentUri: 'https://example.invalid/a.mp4' }), null);
 });
 
 test('PDF text extraction preserves layout lines and adjacent split-word fragments', () => {

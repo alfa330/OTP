@@ -1,8 +1,16 @@
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .common import WEEKDAYS_RU, _round_value, _to_float, _to_int
+from .forecast_engine import (
+    engine_settings as _engine_settings,
+    incident_extra_agents as _engine_incident_extra_agents,
+    line_profile_for_date as _engine_line_profile_for_date,
+    prefetch_line as _engine_prefetch_line,
+    staffing_for_day as _engine_staffing_for_day,
+)
 
 
 INCIDENT_UPLIFT_LOOKBACK_DAYS = 6
@@ -225,8 +233,68 @@ def _apply_daily_aht_to_profile(profile: Dict[str, Any], settings: Dict[str, Any
     }
 
 
-def _compute_forecast_profile_for_date_tx(cursor, forecast_date, settings: Dict[str, Any]) -> Dict[str, Any]:
+def _engine_guarded(cursor, engine_cache: Optional[dict], label: str, step: Callable[[], Any], queries: bool = True) -> Any:
+    """Шаг движка прогноза для линии. Любой его сбой (таблиц ещё нет, битая строка прогона)
+    оставляет день прежнему правилу, а не роняет весь запрос раздела; шаг с запросами к базе
+    идёт под точкой сохранения, чтобы транзакция вызывающего осталась рабочей."""
+    if engine_cache is not None and engine_cache.get("failed"):
+        return None
+    savepoint = False
+    if queries:
+        try:
+            cursor.execute("SAVEPOINT resource_engine")
+            savepoint = True
+        except Exception:  # noqa: BLE001 — нет транзакции (autocommit): защищать нечего
+            savepoint = False
+    try:
+        result = step()
+    except Exception:  # noqa: BLE001
+        logging.exception("Движок прогноза не посчитал %s — день идёт по прежнему правилу", label)
+        if savepoint:
+            cursor.execute("ROLLBACK TO SAVEPOINT resource_engine")
+        if engine_cache is not None:
+            engine_cache["failed"] = True
+        return None
+    if savepoint:
+        cursor.execute("RELEASE SAVEPOINT resource_engine")
+    return result
+
+
+def _engine_enabled(settings: Dict[str, Any]) -> bool:
+    return _engine_settings(settings)["forecast_engine"] == "timesfm"
+
+
+def _prefetch_engine_tx(cursor, period_start, period_end, settings: Dict[str, Any], engine_cache: dict) -> None:
+    """Всё, что нужно дням движка за период, — несколькими запросами на весь период."""
+    if not _engine_enabled(settings):
+        return
+    _engine_guarded(
+        cursor, engine_cache, f"{period_start}..{period_end}",
+        lambda: _engine_prefetch_line(cursor, period_start, period_end, settings, engine_cache),
+    )
+
+
+def _compute_forecast_profile_for_date_tx(cursor, forecast_date, settings: Dict[str, Any],
+                                          engine_cache: Optional[dict] = None) -> Dict[str, Any]:
     weekday = forecast_date.weekday()
+    # Новый движок (прогноз TimesFM + цикл месяца, люди по Erlang A под цели SL/AR), если он
+    # включён и на этот день уже есть прогноз, сделанный ДО дня. Иначе — прежнее правило
+    # «тот же день недели −21 и −14 дней»: прошлые дни без сохранённого прогноза так и
+    # остаются посчитанными по-старому, задним числом ничего не переписывается.
+    if _engine_enabled(settings):
+        covered = (engine_cache or {}).get("forecast_range")
+        prefetched = bool(covered and covered[0] <= forecast_date <= covered[1])
+        engine_profile = _engine_guarded(
+            cursor, engine_cache, forecast_date.isoformat(),
+            lambda: _engine_line_profile_for_date(cursor, forecast_date, settings, engine_cache),
+            queries=not prefetched,
+        )
+        if engine_profile is not None:
+            return {
+                **WEEKDAYS_RU[weekday],
+                **engine_profile,
+                "forecast_date": forecast_date.isoformat(),
+            }
     expected_history_dates = [
         forecast_date - timedelta(days=21),
         forecast_date - timedelta(days=14),
@@ -257,9 +325,11 @@ def _compute_period_forecast_profiles_tx(cursor, period_start, period_end, setti
     if period_end < period_start:
         period_start, period_end = period_end, period_start
     profiles = []
+    engine_cache: dict = {}
+    _prefetch_engine_tx(cursor, period_start, period_end, settings, engine_cache)
     current_date = period_start
     while current_date <= period_end:
-        profiles.append(_compute_forecast_profile_for_date_tx(cursor, current_date, settings))
+        profiles.append(_compute_forecast_profile_for_date_tx(cursor, current_date, settings, engine_cache))
         current_date += timedelta(days=1)
     return profiles
 
@@ -697,6 +767,23 @@ def _build_forecast_payload(
             if incident_window_active else 0.0
         )
         actual_day = actual_resource_by_day.get(forecast_date_iso, {})
+        engine_info = profile.get("engine") or None
+        engine_params = None
+        engine_ur = float(settings.get("ur") or 0.95) or 0.95
+        actual_engine_fte_by_hour = None
+        if engine_info:
+            engine_params = {"aht_seconds": engine_info.get("aht_seconds"),
+                             "patience_seconds": engine_info.get("patience_seconds")}
+            if actual_day.get("has_actual_report"):
+                # «Факт» дня движка — те же Erlang A и цели, но на звонках, что пришли на
+                # деле: разница с прогнозом — ошибка прогноза звонков, а не смена модели
+                # (прежний «факт» — чистая нагрузка разговоров через Occ × UR).
+                actual_hourly = actual_day.get("hourly") or {}
+                actual_staff = _engine_staffing_for_day(
+                    [_to_float((actual_hourly.get(hour) or {}).get("actual_received_calls")) for hour in range(24)],
+                    engine_params, settings,
+                )
+                actual_engine_fte_by_hour = {item["hour"]: item["agents"] / engine_ur for item in actual_staff["hours"]}
         hourly_forecast = []
         day_incident_calls = 0.0
         day_incident_workload_minutes = 0.0
@@ -716,8 +803,19 @@ def _build_forecast_payload(
             if forecast_calls <= 0 and incident_calls <= 0:
                 incident_calls = _to_float(uplift_hour.get("weighted_delta_calls")) * future_weight
             incident_calls = max(0.0, incident_calls)
-            incident_workload_minutes = incident_calls * settings["answer_rate"] * forecast_aht_seconds / 60
-            incident_fte = incident_workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
+            if "engine_agents" in row and engine_params is not None:
+                # Час посчитан Erlang A: лишние звонки — это сколько людей добавить часу,
+                # чтобы он удержал свой уровень сервиса (не выше цели дня, не ниже пола
+                # часа), а не «звонки × FTE на звонок»: в тихий час доля звонка давала
+                # целого человека.
+                incident_workload_minutes = incident_calls * forecast_aht_seconds / 60
+                incident_fte = _engine_incident_extra_agents(
+                    forecast_calls, incident_calls, _to_int(row.get("engine_agents")), row.get("engine_sl"),
+                    engine_params, settings,
+                ) / engine_ur
+            else:
+                incident_workload_minutes = incident_calls * settings["answer_rate"] * forecast_aht_seconds / 60
+                incident_fte = incident_workload_minutes / effective_minutes if effective_minutes > 0 else 0.0
             day_incident_calls += incident_calls
             day_incident_workload_minutes += incident_workload_minutes
             day_incident_fte += incident_fte
@@ -753,9 +851,18 @@ def _build_forecast_payload(
                     "actual_talk_time_seconds": _to_float(actual_hour.get("actual_talk_time_seconds")),
                     "actual_aht_seconds": _to_float(actual_hour.get("actual_aht_seconds")),
                     "actual_workload_minutes": _to_float(actual_hour.get("actual_workload_minutes")),
-                    "actual_report_fte": _to_float(actual_hour.get("actual_report_fte")),
+                    "actual_report_fte": (
+                        actual_engine_fte_by_hour.get(hour, 0.0)
+                        if actual_engine_fte_by_hour is not None and actual_hour.get("has_actual_report")
+                        else _to_float(actual_hour.get("actual_report_fte"))
+                    ),
+                    "actual_workload_report_fte": _to_float(actual_hour.get("actual_report_fte")),
                 }
             )
+        actual_day_report_fte = (
+            sum(actual_engine_fte_by_hour.values()) if actual_engine_fte_by_hour is not None
+            else _to_float(actual_day.get("actual_report_fte"))
+        )
         forecast_calls_total = _to_float(profile.get("avg_daily_calls"))
         forecast_workload_minutes_total = sum(_to_float(row.get("workload_minutes")) for row in profile.get("hourly_profile", []))
         forecast_daily_fte = _to_float(profile.get("daily_fte"))
@@ -787,8 +894,9 @@ def _build_forecast_payload(
                 "actual_lost_calls": _to_int(actual_day.get("actual_lost_calls")),
                 "actual_aht_seconds": _to_float(actual_day.get("actual_aht_seconds")),
                 "actual_workload_minutes": _to_float(actual_day.get("actual_workload_minutes")),
-                "actual_report_fte": _to_float(actual_day.get("actual_report_fte")),
-                "actual_forecast_fte_delta": _to_float(actual_day.get("actual_report_fte")) - forecast_daily_fte,
+                "actual_report_fte": actual_day_report_fte,
+                "actual_workload_report_fte": _to_float(actual_day.get("actual_report_fte")),
+                "actual_forecast_fte_delta": actual_day_report_fte - forecast_daily_fte,
                 "hourly_forecast": hourly_forecast,
             }
         )
@@ -802,7 +910,35 @@ def _build_forecast_payload(
         incident_adjusted_base_operators / settings["shrinkage_coeff"]
         if settings["shrinkage_coeff"] > 0 else 0.0
     )
+    engine_days = [day for day in days if day.get("engine")]
+    forecast_engine_summary = None
+    if engine_days:
+        # Способ, AHT и терпение — того прогона, чьим прогнозом посчитано большинство будущих
+        # дней, то есть самого свежего: у прошедших дней периода свои, более старые замеры.
+        newest = max(engine_days, key=lambda day: day["engine"].get("made_on") or "")["engine"]
+        calls_total = sum(_to_float(day.get("forecast_calls")) for day in engine_days)
+        forecast_engine_summary = {
+            "days": len(engine_days),
+            "period_days": len(days),
+            "method": newest.get("method"),
+            "method_label": newest.get("method_label"),
+            "made_on": newest.get("made_on"),
+            "aht_seconds": newest.get("aht_seconds"),
+            "patience_seconds": newest.get("patience_seconds"),
+            "params_measured_on": newest.get("params_measured_on"),
+            "targets": newest.get("targets"),
+            "calls": round(calls_total, 1),
+            "calls_low": round(sum(_to_float(day["engine"].get("calls_low")) for day in engine_days), 1),
+            "calls_high": round(sum(_to_float(day["engine"].get("calls_high")) for day in engine_days), 1),
+            # Дни, где потерь по плану меньше нижней границы AR: людей больше, чем требует
+            # цель, — так выходит, когда держит предел загрузки или пол SL часа.
+            "below_ar_min_days": sum(1 for day in engine_days if day["engine"].get("ar_below_band")),
+            # Сводные SL/AR — взвешенные звонками дня, как их считает табло за период.
+            "period_sl": round(sum(_to_float(day["engine"].get("day_sl")) * _to_float(day.get("forecast_calls")) for day in engine_days) / calls_total, 4) if calls_total > 0 else None,
+            "period_ar": round(sum(_to_float(day["engine"].get("day_ar")) * _to_float(day.get("forecast_calls")) for day in engine_days) / calls_total, 4) if calls_total > 0 else None,
+        }
     return {
+        "forecastEngine": forecast_engine_summary,
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "periodDays": len(profiles),
@@ -887,8 +1023,9 @@ def _build_week_forecast_payload(
     )
 
 
-def _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings: Dict[str, Any]) -> Dict[str, Any]:
-    return _compute_forecast_profile_for_date_tx(cursor, report_date, settings)
+def _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings: Dict[str, Any],
+                                                    engine_cache: Optional[dict] = None) -> Dict[str, Any]:
+    return _compute_forecast_profile_for_date_tx(cursor, report_date, settings, engine_cache)
 
 
 def _period_totals(
