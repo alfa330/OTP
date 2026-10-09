@@ -88,6 +88,17 @@ export const itemSummary = (item) => {
     return parts.join(' · ');
 };
 
+/* На какой НАШ номер и в какой таксопарк был тест: «на +7 747 577 77 78 · Jana Taxi».
+   Исходящий — «с номера»; номер неизвестен (исходящий Oktell, справочник молчит) —
+   только парк; нет ни того, ни другого — пусто. */
+export const lineCaption = (item) => {
+    const line = String(item?.line || '').trim();
+    const park = String(item?.park || '').trim();
+    if (!line) return park;
+    const lead = item?.direction === 'out' ? 'с' : 'на';
+    return park ? `${lead} ${line} · ${park}` : `${lead} ${line}`;
+};
+
 export const filterItems = (items, phoneKey) => (
     phoneKey ? (items || []).filter((item) => item.phone_key === phoneKey) : (items || [])
 );
@@ -141,6 +152,7 @@ export const SOURCE_HINT = [
     'Звонки ОП — FreePBX, СЗоВ — Oktell, Тез КЦ — Binotel.',
     'Чаты: WhatsApp ОП (Wazzup), СЗоВ (Chat2Desk), Тез КЦ (ChatApp) — за последние 45 дней.',
     'Один тест — один звонок или одна переписка за день.',
+    'У каждого теста — наш номер, на который позвонили или написали, и таксопарк этой линии.',
 ].join(' ');
 
 export const REGISTRY_HINT = [

@@ -66455,6 +66455,68 @@ from test_numbers import keys as _test_numbers_keys  # noqa: E402
 
 _test_numbers_keys.configure(db._get_cursor)
 
+# Справочники линий для «Тестов по дням»: на какой наш номер и в какой таксопарк был
+# тест. Каналы и лицензии меняются редко, а экран открывают часто — кеш на 10 минут;
+# справочник не ответил — прежний ответ ещё годится, а без него повтор не раньше чем
+# через минуту, иначе каждое открытие экрана ждало бы тайм-аут API.
+_TEST_NUMBERS_LINES_CACHE = {}
+_TEST_NUMBERS_LINES_TTL = 600
+_TEST_NUMBERS_LINES_RETRY = 60
+
+
+def _test_numbers_cached(name, load):
+    now = time.time()
+    cached = _TEST_NUMBERS_LINES_CACHE.get(name)
+    if cached and now < cached[0]:
+        if cached[1] is None:
+            raise RuntimeError(f'справочник линий {name} недавно не ответил')
+        return cached[1]
+    try:
+        value = load()
+    except Exception:
+        previous = cached[1] if cached else None
+        _TEST_NUMBERS_LINES_CACHE[name] = (now + _TEST_NUMBERS_LINES_RETRY, previous)
+        if previous is None:
+            raise
+        logging.warning("Реестр тестовых номеров: справочник линий %s не обновился", name, exc_info=True)
+        return previous
+    _TEST_NUMBERS_LINES_CACHE[name] = (now + _TEST_NUMBERS_LINES_TTL, value)
+    return value
+
+
+def _test_numbers_c2d_channels():
+    """{id канала Chat2Desk: его номер} — GET /v1/channels."""
+    def load():
+        response = requests.get(f"{_chat2desk_api_base_url()}/v1/channels",
+                                headers={'Authorization': _chat2desk_authorization_header(),
+                                         'Accept': 'application/json'},
+                                params={'limit': 200}, timeout=10)
+        response.raise_for_status()
+        payload = response.json() or {}
+        rows = payload.get('data') if isinstance(payload, dict) else payload
+        return {int(ch['id']): str(ch.get('phone') or '') for ch in rows or [] if ch.get('id') is not None}
+    return _test_numbers_cached('c2d', load)
+
+
+def _test_numbers_chatapp_lines():
+    """{(licenseId, messengerType): (название лицензии, номер)} — лицензии ChatApp."""
+    def load():
+        client, _cfg, _company_id = _chatapp_client()
+        if client is None:
+            return {}
+        return {(int(lic), str(messenger)): (name, phone)
+                for lic, messenger, name, phone in client.active_messenger_licenses()}
+    return _test_numbers_cached('chatapp', load)
+
+
+def _test_numbers_binotel_lines(phones):
+    """{generalCallID: номер линии} по истории номеров клиентов в Binotel Тез КЦ:
+    зеркало tez_lead_calls линию не хранит, а журнал Binotel её знает."""
+    calls = _tez_leads_binotel_client().list_calls_by_external_numbers(phones)
+    return {str(call['general_call_id']): call.get('line_number')
+            for call in calls or [] if call.get('general_call_id')}
+
+
 try:
     from test_numbers.routes import build_test_numbers_blueprint  # noqa: E402
 
@@ -66464,6 +66526,14 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         oktell_query=_oktell_query,
+        lines={
+            'oktell_line_key': _oktell_billing_line_key,
+            'oktell_park_label': _oktell_billing_park_label,
+            'wazzup_channels': _wazzup_channels_from_api,
+            'c2d_channels': _test_numbers_c2d_channels,
+            'chatapp_lines': _test_numbers_chatapp_lines,
+            'binotel_lines': _test_numbers_binotel_lines,
+        },
     ))
     logging.info("Раздел «Реестр тестовых номеров»: Blueprint подключён на /api/test_numbers")
 except Exception:

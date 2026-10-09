@@ -10,7 +10,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
 import {
     REGISTRY_HINT, SOURCE_HINT, countsByNumber, dayLabel, daysOf, filterItems, isoDay, itemSummary,
-    numberCaption, periodError, periodPresets, shiftDay, splitLabel, testsLabel, timeLabel,
+    lineCaption, numberCaption, periodError, periodPresets, shiftDay, splitLabel, testsLabel, timeLabel,
 } from './testNumbersMeta';
 
 /*
@@ -148,6 +148,7 @@ const ItemIcon = ({ item }) => {
 const ItemRow = ({ item, numbersByKey }) => {
     const number = numbersByKey.get(item.phone_key);
     const summary = itemSummary(item);
+    const line = lineCaption(item);
     return (
         <li className="flex items-start gap-3 px-4 py-2.5">
             <span className="w-11 shrink-0 pt-0.5 text-[13px] tabular-nums text-slate-500">{timeLabel(item.at)}</span>
@@ -155,6 +156,7 @@ const ItemRow = ({ item, numbersByKey }) => {
             <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-baseline gap-x-2 text-[13.5px]">
                     <span className="font-medium text-slate-900">{item.channel}</span>
+                    {line && <span className="tabular-nums text-slate-700">{line}</span>}
                     {item.note && <span className="text-slate-500">{item.note}</span>}
                 </div>
                 <div className="mt-0.5 flex flex-wrap gap-x-2 text-[12.5px] text-slate-500">

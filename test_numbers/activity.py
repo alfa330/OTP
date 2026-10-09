@@ -13,6 +13,20 @@
 Один тест — один звонок или одна переписка за сутки: тестировщик, написавший в
 чат утром и вечером, сделал один тест, а не двадцать сообщений.
 
+У каждого теста — НАШ номер (`line`: на какой номер позвонили или написали, с
+какого позвонили) и таксопарк (`park`; у Тез КЦ — название линии):
+
+    freepbx    номер касания; парк — по очереди, у исходящего — по номеру (cdr/lines.py,
+               то же правило, что в «Касаниях»)
+    oktell     набранная линия цепочки (плечо «снаружи в IVR»); парк — taxi_park звонка
+    binotel    линия из журнала Binotel (живой запрос по номерам реестра); названия нет
+    wazzup     номер и название канала Wazzup
+    chat2desk  номер канала Chat2Desk; парк — название канала
+    chatapp    номер и название лицензии ChatApp
+
+Справочники линий (API Wazzup, Chat2Desk, ChatApp, Binotel) приходят снаружи — от
+бота, у которого есть ключи; без них тест показывается без номера линии.
+
 Источник, который не ответил (Oktell лежит, таблицы нет на стенде), не роняет
 экран: его тесты не показываются, а в ответе есть строка «чего не хватает».
 """
@@ -23,6 +37,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 from . import keys as keys_mod
+from . import rules as rules_mod
 
 ALMATY = timezone(timedelta(hours=5))
 
@@ -97,6 +112,8 @@ def _item(source, phone_key, at, **extra):
         'result': None,
         'duration_seconds': None,
         'messages': None,
+        'line': None,     # наш номер: «+7 747 577 77 78»
+        'park': None,     # таксопарк (у Тез КЦ — название линии)
     }
     item.update(extra)
     return item
@@ -107,6 +124,23 @@ def _rows(cursor):
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def line_display(raw):
+    """Наш номер на экран: «+7 747 577 77 78». Не номер (обрывок, имя) — None."""
+    key = keys_mod.phone_key(raw)
+    return rules_mod.display_phone(key) if key else None
+
+
+def park_name(name, line=None):
+    """Название канала без самого номера: «Центр регистрации 87475777778» → «Центр регистрации»
+    (номер и так стоит рядом). Пустое — None."""
+    text = ' '.join(str(name or '').split())
+    key = keys_mod.phone_key(line) if line else None
+    if key:
+        text = ' '.join(token for token in text.split()
+                        if not (token.isdigit() and keys_mod.phone_key(token) == key))
+    return text or None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Наша база
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,9 +149,11 @@ def _freepbx(cursor, phone_keys, start, end):
     # Номер касания — ровно десять цифр (cdr/touches.py: norm_phone), по нему индекс.
     # Сотрудник по внутреннему номеру — нынешний его владелец: номер уволившегося
     # отдают новому, а экрану тестов точная история номера не нужна.
+    from cdr import lines as cdr_lines, queries as cdr_queries
     cursor.execute(
         """
         SELECT t.linkedid, t.phone, t.started_at, t.call_type, t.result, t.ext, t.queue,
+               t.line_number,
                COALESCE(t.talk_measured_seconds, t.talk_seconds) AS talk_seconds,
                (SELECT u.name
                   FROM users u
@@ -132,8 +168,16 @@ def _freepbx(cursor, phone_keys, start, end):
         """,
         {'keys': list(phone_keys), 'start': start, 'end': end},
     )
+    rows = _rows(cursor)
+    # Парк — то же правило, что в «Касаниях» (cdr/lines.py): входящий — по своей
+    # очереди, исходящий и бесочередной — по очереди номера. Справочник номеров
+    # строится, только если такие касания есть (это проход по входящим за 60 дней).
+    known = {}
+    if any(row['line_number'] and (row['call_type'] == 'Исходящий' or not row['queue']) for row in rows):
+        known = cdr_lines.line_queues(cdr_queries.line_queue_rows(
+            cursor, cdr_queries.today_almaty() - timedelta(days=60)))
     items = []
-    for row in _rows(cursor):
+    for row in rows:
         direction = 'out' if row['call_type'] == 'Исходящий' else 'in'
         items.append(_item(
             'freepbx', row['phone'], row['started_at'],
@@ -142,6 +186,8 @@ def _freepbx(cursor, phone_keys, start, end):
             operator=row['operator_name'] or (f"вн. {row['ext']}" if row['ext'] else None),
             result=row['result'],
             duration_seconds=int(row['talk_seconds'] or 0),
+            line=line_display(row['line_number']),
+            park=cdr_lines.park(row, known) or None,
         ))
     return items
 
@@ -172,6 +218,8 @@ def _binotel(cursor, phone_keys, start, end):
             operator=row['operator_name'] or (f"вн. {row['internal_number']}" if row['internal_number'] else None),
             result=_BINOTEL_RESULTS.get(str(row['disposition'] or '').upper(), row['disposition'] or None),
             duration_seconds=int(row['billsec'] or 0),
+            # Линии зеркало не хранит: её отдаёт журнал Binotel (attach_lines).
+            _line_ref={'call_id': str(row['general_call_id']), 'phone': row['phone_norm']},
         ))
     return items
 
@@ -216,6 +264,7 @@ def _wazzup(cursor, phone_keys, start, end):
             operator=row['operators'],
             messages=int(row['messages'] or 0),
             note=account,
+            _line_ref={'account': row['account'], 'channel_id': str(row['channel_id'])},
         ))
     return items
 
@@ -250,17 +299,20 @@ def _chat2desk(cursor, phone_keys, start, end):
         at = row['request_start'] or datetime.combine(row['day'], datetime.min.time())
         chat = chats.setdefault((key, row['channel_id'], row['day']),
                                 {'at': at, 'messages': 0, 'operators': [],
-                                 'note': row['channel_name'] or row['transport']})
+                                 'park': row['channel_name'] or row['transport']})
         chat['at'] = min(chat['at'], at)
         chat['messages'] += int(row['incoming_messages'] or 0) + int(row['outgoing_messages'] or 0)
         if row['operator_name'] and row['operator_name'] not in chat['operators']:
             chat['operators'].append(row['operator_name'])
+    # Канал Chat2Desk назван по парку («Jana Taxi», «Ноль такси»), номер канала —
+    # из справочника каналов (attach_lines).
     return [_item('chat2desk', key, chat['at'],
                   id=f"chat2desk:{key}:{channel_id}:{day.isoformat()}",
                   direction='in',
                   operator=', '.join(chat['operators']) or None,
                   messages=chat['messages'] or None,
-                  note=chat['note'])
+                  park=park_name(chat['park']),
+                  _line_ref={'channel_id': channel_id})
             for (key, channel_id, day), chat in chats.items()]
 
 
@@ -301,6 +353,7 @@ def _chatapp(cursor, phone_keys, start, end):
             direction='in' if row['inbound'] else 'out',
             operator=row['operators'],
             messages=int(row['messages'] or 0),
+            _line_ref={'license_id': row['license_id'], 'messenger_type': row['messenger_type']},
         ))
     return items
 
@@ -317,7 +370,11 @@ _oktell_cache = {}
 def oktell_sql(phone_keys, start, end):
     """Звонки СЗоВ с номерами реестра за период ОДНИМ запросом (прокси не любит
     серий). Номер клиента у входящих и исходящих — `[number]`, одиннадцать цифр
-    (сверено на сутках 08.10.2026: пустых нет)."""
+    (сверено на сутках 08.10.2026: пустых нет).
+
+    Наш номер — набранная линия цепочки: `ANumberDialed` у плеча «снаружи в IVR»
+    (ConnectionType = 4, есть у каждого входящего). Поиск по индексу IdChain: на
+    живом прокси 0,2 с на 79 звонков. У исходящего такого плеча нет — линия пустая."""
     condition = keys_mod.tsql_not_test('t.[number]', phone_keys)
     if not condition:
         return None
@@ -330,10 +387,13 @@ def oktell_sql(phone_keys, start, end):
         "CONVERT(varchar(19), t.dt_insert, 120) AS occurred_at, t.route AS route, "
         "COALESCE(t.[number], N'') AS phone, t.taxi_park AS taxi_park, "
         "t.result_call AS result_call, t.call_result AS call_result, "
-        "t.total_length AS total_length, oi.Name AS operator_name "
+        "t.total_length AS total_length, oi.Name AS operator_name, l.ANumberDialed AS line "
         "FROM oktell.dbo.Call_Systems_hst t "
         "LEFT JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi "
         "ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
+        "OUTER APPLY (SELECT TOP 1 s.ANumberDialed FROM oktell.dbo.A_Stat_Connections_1x1 s "
+        "WHERE s.IdChain = TRY_CONVERT(uniqueidentifier, t.chainid) AND s.ConnectionType = 4 "
+        "ORDER BY s.TimeStart) l "
         f"WHERE t.dt_insert >= '{date_from}' AND t.dt_insert < '{date_to}' "
         f"AND {match} "
         # Упрёмся в потолок — пусть пропадут старые, а не сегодняшние: их смотрят чаще.
@@ -341,7 +401,10 @@ def oktell_sql(phone_keys, start, end):
     )
 
 
-def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic):
+def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic, line_key=None, park_label=None):
+    """line_key — ключ линии из биллинга Oktell (чинит записи вида «7639iTaxi»),
+    park_label — подпись парка, которой его называет бизнес («Hokage» → «Wolt»).
+    Без них — последние 10 цифр и taxi_park как есть."""
     sql = oktell_sql(phone_keys, start, end)
     if not sql:
         return [], False
@@ -356,6 +419,8 @@ def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic):
     items = []
     for row in rows:
         route = str(row.get('route') or '')
+        park = str(row.get('taxi_park') or '').strip()
+        line = line_key(row.get('line')) if line_key else row.get('line')
         items.append(_item(
             'oktell', keys_mod.phone_key(row.get('phone')), row.get('occurred_at'),
             id=f"oktell:{row.get('call_id')}",
@@ -363,7 +428,8 @@ def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic):
             operator=row.get('operator_name'),
             result=row.get('result_call') or None,
             duration_seconds=int(row.get('total_length') or 0),
-            note=row.get('taxi_park') or None,
+            line=line_display(line),
+            park=(park_label(park) if park_label else park) if park else None,
         ))
     with _oktell_cache_lock:
         _oktell_cache[cache_key] = (now, items, truncated)
@@ -371,6 +437,98 @@ def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic):
         for stale in [k for k, v in _oktell_cache.items() if now - v[0] >= _OKTELL_CACHE_SECONDS]:
             _oktell_cache.pop(stale, None)
     return items, truncated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Наш номер и парк из справочников API
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Справочники линий приходят от бота (у него ключи API), каждый — по желанию:
+#   oktell_line_key(raw) -> '7075050880' | ''     ключ линии биллинга Oktell
+#   oktell_park_label(name) -> str                подпись парка Oktell
+#   wazzup_channels(account) -> [{'channelId', 'name', 'plainId'}, ...]
+#   c2d_channels() -> {id канала: номер}
+#   chatapp_lines() -> {(licenseId, messengerType): (название, номер)}
+#   binotel_lines(номера клиентов) -> {generalCallID: номер линии}
+LINE_LOOKUPS = ('oktell_line_key', 'oktell_park_label', 'wazzup_channels', 'c2d_channels',
+                'chatapp_lines', 'binotel_lines')
+
+# Журнал Binotel по номерам отдаёт всю их историю — один запрос на набор номеров,
+# повтор экрана в пределах кеша его не повторяет.
+_BINOTEL_LINES_CACHE_SECONDS = 120
+_binotel_cache = {}
+_binotel_cache_lock = threading.Lock()
+
+
+def _binotel_lines(fetch, phones, *, clock):
+    cache_key = tuple(phones)
+    now = clock()
+    with _binotel_cache_lock:
+        cached = _binotel_cache.get(cache_key)
+        if cached and now - cached[0] < _BINOTEL_LINES_CACHE_SECONDS:
+            return cached[1]
+    found = {str(call_id): line for call_id, line in (fetch(list(phones)) or {}).items()}
+    with _binotel_cache_lock:
+        _binotel_cache[cache_key] = (now, found)
+        for stale in [k for k, v in _binotel_cache.items() if now - v[0] >= _BINOTEL_LINES_CACHE_SECONDS]:
+            _binotel_cache.pop(stale, None)
+    return found
+
+
+def attach_lines(items, lines, *, clock=time.monotonic):
+    """Наш номер и название линии туда, где их знает только API (Binotel, Wazzup,
+    Chat2Desk, ChatApp). Справочник не ответил — тест остаётся, без номера; вернётся
+    список таких источников, чтобы экран сказал, чего не хватает."""
+    lines = lines or {}
+    pending = {}
+    for item in items:
+        ref = item.pop('_line_ref', None)
+        if ref is not None:
+            pending.setdefault(item['source'], []).append((item, ref))
+    failed = []
+
+    def wazzup(found):
+        channels = {}
+        for account in sorted({ref['account'] for _, ref in found}):
+            for channel in lines['wazzup_channels'](account) or []:
+                channels[(account, str(channel.get('channelId')))] = channel
+        for item, ref in found:
+            channel = channels.get((ref['account'], ref['channel_id']))
+            if channel:
+                item['line'] = line_display(channel.get('plainId'))
+                item['park'] = park_name(channel.get('name'), channel.get('plainId'))
+
+    def chat2desk(found):
+        phones = {int(k): v for k, v in (lines['c2d_channels']() or {}).items()}
+        for item, ref in found:
+            phone = phones.get(int(ref['channel_id'])) if ref['channel_id'] is not None else None
+            if phone:
+                item['line'] = line_display(phone)
+                item['park'] = park_name(item['park'], phone)
+
+    def chatapp(found):
+        licenses = {(int(k[0]), str(k[1])): v for k, v in (lines['chatapp_lines']() or {}).items()}
+        for item, ref in found:
+            name, phone = licenses.get((int(ref['license_id']), str(ref['messenger_type'])), (None, None))
+            item['line'] = line_display(phone)
+            item['park'] = park_name(name, phone)
+
+    def binotel(found):
+        phones = sorted({ref['phone'] for _, ref in found if ref['phone']})
+        by_call = _binotel_lines(lines['binotel_lines'], phones, clock=clock)
+        for item, ref in found:
+            item['line'] = line_display(by_call.get(ref['call_id']))
+
+    for source, lookup, fill in (('wazzup', 'wazzup_channels', wazzup), ('chat2desk', 'c2d_channels', chat2desk),
+                                 ('chatapp', 'chatapp_lines', chatapp), ('binotel', 'binotel_lines', binotel)):
+        if not pending.get(source) or not lines.get(lookup):
+            continue
+        try:
+            fill(pending[source])
+        except Exception:  # noqa: BLE001 — без номера линии тест всё равно показывается
+            logging.exception('Реестр тестовых номеров: номера линий %s не получены', source)
+            failed.append(source)
+    return failed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,12 +544,14 @@ _DB_SOURCES = (
 )
 
 
-def collect(get_cursor, phone_keys, start, end, *, oktell_query=None):
+def collect(get_cursor, phone_keys, start, end, *, oktell_query=None, lines=None):
     """Все тесты периода: {'items': [...], 'days': [...], 'missing': [...]}.
 
     Каждый источник базы — своим курсором: упавший запрос откатывает только
-    свою транзакцию, остальные источники дочитываются.
+    свою транзакцию, остальные источники дочитываются. lines — справочники линий
+    (LINE_LOOKUPS): наш номер и парк там, где их знает только API.
     """
+    lines = lines or {}
     phone_keys = sorted({k for k in phone_keys if k})
     items, missing = [], []
     if phone_keys:
@@ -408,7 +568,9 @@ def collect(get_cursor, phone_keys, start, end, *, oktell_query=None):
                             'reason': 'Oktell не подключён'})
         else:
             try:
-                oktell_items, truncated = _oktell(oktell_query, phone_keys, start, end)
+                oktell_items, truncated = _oktell(oktell_query, phone_keys, start, end,
+                                                  line_key=lines.get('oktell_line_key'),
+                                                  park_label=lines.get('oktell_park_label'))
                 items.extend(oktell_items)
                 if truncated:
                     missing.append({'source': 'oktell', 'label': SOURCES['oktell']['label'],
@@ -417,6 +579,9 @@ def collect(get_cursor, phone_keys, start, end, *, oktell_query=None):
                 logging.exception('Реестр тестовых номеров: Oktell не ответил')
                 missing.append({'source': 'oktell', 'label': SOURCES['oktell']['label'],
                                 'reason': 'Oktell не ответил'})
+    for source in attach_lines(items, lines):
+        missing.append({'source': source, 'label': SOURCES[source]['label'],
+                        'reason': 'номера линий не получены'})
     items = [item for item in items if item.get('day')]
     items.sort(key=lambda item: (item['at'] or '', item['id']), reverse=True)
     return {'items': items, 'days': per_day(items, start, end), 'missing': missing}

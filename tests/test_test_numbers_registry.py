@@ -299,6 +299,24 @@ class _RowsCursor:
         return list(self.rows)
 
 
+class _QueueCursor:
+    """Курсор с ответами по очереди: [(колонки, строки), ...] — по одному на execute."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.description = []
+        self.rows = []
+        self.sql = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        columns, self.rows = self.answers.pop(0)
+        self.description = [(name,) for name in columns]
+
+    def fetchall(self):
+        return list(self.rows)
+
+
 class ActivityTests(unittest.TestCase):
     """«Тесты по дням»: период, Oktell, склейка переписок, упавший источник."""
 
@@ -382,10 +400,195 @@ class ActivityTests(unittest.TestCase):
         items = activity._chat2desk(_RowsCursor(columns, rows), [self.TEST], oct8, oct9)
         self.assertEqual(len(items), 3, 'Линия 8-го, Телеграм 8-го, Линия 9-го')
         self.assertEqual(len({item['id'] for item in items}), 3)
-        line = next(item for item in items if item['day'] == '2026-10-08' and item['note'] == 'Линия')
+        line = next(item for item in items if item['day'] == '2026-10-08' and item['park'] == 'Линия')
         self.assertEqual((line['at'], line['messages'], line['operator']),
                          ('2026-10-08T09:00:00', 5, 'Оператор Б, Оператор А'))
         self.assertEqual({item['phone_key'] for item in items}, {self.TEST})
+
+    # ── наш номер и таксопарк теста ─────────────────────────────────────────
+
+    def test_line_and_park_text(self):
+        self.assertEqual(activity.line_display('77475777778'), '+7 747 577 77 78')
+        self.assertEqual(activity.line_display('+77075050880'), '+7 707 505 08 80')
+        self.assertIsNone(activity.line_display('chestniy_taxi'))
+        self.assertIsNone(activity.line_display(None))
+        # Номер в названии канала не дублируется рядом с самим номером.
+        self.assertEqual(activity.park_name('Salam Taxi 77000000303', '77000000303'), 'Salam Taxi')
+        self.assertEqual(activity.park_name('Центр регистрации 87475777778', '77475777778'), 'Центр регистрации')
+        self.assertEqual(activity.park_name('  Jana   Taxi ', None), 'Jana Taxi')
+        self.assertIsNone(activity.park_name('', '77000000303'))
+
+    def test_freepbx_line_and_park_follow_the_touches_rule(self):
+        """Входящий — парк по своей очереди; исходящий — по очереди номера (cdr/lines.py)."""
+        touches = ('linkedid', 'phone', 'started_at', 'call_type', 'result', 'ext', 'queue', 'line_number',
+                   'talk_seconds', 'operator_name')
+        at = datetime(2026, 10, 8, 10)
+        cursor = _QueueCursor(
+            (touches, [('1.1', self.TEST, at, 'Входящий', 'Отвечен', '6001', '3034', '7001223322', 30, 'Оператор'),
+                       ('1.2', self.TEST, at, 'Исходящий', 'Отвечен', '6001', '', '7475777778', 40, 'Оператор')]),
+            (('line_number', 'queue', 'n'), [('7475777778', '3010', 12), ('7001223322', '3034', 5)]))
+        items = activity._freepbx(cursor, [self.TEST], date(2026, 10, 8), date(2026, 10, 8))
+        self.assertEqual([(i['direction'], i['line'], i['park']) for i in items], [
+            ('in', '+7 700 122 33 22', 'Jana такси'),
+            ('out', '+7 747 577 77 78', 'Центр регистрации'),
+        ])
+
+    def test_oktell_takes_the_dialed_line_of_the_chain(self):
+        sql = activity.oktell_sql({self.TEST}, date(2026, 10, 1), date(2026, 10, 9))
+        self.assertIn('l.ANumberDialed AS line', sql)
+        self.assertIn('OUTER APPLY (SELECT TOP 1 s.ANumberDialed FROM oktell.dbo.A_Stat_Connections_1x1 s '
+                      'WHERE s.IdChain = TRY_CONVERT(uniqueidentifier, t.chainid) AND s.ConnectionType = 4', sql)
+        rows = [{'call_id': 1, 'occurred_at': '2026-10-08 10:00:00', 'route': 'incoming', 'phone': '77000000101',
+                 'taxi_park': 'Hokage ', 'line': '7639iTaxi'},
+                {'call_id': 2, 'occurred_at': '2026-10-08 11:00:00', 'route': 'outgoing', 'phone': '77000000101',
+                 'taxi_park': 'iTaxi', 'line': None}]
+        activity._oktell_cache.clear()
+        self.addCleanup(activity._oktell_cache.clear)
+        items, _ = activity._oktell(lambda sql: rows, [self.TEST], date(2026, 10, 8), date(2026, 10, 8),
+                                    line_key=lambda raw: '7074777639' if raw == '7639iTaxi' else '',
+                                    park_label={'Hokage': 'Wolt'}.get)
+        self.assertEqual([(i['line'], i['park']) for i in items],
+                         [('+7 707 477 76 39', 'Wolt'), (None, None)])
+
+    def test_attach_lines_fills_chats_and_binotel_and_survives_a_dead_lookup(self):
+        def item(source, ref, **extra):
+            return activity._item(source, self.TEST, datetime(2026, 10, 8, 10), id=source, _line_ref=ref, **extra)
+
+        items = [item('wazzup', {'account': 'op', 'channel_id': 'ch-1'}),
+                 item('chat2desk', {'channel_id': 3624}, park='Jana Taxi'),
+                 item('chatapp', {'license_id': 70651, 'messenger_type': 'caWhatsApp'}),
+                 item('binotel', {'call_id': 'g-1', 'phone': '77000000101'})]
+        asked = []
+        lines = {
+            'wazzup_channels': lambda account: [{'channelId': 'ch-1', 'name': 'Salam Taxi 77000000303',
+                                                 'plainId': '77000000303'}],
+            'c2d_channels': lambda: {'3624': '77078544502'},
+            'chatapp_lines': lambda: {(70651, 'caWhatsApp'): ('Отдел продаж', '+7 700 299 0770')},
+            'binotel_lines': lambda phones: asked.append(phones) or {'g-1': '77003000770'},
+        }
+        activity._binotel_cache.clear()
+        self.addCleanup(activity._binotel_cache.clear)
+        self.assertEqual(activity.attach_lines(items, lines), [])
+        self.assertEqual([(i['source'], i['line'], i['park']) for i in items], [
+            ('wazzup', '+7 700 000 03 03', 'Salam Taxi'),
+            ('chat2desk', '+7 707 854 45 02', 'Jana Taxi'),
+            ('chatapp', '+7 700 299 07 70', 'Отдел продаж'),
+            ('binotel', '+7 700 300 07 70', None),
+        ])
+        self.assertTrue(all('_line_ref' not in i for i in items), 'служебная ссылка наружу не уходит')
+        self.assertEqual(asked, [['77000000101']])
+
+        # Справочник лежит — тест остаётся, без номера, а источник назван.
+        broken = [item('chat2desk', {'channel_id': 3624}, park='Jana Taxi')]
+
+        def dead():
+            raise RuntimeError('Chat2Desk лежит')
+
+        with mock.patch.object(activity.logging, 'exception'):
+            self.assertEqual(activity.attach_lines(broken, {'c2d_channels': dead}), ['chat2desk'])
+        self.assertEqual((broken[0]['line'], broken[0]['park']), (None, 'Jana Taxi'))
+        # Без справочников — тихо и без служебных полей.
+        bare = [item('wazzup', {'account': 'op', 'channel_id': 'ch-1'})]
+        self.assertEqual(activity.attach_lines(bare, None), [])
+        self.assertNotIn('_line_ref', bare[0])
+
+    def test_dead_line_lookup_is_named_in_missing(self):
+        def wazzup(cursor, phone_keys, start, end):
+            return [activity._item('wazzup', self.TEST, datetime(2026, 10, 8, 10), id='wz',
+                                   _line_ref={'account': 'op', 'channel_id': 'ch-1'})]
+
+        def dead(account):
+            raise RuntimeError('Wazzup лежит')
+
+        @contextmanager
+        def get_cursor():
+            yield object()
+
+        with mock.patch.object(activity, '_DB_SOURCES', (('wazzup', wazzup),)), \
+                mock.patch.object(activity.logging, 'exception'):
+            result = activity.collect(get_cursor, [self.TEST], date(2026, 10, 8), date(2026, 10, 8),
+                                      lines={'wazzup_channels': dead})
+        self.assertEqual(len(result['items']), 1)
+        self.assertIn(('wazzup', 'номера линий не получены'),
+                      [(m['source'], m['reason']) for m in result['missing']])
+
+    def test_blueprint_refuses_unknown_line_lookups(self):
+        with self.assertRaises(ValueError):
+            routes.build_test_numbers_blueprint(db=None, require_api_key=lambda f: f,
+                                                build_cors_preflight_response=lambda: None,
+                                                resolve_requester=lambda: None, lines={'binotel': print})
+
+    def _bot_line_helpers(self, **fakes):
+        """Помощники бота так, как их вырезают тесты проекта: AST → свой namespace."""
+        import ast
+        import logging as logging_mod
+        names = {'_TEST_NUMBERS_LINES_CACHE', '_TEST_NUMBERS_LINES_TTL', '_TEST_NUMBERS_LINES_RETRY',
+                 '_test_numbers_cached', '_test_numbers_c2d_channels', '_test_numbers_chatapp_lines',
+                 '_test_numbers_binotel_lines'}
+        tree = ast.parse(_read(BOT_PY))
+        nodes = [n for n in tree.body
+                 if (isinstance(n, ast.FunctionDef) and n.name in names)
+                 or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in names for t in n.targets))]
+        self.assertEqual(len(nodes), len(names))
+        clock = {'now': 1000.0}
+        ns = {'time': mock.Mock(time=lambda: clock['now']), 'logging': mock.Mock(wraps=logging_mod),
+              '_chat2desk_api_base_url': lambda: 'https://c2d', '_chat2desk_authorization_header': lambda: 'tok'}
+        ns.update(fakes)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT_PY), 'exec'), ns)
+        return ns, clock
+
+    def test_bot_c2d_channels_are_cached_and_survive_a_dead_api(self):
+        calls = []
+
+        def get(url, headers=None, params=None, timeout=None):
+            calls.append((url, headers['Authorization'], params, timeout))
+            if fail['now']:
+                raise RuntimeError('Chat2Desk лежит')
+            return mock.Mock(raise_for_status=lambda: None,
+                             json=lambda: {'data': [{'id': 3624, 'phone': '77078544502'}, {'name': 'без id'}]})
+
+        fail = {'now': True}
+        ns, clock = self._bot_line_helpers(requests=mock.Mock(get=get))
+        channels = ns['_test_numbers_c2d_channels']
+        with self.assertRaises(RuntimeError):
+            channels()
+        with self.assertRaises(RuntimeError):
+            channels()                                   # повтор не раньше чем через минуту
+        self.assertEqual(len(calls), 1)
+        clock['now'] += 61
+        fail['now'] = False
+        self.assertEqual(channels(), {3624: '77078544502'})
+        self.assertEqual(calls[-1], ('https://c2d/v1/channels', 'tok', {'limit': 200}, 10))
+        clock['now'] += 300
+        channels()
+        self.assertEqual(len(calls), 2, 'в пределах 10 минут — из кеша')
+        clock['now'] += 301
+        fail['now'] = True
+        self.assertEqual(channels(), {3624: '77078544502'}, 'API лёг — годится прежний ответ')
+
+    def test_bot_chatapp_and_binotel_lookups(self):
+        client = mock.Mock()
+        client.active_messenger_licenses.return_value = [(70651, 'caWhatsApp', 'Отдел продаж', '+7 700 299 0770')]
+        binotel = mock.Mock()
+        binotel.list_calls_by_external_numbers.return_value = [
+            {'general_call_id': 555, 'line_number': '77003000770'}, {'general_call_id': None, 'line_number': 'x'}]
+        ns, _clock = self._bot_line_helpers(_chatapp_client=lambda: (client, {}, 1),
+                                            _tez_leads_binotel_client=lambda: binotel)
+        self.assertEqual(ns['_test_numbers_chatapp_lines'](), {(70651, 'caWhatsApp'): ('Отдел продаж', '+7 700 299 0770')})
+        self.assertEqual(ns['_test_numbers_binotel_lines'](['77000000101']), {'555': '77003000770'})
+        binotel.list_calls_by_external_numbers.assert_called_once_with(['77000000101'])
+        ns_off, _ = self._bot_line_helpers(_chatapp_client=lambda: (None, {}, None))
+        self.assertEqual(ns_off['_test_numbers_chatapp_lines'](), {})
+
+    def test_bot_passes_every_line_lookup(self):
+        """Справочники — ровно в вызов блюпринта реестра (по AST, а не по тексту): лишний
+        аргумент в чужом вызове уронил бы при старте и тот раздел."""
+        import ast
+        calls = [node for node in ast.walk(ast.parse(_read(BOT_PY))) if isinstance(node, ast.Call)
+                 and any(kw.arg == 'lines' for kw in node.keywords)]
+        self.assertEqual([getattr(call.func, 'id', None) for call in calls], ['build_test_numbers_blueprint'])
+        lines = next(kw.value for kw in calls[0].keywords if kw.arg == 'lines')
+        self.assertEqual(sorted(key.value for key in lines.keys), sorted(activity.LINE_LOOKUPS))
 
     def test_chatapp_ids_differ_by_messenger(self):
         columns = ('license_id', 'messenger_type', 'chat_id', 'phone_key', 'day', 'first_at', 'messages',

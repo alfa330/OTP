@@ -79,12 +79,16 @@ def _duplicate(existing, phone_display):
 
 
 def build_test_numbers_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                                 resolve_requester, oktell_query=None):
+                                 resolve_requester, oktell_query=None, lines=None):
     """Собирает Blueprint раздела.
 
     oktell_query — bot_schedule2._oktell_query (один read-only SELECT к прокси);
     без него звонки СЗоВ на экране не показываются, а экран говорит об этом.
+    lines — справочники линий (activity.LINE_LOOKUPS): наш номер и таксопарк теста.
     """
+    unknown = set(lines or {}) - set(activity.LINE_LOOKUPS)
+    if unknown:
+        raise ValueError(f'неизвестные справочники линий: {sorted(unknown)}')
     bp = Blueprint('test_numbers', __name__, url_prefix='/api/test_numbers')
 
     def section_route(rule, methods=('GET',), edit=False):
@@ -230,7 +234,8 @@ def build_test_numbers_blueprint(*, db, require_api_key, build_cors_preflight_re
             if not schema.schema_is_ready(cursor):
                 return _not_ready()
             phone_keys = sorted(keys.load_keys(cursor))
-        result = activity.collect(db._get_cursor, phone_keys, start, end, oktell_query=oktell_query)
+        result = activity.collect(db._get_cursor, phone_keys, start, end, oktell_query=oktell_query,
+                                  lines=lines)
         return jsonify({"from": start.isoformat(), "to": end.isoformat(), **result})
 
     return bp

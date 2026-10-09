@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   MAX_PERIOD_DAYS, countsByNumber, dayLabel, daySpan, daysOf, durationLabel, filterItems, itemSummary,
-  numberCaption, periodError, periodPresets, shiftDay, splitLabel, testsLabel, timeLabel,
+  lineCaption, numberCaption, periodError, periodPresets, shiftDay, splitLabel, testsLabel, timeLabel,
 } from '../src/components/test_numbers/testNumbersMeta.js';
 
 /* «Реестр тестовых номеров» — подписи и подсчёты экрана. Сервер отдаёт тесты
@@ -81,4 +81,16 @@ test('номер с владельцем одной строкой', () => {
     '+7 700 000 01 01 · Иванова Айгерим');
   assert.equal(numberCaption({ phone_display: '+7 700 000 01 01', owner: null }), '+7 700 000 01 01');
   assert.equal(numberCaption(null), '');
+});
+
+test('наш номер и таксопарк теста: «на» у входящего, «с» у исходящего', () => {
+  assert.equal(lineCaption({ direction: 'in', line: '+7 700 122 33 22', park: 'Jana такси' }),
+    'на +7 700 122 33 22 · Jana такси');
+  assert.equal(lineCaption({ direction: 'out', line: '+7 747 577 77 78', park: 'Центр регистрации' }),
+    'с +7 747 577 77 78 · Центр регистрации');
+  // Исходящий Oktell — линии нет, только парк; Binotel — номер без названия.
+  assert.equal(lineCaption({ direction: 'out', line: null, park: 'iTaxi' }), 'iTaxi');
+  assert.equal(lineCaption({ direction: 'in', line: '+7 700 300 07 70', park: null }), 'на +7 700 300 07 70');
+  assert.equal(lineCaption({ direction: 'in', line: '', park: '' }), '');
+  assert.equal(lineCaption(null), '');
 });
