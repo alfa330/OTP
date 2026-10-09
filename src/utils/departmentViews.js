@@ -553,17 +553,26 @@ const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_depar
 const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 
-/* Отделы, где направление сотруднику выбирать необязательно (решение владельца
-   06.10.2026: «именно у отдела аналитики»). У отдела нет ни одного направления
-   (прод, 06.10.2026), а форма и сервер требовали выбрать его у каждого
-   оператора — завести аналитика было нельзя вовсе.
+/* Отделы, где направление сотруднику выбирать необязательно. Отдел аналитики —
+   решение владельца 06.10.2026 («именно у отдела аналитики»): у отдела нет ни
+   одного направления (прод, 06.10.2026), а форма и сервер требовали выбрать его
+   у каждого оператора — завести аналитика было нельзя вовсе. IT — решение
+   владельца 09.10.2026: при заведении сотрудника в IT не обязательны ни группа,
+   ни направление (группа — EMPLOYEE_GROUP_OPTIONAL_DEPARTMENTS ниже).
 
    Это не EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS: там поля в карточке нет, и
    присланное направление сервер отбрасывает. Здесь поле остаётся — отделу могут
    завести направления позже, — и выбранное сохраняется как у любого оператора;
    снята только обязательность.
    Зеркало — EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES в bot_schedule2.py. */
-const EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS = new Set(['analytik']);
+const EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS = new Set(['analytik', 'it']);
+
+/* Отделы, где группу при заведении сотрудника выбирать необязательно (решение
+   владельца 09.10.2026 — IT, вместе с направлением выше). Поле в карточке
+   остаётся: выбранная группа сохраняется как обычно, и супервайзер с
+   направлением приходят из неё. Зеркала на сервере нет: ручка add_user группу
+   не требует ни у кого — обязательной её делала только карточка. */
+const EMPLOYEE_GROUP_OPTIONAL_DEPARTMENTS = new Set(['it']);
 
 const departmentCodeIn = (set) => (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -575,6 +584,7 @@ export const departmentCodeHidesEmployeeSipInput = departmentCodeIn(EMPLOYEE_SIP
 export const departmentCodeHidesEmployeeInternship = departmentCodeIn(EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS);
 export const departmentCodeHidesEmployeeTaxiproId = departmentCodeIn(EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS);
 export const departmentCodeHasOptionalEmployeeDirection = departmentCodeIn(EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS);
+export const departmentCodeHasOptionalEmployeeGroup = departmentCodeIn(EMPLOYEE_GROUP_OPTIONAL_DEPARTMENTS);
 
 export const departmentHidesEmployeeDirection = (user) => departmentCodeHidesEmployeeDirection(departmentCodeOf(user));
 export const departmentHidesEmployeeInternship = (user) => departmentCodeHidesEmployeeInternship(departmentCodeOf(user));

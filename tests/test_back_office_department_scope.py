@@ -178,7 +178,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
         # валидация требовала выбрать группу и направление, которых нет.
         modal = _read(MODAL_PATH)
         self.assertIn(
-            "if (isCreateMode && isOperatorUser && showOperatorLineFields && !editedUser.group_id) {",
+            "if (isCreateMode && isOperatorUser && showOperatorLineFields && !groupMayStayEmpty && !editedUser.group_id) {",
             modal,
         )
         self.assertIn(

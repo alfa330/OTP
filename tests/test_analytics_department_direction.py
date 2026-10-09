@@ -7,6 +7,11 @@
 случай ООЗ, где его нет: выбранное направление сохраняется и проверяется как обычно,
 снята только обязательность.
 
+С 09.10.2026 тот же набор держит и IT (решение владельца: при заведении сотрудника в IT
+не обязательны ни группа, ни направление). Группу ручка не требует ни у кого — её
+обязательной делала только карточка, — поэтому для IT здесь проверяется, что сотрудник
+заводится вовсе без группы и направления, а выбранные проверяются как обычно.
+
 Ручка здесь исполняется по-настоящему: её текст и текст помощников берутся из
 `bot_schedule2.py`, подменены только база, запрос и вход. Имена, которые подменены,
 сверяются с модулем — иначе заглушка скрыла бы, что ручка зовёт уже не то.
@@ -37,19 +42,23 @@ BOT_TREE = source_cache.tree(BOT_PATH)
 _BOT_LINES = BOT_SOURCE.splitlines(keepends=True)
 
 ANALYTICS, SZOV, SALES, OOZ, HR = 2134, 1, 367, 2008, 1499
+# id отдела IT условный: правило держится на коде 'it', а не на id.
+IT = 4000
 DEPARTMENTS = {
     SZOV: {'id': SZOV, 'code': 'szov'},
     SALES: {'id': SALES, 'code': 'op'},
     HR: {'id': HR, 'code': 'hr'},
     OOZ: {'id': OOZ, 'code': 'request_processing_department'},
     ANALYTICS: {'id': ANALYTICS, 'code': 'analytik'},
+    IT: {'id': IT, 'code': 'it'},
 }
 # направление -> отдел; 500 — направление, которое аналитике заведут когда-нибудь
-DIRECTIONS = {70: SZOV, 71: SALES, 500: ANALYTICS}
+DIRECTIONS = {70: SZOV, 71: SALES, 500: ANALYTICS, 600: IT}
 GROUPS = {
     41: {'id': 41, 'department_id': ANALYTICS, 'status': 'active'},
     10: {'id': 10, 'department_id': SZOV, 'status': 'active'},
     40: {'id': 40, 'department_id': OOZ, 'status': 'active'},
+    60: {'id': 60, 'department_id': IT, 'status': 'active'},
 }
 
 # Настоящие помощники и наборы ручки — в порядке объявления в модуле.
@@ -166,6 +175,9 @@ ANALYTICS_HEAD = {'id': 229, 'role': 'admin', 'department': ANALYTICS, 'headed':
 SZOV_HEAD = {'id': 2, 'role': 'admin', 'department': SZOV, 'headed': SZOV}
 # СВ со своим направлением «Основа» (id 70, отдел СЗоВ) — ради фолбэка наследования.
 ANALYTICS_SV = {'id': 7, 'role': 'sv', 'department': ANALYTICS, 'headed': None, 'direction': 'Основа'}
+IT_HEAD = {'id': 300, 'role': 'admin', 'department': IT, 'headed': IT}
+# Кадровик заводит людей по всей компании: отдел из запроса сервер ему не переписывает.
+HR_MANAGER = {'id': 42, 'role': 'hr_manager', 'department': HR, 'headed': None, 'personnel': True}
 
 
 def _add_user(payload, requester=SUPER_ADMIN):
@@ -181,7 +193,7 @@ def _add_user(payload, requester=SUPER_ADMIN):
         'request': SimpleNamespace(get_json=lambda *args, **kwargs: dict(payload)),
         'jsonify': lambda body: body,
         '_get_authenticated_requester': lambda: (requester['id'], requester_row, None),
-        '_is_employee_accounting_manager': lambda _requester_id: False,
+        '_is_employee_accounting_manager': lambda _requester_id: bool(requester.get('personnel')),
         '_headed_department_id': lambda _requester_id: requester.get('headed'),
         # Здесь каждый глава возглавляет один отдел — тот же, что в 'headed'.
         '_headed_department_ids': lambda _requester_id: frozenset(
@@ -319,12 +331,67 @@ class OtherDepartmentsTests(unittest.TestCase):
         self.assertEqual(without.department_lookups, with_direction.department_lookups + 1)
 
 
+class ItCreationTests(unittest.TestCase):
+    """IT (решение владельца 09.10.2026): ни группа, ни направление не обязательны."""
+
+    def test_it_employee_is_created_without_group_and_direction(self):
+        for requester in (SUPER_ADMIN, HR_MANAGER, IT_HEAD):
+            for empty in ({}, {'group_id': None, 'direction_id': None}, {'group_id': '', 'direction_id': ''}):
+                with self.subTest(requester=requester['role'], payload=empty):
+                    status, body, db = _add_user(_operator(department_id=IT, **empty), requester=requester)
+
+                    self.assertEqual((status, body.get('status')), (200, 'success'), body)
+                    (created,) = db.created
+                    self.assertEqual(
+                        (created['role'], created['department_id'], created['direction_id'],
+                         created['supervisor_id']),
+                        ('operator', IT, None, None),
+                    )
+                    self.assertEqual(db.memberships, [])
+
+    def test_chosen_group_is_saved_and_brings_its_direction(self):
+        status, body, db = _add_user(_operator(department_id=IT, group_id=60), requester=HR_MANAGER)
+
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(db.created[0]['direction_id'])
+        # Направления в форме нет — оператор получит действующее направление группы.
+        self.assertEqual(db.memberships, [(60, 901, {
+            'start_date': '2026-10-06', 'assigned_by': HR_MANAGER['id'], 'sync_direction': True,
+        })])
+
+    def test_chosen_direction_is_saved_and_checked_as_usual(self):
+        status, body, db = _add_user(_operator(department_id=IT, direction_id='600'))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(db.created[0]['direction_id'], 600)
+
+        status, body, db = _add_user(_operator(department_id=IT, direction_id=70))
+        self.assertEqual((status, body), (400, {"error": "Направление не принадлежит выбранному отделу"}))
+        self.assertEqual(db.created, [])
+
+    def test_group_of_another_department_is_still_rejected(self):
+        status, body, db = _add_user(_operator(department_id=IT, group_id=10), requester=HR_MANAGER)
+
+        self.assertEqual((status, body), (400, {"error": "Группа не принадлежит выбранному отделу"}))
+        self.assertEqual(db.created, [])
+
+    def test_other_departments_still_require_a_direction(self):
+        # Кадровик заводит в СЗоВ — правило IT туда не переносится.
+        status, body, db = _add_user(_operator(department_id=SZOV, group_id=10), requester=HR_MANAGER)
+        self.assertEqual((status, body), (400, {"error": "Missing required field: direction_id"}))
+        self.assertEqual(db.created, [])
+
+        # Глава СЗоВ присылает отдел IT: сервер его выбор игнорирует.
+        status, body, db = _add_user(_operator(department_id=IT, group_id=10), requester=SZOV_HEAD)
+        self.assertEqual((status, body), (400, {"error": "Missing required field: direction_id"}))
+        self.assertEqual(db.created, [])
+
+
 class RuleDefinitionTests(unittest.TestCase):
     def test_backend_set_mirrors_the_frontend(self):
         self.assertIn(
-            "EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik'})", BOT_SOURCE)
+            "EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik', 'it'})", BOT_SOURCE)
         self.assertIn(
-            "const EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS = new Set(['analytik']);",
+            "const EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS = new Set(['analytik', 'it']);",
             source_cache.read(VIEWS_PATH),
         )
 
@@ -341,6 +408,7 @@ class RuleDefinitionTests(unittest.TestCase):
 
         self.assertTrue(optional(ANALYTICS))
         self.assertTrue(optional(str(ANALYTICS)), 'id строкой из JSON')
+        self.assertTrue(optional(IT))
         for department_id in (SZOV, SALES, HR, OOZ):
             self.assertFalse(optional(department_id), DEPARTMENTS[department_id]['code'])
         # Отдел неизвестен или база не ответила — обязательность не снимаем.

@@ -386,7 +386,8 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         # а супервайзер наследуется от группы каскадом. С задачи #228 тот же
         # селект есть и у обычного СВ, поэтому условие держится только на роли
         # сотрудника — а право показать блок даёт canShowOperatorRateControls
-        # (админ, глава отдела, СВ).
+        # (админ, кадровик, глава отдела, СВ). Кадровик — с 09.10.2026
+        # (82743007): isUnscopedRequester = админ или кадровик.
         modal = _read(USER_EDIT_MODAL_PATH)
         controls_start = modal.index("{canShowOperatorRateControls && (")
         group_label = modal.index(">Группа</label>", controls_start)
@@ -396,7 +397,7 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         rate_controls = _read(USER_EDIT_MODAL_PATH)
         self.assertIn(
             "const canShowOperatorRateControls = isOperatorDraft(editedUser) "
-            "&& (isAdminLikeRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);",
+            "&& (isUnscopedRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);",
             rate_controls,
         )
 

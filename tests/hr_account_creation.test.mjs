@@ -21,6 +21,7 @@ const departments = [
     { id: 1, code: 'szov', name: 'СЗоВ' },
     { id: 2, code: 'hr', name: 'HR' },
     { id: 3, code: 'accounting', name: 'Бухгалтерия' },
+    { id: 4, code: 'it', name: 'IT' },
 ];
 const hr = { id: 42, role: 'hr_manager', department_id: 2, department_code: 'hr' };
 const appSource = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
@@ -63,8 +64,14 @@ function form(draft = initialDraft(), user = hr) {
     };
     const props = {
         isOpen: true, userToEdit: draft, user, departments, onClose() {},
-        directions: [{ id: 10, name: 'Основа', department_id: 1 }],
-        groups: [{ id: 100, name: 'Группа СЗоВ', status: 'active', department_id: 1, direction_id: 10 }],
+        directions: [
+            { id: 10, name: 'Основа', department_id: 1 },
+            { id: 40, name: 'Разработка', department_id: 4 },
+        ],
+        groups: [
+            { id: 100, name: 'Группа СЗоВ', status: 'active', department_id: 1, direction_id: 10 },
+            { id: 400, name: 'Группа IT', status: 'active', department_id: 4, direction_id: 40 },
+        ],
         onSave: async (value) => {
             saved.push(value);
             return { status: 'success', id: 900, login: 'test-login', password: 'test-password' };
@@ -120,7 +127,7 @@ test('HR видит доступный выбор всех отделов при
         const select = ui.field('Отдел');
         assert.ok(select, 'Поле «Отдел» видно кадровику');
         assert.equal(select.props.disabled, false);
-        assert.deepEqual(select.props.options.map((option) => option.value), ['', 1, 2, 3]);
+        assert.deepEqual(select.props.options.map((option) => option.value), ['', 1, 2, 3, 4]);
         assert.ok(ui.field('Группа'), 'HR может назначить оператору группу');
         assert.ok(ui.field('Направление'), 'HR может назначить оператору направление');
     }
@@ -198,4 +205,63 @@ test('выбор отдела не превращает тренера, супе
         assert.equal(ui.saved[0].role, role);
         assert.equal(ui.saved[0].department_id, 1);
     }
+});
+
+test('IT: HR и глава отдела создают сотрудника без группы или с выбранной группой', async () => {
+    const itHead = { id: 7, role: 'admin', department_id: 4, department_code: 'it', headed_department_id: 4 };
+    for (const user of [hr, itHead]) {
+        for (const groupId of ['', 400]) {
+            const ui = form({ ...initialDraft(hr, 4), name: 'Разработчик', hire_date: '2026-10-09', direction_id: 40 }, user);
+            await ui.click('Общее');
+            const group = ui.field('Группа');
+            assert.ok(group);
+            assert.equal(group.props.options[0].label, 'Без группы');
+            group.props.onChange(groupId);
+            await ui.click('Создать');
+            assert.equal(ui.saved.length, 1);
+            assert.equal(ui.saved[0].department_id, 4);
+            assert.equal(ui.saved[0].group_id, groupId);
+        }
+    }
+});
+
+test('при смене IT на СЗоВ группа снова обязательна', async () => {
+    const ui = form({ ...initialDraft(hr, 4), name: 'Сотрудник', hire_date: '2026-10-09', direction_id: 40 });
+    await ui.click('Общее');
+    ui.field('Отдел').props.onChange(1);
+    assert.equal(ui.field('Группа').props.options[0].label, 'Выберите группу');
+    ui.field('Направление').props.onChange(10);
+    await ui.click('Создать');
+    assert.equal(ui.saved.length, 0);
+    assert.match(ui.text(), /Группа обязательна/);
+});
+
+test('IT: HR и глава отдела заводят сотрудника без группы и без направления', async () => {
+    const itHead = { id: 7, role: 'admin', department_id: 4, department_code: 'it', headed_department_id: 4 };
+    for (const user of [hr, itHead]) {
+        const ui = form({ ...initialDraft(hr, 4), name: 'Разработчик', hire_date: '2026-10-09' }, user);
+        await ui.click('Общее');
+        assert.equal(ui.field('Группа').props.options[0].label, 'Без группы');
+        assert.equal(ui.field('Направление').props.options[0].label, 'Без направления');
+        await ui.click('Создать');
+        assert.equal(ui.saved.length, 1, user.role);
+        assert.equal(ui.saved[0].role, 'operator');
+        assert.equal(ui.saved[0].department_id, 4);
+        // Пустое App.jsx (saveUserChanges) отправляет на сервер как null.
+        assert.ok(!ui.saved[0].group_id);
+        assert.ok(!ui.saved[0].direction_id);
+        assert.match(ui.text(), /test-login/);
+    }
+});
+
+test('при смене IT на СЗоВ направление снова обязательно', async () => {
+    const ui = form({ ...initialDraft(hr, 4), name: 'Сотрудник', hire_date: '2026-10-09' });
+    await ui.click('Общее');
+    ui.field('Отдел').props.onChange(1);
+    assert.equal(ui.field('Направление').props.options[0].label, 'Выберите направление');
+    ui.field('Группа').props.onChange(100);
+    ui.field('Направление').props.onChange('');
+    await ui.click('Создать');
+    assert.equal(ui.saved.length, 0);
+    assert.match(ui.text(), /Направление обязательно/);
 });

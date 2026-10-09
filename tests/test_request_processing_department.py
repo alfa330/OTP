@@ -155,8 +155,10 @@ class RequestProcessingCardTests(unittest.TestCase):
         modal = _read(MODAL_PATH)
         self.assertIn("if (isOperatorUser && showDirectionField && !directionMayStayEmpty && !editedUser.direction_id) {", modal)
         # Группа остаётся обязательной — ради неё владелец и заводит группу ООЗ.
+        # Снимает её только набор необязательной группы, а ООЗ в нём нет
+        # (tests/it_department_views.test.mjs).
         self.assertIn(
-            "if (isCreateMode && isOperatorUser && showOperatorLineFields && !editedUser.group_id) {",
+            "if (isCreateMode && isOperatorUser && showOperatorLineFields && !groupMayStayEmpty && !editedUser.group_id) {",
             modal,
         )
 

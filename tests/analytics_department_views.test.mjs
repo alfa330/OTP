@@ -16,8 +16,10 @@ import {
    возвращает обязательность. */
 
 const CODE = 'analytik';
+// IT здесь нет: с 09.10.2026 направление необязательно и там
+// (tests/it_department_views.test.mjs).
 const OTHER_CODES = [
-    'szov', 'op', 'tez', 'front_office', 'remote_cc', 'accounting', 'hr', 'marketing', 'it',
+    'szov', 'op', 'tez', 'front_office', 'remote_cc', 'accounting', 'hr', 'marketing',
     'request_processing_department',
 ];
 
