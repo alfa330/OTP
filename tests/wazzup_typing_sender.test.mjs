@@ -54,7 +54,7 @@ test('idle stop is measured from the last edit; a saved nonempty field never ren
     assert.equal(time.pending, 0);
     await time.tick(60000); assert.equal(calls.length, 0);
     sender.activity('a'); await flush();
-    await time.tick(3999); assert.equal(calls.length, 1);
+    await time.tick(2499); assert.equal(calls.length, 1);
     await time.tick(1); assert.deepEqual(calls.map((call) => call.typing), [true, false]);
     assert.equal(time.pending, 0);
     await time.tick(60000); assert.equal(calls.length, 2);

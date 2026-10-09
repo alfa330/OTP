@@ -2,7 +2,7 @@
 // A stop follows any outstanding pulse. Sequence numbers also protect against
 // a timed-out HTTP request being processed after a newer request on the server.
 export const TYPING_PULSE_MS = 3000;
-export const TYPING_IDLE_MS = 4000;
+export const TYPING_IDLE_MS = 2500;
 const FAILURE_BACKOFF_MS = 5000;
 
 export function createChatTypingSender({ send, now = Date.now, schedule = setTimeout, cancel = clearTimeout }) {
