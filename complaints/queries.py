@@ -15,6 +15,8 @@
 import json
 from datetime import date, datetime, timedelta
 
+from crm import queries as crm_queries
+
 from . import access, catalog
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
@@ -57,6 +59,14 @@ _CURRENT_GROUP_MEMBER = """
 """
 
 
+# Жалоба на проверке (Яндекс) у супервайзера отдела автора — форма
+# access.reviews_for_department: проверяет её любой СВ отдела, и любой из них её
+# видит и разбирает. Своя жалоба — не его: её решает коллега.
+_DEPARTMENT_REVIEW = ('(c.review_state IS NOT NULL'
+                      ' AND c.creator_department_id = %(viewer_department)s'
+                      ' AND c.created_by IS DISTINCT FROM %(viewer_id)s)')
+
+
 def visibility_sql(ctx):
     """Условие «жалоба видна пользователю» для WHERE. Возвращает (sql, params).
 
@@ -76,6 +86,7 @@ def visibility_sql(ctx):
         if ctx.get('department_id') is not None:
             params['viewer_department'] = int(ctx['department_id'])
             clauses.append('c.target_department_id = %(viewer_department)s')
+            clauses.append(_DEPARTMENT_REVIEW)
         groups = [int(x) for x in (ctx.get('group_ids') or [])]
         if groups:
             params['viewer_groups'] = groups
@@ -106,6 +117,7 @@ def handling_sql(ctx):
         if ctx.get('department_id') is not None:
             params['viewer_department'] = int(ctx['department_id'])
             clauses.append('c.target_department_id = %(viewer_department)s')
+            clauses.append('(c.target_department_id IS NULL AND %s)' % _DEPARTMENT_REVIEW)
         groups = [int(x) for x in (ctx.get('group_ids') or [])]
         if groups:
             params['viewer_groups'] = groups
@@ -547,31 +559,17 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
 def reviewer_sql(param='viewer_id'):
     """Условие «зритель проверяет эту жалобу до группы» (catalog.REVIEW_*).
 
-    Проверяет супервайзер текущей группы автора — он отвечает за приём; у
-    автора нет группы с супервайзером — глава отдела автора, иначе жалобу не
-    увидел бы никто. Та же граница, что у access.can_handle для жалоб без
-    отдела, только адресная: колокол и счётчик будят того, чья это задача, а
-    не всех, кому жалоба видна. Одна строка на счётчик раздела и колокол,
-    чтобы бейдж и список не разошлись. Триггер колокола (database.py) будит
-    этот же круг шире — всех СВ групп автора и главу, — лишний тычок стоит
-    одной перечитки сводки, а недобуженный стоил бы пропущенной задачи.
+    Проверяет любой супервайзер отдела автора; других СВ в отделе нет — глава
+    отдела, иначе жалобу не увидел бы никто (владелец, 09.10.2026; до этого —
+    только супервайзер группы оператора). Правило одно с «Сотрудничеством с
+    Яндексом» в «Обращениях» — crm/queries.department_reviewer_sql. Оно
+    адресное: колокол и счётчик будят тех, чья это задача, а не всех, кому
+    жалоба видна (глава при живых СВ, админ). Одна строка на счётчик раздела и
+    колокол, чтобы бейдж и список не разошлись; триггер колокола (database.py)
+    будит этот же круг.
     """
-    current = ('{alias}.start_date <= CURRENT_DATE AND ({alias}.end_date IS NULL '
-               'OR {alias}.end_date >= CURRENT_DATE)')
-    supervised = """
-        SELECT 1 FROM group_operator_memberships gom
-          JOIN group_supervisor_memberships gsm ON gsm.group_id = gom.group_id
-          JOIN groups g ON g.id = gom.group_id AND g.status = 'active'
-         WHERE gom.operator_id = c.created_by
-           AND {gom} AND {gsm}""".format(gom=current.format(alias='gom'),
-                                         gsm=current.format(alias='gsm'))
-    return """(
-        EXISTS ({supervised} AND gsm.supervisor_id = %({param})s)
-        OR (NOT EXISTS ({supervised})
-            AND c.creator_department_id IN (
-                SELECT d.id FROM departments d
-                 WHERE d.head_user_id = %({param})s AND d.is_active))
-    )""".format(supervised=supervised, param=param)
+    return crm_queries.department_reviewer_sql(
+        param, author='c.created_by', department='c.creator_department_id')
 
 
 def counters(cursor, ctx):

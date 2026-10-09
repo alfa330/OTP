@@ -7145,23 +7145,19 @@ class Database:
                     END IF;
                     -- Исключение — обращение на проверке у супервайзера (задача
                     -- #297, «Сотрудничество с Яндексом»): это уже не чужая
-                    -- переписка, а его задача. Будим супервайзеров текущих
-                    -- групп автора и главу его отдела
-                    -- (crm/queries.py::reviewer_sql) — и когда обращение встало
+                    -- переписка, а его задача. Проверяет любой супервайзер
+                    -- отдела автора, а без них — глава отдела
+                    -- (crm/queries.py::department_reviewer_sql). Будим всех
+                    -- работающих СВ отдела и главу — и когда обращение встало
                     -- на проверку, и когда по нему решили: задача должна
-                    -- погаснуть у всех проверяющих. Круг шире точного — лишний
-                    -- тычок стоит одной перечитки сводки.
+                    -- погаснуть у всех проверяющих. Глава при живых СВ — круг
+                    -- шире точного, лишний тычок стоит одной перечитки сводки.
                     IF NEW.review_state IS NOT NULL THEN
                         targets := targets || ARRAY(
-                            SELECT gsm.supervisor_id
-                              FROM group_operator_memberships gom
-                              JOIN group_supervisor_memberships gsm
-                                ON gsm.group_id = gom.group_id
-                             WHERE gom.operator_id = NEW.created_by
-                               AND gom.start_date <= CURRENT_DATE
-                               AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
-                               AND gsm.start_date <= CURRENT_DATE
-                               AND (gsm.end_date IS NULL OR gsm.end_date >= CURRENT_DATE)
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')
                         ) || ARRAY(
                             SELECT d.head_user_id FROM departments d
                              WHERE d.id = NEW.department_id
@@ -7184,21 +7180,17 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by, OLD.responsible_id];
                     END IF;
-                    -- Жалоба на проверке (Яндекс): решают супервайзеры текущих
-                    -- групп автора, а без них — глава его отдела
-                    -- (complaints/queries.py::reviewer_sql). Будим круг шире
-                    -- точного — лишний тычок стоит одной перечитки сводки.
+                    -- Жалоба на проверке (Яндекс): решает любой супервайзер
+                    -- отдела автора, а без них — глава отдела
+                    -- (crm/queries.py::department_reviewer_sql). Будим всех
+                    -- работающих СВ отдела и главу — круг шире точного, лишний
+                    -- тычок стоит одной перечитки сводки.
                     IF NEW.review_state IS NOT NULL THEN
                         targets := targets || ARRAY(
-                            SELECT gsm.supervisor_id
-                              FROM group_operator_memberships gom
-                              JOIN group_supervisor_memberships gsm
-                                ON gsm.group_id = gom.group_id
-                             WHERE gom.operator_id = NEW.created_by
-                               AND gom.start_date <= CURRENT_DATE
-                               AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
-                               AND gsm.start_date <= CURRENT_DATE
-                               AND (gsm.end_date IS NULL OR gsm.end_date >= CURRENT_DATE)
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.creator_department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')
                         ) || ARRAY(
                             SELECT d.head_user_id FROM departments d
                              WHERE d.id = NEW.creator_department_id

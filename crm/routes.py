@@ -957,7 +957,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if ticket.get('review_state') != schema.REVIEW_PENDING:
             return jsonify({"error": "Обращение уже не ждёт проверки — обновите карточку"}), 409
         if not access.can_review(ctx, ticket):
-            return jsonify({"error": "Проверяет обращение супервайзер оператора"}), 403
+            return jsonify({"error": "Проверяет обращение супервайзер отдела"}), 403
 
         decision = str(data.get('decision') or '')
         delivered, delivery_error = None, None

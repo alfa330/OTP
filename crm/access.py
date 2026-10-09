@@ -267,14 +267,14 @@ def can_review(ctx, ticket):
     """Решить по обращению на проверке: «Решено» с итогом или «Отправить в
     группу» (возврат задачи #297; владелец, 07.10.2026 — как у жалоб на Яндекс).
 
-    Проверяет супервайзер группы автора, а когда такой группы у автора нет —
-    глава его отдела: по этому правилу считаются счётчик раздела и колокол
-    (queries.reviewer_sql). Нажать может и тот, кто стоит над ними — глава
-    отдела автора и глобальный админ: иначе обращение оператора, чей
-    супервайзер в отпуске, ждало бы его возвращения. То же деление у жалоб
-    (complaints/access.can_review).
+    Проверяет любой супервайзер отдела автора (владелец, 09.10.2026), а когда
+    других супервайзеров в отделе нет — глава отдела: по этому правилу
+    считаются счётчик раздела и колокол (queries.reviewer_sql). Нажать может и
+    тот, кто стоит над ними, — глава отдела автора и глобальный админ. То же
+    деление у жалоб (complaints/access.can_review).
 
-    Оператор не проверяет никогда — ни своё, ни чужое.
+    Оператор не проверяет никогда — ни своё, ни чужое. Супервайзер своё
+    обращение тоже не проверяет: его решает коллега.
     """
     if ticket.get('review_state') != REVIEW_PENDING:
         return False
@@ -286,10 +286,9 @@ def can_review(ctx, ticket):
     headed = {int(x) for x in (ctx.get('headed_department_ids') or [])}
     if department is not None and int(department) in headed:
         return True
-    if is_supervisor(ctx):
-        groups = {int(x) for x in (ctx.get('group_ids') or [])}
-        author_groups = {int(x) for x in (ticket.get('author_group_ids') or [])}
-        return bool(groups & author_groups)
+    if is_supervisor(ctx) and not is_author(ctx, ticket):
+        own = ctx.get('department_id')
+        return department is not None and own is not None and int(department) == int(own)
     return False
 
 

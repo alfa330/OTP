@@ -2843,7 +2843,7 @@ export default function CrmTicketsView({
                                     <button key={String(item.key)} type="button"
                                             disabled={Boolean(searchApplied) || reviewing}
                                             title={searchApplied ? 'Поиск идёт по всем обращениям'
-                                                : reviewing ? 'На проверку приходят обращения ваших операторов'
+                                                : reviewing ? 'На проверку приходят обращения операторов вашего отдела'
                                                     : undefined}
                                             onClick={() => { setMine(item.key); clearSelection(); }}
                                             className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
@@ -2944,7 +2944,7 @@ export default function CrmTicketsView({
                                     {!loading && !error && !feed.items.length && (
                                         <EmptyBlock
                                             hint={reviewing
-                                                ? 'Сюда приходят обращения ваших операторов, которые сначала проверяет супервайзер.'
+                                                ? 'Сюда приходят обращения операторов вашего отдела, которые сначала проверяет супервайзер.'
                                                 : mine
                                                     ? 'Создайте обращение — оно уйдёт в рабочую группу, а ответ вернётся сюда.'
                                                     : 'В этом фильтре пусто.'}>

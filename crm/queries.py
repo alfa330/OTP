@@ -490,36 +490,55 @@ def _ticket_row(row, viewer_id=None):
     }
 
 
+def department_reviewer_sql(param, *, author, department):
+    """Условие «зритель проверяет это до группы» — одно на обращения и жалобы.
+
+    Проверяет ЛЮБОЙ работающий супервайзер отдела автора (владелец,
+    09.10.2026: «чтобы мог проверить любой супервайзер отдела»). До этого — только
+    супервайзер группы оператора, и обращение ждало его одного, даже когда
+    рядом сидели трое свободных. Задача приходит всем сразу и гаснет у всех,
+    как только решил первый (решение ложится один раз — set_review).
+
+    Других супервайзеров в отделе нет — проверяет глава отдела, иначе
+    обращение не увидел бы никто. «Других» — потому что автор и сам бывает
+    супервайзером, а своё обращение не проверяют.
+
+    Уволенные и «на увольнении» не в счёт — ни как проверяющие, ни как повод
+    не будить главу: уволенных СВ в отделе больше, чем работающих, и без этого
+    отсева глава не получил бы задачу никогда. Отпуск и больничный в счёте
+    остаются: задачу увидят коллеги.
+
+    author и department — выражения SQL запроса-хозяина: у обращений это
+    t.created_by и t.department_id, у жалоб c.created_by и
+    c.creator_department_id.
+    """
+    supervisors = """
+        SELECT 1 FROM users rv
+         WHERE rv.department_id = {department}
+           AND lower(COALESCE(rv.role, '')) IN ('sv', 'supervisor')
+           AND COALESCE(rv.status, 'working') NOT IN ('fired', 'dismissal')""".format(
+        department=department)
+    return """(
+        EXISTS ({supervisors} AND rv.id = %({param})s)
+        OR (NOT EXISTS ({supervisors} AND rv.id IS DISTINCT FROM {author})
+            AND {department} IN (
+                SELECT d.id FROM departments d
+                 WHERE d.head_user_id = %({param})s AND d.is_active))
+    )""".format(supervisors=supervisors, param=param, author=author, department=department)
+
+
 def reviewer_sql(param='viewer_id'):
     """Условие «зритель проверяет это обращение до группы» (schema.REVIEW_*).
 
-    Проверяет супервайзер текущей группы автора; у автора нет группы с
-    супервайзером — глава отдела автора, иначе обращение не увидел бы никто.
-    Правило то же, что у жалоб на Яндекс (complaints/queries.reviewer_sql), и
-    так же адресное: счётчик, колокол и бейдж строки будят того, чья это
-    задача, а не каждого, кому обращение видно. Триггер колокола
-    (database.py) будит этот же круг шире — лишний тычок стоит одной перечитки
-    сводки, а недобуженный стоил бы пропущенной задачи.
+    Правило — department_reviewer_sql, то же, что у жалоб на Яндекс
+    (complaints/queries.reviewer_sql). Оно адресное: счётчик, колокол и бейдж
+    строки будят тех, чья это задача, а не каждого, кому обращение видно.
+    Триггер колокола (database.py) будит этот же круг.
 
     Нажать «Решено» или «В группу» вправе круг пошире (access.can_review): там
-    ещё глава отдела при живом супервайзере и глобальный админ.
+    ещё глава отдела при живых супервайзерах и глобальный админ.
     """
-    current = ('{alias}.start_date <= CURRENT_DATE AND ({alias}.end_date IS NULL '
-               'OR {alias}.end_date >= CURRENT_DATE)')
-    supervised = """
-        SELECT 1 FROM group_operator_memberships gom
-          JOIN group_supervisor_memberships gsm ON gsm.group_id = gom.group_id
-          JOIN groups g ON g.id = gom.group_id AND g.status = 'active'
-         WHERE gom.operator_id = t.created_by
-           AND {gom} AND {gsm}""".format(gom=current.format(alias='gom'),
-                                         gsm=current.format(alias='gsm'))
-    return """(
-        EXISTS ({supervised} AND gsm.supervisor_id = %({param})s)
-        OR (NOT EXISTS ({supervised})
-            AND t.department_id IN (
-                SELECT d.id FROM departments d
-                 WHERE d.head_user_id = %({param})s AND d.is_active))
-    )""".format(supervised=supervised, param=param)
+    return department_reviewer_sql(param, author='t.created_by', department='t.department_id')
 
 
 def review_task_sql(param='viewer_id'):

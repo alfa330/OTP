@@ -165,11 +165,25 @@ class RuleTest(unittest.TestCase):
 
 class AccessTest(unittest.TestCase):
 
-    def test_supervisor_of_the_authors_group_decides(self):
-        self.assertTrue(access.can_review(viewer('sv', user_id=55, groups=(6,)), pending()))
+    def test_any_supervisor_of_the_authors_department_decides(self):
+        """Владелец, 09.10.2026: «чтобы мог проверить любой супервайзер
+        отдела» — и супервайзер группы автора, и супервайзер соседней группы,
+        и супервайзер без группы вовсе."""
+        for me in (viewer('sv', user_id=55, groups=(6,)), viewer('sv', user_id=56, groups=(9,)),
+                   viewer('supervisor', user_id=57)):
+            self.assertTrue(access.can_review(me, pending()), me['user_id'])
 
-    def test_supervisor_of_another_group_does_not(self):
-        self.assertFalse(access.can_review(viewer('sv', user_id=56, groups=(9,)), pending()))
+    def test_supervisor_of_another_department_does_not(self):
+        """Даже если автор — в его группе: проверяет отдел автора."""
+        stranger = viewer('sv', user_id=77, department_id=2, department_code='op', groups=(6,))
+        self.assertTrue(access.can_view_ticket(stranger, pending()), 'видит — но не решает')
+        self.assertFalse(access.can_review(stranger, pending()))
+        self.assertFalse(access.can_review(viewer('sv', user_id=78, department_id=None), pending()))
+
+    def test_supervisor_does_not_decide_his_own_ticket(self):
+        """Своё обращение решает коллега, иначе проверки не было бы вовсе."""
+        self.assertFalse(access.can_review(viewer('sv', user_id=55, groups=(6,)),
+                                           pending(created_by=55)))
 
     def test_head_of_the_authors_department_decides(self):
         """И когда у автора нет группы с супервайзером, и когда тот в отпуске."""
@@ -241,6 +255,19 @@ class ReviewerRuleTest(unittest.TestCase):
         theirs = squash(complaint_queries.reviewer_sql('viewer_id'))
         self.assertEqual(ours, theirs.replace('c.created_by', 't.created_by')
                          .replace('c.creator_department_id', 't.department_id'))
+
+    def test_any_working_supervisor_of_the_department_reviews(self):
+        """Любой работающий СВ отдела автора; других СВ нет — глава отдела.
+        Уволенные и «на увольнении» не в счёт ни там, ни там: иначе восемь
+        уволенных СВ навсегда закрыли бы главе задачу."""
+        rule = squash(queries.reviewer_sql('viewer_id'))
+        self.assertIn('rv.department_id = t.department_id', rule)
+        self.assertIn("lower(COALESCE(rv.role, '')) IN ('sv', 'supervisor')", rule)
+        self.assertEqual(rule.count("COALESCE(rv.status, 'working') NOT IN ('fired', 'dismissal')"), 2)
+        self.assertIn('AND rv.id = %(viewer_id)s', rule)
+        self.assertIn('AND rv.id IS DISTINCT FROM t.created_by', rule)
+        self.assertIn('d.head_user_id = %(viewer_id)s AND d.is_active', rule)
+        self.assertNotIn('group_operator_memberships', rule)
 
     def test_the_task_is_pending_and_not_my_own(self):
         task = squash(queries.review_task_sql('viewer_id'))
@@ -1047,9 +1074,18 @@ class DecisionEndpointTest(unittest.TestCase):
             self.assertEqual(response.status_code, 403, decision)
         self.assertEqual(self.calls, [])
 
-    def test_supervisor_of_another_group_is_refused(self):
+    def test_supervisor_of_another_group_of_the_department_decides(self):
         self.ctx = viewer('sv', user_id=56, groups=(9,))
-        self.assertEqual(self.post({'decision': 'send'}).status_code, 403)
+        response = self.post({'decision': 'send'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.calls, [('send', 110, 56)])
+
+    def test_supervisor_is_refused_on_his_own_ticket(self):
+        self.ctx = viewer('sv', user_id=56, groups=(9,))
+        self.ticket = pending(created_by=56)
+        response = self.post({'decision': 'send'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['error'], 'Проверяет обращение супервайзер отдела')
         self.assertEqual(self.calls, [])
 
     def test_outsider_is_stopped_at_the_door_of_the_section(self):
@@ -1243,9 +1279,24 @@ class BellTriggerTest(unittest.TestCase):
         супервайзеру по чужой переписке — шум."""
         self.assertIn('targets := ARRAY[NEW.created_by]', self.branch)
         tail = self.branch[self.branch.index('IF NEW.review_state IS NOT NULL THEN'):]
-        self.assertIn('gsm.supervisor_id', tail)
-        self.assertIn('gom.operator_id = NEW.created_by', tail)
+        # Все работающие супервайзеры отдела автора и глава — а не только
+        # супервайзер его группы (владелец, 09.10.2026).
+        self.assertIn('u.department_id = NEW.department_id', tail)
+        self.assertIn("COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')", tail)
+        self.assertIn("lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')", tail)
         self.assertIn('d.id = NEW.department_id', tail)
+        self.assertNotIn('gsm.supervisor_id', tail)
+
+    def test_complaints_wake_the_same_circle(self):
+        """Жалобы на Яндекс проверяет тот же круг — и будит его так же."""
+        branch = self.block[self.block.index("ELSIF TG_TABLE_NAME = 'complaints'"):]
+        branch = branch[:branch.index("ELSIF TG_TABLE_NAME = 'tasks'")]
+        review = branch[branch.index('IF NEW.review_state IS NOT NULL THEN'):]
+        review = review[:review.index('END IF;')]
+        self.assertIn('u.department_id = NEW.creator_department_id', review)
+        self.assertIn("NOT IN ('fired', 'dismissal')", review)
+        self.assertIn('d.id = NEW.creator_department_id', review)
+        self.assertNotIn('gsm.supervisor_id', review)
 
     def test_new_pending_ticket_wakes_the_supervisor_at_once(self):
         """Обычная вставка колокол не будит (автору нечего читать), а вставшее

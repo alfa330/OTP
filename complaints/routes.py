@@ -399,13 +399,13 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
     @route('/complaints/<int:complaint_id>/review', methods=('POST',))
     def complaints_review(complaint_id, ctx):
         """Решение по жалобе на проверке (Яндекс): «Отправить в группу» или
-        «Решено» с итогом. Решает тот, кто разбирает жалобу, — супервайзер
-        группы оператора, глава его отдела, админ."""
+        «Решено» с итогом. Решает тот, кто разбирает жалобу, — любой
+        супервайзер отдела оператора, глава отдела, админ."""
         data = _payload()
         with db._get_cursor() as cursor:
             complaint = _load(cursor, complaint_id, ctx)
         if not access.can_handle(ctx, complaint):
-            return jsonify({"error": "Проверяет жалобу супервайзер оператора"}), 403
+            return jsonify({"error": "Проверяет жалобу супервайзер отдела"}), 403
         if complaint.get('review_state') != catalog.REVIEW_PENDING:
             return jsonify({"error": "Жалоба уже не ждёт проверки — обновите карточку"}), 409
         decision = str(data.get('decision') or '')
