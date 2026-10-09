@@ -1297,10 +1297,11 @@ class EmployeeCardWiringTests(unittest.TestCase):
         change = self.modal.split("const handleDepartmentChange = (deptValue) => {")[1].split(
             "const handleGroupChange")[0]
         self.assertIn(
-            "            if (canPickHeadedDepartment) {\n"
+            "            if (!userToEdit?.id) {\n"
             "                next.role = employeeRoleForDepartmentCode(\n"
             "                    prev?.role,\n"
-            "                    requesterHeadedDepartments.find((d) => d.id === effDept)?.code,\n"
+            "                    (departments || []).find((d) => Number(d.id) === effDept)?.code\n"
+            "                        ?? requesterHeadedDepartments.find((d) => d.id === effDept)?.code,\n"
             "                );\n"
             "            }", change)
         self.assertIn("import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';", self.modal)

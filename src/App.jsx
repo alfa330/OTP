@@ -51323,9 +51323,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : (manageUsersDeptFilter || "");
                 const createDeptCode = createDeptId
                     ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
-                    : (isScopedDepartmentHead
+                    : (isScopedDepartmentHead && !isEmployeeAccountingManager
                         ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
-                        : (user?.department_code ?? user?.departmentCode ?? null));
+                        : 'szov');
                 setUserToEdit({
                     name: "",
                     rate: 1.0,
