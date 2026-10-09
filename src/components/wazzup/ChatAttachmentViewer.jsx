@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, PictureInPicture2, ScanText, Undo2, ZoomIn, ZoomOut } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, Maximize2, Minimize2, PictureInPicture2, ScanText, Undo2, ZoomIn, ZoomOut } from 'lucide-react';
 import { IosModal } from '../ui/ios';
 import { ATTACHMENT_MAX_BYTES, attachmentName, attachmentPreviewKind, boundedCanvasSize, pdfPageText, saveAttachment } from './chatAttachments';
 import ChatAttachmentStrip from './ChatAttachmentStrip';
@@ -32,9 +32,11 @@ function PdfPage({ document: pdf, library, number, zoom, onReady, onError, hostW
         let timer;
         const resize = () => {
             clearTimeout(timer);
-            timer = setTimeout(() => setWidth(Math.max(180, element.clientWidth - 24)), 80);
+            timer = setTimeout(() => {
+                if (element.clientWidth > 24) setWidth(Math.max(180, element.clientWidth - 24));
+            }, 80);
         };
-        setWidth(Math.max(180, element.clientWidth - 24));
+        if (element.clientWidth > 24) setWidth(Math.max(180, element.clientWidth - 24));
         const observer = new hostWindow.ResizeObserver(resize);
         observer.observe(element);
         return () => { observer.disconnect(); clearTimeout(timer); };
@@ -177,8 +179,11 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const [currentPage, setCurrentPage] = useState(null);
     const [extracting, setExtracting] = useState(false);
     const [extracted, setExtracted] = useState(null);
+    const [textView, setTextView] = useState(false);
+    const [expandedText, setExpandedText] = useState(false);
     const [copied, setCopied] = useState(false);
     const [retry, setRetry] = useState(0);
+    const [failedPreview, setFailedPreview] = useState(null);
     const latest = useRef({});
     // A replacement file or another API must not inherit the old file's bytes
     // or recognized text, even if the message identifiers are unchanged.
@@ -195,6 +200,11 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const asset = loadedAsset?.sourceKey === sourceKey ? loadedAsset : null;
     const download = loadedDownload?.sourceKey === sourceKey ? loadedDownload : null;
     const isVideo = attachmentPreviewKind(message) === 'video';
+    // The conversation has already displayed this URL. Reuse the browser's
+    // image cache immediately while the authenticated OCR/download copy loads.
+    const directImage = attachmentPreviewKind(message) === 'image' && failedPreview !== sourceKey
+        ? message.contentUri : null;
+    const imageUrl = directImage || (asset?.kind === 'image' ? asset.url : null);
     const knownUnsupported = attachmentPreviewKind(message) === 'document' && Boolean(attachmentName(message));
     // A cached image is on screen one frame after opening: showing the progress
     // indicator for that frame would only make the viewer flicker.
@@ -250,6 +260,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         setLoading(!isVideo && !knownUnsupported && !(cached && cached.type.startsWith('image/')));
         // Text recognized earlier for this page is shown again without a new request.
         setAsset(null); setDownload(null); setError(''); setExtracted(cache.getText(sourceKey, 1)); setPage(1); setZoom(1); setCurrentPage(null); setExtracting(false); setCopied(false);
+        setTextView(false); setExpandedText(false);
         (async () => {
             // Video uses the same native streaming URL already available in the
             // authorized conversation. It never hits the image/PDF proxy or OCR.
@@ -334,10 +345,12 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         copyState.current.version += 1;
         cancelExtraction(); setExtracting(false); setError(''); setCurrentPage(null);
         setCopied(false); setPage(value); setExtracted(cache.getText(sourceKey, value));
+        setTextView(Boolean(cache.getText(sourceKey, value))); setExpandedText(false);
     };
     const extract = async (forceOcr = false) => {
         if (!asset || extraction.current || navigation.current.messageId !== message.messageId || (asset.kind === 'pdf' && !currentPage)) return;
         setError(''); setCopied(false);
+        setTextView(true);
         if (!forceOcr && currentPage?.text) {
             const result = { text: currentPage.text, source: 'pdf', page };
             cache.putText(sourceKey, page, result);
@@ -392,6 +405,8 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         }
     };
     const canExtract = Boolean(asset) && !loading && !extracting && (asset.kind !== 'pdf' || Boolean(currentPage));
+    const hasText = Boolean(asset && (extracted || extracting));
+    const textOnly = hasText && expandedText;
     return createPortal(<IosModal open embedded={Boolean(pip.pipWindow)} onClose={close} title={download?.name || attachmentName(message) || (isVideo ? 'Видео' : 'Просмотр вложения')}
         headerActions={pip.pipWindow ? <button type="button" className={actionButton} onClick={pip.returnToChat}
             aria-label="Вернуть в чат" title="Вернуть в чат"><Undo2 size={16} /><span className="hidden sm:inline">В чат</span></button>
@@ -403,7 +418,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
         <div ref={container} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none" style={{ height: pip.pipWindow ? undefined : 'min(78vh, 900px)' }}>
             {pip.error && <div role="alert" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">{pip.error}</div>}
-            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-2">
+            <div className={`flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-2 ${hasText && textView ? 'hidden md:flex' : 'flex'}`}>
                 {asset?.kind === 'pdf' && <>
                     <button type="button" className={iconButton} disabled={page <= 1} aria-label="Предыдущая страница"
                         title="Предыдущая страница" onClick={() => changePage(page - 1)}><ChevronLeft size={17} /></button>
@@ -411,7 +426,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                     <button type="button" className={iconButton} disabled={page >= asset.pdf.numPages} aria-label="Следующая страница"
                         title="Следующая страница" onClick={() => changePage(page + 1)}><ChevronRight size={17} /></button>
                 </>}
-                {asset && <>
+                {(asset || imageUrl) && <>
                     <button type="button" className={iconButton} disabled={zoom <= 0.5} aria-label="Уменьшить" title="Уменьшить"
                         onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}><ZoomOut size={16} /></button>
                     <span className="text-xs tabular-nums text-slate-500">{Math.round(zoom * 100)}%</span>
@@ -437,9 +452,16 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                 {!asset && !loading && <button type="button" className="font-semibold underline" onClick={() => setRetry((value) => value + 1)}>Повторить</button>}
                 {message.contentUri && <a href={message.contentUri} target="_blank" rel="noopener noreferrer" className="font-semibold underline">Открыть оригинал</a>}
             </div>}
+            {hasText && <div className={`shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-3 py-1.5 ${textOnly ? 'flex' : 'flex md:hidden'}`}
+                role="group" aria-label="Режим просмотра">
+                <button type="button" aria-pressed={!textView} onClick={() => { setTextView(false); setExpandedText(false); }}
+                    className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium ${!textView ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>Файл</button>
+                <button type="button" aria-pressed={textView} onClick={() => setTextView(true)}
+                    className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium ${textView ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>Текст</button>
+            </div>}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-                <div className="relative min-h-0 min-w-0 flex-1 bg-slate-200/70">
-                    {!knownUnsupported && !isVideo && !instant && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
+                <div data-attachment-file className={`relative min-h-0 min-w-0 flex-1 bg-slate-200/70 ${textOnly ? 'hidden' : hasText && textView ? 'hidden md:block' : ''}`}>
+                    {!knownUnsupported && !isVideo && !imageUrl && !instant && (!currentSource || loading) && <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={18} className="animate-spin" /> Открываем вложение…</div>}
                     {isVideo && <div className="flex h-full items-center justify-center bg-slate-950 p-1 sm:p-3">
                         <video key={`${sourceKey}:${retry}`} ref={video} src={message.contentUri} controls playsInline autoPlay preload="metadata"
                             aria-label="Видео из сообщения" className="h-full max-h-full w-full object-contain"
@@ -456,25 +478,34 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                     </div>}
                     {asset?.kind === 'pdf' && <PdfPage key={sourceKey} document={asset.pdf} library={asset.library} number={page} zoom={zoom}
                         onReady={ready} onError={pageError} hostWindow={pip.pipWindow || homeDocument.current.defaultView} />}
-                    {asset?.kind === 'image' && <div className="wazzup-scrollbar flex h-full overflow-auto p-3">
-                        <img src={asset.url} alt="Вложение из сообщения" className="m-auto shrink-0 object-contain"
+                    {imageUrl && <div className="wazzup-scrollbar flex h-full overflow-auto p-3">
+                        <img key={imageUrl} src={imageUrl} alt="Вложение из сообщения" className="m-auto shrink-0 object-contain"
                             style={{ width: `${zoom * 100}%`, maxWidth: 'none', maxHeight: zoom === 1 ? '100%' : undefined }}
-                            onError={() => pageError('Не удалось отобразить изображение. Скачайте файл.')} />
+                            onError={() => {
+                                if (directImage) setFailedPreview(sourceKey);
+                                else pageError('Не удалось отобразить изображение. Скачайте файл.');
+                            }} />
                     </div>}
                 </div>
-                {asset && (extracted || extracting) && <div className="flex max-h-[35vh] min-h-36 flex-col border-t border-slate-200 bg-white md:max-h-none md:w-80 md:border-l md:border-t-0">
-                    <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+                {hasText && <div data-attachment-text className={`min-h-0 min-w-0 flex-1 flex-col bg-white ${textView ? 'flex' : 'hidden md:flex'} ${textOnly ? '' : 'md:w-80 md:flex-none md:border-l md:border-slate-200'}`}>
+                    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
                         <span className="text-xs font-semibold text-slate-600">{asset?.kind === 'pdf' ? `Текст страницы ${page}` : 'Текст изображения'}</span>
+                        <div className="flex items-center gap-1">
+                        <button type="button" className={`${iconButton} hidden md:inline-flex`} onClick={() => { setExpandedText(!expandedText); setTextView(true); }}
+                            aria-label={textOnly ? 'Показать файл рядом с текстом' : 'Развернуть текст'} title={textOnly ? 'Показать файл рядом с текстом' : 'Развернуть текст'}>
+                            {textOnly ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
                         <button type="button" className={iconButton} disabled={!extracted?.text || extracting} onClick={copyText}
                             aria-label="Копировать текст" title={copied ? 'Скопировано' : 'Копировать текст'}>{copied ? <Check size={16} /> : <Copy size={16} />}</button>
+                        </div>
                     </div>
                     {extracting ? <div role="status" className="flex items-center justify-center gap-2 px-3 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Распознаём текущую страницу…</div>
                         : <textarea ref={resultBox} readOnly value={extracted?.text || ''} aria-label="Извлечённый текст"
                             placeholder="На этой странице текст не найден" className="wazzup-scrollbar min-h-0 flex-1 resize-none border-0 p-3 text-sm leading-relaxed text-slate-700 outline-none" />}
-                    {extracted?.source === 'ocr' && !extracting && <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400">Распознано с помощью ИИ. Проверьте текст перед использованием.</p>}
+                    {extracted?.source === 'ocr' && !extracting && <p className="shrink-0 border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400">Распознано ИИ. Проверьте текст.</p>}
                 </div>}
             </div>
             {onSelect && <ChatAttachmentStrip items={items} selectedId={message.messageId} onSelect={select}
+                compact={hasText && textView}
                 onPrevious={() => step(-1)} onNext={() => step(1)} />}
         </div>
     </IosModal>, portalHost);

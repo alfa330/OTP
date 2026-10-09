@@ -111,6 +111,7 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         } catch (e) { setError(e.response?.data?.error || 'Не удалось удалить шаблон'); }
         finally { mutationRef.current = false; setBusy(false); }
     };
+    const matchingTemplates = items.filter((item) => String(item.title || '').toLowerCase().includes(search.trim().toLowerCase()));
     return <div ref={rootRef} className="shrink-0">
         <div className="flex gap-0.5">
             <button ref={templateButtonRef} type="button" disabled={locked || mutationRef.current} aria-label="Шаблоны сообщений" title="Шаблоны сообщений · /" aria-expanded={panel === 'templates'}
@@ -169,14 +170,14 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                     <button type="button" onClick={() => setSelected(null)} className="text-sm">Назад</button>
                 </div> : <>
                     <div className="mb-2 flex gap-2">
-                        <input aria-label="Найти шаблон" placeholder="Найти шаблон…" value={search} onChange={(e) => setSearch(e.target.value)}
+                        <input aria-label="Найти шаблон" placeholder="Найти по названию…" value={search} onChange={(e) => setSearch(e.target.value)}
                             className="min-w-0 flex-1 rounded-lg border p-2 text-xs" />
                         <button type="button" disabled={busy} onClick={() => { setEditing({ title: '', text: '' }); setError(''); }}
                             className="text-xs font-semibold text-blue-600">+ iCORE</button>
                     </div>
                     {busy && <p className="text-xs text-slate-500">Загрузка…</p>}
                     <div className="max-h-60 overflow-y-auto">
-                        {items.filter((item) => `${item.title} ${item.text}`.toLowerCase().includes(search.toLowerCase())).map((item) =>
+                        {matchingTemplates.map((item) =>
                             <div key={`${item.source}:${item.id}`} className="flex gap-1 border-b border-slate-100 py-1">
                                 <button type="button" disabled={busy || !item.supported} title={item.unsupportedReason || item.text}
                                     onClick={() => { setValues({}); item.variables.length ? setSelected(item) : choose(item); }}
@@ -194,6 +195,7 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                                 </>}
                             </div>)}
                         {!busy && !items.length && <p className="py-3 text-xs text-slate-500">Для этого канала шаблонов пока нет.</p>}
+                        {!busy && items.length > 0 && !matchingTemplates.length && <p className="py-3 text-xs text-slate-500">Шаблоны с таким названием не найдены.</p>}
                     </div>
                     {deleting && <div className="mt-2 rounded bg-rose-50 p-2 text-xs">
                         Удалить «{deleting.title}» для всей команды?

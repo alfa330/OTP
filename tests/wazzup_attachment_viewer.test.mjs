@@ -248,6 +248,56 @@ test('image opens without OCR; explicit extraction uses current IDs and same-tic
     }finally{h.restore();}
 });
 
+test('a conversation photo is visible and zoomable while its OCR copy is still downloading',async()=>{
+    const response=defer();const h=fixture({get:()=>response.promise});
+    const message={messageId:'visible-photo',type:'image',contentUri:'https://example.invalid/already-visible.jpg'};
+    try{
+        let tree=h.render({message});tree=h.render();
+        assert.equal(find(tree,node=>node.type==='img').props.src,message.contentUri);
+        assert.equal(find(tree,node=>node.props?.role==='status'),null);
+        assert.equal(extractButton(tree).props.disabled,true);
+        label(tree,'Увеличить').props.onClick();tree=h.render();
+        assert.equal(find(tree,node=>node.type==='img').props.style.width,'125%');
+        response.resolve({data:new Blob(['ready'],{type:'image/jpeg'})});await tick();tree=h.render();
+        assert.equal(find(tree,node=>node.type==='img').props.src,message.contentUri,'ready OCR bytes must not flash or replace the displayed image');
+        assert.equal(find(tree,node=>node.type==='img').props.style.width,'125%');
+        assert.equal(extractButton(tree).props.disabled,false);
+        assert.equal(h.requests.length,1);assert.equal(h.posts.length,0);
+    }finally{h.restore();}
+});
+
+test('an unavailable direct preview falls back to the authenticated downloaded image',async()=>{
+    const response=defer();const h=fixture({get:()=>response.promise});
+    try{
+        let tree=h.render({message:{messageId:'photo',type:'image',contentUri:'https://example.invalid/blocked.jpg'}});
+        find(tree,node=>node.type==='img').props.onError();tree=h.render();
+        assert.equal(find(tree,node=>node.type==='img'),null);
+        response.resolve({data:new Blob(['copy'],{type:'image/png'})});await tick();tree=h.render();
+        assert.equal(find(tree,node=>node.type==='img').props.src,'blob:fixture-0');
+        assert.equal(find(tree,node=>node.props?.role==='alert'),null);
+    }finally{h.restore();}
+});
+
+test('text reading mode opens after extraction and switches without new OCR or download',async()=>{
+    const h=fixture();
+    const button=(tree,text)=>find(tree,node=>node.type==='button'&&node.props.children===text);
+    try{
+        h.render();await tick();await extractButton(h.render()).props.onClick();
+        let tree=h.render();
+        assert.equal(button(tree,'Текст').props['aria-pressed'],true);
+        assert.equal(find(tree,node=>node.type?.name==='ChatAttachmentStrip'),null);
+        const text=label(tree,'Извлечённый текст').props.value;
+        button(tree,'Файл').props.onClick();tree=h.render();
+        assert.equal(button(tree,'Файл').props['aria-pressed'],true);
+        button(tree,'Текст').props.onClick();tree=h.render();
+        label(tree,'Развернуть текст').props.onClick();tree=h.render();
+        assert.ok(label(tree,'Показать файл рядом с текстом'));
+        label(tree,'Показать файл рядом с текстом').props.onClick();tree=h.render();
+        assert.equal(label(tree,'Извлечённый текст').props.value,text);
+        assert.equal(h.requests.length,1);assert.equal(h.posts.length,1);
+    }finally{h.restore();}
+});
+
 test('closing during OCR cancels the POST and suppresses stale text',async()=>{
     const response=defer();const h=fixture({post:()=>response.promise});
     try{
@@ -317,7 +367,7 @@ test('rapid selection aborts old download and ignores its later response',async(
         second.resolve({data:new Blob(['current'],{type:'image/png'})});await tick();
         first.resolve({data:new Blob(['stale'],{type:'image/jpeg'})});await tick();
         assert.equal(h.created.length,1);assert.equal(await h.created[0].blob.text(),'current');
-        assert.equal(find(h.render(),(node)=>node.type==='img'&&node.props.alt==='Вложение из сообщения').props.src,'blob:fixture-0');
+        assert.equal(find(h.render(),(node)=>node.type==='img'&&node.props.alt==='Вложение из сообщения').props.src,media[2].contentUri);
     }finally{h.restore();}
 });
 

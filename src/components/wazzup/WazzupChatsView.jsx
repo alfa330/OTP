@@ -41,7 +41,31 @@ import { normalizeRole } from '../../utils/roles';
 import './chatThread.css';
 import './workspace.css';
 
-const ChatAttachmentViewer = lazy(() => import('./ChatAttachmentViewer'));
+let attachmentViewerModule;
+const loadAttachmentViewer = () => {
+    attachmentViewerModule ||= import('./ChatAttachmentViewer').catch((error) => {
+        attachmentViewerModule = null;
+        throw error;
+    });
+    return attachmentViewerModule;
+};
+const warmAttachmentViewer = (kind) => {
+    // Intent loads code only; private files remain on-demand after opening.
+    loadAttachmentViewer().catch(() => {});
+    if (kind === 'pdf') import('./pdfRuntime').catch(() => {});
+};
+const ChatAttachmentViewer = lazy(loadAttachmentViewer);
+
+function AttachmentViewerFallback({ message, onClose }) {
+    const image = attachmentPreviewKind(message) === 'image';
+    return <IosModal open onClose={onClose} title={attachmentName(message) || 'Просмотр вложения'}
+        maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
+        <div className="flex items-center justify-center overflow-auto bg-slate-200/70 p-3" style={{ height: 'min(78vh, 900px)' }}>
+            {image ? <img src={message.contentUri} alt="Вложение из сообщения" className="m-auto max-h-full max-w-full object-contain" />
+                : <div className="flex items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>}
+        </div>
+    </IosModal>;
+}
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -187,10 +211,12 @@ function MediaContent({ msg, light, onAttachment }) {
 
     if (previewKind) {
         const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : previewKind === 'video' ? 'Видео' : 'Документ');
-        if (previewKind === 'video') return <ChatMessageVideo src={uri} label={label} onOpen={() => onAttachment(msg)} />;
-        if (previewKind === 'image') return <ChatMessageImage src={uri} label={label} light={light}
+        const warm = () => warmAttachmentViewer(previewKind);
+        let content;
+        if (previewKind === 'video') content = <ChatMessageVideo src={uri} label={label} onOpen={() => onAttachment(msg)} />;
+        else if (previewKind === 'image') content = <ChatMessageImage src={uri} label={label} light={light}
             onOpen={() => onAttachment(msg)} />;
-        return <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
+        else content = <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
             className={`inline-flex max-w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] font-medium ${
                 light ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
             <FileText size={20} className="shrink-0" />
@@ -198,6 +224,7 @@ function MediaContent({ msg, light, onAttachment }) {
                 <span className={`block text-[11px] font-normal ${light ? 'text-blue-100' : 'text-slate-500'}`}>Просмотреть в чате</span>
             </span>
         </button>;
+        return <div className="contents" onPointerEnter={warm} onFocus={warm}>{content}</div>;
     }
 
     if (uri && msg.type === 'image') {
@@ -975,6 +1002,7 @@ function ChatsWorkspace(props) {
     const attachmentThread = useRef([]);
     const openAttachment = useCallback((message, videoOnly = false) => {
         if (!selected) return;
+        warmAttachmentViewer(attachmentPreviewKind(message));
         const items = buildAttachmentGroup(attachmentThread.current, message)
             .filter((item) => !videoOnly || attachmentPreviewKind(item) === 'video');
         setAttachmentSelection((current) => ({ key: selectedKey, chat: { ...selected }, account,
@@ -1885,9 +1913,7 @@ function ChatsWorkspace(props) {
                 </div>
             </div>
             {attachmentAllowed &&
-                <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
-                    <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
-                </IosModal>}>
+                <Suspense fallback={<AttachmentViewerFallback message={attachmentSelection.message} onClose={() => setAttachmentSelection(null)} />}>
                     <ChatAttachmentViewer key={attachmentSelection.key}
                         apiBaseUrl={apiBaseUrl} headers={headers} chat={attachmentSelection.chat} message={attachmentSelection.message}
                         items={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(attachmentSelection.chat.channelId)

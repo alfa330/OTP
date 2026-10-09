@@ -96,6 +96,47 @@ test('ordinary Wazzup replies insert plain text, while only WABA templates displ
     } finally { h.restore(); }
 });
 
+test('template search matches only titles, ignoring case and surrounding query whitespace', async () => {
+    const bodyOnly = { ...plain, id: 'body-only', title: 'Инструкция', text: 'Быстрый ответ внутри сообщения' };
+    const items = [plain, bodyOnly, waba];
+    const h = fixture(() => Promise.resolve({ data: { items } }));
+    const option = (tree, item) => find(tree, (node) => node.type === 'button' && node.props.title === item.text);
+    try {
+        let tree = await h.open();
+        assert.equal(label(tree, 'Найти шаблон').props.placeholder, 'Найти по названию…');
+        for (const query of ['БЫСТРЫЙ', '  быстРЫЙ ответ  ', '\tОТВЕТ\n']) {
+            label(tree, 'Найти шаблон').props.onChange({ target: { value: query } });
+            tree = h.render();
+            assert.ok(option(tree, plain));
+            assert.equal(option(tree, bodyOnly), null, 'a body-only match must not enter search results');
+            assert.equal(option(tree, waba), null);
+        }
+        label(tree, 'Найти шаблон').props.onChange({ target: { value: 'Обычный текст' } });
+        tree = h.render();
+        assert.ok(items.every((item) => option(tree, item) === null));
+        for (const query of ['', '   ']) {
+            label(tree, 'Найти шаблон').props.onChange({ target: { value: query } });
+            tree = h.render();
+            assert.ok(items.every((item) => option(tree, item)), 'clearing the search restores all templates');
+        }
+    } finally { h.restore(); }
+});
+
+test('slash title search keeps templates with the same name distinct and inserts the chosen one', async () => {
+    const local = { ...plain, source: 'icore', text: 'Локальный ответ' };
+    const h = fixture(() => Promise.resolve({ data: { items: [plain, local, waba] } }));
+    try {
+        h.render({ slash: ' ОТВЕТ ' }); h.render(); await tick();
+        const tree = h.render();
+        const sourceButton = find(tree, (node) => node.type === 'button' && node.props.title === plain.text);
+        const localButton = find(tree, (node) => node.type === 'button' && node.props.title === local.text);
+        assert.ok(sourceButton && localButton, 'matching names do not collapse distinct source/ID pairs');
+        assert.equal(find(tree, (node) => node.type === 'button' && node.props.title === waba.text), null);
+        localButton.props.onClick();
+        assert.deepEqual(h.choices, [{ text: local.text, preview: '' }]);
+    } finally { h.restore(); }
+});
+
 test('Enter stays inside template dialog and cannot implicitly submit the message form', async () => {
     const h = fixture();
     try {

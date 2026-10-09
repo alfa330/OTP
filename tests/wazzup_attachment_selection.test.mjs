@@ -32,6 +32,8 @@ await build({ stdin: { contents: `
     const useEffect=(...args)=>globalThis.__selectionHarness.useEffect(...args);
     const useCallback=(...args)=>globalThis.__selectionHarness.useCallback(...args);
     const ChatAttachmentViewer='attachment-viewer', Suspense='suspense', IosModal='modal', Loader2='loader';
+    const warmAttachmentViewer=()=>{};
+    const AttachmentViewerFallback='attachment-fallback';
     export default function Selection({selected, account, user, apiBaseUrl, pilot}) {
         const [attachmentSelection, setAttachmentSelection] = useState(null);
         const setReplySelection=()=>{}, setNoteComposerKey=()=>{};
