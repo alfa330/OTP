@@ -1298,7 +1298,7 @@ def _get_user_payload(user):
             logging.exception("Не удалось определить модель направления пользователя %s", user_id)
 
     # Верификатор отдела продаж: «Чаты ОП» ему открыты в режиме обработки, за
-    # сканом QR (у СВ ещё и кодом из Telegram главы отдела, wazzup/access.py). Группа
+    # обычным QR портала (wazzup/access.py). Группа
     # верификаторов определяется моделью группы на сегодня, а не направлением,
     # поэтому портал сам этого не выведет — пункт меню он рисует по флагу.
     # Спрашиваем только у рядовых операторов продаж: остальным флаг не положен, и
@@ -2117,6 +2117,16 @@ def _build_sensitive_qr_token(session_id, user_id):
     )
     token = base64.b32encode(body + _sensitive_qr_signature(body)).decode('ascii').rstrip('=')
     return token, expires_at
+
+
+def _sensitive_qr_payload(session_id, user_id):
+    """(строка для QR, срок) — код доступа с приставкой, как его рисует экран.
+
+    Нужен экрану замка «Чатов ОП» (wazzup/workspace_routes.py): код там обычный,
+    и собираться он обязан этим же сборщиком — иначе сканер «QR доступ» не
+    принял бы его за свой."""
+    token, expires_at = _build_sensitive_qr_token(session_id=session_id, user_id=user_id)
+    return f"{SENSITIVE_QR_PREFIX}{token}", expires_at
 
 
 def _decode_sensitive_qr_token(token):
@@ -5856,10 +5866,9 @@ def _wazzup_chat_access():
                          переписка, показатели, привязка. Писать клиентам из неё
                          может только супер-админ («пока что суперадмины»);
         mode 'operator'  верификатор: только аккаунт «op» в режиме обработки, и
-                         только пока его сессии подтверждён доступ — супервайзер
-                         отсканировал QR и ввёл код, пришедший главе отдела,
-                         либо админ/глава открыл доступ сканом без кода;
-                         до этого locked=True;
+                         только пока его сессии подтверждён доступ — обычным QR
+                         портала (скан супервайзера, админа или главы отдела)
+                         либо прежним кодом чатов; до этого locked=True;
         mode None        раздел закрыт.
 
     Считается один раз на запрос: в одном запросе его спрашивают и гард ручки,
@@ -8948,8 +8957,9 @@ app.register_blueprint(build_pilot_blueprint(
 ))
 wazzup_syntony.start_worker(db)
 
-# Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (скан QR, у СВ ещё
-# и код из Telegram главы отдела) и статусы смены. Статусы ложатся в operator_status_events
+# Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (обычный QR портала;
+# прежний код чатов с кодом главы для СВ — wazzup/workspace_routes.py) и статусы смены.
+# Статусы ложатся в operator_status_events
 # тем же append_operator_status_event, что события iCORE Phone, — часы, опоздания
 # и «Графики работы» считаются без второго источника. Сторож
 # (_wazzup_workspace_sweep) закрывает смену, чей портал замолчал.
@@ -8969,6 +8979,7 @@ try:
             chat_id=chat_id, text=text, parse_mode='HTML'),
         secret=SENSITIVE_QR_SECRET,
         sales_department_id=AI_QA_OP_DEPARTMENT_ID,
+        portal_qr=_sensitive_qr_payload,
         role_label=lambda role: SENSITIVE_ACCESS_ROLE_LABELS.get(_normalize_user_role(role), ''),
         avatar_url=lambda user: (_build_avatar_signed_url(user[15], user[16])
                                  if len(user) > 16 else None),

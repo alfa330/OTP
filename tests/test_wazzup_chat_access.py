@@ -231,6 +231,9 @@ class OperatorStateTests(unittest.TestCase):
         self.assertIn('s.revoked_at IS NULL', sql)
         self.assertIn("s.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", sql)
         self.assertIn('a.revoked_at IS NULL', sql)
+        # Обычный QR портала тоже открывает чаты (09.10.2026) — но только своей сессии.
+        self.assertIn('AND s.user_id = u.id', sql)
+        self.assertIn('AND (s.sensitive_data_unlocked OR EXISTS (SELECT 1 FROM wazzup_chat_access a', sql)
 
 
 # ── _wazzup_chat_access и гарды: настоящие функции монолита ───────────────────

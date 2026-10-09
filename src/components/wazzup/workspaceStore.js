@@ -18,7 +18,7 @@ import { newClientEventId } from './workspaceStatus';
 const EMPTY = Object.freeze({
     ready: false,          // сервер ответил хотя бы раз
     error: '',             // первая загрузка не удалась
-    locked: true,          // доступ не подтверждён (скан + код из Telegram)
+    locked: true,          // доступ не подтверждён (обычный QR портала)
     statuses: [],
     startKey: '',          // статус, с которого начинается смена, и ключ её конца —
     logoutKey: '',         // оба знает сервер (wazzup/shift.py), копий здесь нет

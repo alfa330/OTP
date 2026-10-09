@@ -85,7 +85,8 @@ def stand():
         CREATE TABLE group_operator_memberships (id SERIAL PRIMARY KEY, group_id INTEGER,
             operator_id INTEGER, start_date DATE, end_date DATE);
         CREATE TABLE user_sessions (session_id UUID PRIMARY KEY, user_id INTEGER,
-            revoked_at TIMESTAMP, expires_at TIMESTAMP NOT NULL);
+            revoked_at TIMESTAMP, expires_at TIMESTAMP NOT NULL,
+            sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE);
         CREATE TABLE operator_status_events (id BIGSERIAL PRIMARY KEY, operator_id INTEGER,
             event_at TIMESTAMP, status_key TEXT, state_note TEXT, event_kind TEXT, client_event_id TEXT);
     ''')
@@ -219,6 +220,45 @@ def test_access_belongs_to_one_live_session(stand):
     assert state(stand, OSNOVA, session) == {'verifier': False, 'unlocked': False}
     assert stand['store'].session_is_live(session, VERIFIER) is True
     assert stand['store'].session_is_live(session, OSNOVA) is False
+
+
+def test_portal_qr_opens_the_chats_of_that_session_only(stand):
+    """Решение владельца 09.10.2026: обычный QR портала (тот же, что у «Вики»)
+    открывает и чаты — без строки в wazzup_chat_access и без кода главы."""
+    cursor, connection = stand['cursor'], stand['connection']
+
+    def unlock_portal(session_id):
+        cursor.execute("UPDATE user_sessions SET sensitive_data_unlocked = TRUE WHERE session_id = %s",
+                       (session_id,))
+        connection.commit()
+
+    session, other = new_session(stand), new_session(stand)
+    assert state(stand, VERIFIER, session) == {'verifier': True, 'unlocked': False}
+    unlock_portal(session)
+    assert state(stand, VERIFIER, session) == {'verifier': True, 'unlocked': True}
+    assert state(stand, VERIFIER, other)['unlocked'] is False
+    cursor.execute('SELECT COUNT(*) FROM wazzup_chat_access')
+    assert cursor.fetchone()[0] == 0
+    # Подтверждение живёт с сессией: отозванная или истёкшая чатов не открывает.
+    revoked = new_session(stand, revoked=True)
+    expired = new_session(stand, expires_in_days=-1)
+    for dead in (revoked, expired):
+        unlock_portal(dead)
+        assert state(stand, VERIFIER, dead)['unlocked'] is False
+    # Сессия чужого человека, даже подтверждённая, верификатору не засчитывается.
+    stranger = new_session(stand, user_id=OSNOVA)
+    unlock_portal(stranger)
+    assert state(stand, VERIFIER, stranger)['unlocked'] is False
+    # Обычный QR верификатором не делает: оператор «Основы» остаётся без режима обработки.
+    assert state(stand, OSNOVA, stranger) == {'verifier': False, 'unlocked': False}
+    # Снял подтверждение сам (выход из QR-доступа) — чаты снова закрыты.
+    cursor.execute("UPDATE user_sessions SET sensitive_data_unlocked = FALSE WHERE session_id = %s",
+                   (session,))
+    connection.commit()
+    assert state(stand, VERIFIER, session)['unlocked'] is False
+    # Прежний код чатов продолжает действовать и без обычного подтверждения.
+    assert redeem(stand, open_challenge(stand, session), '482915')[0] == 'granted'
+    assert state(stand, VERIFIER, session)['unlocked'] is True
 
 
 def test_access_ends_with_the_session(stand):

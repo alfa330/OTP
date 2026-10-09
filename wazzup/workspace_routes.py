@@ -1,17 +1,19 @@
 """HTTP рабочего места верификатора в «Чатах ОП». Правила — wazzup/access.py и wazzup/shift.py.
 
     GET  /api/wazzup/workspace            режим раздела, закрыт ли он, статусы и текущий статус
-    POST /api/wazzup/workspace/qr         верификатор: код для сканера
-    POST /api/wazzup/workspace/scan       админ/глава: открыть доступ; СВ: отправить код главе отдела
+    POST /api/wazzup/workspace/qr         верификатор: обычный QR портала для экрана замка
+    POST /api/wazzup/workspace/scan       прежний код чатов (OTPW:): админ/глава открывает, СВ шлёт код главе
     POST /api/wazzup/workspace/code       подтверждающий: выслать код ещё раз
     POST /api/wazzup/workspace/approve    подтверждающий: код из Telegram -> доступ открыт
     POST /api/wazzup/workspace/status     верификатор: поставить статус смены
     POST /api/wazzup/workspace/heartbeat  верификатор: портал открыт — продлить смену
 
-Подтверждает тот же круг, что и обычный QR-доступ (`_sensitive_access_approval_error`:
-супервайзер и глава отдела сотрудника, админ без отдела, супер-админ).
-Админ, супер-админ и глава отдела открывают доступ сканированием QR; супервайзер
-дополнительно вводит код, который уходит главе отдела сотрудника в Telegram.
+С 09.10.2026 экран замка показывает ОБЫЧНЫЙ QR портала (решение владельца): его
+подтверждают в «QR доступ» одним сканом — супервайзер и глава отдела сотрудника,
+админ без отдела, супер-админ (`_sensitive_access_approval_error`), — и такая
+сессия открывает чаты (access.load_operator_state). Скан, код и подтверждение ниже —
+прежний путь для кодов OTPW:, показанных до этого: подтверждает тот же круг, а
+супервайзер дополнительно вводит код, который уходит главе отдела в Telegram.
 
 Зависимости приходят аргументами фабрики — проверки прав и авторизация живут в
 bot_schedule2, и обратный импорт был бы циклом (как у op_wallboard). SQL — в
@@ -77,13 +79,12 @@ def build_code_message(code, operator_name, approver_name, approver_role_label, 
 def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                      chat_access, current_session_id, approver_context,
                                      approval_perimeter_error, send_telegram, secret,
-                                     sales_department_id, role_label=lambda role: '',
+                                     sales_department_id, portal_qr, role_label=lambda role: '',
                                      avatar_url=lambda user: None, store=None, now=almaty_now,
                                      clock=utc_now, new_code=access.new_code,
                                      heartbeat_seconds=shift.HEARTBEAT_SECONDS,
                                      presence_timeout_seconds=shift.PRESENCE_TIMEOUT_SECONDS,
-                                     code_ttl_seconds=access.CODE_TTL_SECONDS,
-                                     qr_ttl_seconds=access.QR_TTL_SECONDS):
+                                     code_ttl_seconds=access.CODE_TTL_SECONDS):
     """chat_access() -> {'user_id', 'mode', 'locked', 'can_process'} для человека
     запроса (bot_schedule2._wazzup_chat_access): одно правило на раздел, ленту,
     отправку и статусы.
@@ -91,7 +92,10 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
     approver_context(approver_id) -> (context, error): вправе ли человек вообще
     подтверждать доступ (админ, супервайзер или глава отдела) и его отделы.
     approval_perimeter_error(**kwargs) — `_sensitive_access_approval_error`:
-    периметр подтверждения тот же, что у обычного QR, своей копии правила нет."""
+    периметр подтверждения тот же, что у обычного QR, своей копии правила нет.
+    portal_qr(session_id, user_id) -> (строка для QR, срок) — обычный код портала
+    (`_sensitive_qr_payload`): своего сборщика здесь нет, чтобы экран чатов не
+    показал код, который сканер «QR доступ» не примет за свой."""
     bp = Blueprint('wazzup_workspace', __name__, url_prefix='/api/wazzup/workspace')
     store = store or WorkspaceStore(db)
 
@@ -288,6 +292,11 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
     @bp.route('/qr', methods=['POST', 'OPTIONS'])
     @require_api_key
     def workspace_qr():
+        """Код для экрана замка — обычный QR портала, тот же, что у «Вики».
+
+        Именно эта ручка, а не /api/sensitive-access/qr/request из портала: её
+        зовут и вкладки, открытые до перехода на обычный QR, — они рисуют то,
+        что вернул сервер, и начинают показывать обычный код без перезагрузки."""
         if request.method == 'OPTIONS':
             return build_cors_preflight_response()
         state, error = operator_guard(allow_locked=True)
@@ -299,11 +308,10 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
         try:
             if not store.session_is_live(session_id, state['user_id']):
                 return fail('Сессия завершена — войдите в портал заново', 401)
-            token, expires_at = access.build_qr_token(
-                secret, session_id, state['user_id'], now=clock(), ttl_seconds=qr_ttl_seconds)
+            payload, expires_at = portal_qr(session_id, state['user_id'])
             return jsonify({
                 "status": "success",
-                "qr_payload": access.QR_PREFIX + token,
+                "qr_payload": payload,
                 "token_expires_at": expires_at.isoformat().replace('+00:00', 'Z'),
                 "granted": not state.get('locked'),
             }), 200

@@ -74,9 +74,10 @@ export const newClientEventId = () => {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 };
 
-/* Код из QR — про чаты? Знак ставит сервер (wazzup/access.py: QR_PREFIX). По нему
-   сканер выбирает, какой ручкой его разбирать: у чатов подтверждение идёт с
-   кодом из Telegram, у остальных разделов — одним нажатием. */
+/* Код из QR — прежний код чатов? Знак ставит сервер (wazzup/access.py: QR_PREFIX).
+   По нему сканер выбирает, какой ручкой его разбирать: у такого кода
+   подтверждение идёт с кодом из Telegram, у обычного — одним нажатием. С
+   09.10.2026 экран чатов показывает обычный код; этот знак — у показанных раньше. */
 export const CHAT_ACCESS_QR_PREFIX = 'OTPW:';
 
 export const isChatAccessQr = (raw) => (

@@ -12,6 +12,7 @@ class MemoryWorkspaceStore:
         self.verifiers = set()            # id сотрудников-верификаторов
         self.live_sessions = set()        # (session_id, user_id)
         self.granted = {}                 # session_id -> {'user_id', 'granted_by', 'code_recipient_id'}
+        self.portal_unlocked = set()      # (session_id, user_id) — подтверждено обычным QR портала
         self.recipients = {}              # user_id -> {'id', 'name', 'telegram_id', 'department_name'}
         self.challenges = {}              # id -> строка ожидания кода
         self.created = []                 # (approver_id, user_id, момент) — для потолка в час
@@ -24,8 +25,9 @@ class MemoryWorkspaceStore:
     def operator_state(self, user_id, session_id, day, sales_department_id):
         verifier = user_id in self.verifiers
         grant = self.granted.get(str(session_id))
-        unlocked = bool(verifier and grant and grant['user_id'] == user_id
-                        and (str(session_id), user_id) in self.live_sessions)
+        unlocked = bool(verifier and (str(session_id), user_id) in self.live_sessions
+                        and ((grant and grant['user_id'] == user_id)
+                             or (str(session_id), user_id) in self.portal_unlocked))
         return {'verifier': verifier, 'unlocked': unlocked}
 
     def session_is_live(self, session_id, user_id):

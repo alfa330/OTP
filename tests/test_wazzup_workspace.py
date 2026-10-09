@@ -5,10 +5,15 @@
 `_sensitive_access_approval_error` из bot_schedule2.py.
 """
 import ast
+import base64
+import hashlib
+import hmac
 import re
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from flask import Flask
 
@@ -227,6 +232,16 @@ DEPARTMENTS = {VERIFIER: OP, OTHER_VERIFIER: OP, SV: OP, SECOND_SV: OP, HEAD: OP
 HEADED = {HEAD: [OP]}
 PRIVILEGED = {'sv', 'admin', 'super_admin'}
 
+# Обычный QR портала — настоящие сборщик и разбор из bot_schedule2.py: экран чатов
+# обязан показывать код, который сканер «QR доступ» примет тем же разбором, что код «Вики».
+PORTAL_QR = _bot_names(
+    ('_sensitive_qr_signature', '_build_sensitive_qr_token', '_sensitive_qr_payload',
+     '_decode_sensitive_qr_token', '_normalize_sensitive_qr_token', 'SENSITIVE_QR_PREFIX',
+     'SENSITIVE_QR_LEGACY_PREFIX', 'SENSITIVE_QR_BODY_BYTES', 'SENSITIVE_QR_SIGNATURE_BYTES'),
+    {'SENSITIVE_QR_SECRET': SECRET, 'SENSITIVE_QR_TTL_SECONDS': 300, 'base64': base64,
+     'hashlib': hashlib, 'hmac': hmac, 'uuid': uuid, 'datetime': datetime,
+     'timedelta': timedelta, 'timezone': timezone, 'urlparse': urlparse, 'parse_qs': parse_qs})
+
 
 class Telegram:
     def __init__(self):
@@ -298,6 +313,7 @@ class Env:
             approver_context=approver_context,
             approval_perimeter_error=perimeter['_sensitive_access_approval_error'],
             send_telegram=self.telegram.send, secret=SECRET, sales_department_id=OP,
+            portal_qr=PORTAL_QR['_sensitive_qr_payload'],
             role_label=lambda role: {'sv': 'Супервайзер', 'admin': 'Администратор'}.get(role, ''),
             store=self.store, now=lambda: self.now, clock=lambda: self.clock,
             new_code=lambda: next(self.codes))
@@ -315,7 +331,10 @@ class Env:
         return self.client.get('/api/wazzup/workspace')
 
     def qr(self):
-        return self.as_user(VERIFIER).post('/qr').get_json()['qr_payload']
+        """Код чатов прежнего вида (OTPW:). Такие показывали экраны до 09.10.2026, и
+        ручки скана их принимают по-прежнему; сам /qr теперь отдаёт обычный код."""
+        token, _ = access.build_qr_token(SECRET, SESSION, VERIFIER, now=self.clock)
+        return access.QR_PREFIX + token
 
     def scan(self, approver=SV, payload=None):
         payload = payload or self.qr()
@@ -363,14 +382,44 @@ class QrRouteTests(unittest.TestCase):
     def setUp(self):
         self.env = Env()
 
-    def test_verifier_gets_a_chat_code_for_his_own_session(self):
+    def test_verifier_gets_the_portal_code_for_his_own_session(self):
+        """Решение владельца 09.10.2026: экран чатов показывает ОБЫЧНЫЙ QR портала.
+        Сканер «QR доступ» разбирает его тем же разбором, что код «Вики», и
+        супервайзер подтверждает его одним сканом — без кода главы отдела."""
+        before = datetime.now(timezone.utc)
         body = self.env.as_user(VERIFIER).post('/qr').get_json()
-        self.assertTrue(body['qr_payload'].startswith(access.QR_PREFIX))
+        payload = body['qr_payload']
+        self.assertTrue(payload.startswith(PORTAL_QR['SENSITIVE_QR_PREFIX']), payload)
+        self.assertFalse(access.is_chat_qr(payload))       # сканер не уведёт его в ручки OTPW:
         self.assertFalse(body['granted'])
-        claims = access.decode_qr_token(SECRET, body['qr_payload'], now=UTC)
+        claims = PORTAL_QR['_decode_sensitive_qr_token'](
+            PORTAL_QR['_normalize_sensitive_qr_token'](payload))
         self.assertEqual((claims['session_id'], claims['user_id']), (SESSION, VERIFIER))
-        self.assertEqual(body['token_expires_at'],
-                         (UTC + timedelta(seconds=access.QR_TTL_SECONDS)).isoformat().replace('+00:00', 'Z'))
+        expires_at = datetime.fromisoformat(body['token_expires_at'].replace('Z', '+00:00'))
+        self.assertLess(abs((expires_at - claims['expires_at']).total_seconds()), 1)
+        self.assertGreater(expires_at, before + timedelta(seconds=290))
+        # Прежняя ручка скана этот код за свой не примет.
+        with self.assertRaises(access.QrError):
+            access.decode_qr_token(SECRET, payload, now=UTC)
+
+    def test_portal_wires_the_portal_code_builder(self):
+        calls = [node for node in ast.walk(source_cache.parse(BOT_SOURCE))
+                 if isinstance(node, ast.Call)
+                 and getattr(node.func, 'attr', None) == 'build_wazzup_workspace_blueprint']
+        self.assertEqual(len(calls), 1)
+        portal_qr = {kw.arg: kw.value for kw in calls[0].keywords}['portal_qr']
+        self.assertEqual(getattr(portal_qr, 'id', None), '_sensitive_qr_payload')
+
+    def test_portal_code_approval_opens_the_chats(self):
+        self.env.store.portal_unlocked.add((SESSION, VERIFIER))
+        body = self.env.as_user(VERIFIER).state().get_json()
+        self.assertEqual((body['mode'], body['locked'], body['canProcess']), ('operator', False, True))
+        self.assertTrue(self.env.as_user(VERIFIER).post('/qr').get_json()['granted'])
+        # Прежний код той же сессии уже не просит кода из Telegram.
+        scan = self.env.scan(SV).get_json()
+        self.assertTrue(scan['already_granted'])
+        self.assertNotIn('challengeId', scan)
+        self.assertEqual(self.env.telegram.sent, [])
 
     def test_only_verifiers_get_a_code(self):
         for user_id in (SV, ADMIN, SUPER, LINE_OPERATOR, None):

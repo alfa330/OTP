@@ -3,10 +3,9 @@
 Постановка владельца 08.10.2026. Писать клиентам из iCORE могут двое:
 
 * верификатор — рядовой оператор отдела продаж, чья группа на сегодня считается
-  по модели «Верификатор». Супервайзер сканирует его QR и вводит временный код,
-  который уходит в Telegram главе отдела. Админ, супер-админ и глава отдела
-  открывают доступ сканированием без Telegram-кода.
-  Доступ живёт, пока жива сессия портала на этом
+  по модели «Верификатор». Раздел у него открывается ОБЫЧНЫМ QR портала — тем же,
+  что «Вики» и «Обращения»: супервайзер, админ или глава отдела сканирует его
+  одним сканом, без кода. Доступ живёт, пока жива сессия портала на этом
   устройстве, — как у остальных разделов за QR;
 * супер-админ — без подтверждения.
 
@@ -14,11 +13,12 @@
 осталась на просмотре переписки — её считает `_verifier_chats_guard` в
 bot_schedule2.py, сюда она не входит.
 
-Ключ ОТДЕЛЬНЫЙ от общего QR-доступа («Вики», «Обращения», оценки). Тот открывает
-один скан без кода; впусти он ещё и в чаты, требование о коде главы отдела
-обходилось бы подтверждением любого другого раздела. Поэтому и у кода свой
-знак (`OTPW:`), и подпись у него своя: код одного вида второй ручкой не
-принимается.
+Обычный QR — решение владельца 09.10.2026 («чтобы раздел открывался через
+обычный QR и его могли открывать супервайзеры»). До него у чатов был отдельный
+ключ: свой код (`OTPW:`, своя подпись), а супервайзер вводил ещё и временный код
+из Telegram главы отдела. Тот путь (`wazzup_chat_access` и ручки скана ниже)
+оставлен: уже выданные им подтверждения продолжают действовать, а
+`load_operator_state` принимает любое из двух.
 
 Модуль чистый: ни Flask, ни подключения к базе. SQL получает курсор вызывающего.
 """
@@ -127,13 +127,17 @@ _OPERATOR_STATE_SQL = """
            LOWER(COALESCE(gm.calculation_model_code, dir.calculation_model_code, '')),
            EXISTS (
                SELECT 1
-                 FROM wazzup_chat_access a
-                 JOIN user_sessions s ON s.session_id = a.session_id
-                WHERE a.session_id = %(session_id)s::uuid
-                  AND a.user_id = u.id
-                  AND a.revoked_at IS NULL
+                 FROM user_sessions s
+                WHERE s.session_id = %(session_id)s::uuid
+                  AND s.user_id = u.id
                   AND s.revoked_at IS NULL
                   AND s.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                  AND (s.sensitive_data_unlocked
+                       OR EXISTS (SELECT 1
+                                    FROM wazzup_chat_access a
+                                   WHERE a.session_id = s.session_id
+                                     AND a.user_id = u.id
+                                     AND a.revoked_at IS NULL))
            )
       FROM users u
       LEFT JOIN departments dep ON dep.id = u.department_id
@@ -154,6 +158,9 @@ _OPERATOR_STATE_SQL = """
 
 def load_operator_state(cursor, user_id, session_id, day, sales_department_id):
     """{'verifier': bool, 'unlocked': bool} — один запрос на всё.
+
+    unlocked — сессия подтверждена обычным QR портала (`sensitive_data_unlocked`,
+    тот же признак, что открывает «Вики») или прежним кодом чатов.
 
     Отдел продаж узнаём и по id: код в справочнике заполнен не везде, а по
     одному полю человек молча терялся бы (то же правило в `_department_code_of_user`).
