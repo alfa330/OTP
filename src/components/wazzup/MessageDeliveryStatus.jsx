@@ -18,7 +18,8 @@ export default function MessageDeliveryStatus({ status }) {
     const item = STATUSES[status];
     if (!item) return null;
     const { Icon, label, color } = item;
-    return <span role="img" aria-label={label} title={label} className={`inline-flex items-center ${color}`}>
+    // data-status — тема чатов красит «прочитано» под цвет своего пузыря (chatThemes.css).
+    return <span role="img" aria-label={label} title={label} data-status={status} className={`inline-flex items-center ${color}`}>
         <Icon size={16} strokeWidth={2} aria-hidden="true" />
     </span>;
 }

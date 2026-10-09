@@ -518,11 +518,16 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
  * с overflow-hidden, и вложенное меню она бы обрезала. Механика позиционирования
  * повторяет CustomSelect — общий приём раздела, а не второй способ делать то же.
  *
- * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore? }]
+ * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore?, checked? }]
+ *
+ * checked — меню выбора одного из нескольких (тема чатов): у пунктов с этим
+ * полем роль menuitemradio, у выбранного синяя галочка справа.
  */
-/* trigger — необязательная видимая подпись кнопки ({ icon, text }): рядом с
-   другими кнопками два одинаковых «···» не различить («Пресеты» и «Выгрузить»
-   в панели фильтров). Без неё — прежняя круглая кнопка «···». */
+/* trigger — необязательная видимая подпись кнопки ({ icon, text, className? }):
+   рядом с другими кнопками два одинаковых «···» не различить («Пресеты» и
+   «Выгрузить» в панели фильтров). Без неё — прежняя круглая кнопка «···».
+   className — вид кнопки вместо iosBtnSecondary, когда она стоит в ряду
+   кнопок другого вида (iosBtnGhost в шапке раздела). */
 export const IosMenu = ({ items = [], label = 'Действия', align = 'right', disabled = false, trigger = null }) => {
     const [open, setOpen] = React.useState(false);
     const [coords, setCoords] = React.useState(null);
@@ -596,7 +601,9 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                 aria-expanded={open}
                 onClick={() => setOpen((v) => !v)}
                 className={trigger
-                    ? `${iosBtnSecondary} shrink-0 ${open ? '!bg-slate-200' : ''}`
+                    ? (trigger.className
+                        ? `${trigger.className} shrink-0 ${open ? 'bg-slate-100 text-slate-900' : ''}`
+                        : `${iosBtnSecondary} shrink-0 ${open ? '!bg-slate-200' : ''}`)
                     : `grid h-8 w-8 shrink-0 place-items-center rounded-full transition active:scale-95 disabled:opacity-40 ${
                         open ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
                     }`}
@@ -628,12 +635,13 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                     }}
                     className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl animate-[fadeIn_.12s_ease]"
                 >
-                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore }) => (
+                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore, checked }) => (
                         <React.Fragment key={key}>
                             {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
                             <button
                                 type="button"
-                                role="menuitem"
+                                role={checked === undefined ? 'menuitem' : 'menuitemradio'}
+                                aria-checked={checked === undefined ? undefined : checked}
                                 onClick={() => { setOpen(false); onSelect?.(); }}
                                 className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition ${
                                     danger
@@ -644,6 +652,11 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                                 {Icon && <Icon size={15} className={danger ? 'text-rose-500' : 'text-slate-400'} />}
                                 <span className="min-w-0 flex-1 truncate">{text}</span>
                                 {hint && <span className="shrink-0 text-[11.5px] text-slate-400">{hint}</span>}
+                                {checked && (
+                                    <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true" className="shrink-0 text-blue-600">
+                                        <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                )}
                             </button>
                         </React.Fragment>
                     ))}

@@ -25,6 +25,8 @@ import {
 } from './sendQueue';
 import { chatListDraft, useChatDrafts } from './chatDrafts';
 import { orderChatList, waitingCount } from './chatListOrder';
+import ChatThemeMenu from './ChatThemeMenu';
+import { chatThemeStyle, useChatTheme, useNightMenus, usePortalDark } from './chatThemes';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -45,6 +47,7 @@ import { configureWorkspace, loadWorkspace, useWorkspace } from './workspaceStor
 import { attachmentCache } from './attachmentCache';
 import { normalizeRole } from '../../utils/roles';
 import './chatThread.css';
+import './chatThemes.css';
 import './workspace.css';
 
 let attachmentViewerModule;
@@ -290,11 +293,11 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                 }
             }} className={`wazzup-message-bubble min-w-0 max-w-full rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
                 out ? 'wazzup-message-outgoing rounded-br-md bg-[#dcf8c6] text-slate-900'
-                    : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
+                    : 'wazzup-message-incoming rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>
                 {quote && <button type="button" onClick={() => onQuote?.(quote.messageId)}
                     title="Перейти к исходному сообщению"
-                    className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
+                    className={`wazzup-message-quote mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
                         out ? 'border-emerald-600 bg-black/5 text-emerald-950' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
                     <span className="block truncate font-semibold">{quote.author}</span>
                     <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} links={false} /></span>
@@ -306,7 +309,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                         [{msg.type || 'сообщение'}]
                     </div>
                 )}
-                <div className="mt-0.5 flex flex-wrap items-center justify-end gap-1 text-[11px] text-slate-500">
+                <div className="wazzup-message-meta mt-0.5 flex flex-wrap items-center justify-end gap-1 text-[11px] text-slate-500">
                     {msg.isDeleted && (
                         <span className="flex items-center gap-0.5 text-rose-600">
                             <Ban size={10} /> удалено
@@ -387,7 +390,7 @@ function ThreadScrollDate({ box, chatKey }) {
     useEffect(() => { setVisible(false); setDate(''); }, [chatKey]);
     return <div aria-hidden="true"
         className={`pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center transition-opacity duration-200 motion-reduce:transition-none ${visible ? 'opacity-100' : 'opacity-0'}`}>
-        {date && <span className="rounded-full bg-white/95 px-3 py-1 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/80 backdrop-blur-sm">{date}</span>}
+        {date && <span className="wz-day-pill rounded-full bg-white/95 px-3 py-1 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/80 backdrop-blur-sm">{date}</span>}
     </div>;
 }
 
@@ -1096,6 +1099,11 @@ function ChatsWorkspace(props) {
     // Личные черновики (chatDrafts.js): «Черновик: …» в списке видит только их автор.
     const draftOwner = account === 'op' && mayProcess ? user?.id ?? null : null;
     const drafts = useChatDrafts(draftOwner);
+    // Тема окна (chatThemes.js) — личная; в тёмном режиме портала окно и так тёмное.
+    const portalDark = usePortalDark();
+    const chatTheme = useChatTheme(user?.id ?? null);
+    const themed = !portalDark && chatTheme.applied.id !== 'standard';
+    useNightMenus(themed && chatTheme.applied.id === 'night');
     const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
     // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
     const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
@@ -1688,7 +1696,9 @@ function ChatsWorkspace(props) {
 
     return (
         <div className={`wz-workspace flex h-full min-h-0 w-full flex-col ${entering ? 'wz-workspace-enter' : ''}`}
-             style={{ fontFamily: APPLE_FONT, '--wz-mobile-header-space': operator ? '154px' : '170px' }}>
+             data-chat-theme={themed ? chatTheme.applied.id : undefined}
+             style={{ fontFamily: APPLE_FONT, '--wz-mobile-header-space': operator ? '154px' : '170px',
+                      ...(themed ? chatThemeStyle(chatTheme.applied) : {}) }}>
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:pl-11 sm:pr-6">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
@@ -1735,6 +1745,8 @@ function ChatsWorkspace(props) {
                     </a>
                     </>}
                     {toolbar}
+                    {mainTab === 'chats' && !portalDark &&
+                        <ChatThemeMenu selected={chatTheme.selected} onChoose={chatTheme.choose} />}
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить
@@ -1859,7 +1871,7 @@ function ChatsWorkspace(props) {
                 </div>
 
                 {/* Лента переписки */}
-                <div className="flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
+                <div className="wz-chat-pane flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
                     {/* Пришли по ссылке с одним номером: пока он разрешается в чат,
                         «Выберите чат слева» читалось бы как «ссылка не работает». */}
                     {!selected && deepLinkResolving && (
@@ -1986,7 +1998,7 @@ function ChatsWorkspace(props) {
                                 </div>}
                                 {threadWithDays.map((m, index) => m._day ? (
                                     <div key={m.messageId} className="flex justify-center py-1.5">
-                                        <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
+                                        <span className="wz-day-pill rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">
                                             {m._day}
                                         </span>
                                     </div>

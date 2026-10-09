@@ -1,0 +1,88 @@
+/* Темы «Чатов ОП» (chatThemes.js). Значения — переменные на окне раздела
+ * (.wz-workspace[data-chat-theme]), здесь — куда они ложатся. Стандартная тема
+ * атрибута не ставит, и ни одно правило ниже её не касается.
+ *
+ * В тёмном режиме портала окно и так тёмное — там темы не действуют.
+ * !important: правила спорят с утилитами Tailwind того же элемента и со слоем
+ * «Ночи», который перекрывает их сам с !important. */
+
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wz-chat-pane {
+    background: var(--wz-wall) !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-incoming {
+    background-color: var(--wz-incoming) !important;
+    --tw-ring-color: var(--wz-incoming-line) !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-outgoing {
+    background-color: var(--wz-outgoing) !important;
+}
+/* Цитата в своём пузыре — цветом темы, а не зелёным стандартной. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-outgoing .wazzup-message-quote {
+    border-color: var(--wz-accent) !important;
+    background-color: var(--wz-quote) !important;
+    color: var(--wz-quote-ink) !important;
+}
+/* Время и серые галочки на цветном пузыре — на ступень темнее, чтобы читались
+   не хуже, чем в стандартной; «прочитано» — тон, отличимый от серых. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-outgoing .wazzup-message-meta,
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-outgoing :is([data-status='queued'], [data-status='pending'], [data-status='sent'], [data-status='delivered']) {
+    color: var(--wz-meta) !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wazzup-message-outgoing [data-status='read'] {
+    color: var(--wz-read) !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wz-day-pill {
+    background-color: var(--wz-pill) !important;
+    color: var(--wz-pill-ink) !important;
+}
+
+/* «Ночь» — окно раздела целиком. Утилиты перекрашивает chatThemeNight.css;
+ * здесь — то, что живёт вне утилит: полотно окна, системные элементы, ползунки,
+ * заметки, плеер, эмодзи. Тона — те же, что у тёмного режима портала. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] {
+    background-color: #17191e;
+    color-scheme: dark;
+}
+/* Меню раздела рисуются в портал (useNightMenus в chatThemes.js): сама
+   подложка меню — здесь, пункты — в chatThemeNight.css. */
+html:not([data-otp-theme='dark']) body[data-wz-chat-night] > [role='menu'] {
+    background-color: rgba(30, 33, 39, 0.96) !important;
+    --tw-ring-color: rgba(70, 78, 89, 0.8) !important;
+    color-scheme: dark;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar) {
+    scrollbar-color: #3d434d transparent;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar)::-webkit-scrollbar-thumb {
+    background: #3d434d;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .wazzup-internal-note {
+    background-color: #2b2923 !important;
+    border-color: #494334 !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .wazzup-audio {
+    --audio-accent: #62cbb0;
+    --audio-track: rgba(98, 203, 176, .25);
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .wazzup-audio-play { color: #133b30; }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .wazzup-audio-caption { color: #94a3b8; }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .wazzup-audio-speed { background: rgba(98, 203, 176, .12); }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='night'] .EmojiPickerReact {
+    --epr-bg-color: #1e2127;
+    --epr-category-label-bg-color: rgba(30, 33, 39, .94);
+    --epr-text-color: #a8b1bf;
+    --epr-highlight-color: #a8b1bf;
+    --epr-hover-bg-color: #2a2f37;
+    --epr-hover-bg-color-reduced-opacity: rgba(42, 47, 55, .5);
+    --epr-focus-bg-color: #333941;
+    --epr-search-input-bg-color: #22262d;
+    --epr-search-input-bg-color-active: #22262d;
+    --epr-search-input-text-color: #e8ecf2;
+    --epr-search-input-placeholder-color: #7d8695;
+    --epr-search-border-color: #2e333c;
+    --epr-search-border-color-active: #464e59;
+    --epr-picker-border-color: #2e333c;
+    --epr-emoji-variation-picker-bg-color: #22262d;
+    --epr-skin-tone-picker-menu-color: #22262d;
+    --epr-category-icon-active-color: #93c5fd;
+}
