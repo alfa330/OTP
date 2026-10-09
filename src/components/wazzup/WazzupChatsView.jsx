@@ -37,7 +37,6 @@ import ChatMessageImage from './ChatMessageImage';
 import ChatMessageVideo from './ChatMessageVideo';
 import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
-import ChatChannelsSidebar from './ChatChannelsSidebar';
 import useInternalNotes from './useInternalNotes';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
@@ -194,21 +193,9 @@ const initials = (name) => {
     return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
 };
 
-// Детерминированный пастельный градиент аватарки по имени
-const AVATAR_HUES = [
-    'from-sky-400 to-blue-500', 'from-emerald-400 to-teal-500',
-    'from-violet-400 to-purple-500', 'from-amber-400 to-orange-500',
-    'from-rose-400 to-pink-500', 'from-cyan-400 to-sky-500',
-];
-const avatarClass = (name) => {
-    let h = 0;
-    for (const ch of String(name || '')) h = (h * 31 + ch.charCodeAt(0)) % 997;
-    return AVATAR_HUES[h % AVATAR_HUES.length];
-};
-
 const Avatar = ({ name, size = 'h-9 w-9', muted = false, icon: Icon = null }) => (
-    <div className={`${size} flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-[12px] font-semibold text-white shadow-sm ${
-        muted ? 'from-slate-300 to-slate-400' : avatarClass(name)}`}>
+    <div className={`${size} flex shrink-0 items-center justify-center rounded-full text-[13px] font-medium ${
+        muted ? 'bg-slate-100 text-slate-400' : 'bg-slate-200 text-slate-600'}`}>
         {Icon ? <Icon size={15} /> : initials(name)}
     </div>
 );
@@ -1006,7 +993,6 @@ function ChatsWorkspace(props) {
     };
 
     const [channels, setChannels] = useState(null);       // null = загрузка
-    const [channelId, setChannelId] = useState('');       // '' = все каналы
     const [chats, setChats] = useState(null);
     const [chatsTotal, setChatsTotal] = useState(0);
     const [chatsError, setChatsError] = useState(null);
@@ -1163,7 +1149,7 @@ function ChatsWorkspace(props) {
        и переход по ссылке на нём закрывал бы уже открытую переписку и вешал
        ложную плашку «чат не найден» — достаточно было соседнему запросу
        отменить наш или токену истечь. */
-    const loadChats = ({ reset = true, channel = channelId, q = appliedSearch, silent = false } = {}) => {
+    const loadChats = ({ reset = true, q = appliedSearch, silent = false } = {}) => {
         if (silent && chatsRequest.current.loading) return Promise.resolve(false);
         chatsRequest.current.controller?.abort();
         const controller = new AbortController();
@@ -1175,7 +1161,7 @@ function ChatsWorkspace(props) {
         if (reset && !silent) { setChats(null); setChatsError(null); }
         return axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), signal: controller.signal,
-            params: { channel_id: channel || undefined, q: q || undefined,
+            params: { q: q || undefined,
                       limit: silent ? Math.min(100, Math.max(PAGE_SIZE, chats?.length || 0)) : PAGE_SIZE, offset,
                       account: accountRef.current },
         }).then((r) => {
@@ -1185,8 +1171,8 @@ function ChatsWorkspace(props) {
                 if (event.seq <= liveSeq) continue;
                 const chat = event.chat;
                 const query = q.trim().toLowerCase();
-                if ((!channel || chat.channelId === channel) && (!query || [chat.contactName, chat.contactPhone, chat.chatId]
-                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, mergeChatRow(responseItems.get(key), chat));
+                if (!query || [chat.contactName, chat.contactPhone, chat.chatId]
+                    .some((value) => String(value || '').toLowerCase().includes(query))) responseItems.set(key, mergeChatRow(responseItems.get(key), chat));
                 else responseItems.delete(key);
             }
             r.data.items = [...responseItems.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
@@ -1334,8 +1320,7 @@ function ChatsWorkspace(props) {
                 const byId = new Map(prev.map((chat) => [pilotChatKey('op', chat), chat]));
                 for (const chat of summaries) {
                     const q = appliedSearch.trim().toLowerCase();
-                    const matches = (!channelId || chat.channelId === channelId)
-                        && (!q || [chat.contactName, chat.contactPhone, chat.chatId].some((s) => String(s || '').toLowerCase().includes(q)));
+                    const matches = !q || [chat.contactName, chat.contactPhone, chat.chatId].some((s) => String(s || '').toLowerCase().includes(q));
                     if (matches) byId.set(pilotChatKey('op', chat), mergeChatRow(byId.get(pilotChatKey('op', chat)), chat));
                     else byId.delete(pilotChatKey('op', chat));
                 }
@@ -1427,8 +1412,8 @@ function ChatsWorkspace(props) {
     const waiting = useMemo(() => (account === 'op' ? { items: unread.items, ready: unread.ready } : null),
         [account, unread.items, unread.ready]);
     const visibleChats = useMemo(() => orderChatList(chats, waiting, {
-        unreadOnly: unreadOnly && pilot.enabled, channelId, search: appliedSearch,
-    }), [chats, waiting, unreadOnly, pilot.enabled, channelId, appliedSearch]);
+        unreadOnly: unreadOnly && pilot.enabled, search: appliedSearch,
+    }), [chats, waiting, unreadOnly, pilot.enabled, appliedSearch]);
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
     const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
@@ -1458,23 +1443,13 @@ function ChatsWorkspace(props) {
         setUnreadOnly(false);
         chatsRequest.current.controller?.abort();
         threadRequest.current.controller?.abort();
-        setChannelId(''); setSearch(''); setAppliedSearch('');
+        setSearch(''); setAppliedSearch('');
         setSelected(null); setThread(null); setThreadHasMore(false);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
         deepLinkPending.current = false;
         setChannels(null);
         loadChannels();
-        loadChats({ reset: true, channel: '', q: '' });
-    };
-
-    const pickChannel = (cid) => {
-        threadRequest.current.controller?.abort();
-        threadRequest.current.id += 1;
-        setChannelId(cid);
-        setSelected(null); setThread(null);
-        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
-        deepLinkPending.current = false;
-        loadChats({ channel: cid });
+        loadChats({ reset: true, q: '' });
     };
 
     const onSearchInput = (value) => {
@@ -1540,12 +1515,8 @@ function ChatsWorkspace(props) {
             loadChannels();
         }
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
-        /* Фильтр по каналу НЕ ставим даже для точной пары. Поиска по chatId
-           достаточно, чтобы строка нашлась, а выставленный канал потом нечем
-           снять: колонка каналов — единственный способ вернуться к «Все
-           каналы» — на узком экране скрыта (hidden md:flex). */
+        // Поиск по номеру показывает его переписки во всех каналах аккаунта.
         const q = target.channelId ? target.chatId : target.phone;
-        setChannelId('');
         setSearch(q);
         setAppliedSearch(q);
         if (target.channelId) openChat({ channelId: target.channelId, chatId: target.chatId });
@@ -1554,7 +1525,7 @@ function ChatsWorkspace(props) {
            — это уже разрешённая цель), и поднятый раньше он тут же гаснул бы,
            а промах по точной паре терял метку chat= из адреса. */
         deepLinkPending.current = true;
-        loadChats({ reset: true, channel: '', q }).then((items) => {
+        loadChats({ reset: true, q }).then((items) => {
             setDeepLinkResolving(false);
             /* null — это «не знаем»: запрос отменили, он устарел или сервер
                ответил ошибкой. Пустого списка тут нет, и трактовать это как
@@ -1566,7 +1537,7 @@ function ChatsWorkspace(props) {
                остаётся поднятым, и метка chat= держится в адресе: перезагрузка
                обязана воспроизводить то же состояние, а не отправлять человека
                к полному списку, будто ссылки и не было. Снимут его первые
-               действия человека — выбор канала, поиск или открытие чата. */
+               действия человека — поиск или открытие чата. */
             if (target.channelId) {
                 const row = findWazzupChatExact(items, target);
                 if (row) {
@@ -1688,8 +1659,6 @@ function ChatsWorkspace(props) {
     const lastInboundAt = useMemo(() => latestInboundTime(thread,
         inboundTime?.key === selectedKey ? inboundTime.at : null), [thread, inboundTime, selectedKey]);
 
-    const activeChannels = (channels || []).filter((c) => (c.chatsCount || 0) > 0 || c.state === 'active');
-
     const segBtn = (key, Icon, label) => (
         <SegButton active={mainTab === key} onClick={() => setMainTab(key)} icon={Icon}>
             {label}
@@ -1776,13 +1745,8 @@ function ChatsWorkspace(props) {
                 кнопки переносятся на вторую строку или окно меняет высоту. */}
             <div className="wz-columns flex min-h-0 flex-1 overflow-hidden border-t border-slate-200/70 bg-white"
                  style={{ display: mainTab === 'chats' ? undefined : 'none' }}>
-                {/* Каналы */}
-                <ChatChannelsSidebar channels={activeChannels} selectedChannelId={channelId}
-                    onSelect={pickChannel} apiBaseUrl={apiBaseUrl} headers={headers}
-                    user={user} account={account} loading={channels === null} />
-
                 {/* Список чатов */}
-                <div className="flex w-80 shrink-0 flex-col border-r border-slate-100">
+                <div className="wz-contact-list flex w-80 shrink-0 flex-col border-r border-slate-200">
                     <div className="border-b border-slate-100 p-2.5">
                         <div className="relative">
                             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1800,7 +1764,7 @@ function ChatsWorkspace(props) {
                                 className="text-amber-700" title={unread.error}>Обновить счётчик</button>}
                         </div>}
                     </div>
-                    <div className="wazzup-scrollbar flex-1 overflow-y-auto py-1">
+                    <div className="wazzup-scrollbar flex-1 overflow-y-auto">
                         {chats === null && (
                             <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
                                 <Loader2 size={15} className="animate-spin" /> Загрузка чатов…
@@ -1816,7 +1780,7 @@ function ChatsWorkspace(props) {
                                 {/* «База пуста» и «фильтр ничего не нашёл» — разные вещи.
                                     Раньше в эту строку попадали только руками через
                                     поиск, а с переходом по ссылке это штатный экран. */}
-                                {unreadOnly ? 'Нет сообщений, ожидающих ответа' : appliedSearch || channelId
+                                {unreadOnly ? 'Нет сообщений, ожидающих ответа' : appliedSearch
                                     ? 'Ничего не нашлось по этому фильтру'
                                     : 'Чатов пока нет — сбор идёт с 17.07.2026'}
                             </div>
@@ -1831,21 +1795,22 @@ function ChatsWorkspace(props) {
                             const byNumberOpen = byNumber && channelsOpen === rowKey;
                             const byNumberId = `wz-by-number-${chat.channelId}-${chat.chatId}`;
                             return (
-                                <div key={rowKey}>
+                                <div key={rowKey} className="relative">
                                 <div className="relative">
                                 <button onClick={() => openChat(chat)}
-                                        className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl py-2 pl-2.5 pr-8 text-left transition ${
-                                            isSel ? 'bg-blue-500/10 ring-1 ring-blue-200/60' : 'hover:bg-slate-50'}`}>
-                                    <div className="flex items-center gap-2.5">
-                                        <Avatar name={chat.contactName || chat.contactPhone || chat.chatId} />
+                                        aria-current={isSel ? 'true' : undefined}
+                                        className={`wz-contact-row block min-h-[72px] w-full py-3 pl-4 pr-8 text-left transition ${
+                                            isSel ? 'bg-slate-100' : 'hover:bg-slate-50'}`}>
+                                    <div className="flex items-center gap-3">
+                                        <Avatar name={chat.contactName || chat.contactPhone || chat.chatId} size="h-11 w-11" />
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-baseline justify-between gap-2">
-                                                <span className="truncate text-[13.5px] font-semibold text-slate-900">
+                                                <span className="truncate text-[15px] font-medium leading-5 text-slate-900">
                                                     {chat.contactName || chat.contactPhone || chat.chatId}
                                                 </span>
                                                 <span className="shrink-0 text-[11px] text-slate-400">{fmtListDate(chat.lastMessageAt)}</span>
                                             </div>
-                                            <div className="flex items-center gap-1 text-[12px] text-slate-500">
+                                            <div className="mt-1 flex items-center gap-1 text-[13px] leading-5 text-slate-500">
                                                 {problemChats.has(pilotChatKey('op', chat)) && account === 'op' &&
                                                     <AlertCircle size={12} className="shrink-0 text-rose-600"
                                                         role="img" aria-label="Есть неотправленное сообщение"
@@ -1886,6 +1851,7 @@ function ChatsWorkspace(props) {
                                         apiBaseUrl={apiBaseUrl} headers={headers} channelName={channelName}
                                         selected={selected} onOpen={openChat} formatTime={fmtListDate} />
                                 )}
+                                <div aria-hidden="true" className="pointer-events-none absolute bottom-0 left-[72px] right-0 border-b border-slate-200" />
                                 </div>
                             );
                         })}
