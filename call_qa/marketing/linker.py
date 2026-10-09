@@ -119,6 +119,9 @@ def _fetch_subjects(cur, only_new=True):
     правила доезжает до истории сама. Полная перелинковка (`only_new=False`)
     остаётся для ручного «пересчитать всё».
     """
+    # Разговор с номером из «Реестра тестовых номеров» со сделкой не связывается:
+    # тестировщик — не клиент маркетинга.
+    test_numbers = test_keys.load_keys(cur)
     sql = _SUBJECTS_SQL.format(phone=_SUBJECT_PHONE, moment=_SUBJECT_MOMENT)
     params = ()
     if only_new:
@@ -130,9 +133,6 @@ def _fetch_subjects(cur, only_new=True):
         params = (LINK_RULES_VERSION,)
     cur.execute(sql, params)
     rows = cur.fetchall()
-    # Разговор с номером из «Реестра тестовых номеров» со сделкой не связывается:
-    # тестировщик — не клиент маркетинга.
-    test_numbers = test_keys.load_keys(cur)
     out = []
     for kind, call_id, phone, happened_at in rows:
         digits = norm_phone(phone)

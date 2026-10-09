@@ -41,6 +41,7 @@ GUEST, GUEST2, OWN, OWN2, FIRED, TEZ_OP, NOBODY = 701, 702, 520, 521, 704, 703, 
 BASE_DDL = '''
     CREATE TABLE departments (id integer PRIMARY KEY, name text NOT NULL, code text,
                               is_active boolean DEFAULT TRUE);
+    CREATE TABLE test_phone_numbers (phone_key varchar(10) UNIQUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, login text, role text,
                         status text NOT NULL DEFAULT 'working', department_id integer,
                         sip_number text);

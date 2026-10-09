@@ -15,7 +15,6 @@ amoCRM, не появилась ли сделка (урок 01.09.2026: 172 ко
 from datetime import timedelta
 
 from cdr import touches as touches_mod
-from test_numbers import keys as test_keys
 
 SENDING = 'sending'
 CREATED = 'created'
@@ -92,8 +91,10 @@ def candidates(cursor, since, limit=50):
            AND NOT EXISTS (SELECT 1 FROM cdr_missed_leads m
                             WHERE m.linkedid = t.linkedid AND m.phone = t.phone)
            -- Тестовый номер (реестр test_numbers) сделку в amoCRM не заводит: решения по
-           -- нему не пишется вовсе, и в журнале робота его нет.
-           AND """ + test_keys.sql_not_test('t.phone', digits=True) + """
+           -- нему не пишется вовсе, и в журнале робота его нет. Условие — дословно
+           -- test_keys.sql_not_test('t.phone', digits=True): текст запроса целиком в
+           -- кавычках, его грамматику проверяет тест.
+           AND NOT EXISTS (SELECT 1 FROM test_phone_numbers _tpn WHERE _tpn.phone_key = RIGHT(COALESCE((t.phone)::text, ''), 10))
          ORDER BY t.started_at, t.linkedid
          LIMIT %(limit)s
     """, {'since': since, 'since_day': since.date(), 'limit': int(limit),
@@ -220,7 +221,8 @@ def due_retries(cursor, limit=20):
              OR (m.status = 'sending'
                  AND m.sent_at < NOW() - make_interval(mins => %(stale)s)))
            -- Номер, внесённый в реестр тестовых, пока строка ждала повтора, — повтора нет.
-           AND """ + test_keys.sql_not_test('m.phone', digits=True) + """
+           -- Дословно test_keys.sql_not_test('m.phone', digits=True).
+           AND NOT EXISTS (SELECT 1 FROM test_phone_numbers _tpn WHERE _tpn.phone_key = RIGHT(COALESCE((m.phone)::text, ''), 10))
          ORDER BY m.started_at
          LIMIT %(limit)s
     """, {'step': RETRY_STEP_MINUTES, 'stale': SENDING_STALE_MINUTES, 'limit': int(limit)})

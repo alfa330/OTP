@@ -202,9 +202,18 @@ const TestNumbersView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             .catch((requestError) => setLoadError(errorOf(requestError, 'Не удалось открыть раздел')));
     }, [apiBaseUrl, headers]);
 
+    // Ответ принимается, только если он на последний запрос: при быстрой смене периода
+    // долгий ответ за 30 дней (Oktell читается живьём) иначе затёр бы ответ за 7.
+    const activityRequestRef = useRef(0);
     const loadActivity = useCallback((range) => {
+        const request = activityRequestRef.current + 1;
+        activityRequestRef.current = request;
+        const latest = () => request === activityRequestRef.current;
         const problem = periodError(range.from, range.to);
         if (problem) {
+            // Дни прежнего периода под новым пикером — неправда: список убираем.
+            setActivity(null);
+            setActivityLoading(false);
             setActivityError(problem);
             return Promise.resolve();
         }
@@ -214,9 +223,11 @@ const TestNumbersView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             headers: headers(),
             params: { from: range.from, to: range.to },
         })
-            .then((response) => setActivity(response.data || null))
-            .catch((requestError) => setActivityError(errorOf(requestError, 'Не удалось загрузить тесты')))
-            .finally(() => setActivityLoading(false));
+            .then((response) => { if (latest()) setActivity(response.data || null); })
+            .catch((requestError) => {
+                if (latest()) setActivityError(errorOf(requestError, 'Не удалось загрузить тесты'));
+            })
+            .finally(() => { if (latest()) setActivityLoading(false); });
     }, [apiBaseUrl, headers]);
 
     useEffect(() => { loadRegistry(); }, [loadRegistry]);
@@ -410,58 +421,61 @@ const TestNumbersView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     <div className="rounded-xl bg-rose-50 px-3 py-2 text-[13px] text-rose-700">{activityError}</div>
                 )}
 
-                <div className={`${iosCard} overflow-hidden`}>
-                    {numbers.length === 0 ? (
-                        <div className="px-5 py-6 text-center text-[14px] text-slate-500">
-                            Здесь появятся звонки и чаты с номерами реестра.
-                        </div>
-                    ) : !activity && activityLoading ? (
-                        <div className="flex items-center justify-center px-5 py-6 text-[14px] text-slate-500">
-                            <Loader2 size={16} className="mr-2 animate-spin" /> Загружаем тесты…
-                        </div>
-                    ) : days.length === 0 ? (
-                        <div className="px-5 py-6 text-center text-[14px] text-slate-500">
-                            За выбранный период тестов не было.
-                        </div>
-                    ) : (
-                        <ul className="divide-y divide-slate-100">
-                            {days.map((day) => {
-                                const expanded = openDay === day.day;
-                                return (
-                                    <li key={day.day}>
-                                        <button
-                                            type="button"
-                                            className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
-                                            aria-expanded={expanded}
-                                            onClick={() => setOpenDay(expanded ? null : day.day)}
-                                        >
-                                            <span className="min-w-0 flex-1 text-[14.5px] font-medium text-slate-900">
-                                                {dayLabel(day.day, today)}
-                                            </span>
-                                            <span className="hidden text-[13px] tabular-nums text-slate-500 sm:inline">
-                                                {splitLabel(day)}
-                                            </span>
-                                            <span className="text-right text-[14px] font-semibold tabular-nums text-slate-900">
-                                                {testsLabel(day.total)}
-                                            </span>
-                                            <ChevronDown
-                                                size={16}
-                                                className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
-                                            />
-                                        </button>
-                                        {expanded && (
-                                            <ul className="divide-y divide-slate-100 bg-slate-50/60">
-                                                {day.items.map((item) => (
-                                                    <ItemRow key={item.id} item={item} numbersByKey={numbersByKey} />
-                                                ))}
-                                            </ul>
-                                        )}
-                                    </li>
-                                );
-                            })}
-                        </ul>
-                    )}
-                </div>
+                {/* Ошибка периода или загрузки — без списка: «тестов не было» под ней было бы неправдой. */}
+                {!(activityError && !activity) && (
+                    <div className={`${iosCard} overflow-hidden`}>
+                        {numbers.length === 0 ? (
+                            <div className="px-5 py-6 text-center text-[14px] text-slate-500">
+                                Здесь появятся звонки и чаты с номерами реестра.
+                            </div>
+                        ) : !activity && activityLoading ? (
+                            <div className="flex items-center justify-center px-5 py-6 text-[14px] text-slate-500">
+                                <Loader2 size={16} className="mr-2 animate-spin" /> Загружаем тесты…
+                            </div>
+                        ) : days.length === 0 ? (
+                            <div className="px-5 py-6 text-center text-[14px] text-slate-500">
+                                За выбранный период тестов не было.
+                            </div>
+                        ) : (
+                            <ul className="divide-y divide-slate-100">
+                                {days.map((day) => {
+                                    const expanded = openDay === day.day;
+                                    return (
+                                        <li key={day.day}>
+                                            <button
+                                                type="button"
+                                                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                                                aria-expanded={expanded}
+                                                onClick={() => setOpenDay(expanded ? null : day.day)}
+                                            >
+                                                <span className="min-w-0 flex-1 text-[14.5px] font-medium text-slate-900">
+                                                    {dayLabel(day.day, today)}
+                                                </span>
+                                                <span className="hidden text-[13px] tabular-nums text-slate-500 sm:inline">
+                                                    {splitLabel(day)}
+                                                </span>
+                                                <span className="text-right text-[14px] font-semibold tabular-nums text-slate-900">
+                                                    {testsLabel(day.total)}
+                                                </span>
+                                                <ChevronDown
+                                                    size={16}
+                                                    className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
+                                                />
+                                            </button>
+                                            {expanded && (
+                                                <ul className="divide-y divide-slate-100 bg-slate-50/60">
+                                                    {day.items.map((item) => (
+                                                        <ItemRow key={item.id} item={item} numbersByKey={numbersByKey} />
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+                )}
             </section>
 
             <NumberSheet

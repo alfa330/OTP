@@ -27973,7 +27973,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE
-                              AND """ + test_keys.sql_not_test('phone_number') + """
+                              AND """ + test_keys.sql_calls_not_test() + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -27992,7 +27992,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
-                              AND """ + test_keys.sql_not_test('phone_number') + """
+                              AND """ + test_keys.sql_calls_not_test() + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -57800,7 +57800,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
                 SELECT COUNT(*) FILTER (WHERE survey_response_id IS NULL), AVG(score)
                 FROM calls
                 WHERE operator_id = %s AND month=%s
-                  AND """ + test_keys.sql_not_test('phone_number') + """
+                  AND """ + test_keys.sql_calls_not_test() + """
             """, (op_id, datetime.now().strftime('%Y-%m')))
             result = cursor.fetchone()
         

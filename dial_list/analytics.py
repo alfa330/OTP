@@ -30,7 +30,7 @@ _LEADS_CTE = """
         FROM dial_list_leads l
         WHERE l.department_id = %(department_id)s AND l.period = %(period)s
           -- Номер из реестра тестовых (test_numbers) — проверка обзвона, а не водитель.
-          AND """ + test_keys.sql_not_test('l.phone_norm', digits=True) + """
+          AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
     ),
     att AS (
         SELECT a.lead_id, t.operator_id, t.requested_at, t.cancelled,

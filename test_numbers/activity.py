@@ -225,7 +225,7 @@ def _chat2desk(cursor, phone_keys, start, end):
     # «[wa_…] KZ.…», а номер — в assigned_phone: смотреть надо оба поля.
     cursor.execute(
         f"""
-        SELECT r.request_id, r.day, r.request_start, r.transport, r.channel_name,
+        SELECT r.request_id, r.day, r.request_start, r.transport, r.channel_id, r.channel_name,
                r.client_phone, r.assigned_phone,
                COALESCE(u.name, r.c2d_operator_name) AS operator_name,
                r.incoming_messages, r.outgoing_messages, r.rating_score,
@@ -240,21 +240,28 @@ def _chat2desk(cursor, phone_keys, start, end):
         """,
         {'keys': list(phone_keys), 'start': start, 'end': end},
     )
+    # Одна переписка за сутки — один тест, как у Wazzup и ChatApp: обращение, которое
+    # оператор закрыл, а тестировщик вечером открыл заново, — та же переписка того же
+    # дня в том же канале. Обращения склеиваются по (номер, канал, день).
     wanted = set(phone_keys)
-    items = []
+    chats = {}
     for row in _rows(cursor):
         key = row['client_key'] if row['client_key'] in wanted else row['assigned_key']
         at = row['request_start'] or datetime.combine(row['day'], datetime.min.time())
-        messages = int(row['incoming_messages'] or 0) + int(row['outgoing_messages'] or 0)
-        items.append(_item(
-            'chat2desk', key, at,
-            id=f"chat2desk:{row['request_id']}",
-            direction='in',
-            operator=row['operator_name'],
-            messages=messages or None,
-            note=row['channel_name'] or row['transport'],
-        ))
-    return items
+        chat = chats.setdefault((key, row['channel_id'], row['day']),
+                                {'at': at, 'messages': 0, 'operators': [],
+                                 'note': row['channel_name'] or row['transport']})
+        chat['at'] = min(chat['at'], at)
+        chat['messages'] += int(row['incoming_messages'] or 0) + int(row['outgoing_messages'] or 0)
+        if row['operator_name'] and row['operator_name'] not in chat['operators']:
+            chat['operators'].append(row['operator_name'])
+    return [_item('chat2desk', key, chat['at'],
+                  id=f"chat2desk:{key}:{channel_id}:{day.isoformat()}",
+                  direction='in',
+                  operator=', '.join(chat['operators']) or None,
+                  messages=chat['messages'] or None,
+                  note=chat['note'])
+            for (key, channel_id, day), chat in chats.items()]
 
 
 def _chatapp(cursor, phone_keys, start, end):
@@ -290,7 +297,7 @@ def _chatapp(cursor, phone_keys, start, end):
     for row in _rows(cursor):
         items.append(_item(
             'chatapp', row['phone_key'], row['first_at'],
-            id=f"chatapp:{row['license_id']}:{row['chat_id']}:{row['day'].isoformat()}",
+            id=f"chatapp:{row['license_id']}:{row['messenger_type']}:{row['chat_id']}:{row['day'].isoformat()}",
             direction='in' if row['inbound'] else 'out',
             operator=row['operators'],
             messages=int(row['messages'] or 0),
@@ -329,7 +336,8 @@ def oktell_sql(phone_keys, start, end):
         "ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
         f"WHERE t.dt_insert >= '{date_from}' AND t.dt_insert < '{date_to}' "
         f"AND {match} "
-        "ORDER BY t.dt_insert"
+        # Упрёмся в потолок — пусть пропадут старые, а не сегодняшние: их смотрят чаще.
+        "ORDER BY t.dt_insert DESC"
     )
 
 
@@ -404,7 +412,7 @@ def collect(get_cursor, phone_keys, start, end, *, oktell_query=None):
                 items.extend(oktell_items)
                 if truncated:
                     missing.append({'source': 'oktell', 'label': SOURCES['oktell']['label'],
-                                    'reason': f'показаны первые {OKTELL_ROW_CAP}'})
+                                    'reason': f'показаны последние {OKTELL_ROW_CAP}'})
             except Exception:  # noqa: BLE001
                 logging.exception('Реестр тестовых номеров: Oktell не ответил')
                 missing.append({'source': 'oktell', 'label': SOURCES['oktell']['label'],

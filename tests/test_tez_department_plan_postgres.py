@@ -43,7 +43,8 @@ def db(request):
         CREATE TABLE work_shifts (id serial, operator_id integer, shift_date date, start_time time, end_time time, shift_type text);
         CREATE TABLE tez_lead_batches (id integer PRIMARY KEY, department_id integer);
         CREATE TABLE tez_leads (id integer PRIMARY KEY, first_batch_id integer);
-        CREATE TABLE tez_lead_successes (lead_id integer, year integer, month integer);
+        CREATE TABLE tez_lead_successes (lead_id integer, year integer, month integer, phone_norm text);
+        CREATE TABLE test_phone_numbers (phone_key varchar(10));
         CREATE TABLE department_monthly_plans (department_id integer, year integer, month integer,
             plan_per_fte numeric, updated_by integer, updated_at timestamp,
             UNIQUE(department_id, year, month));

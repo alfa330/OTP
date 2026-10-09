@@ -69,6 +69,15 @@ def serialize_number(row):
     }
 
 
+def _duplicate(existing, phone_display):
+    """409 «номер уже в реестре» — с тем, чей он: и для дубля, и для гонки двух вставок."""
+    existing = existing or {}
+    who = existing.get('owner_name') or 'без владельца'
+    shown = existing.get('phone_display') or phone_display
+    return _bad(f'Номер уже в реестре: {shown} — {who}', 'TEST_NUMBERS_DUPLICATE', 409,
+                number=serialize_number(existing) if existing else None)
+
+
 def build_test_numbers_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                  resolve_requester, oktell_query=None):
     """Собирает Blueprint раздела.
@@ -168,16 +177,12 @@ def build_test_numbers_blueprint(*, db, require_api_key, build_cors_preflight_re
                             404, field='owner')
             existing = queries.find_by_key(cursor, phone_key)
             if existing:
-                who = existing.get('owner_name') or 'без владельца'
-                return _bad(f'Номер уже в реестре: {existing["phone_display"]} — {who}',
-                            'TEST_NUMBERS_DUPLICATE', 409, number=serialize_number(existing))
+                return _duplicate(existing, phone_display)
             created = queries.add_number(cursor, phone_key=phone_key, phone_display=phone_display,
                                          owner=owner, actor=_actor(ctx))
             if not created:
-                # Кто-то добавил тот же номер между проверкой и вставкой.
-                existing = queries.find_by_key(cursor, phone_key)
-                return _bad('Номер уже в реестре', 'TEST_NUMBERS_DUPLICATE', 409,
-                            number=serialize_number(existing) if existing else None)
+                # Кто-то добавил тот же номер между проверкой и вставкой — ответ тот же.
+                return _duplicate(queries.find_by_key(cursor, phone_key), phone_display)
         keys.invalidate_cache()
         return jsonify({"number": serialize_number(created)}), 201
 

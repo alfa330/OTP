@@ -498,6 +498,16 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
 
             summary['leads_seen'] = total
 
+            # Журнал этапов — по ВСЕМ сделкам, и тестовым тоже: это сырьё (история, которой
+            # в amoCRM нет), а не расчёт, и читают его только через уже отобранные
+            # разговоры. Сделка, чей номер внесли в реестр по ошибке, историю не теряет.
+            # Журнал — ДО отбора «какие сутки вправе переписать»: история сделки меняется
+            # и у зафиксированных суток, а запрет переписывать ИТОГ не значит, что не надо
+            # запоминать, куда уехала сама сделка. Без этого ФТ-08 «этап на момент
+            # разговора» отвечать нечем (op_funnel_lead_stages).
+            if lead_rows:
+                summary['stage_rows'] = queries.log_lead_stages(cursor, lead_rows)
+
             # Лид тестировщика (все его номера — из реестра test_numbers) в воронку не
             # идёт: ни в итоги и причины, ни в снимок, по которому открываются списки
             # за цифрой, — иначе цифра и список за ней разошлись бы.
@@ -521,13 +531,6 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
                             'bucket': row.get('reason_bucket') or '',
                         }
                 queries.upsert_reason_dict(cursor, list(dictionary.values()))
-
-                # Журнал этапов — ДО отбора «какие сутки вправе переписать»:
-                # история сделки меняется и у зафиксированных суток, а запрет
-                # переписывать ИТОГ не значит, что не надо запоминать, куда
-                # уехала сама сделка. Без этой строки ФТ-08 «этап на момент
-                # разговора» отвечать нечем (op_funnel_lead_stages).
-                summary['stage_rows'] = queries.log_lead_stages(cursor, lead_rows)
 
                 # Лиды и разбивку причин переписываем ТОЛЬКО у тех суток, чей итог
                 # мы вправе переписать.
@@ -666,10 +669,11 @@ def sync_amo_changes(db, since=None, started_by=None):
                 owner_map = queries.resolve_operator_map(cursor, source)
                 rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map,
                                               loss_reasons, contact_phones)
-                rows = _without_test_leads(cursor, rows)
                 if seen:
                     queries.touch_operator_map(cursor, source, seen, direction_code)
+                # Журнал этапов — по всем сделкам (сырьё), снимок — без сделок тестировщика.
                 summary['stage_rows'] = queries.log_lead_stages(cursor, rows)
+                rows = _without_test_leads(cursor, rows)
 
                 # Снимок: новые сделки — всегда, существующие — только в
                 # незафиксированных сутках.

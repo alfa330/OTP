@@ -157,7 +157,6 @@ def load_lead_deals(cursor, day, direction=lead_speed_mod.LEAD_DIRECTION,
 
     Сделка, все номера которой — из реестра тестовых (test_numbers), в плитку не идёт:
     её завёл робот пропущенных по тестовому звонку или сам тестировщик."""
-    test_numbers = test_keys.load_keys(cursor)
     cursor.execute("""
         SELECT lead_key, created_at, phones, phone
           FROM op_funnel_leads
@@ -166,6 +165,7 @@ def load_lead_deals(cursor, day, direction=lead_speed_mod.LEAD_DIRECTION,
     """, (direction, source, day))
     deals = [{'lead_key': row[0], 'created_at': row[1], 'phones': row[2] or '', 'phone': row[3] or ''}
              for row in cursor.fetchall()]
+    test_numbers = test_keys.load_keys(cursor)
     return [deal for deal in deals
             if not test_keys.all_test(cdr_leads_mod.lead_phones(deal), test_numbers)]
 

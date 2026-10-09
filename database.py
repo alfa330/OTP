@@ -23626,19 +23626,21 @@ class Database:
         return stats
 
     def count_tez_successes(self, year, month):
-        """Сколько успешек сейчас засчитано за период (для контроля убыли)."""
+        """Сколько успешек сейчас засчитано за период (для контроля убыли).
+
+        Без номеров «Реестра тестовых номеров»: их успешки пересчёт снимает намеренно,
+        и сторож убыли сравнивал бы несопоставимые числа."""
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             cursor.execute(
-                "SELECT COUNT(*) FROM tez_lead_successes WHERE year = %s AND month = %s",
+                "SELECT COUNT(*) FROM tez_lead_successes s WHERE s.year = %s AND s.month = %s AND "
+                + test_keys.sql_not_test('s.phone_norm', digits=True),
                 (int(year), int(month))
             )
             return int((cursor.fetchone() or [0])[0] or 0)
 
     def get_tez_lead_funnel(self, year, month):
-        """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки.
-
-        Лиды с номерами «Реестра тестовых номеров» (test_numbers) в воронку не входят;
-        их успешки снимает пересчёт (tez.lead_service.recompute_outcomes)."""
+        """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
         from tez.op_leads import ALMATY_TZ, call_window_for_period
         from test_numbers import keys as test_keys
         not_test = test_keys.sql_not_test('l.phone_norm', digits=True)
@@ -23699,6 +23701,9 @@ class Database:
             # Успешки периода — по месяцу ПОЕЗДКИ, вместе с перенесёнными, плюс
             # отдельно сколько из них дал перенос: для владельца это ответ на
             # вопрос «что дало правило», а не строчка мелким шрифтом.
+            # Лиды с номерами «Реестра тестовых номеров» не входят ни в базу, ни в
+            # успешки: пересчёт закрытых месяцев не идёт, и снятая им успешка
+            # осталась бы в числителе при уже очищенном знаменателе.
             prev_year, prev_month = (int(year) - 1, 12) if int(month) == 1 else (int(year), int(month) - 1)
             cursor.execute(
                 """
@@ -23707,6 +23712,7 @@ class Database:
                 FROM tez_lead_successes s
                 JOIN tez_leads l ON l.id = s.lead_id
                 WHERE s.year = %s AND s.month = %s
+                  AND """ + not_test + """
                 """,
                 (prev_year, prev_month, int(year), int(month))
             )
@@ -23771,6 +23777,7 @@ class Database:
 
     def get_tez_operator_successes(self, year, month, group_id=None):
         """Рейтинг операторов по успешкам месяца (месяц берётся по дате поездки)."""
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23787,6 +23794,7 @@ class Database:
                 FROM tez_lead_successes s
                 LEFT JOIN users u ON u.id = s.operator_id
                 WHERE s.year = %s AND s.month = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 GROUP BY s.operator_id, COALESCE(u.name, s.operator_name)
                 ORDER BY successes DESC, operator_name
@@ -23803,6 +23811,7 @@ class Database:
 
     def get_tez_successes_by_day(self, year, month, group_id=None):
         """Успешки по дням — дата = день выполнения первой поездки."""
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23814,6 +23823,7 @@ class Database:
                 SELECT s.success_date, COUNT(*)
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 GROUP BY s.success_date
                 ORDER BY s.success_date
@@ -23830,6 +23840,7 @@ class Database:
         детализации лидов: тут выборка идёт от успешки, поэтому и группа, и день
         применяются без риска молча отрезать лиды без успешки.
         """
+        from test_numbers import keys as test_keys
         params = [int(year), int(month), success_date]
         group_sql = ''
         if group_id:
@@ -23849,6 +23860,7 @@ class Database:
                 LEFT JOIN tez_lead_calls c ON c.general_call_id = s.call_general_id
                 LEFT JOIN tez_lead_batches batch ON batch.id = l.first_batch_id
                 WHERE s.year = %s AND s.month = %s AND s.success_date = %s
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}
                 ORDER BY s.call_at
                 """,
@@ -23877,6 +23889,7 @@ class Database:
         operator_id сужает выборку до одного оператора — так «Мои часы» получают
         свои успешки без доступа к статистике всей группы.
         """
+        from test_numbers import keys as test_keys
         params = [int(year), int(month)]
         group_sql = ''
         if group_id:
@@ -23895,6 +23908,7 @@ class Database:
                 FROM tez_lead_successes s
                 WHERE s.year = %s AND s.month = %s
                   AND s.operator_id IS NOT NULL
+                  AND {test_keys.sql_not_test('s.phone_norm', digits=True)}
                 {group_sql}{operator_sql}
                 GROUP BY s.operator_id, EXTRACT(DAY FROM s.success_date)
                 """,
@@ -23908,8 +23922,12 @@ class Database:
     @staticmethod
     def _tez_leads_detail_filters(status=None, operator_id=None, search=None):
         """Общий фрагмент WHERE + параметры для детализации/подсчёта лидов —
-        чтобы страница и её total считались по одинаковым условиям."""
-        sql = ''
+        чтобы страница и её total считались по одинаковым условиям.
+
+        Лид с номером «Реестра тестовых номеров» — не в периметре воронки: ни в
+        странице, ни в total."""
+        from test_numbers import keys as test_keys
+        sql = ' AND ' + test_keys.sql_not_test('l.phone_norm', digits=True)
         params = []
         if status:
             sql += " AND l.status = %s"
@@ -24037,6 +24055,7 @@ class Database:
         других вариантов в tez_lead_successes нет), то есть ровно на строках
         этой выборки. Считать успешки в отчёте и в разделе теперь одно и то же.
         """
+        from test_numbers import keys as test_keys
         year, month = int(year), int(month)
         prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
         sql = """
@@ -24136,6 +24155,8 @@ class Database:
                 LIMIT 1
             ) lc ON TRUE
             LEFT JOIN users lu ON lu.id = lc.operator_id
+            -- Номер «Реестра тестовых номеров» не в периметре воронки — и не в отчёте.
+            WHERE """ + test_keys.sql_not_test('r.phone_norm', digits=True) + """
             -- Своя база месяца идёт первой, перенос — за ней: у листа одна
             -- шапка, и блоками он читается так же, как раньше читались два листа.
             ORDER BY r.is_carried, r.trip_at DESC NULLS LAST, r.full_name
@@ -24174,16 +24195,18 @@ class Database:
 
     def get_tez_success_counts_for_operators(self, operator_ids, year, month):
         """{operator_id: успешек за месяц} — для подстановки факта в план ОП."""
+        from test_numbers import keys as test_keys
         ids = [int(v) for v in (operator_ids or []) if v is not None]
         if not ids:
             return {}
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT operator_id, COUNT(*)
-                FROM tez_lead_successes
-                WHERE year = %s AND month = %s AND operator_id = ANY(%s)
-                GROUP BY operator_id
+                SELECT s.operator_id, COUNT(*)
+                FROM tez_lead_successes s
+                WHERE s.year = %s AND s.month = %s AND s.operator_id = ANY(%s)
+                  AND """ + test_keys.sql_not_test('s.phone_norm', digits=True) + """
+                GROUP BY s.operator_id
                 """,
                 (int(year), int(month), ids)
             )
@@ -32752,7 +32775,7 @@ class Database:
             # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
             # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
             from test_numbers import keys as test_keys
-            not_test_calls = test_keys.sql_not_test('phone_number')
+            not_test_calls = test_keys.sql_calls_not_test()
             cursor.execute("""
                 SELECT
                     (SELECT COUNT(*) FROM calls
@@ -34489,7 +34512,7 @@ class Database:
                     MAX(created_at) AS latest_date
                 FROM calls
                 WHERE operator_id = %s
-                  AND """ + test_keys.sql_not_test('phone_number') + """
+                  AND """ + test_keys.sql_calls_not_test() + """
                 GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
@@ -34993,7 +35016,7 @@ class Database:
         # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
         # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
         from test_numbers import keys as test_keys
-        filter_clause = "month = %s AND is_draft = FALSE AND " + test_keys.sql_not_test('phone_number')
+        filter_clause = "month = %s AND is_draft = FALSE AND " + test_keys.sql_calls_not_test()
         if normalized_ids is not None:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
@@ -35205,7 +35228,7 @@ class Database:
         # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
         # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
         from test_numbers import keys as test_keys
-        not_test_calls = test_keys.sql_not_test('phone_number')
+        not_test_calls = test_keys.sql_calls_not_test()
         query = f"""
             WITH latest_versions AS (
                 SELECT
@@ -35506,7 +35529,7 @@ class Database:
                 MAX(created_at) AS latest_date
             FROM calls
             WHERE month = %s
-              AND """ + test_keys.sql_not_test('phone_number') + """
+              AND """ + test_keys.sql_calls_not_test() + """
             GROUP BY phone_number, operator_id, month, appeal_date
         ),
         latest_calls AS (
@@ -36155,7 +36178,7 @@ class Database:
                     AND created_at >= %s
                     AND created_at <= %s
                     AND is_draft = FALSE
-                    AND """ + test_keys.sql_not_test('phone_number') + """
+                    AND """ + test_keys.sql_calls_not_test() + """
                     GROUP BY operator_id, phone_number, month, appeal_date
                 ),
                 latest_calls AS (
@@ -36217,7 +36240,7 @@ class Database:
                 FROM calls
                 WHERE is_draft = FALSE
                   AND created_at >= %s AND created_at <= %s
-                  AND """ + test_keys.sql_not_test('phone_number') + """
+                  AND """ + test_keys.sql_calls_not_test() + """
                 GROUP BY phone_number, operator_id, month, appeal_date
             )
             SELECT

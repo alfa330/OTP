@@ -19,7 +19,7 @@
 import sys
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -32,7 +32,7 @@ try:
 except ImportError:  # pragma: no cover
     Flask = None
 
-from test_numbers import access, keys, queries, routes, rules, schema  # noqa: E402
+from test_numbers import access, activity, keys, queries, routes, rules, schema  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 DATABASE_PY = ROOT / 'database.py'
@@ -284,6 +284,140 @@ class Store:
         return row
 
 
+class _RowsCursor:
+    """Курсор с колонками: ровно то, что читает activity._rows."""
+
+    def __init__(self, columns, rows):
+        self.description = [(name,) for name in columns]
+        self.rows = rows
+        self.sql = None
+
+    def execute(self, sql, params=None):
+        self.sql = sql
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class ActivityTests(unittest.TestCase):
+    """«Тесты по дням»: период, Oktell, склейка переписок, упавший источник."""
+
+    TEST = '7000000101'
+
+    def test_period_limits(self):
+        today = date(2026, 10, 9)
+        self.assertEqual(activity.parse_period(None, None, today), (date(2026, 9, 26), today))
+        self.assertEqual(activity.parse_period('2026-09-09', '2026-10-09', today), (date(2026, 9, 9), today))
+        for args in (('2026-09-08', '2026-10-09'), ('2026-10-09', '2026-10-01'), ('вчера', None)):
+            with self.subTest(args=args), self.assertRaises(activity.PeriodError):
+                activity.parse_period(*args, today)
+
+    def test_oktell_selects_exactly_the_registry_numbers_newest_first(self):
+        sql = activity.oktell_sql({self.TEST}, date(2026, 10, 1), date(2026, 10, 9))
+        # Условие «не тестовый» перевёрнуто: здесь нужны как раз тестовые.
+        self.assertIn(keys.tsql_key('t.[number]') + f" IN ('{self.TEST}')", sql)
+        self.assertNotIn('NOT IN', sql)
+        self.assertIn("t.dt_insert >= '20261001' AND t.dt_insert < '20261010'", sql)
+        # Упёрлись в потолок — теряются старые, а не сегодняшние.
+        self.assertTrue(sql.endswith('ORDER BY t.dt_insert DESC'))
+        self.assertTrue(sql.startswith(f'SELECT TOP {activity.OKTELL_ROW_CAP} '))
+        self.assertIsNone(activity.oktell_sql(set(), date(2026, 10, 1), date(2026, 10, 9)))
+
+    def test_oktell_is_read_once_per_period(self):
+        calls = []
+
+        def query(sql):
+            calls.append(sql)
+            return [{'call_id': 1, 'occurred_at': '2026-10-08 10:00:00', 'route': 'incoming',
+                     'phone': '77000000101', 'total_length': 30}]
+
+        activity._oktell_cache.clear()
+        self.addCleanup(activity._oktell_cache.clear)
+        moments = iter([100.0, 150.0, 300.0])
+        args = (query, [self.TEST], date(2026, 10, 1), date(2026, 10, 9))
+        first, truncated = activity._oktell(*args, clock=lambda: next(moments))
+        self.assertEqual((len(first), truncated), (1, False))
+        activity._oktell(*args, clock=lambda: next(moments))
+        self.assertEqual(len(calls), 1, 'повтор в пределах 120 с — из кеша')
+        activity._oktell(*args, clock=lambda: next(moments))
+        self.assertEqual(len(calls), 2)
+
+    def test_failed_source_goes_to_missing_and_others_stay(self):
+        def freepbx(cursor, phone_keys, start, end):
+            return [activity._item('freepbx', self.TEST, datetime(2026, 10, 8, 10), id='freepbx:1:x')]
+
+        def broken(cursor, phone_keys, start, end):
+            raise RuntimeError('таблицы нет')
+
+        @contextmanager
+        def get_cursor():
+            yield object()
+
+        with mock.patch.object(activity, '_DB_SOURCES', (('freepbx', freepbx), ('wazzup', broken))), \
+                mock.patch.object(activity.logging, 'exception'):
+            result = activity.collect(get_cursor, [self.TEST], date(2026, 10, 7), date(2026, 10, 9))
+        self.assertEqual([item['id'] for item in result['items']], ['freepbx:1:x'])
+        self.assertEqual([(m['source'], m['reason']) for m in result['missing']],
+                         [('wazzup', 'не удалось прочитать'), ('oktell', 'Oktell не подключён')])
+        self.assertEqual([(d['day'], d['calls'], d['chats']) for d in result['days']],
+                         [('2026-10-09', 0, 0), ('2026-10-08', 1, 0), ('2026-10-07', 0, 0)])
+
+    def test_chat2desk_one_chat_a_day_is_one_test(self):
+        """Обращение, закрытое утром и открытое вечером, — та же переписка того же дня."""
+        columns = ('request_id', 'day', 'request_start', 'transport', 'channel_id', 'channel_name',
+                   'client_phone', 'assigned_phone', 'operator_name', 'incoming_messages',
+                   'outgoing_messages', 'rating_score', 'client_key', 'assigned_key')
+        oct8, oct9 = date(2026, 10, 8), date(2026, 10, 9)
+        rows = [
+            (1, oct8, datetime(2026, 10, 8, 19), 'whatsapp', 11, 'Линия', '77000000101', None, 'Оператор Б',
+             1, 1, None, self.TEST, ''),
+            # Клиент WhatsApp пришёл идентификатором: номер — в assigned_phone.
+            (2, oct8, datetime(2026, 10, 8, 9), 'whatsapp', 11, 'Линия', '[wa_gupshup] KZ.1234567890123456',
+             '77000000101', 'Оператор А', 2, 1, None, '7890123456', self.TEST),
+            (3, oct8, datetime(2026, 10, 8, 12), 'telegram', 12, 'Телеграм', '77000000101', None, None,
+             1, 0, None, self.TEST, ''),
+            (4, oct9, datetime(2026, 10, 9, 9), 'whatsapp', 11, 'Линия', '77000000101', None, None,
+             1, 0, None, self.TEST, ''),
+        ]
+        items = activity._chat2desk(_RowsCursor(columns, rows), [self.TEST], oct8, oct9)
+        self.assertEqual(len(items), 3, 'Линия 8-го, Телеграм 8-го, Линия 9-го')
+        self.assertEqual(len({item['id'] for item in items}), 3)
+        line = next(item for item in items if item['day'] == '2026-10-08' and item['note'] == 'Линия')
+        self.assertEqual((line['at'], line['messages'], line['operator']),
+                         ('2026-10-08T09:00:00', 5, 'Оператор Б, Оператор А'))
+        self.assertEqual({item['phone_key'] for item in items}, {self.TEST})
+
+    def test_chatapp_ids_differ_by_messenger(self):
+        columns = ('license_id', 'messenger_type', 'chat_id', 'phone_key', 'day', 'first_at', 'messages',
+                   'inbound', 'operators')
+        at = datetime(2026, 10, 8, 10, tzinfo=timezone.utc)
+        rows = [(7, 'grWhatsApp', '77000000101', self.TEST, date(2026, 10, 8), at, 3, 2, None),
+                (7, 'caWhatsApp', '77000000101', self.TEST, date(2026, 10, 8), at, 1, 1, None)]
+        items = activity._chatapp(_RowsCursor(columns, rows), [self.TEST], date(2026, 10, 8), date(2026, 10, 8))
+        self.assertEqual(len({item['id'] for item in items}), 2)
+
+
+class InsertSqlTests(unittest.TestCase):
+
+    def test_insert_is_conflict_safe(self):
+        """Без ON CONFLICT гонка двух вставок дала бы UniqueViolation — 500 вместо 409."""
+        class Cursor:
+            sql = []
+
+            def execute(self, sql, params=None):
+                self.sql.append(sql)
+
+            def fetchone(self):
+                return None
+
+        cursor = Cursor()
+        created = queries.add_number(cursor, phone_key='7000000101', phone_display='+7 700 000 01 01',
+                                     owner={'id': 5}, actor={'user_id': 1})
+        self.assertIsNone(created)
+        self.assertIn('ON CONFLICT (phone_key) DO NOTHING', cursor.sql[0])
+        self.assertEqual(len(cursor.sql), 1, 'без вставки — ни журнала, ни перечитывания')
+
+
 class FakeDb:
     def __init__(self):
         self.commits = 0
@@ -346,16 +480,37 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(number['created_at'], '2026-10-09T10:30:00+05:00')
 
     def test_supervisor_gets_403_everywhere(self):
-        self.viewer = person(role='sv')
-        for method, url in (('get', '/api/test_numbers'), ('get', '/api/test_numbers/people'),
-                            ('post', '/api/test_numbers/numbers'),
-                            ('patch', '/api/test_numbers/numbers/1'),
-                            ('delete', '/api/test_numbers/numbers/1')):
-            with self.subTest(url=url, method=method):
-                response = getattr(self.client, method)(url, json={})
-                self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.get_json()['code'], 'TEST_NUMBERS_CLOSED')
+        """Реестр ведут админы и главы отделов; СВ, оператор, тренер и стажёр — закрыто."""
+        for role in ('sv', 'operator', 'trainer', 'trainee'):
+            self.viewer = person(role=role)
+            for method, url in (('get', '/api/test_numbers'), ('get', '/api/test_numbers/people'),
+                                ('get', '/api/test_numbers/activity'),
+                                ('post', '/api/test_numbers/numbers'),
+                                ('patch', '/api/test_numbers/numbers/1'),
+                                ('delete', '/api/test_numbers/numbers/1')):
+                with self.subTest(role=role, url=url, method=method):
+                    response = getattr(self.client, method)(url, json={})
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(response.get_json()['code'], 'TEST_NUMBERS_CLOSED')
         self.assertEqual(self.store.writes, [])
+
+    def test_head_of_any_department_is_let_in(self):
+        self.viewer = person(role='sv', headed_codes=('hr',))
+        self.assertEqual(self.client.get('/api/test_numbers').status_code, 200)
+        self.assertEqual(self.add().status_code, 201)
+
+    def test_insert_race_answers_409_not_500(self):
+        """Два админа (или двойной клик) между проверкой и вставкой: ON CONFLICT DO NOTHING
+        отдаёт None, и ручка отвечает тем же 409 с владельцем, что и обычный дубль."""
+        self.add()
+        existing = self.store.find_by_key(None, '7000000101')
+        calls = iter([None, existing])
+        with mock.patch.object(queries, 'find_by_key', lambda cursor, key: next(calls)), \
+                mock.patch.object(queries, 'add_number', lambda cursor, **kw: None):
+            response = self.add(phone='8 700 000 01 01', owner=6)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'TEST_NUMBERS_DUPLICATE')
+        self.assertEqual(response.get_json()['number']['owner']['id'], 5)
 
     def test_add_validates_before_writing(self):
         cases = (
@@ -429,7 +584,10 @@ class WiringTests(unittest.TestCase):
         """Пункт, выданный главе, обязан быть и в его ветке меню, а не только в админской."""
         app = _read(APP_JSX)
         self.assertEqual(app.count("handleSidebarViewNavigation(e, 'test_numbers')"), 2)
-        self.assertIn("view === 'test_numbers' && canAccessTestNumbersSection", app)
+        # Отрисовка и гард навигации — разные строки: без строки гарда главу отдела со своим
+        # набором разделов выкидывало бы из реестра сразу после входа.
+        self.assertIn("{view === 'test_numbers' && canAccessTestNumbersSection && (", app)
+        self.assertIn("if (view === 'test_numbers' && canAccessTestNumbersSection) return;", app)
 
 
 if __name__ == '__main__':

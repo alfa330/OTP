@@ -299,7 +299,7 @@ class SignChecker:
             lead_filter = "AND l.id = ANY(%(lead_ids)s::uuid[])"
         # Успешка за номер из реестра тестовых (test_numbers) не засчитывается: это
         # проверка обзвона, а не водитель.
-        test_filter = "AND " + test_keys.sql_not_test('l.phone_norm', digits=True)
+        test_filter = "AND " + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL
         with self.db._get_cursor() as cur:
             cur.execute(self._RESOLVE_SQL.format(lead_filter=lead_filter, test_filter=test_filter),
                         params)

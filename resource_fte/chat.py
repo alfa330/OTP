@@ -429,8 +429,11 @@ def _week_start(value: date) -> date:
 
 
 def _latest_chat_day_tx(cursor) -> Optional[date]:
-    cursor.execute("SELECT MAX(day) FROM c2d_requests WHERE request_type = %s AND " + _NOT_TEST_SQL,
-                   (CHAT_REQUEST_TYPE,))
+    # Не MAX(day): с условием реестра Postgres теряет оптимизацию min/max и читает всю
+    # таблицу (стенд, 80 тыс. обращений: 88 мс против 0,4). Обратный проход по индексу
+    # дня останавливается на первой нетестовой строке.
+    cursor.execute("SELECT day FROM c2d_requests WHERE request_type = %s AND " + _NOT_TEST_SQL
+                   + " ORDER BY day DESC LIMIT 1", (CHAT_REQUEST_TYPE,))
     row = cursor.fetchone()
     return row[0] if row and row[0] else None
 

@@ -90,14 +90,19 @@ def sql_not_test_any(*exprs, digits=False):
     совпадёт, и номер такого клиента лежит во втором поле).
     """
     make = sql_digits_key if digits else sql_key
-    keys = ', '.join(make(expr) for expr in exprs)
-    return f"NOT EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({keys}))"
+    return sql_not_test_keys(*(make(expr) for expr in exprs))
 
 
 def sql_not_test_keys(*key_exprs):
     """Ни один из готовых ключей строки (sql_key / sql_digits_key) не тестовый —
-    когда у полей разный вид: свободный текст рядом с цифрами."""
-    return f"NOT EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({', '.join(key_exprs)}))"
+    когда у полей разный вид: свободный текст рядом с цифрами.
+
+    На каждый ключ — свой NOT EXISTS, а не один с IN-списком: так у планировщика
+    hash anti-join на каждый ключ, а IN-список даёт вложенный цикл с поиском по
+    индексу реестра на каждую строку (стенд, 80 тыс. обращений: год 34 мс против
+    80, месяц 4 против 8). В скобках — фрагмент безопасен в любом месте условия."""
+    parts = [f"NOT EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key = {key})" for key in key_exprs]
+    return '(' + ' AND '.join(parts) + ')'
 
 
 def sql_is_test_any(*exprs, digits=False):
@@ -105,6 +110,24 @@ def sql_is_test_any(*exprs, digits=False):
     make = sql_digits_key if digits else sql_key
     keys = ', '.join(make(expr) for expr in exprs)
     return f"EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({keys}))"
+
+
+def sql_calls_not_test(alias=None):
+    """Строка журнала оценок (calls) — не с тестового номера.
+
+    Номер — в phone_number, но у оценки чата бывает только в снапшоте переписки: у
+    клиента Chat2Desk, пришедшего в WhatsApp идентификатором, в phone_number
+    «[wa_…] KZ.<16 цифр>», а номер — в assigned_phone обращения (на проде 20 из 778
+    оценок чатов за 120 дней); у WhatsApp Wazzup без contact_phone форма пишет имя
+    контакта, а номер — сам chat_id. alias=None — запрос по одной calls без соединений."""
+    p = f'{alias}.' if alias else ''
+    snapshot_keys = (sql_digits_key('_tr.assigned_phone') + ", CASE WHEN _ts.source = 'wazzup'"
+                     " AND _ts.transport IN ('whatsapp', 'wapi') THEN " + sql_key('_ts.wz_chat_id') + " END")
+    return (sql_not_test(f'{p}phone_number')
+            + " AND NOT EXISTS (SELECT 1 FROM c2d_chat_snapshots _ts"
+            " LEFT JOIN c2d_requests _tr ON _tr.request_id = _ts.request_id"
+            f" WHERE _ts.id = {p}c2d_snapshot_id AND EXISTS (SELECT 1 FROM {TABLE} _tpn"
+            f" WHERE _tpn.phone_key IN ({snapshot_keys})))")
 
 
 def wazzup_phone_sql(alias=None):
@@ -117,6 +140,20 @@ def wazzup_phone_sql(alias=None):
     p = f'{alias}.' if alias else ''
     return (f"COALESCE(NULLIF({p}contact_phone, ''), "
             f"CASE WHEN {p}chat_type IN ('whatsapp', 'wapi') THEN {p}chat_id END)")
+
+
+# Лид базы обзвона (dial_list_leads под алиасом l) не с тестового номера. Отсюда, а
+# не по месту: в аналитике обзвона и в «Моём прогрессе» полей с номерами нет по
+# правилу (номер здесь только сравнивается с реестром и наружу не уходит).
+DIAL_LIST_LEAD_NOT_TEST_SQL = sql_not_test('l.phone_norm', digits=True)
+# Строка выдачи (dial_list_assignments под алиасом a) и попытка (dial_list_attempts
+# под алиасом t) — не по лиду с тестовым номером: номер есть только у лида.
+DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL = (
+    "NOT EXISTS (SELECT 1 FROM dial_list_leads _tl WHERE _tl.id = a.lead_id AND "
+    + sql_is_test('_tl.phone_norm', digits=True) + ")")
+DIAL_LIST_ATTEMPT_NOT_TEST_SQL = (
+    "NOT EXISTS (SELECT 1 FROM dial_list_assignments _ta JOIN dial_list_leads _tl ON _tl.id = _ta.lead_id "
+    "WHERE _ta.id = t.assignment_id AND " + sql_is_test('_tl.phone_norm', digits=True) + ")")
 
 
 # Обращения Chat2Desk с номером реестра — по ленте вебхуков. Номер приходит не в
