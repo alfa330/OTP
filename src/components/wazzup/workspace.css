@@ -11,8 +11,8 @@ body.mobile-shell .wz-start { min-height: calc(100vh - 140px); }
 
 /* Открытие рабочего окна «Чатов ОП» после «Начать смену».
  *
- * Окно проявляется из лёгкого размытия и подъезжает снизу, а три его колонки
- * (каналы, чаты, лента) входят друг за другом. Всё вместе — меньше полусекунды:
+ * Окно проявляется из лёгкого размытия и подъезжает снизу, а две его колонки
+ * (чаты и лента) входят друг за другом. Всё вместе — меньше полусекунды:
  * человек нажал кнопку затем, чтобы работать, и анимация не должна его держать.
  *
  * Только transform, opacity и filter — без перерасчёта раскладки. Конечный кадр
@@ -43,14 +43,13 @@ body.mobile-shell .wz-start { min-height: calc(100vh - 140px); }
     transform-origin: 50% 35%;
 }
 
-/* Колонки — прямые потомки карточки раздела: каналы, список чатов, лента. */
+/* Колонки — прямые потомки карточки раздела: список чатов и лента. */
 .wz-workspace-enter .wz-columns > * {
     animation: wz-column-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .wz-workspace-enter .wz-columns > :nth-child(1) { animation-delay: 70ms; }
 .wz-workspace-enter .wz-columns > :nth-child(2) { animation-delay: 130ms; }
-.wz-workspace-enter .wz-columns > :nth-child(3) { animation-delay: 190ms; }
 
 @media (prefers-reduced-motion: reduce) {
     .wz-start > div,
