@@ -243,6 +243,7 @@ const ComplaintsView = lazyWithRetry(() => import('./components/complaints/Compl
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
 const ThermoboxesView = lazyWithRetry(() => import('./components/thermoboxes/ThermoboxesView'));
+const TestNumbersView = lazyWithRetry(() => import('./components/test_numbers/TestNumbersView'));
 const BaigaView = lazyWithRetry(() => import('./components/baiga/BaigaView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
@@ -794,6 +795,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     parcels: 'Unclaimed parcels',
     water: 'Water accounting',
     thermoboxes: 'Thermoboxes',
+    test_numbers: 'Test numbers',
     baiga: 'Baiga lists',
     sign_links: 'Signing links',
     driver_chats: 'Driver chats',
@@ -2540,6 +2542,19 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
     return THERMOBOXES_SECTION_DEPARTMENT_CODES.includes(
         normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
     );
+};
+
+/* «Реестр тестовых номеров» — номера, с которых сотрудники проверяют линии и
+   чаты; их звонки и чаты не входят ни в один расчёт (test_numbers/keys.py).
+
+   Ведут админы и главы отделов (решение владельца 09.10.2026). Супервайзеру не
+   даём: номером в реестре можно было бы спрятать звонок своего оператора.
+   Здесь решается только «показывать ли пункт меню»; сервер проверяет то же
+   правило на каждой ручке (test_numbers/access.py: can_open_section). */
+const canAccessTestNumbersSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin' || role === 'admin') return true;
+    return isDepartmentHead(userLike);
 };
 
 /* «Списки Байги» (#356) — итоги еженедельной акции Байга.
@@ -42803,6 +42818,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
+            const canAccessTestNumbersSection = canAccessTestNumbersSectionForUser(user);
             const canAccessBaigaSection = canAccessBaigaSectionForUser(user);
             // «Библиотека» (#282): ведут СВ и выше и тренер, читают все остальные
             // сотрудники (canAccessLibrarySectionForUser). Сервер закрыт тем же
@@ -52475,6 +52491,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'water' && canAccessWaterSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
+                // «Реестр тестовых номеров» — свой предикат: раздел общефирменный,
+                // в allowlist отделов его нет.
+                if (view === 'test_numbers' && canAccessTestNumbersSection) return;
                 // «Списки Байги» — свой предикат: раздел открыт ОП, СЗоВ и
                 // «Маркетингу», а у ОП и «Маркетинга» есть allowlist, и проверка
                 // ниже выбросила бы их из раздела сразу после входа.
@@ -52510,7 +52529,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -54850,6 +54869,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {renderDividerIfInner(
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
+                                                canAccessTestNumbersSection,
                                                 canAccessDialListSection && deptAllowsInner('dial_list'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
@@ -54868,6 +54888,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
+                                            )}
+                                            {/* «Реестр тестовых номеров» — без SidebarDeptScope: номер
+                                                не принадлежит отделу, раздел виден при любом выбранном.
+                                                Пункт продублирован в ветке глав отделов. */}
+                                            {canAccessTestNumbersSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'test_numbers')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'test_numbers' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-flask"></FaIcon> <span className="sidebar-text">Реестр тестовых номеров</span>
+                                                    </button>
+                                                </li>
                                             )}
                                             {canAccessDialListSection && (
                                                 <SidebarDeptScope section="dial_list" activeCode={activeDeptCode}>
@@ -54943,7 +54976,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
-                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessFleetEdm, canAccessDriverMailings)}
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessTestNumbersSection, canAccessFleetEdm, canAccessDriverMailings)}
 
                                             {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                                             <li>
@@ -54952,6 +54985,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* Ветка открыта и супервайзерам — пункт только главе
+                                                (canAccessTestNumbersSectionForUser). */}
+                                            {canAccessTestNumbersSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'test_numbers')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'test_numbers' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-flask"></FaIcon> <span className="sidebar-text">Реестр тестовых номеров</span>
                                                 </button>
                                             </li>
                                             )}
@@ -55322,6 +55367,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessParcelsSection,
                 canAccessWaterSection,
                 canAccessThermoboxesSection,
+                canAccessTestNumbersSection,
                 canAccessBaigaSection,
                 canAccessLibrarySection,
                 eventsSectionShown,
@@ -55834,6 +55880,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "thermoboxes" && canAccessThermoboxesSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <ThermoboxesView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {/* «Реестр тестовых номеров» — без QR-замка: раздел только у админов и глав. */}
+                        {view === 'test_numbers' && canAccessTestNumbersSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <TestNumbersView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}

@@ -6977,6 +6977,7 @@ class Database:
             self._init_complaints_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
+            self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
@@ -64441,6 +64442,18 @@ class Database:
                      result['messages'], result['chats'], result['episodes_deleted'],
                      len(result['episodes_kept']), result['outside_episodes'])
         return result
+
+    def _init_test_numbers_schema_tx(self, cursor):
+        """Схема «Реестра тестовых номеров» — БЕЗ своего SAVEPOINT, намеренно.
+
+        Таблица реестра стоит в условиях исключения десятков расчётов (табло,
+        отчёты, ИИ-оценка — test_numbers/keys.py: sql_not_test). Не развернись она
+        тихо, как раздел, — упали бы все эти запросы сразу. Пусть лучше не
+        стартует новая версия: старая продолжит работать, а ошибка будет видна в
+        логе деплоя. DDL простой и зависит только от `users`.
+        """
+        from test_numbers.schema import init_test_numbers_schema
+        init_test_numbers_schema(cursor)
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

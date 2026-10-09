@@ -66127,6 +66127,24 @@ except Exception:
     logging.exception("Раздел «Термокороба»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
+# Номера, с которых сотрудники проверяют линии и чаты; их звонки и чаты не входят
+# ни в один расчёт (test_numbers/keys.py). Реестр ведут админы и главы отделов.
+try:
+    from test_numbers.routes import build_test_numbers_blueprint  # noqa: E402
+
+    app.register_blueprint(build_test_numbers_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        oktell_query=_oktell_query,
+    ))
+    logging.info("Раздел «Реестр тестовых номеров»: Blueprint подключён на /api/test_numbers")
+except Exception:
+    logging.exception("Раздел «Реестр тестовых номеров»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Списки Байги» (итоги еженедельной акции Байга, #356) ──────────────
 # Тот же приём, что у «Посылок». В строках ФИО и номер ВУ водителя, поэтому у
 # операторов раздел закрыт тем же QR-ключом (baiga/access.py).
