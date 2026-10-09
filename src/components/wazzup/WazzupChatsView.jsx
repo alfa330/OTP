@@ -1020,6 +1020,7 @@ function ChatsWorkspace(props) {
        остаётся пусто. */
     const [deepLinkChatUrl, setDeepLinkChatUrl] = useState('');
     const initialChatDone = useRef('');
+    const deepLinkRequest = useRef(null);
     // Цель ссылки ещё не разрешена — эффект синхронизации адреса ждёт.
     const deepLinkPending = useRef(false);
     const chatsRequest = useRef({ id: 0, controller: null });
@@ -1084,6 +1085,11 @@ function ChatsWorkspace(props) {
         };
     }, [selectedKey]);
     const searchDebounce = useRef(null);
+    useEffect(() => () => {
+        deepLinkRequest.current?.abort();
+        initialChatDone.current = '';
+        clearTimeout(searchDebounce.current);
+    }, []);
     // Личные черновики (chatDrafts.js): «Черновик: …» в списке видит только их автор.
     const draftOwner = account === 'op' && mayProcess ? user?.id ?? null : null;
     const drafts = useChatDrafts(draftOwner);
@@ -1139,10 +1145,9 @@ function ChatsWorkspace(props) {
             .catch(() => { setChannels([]); showToast?.('Не удалось загрузить каналы', 'error'); });
     };
 
-    /* Отдаёт промис со строками ответа: тем же запросом переход по ссылке
-       разрешает свою цель. Заводить для него отдельный axios нельзя — соседняя
-       строка отменяет предыдущий запрос по общему chatsRequest, и одна из двух
-       загрузок молча пропала бы вместе с открытием чата.
+    /* Отдаёт промис со строками страницы. Поиск по ссылке-номеру использует
+       тот же запрос; точный чат вне страницы получает метаданные отдельно,
+       не меняя список, общее количество и offset следующей страницы.
 
        МАССИВ — это ответ сервера, и только он. Отмена, устаревший ответ и
        ошибка отдают null: пустой массив в этих ветках означал бы «чатов нет»,
@@ -1438,6 +1443,8 @@ function ChatsWorkspace(props) {
         const key = normalizeWazzupAccount(next);
         if (operator && key !== 'op') return;
         if (key === accountRef.current) return;
+        deepLinkRequest.current?.abort();
+        clearTimeout(searchDebounce.current);
         accountRef.current = key;
         setAccount(key);
         setUnreadOnly(false);
@@ -1445,6 +1452,7 @@ function ChatsWorkspace(props) {
         threadRequest.current.controller?.abort();
         setSearch(''); setAppliedSearch('');
         setSelected(null); setThread(null); setThreadHasMore(false);
+        setDeepLinkResolving(false);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
         deepLinkPending.current = false;
         setChannels(null);
@@ -1453,6 +1461,8 @@ function ChatsWorkspace(props) {
     };
 
     const onSearchInput = (value) => {
+        deepLinkRequest.current?.abort();
+        setDeepLinkResolving(false);
         setSearch(value);
         // Человек взялся искать сам — плашки про ссылку больше не про него.
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
@@ -1465,6 +1475,8 @@ function ChatsWorkspace(props) {
     };
 
     const openChat = (chat) => {
+        deepLinkRequest.current?.abort();
+        setDeepLinkResolving(false);
         setSelected(chat);
         setThreadHasMore(false);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
@@ -1476,15 +1488,13 @@ function ChatsWorkspace(props) {
      *
      * Две формы. Точная пара «канал/чат» открывается СРАЗУ: переписку отдаёт
      * /api/wazzup/chat-messages, которому кроме пары ничего не нужно, и ждать
-     * список незачем; настоящую строку чата (имя, номер, счётчики для шапки)
-     * подставляем, когда придёт ответ списка. Форма «только номер» сначала
-     * разрешается тем же поиском, которым человек ищет чат руками.
+     * список незачем; метаданные чата вне первой страницы загружаем отдельно.
+     * Форма «только номер» сначала разрешается обычным поиском.
      *
-     * Поиск предзаполняем намеренно: строка найденного чата оказывается в
-     * списке и подсвечивается, а человек одним стиранием возвращает полный
-     * список. Подмешивать строку в chats руками нельзя — offset следующей
-     * страницы считается как chats.length, и синтетическая строка молча
-     * спрятала бы один настоящий чат за «Показать ещё».
+     * Точная ссылка восстанавливает переписку без подстановки номера в поиск.
+     * Только ссылка без канала фильтрует список по номеру для выбора диалога.
+     * Подмешивать строку в chats руками нельзя — offset следующей страницы
+     * считается как chats.length, и это спрятало бы один настоящий чат.
      *
      * Гвард — по строковому КЛЮЧУ цели, а не по идентичности объекта: App
      * пересоздаёт объект на каждое изменение адреса. В зависимостях только
@@ -1503,6 +1513,8 @@ function ChatsWorkspace(props) {
         if (!target.channelId && !target.phone) return;
         if (initialChatDone.current === key) return;
         initialChatDone.current = key;
+        deepLinkRequest.current?.abort();
+        clearTimeout(searchDebounce.current);
         // Карточка чатов не размонтируется, а скрывается display:none: придя на
         // вкладке «Операторы», ссылка выставила бы чат невидимо.
         setMainTab('chats');
@@ -1515,17 +1527,21 @@ function ChatsWorkspace(props) {
             loadChannels();
         }
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
-        // Поиск по номеру показывает его переписки во всех каналах аккаунта.
-        const q = target.channelId ? target.chatId : target.phone;
+        // При восстановлении точного чата список остаётся без фильтра.
+        const q = target.channelId ? '' : target.phone;
         setSearch(q);
         setAppliedSearch(q);
         if (target.channelId) openChat({ channelId: target.channelId, chatId: target.chatId });
         else setDeepLinkResolving(true);
+        const controller = new AbortController();
+        deepLinkRequest.current = controller;
+        const isCurrent = () => !controller.signal.aborted && accountRef.current === targetAccount;
         /* Флаг поднимаем ПОСЛЕ openChat: она его снимает (открытие чата руками
            — это уже разрешённая цель), и поднятый раньше он тут же гаснул бы,
            а промах по точной паре терял метку chat= из адреса. */
         deepLinkPending.current = true;
-        loadChats({ reset: true, q }).then((items) => {
+        loadChats({ reset: true, q }).then(async (items) => {
+            if (!isCurrent()) return;
             setDeepLinkResolving(false);
             /* null — это «не знаем»: запрос отменили, он устарел или сервер
                ответил ошибкой. Пустого списка тут нет, и трактовать это как
@@ -1539,15 +1555,26 @@ function ChatsWorkspace(props) {
                к полному списку, будто ссылки и не было. Снимут его первые
                действия человека — поиск или открытие чата. */
             if (target.channelId) {
-                const row = findWazzupChatExact(items, target);
+                let row = findWazzupChatExact(items, target);
+                if (!row) {
+                    const { data } = await axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
+                        headers: headers(), signal: controller.signal,
+                        params: { account: targetAccount, channel_id: target.channelId, chat_id: target.chatId, limit: 1 },
+                    });
+                    if (!isCurrent()) return;
+                    row = findWazzupChatExact(data.items || [], target);
+                }
                 if (row) {
                     // Строка ответа заменяет заглушку: шапке нужны имя, номер и счётчики.
                     setSelected((prev) => (prev && prev.channelId === row.channelId
                         && prev.chatId === row.chatId ? row : prev));
+                    deepLinkPending.current = false;
                     return;
                 }
                 // Чата нет ни в списке, ни в сообщениях: ретеншн чистит обе
                 // таблицы одним правилом (database.cleanup_wazzup_messages).
+                threadRequest.current.controller?.abort();
+                threadRequest.current.id += 1;
                 setSelected(null); setThread(null);
                 setDeepLinkMiss(target.chatId);
                 setDeepLinkChatUrl(wazzupChatUrl(target, accounts, accountRef.current));
@@ -1561,6 +1588,12 @@ function ChatsWorkspace(props) {
             if (matches.length === 1) openChat(matches[0]);
             else if (matches.length) setDeepLinkMany(target.phone);
             else setDeepLinkMiss(target.phone);
+        }).catch((error) => {
+            if (!isCurrent() || axios.isCancel?.(error)) return;
+            // Ошибка загрузки метаданных не означает, что переписки нет.
+            setDeepLinkResolving(false);
+            deepLinkPending.current = false;
+            showToast?.('Не удалось загрузить данные чата. Попробуйте обновить.', 'error');
         });
         onInitialChatConsumed?.();
         /* eslint-disable-next-line */
