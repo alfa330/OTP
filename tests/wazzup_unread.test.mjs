@@ -6,7 +6,7 @@ import { pilotChatKey } from '../src/components/wazzup/chatPilot.js';
 const source = readFileSync(new URL('../src/components/wazzup/useSharedChatUnread.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replaceAll('export function', 'function').replace('export default function', 'function');
 const make = new Function('useEffect','useRef','useState','axios','pilotChatKey','document','window','setTimeout','clearTimeout',
-    source + '\nreturn { hook: useSharedChatUnread, mergeUnread, reconcileUnreadSnapshot };');
+    source + '\nreturn { hook: useSharedChatUnread, mergeUnread, reconcileUnreadSnapshot, presentUnread, holdReply, replySignals, outboxSignals };');
 const chat = { channelId: 'channel', chatId: 'chat' };
 const key = pilotChatKey('op', chat);
 const row = (version, count = 1, id = 'm1') => ({ ...chat, unreadVersion: version, unreadCount: count, lastInboundId: id });
@@ -42,6 +42,7 @@ function harness() {
         }
     };
     return { options, gets, posts, doc, element, flush, get output() { return result; },
+        async rerender() { dirty=true; await flush(); },
         async tick() { const pending=[...timers.values()]; timers.clear(); pending.forEach((fn)=>fn()); await flush(); },
         close() { slots.forEach((slot)=>slot?.cleanup?.()); },
     };
@@ -76,4 +77,104 @@ test('snapshot/stream interleave preserves new chats and changing account cancel
     assert.equal(h.gets[1].payload.signal.aborted,true);
     h.gets[1].resolve({ data:{ items:[row(4)], next:null } }); await old; await h.flush();
     assert.deepEqual(h.output.items,{}); h.close();
+});
+
+// «Ответ не нужен» гаснет в момент ответа: своя очередь — сразу, чужой ответ — по
+// строке архива pending; сервер (статус sent) потом подтверждает это своей строкой.
+const echo = (id = 'w1', message = {}) => ({ account: 'op', ...chat, messageId: id, isEcho: true,
+    status: message.status ?? 'pending',
+    message: { messageId: id, isEcho: true, status: 'pending', clientMessageId: 'c1', authorName: 'Анна', authorId: '',
+        isDeleted: false, ...message } });
+const delivery = (status, id = 'w1') => ({ account: 'op', ...chat, messageId: id, isEcho: true, status, statusOnly: true });
+const queued = (state = 'queued', extra = {}) => ({ clientMessageId: 'c1', account: 'op', ...chat, state, ...extra });
+
+test('an in-flight reply hides only the row version it answered, while one of its sends is alive', () => {
+    const { presentUnread, holdReply } = helpers;
+    const replies = new Map();
+    const items = { [key]: row(5, 2) };
+    assert.equal(holdReply(replies, items, key, 'm:late', { active: true, now: 0 }), false, 'a status alone starts nothing');
+    assert.equal(holdReply(replies, {}, key, 'c:1', { active: true, start: true, now: 0 }), false, 'nothing waits');
+    assert.equal(holdReply(replies, items, key, 'c:1', { active: true, start: true, now: 0 }), true);
+    assert.equal(presentUnread(items, replies, 1)[key].unreadCount, 0);
+    assert.equal(presentUnread(items, replies, 60000)[key].unreadCount, 2, 'no confirmation within a minute');
+    assert.equal(presentUnread({ [key]: row(6, 3, 'm2') }, replies, 1)[key].unreadCount, 3, 'a newer row wins');
+    assert.equal(holdReply(replies, items, key, 'm:other', { active: true, now: 1 }), false);
+    assert.equal(holdReply(replies, items, key, 'c:1', { active: false, now: 1 }), true);
+    assert.equal(presentUnread(items, replies, 1)[key].unreadCount, 2, 'the failed send restores the queue');
+    assert.equal(presentUnread(items, new Map(), 1), items, 'unchanged rows keep their identity');
+});
+
+test('stream: a pending operator echo starts a reply, error ends it; inbound, bots and unread rows start nothing', () => {
+    const { replySignals } = helpers;
+    assert.deepEqual(replySignals([echo()]), [{ key, ref: 'm:w1', active: true, start: true }]);
+    assert.deepEqual(replySignals([delivery('sent'), delivery('error')]).map(({ active, start }) => [active, start]),
+        [[true, false], [false, false]]);
+    const starts = replySignals([
+        { ...echo('in'), isEcho: false },
+        echo('bot', { clientMessageId: null, authorName: ' ', authorId: '' }),
+        echo('gone', { isDeleted: true }),
+        echo('done', { status: 'sent' }), { ...echo('done2'), status: 'sent' },
+        { ...row(9), messageId: `unread:${chat.channelId}:${chat.chatId}`, kind: 'unread' },
+        { ...echo('note'), kind: 'note' },
+    ]).filter(({ start }) => start);
+    assert.deepEqual(starts, []);
+});
+
+test('own queue: queued starts at once, acceptance hands over to the message id, failure is not alive', () => {
+    const { outboxSignals } = helpers;
+    const seen = new Map();
+    assert.deepEqual(outboxSignals([queued()], seen), [{ key, ref: 'c:c1', active: true, start: true }]);
+    assert.deepEqual(outboxSignals([queued()], seen), [], 'the same snapshot repeats nothing');
+    assert.deepEqual(outboxSignals([queued('sent', { messageId: 'w1' })], seen),
+        [{ key, ref: 'c:c1', active: false, start: false }, { key, ref: 'm:w1', active: true, start: true }]);
+    assert.deepEqual(outboxSignals([], seen), []); assert.equal(seen.size, 0);
+    assert.deepEqual(outboxSignals([queued('failed'), { ...queued(), account: 'potok', clientMessageId: 'p' }], seen),
+        [{ key, ref: 'c:c1', active: false, start: true }]);
+});
+
+test('«Ответ не нужен» goes out on send for the sender and the team, and comes back on failure', async () => {
+    const h = harness(); h.options.outbox = []; await h.flush();
+    h.output.apply([row(5, 2)]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 2); assert.equal(h.output.total, 2);
+    h.options.outbox = [queued()]; await h.rerender();
+    assert.equal(h.output.items[key].unreadCount, 0); assert.equal(h.output.total, 0);
+    const shown = h.output.items; await h.rerender();
+    assert.equal(h.output.items, shown, 'the same object while nothing changed');
+    h.options.outbox = [queued('failed')]; await h.rerender();
+    assert.equal(h.output.items[key].unreadCount, 2);
+    // Another operator's reply: the archive row (pending) arrives over the stream.
+    h.options.outbox = []; await h.rerender();
+    h.output.apply([echo('w2')]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 0);
+    h.output.apply([delivery('error', 'w2')]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 2);
+    // Own reply accepted, its local copy settled, then Wazzup reports error.
+    h.options.outbox = [{ ...queued(), clientMessageId: 'c3' }]; await h.rerender();
+    h.options.outbox = [{ ...queued('sent', { messageId: 'w3' }), clientMessageId: 'c3' }]; await h.rerender();
+    h.options.outbox = []; await h.rerender();
+    assert.equal(h.output.items[key].unreadCount, 0);
+    h.output.apply([delivery('error', 'w3')]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 2, 'the accepted reply failed later');
+    h.close();
+});
+
+test('the server row takes over after the reply: sent clears, a new inbound shows, silence expires', async () => {
+    const h = harness(); h.options.outbox = []; await h.flush();
+    h.output.apply([row(5, 2)]); await h.flush();
+    h.options.outbox = [queued()]; await h.rerender();
+    h.options.outbox = [queued('sent', { messageId: 'w1' })]; await h.rerender();
+    h.output.apply([echo('w1')]); await h.flush();
+    h.options.outbox = []; await h.rerender();
+    assert.equal(h.output.items[key].unreadCount, 0, 'no flash between the archive row and Wazzup «sent»');
+    h.output.apply([delivery('sent'), row(6, 0)]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 0);
+    h.output.apply([row(7, 1, 'm3')]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 1, 'the client wrote again after the answer');
+    h.output.apply([echo('w4')]); await h.flush();
+    assert.equal(h.output.items[key].unreadCount, 0);
+    const realNow = Date.now;
+    Date.now = () => realNow() + 61000;
+    try { await h.tick(); } finally { Date.now = realNow; }
+    assert.equal(h.output.items[key].unreadCount, 1, 'Wazzup never confirmed: the queue is back');
+    h.close();
 });

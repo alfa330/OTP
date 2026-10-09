@@ -25,17 +25,116 @@ export function reconcileUnreadSnapshot(rows, current, touched, startedAt) {
     return snapshot;
 }
 
-export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, headers }) {
+/* Ответ в полёте. Сервер закрывает «ждёт ответа», когда Wazzup подтвердил отправку
+ * (статус sent, wazzup/unread.py), — через несколько секунд после нажатия. Всё это
+ * время кнопка «Ответ не нужен», счётчик строки и «Ожидают ответа» говорили бы, что
+ * клиенту не ответили. Поэтому ответ, вставший в очередь вкладки (sendQueue.js) или
+ * принятый Wazzup (строка архива pending), гасит ожидание чата сразу: у отправителя
+ * в момент нажатия, у остальных по живому потоку. Правило сервера не меняется: новая
+ * версия строки (закрыто, клиент написал ещё) сразу заменяет подмену, отказ отправки
+ * или статус error её снимает, а без подтверждения она гаснет сама через минуту. */
+const REPLY_HOLD_MS = 60000;
+const REPLY_STATUSES = new Set(['pending', 'sent', 'delivered', 'read']);
+const OUTBOX_REPLYING = new Set(['queued', 'sending', 'checking', 'sent']);
+
+export function presentUnread(items, replies, now) {
+    let shown = items;
+    for (const [key, reply] of replies) {
+        const row = items[key];
+        if (!(row?.unreadCount > 0) || row.unreadVersion !== reply.version || reply.expiresAt <= now
+            || ![...reply.refs.values()].includes(true)) continue;
+        if (shown === items) shown = { ...items };
+        shown[key] = { ...row, unreadCount: 0 };
+    }
+    return shown;
+}
+
+/* Отправка ref ответа в чате key жива (active) или нет. Подмену заводит только начало
+   ответа (start) в чате, который сейчас ждёт; поздние статусы обновляют лишь уже
+   известные отправки. Подмена прежней версии строки забывается. true — изменилась. */
+export function holdReply(replies, items, key, ref, { active, start = false, now }) {
+    const row = items[key];
+    let reply = replies.get(key);
+    if (reply && row?.unreadVersion !== reply.version) {
+        replies.delete(key);
+        reply = undefined;
+    }
+    if (!reply) {
+        if (!start || !active || !(row?.unreadCount > 0)) return false;
+        reply = { version: row.unreadVersion, refs: new Map(), expiresAt: 0 };
+        replies.set(key, reply);
+    } else if (!start && !reply.refs.has(ref)) return false;
+    if (!active && reply.refs.get(ref) === false) return false;
+    reply.refs.set(ref, active);
+    if (active) reply.expiresAt = now + REPLY_HOLD_MS;
+    return true;
+}
+
+// Живой поток: строка архива с ответом сотрудника (pending) — начало ответа; статусы
+// его отправки после — живая она (pending/sent/delivered/read) или нет (error).
+export function replySignals(changes) {
+    const signals = [];
+    for (const event of changes || []) {
+        if (!event?.messageId || event.kind || event.isEcho === false) continue;
+        const message = event.message;
+        const status = event.status ?? message?.status;
+        if (!status) continue;
+        const ref = `m:${event.messageId}`;
+        const key = pilotChatKey('op', event);
+        const reply = message?.isEcho === true && !message.isDeleted
+            && Boolean(message.clientMessageId || String(message.authorId || '').trim()
+                || String(message.authorName || '').trim());
+        signals.push({ key, ref, active: REPLY_STATUSES.has(status) && !message?.isDeleted,
+            start: event.statusOnly !== true && reply && status === 'pending' });
+    }
+    return signals;
+}
+
+// Очередь вкладки: ответ встал в очередь — начало; принят — добавляется id сообщения
+// (по нему придёт error); отказ или неясный исход — отправка не живая.
+export function outboxSignals(outbox, seen) {
+    const signals = [];
+    const present = new Set();
+    for (const item of outbox || []) {
+        if (item?.account !== 'op' || !item.clientMessageId) continue;
+        present.add(item.clientMessageId);
+        const before = seen.get(item.clientMessageId);
+        if (before && before.state === item.state && before.messageId === item.messageId) continue;
+        seen.set(item.clientMessageId, { state: item.state, messageId: item.messageId });
+        const key = pilotChatKey('op', item);
+        const active = OUTBOX_REPLYING.has(item.state);
+        // Принятый ответ дальше ведёт id сообщения: по нему придут sent или error.
+        signals.push({ key, ref: `c:${item.clientMessageId}`, active: active && !item.messageId, start: !before });
+        if (item.messageId) signals.push({ key, ref: `m:${item.messageId}`, active, start: true });
+    }
+    for (const id of [...seen.keys()]) if (!present.has(id)) seen.delete(id);
+    return signals;
+}
+
+export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, headers, outbox }) {
     const [items, setItems] = useState({});
     // Снимок пришёл: items — все ждущие ответа, а не только пришедшие по потоку.
     const [ready, setReady] = useState(false);
     const [error, setError] = useState('');
+    const [replyTick, setReplyTick] = useState(0);
     const state = useRef({ items: {}, epoch: 0, events: 0, touched: {}, loading: null,
-        controller: null, acknowledgements: new Map(), metadata: new Map() });
+        controller: null, acknowledgements: new Map(), metadata: new Map(),
+        replies: new Map(), outboxSeen: new Map(), shown: null });
     const latest = useRef({});
     latest.current = { enabled, headers };
+    const holdReplies = (signals) => {
+        if (!latest.current.enabled || !signals.length) return;
+        const now = Date.now();
+        let changed = false;
+        for (const { key, ref, active, start } of signals) {
+            changed = holdReply(state.current.replies, state.current.items, key, ref, { active, start, now }) || changed;
+        }
+        if (changed) setReplyTick((tick) => tick + 1);
+    };
     const apply = (changes) => {
         if (!latest.current.enabled) return;
+        // До строк счётчика: ответ, пришедший в одной пачке с новым входящим, его не скроет.
+        holdReplies(replySignals(changes));
         let next = state.current.items;
         const rows = changes.filter((item) => Number.isFinite(item.unreadVersion));
         // Message and unread notifications can arrive separately. Retain a
@@ -107,6 +206,8 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
         state.current.items = {};
         state.current.touched = {};
         state.current.metadata.clear();
+        state.current.replies.clear();
+        state.current.outboxSeen.clear();
         setItems({});
         setReady(false);
         setError('');
@@ -118,6 +219,20 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
             state.current.loading = null;
         };
     }, [enabled, apiBaseUrl]);
+    useEffect(() => { holdReplies(outboxSignals(outbox, state.current.outboxSeen)); }, [outbox, enabled, apiBaseUrl]);
+    // Подмена без подтверждения гаснет сама; забытые (новая версия строки) — убираются.
+    useEffect(() => {
+        const now = Date.now();
+        let next = Infinity;
+        for (const [key, reply] of state.current.replies) {
+            if (reply.expiresAt <= now || state.current.items[key]?.unreadVersion !== reply.version) {
+                state.current.replies.delete(key);
+            } else next = Math.min(next, reply.expiresAt);
+        }
+        if (!Number.isFinite(next)) return undefined;
+        const timer = setTimeout(() => setReplyTick((tick) => tick + 1), next - now + 1);
+        return () => clearTimeout(timer);
+    }, [items, replyTick]);
     const markRead = async (chat = selected, seenMessageId) => {
         const row = state.current.items[pilotChatKey('op', chat)];
         if (!latest.current.enabled || !row?.unreadCount || (seenMessageId && row.lastInboundId !== seenMessageId)) return;
@@ -140,5 +255,11 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
             if (state.current.acknowledgements.get(ackKey) === controller) state.current.acknowledgements.delete(ackKey);
         }
     };
-    return { items, ready, apply, refresh, markRead, error, total: Object.values(items).reduce((sum, row) => sum + row.unreadCount, 0) };
+    // Один и тот же объект, пока ничего не менялось: от него считаются порядок и фильтр списка.
+    const memo = state.current.shown;
+    const shown = memo?.items === items && memo.tick === replyTick ? memo.value
+        : presentUnread(items, state.current.replies, Date.now());
+    state.current.shown = { items, tick: replyTick, value: shown };
+    return { items: shown, ready, apply, refresh, markRead, error,
+        total: Object.values(shown).reduce((sum, row) => sum + row.unreadCount, 0) };
 }

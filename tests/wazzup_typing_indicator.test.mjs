@@ -166,10 +166,17 @@ test('list variant restores the last message after typing stops', () => {
     try {
         assert.equal(text(h.render()), 'Последнее сообщение');
         const tree = h.apply([event()]);
-        assert.equal(text(tree), 'Анна печатает…');
-        // A long name is truncated; the verb never is.
-        assert.deepEqual(elements(tree).filter((node) => /shrink-0/.test(node.props.className || ''))
-            .map(text), [' печатает…']);
+        assert.equal(text(tree), 'Анна печатает');
+        const row = elements(tree).find((node) => node.props['data-testid'] === 'wazzup-chat-typing');
+        assert.equal(row.props.title, 'Анна печатает…');
+        // As in the thread: three decorative dots after the verb.
+        const dots = elements(tree).filter((node) => node.props.className === 'wazzup-typing-dot');
+        assert.equal(dots.length, 3);
+        assert.equal(elements(tree).find((node) => node.props['aria-hidden'] === 'true')
+            .props.className.includes('shrink-0'), true);
+        // A long name is truncated; the verb and the dots never are.
+        assert.deepEqual(elements(tree).filter((node) => /^shrink-0/.test(node.props.className || ''))
+            .map(text), [' печатает']);
         assert.equal(text(h.apply([event({ sequence: 2, typing: false })])), 'Последнее сообщение');
     } finally { h.close(); }
 });

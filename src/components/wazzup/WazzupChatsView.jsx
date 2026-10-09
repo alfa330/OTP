@@ -1134,6 +1134,8 @@ function ChatsWorkspace(props) {
     const unread = useSharedChatUnread({
         enabled: account === 'op' && mayProcess,
         active: mainTab === 'chats', selected, thread, box: threadBox, apiBaseUrl, headers,
+        // Свой ответ гасит ожидание чата в момент нажатия, не дожидаясь Wazzup.
+        outbox: allOutbox,
     });
 
     const channelName = useMemo(() => {

@@ -3,6 +3,8 @@
 // a timed-out HTTP request being processed after a newer request on the server.
 export const TYPING_PULSE_MS = 3000;
 export const TYPING_IDLE_MS = 2500;
+// A new start after a stop (cleared field, blur, idle) — at most once a second.
+export const TYPING_RESTART_MS = 1000;
 const FAILURE_BACKOFF_MS = 5000;
 
 export function createChatTypingSender({ send, now = Date.now, schedule = setTimeout, cancel = clearTimeout }) {
@@ -10,6 +12,7 @@ export function createChatTypingSender({ send, now = Date.now, schedule = setTim
     let blocked = false;
     let desired = false;
     let mayBeActive = false;
+    let confirmed = false;   // the last positive request reached the server
     let pendingPulse = false;
     let running = false;
     let sequence = 0;
@@ -26,9 +29,14 @@ export function createChatTypingSender({ send, now = Date.now, schedule = setTim
         const typing = desired && !disposed && !blocked;
         if (typing) {
             if (!pendingPulse) return;
-            const delay = Math.max(lastPositive + TYPING_PULSE_MS, retryAfter) - now();
+            // A live indicator is renewed by the next edit after the pulse interval,
+            // never by a timer: a timer heartbeat after the last keystroke lands just
+            // before the idle stop and holds the next start back for seconds. Edits
+            // pause less than the idle stop, so renewals stay well inside the 8 s TTL.
+            const live = mayBeActive && confirmed;
+            const delay = Math.max(lastPositive + (live ? TYPING_PULSE_MS : TYPING_RESTART_MS), retryAfter) - now();
             if (delay > 0) {
-                if (pulseTimer === null) pulseTimer = schedule(() => { pulseTimer = null; pump(); }, delay);
+                if (!live && pulseTimer === null) pulseTimer = schedule(() => { pulseTimer = null; pump(); }, delay);
                 return;
             }
         } else if (!mayBeActive) return;
@@ -42,7 +50,8 @@ export function createChatTypingSender({ send, now = Date.now, schedule = setTim
         let request;
         try { request = send({ typing, sequence: ++sequence }); }
         catch (error) { request = Promise.reject(error); }
-        Promise.resolve(request).catch((error) => {
+        Promise.resolve(request).then(() => { confirmed = typing; }, (error) => {
+            confirmed = false;
             retryAfter = now() + FAILURE_BACKOFF_MS;
             if ([401, 403].includes(error?.response?.status)) {
                 blocked = true;

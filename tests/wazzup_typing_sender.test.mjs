@@ -60,15 +60,30 @@ test('idle stop is measured from the last edit; a saved nonempty field never ren
     await time.tick(60000); assert.equal(calls.length, 2);
 });
 
-test('clear cancels a queued pulse, and restarting cannot bypass the positive rate limit', async () => {
+test('clear cancels a queued pulse; restarting after a stop is held to one start per second', async () => {
     const { sender, time, calls } = senderFixture();
     sender.activity('a'); await flush();
-    await time.tick(500); sender.activity('ab');
-    await time.tick(500); sender.activity('   '); await flush();
+    await time.tick(150); sender.activity('ab');
+    await time.tick(150); sender.activity('   '); await flush();
     assert.deepEqual(calls.map((call) => call.typing), [true, false]);
     assert.equal(time.pending, 0);
-    sender.activity('new'); await time.tick(1999); assert.equal(calls.length, 2);
-    await time.tick(1); assert.equal(calls.at(-1).at, 3000);
+    await time.tick(100); sender.activity('new'); await time.tick(599); assert.equal(calls.length, 2);
+    await time.tick(1); assert.deepEqual([calls.at(-1).typing, calls.at(-1).at], [true, 1000]);
+    sender.destroy(); await flush();
+});
+
+test('a pause that ends in the idle stop does not hold back the next start', async () => {
+    // Found by review: a timer heartbeat right before the idle stop used to delay
+    // the restart by up to 3 s while the operator was typing again.
+    const { sender, time, calls } = senderFixture();
+    sender.activity('a'); await flush();
+    await time.tick(600); sender.activity('ab');
+    await time.tick(2600);
+    sender.activity('abc'); await flush();
+    assert.deepEqual(calls.map(({ typing, at }) => [typing, at]), [[true, 0], [false, 3100], [true, 3200]]);
+    for (let i = 1; i <= 40; i += 1) { await time.tick(200); sender.activity(`abc${i}`); }
+    const positives = calls.filter((call) => call.typing).map((call) => call.at);
+    assert.deepEqual(positives, [0, 3200, 6200, 9200], 'a live indicator is renewed by edits every 3 s');
     sender.destroy(); await flush();
 });
 
