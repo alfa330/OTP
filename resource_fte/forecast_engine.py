@@ -42,7 +42,7 @@ HORIZON_DAYS = 42
 HISTORY_DAYS = 800
 CONFIDENCE = 0.8
 PARAMS_WINDOW_DAYS = 28
-SZOV_LONG_HISTORY_DAYS = 400
+LONG_HISTORY_DAYS = 400
 OKTELL_PAUSE_SECONDS = 30
 PROFILE_WEEKS = 8
 SCHEMA_RETRY_SECONDS = 600
@@ -586,7 +586,8 @@ def list_adjustments(cursor, department: str, date_from: Optional[date] = None, 
     ]
 
 
-def add_adjustment(cursor, department: str, payload: Dict[str, object], user_id: Optional[int]) -> dict:
+def add_adjustment(cursor, department: str, payload: Dict[str, object], user_id: Optional[int],
+                   today: Optional[date] = None) -> dict:
     if department not in DEPARTMENTS:
         raise ValueError("Неизвестный отдел")
     kind = str(payload.get("kind") or "").strip()
@@ -609,6 +610,10 @@ def add_adjustment(cursor, department: str, payload: Dict[str, object], user_id:
             raise ValueError("Укажите процент поправки")
         if not math.isfinite(percent) or not -90 <= percent <= 300:
             raise ValueError("Поправка от −90 до +300 %")
+        # The past is counted already: an event there would only rewrite yesterday's plan
+        # and, hidden from the list, could not even be removed.
+        if date_to < (today or datetime.now().date()):
+            raise ValueError("Событие ставится на сегодня и следующие дни")
     note = str(payload.get("note") or "").strip()[:300]
     cursor.execute(
         """
@@ -715,6 +720,12 @@ def forecast_department(series: Dict[date, float], department: str, made_on: dat
     }
 
 
+def _first_volume_day(cursor, department: str) -> Optional[date]:
+    cursor.execute("SELECT MIN(day) FROM resource_daily_volume WHERE department = %s", (department,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def _szov_backfill_done(cursor) -> bool:
     cursor.execute(
         "SELECT 1 FROM resource_forecast_runs WHERE department = 'szov' AND params ? 'oktell_backfill' "
@@ -762,17 +773,18 @@ def run_department(db, department: str, today: Optional[date] = None, oktell_que
         backfill_from = None
         with db._get_cursor() as cursor:
             refresh_volume(cursor, department, made_on - timedelta(days=60), made_on)
-            if department == "szov" and oktell_query is not None and not _szov_backfill_done(cursor):
-                cursor.execute("SELECT MIN(day) FROM resource_daily_volume WHERE department = 'szov'")
-                first_known = cursor.fetchone()[0]
-                wanted_start = made_on - timedelta(days=HISTORY_DAYS - 1)
-                if first_known is None or (first_known - wanted_start).days > HISTORY_DAYS - SZOV_LONG_HISTORY_DAYS:
-                    # Portal days first, so the long Oktell history only fills what is missing.
-                    refresh_volume(cursor, "szov", wanted_start, made_on)
-                    cursor.execute("SELECT MIN(day) FROM resource_daily_volume WHERE department = 'szov'")
-                    first_known = cursor.fetchone()[0] or made_on
-                    if (first_known - wanted_start).days > 30:
-                        backfill_from = (wanted_start, first_known)
+            wanted_start = made_on - timedelta(days=HISTORY_DAYS - 1)
+            first_known = _first_volume_day(cursor, department)
+            if first_known is None or (first_known - wanted_start).days > HISTORY_DAYS - LONG_HISTORY_DAYS:
+                # A short stored history: the first run, or a source filled back later (the
+                # bridge holds ОП from March, the Binotel mirror Тез from June). Take every day
+                # the source tables have, not only the last 60 — the backtest gave TimesFM all
+                # of them. Portal days first, so the long Oktell history only fills the rest.
+                refresh_volume(cursor, department, wanted_start, made_on)
+                first_known = _first_volume_day(cursor, department) or made_on
+                if (department == "szov" and oktell_query is not None
+                        and (first_known - wanted_start).days > 30 and not _szov_backfill_done(cursor)):
+                    backfill_from = (wanted_start, first_known)
         if backfill_from is not None:
             # Optional: the portal's own days are enough to forecast, so an Oktell failure
             # here costs a note in the run, not the night's forecast. Tried again next night
@@ -1050,17 +1062,20 @@ def load_hours(cursor, date_from: date, date_to: date, isodow: Optional[int] = N
 
 
 def hourly_shares(cursor, forecast_date: date, weeks: int = PROFILE_WEEKS,
-                  hours: Optional[Dict[date, Tuple[np.ndarray, float]]] = None) -> Optional[List[float]]:
+                  hours: Optional[Dict[date, Tuple[np.ndarray, float]]] = None,
+                  excluded: Iterable[date] = ()) -> Optional[List[float]]:
     """Share of the day's calls per hour for this weekday: mean over the `weeks` same weekdays
     before min(forecast date, today). Days that lost more than 15 % of calls or had fewer
-    than 300 calls are skipped: an overloaded day has a distorted shape (redials).
+    than 300 calls are skipped: an overloaded day has a distorted shape (redials). So are
+    the days the planner excluded — a telephony outage keeps its 300 calls but not its shape.
     `hours` — load_hours() of a range that covers the window, to spare the query."""
     end = min(forecast_date, datetime.now().date())
     start = end - timedelta(days=7 * weeks)
     isodow = forecast_date.isoweekday()
     if hours is None:
         hours = load_hours(cursor, start, end, isodow)
-    days = {d: v for d, v in hours.items() if start <= d < end and d.isoweekday() == isodow}
+    skip = set(excluded)
+    days = {d: v for d, v in hours.items() if start <= d < end and d.isoweekday() == isodow and d not in skip}
     shares = []
     for arr, lost in days.values():
         total = arr.sum()
@@ -1086,6 +1101,7 @@ def prefetch_line(cursor, date_from: date, date_to: date, settings: Dict[str, ob
     cache["params_history"] = params_history(cursor, "szov")
     if not cache["params_history"]:
         return
+    cache["excluded"] = frozenset(_excluded_days(list_adjustments(cursor, "szov")))
     cache["forecasts"] = daily_forecast(cursor, "szov", date_from, date_to)
     cache["forecast_range"] = (date_from, date_to)
     if cache["forecasts"]:
@@ -1137,9 +1153,12 @@ def line_profile_for_date(cursor, forecast_date: date, settings: Dict[str, objec
     params = params_for(cache["params_history"], forecast["made_on"])
     if not params:
         return None
+    if "excluded" not in cache:
+        cache["excluded"] = frozenset(_excluded_days(list_adjustments(cursor, "szov")))
     shares_key = ("shares", forecast_date.isoweekday(), min(forecast_date, datetime.now().date()))
     if shares_key not in cache:
-        cache[shares_key] = hourly_shares(cursor, forecast_date, hours=_cached_hours(cache, forecast_date))
+        cache[shares_key] = hourly_shares(cursor, forecast_date, hours=_cached_hours(cache, forecast_date),
+                                          excluded=cache["excluded"])
     shares = cache[shares_key]
     if not shares:
         return None

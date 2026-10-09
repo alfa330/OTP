@@ -328,8 +328,13 @@ class ForecastEngineTests(unittest.TestCase):
             forecast_engine.add_adjustment(cursor, "szov", {"kind": "exclude", "date_from": "2026-01-01", "date_to": "2026-06-01"}, 1)
         with self.assertRaises(ValueError):
             forecast_engine.add_adjustment(cursor, "nope", {"kind": "exclude", "date_from": "2026-10-13"}, 1)
-        created = forecast_engine.add_adjustment(cursor, "szov", {"kind": "uplift", "date_from": "2026-10-16", "date_to": "2026-10-13", "percent": "15"}, 1)
-        self.assertEqual((created["date_from"], created["date_to"], created["percent"]), ("2026-10-13", "2026-10-16", 15.0))
+        today = date(2026, 10, 9)
+        with self.assertRaises(ValueError):
+            forecast_engine.add_adjustment(cursor, "szov", {"kind": "uplift", "date_from": "2026-10-06", "date_to": "2026-10-08", "percent": 20}, 1, today=today)
+        excluded = forecast_engine.add_adjustment(cursor, "szov", {"kind": "exclude", "date_from": "2026-09-14", "date_to": "2026-09-16"}, 1, today=today)
+        self.assertEqual(excluded["kind"], "exclude")
+        created = forecast_engine.add_adjustment(cursor, "szov", {"kind": "uplift", "date_from": "2026-10-16", "date_to": "2026-10-09", "percent": "15"}, 1, today=today)
+        self.assertEqual((created["date_from"], created["date_to"], created["percent"]), ("2026-10-09", "2026-10-16", 15.0))
 
     def test_volumes_take_closed_days_only(self):
         op = forecast_engine.volume_sql("op")
@@ -430,6 +435,53 @@ class ForecastEngineTests(unittest.TestCase):
         self.assertAlmostEqual(shares[10], 3 / 8)
         self.assertAlmostEqual(shares[12], 5 / 8)
         self.assertAlmostEqual(shares[20], 0.0)
+
+    def test_excluded_days_do_not_shape_the_hours(self):
+        today = datetime.now().date()
+        hours = {}
+        for weeks_back in range(1, 9):
+            d = today - timedelta(days=7 * weeks_back)
+            arr = np.zeros(24)
+            arr[10 if weeks_back != 2 else 20] = 1000.0   # the outage day called at the wrong hour
+            hours[d] = (arr, 0.0)
+        outage = today - timedelta(days=14)
+        far = today + timedelta(days=7)
+        self.assertGreater(forecast_engine.hourly_shares(None, far, hours=hours)[20], 0.1)
+        shares = forecast_engine.hourly_shares(None, far, hours=hours, excluded=[outage])
+        self.assertAlmostEqual(shares[20], 0.0)
+        self.assertAlmostEqual(shares[10], 1.0)
+
+    def test_prefetched_day_runs_no_queries(self):
+        # A prefetched day is computed without a savepoint, so it must not touch the database.
+        day = date(2026, 10, 16)
+        history = [("2026-10-08", {"aht_seconds": 245, "patience_seconds": 210, "made_on": "2026-10-08"})]
+        cursor = mock.MagicMock()
+        cache = {}
+        settings = {"forecast_engine": "timesfm", "ur": 0.95}
+        with mock.patch.object(forecast_engine, "schema_ready", return_value=True), \
+                mock.patch.object(forecast_engine, "params_history", return_value=history), \
+                mock.patch.object(forecast_engine, "daily_forecast", return_value={day: _engine_day(day)}), \
+                mock.patch.object(forecast_engine, "list_adjustments", return_value=[]), \
+                mock.patch.object(forecast_engine, "load_hours", return_value={}), \
+                mock.patch.object(forecast_engine, "hourly_shares", return_value=_shares()):
+            forecast_engine.prefetch_line(cursor, day, day, settings, cache)
+            cursor.reset_mock()
+            with mock.patch.object(forecast_engine, "list_adjustments", side_effect=AssertionError("query")):
+                profile = forecast_engine.line_profile_for_date(cursor, day, settings, cache)
+        self.assertIsNotNone(profile)
+        cursor.execute.assert_not_called()
+
+    def test_line_profile_leaves_excluded_days_out_of_the_shape(self):
+        day = date(2026, 10, 16)
+        history = [("2026-10-08", {"aht_seconds": 245, "patience_seconds": 210, "made_on": "2026-10-08"})]
+        outage = {"kind": "exclude", "date_from": "2026-09-25", "date_to": "2026-09-25", "percent": None, "note": ""}
+        with mock.patch.object(forecast_engine, "schema_ready", return_value=True), \
+                mock.patch.object(forecast_engine, "params_history", return_value=history), \
+                mock.patch.object(forecast_engine, "daily_forecast", return_value={day: _engine_day(day)}), \
+                mock.patch.object(forecast_engine, "list_adjustments", return_value=[outage]), \
+                mock.patch.object(forecast_engine, "hourly_shares", return_value=_shares()) as shares:
+            forecast_engine.line_profile_for_date(mock.MagicMock(), day, {"forecast_engine": "timesfm", "ur": 0.95})
+        self.assertEqual(set(shares.call_args.kwargs["excluded"]), {date(2026, 9, 25)})
 
     def test_incident_wave_in_a_quiet_hour_adds_nobody(self):
         params = {"aht_seconds": 245, "patience_seconds": 210}
@@ -551,6 +603,31 @@ class RunTests(unittest.TestCase):
         result, _, _ = self._run(db, forecaster=_RecordingForecaster(fail=True))
         self.assertEqual((result["status"], result["method"]), ("success", "calendar"))
         self.assertEqual(len(db.executed("INSERT INTO resource_daily_forecasts")), forecast_engine.HORIZON_DAYS)
+
+    def _portal_run(self, db, department="op"):
+        with mock.patch.object(forecast_engine, "ensure_schema_db", return_value=True),                 mock.patch.object(forecast_engine, "refresh_volume") as refresh,                 mock.patch.object(forecast_engine, "load_volume", return_value=self._series()),                 mock.patch.object(forecast_engine, "list_adjustments", return_value=[]),                 mock.patch.object(forecast_engine, "measure_params_from_portal",
+                                  return_value={"aht_seconds": 90.0, "patience_seconds": 60.0}):
+            result = forecast_engine.run_department(db, department, today=self.TODAY, forecaster=_RecordingForecaster())
+        return result, [(c.args[1], c.args[2], c.args[3]) for c in refresh.call_args_list]
+
+    def test_short_stored_history_takes_every_source_day(self):
+        # The bridge holds ОП from March; the first production run stored only the last 60 days.
+        db = _ScriptedDb([
+            ("INSERT INTO resource_forecast_runs", (16,), []),
+            ("SELECT MIN(day)", (self.MADE_ON - timedelta(days=60),), []),
+        ])
+        result, windows = self._portal_run(db, "op")
+        self.assertEqual(result["status"], "success")
+        self.assertIn(("op", self.MADE_ON - timedelta(days=forecast_engine.HISTORY_DAYS - 1), self.MADE_ON), windows)
+
+    def test_long_stored_history_refreshes_only_recent_days(self):
+        db = _ScriptedDb([
+            ("INSERT INTO resource_forecast_runs", (17,), []),
+            ("SELECT MIN(day)", (self.MADE_ON - timedelta(days=600),), []),
+        ])
+        result, windows = self._portal_run(db, "tez")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(windows, [("tez", self.MADE_ON - timedelta(days=60), self.MADE_ON)])
 
     def test_no_schema_no_run(self):
         db = _ScriptedDb()
@@ -783,6 +860,47 @@ class LineIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["calls"], 4000)
         self.assertEqual(summary["below_ar_min_days"], 1)
 
+    def test_summary_takes_the_newest_run(self):
+        def engine_day(day, made_on, aht):
+            return {"weekday": 1, "forecast_date": day, "avg_daily_calls": 1000.0, "daily_fte": 10.0, "aht_seconds": aht,
+                    "hourly_profile": [{"hour": 10, "avg_calls": 1000.0, "aht_seconds": aht, "workload_minutes": 1.0,
+                                        "fte": 10.0, "engine_agents": 9, "engine_sl": 0.85}],
+                    "engine": {"method": "timesfm_dom", "method_label": "TimesFM + цикл месяца", "made_on": made_on,
+                               "calls_low": 800.0, "calls_high": 1200.0, "day_sl": 0.85, "day_ar": 0.04,
+                               "aht_seconds": aht, "patience_seconds": 200.0, "params_measured_on": made_on,
+                               "targets": {"sl_target": 0.8}}}
+        payload = calculations._build_forecast_payload(
+            date(2026, 10, 1), date(2026, 10, 2),
+            [engine_day("2026-10-01", "2026-09-28", 241.0), engine_day("2026-10-02", "2026-10-01", 231.0)], self._settings())
+        summary = payload["forecastEngine"]
+        self.assertEqual((summary["made_on"], summary["aht_seconds"], summary["params_measured_on"]), ("2026-10-01", 231.0, "2026-10-01"))
+
+    def test_overview_fact_of_engine_days_uses_the_same_model(self):
+        from resource_fte import service
+        engine_day, legacy_day = date(2026, 10, 7), date(2026, 10, 6)
+        calls = np.array([0.0] * 7 + [60.0] * 14 + [10.0] * 3)
+
+        def fake_prefetch(cursor, date_from, date_to, settings, cache):
+            # The prefetch holds the weeks BEFORE a forecast day only, not the day itself.
+            cache.update({"forecasts": {engine_day: {}}, "hours": {}, "forecast_range": (date_from, date_to)})
+
+        history = [{"report_date": engine_day.isoformat(), "actual_report_fte_total": 99.0},
+                   {"report_date": legacy_day.isoformat(), "actual_report_fte_total": 88.0}]
+        settings = self._settings()
+        with mock.patch.object(service, "_prefetch_engine_tx", side_effect=fake_prefetch), \
+                mock.patch.object(service, "_engine_load_hours",
+                                  return_value={engine_day: (calls, 0.0), legacy_day: (calls, 0.0)}) as load_hours, \
+                mock.patch.object(service, "_compute_forecast_profile_for_date_tx",
+                                  return_value={"engine": {"aht_seconds": 245.0, "patience_seconds": 210.0}}):
+            service._apply_engine_fact_to_history_tx(mock.MagicMock(), history, settings)
+        expected = forecast_engine.staffing_for_day(list(calls), {"aht_seconds": 245.0, "patience_seconds": 210.0}, settings)
+        self.assertAlmostEqual(history[0]["actual_report_fte_total"], sum(h["agents"] for h in expected["hours"]) / 0.95)
+        self.assertEqual(history[0]["actual_workload_report_fte_total"], 99.0)
+        self.assertEqual(history[1]["actual_report_fte_total"], 88.0)
+        self.assertNotIn("actual_workload_report_fte_total", history[1])
+        # The days' own hours, up to and including the newest history day.
+        self.assertEqual(load_hours.call_args.args[1:], (legacy_day, engine_day + timedelta(days=1)))
+
     def _engine_profile(self, day, shares=None):
         settings = self._settings()
         history = [("2026-10-08", {"aht_seconds": 245, "patience_seconds": 210, "made_on": "2026-10-08"})]
@@ -868,6 +986,21 @@ class FrontendGuardTests(unittest.TestCase):
         self.assertIn("IosDateRangePicker", source)
         self.assertIn("InfoHint", source)
         self.assertIn("IosSegmented", source)
+
+    def test_hook_watches_runs_it_did_not_start_and_guards_double_clicks(self):
+        source = (ROOT / "src/components/resources/ResourceForecastEngine.jsx").read_text(encoding="utf-8")
+        # A run going on when the screen opens (nightly, another planner) is watched until it ends.
+        self.assertIn("if (data?.run_state?.department_busy && !activeRef.current) waitForRunRef.current?.(data.last_run, { quiet: true });", source)
+        # Past the wait limit the screen keeps watching instead of leaving the button busy.
+        self.assertIn("pollRef.current = setTimeout(tick, watching ? QUIET_POLL_MS : RUN_POLL_MS);", source)
+        self.assertIn("if (!enabled || busy || startingRef.current) return;", source)
+        # Only in-range values reach the draft while typing; leaving a field empty restores it.
+        self.assertIn("if (parsed !== null && parsed >= min && parsed <= max) onCommit(toStored(parsed));", source)
+
+    def test_overview_measures_the_fact_of_engine_days_by_the_same_model(self):
+        import inspect
+        from resource_fte import service
+        self.assertIn("_apply_engine_fact_to_history_tx(cursor, history, settings)", inspect.getsource(service.get_resource_overview))
 
     def test_engine_cards_are_line_only(self):
         source = (ROOT / "src/components/resources/ResourceFteView.jsx").read_text(encoding="utf-8")

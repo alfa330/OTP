@@ -14,6 +14,7 @@ from psycopg2.extras import Json, execute_values
 from resource_fte.calculations import (
     _actual_resource_load_for_period_tx,
     _build_forecast_payload,
+    _compute_forecast_profile_for_date_tx,
     _compute_historical_forecast_profile_for_day_tx,
     _compute_period_forecast_profiles_tx,
     _compute_recent_incident_uplift_profile_tx,
@@ -43,7 +44,9 @@ from resource_fte.forecast_engine import (
     FORECAST_ENGINES,
     engine_settings,
     ensure_schema_db as _ensure_forecast_engine_schema_db,
+    load_hours as _engine_load_hours,
     settings_columns_ready as _forecast_engine_columns_ready,
+    staffing_for_day as _engine_staffing_for_day,
 )
 
 
@@ -1628,6 +1631,7 @@ def get_resource_overview(
             }
             for row in cursor.fetchall()
         ]
+        _apply_engine_fact_to_history_tx(cursor, history, settings)
         cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
         loaded_report_dates = [row[0].isoformat() for row in cursor.fetchall()]
 
@@ -1640,6 +1644,37 @@ def get_resource_overview(
         "loaded_report_dates": loaded_report_dates,
         "history": history,
     }
+
+
+def _apply_engine_fact_to_history_tx(cursor, history: List[Dict[str, Any]], settings: Dict[str, Any]) -> None:
+    """«Факт FTE» в истории «Обзора» у дней, посчитанных движком, — та же Erlang A на звонках,
+    что пришли на деле, с AHT и терпением прогноза этого дня. Иначе «Разница FTE» сравнивала
+    бы прогноз Erlang A с чистой нагрузкой разговоров через Occ × UR — разницу моделей, а не
+    ошибку прогноза (на «Прогнозах» факт таких дней уже считается так же)."""
+    if not history:
+        return
+    rows = {_parse_report_date(row["report_date"]): row for row in history}
+    cache: Dict[str, Any] = {}
+    _prefetch_engine_tx(cursor, min(rows), max(rows), settings, cache)
+    forecasts = cache.get("forecasts") or {}
+    if not forecasts:
+        return
+    # Часы самих дней истории: предзагрузка держит только недели ДО прогнозного дня.
+    hours = _engine_load_hours(cursor, min(rows), max(rows) + timedelta(days=1))
+    ur = float(settings.get("ur") or 0.95) or 0.95
+    for day, row in rows.items():
+        if day not in forecasts or day not in hours:
+            continue
+        engine = _compute_forecast_profile_for_date_tx(cursor, day, settings, cache).get("engine")
+        if not engine:
+            continue
+        staff = _engine_staffing_for_day(
+            [float(calls) for calls in hours[day][0]],
+            {"aht_seconds": engine.get("aht_seconds"), "patience_seconds": engine.get("patience_seconds")},
+            settings,
+        )
+        row["actual_workload_report_fte_total"] = row["actual_report_fte_total"]
+        row["actual_report_fte_total"] = sum(item["agents"] for item in staff["hours"]) / ur
 
 
 def get_resource_operator_availability_details(

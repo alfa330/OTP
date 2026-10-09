@@ -15,6 +15,8 @@ import { RfPhoneGroup, RfPhoneGroupAction, RfPhoneNote, RfPhoneRow, RfPhoneToggl
 
 export const ENGINE_DEPARTMENT = 'szov';
 const RUN_POLL_MS = 8000;
+// Чужой пересчёт (ночной, другого планировщика) или свой дольше предела — смотрим реже и молча.
+const QUIET_POLL_MS = 30000;
 // Первый пересчёт СЗоВ ещё и подтягивает два года истории из Oktell с паузами — минуты.
 const RUN_POLL_LIMIT_MS = 8 * 60 * 1000;
 
@@ -58,6 +60,9 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
   const [deletingIds, setDeletingIds] = useState(() => new Set());
   const requestRef = useRef(0);
   const pollRef = useRef(null);
+  const activeRef = useRef(false);
+  const startingRef = useRef(false);
+  const waitForRunRef = useRef(null);
   const generationRef = useRef(0);
   const mountedRef = useRef(false);
   const infoRef = useRef(null);
@@ -86,6 +91,9 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
       const data = response.data || null;
       infoRef.current = data;
       setInfo(data);
+      // Идёт пересчёт, которого этот экран не ждёт (ночной, запущенный другим, или экран
+      // открыли посреди него): следим за ним молча, иначе кнопка так и осталась бы «занята».
+      if (data?.run_state?.department_busy && !activeRef.current) waitForRunRef.current?.(data.last_run, { quiet: true });
       return data;
     } catch (error) {
       // Прежнее состояние остаётся: пропавший список поправок толкал бы завести их заново.
@@ -99,6 +107,7 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      activeRef.current = false;
       generationRef.current += 1;
       if (pollRef.current) clearTimeout(pollRef.current);
     };
@@ -109,14 +118,18 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
 
   // Ждём пересчёт, который начнётся после `previousRun`. Новый вызов отменяет прежнее
   // ожидание (поколение), уход с экрана — тоже: ни тостов, ни запросов после него.
-  const waitForRun = useCallback((previousRun) => {
+  // quiet — чужой пересчёт: без тостов, только обновить цифры, когда сервер освободится.
+  const waitForRun = useCallback((previousRun, { quiet = false } = {}) => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     if (pollRef.current) clearTimeout(pollRef.current);
+    activeRef.current = true;
     const started = Date.now();
-    setWaiting(true);
+    let watching = quiet;
+    if (!watching) setWaiting(true);
     const finish = (message, tone) => {
       pollRef.current = null;
+      activeRef.current = false;
       setWaiting(false);
       if (message) notifyRef.current?.(message, tone);
       onChangedRef.current?.();
@@ -127,31 +140,45 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
       if (data) {
         const run = data.last_run;
         const departmentBusy = Boolean(data.run_state?.department_busy);
-        const newRun = Boolean(run) && (run.id !== previousRun?.id || previousRun?.status === 'running');
-        if (!departmentBusy && newRun && run.status !== 'running') {
-          if (run.status === 'success') {
-            finish(run.method === 'calendar' ? 'Прогноз пересчитан календарной моделью: TimesFM был недоступен' : 'Прогноз пересчитан');
-          } else {
-            finish(run.detail || 'Пересчёт прогноза не удался', 'error');
+        if (watching) {
+          if (!departmentBusy) {
+            finish();
+            return;
           }
-          return;
-        }
-        if (!departmentBusy && !newRun) {
-          finish('Пересчёт не запустился — попробуйте ещё раз', 'error');
-          return;
+        } else {
+          const newRun = Boolean(run) && (run.id !== previousRun?.id || previousRun?.status === 'running');
+          if (!departmentBusy && newRun && run.status !== 'running') {
+            if (run.status === 'success') {
+              finish(run.method === 'calendar' ? 'TimesFM был недоступен — посчитан запасной прогноз, подробности в карточке' : 'Прогноз пересчитан');
+            } else {
+              finish(run.detail || 'Пересчёт прогноза не удался', 'error');
+            }
+            return;
+          }
+          if (!departmentBusy && !newRun) {
+            finish('Пересчёт не запустился — попробуйте ещё раз', 'error');
+            return;
+          }
         }
       }
-      if (Date.now() - started > RUN_POLL_LIMIT_MS) {
-        finish('Пересчёт ещё идёт — цифры обновятся, когда он закончится');
-        return;
+      if (!watching && Date.now() - started > RUN_POLL_LIMIT_MS) {
+        // Дольше обычного: сказать один раз и дальше следить молча — цифры обновятся
+        // сами, когда пересчёт закончится, а кнопка освободится.
+        notifyRef.current?.('Пересчёт ещё идёт — цифры обновятся, когда он закончится');
+        setWaiting(false);
+        watching = true;
       }
-      pollRef.current = setTimeout(tick, RUN_POLL_MS);
+      pollRef.current = setTimeout(tick, watching ? QUIET_POLL_MS : RUN_POLL_MS);
     };
-    pollRef.current = setTimeout(tick, RUN_POLL_MS);
+    pollRef.current = setTimeout(tick, watching ? QUIET_POLL_MS : RUN_POLL_MS);
   }, []);
+  useEffect(() => { waitForRunRef.current = waitForRun; }, [waitForRun]);
 
   const run = useCallback(async () => {
-    if (!enabled || busy) return;
+    // Второй клик, пока первый запрос ещё в пути, — не второй пересчёт (и не второй вызов TimesFM).
+    if (!enabled || busy || startingRef.current) return;
+    startingRef.current = true;
+    setWaiting(true);
     const previousRun = infoRef.current?.last_run || null;
     try {
       const response = await axios.post(`${apiRoot}${apiPrefix}/engine/run`, { department: ENGINE_DEPARTMENT }, {
@@ -162,7 +189,10 @@ export function useForecastEngine({ enabled, apiRoot, apiPrefix, buildHeaders, n
         : 'Пересчёт прогноза запущен');
       waitForRun(previousRun);
     } catch (error) {
+      setWaiting(false);
       notifyRef.current?.(error?.response?.data?.error || 'Не удалось запустить пересчёт', 'error');
+    } finally {
+      startingRef.current = false;
     }
   }, [apiPrefix, apiRoot, busy, enabled, waitForRun]);
 
@@ -253,32 +283,41 @@ const toFieldText = (value, scale) => {
 
 /*
  * Поле с границами. Пока человек печатает, текст его — не переписываем («2,25» не
- * превращается в «2,3» на полуслове); в черновик уходит уже обрезанное границами
- * значение, так что сохранить «150 %» нельзя. При уходе с поля текст выравнивается.
+ * превращается в «2,3» на полуслове), а в черновик уходят только значения в границах:
+ * «9» на пути к «95» не должно стать сохранённым SL 50 %. При уходе с поля число вне
+ * границ подтягивается к ним, а пустое или битое — возвращает то, что было до правки.
  */
 function useBoundedField(value, scale, min, max, onCommit) {
   const [text, setText] = useState(() => toFieldText(value, scale));
   const editingRef = useRef(false);
+  const beforeRef = useRef(value);
   useEffect(() => {
     if (!editingRef.current) setText(toFieldText(value, scale));
   }, [value, scale]);
-  const commit = (raw, final) => {
+  const parse = (raw) => {
     const cleaned = String(raw ?? '').replace(',', '.').trim();
     const parsed = Number(cleaned);
-    if (cleaned === '' || !Number.isFinite(parsed)) {
-      if (final) setText(toFieldText(value, scale));
-      return;
-    }
-    const clamped = Math.min(max, Math.max(min, parsed));
-    const stored = scale === 1 ? Math.round(clamped) : clamped / scale;
-    onCommit(stored);
-    if (final) setText(toFieldText(stored, scale));
+    return cleaned === '' || !Number.isFinite(parsed) ? null : parsed;
   };
+  const toStored = (number) => (scale === 1 ? Math.round(number) : number / scale);
   return {
     value: text,
-    onFocus: () => { editingRef.current = true; },
-    onChange: (raw) => { setText(raw); commit(raw, false); },
-    onBlur: (raw) => { editingRef.current = false; commit(raw, true); },
+    onFocus: () => {
+      editingRef.current = true;
+      beforeRef.current = value;
+    },
+    onChange: (raw) => {
+      setText(raw);
+      const parsed = parse(raw);
+      if (parsed !== null && parsed >= min && parsed <= max) onCommit(toStored(parsed));
+    },
+    onBlur: (raw) => {
+      editingRef.current = false;
+      const parsed = parse(raw);
+      const stored = parsed === null ? beforeRef.current : toStored(Math.min(max, Math.max(min, parsed)));
+      onCommit(stored);
+      setText(toFieldText(stored, scale));
+    },
   };
 }
 
@@ -430,7 +469,7 @@ const engineStatusLines = (summary, engine) => {
   const lastSuccess = engine?.last_success;
   const legacyDays = summary ? Math.max(0, Number(summary.period_days || 0) - Number(summary.days || 0)) : 0;
   if (summary && Number(summary.below_ar_min_days) > 0) {
-    lines.push(['slate', `В ${ruNumber(summary.below_ar_min_days)} дн. потерь по плану меньше ${ruPercent(summary.targets?.ar_min, 0)}: людей с запасом — держит предел занятости или SL часа.`]);
+    lines.push(['slate', `В ${ruNumber(summary.below_ar_min_days)} дн. потерь по плану меньше ${ruPercent(summary.targets?.ar_min)}: людей с запасом — держит предел занятости или SL часа.`]);
   }
   if (legacyDays > 0) {
     lines.push(['amber', `${ruNumber(legacyDays)} дн. периода посчитаны прежним способом: на них прогноза TimesFM ещё нет.`]);
@@ -438,8 +477,12 @@ const engineStatusLines = (summary, engine) => {
   if (lastRun?.status === 'failed') {
     lines.push(['rose', `Последний пересчёт (${ruDate(lastRun.made_on)}) не удался: ${lastRun.detail || 'причина не записана'}.`]);
   }
-  if (lastSuccess?.method === 'calendar') {
-    lines.push(['amber', `TimesFM был недоступен — прогноз посчитан календарной моделью. ${lastSuccess.detail || ''}`.trim()]);
+  // О запасном прогнозе говорим по тому, что на экране: после неудачной ночи показывается
+  // прогноз TimesFM на день-два старше, а не календарный.
+  if (summary?.method === 'calendar') {
+    lines.push(['amber', `TimesFM был недоступен — прогноз посчитан календарной моделью. ${lastSuccess?.detail || ''}`.trim()]);
+  } else if (summary && lastSuccess?.method === 'calendar') {
+    lines.push(['amber', `Пересчёт ${ruDate(lastSuccess.made_on)} прошёл без TimesFM — показан прогноз TimesFM по данным на ${ruDate(summary.made_on)}.`]);
   }
   return lines;
 };
@@ -452,7 +495,7 @@ const LINE_TONES = {
 
 const callsLabel = (summary) => (
   Number(summary?.days) < Number(summary?.period_days)
-    ? `Звонков за ${ruNumber(summary.days)} дн. TimesFM`
+    ? `Звонков за ${ruNumber(summary.days)} дн. ${summary.method === 'calendar' ? 'календарной модели' : 'TimesFM'}`
     : 'Звонков за период'
 );
 
@@ -522,8 +565,8 @@ export function EngineForecastCard({ summary, engine, mode, busy, deletingIds, o
       {summary ? (
         <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
           <Stat label={callsLabel(summary)} value={ruNumber(summary.calls)} hint={`коридор ${ruNumber(summary.calls_low)}–${ruNumber(summary.calls_high)}`} />
-          <Stat label={`SL за ${ruNumber(summary.targets?.sl_seconds)} с, ожидаемый`} value={ruPercent(summary.period_sl)} hint={`цель от ${ruPercent(summary.targets?.sl_target, 0)}`} />
-          <Stat label="AR, ожидаемый" value={ruPercent(summary.period_ar)} hint={`цель ${ruPercent(summary.targets?.ar_min, 0)}–${ruPercent(summary.targets?.ar_max, 0)}`} />
+          <Stat label={`SL за ${ruNumber(summary.targets?.sl_seconds)} с, ожидаемый`} value={ruPercent(summary.period_sl)} hint={`цель от ${ruPercent(summary.targets?.sl_target)}`} />
+          <Stat label="AR, ожидаемый" value={ruPercent(summary.period_ar)} hint={`цель ${ruPercent(summary.targets?.ar_min)}–${ruPercent(summary.targets?.ar_max)}`} />
           <Stat label="AHT · терпение" value={`${ruNumber(summary.aht_seconds)} с · ${summary.patience_seconds ? `${ruNumber(summary.patience_seconds)} с` : '—'}`} hint={summary.params_measured_on ? `замер ${ruDate(summary.params_measured_on)}` : null} />
         </div>
       ) : null}
@@ -561,7 +604,8 @@ export function EngineForecastCard({ summary, engine, mode, busy, deletingIds, o
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <IosSegmented value={kind} onChange={setKind} ariaLabel="Вид поправки"
             options={[{ value: 'uplift', label: 'Событие' }, { value: 'exclude', label: 'Исключить дни' }]} />
-          <IosDateRangePicker from={range?.from} to={range?.to} onChange={setRange} presets={presets} portal />
+          <IosDateRangePicker from={range?.from} to={range?.to} onChange={setRange} presets={presets} portal
+            min={kind === 'uplift' ? isoDate(new Date()) : undefined} />
           {kind === 'uplift' ? (
             <input type="number" step={5} min={-90} max={300} value={percent} placeholder="+%"
               onChange={(event) => setPercent(event.target.value)} className={`${inputClass} w-24`} aria-label="Процент поправки" />
@@ -595,7 +639,7 @@ export function EnginePhoneForecast({ summary, engine, mode, busy, deletingIds, 
             <RfPhoneRow title={callsLabel(summary)} subtitle={`коридор ${ruNumber(summary.calls_low)}–${ruNumber(summary.calls_high)}`}
               value={ruNumber(summary.calls)} valueClassName="font-semibold text-slate-900" />
             <RfPhoneRow title="SL · AR, ожидаемые"
-              subtitle={`цель SL от ${ruPercent(summary.targets?.sl_target, 0)}, AR ${ruPercent(summary.targets?.ar_min, 0)}–${ruPercent(summary.targets?.ar_max, 0)}`}
+              subtitle={`цель SL от ${ruPercent(summary.targets?.sl_target)}, AR ${ruPercent(summary.targets?.ar_min)}–${ruPercent(summary.targets?.ar_max)}`}
               value={`${ruPercent(summary.period_sl)} · ${ruPercent(summary.period_ar)}`} />
           </>
         ) : (

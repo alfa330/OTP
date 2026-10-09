@@ -4745,7 +4745,7 @@ const ResourceFteView = ({
   let lineForecastText = cfg.forecastText;
   if (engineSummary) {
     lineForecastText = Number(engineSummary.days) < Number(engineSummary.period_days)
-      ? 'Дни с прогнозом TimesFM: люди по часам — Erlang A под цели SL и AR. Остальные дни — по двум историческим датам (−21 и −14 дней).'
+      ? `Дни с прогнозом ${engineSummary.method === 'calendar' ? 'календарной модели' : 'TimesFM'}: люди по часам — Erlang A под цели SL и AR. Остальные дни — по двум историческим датам (−21 и −14 дней).`
       : `Звонки — ${engineSummary.method_label}, люди по часам — Erlang A под цели SL и AR.`;
   }
   const selectedFileName = uploadFile?.name || 'Файл не выбран';
@@ -9279,7 +9279,7 @@ const ResourceFteView = ({
                                     className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-semibold text-blue-700 ring-1 ring-inset ring-blue-200"
                                     title={`${profile.engine.method_label}; коридор ${formatInt(profile.engine.calls_low)}–${formatInt(profile.engine.calls_high)}`}
                                   >
-                                    TimesFM
+                                    {profile.engine.method === 'calendar' ? 'Календарь' : 'TimesFM'}
                                   </span>
                                 ) : cfg.hasHistoryPairs ? (
                                   <span

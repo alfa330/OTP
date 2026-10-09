@@ -913,18 +913,20 @@ def _build_forecast_payload(
     engine_days = [day for day in days if day.get("engine")]
     forecast_engine_summary = None
     if engine_days:
-        first = engine_days[0]["engine"]
+        # Способ, AHT и терпение — того прогона, чьим прогнозом посчитано большинство будущих
+        # дней, то есть самого свежего: у прошедших дней периода свои, более старые замеры.
+        newest = max(engine_days, key=lambda day: day["engine"].get("made_on") or "")["engine"]
         calls_total = sum(_to_float(day.get("forecast_calls")) for day in engine_days)
         forecast_engine_summary = {
             "days": len(engine_days),
             "period_days": len(days),
-            "method": first.get("method"),
-            "method_label": first.get("method_label"),
-            "made_on": max(day["engine"].get("made_on") or "" for day in engine_days),
-            "aht_seconds": first.get("aht_seconds"),
-            "patience_seconds": first.get("patience_seconds"),
-            "params_measured_on": first.get("params_measured_on"),
-            "targets": first.get("targets"),
+            "method": newest.get("method"),
+            "method_label": newest.get("method_label"),
+            "made_on": newest.get("made_on"),
+            "aht_seconds": newest.get("aht_seconds"),
+            "patience_seconds": newest.get("patience_seconds"),
+            "params_measured_on": newest.get("params_measured_on"),
+            "targets": newest.get("targets"),
             "calls": round(calls_total, 1),
             "calls_low": round(sum(_to_float(day["engine"].get("calls_low")) for day in engine_days), 1),
             "calls_high": round(sum(_to_float(day["engine"].get("calls_high")) for day in engine_days), 1),
