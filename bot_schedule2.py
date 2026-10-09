@@ -13392,6 +13392,191 @@ def api_resource_fte_recalculate():
         return _resource_fte_error_response(error)
 
 
+# ── Прогноз звонков по отделам (TimesFM в BigQuery) и люди по Erlang A ─────────────────
+# Движок — resource_fte/forecast_engine.py: ночной прогон на 42 дня вперёд по СЗоВ, ОП и
+# Тез КЦ, ручной запуск, поправки «исключить дни» / «событие +N %».
+# Свой поток: в прогоне паузы между запросами к Oktell и ожидание BigQuery, общему пулу
+# бота (4 потока) их держать незачем.
+resource_forecast_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='resource-forecast')
+
+
+def _resource_engine_oktell_query():
+    return _oktell_query if _oktell_api_ready() else None
+
+
+def _resource_engine_run(departments, triggered_by):
+    from resource_fte import forecast_engine
+    started = time.time()
+    results = forecast_engine.run_all(db, oktell_query=_resource_engine_oktell_query(),
+                                      triggered_by=triggered_by,
+                                      departments=tuple(departments or forecast_engine.DEPARTMENTS))
+    logging.info(
+        "Resource forecast run (%s) in %.0fs: %s", triggered_by, time.time() - started,
+        ", ".join(f"{item.get('department')}={item.get('status')}"
+                  + (f"/{item.get('method')}" if item.get('method') else "")
+                  + (f" ({item.get('error')})" if item.get('error') else "")
+                  for item in results),
+    )
+    return results
+
+
+def _resource_engine_run_in_background(departments, user_id):
+    """Ставит прогон и возвращает, что с ним: 'started' или 'queued' (идёт другой прогон —
+    этот отдел пересчитается сразу за ним, запрос не теряется)."""
+    from resource_fte import forecast_engine
+    status = "queued" if forecast_engine.run_state()["running"] else "started"
+    triggered_by = f'user:{user_id}' if user_id else 'manual'
+
+    def _run():
+        try:
+            _resource_engine_run(departments, triggered_by)
+        except Exception:
+            logging.exception("resource forecast manual run failed")
+
+    threading.Thread(target=_run, name='resource-forecast-run', daemon=True).start()
+    return status
+
+
+def _resource_engine_schema_response():
+    from resource_fte import forecast_engine
+    if forecast_engine.ensure_schema_db(db):
+        return None
+    return jsonify({"error": "Таблицы прогноза ещё не созданы — повторите через несколько минут"}), 503
+
+
+@app.route('/api/resource_fte/engine', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    from resource_fte.common import _parse_report_date
+    department = (request.args.get('department') or 'szov').strip().lower()
+    if department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    today = datetime.now().date()
+    try:
+        date_from = _parse_report_date(request.args.get('date_from')) if request.args.get('date_from') else today
+        date_to = _parse_report_date(request.args.get('date_to')) if request.args.get('date_to') else today + timedelta(days=27)
+    except ValueError:
+        return jsonify({"error": "Некорректная дата — нужен формат ГГГГ-ММ-ДД"}), 400
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    if (date_to - date_from).days > 62:
+        return jsonify({"error": "Период не длиннее 63 дней"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            forecast = forecast_engine.daily_forecast(cursor, department, date_from, date_to)
+            cursor.execute(
+                "SELECT day, offered, answered FROM resource_daily_volume WHERE department = %s AND day BETWEEN %s AND %s",
+                (department, date_from, date_to),
+            )
+            actual = {row[0].isoformat(): {"offered": row[1], "answered": row[2]} for row in cursor.fetchall()}
+            payload = {
+                "department": department,
+                "departments": [{"key": key, "label": cfg["label"], "method": cfg["method"],
+                                 "method_label": forecast_engine.METHOD_LABELS[cfg["method"]]}
+                                for key, cfg in forecast_engine.DEPARTMENTS.items()],
+                "last_run": forecast_engine.latest_run(cursor, department, successful=False),
+                "last_success": forecast_engine.latest_run(cursor, department, successful=True),
+                "params": forecast_engine.latest_params(cursor, department),
+                "adjustments": forecast_engine.list_adjustments(cursor, department),
+                "days": [{**item, "actual": actual.get(day.isoformat())} for day, item in sorted(forecast.items())],
+            }
+        run_state = forecast_engine.run_state()
+        payload["run_state"] = {
+            "running": run_state["running"],
+            "department_busy": run_state["current"] == department or department in run_state["pending"],
+        }
+        return jsonify({"status": "success", **payload}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/engine/run', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_run():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    payload = request.get_json(silent=True) or {}
+    department = str(payload.get('department') or '').strip().lower()
+    if department and department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    departments = [department] if department else list(forecast_engine.DEPARTMENTS)
+    status = _resource_engine_run_in_background(departments, requester_id)
+    return jsonify({"status": status, "departments": departments}), 202
+
+
+@app.route('/api/resource_fte/engine/adjustments', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_adjustments():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    payload = request.get_json(silent=True) or {}
+    department = str(payload.get('department') or 'szov').strip().lower()
+    if department not in forecast_engine.DEPARTMENTS:
+        return jsonify({"error": "Неизвестный отдел"}), 400
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            created = forecast_engine.add_adjustment(cursor, department, payload, requester_id)
+    except ValueError as error:
+        # add_adjustment поднимает ValueError только с текстом для человека.
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+    # Исключённые дни меняют вход модели — прогноз отдела пересчитывается сразу.
+    # Поправка «событие» применяется при чтении, пересчёт ей не нужен.
+    run_status = None
+    if created["kind"] == "exclude":
+        run_status = _resource_engine_run_in_background([department], requester_id)
+    return jsonify({"status": "success", "adjustment": created, "run": run_status}), 200
+
+
+@app.route('/api/resource_fte/engine/adjustments/<int:adjustment_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_engine_adjustment_delete(adjustment_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import forecast_engine
+    schema_error = _resource_engine_schema_response()
+    if schema_error is not None:
+        return schema_error
+    try:
+        with db._get_cursor() as cursor:
+            removed = forecast_engine.delete_adjustment(cursor, adjustment_id)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+    if removed is None:
+        return jsonify({"error": "Поправка не найдена"}), 404
+    run_status = None
+    if removed["kind"] == "exclude":
+        run_status = _resource_engine_run_in_background([removed["department"]], requester_id)
+    return jsonify({"status": "success", "run": run_status}), 200
+
+
 @app.route('/api/shift_auction/test_access', methods=['GET', 'PUT', 'OPTIONS'])
 @require_api_key
 def api_shift_auction_test_access():
@@ -70636,6 +70821,33 @@ if __name__ == '__main__':
         )
     else:
         logging.info("Oktell resource sync is disabled by OKTELL_RESOURCE_SYNC_ENABLED")
+
+    # Прогноз звонков отделов на 42 дня (TimesFM в BigQuery) — после ночной синхронизации
+    # Oktell (05:40) и после того, как мост и зеркало Binotel закрыли вчерашние сутки.
+    if _env_bool('RESOURCE_FORECAST_ENABLED', True):
+        def _resource_forecast_schema():
+            from resource_fte import forecast_engine
+            forecast_engine.ensure_schema_db(db)
+
+        # Таблицы движка — при старте, своей транзакцией и не задерживая запуск.
+        resource_forecast_pool.submit(_resource_forecast_schema)
+
+        async def run_resource_forecast_job():
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(resource_forecast_pool, _resource_engine_run, None, 'scheduler')
+
+        scheduler.add_job(
+            run_resource_forecast_job,
+            CronTrigger(
+                hour=_env_int('RESOURCE_FORECAST_NIGHTLY_HOUR', 6, minimum=0, maximum=23),
+                minute=_env_int('RESOURCE_FORECAST_NIGHTLY_MINUTE', 20, minimum=0, maximum=59),
+                timezone=ZoneInfo(OKTELL_SYNC_TIMEZONE)
+            ),
+            id='resource_forecast_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
 
     # Ретеншн сырых событий статусов: удаляем operator_status_events старше горизонта хранения
     # (STATUS_EVENTS_RETENTION_DAYS, по умолчанию 120 дней). Сегменты (источник отчётов) не трогаем;

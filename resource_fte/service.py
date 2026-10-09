@@ -19,6 +19,7 @@ from resource_fte.calculations import (
     _compute_recent_incident_uplift_profile_tx,
     _compute_week_forecast_profiles_tx,
     _next_week_start_date,
+    _prefetch_engine_tx,
     _week_start_date,
 )
 from resource_fte.common import (
@@ -37,6 +38,13 @@ from resource_fte.schedule_generation import (
     _normalize_shift_templates,
     get_resource_shift_templates,
 )
+from resource_fte.forecast_engine import (
+    ENGINE_SETTING_DEFAULTS,
+    FORECAST_ENGINES,
+    engine_settings,
+    ensure_schema_db as _ensure_forecast_engine_schema_db,
+    settings_columns_ready as _forecast_engine_columns_ready,
+)
 
 
 DEFAULT_RESOURCE_SETTINGS = {
@@ -48,9 +56,11 @@ DEFAULT_RESOURCE_SETTINGS = {
     "fte_rounding": "none",
     "shift_rounding": "ceil",
     "selected_direction_ids": [],
+    **ENGINE_SETTING_DEFAULTS,
 }
 
 ROUNDING_MODES = {"none", "ceil", "floor", "round"}
+ENGINE_SETTING_KEYS = ("forecast_engine", "sl_target", "sl_seconds", "ar_min", "ar_max", "hour_sl_floor", "max_occupancy")
 
 HEADER_ALIASES = {
     "report_date": ["дата", "date", "день"],
@@ -137,15 +147,19 @@ def _as_settings(row: Optional[Iterable[Any]]) -> Dict[str, Any]:
         "fte_rounding",
         "shift_rounding",
         "selected_direction_ids",
+        *ENGINE_SETTING_KEYS,
     ]
     settings = dict(DEFAULT_RESOURCE_SETTINGS)
     for key, value in zip(keys, row):
         if key == "selected_direction_ids":
             settings[key] = _coerce_int_list(value)
+        elif key == "forecast_engine":
+            settings[key] = value
         else:
             settings[key] = value if key.endswith("_rounding") else _to_float(value, settings[key])
     settings["fte_rounding"] = settings.get("fte_rounding") if settings.get("fte_rounding") in ROUNDING_MODES else "none"
     settings["shift_rounding"] = settings.get("shift_rounding") if settings.get("shift_rounding") in ROUNDING_MODES else "ceil"
+    settings.update(engine_settings(settings))
     return settings
 
 
@@ -174,11 +188,22 @@ def _coerce_int_list(value: Any) -> List[int]:
 
 
 def _get_settings_tx(cursor) -> Dict[str, Any]:
+    # Колонки движка прогноза добавляет его модуль своей транзакцией (при старте, перед
+    # прогоном и сохранением настроек), а не database.py: общий монолит правят параллельно.
+    # Здесь — только чтение каталога: колонок ещё нет — читаем прежние поля, цели берутся
+    # по умолчанию, а линия считается прежним правилом. Раздел работать не перестаёт.
+    engine_columns = _forecast_engine_columns_ready(cursor)
     cursor.execute(
         """
         SELECT answer_rate, occ, ur, shrinkage_coeff,
                weekly_hours_per_operator, fte_rounding, shift_rounding,
                selected_direction_ids
+        """
+        + (""",
+               forecast_engine, sl_target, sl_seconds, ar_min, ar_max,
+               hour_sl_floor, max_occupancy
+        """ if engine_columns else "")
+        + """
         FROM resource_settings
         WHERE id = 1
         """
@@ -199,7 +224,8 @@ def get_resource_hourly_forecast(db, date_from, date_to) -> Dict[str, Dict[int, 
     ёмкость штата, доступность операторов и всплеск инцидентов почасовым таблицам не нужны,
     а за месяц они делают обзор самым дорогим запросом раздела.
     День без истории (нет отчётов ни за −21, ни за −14 дней) приходит пустым: прогноза
-    нет, и ноль в таблице выдавал бы себя за посчитанный."""
+    нет, и ноль в таблице выдавал бы себя за посчитанный. День, посчитанный движком
+    (TimesFM + Erlang A), прогноз имеет — своих «исторических дат» у него нет."""
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
         profiles = _compute_period_forecast_profiles_tx(cursor, date_from, date_to, settings)
@@ -208,7 +234,7 @@ def get_resource_hourly_forecast(db, date_from, date_to) -> Dict[str, Dict[int, 
         day_key = str(profile.get("forecast_date") or "")
         if not day_key:
             continue
-        if not profile.get("history_dates"):
+        if not profile.get("history_dates") and not profile.get("engine"):
             result[day_key] = {}
             continue
         result[day_key] = {
@@ -230,6 +256,16 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
             next_settings[key] = payload.get(key)
     if "selected_direction_ids" in payload:
         next_settings["selected_direction_ids"] = _coerce_int_list(payload.get("selected_direction_ids"))
+    if "forecast_engine" in payload and str(payload.get("forecast_engine")) in FORECAST_ENGINES:
+        next_settings["forecast_engine"] = str(payload.get("forecast_engine"))
+    for key in ("sl_target", "ar_min", "ar_max", "hour_sl_floor", "max_occupancy"):
+        if key in payload:
+            value = _to_float(payload.get(key), current[key])
+            # Экран может прислать проценты (80) — храним долю (0,80).
+            next_settings[key] = value / 100 if value > 1 else value
+    if "sl_seconds" in payload:
+        next_settings["sl_seconds"] = _to_float(payload.get("sl_seconds"), current["sl_seconds"])
+    next_settings.update(engine_settings(next_settings))
 
     if next_settings["answer_rate"] > 1:
         next_settings["answer_rate"] = next_settings["answer_rate"] / 100
@@ -237,6 +273,9 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
         next_settings[ratio_key] = min(max(float(next_settings[ratio_key]), 0.0001), 1.0)
     next_settings["weekly_hours_per_operator"] = max(1.0, float(next_settings["weekly_hours_per_operator"]))
 
+    # Колонки целей движка — своей транзакцией до сохранения. Не создались (база занята,
+    # нет прав) — сохраняем прежние поля, а не роняем сохранение целиком.
+    _ensure_forecast_engine_schema_db(db)
     with db._get_cursor() as cursor:
         if next_settings["selected_direction_ids"]:
             cursor.execute(
@@ -253,6 +292,7 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
                 direction_id for direction_id in next_settings["selected_direction_ids"]
                 if direction_id in valid_direction_ids
             ]
+        engine_columns = _forecast_engine_columns_ready(cursor)
         cursor.execute(
             """
             UPDATE resource_settings
@@ -264,6 +304,17 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
                 fte_rounding = %s,
                 shift_rounding = %s,
                 selected_direction_ids = %s,
+            """
+            + ("""
+                forecast_engine = %s,
+                sl_target = %s,
+                sl_seconds = %s,
+                ar_min = %s,
+                ar_max = %s,
+                hour_sl_floor = %s,
+                max_occupancy = %s,
+            """ if engine_columns else "")
+            + """
                 updated_by = %s,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
@@ -277,6 +328,15 @@ def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int]
                 next_settings["fte_rounding"],
                 next_settings["shift_rounding"],
                 Json(next_settings["selected_direction_ids"]),
+                *((
+                    next_settings["forecast_engine"],
+                    next_settings["sl_target"],
+                    int(next_settings["sl_seconds"]),
+                    next_settings["ar_min"],
+                    next_settings["ar_max"],
+                    next_settings["hour_sl_floor"],
+                    next_settings["max_occupancy"],
+                ) if engine_columns else ()),
                 user_id,
             ),
         )
@@ -1069,8 +1129,9 @@ def _apply_profile_forecast_to_day_tx(cursor, report_date, profile: Dict[str, An
     _refresh_daily_summary_tx(cursor, report_date)
 
 
-def _refresh_historical_forecast_for_day_tx(cursor, report_date, settings: Dict[str, Any]) -> Dict[str, Any]:
-    profile = _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings)
+def _refresh_historical_forecast_for_day_tx(cursor, report_date, settings: Dict[str, Any],
+                                            engine_cache: Optional[dict] = None) -> Dict[str, Any]:
+    profile = _compute_historical_forecast_profile_for_day_tx(cursor, report_date, settings, engine_cache)
     _apply_profile_forecast_to_day_tx(cursor, report_date, profile)
     return profile
 
@@ -1078,8 +1139,14 @@ def _refresh_historical_forecast_for_day_tx(cursor, report_date, settings: Dict[
 def _refresh_all_historical_forecasts_tx(cursor, settings: Dict[str, Any]) -> None:
     cursor.execute("SELECT report_date FROM daily_resource_summary ORDER BY report_date ASC")
     report_dates = [row[0] for row in cursor.fetchall()]
+    # Каждый импорт Oktell пересчитывает все прошлые дни: данные движка на весь диапазон —
+    # несколькими запросами, а не по четыре на день; расстановка Erlang A прошлого дня
+    # запоминается по своим входам и при следующем импорте не считается заново.
+    engine_cache: dict = {}
+    if report_dates:
+        _prefetch_engine_tx(cursor, report_dates[0], report_dates[-1], settings, engine_cache)
     for report_date in report_dates:
-        _refresh_historical_forecast_for_day_tx(cursor, report_date, settings)
+        _refresh_historical_forecast_for_day_tx(cursor, report_date, settings, engine_cache)
 
 
 def _resource_schedule_direction_ids_from_settings(settings: Optional[Dict[str, Any]]) -> List[int]:
