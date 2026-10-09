@@ -44,6 +44,9 @@ HTML-200 у Laravel, обрыв посреди пагинации, 422 на кр
 import logging
 from datetime import date, datetime, timedelta
 
+from cdr.leads import lead_phones
+from test_numbers import keys as test_keys
+
 from . import metrics, operator_match, queries, sources
 from .schema import (DIRECTION_CODES, SOURCE_AMO, SOURCE_CRM_PAID_HIRE,
                      SOURCE_CRM_STREAM, SOURCE_CRM_TICKETS, SOURCE_MANUAL,
@@ -418,6 +421,14 @@ def _daily_rows(cursor, direction_code, day_from, day_to, lead_rows, chat_rows, 
     return out
 
 
+def _without_test_leads(cursor, lead_rows):
+    """Лиды без тех, у кого все номера — из реестра тестовых (test_numbers)."""
+    test_numbers = test_keys.load_keys(cursor)
+    if not test_numbers:
+        return lead_rows
+    return [row for row in lead_rows if not test_keys.all_test(lead_phones(row), test_numbers)]
+
+
 # ── Основной проход ──────────────────────────────────────────────────────────
 
 def sync_direction(db, direction_code, day_from, day_to, force=False, started_by=None,
@@ -486,6 +497,11 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
                 total += sum(row['tickets'] for row in ticket_rows)
 
             summary['leads_seen'] = total
+
+            # Лид тестировщика (все его номера — из реестра test_numbers) в воронку не
+            # идёт: ни в итоги и причины, ни в снимок, по которому открываются списки
+            # за цифрой, — иначе цифра и список за ней разошлись бы.
+            lead_rows = _without_test_leads(cursor, lead_rows)
 
             if seen:
                 queries.touch_operator_map(cursor, source, seen, direction_code)
@@ -650,6 +666,7 @@ def sync_amo_changes(db, since=None, started_by=None):
                 owner_map = queries.resolve_operator_map(cursor, source)
                 rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map,
                                               loss_reasons, contact_phones)
+                rows = _without_test_leads(cursor, rows)
                 if seen:
                     queries.touch_operator_map(cursor, source, seen, direction_code)
                 summary['stage_rows'] = queries.log_lead_stages(cursor, rows)

@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 from psycopg2.extras import Json, execute_values
 
+from test_numbers import keys as test_keys
+
 from . import access, queue_facts, sync, touches as touches_mod
 from .schema import RETENTION_DAYS
 
@@ -509,7 +511,10 @@ _FILTER_SQL = """
                AND (t.call_type = 'Исходящий' OR t.queue = '')
           THEN t.line_number = ANY(%(park_lines)s)
           ELSE split_part(t.queue, ',', 1) = ANY(%(park_queues)s) END)
-"""
+""" + "   AND " + test_keys.sql_not_test('t.phone', digits=True) + "\n"
+# Номера «Реестра тестовых номеров» (test_numbers) не входят в раздел вовсе: ни в
+# итоги, ни в таблицу, ни в выгрузку. Тесты видны в самом реестре. Номер касания —
+# ровно десять цифр, поэтому сравнение без регулярного выражения.
 # Условие по парку — то же правило, что cdr/lines.py:park_queue: входящий называется
 # по своей очереди, исходящий и бесочередный — по очереди своего номера. Списки
 # готовит lines.park_filter; пустой список — `= ANY('{}')`, то есть «ни одного».
@@ -768,6 +773,7 @@ def day_touches_compact(cursor, day):
                queued_at, wait_seconds, talk_measured_seconds, hangup_side
           FROM cdr_touches
          WHERE call_day = %s AND call_type <> %s
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
     """, (day, touches_mod.TYPE_IN_BEFORE_QUEUE))
     return [{
         'started_at': row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else '',
@@ -870,7 +876,7 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
            AND talk_seconds > 0
            AND talk_seconds >= %(min_talk)s
            AND coalesce(recording_url, '') <> ''
-    """
+    """ + "       AND " + test_keys.sql_not_test('cdr_touches.phone', digits=True)
     if max_talk:
         params['max_talk'] = int(max_talk)
         sql += " AND talk_seconds <= %(max_talk)s"
@@ -918,7 +924,7 @@ def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limi
            AND coalesce(talk_measured_seconds, talk_seconds) > 0
            AND coalesce(talk_measured_seconds, talk_seconds) >= %(min_talk)s
            AND coalesce(recording_url, '') <> ''
-    """
+    """ + "       AND " + test_keys.sql_not_test('cdr_touches.phone', digits=True)
     if max_talk:
         params['max_talk'] = int(max_talk)
         sql += " AND coalesce(talk_measured_seconds, talk_seconds) <= %(max_talk)s"

@@ -13,7 +13,9 @@
 
 from datetime import datetime, timedelta
 
-from . import touches as touches_mod
+from test_numbers import keys as test_keys
+
+from . import leads as leads_mod, touches as touches_mod
 
 # Сколько дней перед периодом заглядываем в звонки. Окно сделки начинается за две
 # минуты до её создания — сделка в 00:01 может владеть звонком предыдущих суток.
@@ -81,11 +83,18 @@ def _lead_params(source, direction, day_from, day_to, filters):
 
 
 def select_leads(cursor, source, direction, day_from, day_to, filters=None):
-    """Сделки источника за период с ответственным и его внутренним номером."""
+    """Сделки источника за период с ответственным и его внутренним номером.
+
+    Сделка, все номера которой — из реестра тестовых (test_numbers), в разрез не
+    входит: её заводил тестировщик (чаще всего робот пропущенных по тестовому звонку).
+    """
+    test_numbers = test_keys.load_keys(cursor)
     cursor.execute(_LEAD_SQL, _lead_params(source, direction, day_from, day_to, filters))
     out = []
     for row in cursor.fetchall():
         item = dict(zip(_LEAD_KEYS, row))
+        if test_keys.all_test(leads_mod.lead_phones(item), test_numbers):
+            continue
         for key in ('created_at', 'taken_at', 'updated_at'):
             value = item.get(key)
             item[key] = value if isinstance(value, datetime) or value is None else None
@@ -100,6 +109,7 @@ SELECT t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result,
  WHERE t.phone = ANY(%(phones)s)
    AND t.call_day BETWEEN %(day_from)s AND %(day_to)s
    AND t.call_type <> %(before_queue_type)s
+   AND """ + test_keys.sql_not_test('t.phone', digits=True) + """
  ORDER BY t.started_at, t.linkedid
 """
 

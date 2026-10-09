@@ -6980,6 +6980,10 @@ def api_ai_qa_pull_call():
         phone = _qa_phone_suffix(body.get('phone'))
         if body.get('phone') and len(phone) < 4:
             return jsonify({"error": "Укажите не меньше четырёх цифр номера"}), 400
+        from test_numbers import keys as test_keys
+        if phone and test_keys.is_test_phone(phone, test_keys.current_keys()):
+            return jsonify({"error": "Это номер из реестра тестовых номеров — такие звонки "
+                                     "в оценку не берутся"}), 400
         incoming = bool(body.get('incoming', True))
         outgoing = bool(body.get('outgoing', True))
         if not incoming and not outgoing:
@@ -7548,6 +7552,7 @@ def _ai_qa_sample_binotel_candidates(day):
     """Тез КЦ: весь день компании ОДНИМ запросом к Binotel (list_calls_for_day), а
     не по запросу на оператора: у Binotel лимит частоты. Звонок сопоставляется с
     оператором по имени сотрудника — sip у Binotel переходит от человека к человеку."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     from call_qa import daily_sample as qa_sample
     cfg = tez_binotel_calls.get_config()
@@ -7559,7 +7564,7 @@ def _ai_qa_sample_binotel_candidates(day):
     lookup = _status_import_build_operator_lookup(exclude_chat_managers=True, exclude_fired=True)
     call_types = {tez_binotel_calls.CALL_TYPE_INCOMING, tez_binotel_calls.CALL_TYPE_OUTGOING}
     picked = []
-    for call in client.list_calls_for_day(day):
+    for call in test_keys.drop_test_calls(client.list_calls_for_day(day)):
         billsec = call['billsec']
         if call['call_type'] not in call_types or billsec <= 0 or not call['general_call_id']:
             continue
@@ -7649,6 +7654,8 @@ def _ai_qa_sample_c2d_candidates(day):
             cursor, OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
         if not family:
             return []
+        from test_numbers import keys as test_keys
+        not_test = test_keys.sql_not_test_any('r.client_phone', 'r.assigned_phone', digits=True)
         cursor.execute(f"""
             SELECT {db._C2D_REQUEST_COLUMNS}, COALESCE(d.canonical_id, d.id)
               FROM c2d_requests r
@@ -7658,6 +7665,7 @@ def _ai_qa_sample_c2d_candidates(day):
                AND COALESCE(r.outgoing_messages, 0) >= %s
                AND NOT EXISTS (SELECT 1 FROM c2d_chat_snapshots s
                                 WHERE s.request_id = r.request_id)
+               AND {not_test}
         """, (day, list(family), qa_config.C2D_MIN_OPERATOR_MESSAGES))
         rows = cursor.fetchall()
     candidates = []
@@ -27550,6 +27558,7 @@ def get_task_photo_previews(task_id):
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
 def handle_monthly_report():
+    from test_numbers import keys as test_keys
     try:
         month = request.args.get('month')
         if not month:
@@ -27964,6 +27973,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                              AND """ + test_keys.sql_not_test('phone_number') + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -27982,6 +27992,7 @@ def handle_monthly_report():
                             SELECT phone_number, appeal_date, MAX(created_at) as max_date
                             FROM calls
                             WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
+                              AND """ + test_keys.sql_not_test('phone_number') + """
                             GROUP BY phone_number, appeal_date
                         ) lv ON c.phone_number = lv.phone_number
                             AND (
@@ -29218,6 +29229,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     Период ограничен 7 днями: тогда список тянется одним запросом к Binotel и не
     упирается в его лимит частоты (см. также ретрай в tez_binotel_calls._post)."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
@@ -29265,7 +29277,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
     try:
-        calls = client.list_calls_by_internal_number(sip, start_ts, stop_ts)
+        calls = test_keys.drop_test_calls(client.list_calls_by_internal_number(sip, start_ts, stop_ts))
     except Exception:
         logging.exception("binotel random_call: list calls failed (sip=%s)", sip)
         return jsonify({"error": "Не удалось обратиться к Binotel, попробуйте ещё раз"}), 502
@@ -37781,7 +37793,16 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
                                                   request_stats_rows=None,
                                                   prev_request_stats_rows=None,
                                                   next_request_stats_rows=None,
-                                                  next_rating_rows=None):
+                                                  next_rating_rows=None,
+                                                  test_numbers=None):
+    # test_numbers — ключи «Реестра тестовых номеров» (test_numbers/keys.py). Обращения
+    # с такими номерами не входят ни во время ответа, ни в оценки и их разбор, а из
+    # «Чатов» оператора (сводный отчёт вендора, номеров в нём нет) вычитаются.
+    from test_numbers import keys as test_keys
+    test_numbers = frozenset(test_numbers or ())
+    test_request_ids = test_keys.c2d_test_request_ids(
+        test_numbers, request_stats_rows, prev_request_stats_rows, next_request_stats_rows)
+    excluded_test = 0
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
         try:
@@ -37840,6 +37861,9 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if _chat_report_in_surge(start_dt, windows):
             excluded_surge += 1
             continue
+        if test_keys.c2d_row_is_test(row, test_numbers):
+            excluded_test += 1
+            continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
             note_unmatched(raw_name, f"response:{row_index}")
@@ -37897,6 +37921,12 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if metric_day != target_day:
             foreign_day_rating_rows += 1
             continue
+        # Оценка тестового обращения: у клиента WhatsApp с идентификатором номер есть
+        # только в request_stats, поэтому — и по номеру строки, и по её заявке.
+        if (test_keys.c2d_row_is_test(row, test_numbers)
+                or test_keys.c2d_request_id(row) in test_request_ids):
+            excluded_test += 1
+            continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
             note_unmatched(raw_name, f"rating:{row_index}")
@@ -37940,10 +37970,28 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         bucket = chat_count_agg.setdefault((op_id, metric_day), {'chats_count': 0})
         bucket['chats_count'] += int(round(chats_value))
 
+    # «Чаты» оператора — сводный отчёт вендора, номеров в нём нет: тестовые обращения
+    # дня, которые request_stats приписал оператору, вычитаются из его числа.
+    test_chats = {}
+    for row in request_stats_rows or []:
+        if not isinstance(row, dict) or not test_keys.c2d_row_is_test(row, test_numbers):
+            continue
+        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        start_dt = _chat2desk_parse_datetime(
+            _chat2desk_row_first(row, 'request_start', 'reply_start', 'created_at'), target_tz=target_tz)
+        if not raw_name or start_dt is None:
+            continue
+        op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
+        if op_id is None:
+            continue
+        key = (op_id, start_dt.date().strftime('%Y-%m-%d'))
+        test_chats[key] = test_chats.get(key, 0) + 1
+
     update_fields = set()
     for (op_id, metric_day), bucket in chat_count_agg.items():
         metric = metric_for(op_id, metric_day)
-        metric['chats_count'] = int(bucket.get('chats_count') or 0)
+        metric['chats_count'] = max(
+            0, int(bucket.get('chats_count') or 0) - test_chats.get((op_id, metric_day), 0))
     if chat_count_agg:
         update_fields.add('chats_count')
 
@@ -38024,6 +38072,7 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'low_ratings': low_ratings,
         'low_rating_count': len(low_ratings),
         'excluded_surge_rows': int(excluded_surge),
+        'excluded_test_number_rows': int(excluded_test),
         # Сколько копий одной и той же оценки вендор положил в один ответ —
         # молча их отбрасывать нельзя, иначе «всё сошлось» скроет поломку API.
         'duplicate_rating_rows': int(duplicate_rating_rows),
@@ -38055,6 +38104,7 @@ def _chat2desk_saved_surge_windows_for_day(day_obj):
 def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_index, surge_windows=None):
     # Время ответа берём из request_stats (см. _chat2desk_build_metrics_from_statistics_rows).
     # operator_replies больше не тянем — он давал завышенное среднее.
+    from test_numbers import keys as test_keys
     request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
@@ -38103,7 +38153,8 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
         request_stats_rows=request_stats_rows,
         prev_request_stats_rows=prev_request_stats_rows,
         next_request_stats_rows=next_request_stats_rows,
-        next_rating_rows=next_rating_rows
+        next_rating_rows=next_rating_rows,
+        test_numbers=test_keys.current_keys(),
     )
     # Те же строки идут в c2d_requests (раздел «Оценка чатов ЧМ») — без
     # дополнительных запросов к API.
@@ -39042,6 +39093,7 @@ def _oktell_resource_target_days(day=None, date_from=None, date_to=None):
 
 
 def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     return (
@@ -39060,6 +39112,7 @@ def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
         "FROM oktell.dbo.Call_Systems_hst t "
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), DATEPART(HOUR, t.dt_insert)"
     )
 
@@ -39310,6 +39363,7 @@ _OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"
 
 
 def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds, group_by='park'):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39377,6 +39431,7 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), {key_group}{line_group}"
     )
 
@@ -39582,6 +39637,7 @@ def _oktell_billing_grouping_report(params, raw_rows):
 # между страницами, чтобы новые звонки текущего дня не сдвигали уже просмотренные строки.
 def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
                                       minute_from, minute_to, max_call_id=None):
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39592,6 +39648,7 @@ def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"AND (t.result_call = N'{grt}' OR (t.result_call <> N'{grt}' AND t.call_result IN (5,13,19))) "
         f"{id_filter}{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
     )
 
 
@@ -39790,6 +39847,7 @@ def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, 
     У исходящих момент ответа водителя станция не пишет, поэтому там обе величины —
     одна и та же длина коммутации (гудки внутри).
     """
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
@@ -39811,6 +39869,7 @@ def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, 
         "AND t.route IN ('incoming', 'outgoing') "
         f"AND t.result_call NOT IN (N'{grt}', N'{fail}') AND t.call_result IN (5) "
         f"{minute_filter}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), oi.Name"
     )
 
@@ -40800,6 +40859,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
     выражением — прокси Oktell просит не распараллеливать и не частить. «Сегодня» берём по
     часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток совпадала с
     источником, а не с нашим сервером."""
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     # Цепочки, которые прямо сейчас ждут ответа: открытый лег в IVR/очереди и ни одного лега
@@ -40809,6 +40869,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "FROM oktell.dbo.A_Stat_Connections_1x1 a "
         "WHERE a.ConnectionType = 4 AND a.BLineNum = N'IVR' AND a.TimeStop IS NULL "
         f"AND a.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS}, GETDATE()) "
+        f"{test_keys.tsql_and_not_test('a.AOutNumber')}"
         "AND NOT EXISTS (SELECT 1 FROM oktell.dbo.A_Stat_Connections_1x1 d "
         "WHERE d.IdChain = a.IdChain AND d.ConnectionType = 5) "
         "GROUP BY a.IdChain"
@@ -40826,7 +40887,8 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "SELECT COUNT(DISTINCT c.IdChain) AS talking_now "
         "FROM oktell.dbo.A_Stat_Connections_1x1 c "
         "WHERE c.ConnectionType = 5 AND c.TimeStop IS NULL "
-        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE())"
+        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE()) "
+        f"{test_keys.tsql_and_not_test('c.AOutNumber')}"
         ") k CROSS JOIN ("
         "SELECT "
         f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
@@ -40842,6 +40904,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "FROM oktell.dbo.Call_Systems_hst x "
         "WHERE x.route = 'incoming' AND x.taxi_park <> '' "
         f"AND x.result_call <> N'{fail}' "
+        f"{test_keys.tsql_and_not_test('x.[number]')}"
         "AND x.dt_insert >= CONVERT(date, GETDATE()) "
         "AND x.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE()))"
         ") t"
@@ -41317,6 +41380,7 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
     served_sl — принятые с ожиданием в очереди не дольше порога SL, тем же правилом, что у
     снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить.
     wait_served_seconds — ожидание принятых, числитель ASA; тоже правило снимка табло."""
+    from test_numbers import keys as test_keys
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
@@ -41344,6 +41408,7 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
         f"AND t.dt_insert >= {day_start} "
         f"AND t.dt_insert < {day_end} "
         f"{cutoff}"
+        f"{test_keys.tsql_and_not_test('t.[number]')}"
         "GROUP BY DATEPART(HOUR, t.dt_insert) ORDER BY hh"
     )
 
@@ -42680,8 +42745,12 @@ def _chat_hourly_fetch_requests(day_str, *, cache=None):
     else:
         logging.warning("Отчёт по чатам: остановился на CHAT2DESK_API_MAX_PAGES=%s", max_pages)
 
+    # Обращения с номерами «Реестра тестовых номеров» — не чаты: ни в отчёте, ни на табло.
+    from test_numbers import keys as test_keys
+    test_numbers = test_keys.current_keys()
     return [row for row in known.values()
-            if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
+            if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE
+            and not test_keys.c2d_row_is_test(row, test_numbers)]
 
 
 # === Chat2Desk: вебхуки вместо опроса ==========================================================
@@ -44195,8 +44264,11 @@ def _szov_chat_wallboard_day_requests(day_str):
         fresh = (cache.get('day') == day_str
                  and time.time() - float(cache.get('ts') or 0.0) < SZOV_CHAT_WALLBOARD_REQUESTS_TTL_SECONDS)
         if fresh and _chat_hourly_requests_cache.get('day') == day_str and _chat_hourly_requests_cache.get('rows'):
+            from test_numbers import keys as test_keys
+            test_numbers = test_keys.current_keys()
             return [row for row in _chat_hourly_requests_cache['rows'].values()
-                    if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
+                    if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE
+                    and not test_keys.c2d_row_is_test(row, test_numbers)]
     # Саму выкачку ведём БЕЗ лока: она листает страницы Chat2Desk минутами, а на этом же локе
     # стоит почасовой отчёт в Telegram — иначе команда `/chats` ждала бы обновления табло.
     rows = _chat_hourly_fetch_requests(day_str)
@@ -45138,6 +45210,7 @@ def _tez_wallboard_journal_worker(day_key, done=None):
     done — событие этой выкачки: его ждёт шаг табло, которому нечего показать. Итог пишем
     и событие взводим в finally: упади поход на чём угодно, ждущий обязан проснуться, а
     флаг fetching — сняться, иначе журнал не обновлялся бы до перезапуска процесса."""
+    from test_numbers import keys as test_keys
     calls, error = None, None
     try:
         from tez import binotel_calls as tez_binotel_calls
@@ -45149,7 +45222,8 @@ def _tez_wallboard_journal_worker(day_key, done=None):
             error = 'Ключ Binotel API не задан: TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET'
         else:
             try:
-                calls = tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)
+                calls = test_keys.drop_test_calls(
+                    tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key))
             except Exception as exc:
                 # Наружу текст ошибки уезжает в диагностику снимка, а requests пишет в него
                 # адрес API — чистим тем же правилом, что и ошибки кабинета.
@@ -45955,6 +46029,7 @@ async def _tez_broadcast_journal(day_key, hour_end_ts):
     Вчерашних суток (отбивка в 00:00 судит 23:00–24:00) в кэше табло нет: их качаем
     напрямую, в своём потоке, чтобы не выбить у табло сегодняшний журнал.
     Возвращает (звонки | None, ошибка | None)."""
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
     loop = asyncio.get_event_loop()
     today_key = datetime.now(ZoneInfo(TEZ_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
@@ -45963,7 +46038,8 @@ async def _tez_broadcast_journal(day_key, hour_end_ts):
             return None, 'Ключ Binotel API не задан'
         try:
             calls = await loop.run_in_executor(
-                None, lambda: tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key))
+                None, lambda: test_keys.drop_test_calls(
+                    tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)))
             return calls, None
         except Exception as exc:
             logging.error("Отбивка табло Тез КЦ: журнал за %s не прочитан: %s", day_key, exc)
@@ -49151,6 +49227,7 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
     # по операторской стороне заодно отсеивает внешнюю линию/IVR (их Id нет в каталоге).
     # conn_types — фильтр исход/вход для «Случайного звонка»; по умолчанию оба типа (как в синке).
+    from test_numbers import keys as test_keys
     return (
         "SELECT t.auserid, t.operator_name, COUNT(*) AS available FROM ("
         f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, oi.Name AS operator_name "
@@ -49158,13 +49235,15 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
         f"JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = {_OKTELL_EVAL_OPERATOR_UID_EXPR} "
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
         f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
-        + _oktell_eval_duration_clause(min_d, max_d) +
+        + _oktell_eval_duration_clause(min_d, max_d)
+        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
         ") t GROUP BY t.auserid, t.operator_name"
     )
 
 
 def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES,
                             phone_digits=None):
+    from test_numbers import keys as test_keys
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     # Точечный подбор по номеру клиента («ИИ-оценка» → найти звонок по телефону):
     # хвост цифр сравнивается прямо в SQL, иначе случайная выборка в 60 строк
@@ -49185,7 +49264,8 @@ def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_typ
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
         f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
-        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause +
+        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause
+        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
         f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
     )
 
@@ -49524,6 +49604,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
     Binotel обслуживает именно его). force=True игнорирует флаг enabled в настройках.
     progress — колбэк фонового прогона (stage/progress уходят в состояние job'а).
     """
+    from test_numbers import keys as test_keys
     from tez import binotel_calls as tez_binotel_calls
 
     def _report(**fields):
@@ -49599,7 +49680,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                 _report(stage=f'Binotel: {day.isoformat()}',
                         progress={'done': idx, 'total': len(days)})
                 try:
-                    day_calls = client.list_calls_for_day(day)
+                    day_calls = test_keys.drop_test_calls(client.list_calls_for_day(day))
                 except Exception:
                     logging.exception("binotel distribution: день %s не прочитан", day)
                     days_failed += 1
@@ -57686,6 +57767,7 @@ async def back_from_evaluations(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('eval_'), state=sv.view_evaluations)
 async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
+    from test_numbers import keys as test_keys
     sv_id = int(callback.data.split('_')[1])
     user = db.get_user(id=sv_id)
     
@@ -57718,6 +57800,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
                 SELECT COUNT(*) FILTER (WHERE survey_response_id IS NULL), AVG(score)
                 FROM calls
                 WHERE operator_id = %s AND month=%s
+                  AND """ + test_keys.sql_not_test('phone_number') + """
             """, (op_id, datetime.now().strftime('%Y-%m')))
             result = cursor.fetchone()
         
@@ -66130,6 +66213,14 @@ except Exception:
 # ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
 # Номера, с которых сотрудники проверяют линии и чаты; их звонки и чаты не входят
 # ни в один расчёт (test_numbers/keys.py). Реестр ведут админы и главы отделов.
+#
+# Живые источники (Oktell, Binotel, отчёты Chat2Desk) читают ключи реестра через
+# test_numbers.keys.current_keys(): здесь пакету один раз отдаётся курсор базы.
+# Наша база исключает номера условием в SQL (keys.sql_not_test) сама.
+from test_numbers import keys as _test_numbers_keys  # noqa: E402
+
+_test_numbers_keys.configure(db._get_cursor)
+
 try:
     from test_numbers.routes import build_test_numbers_blueprint  # noqa: E402
 

@@ -45,6 +45,13 @@ SOURCES = {
 
 _WAZZUP_ACCOUNTS = {'op': 'Верификаторы', 'potok': 'Поток'}
 
+# Итог звонка Binotel приходит кодом вендора — на экран словами.
+_BINOTEL_RESULTS = {
+    'ANSWER': 'Отвечен', 'VM-SUCCESS': 'Отвечен', 'SUCCESS': 'Отвечен', 'TRANSFER': 'Переведён',
+    'NOANSWER': 'Не ответил', 'BUSY': 'Занято', 'CANCEL': 'Сброшен', 'CONGESTION': 'Не прошёл',
+    'CHANUNAVAIL': 'Недоступен', 'VM': 'Голосовая почта', 'ONLINE': 'Идёт сейчас',
+}
+
 
 class PeriodError(ValueError):
     """Период не годится: текст — для человека."""
@@ -135,7 +142,6 @@ def _freepbx(cursor, phone_keys, start, end):
             operator=row['operator_name'] or (f"вн. {row['ext']}" if row['ext'] else None),
             result=row['result'],
             duration_seconds=int(row['talk_seconds'] or 0),
-            note=row['call_type'],
         ))
     return items
 
@@ -164,7 +170,7 @@ def _binotel(cursor, phone_keys, start, end):
             id=f"binotel:{row['general_call_id']}",
             direction=direction,
             operator=row['operator_name'] or (f"вн. {row['internal_number']}" if row['internal_number'] else None),
-            result=row['disposition'] or None,
+            result=_BINOTEL_RESULTS.get(str(row['disposition'] or '').upper(), row['disposition'] or None),
             duration_seconds=int(row['billsec'] or 0),
         ))
     return items

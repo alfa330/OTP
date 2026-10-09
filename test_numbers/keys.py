@@ -81,19 +81,71 @@ def sql_not_test(expr, *, digits=False):
     return 'NOT ' + sql_is_test(expr, digits=digits)
 
 
-def sql_not_test_any(*exprs):
+def sql_not_test_any(*exprs, digits=False):
     """Ни одно из полей строки не тестовое — для источников, где номер клиента
-    лежит в одном из двух полей (Chat2Desk: client_phone или assigned_phone)."""
-    keys = ', '.join(sql_key(expr) for expr in exprs)
+    лежит в одном из двух полей (Chat2Desk: client_phone или assigned_phone).
+
+    digits=True — поля уже из одних цифр (у Chat2Desk номер клиента — одиннадцать
+    цифр; идентификатор WhatsApp «[wa_…] KZ.…» своим хвостом ни с одним ключом не
+    совпадёт, и номер такого клиента лежит во втором поле).
+    """
+    make = sql_digits_key if digits else sql_key
+    keys = ', '.join(make(expr) for expr in exprs)
     return f"NOT EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({keys}))"
 
 
-def wazzup_phone_sql(alias):
+def sql_not_test_keys(*key_exprs):
+    """Ни один из готовых ключей строки (sql_key / sql_digits_key) не тестовый —
+    когда у полей разный вид: свободный текст рядом с цифрами."""
+    return f"NOT EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({', '.join(key_exprs)}))"
+
+
+def sql_is_test_any(*exprs, digits=False):
+    """Хоть одно из полей строки — номер реестра (зеркало sql_not_test_any)."""
+    make = sql_digits_key if digits else sql_key
+    keys = ', '.join(make(expr) for expr in exprs)
+    return f"EXISTS (SELECT 1 FROM {TABLE} _tpn WHERE _tpn.phone_key IN ({keys}))"
+
+
+def wazzup_phone_sql(alias=None):
     """Номер клиента в строках Wazzup (сообщение, чат, эпизод): contact_phone, а у
     WhatsApp, где его нет, — сам chat_id (это и есть номер). У Telegram и прочих
-    без номера — NULL: такая строка тестовой не станет."""
-    return (f"COALESCE(NULLIF({alias}.contact_phone, ''), "
-            f"CASE WHEN {alias}.chat_type IN ('whatsapp', 'wapi') THEN {alias}.chat_id END)")
+    без номера — NULL: такая строка тестовой не станет.
+
+    alias=None — колонки без алиаса: для запроса, где одно и то же условие стоит и
+    под алиасом, и без него (у реестра таких колонок нет, имена уходят наружу)."""
+    p = f'{alias}.' if alias else ''
+    return (f"COALESCE(NULLIF({p}contact_phone, ''), "
+            f"CASE WHEN {p}chat_type IN ('whatsapp', 'wapi') THEN {p}chat_id END)")
+
+
+# Обращения Chat2Desk с номером реестра — по ленте вебхуков. Номер приходит не в
+# каждом событии (у new_request и close_request карточки клиента нет), поэтому
+# тестовым считается всё обращение, если хоть одно его событие несёт такой номер.
+# Соединение — по хвосту из девяти цифр ДОСЛОВНО тем же выражением, что у индекса
+# idx_c2d_webhook_events_phone_tail (иначе планировщик уйдёт в полный проход), а
+# точное совпадение — по десяти.
+C2D_WEBHOOK_TEST_REQUESTS_SQL = (
+    "SELECT _tw.request_id FROM " + TABLE + " _tpn "
+    "JOIN c2d_webhook_events _tw "
+    "ON right(regexp_replace(_tw.client_phone, '\\D', '', 'g'), 9) = right(_tpn.phone_key, 9) "
+    "AND _tw.client_id IS NOT NULL "
+    "WHERE _tw.request_id IS NOT NULL "
+    "AND right(regexp_replace(_tw.client_phone, '\\D', '', 'g'), 10) = _tpn.phone_key"
+)
+
+
+def all_test(phones, keys):
+    """У строки есть номера, и ВСЕ они тестовые.
+
+    Так решается про сделку и лида с несколькими номерами («Воронка ОП», лиды
+    Тез, базы «Обзвона»): выпадает только сделка тестировщика. Настоящий клиент,
+    к сделке которого кто-то дописал свой номер, остаётся в расчёте.
+    """
+    if not keys:
+        return False
+    found = [key for key in (phone_key(phone) for phone in (phones or ())) if key]
+    return bool(found) and all(key in keys for key in found)
 
 
 def drop_test(rows, phone_of, keys):
@@ -179,3 +231,77 @@ def invalidate_cache():
     """Сбросить кеш — после правки реестра."""
     with _cache_lock:
         _cache['at'] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Откуда живые источники берут ключи
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Приложение один раз при старте отдаёт сюда свой курсор (bot_schedule2:
+# configure(db._get_cursor)), и функции монолита берут ключи вызовом
+# current_keys() через локальный импорт пакета — без помощников уровня модуля.
+# Это важно: тесты вырезают функции монолита через AST и исполняют их в своём
+# пространстве имён. Не настроено (так в тестах и скриптах) — реестр пуст, и
+# функция ведёт себя ровно как до появления реестра.
+
+_provider = {'get_cursor': None}
+
+
+def configure(get_cursor):
+    _provider['get_cursor'] = get_cursor
+    invalidate_cache()
+
+
+def current_keys():
+    get_cursor = _provider['get_cursor']
+    if get_cursor is None:
+        return frozenset()
+    return cached_keys(get_cursor)
+
+
+def tsql_and_not_test(expr):
+    """«AND номер не из реестра » для WHERE запроса к Oktell; реестр пуст — пусто.
+
+    Хвостовой пробел — чтобы склеиваться со следующей частью запроса."""
+    condition = tsql_not_test(expr, current_keys())
+    return f"AND {condition} " if condition else ""
+
+
+def drop_test_calls(calls):
+    """Звонки журнала Binotel без номеров реестра (номер клиента — external_number)."""
+    if calls is None:
+        return None
+    return drop_test(calls, lambda call: (call or {}).get('external_number'), current_keys())
+
+
+# ── Chat2Desk: строки отчётов request_stats / rating ─────────────────────────
+#
+# Номер клиента — в `phone`, а у клиента WhatsApp, пришедшего идентификатором
+# «[wa_…] KZ.…», — в `assigned_phone` (request_stats) или `client_phone`.
+
+def c2d_row_is_test(row, keys):
+    if not keys or not isinstance(row, dict):
+        return False
+    return any(is_test_phone(row.get(field), keys) for field in ('phone', 'assigned_phone', 'client_phone'))
+
+
+def c2d_request_id(row):
+    try:
+        return int((row or {}).get('request_id'))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def c2d_test_request_ids(keys, *row_sets):
+    """Заявки request_stats с номерами реестра — по ним опознаются оценки, в строке
+    которых номера нет (у клиента WhatsApp с идентификатором)."""
+    out = set()
+    if not keys:
+        return out
+    for rows in row_sets:
+        for row in rows or []:
+            if c2d_row_is_test(row, keys):
+                request_id = c2d_request_id(row)
+                if request_id:
+                    out.add(request_id)
+    return out

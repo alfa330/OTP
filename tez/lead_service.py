@@ -30,6 +30,8 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta
 
+from test_numbers import keys as test_keys
+
 from tez.op_leads import (
     ALMATY_TZ,
     DEFAULT_MIN_BILLSEC,
@@ -363,6 +365,12 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
     # веткой, иначе пересчёт июля переписал бы уже выплаченное.
     gap_days = reactivation_gap_for_period(year, month)
 
+    # Лид с номером из «Реестра тестовых номеров» (test_numbers) успешкой не станет:
+    # его звонки не засчитываются, а прежнюю успешку пересчитываемого месяца снимет
+    # apply_tez_lead_outcomes — как у любого лида, переставшего быть успешкой.
+    get_cursor = getattr(db, '_get_cursor', None)
+    test_numbers = test_keys.cached_keys(get_cursor) if get_cursor else frozenset()
+
     outcomes = []
     for lead in leads:
         carried = bool(lead.get('is_carried'))
@@ -381,7 +389,7 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
         outcome = compute_lead_outcome(
             trip_at,
             lead['prev_month_first_order_at'],
-            lead['calls'],
+            [] if test_keys.is_test_phone(lead.get('phone_norm'), test_numbers) else lead['calls'],
             min_billsec=min_billsec,
             last_order_before_at=last_before,
             reactivation_gap_days=gap_days,

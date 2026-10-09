@@ -39,10 +39,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import execute_values
 
+from test_numbers import keys as test_keys
+
 from .common import (
     WEEKDAYS_RU, WORK_DAYS_PER_OPERATOR_WEEK,
     _round_fte_to_half, _to_float, _to_int,
 )
+
+# Обращения с номерами «Реестра тестовых номеров» (test_numbers) — проверки, а не
+# водители: в объём, ответы, прогноз, кривую и биллинг чата они не входят. У клиента
+# WhatsApp, пришедшего идентификатором «[wa_…] KZ.…», номер лежит в assigned_phone —
+# поэтому смотрим оба поля. Оба — только цифры (сверено на проде 09.10.2026), так что
+# условие без регулярного выражения на каждой из десятков тысяч строк окна.
+_NOT_TEST_SQL = test_keys.sql_not_test_any('client_phone', 'assigned_phone', digits=True)
+_NOT_TEST_SQL_R = test_keys.sql_not_test_any('r.client_phone', 'r.assigned_phone', digits=True)
 
 
 # Коэффициенты калибровки «ответ внутри чата ↔ нагрузка». Снимались по выгрузкам табло
@@ -419,7 +429,7 @@ def _week_start(value: date) -> date:
 
 
 def _latest_chat_day_tx(cursor) -> Optional[date]:
-    cursor.execute("SELECT MAX(day) FROM c2d_requests WHERE request_type = %s",
+    cursor.execute("SELECT MAX(day) FROM c2d_requests WHERE request_type = %s AND " + _NOT_TEST_SQL,
                    (CHAT_REQUEST_TYPE,))
     row = cursor.fetchone()
     return row[0] if row and row[0] else None
@@ -434,6 +444,7 @@ def _hourly_volume_tx(cursor, day_from: date, day_to: date) -> Dict[str, Dict[in
         WHERE request_type = %s
           AND request_start IS NOT NULL
           AND day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL + """
         GROUP BY 1, 2
         """,
         (CHAT_REQUEST_TYPE, day_from, day_to),
@@ -506,6 +517,7 @@ def _reply_stats_tx(cursor, day_from: date, day_to: date,
         WHERE request_type = %s
           AND request_start IS NOT NULL
           AND day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL + """
         GROUP BY 1, 2
         """,
         (int(target_first_seconds), CHAT_REQUEST_TYPE, day_from, day_to),
@@ -666,6 +678,7 @@ def _covered_days_tx(cursor, day_from: date, day_to: date) -> set:
         """
         SELECT DISTINCT day FROM c2d_requests
         WHERE request_type = %s AND day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL + """
         """,
         (CHAT_REQUEST_TYPE, day_from, day_to),
     )
@@ -1316,6 +1329,7 @@ def _weekday_profile_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, 
             FROM c2d_requests
             WHERE request_type = %s AND request_start IS NOT NULL
               AND day BETWEEN %s AND %s
+              AND """ + _NOT_TEST_SQL + """
         ), weekday_days AS (
             SELECT EXTRACT(ISODOW FROM day)::int - 1 AS wd, COUNT(*)::int AS days
             FROM sample_days
@@ -1329,6 +1343,7 @@ def _weekday_profile_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, 
         JOIN weekday_days w ON w.wd = EXTRACT(ISODOW FROM r.day)::int - 1
         WHERE r.request_type = %s AND r.request_start IS NOT NULL
           AND r.day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL_R + """
         GROUP BY w.wd, 2, w.days
         ORDER BY 1, 2
         """,
@@ -1357,6 +1372,7 @@ def _daily_history_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, An
         SELECT day, COUNT(*)
         FROM c2d_requests
         WHERE request_type = %s AND day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL + """
         GROUP BY 1 ORDER BY 1
         """,
         (CHAT_REQUEST_TYPE, day_from, day_to),
@@ -1379,6 +1395,7 @@ def _channel_split_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, An
         SELECT COALESCE(NULLIF(channel_name, ''), 'Без канала') AS channel, COUNT(*)
         FROM c2d_requests
         WHERE request_type = %s AND day BETWEEN %s AND %s
+          AND """ + _NOT_TEST_SQL + """
         GROUP BY 1 ORDER BY 2 DESC
         """,
         (CHAT_REQUEST_TYPE, day_from, day_to),
@@ -1967,7 +1984,8 @@ def _chat_billing_window(day_from: date, day_to: date,
     Окно накладывается только когда оно уже полных суток: лишнее условие в WHERE
     отрезает индекс по `day` и заставляет читать таблицу целиком.
     """
-    where = ["r.request_type = %s", "r.request_start IS NOT NULL", "r.day BETWEEN %s AND %s"]
+    where = ["r.request_type = %s", "r.request_start IS NOT NULL", "r.day BETWEEN %s AND %s",
+             _NOT_TEST_SQL_R]
     params: List[Any] = [CHAT_REQUEST_TYPE, day_from, day_to]
     if int(minute_from) > 0 or int(minute_to) < 1439:
         where.append("(EXTRACT(HOUR FROM r.request_start)::int * 60"

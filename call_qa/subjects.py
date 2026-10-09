@@ -26,6 +26,7 @@ from . import config
 from . import media as media_mod
 from .call_end import normalise_call_end_party
 from .evaluation.fingerprint import content_hash
+from test_numbers import keys as test_keys
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -42,6 +43,9 @@ REASON_KIND = "not_dialog"
 REASON_DIRECTION = "direction_not_eligible"
 REASON_NO_DIRECTION = "operator_without_direction"
 REASON_SHORT_RECORDING = "recording_too_short"
+# Номер разговора — в «Реестре тестовых номеров» (test_numbers): сотрудник проверял
+# линию или чат, водителя в разговоре нет.
+REASON_TEST_NUMBER = "test_number"
 
 
 class SubjectNotFound(ValueError):
@@ -218,7 +222,8 @@ def _load_call(call_id: int) -> dict:
         cur.execute(
             """SELECT c.id, c.direction_id, d.name, u.name,
                       TO_CHAR(c.created_at,'DD.MM.YYYY, HH24:MI'), c.score, c.audio_path,
-                      dep.code, c.call_end_party, ic.call_end_party
+                      dep.code, c.call_end_party, ic.call_end_party,
+                      """ + test_keys.sql_is_test('c.phone_number') + """
                  FROM calls c
                  LEFT JOIN imported_calls ic ON ic.id = c.imported_call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
@@ -242,7 +247,8 @@ def _load_call(call_id: int) -> dict:
             # отделом), а не у оператора: оператора могли перевести, а оценка
             # осталась по шкале прежнего направления.
             "department_code": config.normalise_department_code(row[7]),
-            "call_end_party": normalise_call_end_party(row[8], row[9])}
+            "call_end_party": normalise_call_end_party(row[8], row[9]),
+            "is_test_number": bool(row[10]) if len(row) > 10 else False}
 
 
 def _load_wz_episode(episode_id: int) -> dict:
@@ -256,7 +262,8 @@ def _load_wz_episode(episode_id: int) -> dict:
                       e.inbound_count, e.outbound_count, e.human_outbound_count,
                       e.kind, e.operator_user_id, u.name, e.operator_share,
                       e.authors, e.force_closed, e.transcript, e.context_tail,
-                      u.direction_id, d.name, dep.code
+                      u.direction_id, d.name, dep.code,
+                      """ + test_keys.sql_is_test(test_keys.wazzup_phone_sql('e'), digits=True) + """
                  FROM wazzup_episodes e
                  LEFT JOIN users u ON u.id = e.operator_user_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -287,6 +294,7 @@ def _load_wz_episode(episode_id: int) -> dict:
         "datetime": (ended.astimezone(ALMATY).strftime("%d.%m.%Y, %H:%M")
                      if ended is not None else "—"),
         "human_score": None,
+        "is_test_number": bool(row[23]) if len(row) > 23 else False,
     }
     return subject
 
@@ -306,7 +314,8 @@ def _load_imported_call(imported_call_id: int) -> dict:
             """SELECT ic.id, u.direction_id, d.name, COALESCE(u.name, ic.operator_name),
                       TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'DD.MM.YYYY, HH24:MI'),
                       ic.audio_path, ic.operator_id, ic.phone_number, ic.duration_sec,
-                      ic.status, dep.code, hc.score, ic.call_end_party
+                      ic.status, dep.code, hc.score, ic.call_end_party,
+                      """ + test_keys.sql_is_test('ic.phone_number') + """
                  FROM imported_calls ic
                  LEFT JOIN users u ON u.id = ic.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -343,7 +352,8 @@ def _load_imported_call(imported_call_id: int) -> dict:
             "duration_sec": row[8], "import_status": row[9],
             "department_code": config.normalise_department_code(row[10]),
             "human_score": row[11],
-            "call_end_party": normalise_call_end_party(row[12])}
+            "call_end_party": normalise_call_end_party(row[12]),
+            "is_test_number": bool(row[13]) if len(row) > 13 else False}
 
 
 def _load_c2d_snapshot(snapshot_id: int) -> dict:
@@ -359,7 +369,11 @@ def _load_c2d_snapshot(snapshot_id: int) -> dict:
             """SELECT s.id, s.request_id, s.dialog_id, s.day, s.operator_id, u.name,
                       s.c2d_operator_name, s.channel_name, s.transport, s.client_name,
                       s.client_phone, s.messages, s.messages_count, s.created_at,
-                      u.direction_id, d.name, dep.code
+                      u.direction_id, d.name, dep.code,
+                      """ + test_keys.sql_is_test_any(
+                          's.client_phone',
+                          '(SELECT r.assigned_phone FROM c2d_requests r WHERE r.request_id = s.request_id)',
+                          digits=True) + """
                  FROM c2d_chat_snapshots s
                  LEFT JOIN users u ON u.id = s.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -394,7 +408,8 @@ def _load_c2d_snapshot(snapshot_id: int) -> dict:
             "department_code": department_code,
             "eligible_direction_ids": eligible,
             "datetime": day.strftime("%d.%m.%Y") if day is not None else "—",
-            "human_score": None}
+            "human_score": None,
+            "is_test_number": bool(row[17]) if len(row) > 17 else False}
 
 
 def _load_ca_episode(episode_id: int) -> dict:
@@ -412,7 +427,8 @@ def _load_ca_episode(episode_id: int) -> dict:
                       e.contact_phone, e.started_at, e.ended_at, e.messages_count,
                       e.inbound_count, e.outbound_count, e.human_outbound_count,
                       e.kind, e.operator_user_id, u.name, e.operator_share,
-                      e.authors, e.force_closed, u.direction_id, d.name, dep.code
+                      e.authors, e.force_closed, u.direction_id, d.name, dep.code,
+                      """ + test_keys.sql_is_test('e.contact_phone', digits=True) + """
                  FROM chatapp_episodes e
                  LEFT JOIN users u ON u.id = e.operator_user_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -453,7 +469,8 @@ def _load_ca_episode(episode_id: int) -> dict:
             "eligible_direction_ids": eligible,
             "datetime": (ended.astimezone(ALMATY).strftime("%d.%m.%Y, %H:%M")
                          if ended is not None else "—"),
-            "human_score": None}
+            "human_score": None,
+            "is_test_number": bool(row[21]) if len(row) > 21 else False}
 
 
 _LOADERS = {
@@ -475,8 +492,15 @@ def eligibility(subject: dict) -> dict:
     человеку работу другого. Порог доли ответов доминирующего оператора —
     config.WZ_MIN_OPERATOR_SHARE (по умолчанию 90%).
 
-    У звонка такого вопроса нет: запись принадлежит одному оператору целиком."""
+    У звонка такого вопроса нет: запись принадлежит одному оператору целиком.
+
+    Разговор с номером из «Реестра тестовых номеров» не оценивается вовсе — ни звонок,
+    ни переписка: признак `is_test_number` ставит загрузчик субъекта."""
     kind = subject["kind"]
+    if subject.get("is_test_number"):
+        return {"ok": False, "reason": REASON_TEST_NUMBER, "detail": {},
+                "message": ("номер из реестра тестовых номеров — сотрудник проверял линию "
+                            "или чат, такие разговоры не оцениваются")}
     if kind in config.AUDIO_SUBJECT_KINDS:
         return {"ok": True, "reason": None, "detail": {}}
     if kind == config.SUBJECT_C2D_SNAPSHOT:

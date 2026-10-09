@@ -18775,6 +18775,14 @@ class Database:
             start_obj, end_obj = end_obj, start_obj
 
         human_out = self._CHATAPP_HUMAN_OUT
+        # Чат с номером из «Реестра тестовых номеров» (test_numbers) оператору не
+        # засчитывается. Номер — у чата, не у сообщения.
+        from test_numbers import keys as test_keys
+        not_test_chat = (
+            "NOT EXISTS (SELECT 1 FROM chatapp_chats tc"
+            " WHERE tc.license_id = m.license_id AND tc.messenger_type = m.messenger_type"
+            " AND tc.chat_id = m.chat_id AND "
+            + test_keys.sql_is_test("COALESCE(NULLIF(tc.phone, ''), tc.chat_id)", digits=True) + ")")
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
@@ -18838,6 +18846,7 @@ class Database:
                   AND COALESCE(map.is_bot, FALSE) = FALSE
                   AND COALESCE(m.is_deleted, FALSE) = FALSE
                   AND ({human_out})
+                  AND {not_test_chat}
                   AND (m.dt AT TIME ZONE 'Asia/Almaty')::date >= %s
                   AND (m.dt AT TIME ZONE 'Asia/Almaty')::date <= %s
                   AND LOWER(COALESCE(
@@ -23626,8 +23635,13 @@ class Database:
             return int((cursor.fetchone() or [0])[0] or 0)
 
     def get_tez_lead_funnel(self, year, month):
-        """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
+        """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки.
+
+        Лиды с номерами «Реестра тестовых номеров» (test_numbers) в воронку не входят;
+        их успешки снимает пересчёт (tez.lead_service.recompute_outcomes)."""
         from tez.op_leads import ALMATY_TZ, call_window_for_period
+        from test_numbers import keys as test_keys
+        not_test = test_keys.sql_not_test('l.phone_norm', digits=True)
         window_start, window_end = call_window_for_period(year, month)
         # Границы считаем в Python готовыми aware-датами, а не приведением даты
         # к зоне прямо в SQL: у Postgres тип date неявно приводится и к
@@ -23652,6 +23666,7 @@ class Database:
                     COUNT(*) FILTER (WHERE l.prev_month_first_order_at IS NOT NULL) AS active_prev_month
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
+                  AND """ + not_test + """
                 """,
                 (int(year), int(month))
             )
@@ -23675,6 +23690,7 @@ class Database:
                       AND c.started_at >= %s
                       AND c.started_at < %s
                 WHERE l.year = %s AND l.month = %s
+                  AND """ + not_test + """
                 """,
                 (window_from, window_to, int(year), int(month))
             )
@@ -23699,8 +23715,9 @@ class Database:
             # Сколько лидов ЭТОГО месяца сейчас дорабатываются в следующем.
             cursor.execute(
                 """
-                SELECT COUNT(*) FROM tez_leads
-                WHERE year = %s AND month = %s AND status <> 'success'
+                SELECT COUNT(*) FROM tez_leads l
+                WHERE l.year = %s AND l.month = %s AND l.status <> 'success'
+                  AND """ + not_test + """
                 """,
                 (int(year), int(month))
             )
@@ -24933,8 +24950,13 @@ class Database:
         медиану времени ответа усреднением строк не получить. Диалоги и там, и
         в общем итоге считаются ВМЕСТЕ с grp, поэтому итог направления — ровно
         сумма его строк, как и показывает подвал таблицы.
+
+        Переписка с номерами «Реестра тестовых номеров» (test_numbers) в показатели
+        не входит; номер Wazzup — цифры (contact_phone или сам chat_id).
         """
-        window, params = ["m.account = %s"], [account]
+        from test_numbers import keys as test_keys
+        window, params = ["m.account = %s",
+                          test_keys.sql_not_test(test_keys.wazzup_phone_sql('m'), digits=True)], [account]
         if date_from:
             # Явный timestamp обязателен. Для date PostgreSQL выбирает другую
             # перегрузку AT TIME ZONE и при UTC-сессии сдвигает границу на +10 ч.
@@ -25268,8 +25290,12 @@ class Database:
 
     def list_wazzup_episodes(self, day=None, kind=None, operator_user_id=None,
                              limit=50, offset=0):
-        """Список эпизодов для проверки/оценки. day — локальная дата Алматы по ended_at."""
-        where, params = ["TRUE"], []
+        """Список эпизодов для проверки/оценки. day — локальная дата Алматы по ended_at.
+
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) в список не идут.
+        Колонки условия — без алиаса: оно стоит и в счёте без алиаса, и в выборке с ним."""
+        from test_numbers import keys as test_keys
+        where, params = ["TRUE", test_keys.sql_not_test(test_keys.wazzup_phone_sql(), digits=True)], []
         if day:
             where.append("(ended_at AT TIME ZONE 'Asia/Almaty')::date = %s")
             params.append(day)
@@ -25454,7 +25480,11 @@ class Database:
 
         Порядок задан здесь, а не у вызывающего: и первый ответ, и ответ внутри
         чата считаются проходом по ленте обращения, и на неупорядоченной выборке
-        обе величины молча поедут."""
+        обе величины молча поедут.
+
+        Обращения с номерами «Реестра тестовых номеров» (test_numbers) выпадают целиком,
+        со всеми событиями: номер приходит не в каждом событии обращения."""
+        from test_numbers import keys as test_keys
         day_to = day_to or day_from
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -25463,6 +25493,8 @@ class Database:
                        message_type, request_type, is_new_request
                 FROM c2d_webhook_events
                 WHERE day BETWEEN %s AND %s
+                  AND (request_id IS NULL OR request_id NOT IN ("""
+                           + test_keys.C2D_WEBHOOK_TEST_REQUESTS_SQL + """))
                 ORDER BY event_at, id
             """, (day_from, day_to))
             columns = [description[0] for description in cursor.description]
@@ -25519,7 +25551,10 @@ class Database:
         Открытый чат — обращение, по которому были сообщения и не приходило
         `close_request`. Считаем в SQL, а не строками: открытым может быть и
         позавчерашний чат, а тянуть ради счётчика всю неделю событий в память
-        значит платить памятью за одну цифру на плитке."""
+        значит платить памятью за одну цифру на плитке.
+
+        Тестовые обращения (номер из «Реестра тестовых номеров») открытыми не считаются."""
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             cursor.execute("""
                 WITH messages AS (
@@ -25531,6 +25566,7 @@ class Database:
                     WHERE request_id IS NOT NULL
                       AND hook_type IN ('inbox', 'outbox', 'imported_message', 'comment',
                                         'dialog_transferred', 'new_request')
+                      AND request_id NOT IN (""" + test_keys.C2D_WEBHOOK_TEST_REQUESTS_SQL + """)
                     GROUP BY request_id
                 )
                 SELECT m.operator_id, COUNT(*)::int
@@ -25637,8 +25673,14 @@ class Database:
     def _c2d_requests_where(date_from=None, date_to=None, operator_id=None,
                             channel_id=None, transport=None, min_messages=None,
                             max_messages=None, rating_filter=None, department_id=None):
-        """Общий WHERE по c2d_requests (алиас r, users — алиас u)."""
-        where = ["r.operator_id IS NOT NULL"]
+        """Общий WHERE по c2d_requests (алиас r, users — алиас u).
+
+        Обращения с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются
+        и не считаются: номер клиента — в client_phone или, у клиента WhatsApp с
+        идентификатором, в assigned_phone; оба поля — цифры."""
+        from test_numbers import keys as test_keys
+        where = ["r.operator_id IS NOT NULL",
+                 test_keys.sql_not_test_any('r.client_phone', 'r.assigned_phone', digits=True)]
         params = []
         if date_from:
             where.append("r.day >= %s")
@@ -25958,8 +26000,11 @@ class Database:
         кем-либо (calls -> снапшот с ключами эпизода), 'mine' — оценённых этим
         проверяющим, 'none' — без исключений. exclude_episode_ids — эпизоды,
         отсеянные в этом же запросе (переписку съел ретеншн).
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются.
         Возвращает (episode|None, candidates_count)."""
-        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL"]
+        from test_numbers import keys as test_keys
+        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL",
+                 test_keys.sql_not_test(test_keys.wazzup_phone_sql('e'), digits=True)]
         params = []
         if operator_id is not None:
             where.append("e.operator_user_id = %s")
@@ -26441,8 +26486,11 @@ class Database:
                              exclude='any', evaluator_id=None, department_id=None,
                              exclude_episode_ids=None):
         """Случайный эпизод ChatApp по фильтрам — как pick_wazzup_episode.
+        Эпизоды с номерами «Реестра тестовых номеров» (test_numbers) не предлагаются.
         Возвращает (episode|None, candidates_count)."""
-        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL"]
+        from test_numbers import keys as test_keys
+        where = ["e.kind = 'dialog'", "e.operator_user_id IS NOT NULL",
+                 test_keys.sql_not_test('e.contact_phone', digits=True)]
         params = []
         if operator_id is not None:
             where.append("e.operator_user_id = %s")
@@ -29441,6 +29489,9 @@ class Database:
         errors = []
         missing_operators = set()
 
+        # Звонки с номерами «Реестра тестовых номеров» в пул не идут (test_numbers).
+        from test_numbers import keys as test_keys
+        test_numbers = test_keys.cached_keys(self._get_cursor)
         with self._get_cursor() as cur:
             for op in payload.get('distribution', []):
                 op_name = op.get('operator')
@@ -29454,6 +29505,8 @@ class Database:
                     missing_operators.add(op_name)
 
                 for c in op.get('calls', []):
+                    if test_keys.is_test_phone(c.get('phone'), test_numbers):
+                        continue
                     external_id = c.get('id')
                     dt_raw_str = c.get('datetimeRaw')
                     parsed_dt = _parse_datetime_raw(dt_raw_str)
@@ -29522,7 +29575,15 @@ class Database:
         через set_imported_call_audio_path после создания строки.
 
         status — только для ежедневной выборки «ИИ-оценки» ('ai_sample'): такая строка
-        субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает."""
+        субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает.
+
+        Звонок с номером из «Реестра тестовых номеров» (test_numbers) в пул не кладётся
+        вовсе — None, как у дубля: и для журнала, и для ИИ это не работа с водителем.
+        Это страховка: выборки и деление отсеивают такие звонки раньше, до скачивания
+        записи."""
+        from test_numbers import keys as test_keys
+        if test_keys.is_test_phone(phone, test_keys.cached_keys(self._get_cursor)):
+            return None
         parsed_dt = _parse_datetime_raw(datetime_raw)
         phone_norm = _normalize_phone(phone)
         with self._get_cursor() as cur:
@@ -31969,6 +32030,9 @@ class Database:
         прослушки не входят: это субъекты оценки ИИ, и «всего в пуле» с ними
         выводило бы в таблицу операторов, у которых нормы нет вовсе."""
         out = {}
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT operator_id,
@@ -31978,6 +32042,8 @@ class Database:
                        COUNT(*) FILTER (WHERE status = 'skipped') AS skipped
                 FROM imported_calls
                 WHERE month = %s AND operator_id IS NOT NULL
+                  AND """ + test_keys.sql_not_test(
+                      "COALESCE(NULLIF(phone_normalized, ''), phone_number)") + """
                 GROUP BY operator_id
             """, (month,))
             for r in cur.fetchall():
@@ -32683,13 +32749,19 @@ class Database:
             # 4) Количество оценённых звонков и средняя оценка (как раньше).
             # Оценка «Тестирование знаний» входит в среднюю, но звонком не
             # считается — план прослушки от неё не уменьшается.
+            # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+            # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+            from test_numbers import keys as test_keys
+            not_test_calls = test_keys.sql_not_test('phone_number')
             cursor.execute("""
                 SELECT
                     (SELECT COUNT(*) FROM calls
                       WHERE operator_id = %s AND month = %s AND is_draft = FALSE
-                        AND survey_response_id IS NULL) AS call_count,
+                        AND survey_response_id IS NULL
+                        AND """ + not_test_calls + """) AS call_count,
                     (SELECT AVG(score) FROM calls
-                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+                      WHERE operator_id = %s AND month = %s AND is_draft = FALSE
+                        AND """ + not_test_calls + """) AS avg_score
             """, (operator_id, current_month, operator_id, current_month))
             calls_row = cursor.fetchone()
             call_count = int(calls_row[0] or 0)
@@ -34402,7 +34474,11 @@ class Database:
         Последняя версия оценки определяется по ключу
         (operator_id, phone_number, month, appeal_date).
         Для calls.duration -> NULL, для imported_calls.duration -> ic.duration_sec.
+
+        Оценки и звонки с номерами «Реестра тестовых номеров» (test_numbers) в журнал не
+        идут: средний балл оператора браузер считает по этому же списку.
         """
+        from test_numbers import keys as test_keys
         query = """
             WITH latest_versions AS (
                 SELECT 
@@ -34413,6 +34489,7 @@ class Database:
                     MAX(created_at) AS latest_date
                 FROM calls
                 WHERE operator_id = %s
+                  AND """ + test_keys.sql_not_test('phone_number') + """
                 GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
@@ -34579,6 +34656,8 @@ class Database:
                 NULL::boolean AS knowledge_test_auto_submitted
             FROM imported_calls ic
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
+              AND """ + test_keys.sql_not_test(
+                  "COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)") + """
         """
         params.append(operator_id)
 
@@ -34911,7 +34990,10 @@ class Database:
                 return {}
 
         params = [month]
-        filter_clause = "month = %s AND is_draft = FALSE"
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
+        filter_clause = "month = %s AND is_draft = FALSE AND " + test_keys.sql_not_test('phone_number')
         if normalized_ids is not None:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
@@ -35120,6 +35202,10 @@ class Database:
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
+        not_test_calls = test_keys.sql_not_test('phone_number')
         query = f"""
             WITH latest_versions AS (
                 SELECT
@@ -35132,6 +35218,7 @@ class Database:
                 WHERE month = %s
                   AND is_draft = FALSE
                   AND score IS NOT NULL
+                  AND {not_test_calls}
                 GROUP BY operator_id, phone_number, month, appeal_date
             ),
             latest_calls AS (
@@ -35404,7 +35491,10 @@ class Database:
         Последние версии определяются как MAX(created_at) для каждой комбинации:
         (phone_number, operator_id, month, appeal_date)
         Если supervisor_id задан — фильтрует операторов по этому SV и включает самого SV.
+
+        Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в сводку не входят.
         """
+        from test_numbers import keys as test_keys
         query = """
         WITH latest_versions AS (
             -- для каждой пары (phone_number, operator_id, month, appeal_date) берем последний created_at
@@ -35416,6 +35506,7 @@ class Database:
                 MAX(created_at) AS latest_date
             FROM calls
             WHERE month = %s
+              AND """ + test_keys.sql_not_test('phone_number') + """
             GROUP BY phone_number, operator_id, month, appeal_date
         ),
         latest_calls AS (
@@ -36048,6 +36139,8 @@ class Database:
             return cursor.fetchall()
 
     def get_week_call_stats(self, operator_id, start_date, end_date):
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) не считаются.
+        from test_numbers import keys as test_keys
         with self._get_cursor() as cursor:
             query = """
                 WITH latest_versions AS (
@@ -36062,6 +36155,7 @@ class Database:
                     AND created_at >= %s
                     AND created_at <= %s
                     AND is_draft = FALSE
+                    AND """ + test_keys.sql_not_test('phone_number') + """
                     GROUP BY operator_id, phone_number, month, appeal_date
                 ),
                 latest_calls AS (
@@ -36114,6 +36208,8 @@ class Database:
         sd = start_date
         ed = end_date
         params = [sd, ed]
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) не считаются.
+        from test_numbers import keys as test_keys
 
         query = """
             WITH latest_versions AS (
@@ -36121,6 +36217,7 @@ class Database:
                 FROM calls
                 WHERE is_draft = FALSE
                   AND created_at >= %s AND created_at <= %s
+                  AND """ + test_keys.sql_not_test('phone_number') + """
                 GROUP BY phone_number, operator_id, month, appeal_date
             )
             SELECT

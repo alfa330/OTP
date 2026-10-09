@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 
 from cdr import leads as lead_rules
 from cdr.touches import norm_phone
+from test_numbers import keys as test_keys
 
 from . import brands
 
@@ -128,12 +129,18 @@ def _fetch_subjects(cur, only_new=True):
 """
         params = (LINK_RULES_VERSION,)
     cur.execute(sql, params)
+    rows = cur.fetchall()
+    # Разговор с номером из «Реестра тестовых номеров» со сделкой не связывается:
+    # тестировщик — не клиент маркетинга.
+    test_numbers = test_keys.load_keys(cur)
     out = []
-    for kind, call_id, phone, happened_at in cur.fetchall():
+    for kind, call_id, phone, happened_at in rows:
         digits = norm_phone(phone)
         if not digits or happened_at is None:
             # Без номера или без времени связать не с чем. Молча пропускаем:
             # это не ошибка, а обычная переписка без телефона в карточке.
+            continue
+        if digits in test_numbers:
             continue
         out.append({'subject_kind': kind, 'call_id': int(call_id),
                     'phone': digits, 'started_at': happened_at})
