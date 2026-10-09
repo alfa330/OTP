@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from wazzup.chat_list import chat_list_item, chat_list_queries, escape_like
+from wazzup.chat_list import attach_channel_counts, chat_list_item, chat_list_queries, escape_like
 from wazzup.pilot_schema import init_schema
 
 PORT = os.environ.get('WAZZUP_PILOT_TEST_PORT')
@@ -160,3 +160,27 @@ def test_rows_carry_the_last_message_status_by_the_preview_rule(pg):
     assert (items['77000000001']['lastMessageId'], items['77000000001']['lastMessageStatus']) == ('out-1', 'read')
     assert (items['77000000002']['lastMessageId'], items['77000000002']['lastMessageStatus']) == ('in-2', 'inbound')
     assert (items['77000000003']['lastMessageId'], items['77000000003']['lastMessageStatus']) == (None, None)
+
+
+@needs_pg
+def test_chats_of_one_number_across_channels_and_the_arrow_count(pg):
+    """«Чаты по каналам»: точный номер во всех каналах аккаунта; стрелка — где их больше одного."""
+    cursor = pg
+    chat(cursor, '77000000001', 30, channel='ch-a')
+    chat(cursor, '77000000001', 10, channel='ch-b')
+    chat(cursor, '77000000002', 20, channel='ch-a')
+    chat(cursor, '770000000011', 25, channel='ch-a')      # похожий номер — не тот же
+    chat(cursor, '77000000001', 40, account='potok', channel='ch-p')
+    count, rows = chat_list_queries('op', chat_id='77000000001')
+    cursor.execute(*count)
+    assert cursor.fetchone()[0] == 2
+    cursor.execute(*rows)
+    assert [(item['channelId'], item['chatId']) for item in map(chat_list_item, cursor.fetchall())] == [
+        ('ch-a', '77000000001'), ('ch-b', '77000000001')]
+    _, rows = chat_list_queries('op')
+    cursor.execute(*rows)
+    items = attach_channel_counts(cursor, 'op', [chat_list_item(row) for row in cursor.fetchall()])
+    assert {(item['channelId'], item['chatId']): item['channelsCount'] for item in items} == {
+        ('ch-a', '77000000001'): 2, ('ch-b', '77000000001'): 2,
+        ('ch-a', '77000000002'): 1, ('ch-a', '770000000011'): 1}
+    assert attach_channel_counts(cursor, 'op', []) == []

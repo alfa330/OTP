@@ -37,12 +37,17 @@ def escape_like(value):
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
-def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0):
-    """((SQL, параметры) счёта, (SQL, параметры) страницы)."""
+def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0, chat_id=None):
+    """((SQL, параметры) счёта, (SQL, параметры) страницы).
+
+    chat_id — точный номер: «Чаты по каналам» — чаты этого номера во всех каналах."""
     where, params = ['c.account = %s'], [account]
     if channel_id:
         where.append('c.channel_id = %s')
         params.append(channel_id)
+    if chat_id:
+        where.append('c.chat_id = %s')
+        params.append(chat_id)
     if q:
         where.append("(c.contact_name ILIKE %s ESCAPE '\\' OR c.contact_phone ILIKE %s ESCAPE '\\'"
                      " OR c.chat_id ILIKE %s ESCAPE '\\')")
@@ -67,6 +72,26 @@ def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0):
          ORDER BY {order}
          LIMIT %s OFFSET %s""", params + [limit, offset])
     return count, page
+
+
+CHANNEL_COUNTS_SQL = ('SELECT chat_id, COUNT(*) FROM wazzup_chats'
+                      ' WHERE account = %s AND chat_id = ANY(%s) GROUP BY chat_id')
+
+
+def attach_channel_counts(cursor, account, items):
+    """В скольких каналах аккаунта есть чат с номером строки (channelsCount).
+
+    Стрелка «Чаты по каналам» в строке нужна, только если каналов больше одного:
+    иначе она открывала бы список из одного этого же чата. Один запрос на
+    страницу, по индексу (account, chat_id)."""
+    numbers = sorted({item['chatId'] for item in items if item.get('chatId')})
+    if not numbers:
+        return items
+    cursor.execute(CHANNEL_COUNTS_SQL, (account, numbers))
+    counts = dict(cursor.fetchall())
+    for item in items:
+        item['channelsCount'] = counts.get(item.get('chatId'), 1)
+    return items
 
 
 def chat_list_item(row):

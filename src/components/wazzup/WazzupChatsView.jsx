@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
-    ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
+    ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
 } from 'lucide-react';
 import {
@@ -26,6 +26,7 @@ import {
 import { chatListDraft, useChatDrafts } from './chatDrafts';
 import { applyDeliveryToRows, mergeChatRow, orderChatList, waitingCount } from './chatListOrder';
 import ChatThemeMenu from './ChatThemeMenu';
+import ChatChannelsOfNumber from './ChatChannelsOfNumber';
 import { chatThemeStyle, useChatTheme, useNightMenus, usePortalDark } from './chatThemes';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
@@ -1131,6 +1132,8 @@ function ChatsWorkspace(props) {
     const pilotRefresh = useRef({ id: 0, controller: null });
     const liveChatSummaries = useRef({ seq: 0, items: new Map() });
     const [unreadOnly, setUnreadOnly] = useState(false);
+    // Строка, у которой раскрыты «Чаты по каналам» (одна за раз).
+    const [channelsOpen, setChannelsOpen] = useState('');
     const unread = useSharedChatUnread({
         enabled: account === 'op' && mayProcess,
         active: mainTab === 'chats', selected, thread, box: threadBox, apiBaseUrl, headers,
@@ -1821,9 +1824,16 @@ function ChatsWorkspace(props) {
                             const isSel = selected && selected.chatId === chat.chatId && selected.channelId === chat.channelId;
                             const draftText = chatListDraft(drafts, pilotChatKey('op', chat), { owner: draftOwner, open: isSel });
                             const waitingReplies = waitingCount(chat, waiting);
+                            const rowKey = `${chat.channelId}:${chat.chatId}`;
+                            // «Чаты по каналам» — только если номер писал больше чем в один канал.
+                            const byNumber = chat.channelsCount > 1;
+                            const byNumberOpen = byNumber && channelsOpen === rowKey;
+                            const byNumberId = `wz-by-number-${chat.channelId}-${chat.chatId}`;
                             return (
-                                <button key={`${chat.channelId}:${chat.chatId}`} onClick={() => openChat(chat)}
-                                        className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl px-2.5 py-2 text-left transition ${
+                                <div key={rowKey}>
+                                <div className="relative">
+                                <button onClick={() => openChat(chat)}
+                                        className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl py-2 pl-2.5 pr-8 text-left transition ${
                                             isSel ? 'bg-blue-500/10 ring-1 ring-blue-200/60' : 'hover:bg-slate-50'}`}>
                                     <div className="flex items-center gap-2.5">
                                         <Avatar name={chat.contactName || chat.contactPhone || chat.chatId} />
@@ -1861,6 +1871,21 @@ function ChatsWorkspace(props) {
                                         </div>
                                     </div>
                                 </button>
+                                {byNumber && (
+                                    <button type="button" onClick={() => setChannelsOpen(byNumberOpen ? '' : rowKey)}
+                                        aria-expanded={byNumberOpen} aria-controls={byNumberOpen ? byNumberId : undefined}
+                                        aria-label="Чаты по каналам" title="Чаты по каналам"
+                                        className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-600">
+                                        <ChevronDown size={15} className={`transition-transform ${byNumberOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                )}
+                                </div>
+                                {byNumberOpen && (
+                                    <ChatChannelsOfNumber id={byNumberId} chat={chat} account={account}
+                                        apiBaseUrl={apiBaseUrl} headers={headers} channelName={channelName}
+                                        selected={selected} onOpen={openChat} formatTime={fmtListDate} />
+                                )}
+                                </div>
                             );
                         })}
                         {!unreadOnly && chats !== null && chats.length < chatsTotal && (

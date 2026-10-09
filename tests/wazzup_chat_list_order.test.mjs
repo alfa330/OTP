@@ -83,3 +83,11 @@ test('delivery events reach only the row whose last message they concern', async
     assert.equal(applyDeliveryToRows(rows, [event('77000000002', 'm2', 'sent')]), rows, 'a late "sent" changes nothing');
     assert.equal(applyDeliveryToRows(null, [event('77000000001', 'm1', 'read')]), null);
 });
+
+test('a live summary keeps the "chats by channels" arrow of the row', async () => {
+    const { mergeChatRow } = await import('../src/components/wazzup/chatListOrder.js');
+    const listed = row('77000000001', 30, { lastMessageId: 'm1', lastMessageStatus: 'read', channelsCount: 3 });
+    const live = row('77000000001', 31, { lastMessageId: 'm2', lastMessageStatus: 'sent' });
+    assert.deepEqual([mergeChatRow(listed, live).channelsCount, mergeChatRow(listed, live).lastMessageStatus], [3, 'sent']);
+    assert.equal(mergeChatRow(listed, { ...live, channelsCount: 2 }).channelsCount, 2, 'a fresh page count wins');
+});

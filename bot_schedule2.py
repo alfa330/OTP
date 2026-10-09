@@ -8851,6 +8851,8 @@ def api_wazzup_chats():
         return jsonify({"error": "unknown account"}), 400
     channel_id = (request.args.get('channel_id') or '').strip() or None
     q = (request.args.get('q') or '').strip()
+    # Точный номер — «Чаты по каналам»: чаты этого номера во всех каналах.
+    chat_id = (request.args.get('chat_id') or '').strip()[:200] or None
     try:
         limit = min(max(int(request.args.get('limit', 30)), 1), 100)
     except (TypeError, ValueError):
@@ -8860,13 +8862,14 @@ def api_wazzup_chats():
     except (TypeError, ValueError):
         offset = 0
     # Ждущие ответа — первыми (wazzup/chat_list.py).
-    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset)
+    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset, chat_id)
     try:
         with db._get_cursor() as cursor:
             cursor.execute(*count)
             total = cursor.fetchone()[0]
             cursor.execute(*page)
             items = [wazzup_chat_list.chat_list_item(r) for r in cursor.fetchall()]
+            wazzup_chat_list.attach_channel_counts(cursor, account, items)
         return jsonify({"status": "success", "items": items, "total": total}), 200
     except Exception as error:
         logging.exception("wazzup chats failed")

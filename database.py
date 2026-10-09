@@ -3012,6 +3012,13 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_last
                 ON wazzup_chats(account, last_message_at DESC);
             """)
+            # «Чаты по каналам»: чаты одного номера во всех каналах аккаунта
+            # (wazzup/chat_list.py) — без него каждый список просматривал бы
+            # всю таблицу ради стрелки в строке.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_chat
+                ON wazzup_chats(account, chat_id);
+            """)
             # Пилот обработки чатов и ранние статусы доставки Wazzup.
             from wazzup.pilot_schema import init_schema as init_wazzup_pilot_schema
             init_wazzup_pilot_schema(cursor)

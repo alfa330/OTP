@@ -33,9 +33,18 @@ export function waitingCount(chat, unread) {
    и сводкой из живого потока, а статус — ещё и отдельными событиями доставки;
    пришедшая позже копия той же строки не откатывает «прочитано» к «доставлено». */
 export function mergeChatRow(previous, next) {
-    if (!previous || !next || previous.lastMessageId !== next.lastMessageId) return next;
-    const status = laterStatus(previous.lastMessageStatus, next.lastMessageStatus);
-    return status === next.lastMessageStatus ? next : { ...next, lastMessageStatus: status };
+    if (!previous || !next) return next;
+    let merged = next;
+    // Число каналов номера («Чаты по каналам») считает только страница списка —
+    // сводка из живого потока его не несёт, и стрелка не должна от неё пропадать.
+    if (next.channelsCount == null && previous.channelsCount != null) {
+        merged = { ...merged, channelsCount: previous.channelsCount };
+    }
+    if (previous.lastMessageId === next.lastMessageId) {
+        const status = laterStatus(previous.lastMessageStatus, next.lastMessageStatus);
+        if (status !== next.lastMessageStatus) merged = { ...merged, lastMessageStatus: status };
+    }
+    return merged;
 }
 
 // События доставки (statusOnly) — к строкам, чьё последнее сообщение они касаются.
