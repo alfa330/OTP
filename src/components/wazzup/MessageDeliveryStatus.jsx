@@ -1,11 +1,12 @@
 import React from 'react';
-import { AlertCircle, Check, CheckCheck, Clock3 } from 'lucide-react';
+import { AlertCircle, Check, CheckCheck } from 'lucide-react';
 
 const STATUSES = {
-    // Своё сообщение ещё у iCORE (очередь, sendQueue.js) — те же часы, что и
-    // «Принято Wazzup»: для человека это один этап «ещё не ушло».
-    queued: { Icon: Clock3, label: 'Отправляется', color: 'text-slate-500' },
-    pending: { Icon: Clock3, label: 'Принято Wazzup', color: 'text-slate-500' },
+    // Своё сообщение ещё у iCORE (очередь, sendQueue.js) или уже принято Wazzup —
+    // одна серая галочка, как «отправлено» (решение владельца 09.10.2026: часы
+    // вместо неё только отвлекали). Различает их подсказка при наведении.
+    queued: { Icon: Check, label: 'Отправляется', color: 'text-slate-500' },
+    pending: { Icon: Check, label: 'Принято Wazzup', color: 'text-slate-500' },
     sent: { Icon: Check, label: 'Отправлено', color: 'text-slate-500' },
     delivered: { Icon: CheckCheck, label: 'Доставлено', color: 'text-slate-500' },
     read: { Icon: CheckCheck, label: 'Прочитано', color: 'text-sky-500' },

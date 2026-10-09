@@ -52,6 +52,15 @@ test('outgoing delivery uses gray/blue double checks, accessible labels and no v
     assert.doesNotMatch(incoming, /lucide-check-check/);
 });
 
+test('a message still in the queue or just accepted by Wazzup shows one gray check, not a clock', () => {
+    for (const [status, label] of [['queued', 'Отправляется'], ['pending', 'Принято Wazzup'], ['sent', 'Отправлено']]) {
+        const markup = renderToStaticMarkup(React.createElement(Bubble, { msg: { ...msg, isEcho: true, status } }));
+        assert.match(markup, /lucide-check(?!-)/, status);
+        assert.doesNotMatch(markup, /lucide-clock|lucide-check-check/, status);
+        assert.ok(markup.includes(`aria-label="${label}"`) && markup.includes('text-slate-500'), status);
+    }
+});
+
 test('double click on a message chooses the reply without activating embedded media or deleted messages', () => {
     const replies = [];
     const tree = Bubble.type({ msg, onReply: (item) => replies.push(item) });
