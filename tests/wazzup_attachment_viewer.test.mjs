@@ -14,17 +14,19 @@ const output = join(cache,'WazzupAttachmentViewer.mjs');
 await build({ entryPoints:[join(process.cwd(),'src/components/wazzup/ChatAttachmentViewer.jsx')],
     outfile:output,bundle:true,format:'esm',platform:'node',target:'node22',external:['lucide-react'],
     plugins:[{name:'attachment-ui-harness',setup(builder){
-        builder.onResolve({filter:/^(react|react-dom|axios)$|\/ui\/ios$|\.\/pdfRuntime$/},({path}) => ({path,namespace:'fixture'}));
+        builder.onResolve({filter:/^(react|react-dom|axios)$|\/ui\/ios$|\.\/pdfRuntime$|\.\/useAttachmentPip$/},({path}) => ({path,namespace:'fixture'}));
         builder.onLoad({filter:/.*/,namespace:'fixture'},({path}) => ({loader:'js',contents:
             path === 'react' ? `const h=()=>globalThis.__attachmentHarness;
                 export const useState=(...v)=>h().useState(...v);
                 export const useRef=(...v)=>h().useRef(...v);
                 export const useEffect=(...v)=>h().useEffect(...v);
+                export const useLayoutEffect=(...v)=>h().useEffect(...v);
                 export const useCallback=(...v)=>h().useCallback(...v);
                 export default {Fragment:'fixture-fragment',createElement:(...v)=>h().createElement(...v)};`
-            :path === 'react-dom' ? 'export const createPortal=(node)=>node;'
+            :path === 'react-dom' ? 'export const createPortal=(node,target)=>{globalThis.__attachmentHarness.portalTarget=target;return node;};'
             :path === 'axios' ? 'export default {get:(...v)=>globalThis.__attachmentHarness.get(...v),post:(...v)=>globalThis.__attachmentHarness.post(...v)};'
             :path.endsWith('/ios') ? 'export const IosModal=({children})=>children;'
+            :path.endsWith('/useAttachmentPip') ? 'export default ()=>globalThis.__attachmentHarness.pip;'
             :'export const getDocument=(...v)=>globalThis.__attachmentHarness.getDocument(...v); export class TextLayer {};',
         }));
     }}],
@@ -51,12 +53,12 @@ function fixture({get,post,getDocument,cache}={}){
     const props={apiBaseUrl:'/fixture',headers:()=>({Authorization:'fixture'}),
         chat:{channelId:'channel',chatId:'chat'},message:{messageId:'message',contentUri:'https://store.wazzup24.com/a.pdf'},onClose:()=>{},
         cache:cache||createAttachmentCache()};
-    globalThis.document={body:{},activeElement:null,addEventListener(name,handler){listeners.set(name,handler);},removeEventListener(name){listeners.delete(name);},
-        createElement:(kind)=>kind==='canvas'?{width:0,height:0,getContext:()=>({fillRect(){},drawImage(){}}),toDataURL:()=> 'data:image/jpeg;base64,ZmFrZQ=='}:{} };
+    globalThis.document={body:{appendChild(node){node.parentNode=this;node.ownerDocument=globalThis.document;node.isConnected=true;}},activeElement:null,addEventListener(name,handler){listeners.set(name,handler);},removeEventListener(name){listeners.delete(name);},
+        createElement:(kind)=>kind==='canvas'?{width:0,height:0,getContext:()=>({fillRect(){},drawImage(){}}),toDataURL:()=> 'data:image/jpeg;base64,ZmFrZQ=='}:{style:{},querySelectorAll(){return [];},remove(){this.parentNode=null;this.isConnected=false;}} };
     globalThis.Image=class {naturalWidth=3000;naturalHeight=4000;async decode(){}};
     URL.createObjectURL=(blob)=>{const url=`blob:fixture-${created.length}`;created.push({blob,url});return url;};
     URL.revokeObjectURL=(url)=>revoked.push(url);
-    const harness={createElement:React.createElement,
+    const harness={createElement:React.createElement,pip:{supported:false,pipWindow:null,opening:false,error:''},
         get:(...args)=>{requests.push(args);return get?.(...args)||Promise.resolve({data:new Blob(['image'],{type:'image/png'})});},
         post:(...args)=>{posts.push(args);return post?.(...args)||Promise.resolve({data:{text:'Recognized'}});},
         getDocument:(...args)=>getDocument(...args),
@@ -91,6 +93,83 @@ test('closing before download completes aborts GET and ignores its late response
         assert.equal(h.requests[0][1].signal.aborted,true);
         response.resolve({data:new Blob(['late'],{type:'image/png'})});await tick();
         assert.equal(h.created.length,0);assert.equal(h.lateWrites,0);assert.equal(h.posts.length,0);
+    }finally{h.restore();}
+});
+
+test('moving the viewer keeps its host, zoom and OCR while keyboard events follow its window',async()=>{
+    let closed=0;
+    const detached=[];
+    const h=fixture();
+    const pipKeys=new Map();
+    const pipDocument={body:{appendChild(node){node.parentNode=this;node.ownerDocument=pipDocument;node.isConnected=true;}},
+        addEventListener(name,fn){pipKeys.set(name,fn);},removeEventListener(name){pipKeys.delete(name);}};
+    try{
+        h.render({onClose:()=>closed++,onDetachedChange:value=>detached.push(value)});await tick();
+        const host=h.portalTarget;
+        label(h.render(),'Увеличить').props.onClick();
+        await extractButton(h.render()).props.onClick();
+        const posts=h.posts.length,requests=h.requests.length;
+        h.pip={...h.pip,pipWindow:{document:pipDocument}};
+        let tree=h.render();
+        assert.equal(tree.props.embedded,true);
+        assert.equal(h.portalTarget,host);assert.equal(host.ownerDocument,pipDocument);
+        assert.equal(label(tree,'Извлечённый текст').props.value,'Recognized');
+        assert.equal(find(tree,node=>node.type==='img').props.style.width,'125%');
+        h.dispatch({key:'Escape',stopPropagation(){}});assert.equal(closed,0,'main chat Escape must not close PiP');
+        pipKeys.get('keydown')({key:'Escape',stopPropagation(){}});assert.equal(closed,1);
+        h.pip={...h.pip,pipWindow:null};tree=h.render();
+        assert.equal(h.portalTarget,host);assert.equal(host.ownerDocument,document);
+        assert.equal(pipKeys.size,0);assert.equal(tree.props.embedded,false);
+        assert.equal(label(tree,'Извлечённый текст').props.value,'Recognized');
+        assert.equal(h.posts.length,posts);assert.equal(h.requests.length,requests);
+        assert.deepEqual(detached,[false,true,false]);
+    }finally{h.restore();}
+});
+
+test('detaching during recognition preserves the request and its result',async()=>{
+    const response=defer();const h=fixture({post:()=>response.promise});
+    try{
+        h.render();await tick();
+        const work=extractButton(h.render()).props.onClick();await tick();
+        h.pip={...h.pip,pipWindow:{document:{body:{appendChild(){}},addEventListener(){},removeEventListener(){}}}};
+        h.render();assert.equal(h.posts[0][2].signal.aborted,false);
+        response.resolve({data:{text:'Completed inside PiP'}});await work;
+        assert.equal(label(h.render(),'Извлечённый текст').props.value,'Completed inside PiP');
+        assert.equal(h.posts.length,1);assert.equal(h.requests.length,1);
+    }finally{h.restore();}
+});
+
+test('PiP copy and download use the attachment document rather than the opener',async()=>{
+    let selected=0,clicked=0,removed=0;
+    const commands=[],anchors=[];
+    const pipDocument={body:{appendChild(node){anchors.push(node);}},addEventListener(){},removeEventListener(){},
+        execCommand(command){commands.push(command);return true;},
+        createElement(kind){assert.equal(kind,'a');return {click(){clicked++;},remove(){removed++;}};}};
+    const h=fixture();
+    try{
+        h.render();await tick();await extractButton(h.render()).props.onClick();
+        h.pip={...h.pip,pipWindow:{document:pipDocument}};
+        const tree=h.render();
+        find(tree,node=>node.props?.tabIndex===-1).ref.current={ownerDocument:pipDocument,focus(){}};
+        label(tree,'Извлечённый текст').ref.current={focus(){},select(){selected++;}};
+        await label(tree,'Копировать текст').props.onClick();
+        assert.deepEqual(commands,['copy']);assert.equal(selected,1);
+        assert.equal(label(h.render(),'Копировать текст').props.title,'Скопировано');
+        label(tree,'Скачать файл').props.onClick();
+        assert.equal(clicked,1);assert.equal(removed,1);
+        assert.equal(anchors.at(-1).href,'blob:fixture-0');
+        assert.equal(anchors.at(-1).download,'a.pdf');
+    }finally{h.restore();}
+});
+
+test('video is not paused, reloaded or replaced when its host changes documents',async()=>{
+    const h=fixture();
+    try{
+        h.render({message:{messageId:'movie',type:'video',contentUri:'https://example.invalid/video.mp4'}});await tick();
+        const video=h.videos[0];video.currentTime=12;
+        h.pip={...h.pip,pipWindow:{document:{body:{appendChild(){}},addEventListener(){},removeEventListener(){}}}};
+        h.render();h.pip={...h.pip,pipWindow:null};h.render();
+        assert.equal(h.videos.length,1);assert.equal(video.pauseCalls,0);assert.equal(video.loadCalls,0);assert.equal(video.currentTime,12);
     }finally{h.restore();}
 });
 

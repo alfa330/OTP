@@ -974,15 +974,24 @@ function ChatsWorkspace(props) {
     const selectedKey = pilotChatKey(account, selected);
     const attachmentThread = useRef([]);
     const openAttachment = useCallback((message, videoOnly = false) => {
+        if (!selected) return;
         const items = buildAttachmentGroup(attachmentThread.current, message)
             .filter((item) => !videoOnly || attachmentPreviewKind(item) === 'video');
-        setAttachmentSelection({ key: selectedKey, message: { ...message }, items });
-    }, [selectedKey]);
+        setAttachmentSelection((current) => ({ key: selectedKey, chat: { ...selected }, account,
+            ownerId: user?.id, apiBaseUrl, videoOnly, message: { ...message }, items,
+            detached: current?.key === selectedKey && Boolean(current.detached) }));
+    }, [selectedKey, selected, account, user?.id, apiBaseUrl]);
     const selectAttachment = useCallback((message) => {
-        setAttachmentSelection((current) => current?.key === selectedKey
-            && current.items.some((item) => item.messageId === message.messageId)
-            ? { ...current, message } : current);
-    }, [selectedKey]);
+        setAttachmentSelection((current) => {
+            if (!current || current.key !== attachmentSelection?.key) return current;
+            const item = current.items.find((item) => item.messageId === message.messageId);
+            return item ? { ...current, message: item } : current;
+        });
+    }, [attachmentSelection?.key]);
+    const setAttachmentDetached = useCallback((detached) => {
+        setAttachmentSelection((current) => current && current.key === attachmentSelection?.key
+            ? { ...current, detached } : current);
+    }, [attachmentSelection?.key]);
     const chooseReply = useCallback((message) => {
         setNoteComposerKey(null);
         setReplySelection({ key: selectedKey, message: { ...message } });
@@ -1009,7 +1018,9 @@ function ChatsWorkspace(props) {
     }, [showToast, operator]);
     useEffect(() => {
         setReplySelection(null);
-        setAttachmentSelection(null);
+        // A floating attachment keeps the original conversation snapshot.
+        // Returning it to a modal does not change the chat open behind it.
+        setAttachmentSelection((current) => current?.detached ? current : null);
         setNoteComposerKey(null);
         return () => {
             clearTimeout(quoteHighlight.current.timer);
@@ -1235,6 +1246,14 @@ function ChatsWorkspace(props) {
     const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
         onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
+    const attachmentAllowed = Boolean(attachmentSelection
+        && attachmentSelection.account === account && attachmentSelection.ownerId === user?.id
+        && attachmentSelection.apiBaseUrl === apiBaseUrl
+        && (attachmentSelection.videoOnly || (pilot.enabled
+            && !pilot.capability?.excludedChannelIds?.includes(attachmentSelection.chat.channelId))));
+    useEffect(() => {
+        if (!attachmentAllowed) setAttachmentSelection(null);
+    }, [attachmentAllowed]);
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
@@ -1865,14 +1884,15 @@ function ChatsWorkspace(props) {
                     )}
                 </div>
             </div>
-            {attachmentSelection?.key === selectedKey && selected && (pilot.enabled || attachmentPreviewKind(attachmentSelection.message) === 'video') &&
+            {attachmentAllowed &&
                 <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
                     <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
                 </IosModal>}>
-                    <ChatAttachmentViewer key={selectedKey}
-                        apiBaseUrl={apiBaseUrl} headers={headers} chat={selected} message={attachmentSelection.message}
-                        items={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                    <ChatAttachmentViewer key={attachmentSelection.key}
+                        apiBaseUrl={apiBaseUrl} headers={headers} chat={attachmentSelection.chat} message={attachmentSelection.message}
+                        items={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(attachmentSelection.chat.channelId)
                             ? attachmentSelection.items : attachmentSelection.items.filter((item) => attachmentPreviewKind(item) === 'video')} onSelect={selectAttachment}
+                        onDetachedChange={setAttachmentDetached}
                         onClose={() => setAttachmentSelection(null)} />
                 </Suspense>}
         </div>

@@ -60,12 +60,12 @@ export function boundedCanvasSize(width, height, preferredScale = 1, maxPixels =
     return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)), scale };
 }
 
-export function saveAttachment(url, filename) {
-    const anchor = document.createElement('a');
+export function saveAttachment(url, filename, ownerDocument = document) {
+    const anchor = ownerDocument.createElement('a');
     anchor.href = url;
     anchor.download = filename;
     anchor.rel = 'noopener';
-    document.body.appendChild(anchor);
+    ownerDocument.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
 }

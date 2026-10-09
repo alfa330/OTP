@@ -1,11 +1,13 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, ScanText, ZoomIn, ZoomOut } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Copy, Download, FileText, Loader2, PictureInPicture2, ScanText, Undo2, ZoomIn, ZoomOut } from 'lucide-react';
 import { IosModal } from '../ui/ios';
 import { ATTACHMENT_MAX_BYTES, attachmentName, attachmentPreviewKind, boundedCanvasSize, pdfPageText, saveAttachment } from './chatAttachments';
 import ChatAttachmentStrip from './ChatAttachmentStrip';
 import { attachmentCache } from './attachmentCache';
+import useAttachmentPip from './useAttachmentPip';
+import { moveAttachmentHost } from './moveAttachmentHost';
 
 const iconButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-35';
 const actionButton = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40';
@@ -18,7 +20,7 @@ async function requestError(error, fallback) {
     return typeof body?.error === 'string' ? body.error : fallback;
 }
 
-function PdfPage({ document: pdf, library, number, zoom, onReady, onError }) {
+function PdfPage({ document: pdf, library, number, zoom, onReady, onError, hostWindow }) {
     const box = useRef(null);
     const [width, setWidth] = useState(740);
     const canvas = useRef(null);
@@ -32,18 +34,19 @@ function PdfPage({ document: pdf, library, number, zoom, onReady, onError }) {
             timer = setTimeout(() => setWidth(Math.max(180, element.clientWidth - 24)), 80);
         };
         setWidth(Math.max(180, element.clientWidth - 24));
-        const observer = new ResizeObserver(resize);
+        const observer = new hostWindow.ResizeObserver(resize);
         observer.observe(element);
         return () => { observer.disconnect(); clearTimeout(timer); };
-    }, []);
+    }, [hostWindow]);
     useEffect(() => {
         let cancelled = false;
         let render;
         let selection;
         // A fresh canvas per render prevents a cancelled PDF.js task from
         // racing with its replacement when zoom changes quickly.
-        const target = document.createElement('canvas');
-        const layer = document.createElement('div');
+        const ownerDocument = box.current.ownerDocument;
+        const target = ownerDocument.createElement('canvas');
+        const layer = ownerDocument.createElement('div');
         layer.className = 'textLayer wazzup-pdf-text';
         canvas.current.replaceChildren(target);
         textLayer.current.replaceChildren(layer);
@@ -53,7 +56,7 @@ function PdfPage({ document: pdf, library, number, zoom, onReady, onError }) {
             if (cancelled) return;
             const natural = page.getViewport({ scale: 1 });
             const view = page.getViewport({ scale: Math.min(1.4, width / natural.width) * zoom });
-            const pixels = boundedCanvasSize(view.width, view.height, Math.min(window.devicePixelRatio || 1, 2));
+            const pixels = boundedCanvasSize(view.width, view.height, Math.min(ownerDocument.defaultView.devicePixelRatio || 1, 2));
             target.width = pixels.width;
             target.height = pixels.height;
             target.style.width = `${view.width}px`;
@@ -76,7 +79,7 @@ function PdfPage({ document: pdf, library, number, zoom, onReady, onError }) {
             }
         });
         return () => { cancelled = true; render?.cancel(); selection?.cancel(); };
-    }, [pdf, library, number, zoom, width, onReady, onError]);
+    }, [pdf, library, number, zoom, width, onReady, onError, hostWindow]);
     return <div ref={box} className="wazzup-scrollbar h-full overflow-auto p-3">
         <div className="relative mx-auto bg-white shadow-sm" style={size || { minHeight: 200 }}>
             <div ref={canvas} />
@@ -139,7 +142,31 @@ async function downloadAttachment(get, signal) {
 // (attachmentCache.js): reopening an attachment neither downloads it again nor
 // repeats the paid recognition.
 export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, message, items = [], onSelect, onClose,
-    cache = attachmentCache }) {
+    onDetachedChange, cache = attachmentCache }) {
+    // Moving this host preserves the actual video, PDF canvas, selection and
+    // React subtree. Changing createPortal's target would remount them all.
+    const homeDocument = useRef(document);
+    const [portalHost] = useState(() => document.createElement('div'));
+    const cancelMediaTransfer = useRef(null);
+    const moveHost = useCallback((destination) => {
+        if (portalHost.parentNode !== destination) {
+            cancelMediaTransfer.current = moveAttachmentHost(portalHost, destination);
+        }
+    }, [portalHost]);
+    const returnHost = useCallback(() => {
+        if (portalHost.isConnected) moveHost(homeDocument.current.body);
+    }, [portalHost, moveHost]);
+    const pip = useAttachmentPip({ onReturn: returnHost });
+    useLayoutEffect(() => {
+        portalHost.style.height = pip.pipWindow ? '100%' : '';
+        moveHost((pip.pipWindow?.document || homeDocument.current).body);
+    }, [pip.pipWindow, portalHost, moveHost]);
+    useLayoutEffect(() => () => portalHost.remove(), [portalHost]);
+    const detachedCallback = useRef(onDetachedChange);
+    detachedCallback.current = onDetachedChange;
+    useLayoutEffect(() => {
+        detachedCallback.current?.(Boolean(pip.pipWindow));
+    }, [pip.pipWindow]);
     const [loadedAsset, setAsset] = useState(null);
     const [loadedDownload, setDownload] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -155,6 +182,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     // A replacement file or another API must not inherit the old file's bytes
     // or recognized text, even if the message identifiers are unchanged.
     const sourceKey = JSON.stringify([apiBaseUrl, chat.channelId, chat.chatId, message.messageId, message.contentUri]);
+    useLayoutEffect(() => () => cancelMediaTransfer.current?.(), [sourceKey]);
     latest.current = { headers, onClose, items, onSelect, sourceKey };
     const navigation = useRef({ sourceKey, messageId: message.messageId });
     if (navigation.current.sourceKey !== sourceKey) {
@@ -280,7 +308,8 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sourceKey, retry, cancelExtraction, knownUnsupported, isVideo, cache]);
     useEffect(() => {
-        const previousFocus = document.activeElement;
+        const ownerDocument = pip.pipWindow?.document || homeDocument.current;
+        const previousFocus = ownerDocument.activeElement;
         container.current?.focus();
         const escape = (event) => {
             if (event.key === 'Escape') { event.stopPropagation(); close(); }
@@ -292,13 +321,12 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                 event.preventDefault(); step(event.key === 'ArrowLeft' ? -1 : 1);
             }
         };
-        document.addEventListener('keydown', escape);
+        ownerDocument.addEventListener('keydown', escape);
         return () => {
-            document.removeEventListener('keydown', escape);
-            clearTimeout(copyTimer.current);
+            ownerDocument.removeEventListener('keydown', escape);
             if (previousFocus?.isConnected) previousFocus.focus();
         };
-    }, [step, close]);
+    }, [step, close, pip.pipWindow]);
     const ready = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setCurrentPage(value); }, [sourceKey, message.messageId]);
     const pageError = useCallback((value) => { if (latest.current.sourceKey === sourceKey && navigation.current.messageId === message.messageId) setError(value); }, [sourceKey, message.messageId]);
     const changePage = (value) => {
@@ -341,7 +369,18 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         if (!extracted?.text) return;
         const version = copyState.current.version;
         try {
-            await navigator.clipboard.writeText(extracted.text);
+            const ownerDocument = container.current?.ownerDocument || document;
+            // Copy inside PiP during the actual click, avoiding a separate
+            // clipboard permission prompt. Keep the async API as a fallback.
+            let copiedSelection = false;
+            if (pip.pipWindow && resultBox.current) {
+                resultBox.current.focus(); resultBox.current.select();
+                copiedSelection = ownerDocument.execCommand?.('copy') === true;
+            }
+            if (!copiedSelection) {
+                const clipboard = ownerDocument.defaultView?.navigator?.clipboard || navigator.clipboard;
+                await clipboard.writeText(extracted.text);
+            }
             if (!copyState.current.mounted || version !== copyState.current.version) return;
             setCopied(true); clearTimeout(copyTimer.current);
             copyTimer.current = setTimeout(() => setCopied(false), 1800);
@@ -352,10 +391,17 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         }
     };
     const canExtract = Boolean(asset) && !loading && !extracting && (asset.kind !== 'pdf' || Boolean(currentPage));
-    return createPortal(<IosModal open onClose={close} title={download?.name || attachmentName(message) || (isVideo ? 'Видео' : 'Просмотр вложения')}
+    return createPortal(<IosModal open embedded={Boolean(pip.pipWindow)} onClose={close} title={download?.name || attachmentName(message) || (isVideo ? 'Видео' : 'Просмотр вложения')}
+        headerActions={pip.pipWindow ? <button type="button" className={actionButton} onClick={pip.returnToChat}
+            aria-label="Вернуть в чат" title="Вернуть в чат"><Undo2 size={16} /><span className="hidden sm:inline">В чат</span></button>
+            : pip.supported && <button type="button" className={iconButton} onClick={pip.open} disabled={pip.opening}
+                aria-label="Картинка в картинке" title="Картинка в картинке — поверх других окон">
+                {pip.opening ? <Loader2 size={16} className="animate-spin" /> : <PictureInPicture2 size={17} />}
+            </button>}
         subtitle={asset?.kind === 'pdf' ? `${asset.pdf.numPages} стр. · Текст можно выделять на странице` : undefined}
         maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
-        <div ref={container} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none" style={{ height: 'min(78vh, 900px)' }}>
+        <div ref={container} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none" style={{ height: pip.pipWindow ? undefined : 'min(78vh, 900px)' }}>
+            {pip.error && <div role="alert" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">{pip.error}</div>}
             <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-2">
                 {asset?.kind === 'pdf' && <>
                     <button type="button" className={iconButton} disabled={page <= 1} aria-label="Предыдущая страница"
@@ -382,7 +428,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                     {knownUnsupported || isVideo ? <a href={message.contentUri} target="_blank" rel="noopener noreferrer" download={attachmentName(message)}
                         className={iconButton} aria-label="Скачать оригинал" title="Скачать оригинал"><Download size={16} /></a>
                         : <button type="button" className={iconButton} disabled={!download} aria-label="Скачать файл" title="Скачать файл"
-                            onClick={() => saveAttachment(download.url, download.name)}><Download size={16} /></button>}
+                            onClick={() => saveAttachment(download.url, download.name, container.current?.ownerDocument)}><Download size={16} /></button>}
                 </div>
             </div>
             {currentSource && error && <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
@@ -408,7 +454,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
                         <a href={message.contentUri} target="_blank" rel="noopener noreferrer" className="text-xs font-medium text-blue-600 hover:underline">Открыть оригинал</a>
                     </div>}
                     {asset?.kind === 'pdf' && <PdfPage key={sourceKey} document={asset.pdf} library={asset.library} number={page} zoom={zoom}
-                        onReady={ready} onError={pageError} />}
+                        onReady={ready} onError={pageError} hostWindow={pip.pipWindow || homeDocument.current.defaultView} />}
                     {asset?.kind === 'image' && <div className="wazzup-scrollbar flex h-full overflow-auto p-3">
                         <img src={asset.url} alt="Вложение из сообщения" className="m-auto shrink-0 object-contain"
                             style={{ width: `${zoom * 100}%`, maxWidth: 'none', maxHeight: zoom === 1 ? '100%' : undefined }}
@@ -430,5 +476,5 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             {onSelect && <ChatAttachmentStrip items={items} selectedId={message.messageId} onSelect={select}
                 onPrevious={() => step(-1)} onNext={() => step(1)} />}
         </div>
-    </IosModal>, document.body);
+    </IosModal>, portalHost);
 }

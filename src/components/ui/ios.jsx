@@ -388,7 +388,8 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
    (карточка водителя «Обзвона»). Не передано — всё как было. */
 const MODAL_BODY_CLASS = 'thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5';
 
-export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS }) => {
+export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS,
+    embedded = false, headerActions = null }) => {
     /* НА ТЕЛЕФОНЕ ЭТО НЕ ОКНО, А ЭКРАН. Решение владельца 10.09.2026: «убрать
        все модалки и вместо них сделать плавное переключение 1 в 1 как в
        телеграмме — модалка на мобильном выглядит не очень». Карточка посреди
@@ -402,7 +403,10 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
 
        На компьютере ничего не изменилось: там isNarrow всегда false, окно
        появляется и исчезает мгновенно, как раньше. */
-    const isNarrow = useIsMobileShell();
+    const mobileShell = useIsMobileShell();
+    // A detached document has its own window frame. Keep the same React tree
+    // while removing the overlay and the main page's mobile navigation.
+    const isNarrow = mobileShell && !embedded;
     /* Системное «назад» (свайп от края в iOS, кнопка в Android) закрывает
        экран. Только на телефоне: на компьютере «назад» означает «предыдущая
        страница», и закрывать им окно значило бы менять поведение браузера. */
@@ -421,6 +425,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
         return () => clearTimeout(timer);
     }, [open, isNarrow]);
 
+    if (embedded && !open) return null;
     if (!open && !leaving) return null;
     return (
         <div
@@ -428,12 +433,15 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                поднимается над баром разделов и угловым колоколом, колокол
                на это время прячется, а само окно превращается в экран
                (см. mobile-shell.css). */
-            className={`otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}`}
+            className={embedded ? 'flex h-full min-h-0 w-full flex-col overflow-hidden'
+                : `otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
-            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
+            onMouseDown={(e) => { if (!embedded && e.target === e.currentTarget) onClose?.(); }}
         >
-            <div className={`otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
-                <div className="otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
+            <div className={embedded ? 'flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-slate-50'
+                : `otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
+                <div className={embedded ? 'relative flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/80 px-3 py-2'
+                    : 'otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5'}>
                     {/* Шеврон «назад» слева — на телефоне он и закрывает экран:
                         крестик в правом углу читается как «отменить», а уход с
                         экрана в мессенджере делают именно им. Внутренний onBack
@@ -460,6 +468,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
                         {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
                     </div>
+                    {headerActions}
                     {/* Крестик на телефоне не нужен: уход с экрана уже сделан
                         шевроном слева, а две кнопки «закрыть» в одной шапке —
                         лишний шум ровно там, где место дороже всего. */}
