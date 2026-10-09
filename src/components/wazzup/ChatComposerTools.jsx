@@ -11,13 +11,14 @@ function WhatsAppMark() {
     </svg>;
 }
 
-export default function ChatComposerTools({ apiBaseUrl, headers, channelId, locked, emojiDisabled, slash, onChoose, onEmoji }) {
+export default function ChatComposerTools({ apiBaseUrl, headers, channelId, locked, emojiDisabled, slash, onChoose, onEmoji, composerRef, composerKeyDownRef }) {
     const [panel, setPanel] = useState(null);
     const [items, setItems] = useState([]);
     const [warnings, setWarnings] = useState([]);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
+    const [activeKey, setActiveKey] = useState(null);
     const [editing, setEditing] = useState(null);
     const [selected, setSelected] = useState(null);
     const [values, setValues] = useState({});
@@ -28,6 +29,8 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
     const [emojiAttempt, setEmojiAttempt] = useState(0);
     const rootRef = useRef(null);
     const templateButtonRef = useRef(null);
+    const templateListRef = useRef(null);
+    const hadSlash = useRef(false);
     const mutationRef = useRef(false);
     const dismissedSlash = useRef(null);
     const closePanel = (restoreFocus = false) => {
@@ -35,7 +38,7 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         dismissedSlash.current = slash;
         // Скрытие окна сохраняет набранный шаблон и значения переменных.
         setPanel(null); setDeleting(null);
-        if (restoreFocus) templateButtonRef.current?.focus();
+        if (restoreFocus) (composerRef?.current || templateButtonRef.current)?.focus();
     };
     const requestHeaders = () => typeof headers === 'function' ? headers() : headers;
     const warmEmoji = () => { warmChatEmojiPicker().catch(() => {}); };
@@ -50,12 +53,23 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         return () => { active = false; };
     }, [panel, EmojiPicker, emojiAttempt]);
     useEffect(() => {
-        if (slash === null) dismissedSlash.current = null;
-        else if (!locked && slash !== dismissedSlash.current) { setPanel('templates'); setSearch(slash); }
+        if (slash === null) {
+            dismissedSlash.current = null;
+            if (hadSlash.current && panel === 'templates') closePanel();
+            hadSlash.current = false;
+        } else {
+            hadSlash.current = true;
+            if (!locked && slash !== dismissedSlash.current) {
+                setPanel('templates'); setSearch(slash); setActiveKey(null);
+            }
+        }
     }, [slash, locked]);
     useEffect(() => {
         if (!panel || typeof document === 'undefined') return undefined;
-        const outside = (event) => { if (!rootRef.current?.contains(event.target)) closePanel(); };
+        const outside = (event) => {
+            if (panel === 'templates' && event.target === composerRef?.current) return;
+            if (!rootRef.current?.contains(event.target)) closePanel();
+        };
         const escape = (event) => {
             if (event.key !== 'Escape') return;
             event.preventDefault(); event.stopPropagation(); closePanel(true);
@@ -112,10 +126,57 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         finally { mutationRef.current = false; setBusy(false); }
     };
     const matchingTemplates = items.filter((item) => String(item.title || '').toLowerCase().includes(search.trim().toLowerCase()));
+    const availableTemplates = matchingTemplates.filter((item) => item.supported);
+    const templateKey = (item) => `${item.source}:${item.id}`;
+    const activeTemplate = availableTemplates.find((item) => templateKey(item) === activeKey) || availableTemplates[0];
+    const currentKey = activeTemplate ? templateKey(activeTemplate) : null;
+    const selectTemplate = (item) => {
+        if (busy || mutationRef.current || !item.supported) return;
+        setValues({});
+        if (item.variables.length) setSelected(item);
+        else choose(item);
+    };
+    const navigateTemplates = (event) => {
+        if (panel !== 'templates' || locked || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey
+            || event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229 || event.nativeEvent?.keyCode === 229) return false;
+        if (!['ArrowUp', 'ArrowDown', 'Enter', 'Escape'].includes(event.key)) return false;
+        if ((editing || selected || deleting) && event.key.startsWith('Arrow')) return false;
+        event.preventDefault(); event.stopPropagation();
+        if (event.key === 'Escape') closePanel(true);
+        else if (!busy && !editing && !selected && !deleting) {
+            if (event.key === 'Enter') {
+                if (activeTemplate) selectTemplate(activeTemplate);
+            } else if (availableTemplates.length) {
+                const index = availableTemplates.indexOf(activeTemplate);
+                const next = (index + (event.key === 'ArrowDown' ? 1 : -1) + availableTemplates.length) % availableTemplates.length;
+                setActiveKey(templateKey(availableTemplates[next]));
+            }
+        }
+        return true;
+    };
+    useEffect(() => {
+        if (!composerKeyDownRef) return undefined;
+        composerKeyDownRef.current = navigateTemplates;
+        return () => { composerKeyDownRef.current = null; };
+    }, [composerKeyDownRef, navigateTemplates]);
+    useEffect(() => {
+        const list = templateListRef.current;
+        const active = list?.querySelector('[data-template-active="true"]');
+        if (!active) return;
+        const row = active.parentElement;
+        // Scroll just this list; scrollIntoView can also move the chat/page.
+        const top = row.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+        if (top < list.scrollTop) list.scrollTop = top;
+        else if (top + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + row.offsetHeight - list.clientHeight;
+    }, [currentKey, panel, search, editing, selected, deleting]);
     return <div ref={rootRef} className="shrink-0">
         <div className="flex gap-0.5">
             <button ref={templateButtonRef} type="button" disabled={locked || mutationRef.current} aria-label="Шаблоны сообщений" title="Шаблоны сообщений · /" aria-expanded={panel === 'templates'}
-                onClick={() => { if (mutationRef.current) return; if (panel === 'templates') closePanel(); else { setPanel('templates'); setSearch(''); } }}
+                onClick={() => {
+                    if (mutationRef.current) return;
+                    if (panel === 'templates') closePanel(true);
+                    else { setPanel('templates'); setSearch(slash || ''); setActiveKey(null); composerRef?.current?.focus(); }
+                }}
                 className="inline-flex h-10 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40">
                 <Slash size={18} /></button>
             <button type="button" disabled={locked || emojiDisabled || mutationRef.current} aria-label="Выбрать эмодзи" title="Выбрать эмодзи" aria-expanded={panel === 'emoji'}
@@ -140,19 +201,20 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         {panel === 'templates' && !locked && <div role="dialog" aria-label="Шаблоны сообщений"
             onKeyDown={(e) => {
                 if (e.key === 'Escape') { e.stopPropagation(); closePanel(true); }
-                // Enter in template search/variable fields must not submit the message form.
+                // Template editing/variable fields must not submit the message form.
                 if (e.key === 'Enter') { e.stopPropagation(); if (e.target.tagName === 'INPUT') e.preventDefault(); }
             }}
-            className="absolute bottom-full left-0 z-20 mb-2 w-full max-w-md rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
-            <div className="mb-2 flex items-center justify-between text-sm font-semibold">
-                <span>Шаблоны сообщений</span>
-                <button type="button" disabled={mutationRef.current} aria-label="Закрыть" onClick={() => closePanel(true)}><X size={17} /></button>
+            className="absolute bottom-full left-0 z-20 mb-2 flex max-h-[min(420px,60dvh)] w-full max-w-[460px] flex-col overflow-hidden rounded-lg bg-white shadow-[0_3px_18px_rgba(15,23,42,0.18)]">
+            <div className="flex shrink-0 items-center px-4 py-3">
+                <button type="button" disabled={busy || Boolean(editing) || Boolean(selected)}
+                    onClick={() => { setEditing({ title: '', text: '' }); setDeleting(null); setError(''); }}
+                    className="rounded px-1 py-0.5 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-40">+ iCORE</button>
             </div>
-            <>
-                {error && <p role="alert" className="mb-2 text-xs text-rose-600">{error}</p>}
-                {warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-700">{warning}</p>)}
-                {editing ? <div className="space-y-2">
-                    <input aria-label="Название шаблона" disabled={busy} value={editing.title} maxLength={100} placeholder="Название"
+            <div className="flex min-h-0 flex-col">
+                {error && <p role="alert" className="px-4 pb-2 text-xs text-rose-600">{error}</p>}
+                {warnings.map((warning) => <p key={warning} role="status" className="px-4 pb-2 text-xs text-amber-700">{warning}</p>)}
+                {editing ? <div className="space-y-2 overflow-y-auto px-4 pb-4">
+                    <input autoFocus aria-label="Название шаблона" disabled={busy} value={editing.title} maxLength={100} placeholder="Название"
                         onChange={(e) => setEditing({ ...editing, title: e.target.value })} className="w-full rounded border p-2 text-sm" />
                     <textarea aria-label="Текст шаблона" disabled={busy} value={editing.text} maxLength={4096} rows={6} placeholder="Текст ответа"
                         onChange={(e) => setEditing({ ...editing, text: e.target.value })} className="w-full rounded border p-2 text-sm" />
@@ -160,42 +222,38 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                     <button type="button" disabled={busy || !editing.title.trim() || !editing.text.trim()} onClick={save}
                         className="mr-3 text-sm font-semibold text-blue-600 disabled:opacity-40">Сохранить</button>
                     <button type="button" disabled={busy} onClick={() => setEditing(null)} className="text-sm">Отмена</button>
-                </div> : selected ? <div className="space-y-2">
+                </div> : selected ? <div className="space-y-2 overflow-y-auto px-4 pb-4">
                     <p className="text-sm font-medium">{selected.title}</p>
                     <p className="max-h-36 overflow-auto whitespace-pre-wrap text-xs text-slate-600">{selected.text}</p>
-                    {selected.variables.map((key, i) => <input key={key} aria-label={`Переменная ${i+1}`}
+                    {selected.variables.map((key, i) => <input key={key} autoFocus={i === 0} aria-label={`Переменная ${i+1}`}
                         placeholder={`Переменная ${i+1}`} value={values[key] || ''} maxLength={500}
                         onChange={(e) => setValues({ ...values, [key]: e.target.value })} className="w-full rounded border p-2 text-sm" />)}
                     <button type="button" onClick={() => choose(selected)} className="mr-3 text-sm font-semibold text-blue-600">Вставить</button>
                     <button type="button" onClick={() => setSelected(null)} className="text-sm">Назад</button>
                 </div> : <>
-                    <div className="mb-2 flex gap-2">
-                        <input aria-label="Найти шаблон" placeholder="Найти по названию…" value={search} onChange={(e) => setSearch(e.target.value)}
-                            className="min-w-0 flex-1 rounded-lg border p-2 text-xs" />
-                        <button type="button" disabled={busy} onClick={() => { setEditing({ title: '', text: '' }); setError(''); }}
-                            className="text-xs font-semibold text-blue-600">+ iCORE</button>
-                    </div>
-                    {busy && <p className="text-xs text-slate-500">Загрузка…</p>}
-                    <div className="max-h-60 overflow-y-auto">
+                    {busy && <p role="status" className="px-4 py-2 text-sm text-slate-500">Загрузка…</p>}
+                    <div ref={templateListRef} className="wazzup-thin-scrollbar relative min-h-0 overflow-y-auto overscroll-contain pb-1">
                         {matchingTemplates.map((item) =>
-                            <div key={`${item.source}:${item.id}`} className="flex gap-1 border-b border-slate-100 py-1">
+                            <div key={templateKey(item)} className={`group flex items-stretch ${currentKey === templateKey(item) ? 'bg-slate-100' : 'hover:bg-slate-50'}`}>
                                 <button type="button" disabled={busy || !item.supported} title={item.unsupportedReason || item.text}
-                                    onClick={() => { setValues({}); item.variables.length ? setSelected(item) : choose(item); }}
-                                    className="min-w-0 flex-1 rounded p-1 text-left hover:bg-slate-50 disabled:opacity-50">
-                                    <span className="flex items-center gap-1.5 text-xs font-semibold">
-                                        {item.kind === 'waba' && <WhatsAppMark />}
+                                    data-template-key={templateKey(item)} data-template-active={currentKey === templateKey(item)}
+                                    aria-current={currentKey === templateKey(item) ? 'true' : undefined}
+                                    onPointerMove={() => { if (item.supported) setActiveKey(templateKey(item)); }}
+                                    onClick={() => selectTemplate(item)}
+                                    className="min-w-0 flex-1 px-4 py-2.5 text-left outline-none focus-visible:bg-blue-50 disabled:opacity-50">
+                                    <span className="flex items-center gap-2 text-[15px] leading-6 text-slate-900">
                                         <span className="truncate">{item.title}</span>
-                                        <span className="font-normal text-slate-400">{item.source === 'icore' ? 'iCORE' : 'Wazzup'}</span>
+                                        {item.kind === 'waba' && <WhatsAppMark />}
                                     </span>
-                                    <span className="block truncate text-xs text-slate-500">{item.text}</span>
+                                    <span className="mt-1 block truncate text-sm leading-5 text-slate-500">{item.text}</span>
                                 </button>
                                 {item.source === 'icore' && <>
-                                    <button type="button" disabled={busy} aria-label={`Изменить ${item.title}`} onClick={() => setEditing(item)} className="px-1 text-slate-400"><Pencil size={13} /></button>
-                                    <button type="button" disabled={busy} aria-label={`Удалить ${item.title}`} onClick={() => setDeleting(item)} className="px-1 text-slate-400"><Trash2 size={13} /></button>
+                                    <button type="button" disabled={busy} aria-label={`Изменить ${item.title}`} onClick={() => setEditing(item)} className="px-2 text-slate-400 hover:text-blue-600"><Pencil size={15} /></button>
+                                    <button type="button" disabled={busy} aria-label={`Удалить ${item.title}`} onClick={() => setDeleting(item)} className="pr-3 pl-1 text-slate-400 hover:text-rose-600"><Trash2 size={15} /></button>
                                 </>}
                             </div>)}
-                        {!busy && !items.length && <p className="py-3 text-xs text-slate-500">Для этого канала шаблонов пока нет.</p>}
-                        {!busy && items.length > 0 && !matchingTemplates.length && <p className="py-3 text-xs text-slate-500">Шаблоны с таким названием не найдены.</p>}
+                        {!busy && !items.length && <p className="px-4 py-3 text-sm text-slate-500">Для этого канала шаблонов пока нет.</p>}
+                        {!busy && items.length > 0 && !matchingTemplates.length && <p className="px-4 py-3 text-sm text-slate-500">Шаблоны с таким названием не найдены.</p>}
                     </div>
                     {deleting && <div className="mt-2 rounded bg-rose-50 p-2 text-xs">
                         Удалить «{deleting.title}» для всей команды?
@@ -203,7 +261,7 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                         <button type="button" disabled={busy} onClick={() => setDeleting(null)} className="ml-2">Отмена</button>
                     </div>}
                 </>}
-            </>
+            </div>
         </div>}
     </div>;
 }

@@ -59,6 +59,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
     const uploadRef = useRef(null);
     const fileInputRef = useRef(null);
     const textareaRef = useRef(null);
+    const composerKeyDownRef = useRef(null);
     const selectionRef = useRef({ start: saved.text.length, end: saved.text.length });
     const [state, setState] = useState(saved.pending ? 'unknown' : 'idle');
     const [error, setError] = useState(saved.pending
@@ -337,6 +338,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                     <Paperclip size={20} />
                 </button>
                 <ChatComposerTools apiBaseUrl={apiBaseUrl} headers={headers} channelId={chat.channelId}
+                    composerRef={textareaRef} composerKeyDownRef={composerKeyDownRef}
                     locked={locked || hasFile} emojiDisabled={Boolean(preview) || hasFile} slash={!preview && !hasFile && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}
                     onChoose={({ text: next, preview: nextPreview }) => {
                         if (busyRef.current || pendingRef.current || attachmentRef.current || uploadRef.current) return;
@@ -359,6 +361,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                       onChange={(event) => updateText(event.target.value)}
                       onSelect={(event) => { selectionRef.current = { start: event.target.selectionStart, end: event.target.selectionEnd }; }}
                       onKeyDown={(event) => {
+                          if (composerKeyDownRef.current?.(event)) return;
                           if (event.key === 'Enter' && !event.shiftKey
                               && !event.nativeEvent?.isComposing && event.keyCode !== 229
                               && event.nativeEvent?.keyCode !== 229) submit(event);

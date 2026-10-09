@@ -36,14 +36,19 @@ const find = (tree, predicate) => {
 const label = (tree, value) => find(tree, (node) => node.props?.['aria-label'] === value);
 const button = (tree, value) => find(tree, (node) => node.type === 'button' && React.Children.toArray(node.props.children).includes(value));
 const dialog = (tree) => find(tree, (node) => node.props?.role === 'dialog' && node.props?.['aria-label'] === 'Шаблоны сообщений');
+const activeTemplate = (tree) => find(tree, (node) => node.props?.['data-template-active'] === true);
+const templateOption = (tree, item) => find(tree, (node) => node.props?.['data-template-key'] === `${item.source}:${item.id}`);
 
 function fixture(request) {
     const oldDocument = globalThis.document;
     const slots = [], listeners = new Map(), calls = [], choices = [];
-    let index = 0, effects = [], focused = 0;
+    let index = 0, effects = [], focused = 0, composerFocused = 0;
     const inside = {};
-    const root = { contains: (target) => target === inside };
+    const root = { contains: (target) => target === inside, querySelector: () => ({ scrollIntoView() {} }) };
+    const composerKeyDownRef = { current: null };
+    const composerRef = { current: { focus() { composerFocused++; } } };
     const props = { apiBaseUrl: '/fixture', channelId: 'channel', locked: false, slash: null,
+        composerKeyDownRef, composerRef,
         headers: () => ({}), onChoose: (item) => choices.push(item), onEmoji() {} };
     globalThis.document = { addEventListener: (name, handler) => listeners.set(name, handler),
         removeEventListener: (name, handler) => { if (listeners.get(name) === handler) listeners.delete(name); } };
@@ -60,11 +65,18 @@ function fixture(request) {
             label(tree, 'Шаблоны сообщений').ref.current = { focus: () => { focused++; } };
             const pending = effects; effects = []; pending.forEach((fn) => fn()); return tree; },
         async open() { label(this.render(), 'Шаблоны сообщений').props.onClick(); this.render(); await tick(); return this.render(); },
+        slash(value) { this.render({ slash: value }); return this.render(); },
+        key(key, extra = {}) {
+            const event = { key, target: composerRef.current, defaultPrevented: false, stopped: false,
+                preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...extra };
+            return { event, handled: composerKeyDownRef.current?.(event) || false };
+        },
         outside() { listeners.get('pointerdown')?.({ target: {} }); },
         inside() { listeners.get('pointerdown')?.({ target: inside }); },
+        insideComposer() { listeners.get('pointerdown')?.({ target: composerRef.current }); },
         escape() { listeners.get('keydown')?.({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); },
         restore() { slots.forEach((slot) => slot?.cleanup?.()); globalThis.document = oldDocument; delete globalThis.__templateTools; },
-        calls, choices, get focused() { return focused; },
+        calls, choices, get focused() { return focused; }, get composerFocused() { return composerFocused; },
     };
     globalThis.__templateTools = h;
     return h;
@@ -78,7 +90,8 @@ test('outside pointer and Escape close templates; inside clicks and unchanged sl
         h.outside(); assert.equal(dialog(h.render()), null);
         h.render({ locked: true }); h.render({ locked: false }); assert.equal(dialog(h.render()), null);
         assert.ok(dialog(await h.open()));
-        h.escape(); assert.equal(dialog(h.render()), null); assert.equal(h.focused, 1);
+        const focusBeforeEscape = h.composerFocused;
+        h.escape(); assert.equal(dialog(h.render()), null); assert.equal(h.composerFocused, focusBeforeEscape + 1);
     } finally { h.restore(); }
 });
 
@@ -103,20 +116,19 @@ test('template search matches only titles, ignoring case and surrounding query w
     const option = (tree, item) => find(tree, (node) => node.type === 'button' && node.props.title === item.text);
     try {
         let tree = await h.open();
-        assert.equal(label(tree, 'Найти шаблон').props.placeholder, 'Найти по названию…');
+        assert.equal(label(tree, 'Найти шаблон'), null, 'search is entered in the message composer');
+        assert.equal(label(dialog(tree), 'Закрыть'), null);
+        assert.equal(find(dialog(tree), (node) => node.type === 'span' && node.props.children === 'Шаблоны сообщений'), null);
         for (const query of ['БЫСТРЫЙ', '  быстРЫЙ ответ  ', '\tОТВЕТ\n']) {
-            label(tree, 'Найти шаблон').props.onChange({ target: { value: query } });
-            tree = h.render();
+            tree = h.slash(query);
             assert.ok(option(tree, plain));
             assert.equal(option(tree, bodyOnly), null, 'a body-only match must not enter search results');
             assert.equal(option(tree, waba), null);
         }
-        label(tree, 'Найти шаблон').props.onChange({ target: { value: 'Обычный текст' } });
-        tree = h.render();
+        tree = h.slash('Обычный текст');
         assert.ok(items.every((item) => option(tree, item) === null));
         for (const query of ['', '   ']) {
-            label(tree, 'Найти шаблон').props.onChange({ target: { value: query } });
-            tree = h.render();
+            tree = h.slash(query);
             assert.ok(items.every((item) => option(tree, item)), 'clearing the search restores all templates');
         }
     } finally { h.restore(); }
@@ -134,6 +146,114 @@ test('slash title search keeps templates with the same name distinct and inserts
         assert.equal(find(tree, (node) => node.type === 'button' && node.props.title === waba.text), null);
         localButton.props.onClick();
         assert.deepEqual(h.choices, [{ text: local.text, preview: '' }]);
+    } finally { h.restore(); }
+});
+
+test('removing the slash closes its popup while a manually opened popup works without a slash', async () => {
+    const h = fixture();
+    try {
+        h.slash('ответ'); await tick();
+        assert.ok(dialog(h.render()));
+        h.insideComposer();
+        assert.ok(dialog(h.render()), 'clicking the search composer keeps its results open');
+        assert.equal(dialog(h.slash(null)), null);
+        assert.ok(dialog(await h.open()), 'manual open is available with a normal message');
+        h.escape();
+        assert.equal(dialog(h.render()), null);
+        h.slash('ответ'); await tick();
+        assert.ok(dialog(h.render()));
+        const escape = h.key('Escape');
+        assert.equal(escape.handled, true);
+        assert.equal(escape.event.defaultPrevented, true);
+        assert.equal(dialog(h.render()), null);
+        assert.equal(dialog(h.slash('ответ')), null, 'dismissed unchanged slash does not reopen');
+        h.slash(null); h.slash('ответ'); await tick();
+        assert.ok(dialog(h.render()), 'typing a new slash starts a new search');
+    } finally { h.restore(); }
+});
+
+test('composer arrows cycle through supported matches and Enter inserts only the active template', async () => {
+    const disabled = { ...plain, id: 'disabled', supported: false, title: 'Ответ недоступен', text: 'Недоступный ответ' };
+    const local = { ...plain, id: 'local', source: 'icore', text: 'Второй ответ' };
+    const h = fixture(() => Promise.resolve({ data: { items: [disabled, plain, local] } }));
+    try {
+        h.slash('ответ'); await tick(); let tree = h.render();
+        assert.equal(templateOption(tree, disabled).props.disabled, true);
+        assert.equal(activeTemplate(tree).props['data-template-key'], 'wazzup:plain');
+        for (const [key, expected] of [['ArrowDown', 'icore:local'], ['ArrowDown', 'wazzup:plain'], ['ArrowUp', 'icore:local']]) {
+            const result = h.key(key);
+            assert.equal(result.handled, true);
+            assert.equal(result.event.defaultPrevented, true);
+            assert.equal(result.event.stopped, true);
+            tree = h.render();
+            assert.equal(activeTemplate(tree).props['data-template-key'], expected);
+        }
+        const enter = h.key('Enter');
+        assert.equal(enter.handled, true, 'composer must return before its send handler');
+        assert.equal(enter.event.defaultPrevented, true);
+        assert.equal(enter.event.stopped, true);
+        assert.deepEqual(h.choices, [{ text: local.text, preview: '' }]);
+        assert.equal(dialog(h.render()), null);
+        assert.equal(h.calls.some(({ method }) => method !== 'get'), false, 'selection performs no send or mutation request');
+        assert.equal(h.key('Enter').handled, false, 'normal composer Enter resumes after popup dismissal');
+    } finally { h.restore(); }
+});
+
+test('filter changes reset active selection and empty or unsupported-only results consume Enter without insertion', async () => {
+    const disabled = { ...plain, id: 'disabled', supported: false, title: 'Недоступный', text: 'Disabled' };
+    const h = fixture(() => Promise.resolve({ data: { items: [plain, waba, disabled] } }));
+    try {
+        await h.open(); h.key('ArrowDown');
+        assert.equal(activeTemplate(h.render()).props['data-template-key'], 'wazzup:waba');
+        assert.equal(activeTemplate(h.slash('ОТВЕТ')).props['data-template-key'], 'wazzup:plain');
+        for (const query of ['нет совпадений', 'Недоступный']) {
+            const tree = h.slash(query);
+            assert.equal(activeTemplate(tree), null);
+            const enter = h.key('Enter');
+            assert.equal(enter.handled, true);
+            assert.equal(enter.event.defaultPrevented, true);
+            assert.equal(h.choices.length, 0);
+            assert.ok(dialog(h.render()));
+        }
+        assert.equal(h.calls.some(({ method }) => method !== 'get'), false);
+    } finally { h.restore(); }
+});
+
+test('loading results consume Enter but modified and IME keys keep their native composer behavior', async () => {
+    let finish;
+    const h = fixture(() => new Promise((resolve) => { finish = resolve; }));
+    try {
+        h.slash('');
+        assert.equal(h.key('Enter').handled, true);
+        assert.equal(h.choices.length, 0);
+        finish({ data: { items: [plain] } }); await tick(); h.render();
+        for (const extra of [{ shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true },
+            { nativeEvent: { isComposing: true } }, { keyCode: 229 }]) {
+            const result = h.key('Enter', extra);
+            assert.equal(result.handled, false);
+            assert.equal(result.event.defaultPrevented, false);
+        }
+        assert.equal(h.choices.length, 0);
+        assert.ok(dialog(h.render()));
+    } finally { h.restore(); }
+});
+
+test('composer Enter does not choose a list item while variables or an edit draft are open', async () => {
+    const item = { ...waba, variables: ['bodyVar1'], templateCode: '[[code]][[bodyVar1]]' };
+    const h = fixture(() => Promise.resolve({ data: { items: [item] } }));
+    try {
+        await h.open();
+        assert.equal(h.key('Enter').handled, true);
+        assert.ok(label(h.render(), 'Переменная 1'));
+        assert.equal(h.key('Enter').handled, true);
+        assert.equal(h.choices.length, 0, 'Enter in composer cannot insert incomplete WABA variables');
+        button(h.render(), 'Назад').props.onClick();
+        button(h.render(), '+ iCORE').props.onClick();
+        label(h.render(), 'Название шаблона').props.onChange({ target: { value: 'Черновик' } });
+        assert.equal(h.key('Enter').handled, true);
+        assert.equal(h.choices.length, 0);
+        assert.equal(label(h.render(), 'Название шаблона').props.value, 'Черновик');
+        assert.equal(h.calls.some(({ method }) => method !== 'get'), false);
     } finally { h.restore(); }
 });
 
@@ -198,7 +318,7 @@ test('pending template save blocks dismissals and duplicate same-tick writes', a
         const pending = save(); await save();
         h.outside(); h.escape(); assert.ok(dialog(h.render()));
         assert.equal(h.calls.filter(({ method }) => method === 'post').length, 1);
-        assert.equal(label(h.render(), 'Закрыть').props.disabled, true);
+        assert.equal(button(h.render(), 'Сохранить').props.disabled, true);
         finish({ data: { item: { ...plain, source: 'icore', id: 'new' } } }); await pending;
         h.outside(); assert.equal(dialog(h.render()), null);
     } finally { h.restore(); }
