@@ -258,7 +258,7 @@ export const setThemeColorMeta = (color) => {
 export const registerServiceWorker = (baseUrl = '/') => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return Promise.resolve(null);
     const scope = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
-    return navigator.serviceWorker.register(scope + 'sw.js', { scope }).catch((error) => {
+    return navigator.serviceWorker.register(scope + 'sw.js', { scope, updateViaCache: 'none' }).catch((error) => {
         /* Регистрация падает штатно: http без TLS, приватное окно, запрет
            политикой. Портал обязан работать и без воркера — это добавка,
            а не часть приложения. */

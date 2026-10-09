@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
@@ -39,7 +40,7 @@ import './wiki-blocks.css';
    Компонент тянет за собой справочник на 106 КБ, поэтому грузится лениво —
    ровно как раньше, когда он был отдельным разделом. */
 export const CLASSIFIER_SLUG = 'klassifikator-avto';
-const ClassifierView = lazy(() => import('../classifier/ClassifierView'));
+const ClassifierView = lazyWithRetry(() => import('../classifier/ClassifierView'));
 
 /* Статусы, которые обязаны быть подписаны в списках связей.
  *
@@ -111,7 +112,7 @@ const ArticleLinkList = ({ icon: Icon, title, hint, rows, onOpen }) => (
 /* Тренажёр — отдельный чанк: экраны двух приложений, барс и своя таблица стилей
    весят прилично, а открывают их только в статьях-тренажёрах. Грузим по нажатию
    на кнопку в тексте, а не при открытии статьи. */
-const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
+const TrainerModal = lazyWithRetry(() => import('./trainers/TrainerPlayer'));
 
 /* Страница статьи.
  *

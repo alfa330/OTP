@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
@@ -29,16 +30,16 @@ import { sourceDoor } from '../assistant/sourceTarget';
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
-const WikiAssistant = lazy(() => import('./WikiAssistant'));
+const WikiAssistant = lazyWithRetry(() => import('./WikiAssistant'));
 /* «Новости» — лениво по той же причине, что редактор статей: у формы объявления
    свой TipTap, а это ~128 КБ gzip, и платить за них должен тот, кто открыл
    вкладку, а не каждый вошедший в вики. Без ленивости чанк раздела вырос бы
    на треть у всех читателей. */
-const WikiNews = lazy(() => import('./WikiNews'));
-const WikiQuestions = lazy(() => import('./WikiQuestions'));
+const WikiNews = lazyWithRetry(() => import('./WikiNews'));
+const WikiQuestions = lazyWithRetry(() => import('./WikiQuestions'));
 /* «Города» — лениво: схема страны, карточка тарифов и редактор нужны тому,
    кто открыл вкладку, а не каждому вошедшему в вики. */
-const WikiCities = lazy(() => import('./WikiCities'));
+const WikiCities = lazyWithRetry(() => import('./WikiCities'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { readArticleSlugFromSearch } from './articleLink';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';

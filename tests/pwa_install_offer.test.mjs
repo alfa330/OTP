@@ -7,9 +7,27 @@ import {
     detectInstallPlatform,
     isStandaloneDisplay,
     readInstallSnoozeUntil,
+    registerServiceWorker,
     shouldOfferInstall,
     snoozeInstallOffer,
 } from '../src/utils/pwa.js';
+
+test('service worker updates bypass HTTP cache within the application scope', async (t) => {
+    const calls = [];
+    const registration = { scope: 'https://alfa330.github.io/OTP/' };
+    const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+        serviceWorker: {
+            register: async (...args) => { calls.push(args); return registration; },
+        },
+    } });
+    t.after(() => {
+        if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+        else delete globalThis.navigator;
+    });
+    assert.equal(await registerServiceWorker('/OTP'), registration);
+    assert.deepEqual(calls, [['/OTP/sw.js', { scope: '/OTP/', updateViaCache: 'none' }]]);
+});
 
 /* Установка портала на телефон предлагается САМА, поверх работы человека, — и
    ровно поэтому решение «предлагать или молчать» вынесено в чистые функции и

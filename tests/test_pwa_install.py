@@ -158,7 +158,7 @@ class ServiceWorkerTests(unittest.TestCase):
         """Кэш для документа — запасной выход, иначе старая сборка залипнет."""
         body = self._function_body('handleNavigation')
         network = body.index('fetchWithTimeout(')
-        cache = body.index('caches.match(')
+        cache = body.index('matchSafely(')
         self.assertLess(
             network, cache,
             'В handleNavigation кэш опрашивается раньше сети — так устаревшая '
@@ -238,7 +238,7 @@ class RuntimeWiringTests(unittest.TestCase):
     def test_worker_scope_follows_build_base(self):
         util = read(PWA_UTIL)
         self.assertIn("scope + 'sw.js'", util)
-        self.assertIn('{ scope }', util)
+        self.assertIn("{ scope, updateViaCache: 'none' }", util)
 
     def test_runtime_starts_before_render(self):
         """`beforeinstallprompt` приходит раньше, чем появится дерево React."""

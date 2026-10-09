@@ -1,7 +1,8 @@
 import React, {
-    Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+    Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import Orb from './Orb.jsx';
 import useAssistantAppearance from './useAssistantAppearance.js';
@@ -15,7 +16,7 @@ import {
 } from '../../utils/pipWindow';
 import './assistant-orb.css';
 
-const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
+const AssistantPanel = lazyWithRetry(() => import('./AssistantPanel.jsx'));
 
 /* Плавающий помощник: шарик поверх портала и мини-чат из него.
  *

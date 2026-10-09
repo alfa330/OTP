@@ -1,4 +1,5 @@
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
@@ -64,7 +65,7 @@ const warmAttachmentViewer = (kind) => {
     loadAttachmentViewer().catch(() => {});
     if (kind === 'pdf') import('./pdfRuntime').catch(() => {});
 };
-const ChatAttachmentViewer = lazy(loadAttachmentViewer);
+const ChatAttachmentViewer = lazyWithRetry(loadAttachmentViewer);
 
 function AttachmentViewerFallback({ message, onClose }) {
     const image = attachmentPreviewKind(message) === 'image';

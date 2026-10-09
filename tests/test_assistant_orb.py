@@ -170,7 +170,7 @@ class MountTests(unittest.TestCase):
     def test_панель_ленивая_а_шарик_нет(self):
         """Шарик на первом экране у всех — он обязан быть в основном коде.
         Мини-чат тянет markdown с DOMPurify, и его платит только тот, кто открыл."""
-        self.assertRegex(self.orb, r'lazy\(\(\) => import\(.\./AssistantPanel')
+        self.assertRegex(self.orb, r'lazyWithRetry\(\(\) => import\(.\./AssistantPanel')
         self.assertNotIn('lazy', self.app[self.app.index('import AssistantOrb'):]
                          .split('\n')[0])
 
@@ -355,7 +355,7 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertNotIn('assistantThread', self.hook)
         self.assertIn("from './errText'", self.hook)
         # Ленивая загрузка панели при этом обязана остаться.
-        self.assertRegex(self.orb, r'lazy\(\(\) => import\(.\./AssistantPanel')
+        self.assertRegex(self.orb, r'lazyWithRetry\(\(\) => import\(.\./AssistantPanel')
 
     def test_окно_переживает_смену_раздела(self):
         """Уйдя в «Вики», человек теряет шарик — так и задумано (там свой

@@ -14,7 +14,8 @@
  * Ширина. Окно телефона узкое (обычно 400–500 px), поэтому карточки в одну колонку,
  * а проигрыватель сам переключается в узкую раскладку (TrainerPlayer: narrow).
  */
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../utils/lazyWithRetry';
 import {
     ChevronDown, ChevronUp, Layers, Loader2, Monitor, PlayCircle, ShieldCheck, ShieldOff, Smartphone,
 } from 'lucide-react';
@@ -31,7 +32,7 @@ import { phoneTrainers } from './trainerList';
    (почему — в trainerList.js). Считается один раз: реестр статический. */
 const PHONE_TRAINERS = phoneTrainers(TRAINERS);
 
-const TrainerModal = lazy(() => import('../components/wiki/trainers/TrainerPlayer'));
+const TrainerModal = lazyWithRetry(() => import('../components/wiki/trainers/TrainerPlayer'));
 
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const WIKI_BASE = `${API_BASE_URL}/api/wiki`;

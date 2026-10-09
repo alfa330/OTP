@@ -143,6 +143,7 @@ import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTarg
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
+import { recoverFromStaleBundle } from './staleBundleRecovery';
 
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
 const PROXY_STATUS_LABELS = {
@@ -3369,6 +3370,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             componentDidCatch(error, errorInfo) {
                 console.error('ErrorBoundary caught:', error, errorInfo);
+                // React catches lazy rejections before unhandledrejection sees them.
+                recoverFromStaleBundle(error);
                 // Технические детали храним в состоянии: пользователи присылают
                 // фото экрана, и без места падения такую ошибку не найти.
                 // Отдельно фиксируем окружение: встроенный переводчик Chromium
@@ -3398,11 +3401,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 try {
                     if (typeof window === 'undefined') {
                         return;
-                    }
-
-                    if ('caches' in window) {
-                        const cacheKeys = await window.caches.keys();
-                        await Promise.all(cacheKeys.map((key) => window.caches.delete(key)));
                     }
 
                     const url = new URL(window.location.href);

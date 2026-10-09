@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import lazyWithRetry from '../../../utils/lazyWithRetry';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { HelpCircle, RotateCcw, X } from 'lucide-react';
@@ -34,7 +35,7 @@ import './trainer.css';
  * Обычным импортом библиотека попала бы в общий чанк тренажёров, и человек,
  * открывший урок про подписание документов, скачивал бы трёхмерный движок,
  * который там не нужен ни на одном шаге. */
-const CarStage = lazy(() => import('./CarStage'));
+const CarStage = lazyWithRetry(() => import('./CarStage'));
 
 /* Проигрыватель тренажёра: прогресс сверху, учебный телефон и барс рядом.
  *

@@ -18,11 +18,13 @@ await build({ stdin: { contents: `
     import { FileText, Loader2 } from 'lucide-react';
     import { attachmentName, attachmentPreviewKind } from './chatAttachments';
     const useState=()=>[false,()=>{}];
-    const lazy=(loader)=>loader;
+    const lazyWithRetry=(loader)=>loader;
+    const importViewer=()=>globalThis.__attachmentViewerImport
+        ? globalThis.__attachmentViewerImport() : import('./ChatAttachmentViewer');
     const IosModal=({children,...props})=><section>{children}</section>;
     const ChatMessageImage=()=>null, ChatMessageVideo=()=>null, ChatAudioPlayer=()=>null;
     const MEDIA_LABELS={}, MEDIA_ICONS={};
-    ${loading}
+    ${loading.replace("import('./ChatAttachmentViewer')", 'importViewer()')}
     ${media}
     export { loadAttachmentViewer, warmAttachmentViewer, ChatAttachmentViewer, AttachmentViewerFallback, MediaContent };
 `, resolveDir: join(process.cwd(), 'src/components/wazzup'), loader: 'jsx' }, outfile, bundle: true,
@@ -64,6 +66,26 @@ test('intent prepares only the viewer/PDF code, shares the pending viewer import
         assert.deepEqual(globalThis.__attachmentModuleLoads.sort(), ['./ChatAttachmentViewer', './pdfRuntime']);
         assert.deepEqual(requests, []);
     } finally { globalThis.fetch = originalFetch; delete globalThis.__attachmentModuleLoads; }
+});
+
+test('a failed viewer warmup releases its cached promise so opening can retry the import', async () => {
+    const error = new TypeError('Failed to fetch dynamically imported module: /assets/ChatAttachmentViewer-old.js');
+    const loaded = { default: () => null };
+    let calls = 0;
+    globalThis.__attachmentViewerImport = () => ++calls === 1
+        ? Promise.reject(error) : Promise.resolve(loaded);
+    try {
+        const retry = await import(`${pathToFileURL(outfile).href}?failed-warmup`);
+        retry.warmAttachmentViewer('image');
+        const failed = retry.loadAttachmentViewer();
+        await assert.rejects(failed, (reason) => reason === error);
+        assert.equal(calls, 1, 'intent and opening share the in-flight request');
+        const reopened = retry.ChatAttachmentViewer();
+        assert.notEqual(reopened, failed);
+        assert.equal(retry.loadAttachmentViewer(), reopened);
+        assert.equal(await reopened, loaded);
+        assert.equal(calls, 2, 'opening after failure invokes the importer again');
+    } finally { delete globalThis.__attachmentViewerImport; }
 });
 
 test('the lazy viewer fallback immediately displays the already used image URL in the full viewer frame', () => {
