@@ -62525,6 +62525,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         wikiEnabled={wikiSectionEnabled}
                         locked={sensitiveSectionsLocked}
                         lockChecking={sensitiveSectionsChecking}
+                        // Шарик открывают и из раздела, где статус QR не спрашивали.
+                        onCheckAccess={fetchSensitiveAccessStatus}
                         onRequestQr={requestSensitiveQrAccess}
                         onOpenWikiArticle={(slug) => {
                             // Тот же плумбинг, что у колокола: слаг кладём в

@@ -186,6 +186,33 @@ class MountTests(unittest.TestCase):
         self.assertIn('onRequestQr', panel)
         self.assertIn('locked={sensitiveSectionsLocked}', self.app)
 
+    def test_открытая_панель_сама_спрашивает_статус_qr(self):
+        """Верификатор открыл шарик в «Чатах ОП» и видел «Проверяем доступ…»
+        без конца (09.10.2026).
+
+        У рядового оператора портал спрашивает статус QR только при входе в
+        закрытый раздел: при входе в портал запрос снят ради нагрузки в час
+        аукциона. Шарик висит на любой странице, и из раздела вне списка ответа,
+        которого ждёт панель, не запрашивал никто. Спрашивает сама панель — на
+        открытие и один раз на ожидание.
+        """
+        self.assertIn('lockChecking={sensitiveSectionsChecking}', self.app)
+        self.assertIn('onCheckAccess={fetchSensitiveAccessStatus}', self.app)
+        begin = self.orb.index('const accessAskedRef = useRef(false);')
+        effect = self.orb[begin:self.orb.index(']);', begin) + 3]
+        deps = re.search(r'\}, \[([^\]]*)\]\);$', effect)
+        self.assertIsNotNone(deps, 'запрос статуса больше не эффект с зависимостями')
+        self.assertEqual(sorted(dep.strip() for dep in deps.group(1).split(',')),
+                         ['detached', 'lockChecking', 'onCheckAccess', 'open'])
+        # Спрашивает только открытая панель — встроенная или откреплённая.
+        self.assertIn('if (!(open || detached) || accessAskedRef.current) return;', effect)
+        self.assertIn('onCheckAccess?.();', effect)
+        # Ответ пришёл — признак сброшен: следующее ожидание снова спросит.
+        reset = effect[effect.index('if (!lockChecking) {'):]
+        self.assertIn('accessAskedRef.current = false;', reset[:reset.index('}')])
+        self.assertLess(effect.index('accessAskedRef.current = true;'),
+                        effect.index('onCheckAccess?.();'))
+
 
 class VisualTests(unittest.TestCase):
     """Прозрачный знак iCORE: контур, движение и оформление тем."""

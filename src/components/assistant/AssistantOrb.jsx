@@ -134,7 +134,7 @@ const viewportSize = () => ({
 export default function AssistantOrb({
     user, view, apiBaseUrl, withAccessTokenHeader, showToast,
     wikiEnabled = true, locked = false, lockChecking = false,
-    onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
+    onCheckAccess, onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
     onOpenWikiTarget = null,
 }) {
     const userId = user?.id;
@@ -235,6 +235,25 @@ export default function AssistantOrb({
     const chat = useAssistantChat({
         base, headers, spaceId, enabled: started && !locked, withSuggestions: true,
     });
+
+    /* Статус QR панель спрашивает САМА, когда её открыли, а статус ещё не известен.
+       У рядового оператора портал узнаёт его только при входе в закрытый раздел
+       («Вики», «Обращения»…): при входе в портал этот запрос у операторов снят
+       ради нагрузки в час аукциона смен. Шарик же открывают с любой страницы, и
+       верификатор в «Чатах ОП» видел «Проверяем доступ…» без конца (09.10.2026):
+       ответа, которого ждала панель, никто не запрашивал. Спрашиваем на открытие,
+       а не при появлении шарика: шарик висит у всех, панель открывает меньшинство.
+       Ref держит один запрос на ожидание — тычок, пока ответ в пути, второго не шлёт. */
+    const accessAskedRef = useRef(false);
+    useEffect(() => {
+        if (!lockChecking) {
+            accessAskedRef.current = false;
+            return;
+        }
+        if (!(open || detached) || accessAskedRef.current) return;
+        accessAskedRef.current = true;
+        onCheckAccess?.();
+    }, [lockChecking, open, detached, onCheckAccess]);
 
     /* Первая примерка к окну. Позицию сохранял, возможно, широкий монитор —
        на ноутбуке те же координаты означают шарик за краем экрана, которого
