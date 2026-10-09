@@ -52846,6 +52846,71 @@ def delete_work_schedule_status_period():
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _can_remove_dismissal_blacklist(requester, requester_id):
+    """Убрать из ЧС: главы отделов, админы и супер-админы, а не рядовой СВ.
+
+    Поставить ЧС может любой, кто ведёт график, снять — только уровнем выше.
+    Чьих людей — решает та же граница, что у остальных правок графика
+    (_resolve_scoped_operator_for_requester): глава — свой отдел.
+    """
+    return _is_admin_role(requester[3]) or bool(_headed_department_ids(requester_id))
+
+
+@app.route('/api/work_schedules/status_period/blacklist', methods=['DELETE'])
+@require_api_key
+def remove_work_schedule_dismissal_blacklist():
+    """
+    Убрать сотрудника из ЧС: ЧС-увольнение становится обычным увольнением.
+    Body: {
+        "operator_id": int,
+        "range_start": "YYYY-MM-DD",   # optional: вернуть снимок графика оператора
+        "range_end": "YYYY-MM-DD"
+    }
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_management_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _can_remove_dismissal_blacklist(user_data, requester_id):
+            return jsonify({"error": "Убрать из ЧС может глава отдела или администратор"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        range_start = data.get('range_start')
+        range_end = data.get('range_end')
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id"}), 400
+
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        if scope_error:
+            message, status_code = scope_error
+            return jsonify({"error": message}), status_code
+
+        status_periods = db.remove_schedule_dismissal_blacklist(
+            int(target_operator[0]),
+            actor_id=requester_id
+        )
+        if not status_periods:
+            return jsonify({"error": "Сотрудник не в ЧС"}), 404
+
+        operator_snapshot = None
+        if range_start and range_end:
+            operator_snapshot = db.get_operator_with_shifts(int(target_operator[0]), range_start, range_end)
+
+        return jsonify({
+            "message": "Removed from blacklist",
+            "status_periods": status_periods,
+            "operator": operator_snapshot
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error removing dismissal blacklist: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/work_schedules/shifts_bulk', methods=['POST'])
 @require_api_key
 def save_shifts_bulk():

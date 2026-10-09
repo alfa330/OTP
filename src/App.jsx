@@ -16047,6 +16047,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
             const plannerViewerIsPlainSupervisor = isSupervisorRole(user?.role) && !isDepartmentHead(user);
+            // Убрать из ЧС может глава отдела, админ и супер-админ — то же правило
+            // на сервере (_can_remove_dismissal_blacklist). Рядовой СВ ЧС только ставит.
+            const plannerViewerCanRemoveBlacklist = isAdminLikeRoleFn(user?.role) || isDepartmentHead(user);
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
@@ -19060,6 +19063,68 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     console.error('Error deleting status period:', error);
                     emitAppToast(`Ошибка удаления статуса: ${error?.message || error}`, 'error');
                     setModalState(m => ({ ...m, statusDeleting: false }));
+                }
+            };
+
+            // Увольнение остаётся, но перестаёт быть ЧС: его можно прервать сменой
+            // или удалить, как обычное.
+            const removeScheduleDismissalBlacklist = async () => {
+                if (!modalState.opId) return;
+                if (typeof window !== 'undefined' && !window.confirm('Убрать сотрудника из ЧС? Увольнение останется обычным — его можно будет прервать сменой или удалить.')) return;
+                // Окно могут закрыть и открыть на другом человеке, пока идёт запрос:
+                // ответ касается только того окна, из которого нажали.
+                const targetOpId = modalState.opId;
+                const targetDate = modalState.date;
+                const isSameModal = (m) => m.opId === targetOpId && m.date === targetDate;
+
+                try {
+                    setModalState(m => ({ ...m, statusUnblacklisting: true }));
+
+                    const rangeStart = visibleRange?.[0];
+                    const rangeEnd = visibleRange?.[visibleRange.length - 1];
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_period/blacklist`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: targetOpId,
+                            range_start: rangeStart || null,
+                            range_end: rangeEnd || null
+                        })
+                    });
+
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    if (payload?.operator) {
+                        applyOperatorScheduleSnapshot(payload.operator);
+                    } else {
+                        const unflagged = new Set((payload?.status_periods || []).map(p => Number(p?.id)));
+                        const unflag = (period) => (unflagged.has(Number(period?.id))
+                            ? { ...period, isBlacklist: false, is_blacklist: false }
+                            : period);
+                        setOperators(prev => prev.map(op => {
+                            if (op.id !== targetOpId) return op;
+                            return clonePlannerOperator({
+                                ...op,
+                                scheduleStatusPeriods: (op.scheduleStatusPeriods || []).map(unflag),
+                                scheduleStatusDays: Object.fromEntries(
+                                    Object.entries(op.scheduleStatusDays || {}).map(([day, v]) => [day, unflag(v)])
+                                )
+                            });
+                        }));
+                    }
+                    // Галочку ЧС в форме снимаем явно: иначе «Сохранить статус» вернул бы ЧС.
+                    setModalState(m => (isSameModal(m) ? { ...m, dismissalIsBlacklist: false, statusUnblacklisting: false } : m));
+                    emitAppToast('Сотрудник убран из ЧС', 'success');
+                } catch (error) {
+                    console.error('Error removing dismissal blacklist:', error);
+                    emitAppToast(`Не удалось убрать из ЧС: ${error?.message || error}`, 'error');
+                    setModalState(m => (isSameModal(m) ? { ...m, statusUnblacklisting: false } : m));
                 }
             };
 
@@ -32076,7 +32141,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             type="button"
                                             className={WS_PHONE_BUTTON.blue}
                                             onClick={saveScheduleStatusPeriod}
-                                            disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                            disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
                                         >
                                             {modalState.statusSaving ? 'Сохраняем…' : 'Сохранить статус'}
                                         </button>
@@ -32310,7 +32375,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     subtitle={`${modalActiveScheduleStatus.startDate || '—'}${modalActiveScheduleStatus.endDate ? ` — ${modalActiveScheduleStatus.endDate}` : ''}`}
                                                     note={modalActiveScheduleStatus.comment || null}
                                                 />
-                                                {modalActiveScheduleStatus.id && !plannerReadOnly ? (
+                                                {modalActiveScheduleStatus.id && modalActiveScheduleStatus.statusCode === 'dismissal'
+                                                    && modalActiveScheduleStatus.isBlacklist && plannerViewerCanRemoveBlacklist && !plannerReadOnly ? (
+                                                    <WsPhoneRow
+                                                        title="Убрать из ЧС"
+                                                        subtitle="Увольнение останется обычным"
+                                                        trailing={(
+                                                            <WsPhonePill
+                                                                label={modalState.statusUnblacklisting ? '…' : 'Убрать'}
+                                                                onClick={removeScheduleDismissalBlacklist}
+                                                                disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
+                                                            />
+                                                        )}
+                                                    />
+                                                ) : modalActiveScheduleStatus.id && !plannerReadOnly ? (
                                                     <WsPhoneRow
                                                         title="Удалить статус"
                                                         trailing={(
@@ -34884,7 +34962,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                             </div>
                             <div className="flex items-center gap-2">
-                                {modalActiveScheduleStatus?.id && (
+                                {modalActiveScheduleStatus?.id && modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist && plannerViewerCanRemoveBlacklist ? (
+                                    <button
+                                        type="button"
+                                        onClick={removeScheduleDismissalBlacklist}
+                                        disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
+                                        className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                    >
+                                        <FaIcon className={`fas ${modalState.statusUnblacklisting ? 'fa-spinner fa-spin' : 'fa-user-check'}`}></FaIcon>
+                                        {modalState.statusUnblacklisting ? 'Убираем...' : 'Убрать из ЧС'}
+                                    </button>
+                                ) : modalActiveScheduleStatus?.id && (
                                     <button
                                         type="button"
                                         onClick={() => deleteScheduleStatusPeriod(modalActiveScheduleStatus)}
@@ -34899,7 +34987,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     type="button"
                                     onClick={saveScheduleStatusPeriod}
-                                    disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                    disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!modalState.statusUnblacklisting}
                                     className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                 >
                                     <FaIcon className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
@@ -43524,6 +43612,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             });
             const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
             const [promotingUserId, setPromotingUserId] = useState(null);
+            const [unblacklistingUserId, setUnblacklistingUserId] = useState(null);
             // Понижение СВ до оператора: в отличие от повышения одним confirm-ом не
             // обойтись — надо выбрать группу, иначе у человека не будет ни
             // супервайзера, ни учёта часов.
@@ -51423,6 +51512,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 },
             });
 
+            // Убрать из ЧС — главе отдела, админу и супер-админу; сервер проверяет то же
+            // (_can_remove_dismissal_blacklist) и границу отдела главы. Увольнение
+            // остаётся обычным: человека можно вернуть сменой или снять статус.
+            const canRemoveEmployeeBlacklist = isAdminLikeRoleFn(currentUserRole) || isDepartmentHeadUser;
+            const removeEmployeeBlacklist = async (employee) => {
+                const targetUserId = Number(employee?.id);
+                if (!Number.isFinite(targetUserId)) return;
+                setUnblacklistingUserId(targetUserId);
+                try {
+                    await axios.delete(`${API_BASE_URL}/api/work_schedules/status_period/blacklist`, {
+                        data: { operator_id: targetUserId },
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user?.id
+                        })
+                    });
+                    showToast(`«${employee?.name || ''}» больше не в ЧС`, 'success');
+                    await fetchUsers();
+                } catch (err) {
+                    console.error('Remove dismissal blacklist error:', err);
+                    showToast(err.response?.data?.error || 'Не удалось убрать из ЧС', 'error');
+                } finally {
+                    if (isMounted.current) setUnblacklistingUserId(null);
+                }
+            };
+            const employeeUnblacklistAction = (employee) => canRemoveEmployeeBlacklist
+                && isEmployeeBlacklistDismissal(employee) && {
+                key: 'unblacklist',
+                label: unblacklistingUserId === Number(employee?.id) ? 'Убираю из ЧС…' : 'Убрать из ЧС',
+                short: 'Убрать из ЧС',
+                icon: 'unblacklist',
+                disabled: unblacklistingUserId === Number(employee?.id),
+                confirm: {
+                    note: `Убрать «${employee?.name || ''}» из ЧС? Увольнение останется обычным — человека можно будет вернуть на работу.`,
+                    label: 'Убрать',
+                },
+                onClick: () => removeEmployeeBlacklist(employee),
+            };
+
             const manageUsersActionsFor = (employee) => [
                 employeeEditAction(employee),
                 employeeHistoryAction(employee),
@@ -51440,6 +51568,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     confirm: { note: `Повысить «${employee?.name || ''}» до супервайзера?`, label: 'Повысить' },
                     onClick: () => promoteUserToSupervisor(employee, { skipConfirm: true }),
                 },
+                employeeUnblacklistAction(employee),
             ].filter(Boolean);
 
             // Пропсы формы правки — общие у отдельного окна и у экрана в карточке.
@@ -51800,6 +51929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             confirm: { note: `Уволить админа «${name}»?`, label: 'Уволить' },
                             onClick: () => dismissAdminUser(employee, { skipConfirm: true }),
                         },
+                        employeeUnblacklistAction(employee),
                     ].filter(Boolean);
                 };
                 if (isMobileShell) {
@@ -57675,7 +57805,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     actionsFor: isManageOperatorsReadOnly ? null : (op) => [
                                         { key: 'edit', label: 'Изменить', onClick: () => openManagedOperatorEditor(op) },
                                         employeeHistoryAction(op),
-                                    ],
+                                        employeeUnblacklistAction(op),
+                                    ].filter(Boolean),
                                 })}
                                 {view === 'manage_operators' && !isMobileShell && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">

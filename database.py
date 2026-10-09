@@ -47609,7 +47609,10 @@ class Database:
                 'startDate': period_payload['startDate'],
                 'endDate': period_payload['endDate'],
                 'dismissalReason': period_payload['dismissalReason'],
-                'comment': period_payload['comment']
+                'comment': period_payload['comment'],
+                # Окно дня в «Графиках» берёт статус отсюда: без признака ЧС-увольнение
+                # выглядело обычным — без плашки «ЧС» и кнопки «Убрать из ЧС».
+                'isBlacklist': period_payload['isBlacklist']
             }
             cur_day = overlap_start
             while cur_day <= overlap_end:
@@ -64581,6 +64584,36 @@ class Database:
         """
         from test_numbers.schema import init_test_numbers_schema
         init_test_numbers_schema(cursor)
+
+    def remove_schedule_dismissal_blacklist(self, operator_id, actor_id=None):
+        """Убрать сотрудника из ЧС: снять флаг is_blacklist с его ЧС-увольнений.
+
+        Само увольнение остаётся — с той же датой, причиной и комментарием, — но
+        становится обычным: его можно прервать сменой, закрыть датой или удалить.
+        Кому это можно (главы отделов, админы, супер-админы), решает роут.
+        В «Истории изменений» сотрудника остаётся запись, кто снял ЧС.
+
+        Возвращает снятые периоды; пустой список — человек не в ЧС.
+        """
+        operator_id = int(operator_id)
+        actor_id_norm = int(actor_id) if actor_id is not None else None
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE operator_schedule_status_periods
+                SET is_blacklist = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE operator_id = %s
+                  AND status_code = 'dismissal'
+                  AND COALESCE(is_blacklist, FALSE) = TRUE
+                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
+            """, (operator_id,))
+            rows = cursor.fetchall() or []
+            if not rows:
+                return []
+            cursor.execute("""
+                INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (operator_id, actor_id_norm, 'blacklist', 'Да', 'Нет'))
+            return [self._serialize_schedule_status_period(row) for row in rows]
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и
