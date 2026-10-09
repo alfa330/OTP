@@ -8859,39 +8859,14 @@ def api_wazzup_chats():
         offset = max(int(request.args.get('offset', 0)), 0)
     except (TypeError, ValueError):
         offset = 0
-    where, params = ["account = %s"], [account]
-    if channel_id:
-        where.append("channel_id = %s")
-        params.append(channel_id)
-    if q:
-        # Экранируем метасимволы LIKE. Без этого '_' в запросе означал «любой
-        # один символ», а '%' — «что угодно»: поиск «7_78423714» притягивал
-        # чужие чаты, и переход по ссылке на такой чат решал «не найден» по
-        # разбавленной первой странице. Инъекции здесь не было (значение всегда
-        # шло параметром), а вот выдача врала.
-        where.append("(contact_name ILIKE %s ESCAPE '\\' OR contact_phone ILIKE %s ESCAPE '\\'"
-                     " OR chat_id ILIKE %s ESCAPE '\\')")
-        escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        like = f"%{escaped}%"
-        params.extend([like, like, like])
+    # Ждущие ответа — первыми (wazzup/chat_list.py).
+    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset)
     try:
         with db._get_cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM wazzup_chats WHERE {' AND '.join(where)}",
-                           params)
+            cursor.execute(*count)
             total = cursor.fetchone()[0]
-            cursor.execute(f"""
-                SELECT channel_id, chat_id, chat_type, contact_name, contact_phone,
-                       last_message_at, last_message_text, last_message_is_echo,
-                       messages_count, inbound_count, outbound_count
-                  FROM wazzup_chats WHERE {' AND '.join(where)}
-                 ORDER BY last_message_at DESC NULLS LAST
-                 LIMIT %s OFFSET %s""", params + [limit, offset])
-            items = [{'channelId': r[0], 'chatId': r[1], 'chatType': r[2],
-                      'contactName': r[3], 'contactPhone': r[4],
-                      'lastMessageAt': r[5].isoformat() if r[5] else None,
-                      'lastMessageText': r[6], 'lastMessageIsEcho': r[7],
-                      'messagesCount': r[8], 'inboundCount': r[9], 'outboundCount': r[10]}
-                     for r in cursor.fetchall()]
+            cursor.execute(*page)
+            items = [wazzup_chat_list.chat_list_item(r) for r in cursor.fetchall()]
         return jsonify({"status": "success", "items": items, "total": total}), 200
     except Exception as error:
         logging.exception("wazzup chats failed")
@@ -8949,6 +8924,7 @@ from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
 from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
 from wazzup import access as wazzup_access  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
+from wazzup import chat_list as wazzup_chat_list  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402

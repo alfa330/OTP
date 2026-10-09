@@ -24,6 +24,7 @@ import {
     takeBackMessage, useChatOutbox, useOutbox,
 } from './sendQueue';
 import { chatListDraft, useChatDrafts } from './chatDrafts';
+import { orderChatList, waitingCount } from './chatListOrder';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -1404,14 +1405,12 @@ function ChatsWorkspace(props) {
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
-    const loadedChatsByKey = useMemo(() => new Map((chats || []).map((chat) => [pilotChatKey('op', chat), chat])), [chats]);
-    const visibleChats = unreadOnly && pilot.enabled
-        ? Object.values(unread.items).filter((item) => item.unreadCount > 0)
-            .map((item) => loadedChatsByKey.get(pilotChatKey('op', item)) || item.chat)
-            .filter((chat) => chat && (!channelId || chat.channelId === channelId)
-                && (!appliedSearch || [chat.contactName, chat.contactPhone, chat.chatId].some((v) => String(v || '').toLowerCase().includes(appliedSearch.toLowerCase()))))
-            .sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0))
-        : chats;
+    // Ждущие ответа — вверху списка (chatListOrder.js); счётчик ведётся только у «op».
+    const waiting = useMemo(() => (account === 'op' ? { items: unread.items, ready: unread.ready } : null),
+        [account, unread.items, unread.ready]);
+    const visibleChats = useMemo(() => orderChatList(chats, waiting, {
+        unreadOnly: unreadOnly && pilot.enabled, channelId, search: appliedSearch,
+    }), [chats, waiting, unreadOnly, pilot.enabled, channelId, appliedSearch]);
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
     const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
@@ -1803,6 +1802,7 @@ function ChatsWorkspace(props) {
                         {(visibleChats || []).map((chat) => {
                             const isSel = selected && selected.chatId === chat.chatId && selected.channelId === chat.channelId;
                             const draftText = chatListDraft(drafts, pilotChatKey('op', chat), { owner: draftOwner, open: isSel });
+                            const waitingReplies = waitingCount(chat, waiting);
                             return (
                                 <button key={`${chat.channelId}:${chat.chatId}`} onClick={() => openChat(chat)}
                                         className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl px-2.5 py-2 text-left transition ${
@@ -1833,9 +1833,10 @@ function ChatsWorkspace(props) {
                                                 {draftText &&
                                                     <FilePen size={13} className="ml-auto shrink-0 text-slate-400"
                                                         role="img" aria-label="Черновик" />}
-                                                {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
-                                                    <span className={`${draftText ? '' : 'ml-auto '}rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white`}>
-                                                        {unread.items[pilotChatKey('op', chat)].unreadCount}
+                                                {waitingReplies > 0 &&
+                                                    <span className={`${draftText ? '' : 'ml-auto '}rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white`}
+                                                        title="Ждут ответа" data-testid="wazzup-chat-waiting">
+                                                        {waitingReplies}
                                                     </span>}
                                             </div>
                                             {!channelId && (

@@ -27,6 +27,8 @@ export function reconcileUnreadSnapshot(rows, current, touched, startedAt) {
 
 export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, headers }) {
     const [items, setItems] = useState({});
+    // Снимок пришёл: items — все ждущие ответа, а не только пришедшие по потоку.
+    const [ready, setReady] = useState(false);
     const [error, setError] = useState('');
     const state = useRef({ items: {}, epoch: 0, events: 0, touched: {}, loading: null,
         controller: null, acknowledgements: new Map(), metadata: new Map() });
@@ -89,6 +91,7 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
             // Keep only revisions that the next reconciliation can encounter.
             state.current.touched = Object.fromEntries(Object.keys(snapshot).map((key) => [key, state.current.touched[key] || 0]));
             setItems(snapshot);
+            setReady(true);
             setError('');
         })();
         state.current.loading = request;
@@ -105,6 +108,7 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
         state.current.touched = {};
         state.current.metadata.clear();
         setItems({});
+        setReady(false);
         setError('');
         return () => {
             state.current.epoch += 1;
@@ -136,5 +140,5 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
             if (state.current.acknowledgements.get(ackKey) === controller) state.current.acknowledgements.delete(ackKey);
         }
     };
-    return { items, apply, refresh, markRead, error, total: Object.values(items).reduce((sum, row) => sum + row.unreadCount, 0) };
+    return { items, ready, apply, refresh, markRead, error, total: Object.values(items).reduce((sum, row) => sum + row.unreadCount, 0) };
 }
