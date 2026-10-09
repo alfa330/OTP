@@ -1217,10 +1217,25 @@ class ModalScreenTests(unittest.TestCase):
         self.assertIn('if (!open && !leaving) return null;', self.IOS)
         self.assertIn("${leaving ? ' is-leaving' : ''}", self.IOS)
 
-    def test_leaving_delay_is_mobile_only(self):
-        """На компьютере лишний кадр жизни закрытого окна ничем не оправдан —
-        и правка мобильной оболочки не должна менять настольное поведение."""
-        self.assertIn('if (!wasOpen.current || !isNarrow)', self.IOS)
+    def test_leaving_delay_is_per_device(self):
+        """Телефон — уход экраном (SCREEN_LEAVE_MS), компьютер — короткое угасание
+        окна (WINDOW_LEAVE_MS; просьба владельца 09.10.2026 — «слишком резкое
+        закрытие и открытие»). При «Уменьшить движение» окно снимается сразу."""
+        self.assertIn("const delay = isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS);", self.IOS)
+        self.assertIn('if (!wasOpen.current || !delay)', self.IOS)
+
+    def test_desktop_window_motion_matches_the_unmount_delay(self):
+        """Угасание окна на компьютере и задержка его снятия — одно число: иначе
+        окно либо обрубается посреди движения, либо висит лишний кадр пустым."""
+        js_ms = int(re.search(r'export const WINDOW_LEAVE_MS = (\d+);', self.IOS).group(1))
+        config = (ROOT / 'tailwind.config.cjs').read_text(encoding='utf-8')
+        out_s = float(re.search(r"'window-out': 'windowOut ([\d.]+)s", config).group(1))
+        dim_s = float(re.search(r"'window-dim-out': 'windowDimOut ([\d.]+)s", config).group(1))
+        self.assertEqual(js_ms, round(out_s * 1000))
+        self.assertEqual(js_ms, round(dim_s * 1000))
+        # Движение полотна — только на компьютере: на телефоне оно ехало бы внутри экрана.
+        self.assertIn("const panelMotion = isNarrow ? '' :", self.IOS)
+        self.assertIn("const dimMotion = isNarrow ? '' :", self.IOS)
 
     def test_dim_is_off_and_panel_fills_the_screen(self):
         self.assertIn('body.mobile-shell .otp-modal-dim', SHELL_CSS)
@@ -1293,7 +1308,8 @@ class ModalScreenTests(unittest.TestCase):
         """Крестик в правом углу читается как «отменить»; уход с экрана в
         мессенджере делают шевроном слева. Двух кнопок «закрыть» в одной шапке
         быть не должно."""
-        self.assertIn('{(onBack || isNarrow) && (', self.IOS)
+        # shown — то, что окно показывает (при уходе — то, что было в момент закрытия).
+        self.assertIn('{(shown.onBack || isNarrow) && (', self.IOS)
         # Подпись «Назад» рядом со стрелкой убрана 10.09.2026: это вторая
         # подпись к тому же действию, а место в шапке телефона дороже всего.
         self.assertNotIn('<span>Назад</span>', self.IOS)

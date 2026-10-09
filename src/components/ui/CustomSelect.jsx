@@ -367,8 +367,8 @@ export default function CustomSelect({
             fontFamily: isIos ? APPLE_FONT : undefined,
           }}
           className={isIos
-            ? 'flex flex-col overflow-hidden rounded-2xl bg-white shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80 animate-[fadeIn_.12s_ease]'
-            : 'flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl animate-[fadeIn_.12s_ease]'}
+            ? 'flex flex-col overflow-hidden rounded-2xl bg-white shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80 motion-safe:animate-popover-in'
+            : 'flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl motion-safe:animate-popover-in'}
         >
           {showSearch && (
             <div className={`shrink-0 border-b p-1.5 ${isIos ? 'border-slate-100' : 'border-gray-100'}`}>

@@ -295,10 +295,10 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />
             </button>
             {open && !portal && (
-                <div className="absolute left-0 top-full z-50 mt-2">{calendar}</div>
+                <div className="absolute left-0 top-full z-50 mt-2 motion-safe:animate-popover-in">{calendar}</div>
             )}
             {open && portal && coords && createPortal(
-                <div ref={popRef} role="dialog"
+                <div ref={popRef} role="dialog" className="motion-safe:animate-popover-in"
                      style={{ position: 'fixed', left: coords.left, top: coords.top,
                               maxHeight: coords.maxHeight, zIndex: 99999 }}>
                     {calendar}

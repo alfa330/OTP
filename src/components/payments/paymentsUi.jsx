@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Columns3, Copy, Download, FileText, Loader2, Paperclip, Trash2, X } from 'lucide-react';
+import {
+    Check, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw, ShoppingCart, Trash2,
+    UsersRound, X,
+} from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import { iosBtnGhost, iosBtnSecondary, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import {
-    ATTACHMENT_LABELS, fileSizeLabel, fmtMoney, parseAmount, requestState, routeSummary, stateMeta, tonePill,
+    ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, fileSizeLabel, fmtMoney, initialsOf,
+    pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, tonePill,
 } from './paymentsMeta';
 
 /*
@@ -14,9 +18,14 @@ import {
  * раздел не заводит.
  */
 
+/* Кнопка-поле выбора даты в формах раздела: тот же вид, что у полей ввода. */
+export const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
+    + 'text-[14px] tabular-nums text-slate-900 border-0 transition hover:bg-slate-200/70 '
+    + 'focus:outline-none focus:ring-2 focus:ring-blue-500/70 [&>span]:flex-1 [&>span]:text-left';
+
 /* Пояснение к выбору под «i»: фраза о том, зачем поле, и по строке на вариант.
    Данные — из HINTS в paymentsMeta.js: { intro, options: [[вариант, смысл]], outro }. */
-export const ChoiceHint = ({ intro, options = [], outro }) => (
+const ChoiceHint = ({ intro, options = [], outro }) => (
     <div className="space-y-1.5">
         {intro && <div>{intro}</div>}
         {options.length > 0 && (
@@ -76,6 +85,128 @@ export const Choice = ({ value, onChange, options, ariaLabel, stretch = false, d
     </div>
 );
 
+/* ── Заявка в списке: карточка доски, строка «Моих задач», карточка реестра ──
+   Детали — те же, что у карточек раздела «Задачи» (TaskBoardWorkspace.jsx):
+   метка-чип с тонким кольцом, флажок срока, кружки с инициалами. Цвет у чипа —
+   только когда он что-то сообщает (срок подходит, прошёл). */
+
+const CHIP_TONE = {
+    overdue: 'bg-rose-50 text-rose-600 ring-rose-100',
+    soon: 'bg-amber-50 text-amber-700 ring-amber-100',
+    normal: 'bg-slate-100 text-slate-500 ring-transparent',
+    done: 'bg-slate-100 text-slate-400 ring-transparent',
+};
+
+export const MetaChip = ({ tone = 'normal', icon: Icon, title, children }) => (
+    <span title={title} className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-[2px] text-[11px] font-medium tabular-nums ring-1 ${CHIP_TONE[tone] || CHIP_TONE.normal}`}>
+        {Icon && <Icon size={10} strokeWidth={2.25} aria-hidden="true" />}
+        {children}
+    </span>
+);
+
+/* Флажок срока — тот же рисунок, что у «Задач». */
+const FlagIcon = () => (
+    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M3 10.5V2m0 0h6l-1.3 2L9 6H3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+);
+
+/* Срок заявки; у оплаченной — день оплаты. Нет срока — нет и метки. */
+export const DueChip = ({ request, soonDays }) => {
+    const chip = dueChip(request, soonDays ? { soonDays } : undefined);
+    if (!chip) return null;
+    return (
+        <MetaChip tone={chip.tone} title={chip.title}>
+            {chip.icon === 'check' ? <Check size={10} strokeWidth={2.5} aria-hidden="true" /> : <FlagIcon />}
+            {chip.label}
+        </MetaChip>
+    );
+};
+
+/* Метка типа заявки — цвет и значок те же, что у полосы на карточке. Значки — как у
+   выбора типа в «Создать заявку»: тележка — закуп, стрелки по кругу — регулярный. */
+const TYPE_ICONS = { purchase: ShoppingCart, card: CreditCard, regular: RefreshCcw };
+
+export const TypePill = ({ request }) => {
+    const type = requestType(request);
+    const Icon = TYPE_ICONS[type.key];
+    return (
+        <span className={`inline-flex min-w-0 items-center gap-1 rounded-md px-1.5 py-[2px] text-[11px] font-semibold ${type.pill}`} title={`Тип заявки: ${type.label}`}>
+            <Icon size={11} strokeWidth={2.25} className="shrink-0" aria-hidden="true" />
+            <span className="truncate">{type.label}</span>
+        </span>
+    );
+};
+
+/* Рамка карточки заявки — на доске, в окне колонки и в реестре на телефоне:
+   сплошная граница с лёгкой тенью и цветная полоса типа у левого края, внутри
+   карточки, как метка события в «Календаре». `type` — из requestType(). */
+export const requestCardFrame = (type) => 'relative rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] '
+    + 'before:pointer-events-none before:absolute before:bottom-2.5 before:left-1.5 before:top-2.5 before:w-[3px] before:rounded-full '
+    + type.bar;
+
+/* Кружок человека: инициалы на сером, как на карточках «Задач». Подразделение —
+   значком, а не буквой. */
+export const Face = ({ person, size = 20 }) => (
+    <span
+        title={person?.title || person?.name || ''}
+        className="inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 font-semibold text-slate-600"
+        style={{ width: size, height: size, fontSize: Math.max(9.5, Math.round(size * 0.36 * 10) / 10) }}
+    >
+        {person?.role ? <UsersRound size={Math.round(size * 0.55)} strokeWidth={2} aria-hidden="true" /> : initialsOf(person?.name)}
+    </span>
+);
+
+const FlowArrow = () => (
+    <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="shrink-0 text-slate-300">
+        <path d="M1.6 5h6.4M5.8 2.6 8.2 5 5.8 7.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+);
+
+/* «Инициатор → у кого этап». Имена — в подсказках (и для читалки — в aria-label). */
+export const CardFaces = ({ faces }) => {
+    if (!faces?.from && !faces?.to) return null;
+    const label = [faces.from?.title, faces.to?.title].filter(Boolean).join(' → ');
+    return (
+        <span className="flex shrink-0 items-center gap-0.5" title={label} aria-label={label}>
+            {faces.from && <Face person={faces.from} />}
+            {faces.from && faces.to && <FlowArrow />}
+            {faces.to && <Face person={faces.to} />}
+        </span>
+    );
+};
+
+/* Листалка списка — как у раздела «Задачи»: «Показаны 1–20 из 75» и стрелки
+   страниц. Одна страница — просто «12 заявок», без стрелок; `hideSingle` убирает
+   и её там, где число уже стоит рядом (счётчик вкладки, полоса-легенда). */
+const PAGER_BUTTON = 'grid h-7 w-7 place-items-center rounded-lg text-[13px] text-slate-500 transition hover:bg-slate-200/70 '
+    + 'hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent';
+
+export const Pager = ({ page, pageSize, total, loading = false, onPage, forms = REQUEST_FORMS, hideSingle = false }) => {
+    if (!total) return null;
+    const range = pageRange(page, pageSize, total);
+    const single = range.totalPages <= 1;
+    if (single && hideSingle) return null;
+    return (
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1" data-pager>
+            <span className="text-[11.5px] text-slate-400">
+                {single
+                    ? plural(total, forms)
+                    : <>Показаны <b className="font-semibold tabular-nums text-slate-500">{range.from}–{range.to}</b> из <b className="font-semibold tabular-nums text-slate-500">{total}</b></>}
+                {loading && <span className="ml-2 text-slate-300">обновляю…</span>}
+            </span>
+            {!single && (
+                <span className="flex items-center gap-1">
+                    <button type="button" disabled={range.page <= 1 || loading} onClick={() => onPage(range.page - 1)} className={PAGER_BUTTON} aria-label="Предыдущая страница">‹</button>
+                    {/* Ширина — стилем: класс min-w-[…] оболочка телефона обнуляет. */}
+                    <span className="text-center text-[11.5px] tabular-nums text-slate-500" style={{ minWidth: 54 }}>{range.page} / {range.totalPages}</span>
+                    <button type="button" disabled={range.page >= range.totalPages || loading} onClick={() => onPage(range.page + 1)} className={PAGER_BUTTON} aria-label="Следующая страница">›</button>
+                </span>
+            )}
+        </div>
+    );
+};
+
 /* Строка «подпись — значение» в карточке. Пустое значение строку не рисует —
    включая `false`, которое отдаёт `{value && …}`. */
 export const Row = ({ label, children, wide = false }) => {
@@ -98,6 +229,50 @@ export const StatePill = ({ request, className = '' }) => {
             <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
             {meta.label}
         </span>
+    );
+};
+
+/* Метка с точкой — статус справочной записи, закрывающих документов, имущества. */
+export const TonePill = ({ tone = 'neutral', children, className = '' }) => {
+    const pill = tonePill(tone);
+    return (
+        <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11.5px] font-medium ${pill.fill} ${className}`}>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${pill.dot}`} />
+            {children}
+        </span>
+    );
+};
+
+/* Этапы заявки одной строкой (ТЗ, п. 2): пройденные — зелёные, текущий — синий,
+   будущие — серые. Этап, которого у заявки нет (учёт имущества у услуги), не
+   рисуется вовсе: серая точка «пропущено» только отвлекала бы.
+   Чёрточек между этапами нет: семь названий в строку не помещаются, и после
+   переноса чёрточка повисала в начале второй строки. Порядок читается и так —
+   слева направо, по цвету. */
+export const Lifecycle = ({ stages = [], stopped = false }) => {
+    const shown = stages.filter((stage) => stage.state !== 'skipped');
+    return (
+        <ol className="flex flex-wrap items-center gap-1.5">
+            {shown.map((stage) => {
+                const done = stage.state === 'done';
+                const current = stage.state === 'current';
+                const halted = current && stopped;
+                return (
+                    <li key={stage.code} className="flex">
+                        <span
+                            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[12px] ${
+                                halted ? 'bg-slate-200 text-slate-600'
+                                    : current ? 'bg-blue-600 font-medium text-white'
+                                        : done ? 'bg-emerald-50 text-emerald-800'
+                                            : 'bg-slate-100 text-slate-500'}`}
+                        >
+                            {done && <Check size={11} strokeWidth={3} className="text-emerald-600" />}
+                            {stage.label}
+                        </span>
+                    </li>
+                );
+            })}
+        </ol>
     );
 };
 
@@ -149,8 +324,15 @@ export const QuantityInput = ({ value, onChange, className = '', ariaLabel = 'К
     />
 );
 
-/* Выбор сотрудника — CustomSelect с поиском; варианты собираются один раз. */
-export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false }) => {
+/* Список в форме, рядом с полями ввода: тот же рост (41 px), отступ и кегль, что у
+   iosInput. Сам CustomSelect по умолчанию рассчитан на панель фильтров (35 px,
+   12.5 px) — в одном ряду формы такие поля стояли вразнобой. */
+export const FORM_SELECT_TEXT = '!px-3.5 !py-2.5 text-[14px] text-slate-900';
+export const FormSelect = (props) => <CustomSelect variant="ios" textClassName={FORM_SELECT_TEXT} {...props} />;
+
+/* Выбор сотрудника — CustomSelect с поиском; варианты собираются один раз.
+   `compact` — мелкий вид для строки, где рядом стоят такие же мелкие поля. */
+export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false, compact = false }) => {
     const options = useMemo(() => (users || [])
         .filter((user) => !exclude.includes(user.id))
         .map((user) => ({
@@ -164,6 +346,7 @@ export const UserSelect = ({ users, value, onChange, placeholder = 'Выбери
             options={options}
             placeholder={placeholder}
             variant="ios"
+            textClassName={compact ? '' : FORM_SELECT_TEXT}
             searchable
             ariaLabel={ariaLabel || placeholder}
             multiple={multiple}
@@ -191,14 +374,16 @@ export const FilePicker = ({ files, onChange, kinds, disabled = false, label = '
     return (
         <div className="space-y-2">
             {(files || []).map((entry) => (
-                <div key={entry.key} className="flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
+                // На телефоне список «Вид документа» уходит второй строкой: рядом с ним от
+                // имени файла оставалось бы пять букв, и два файла было бы не различить.
+                <div key={entry.key} className="flex flex-wrap items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
                     <FileText size={15} className="shrink-0 text-slate-400" />
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 grow basis-0">
                         <div className="truncate text-[13px] text-slate-800">{entry.file.name}</div>
                         <div className="text-[11.5px] text-slate-500">{fileSizeLabel(entry.file.size)}</div>
                     </div>
                     {kinds && kinds.length > 1 && (
-                        <div className="w-[190px] shrink-0">
+                        <div className="order-last w-full shrink-0 sm:order-none sm:w-[190px]">
                             <CustomSelect
                                 value={entry.kind}
                                 onChange={(kind) => onChange(files.map((item) => (item.key === entry.key ? { ...item, kind } : item)))}
@@ -292,7 +477,7 @@ export const AttachmentList = ({ attachments, apiBaseUrl, headers, canRemove, on
                         </div>
                         <div className="truncate text-[11.5px] text-slate-500">
                             {ATTACHMENT_LABELS[attachment.kind] || attachment.kind}
-                            {showStep && attachment.step_no ? ` · шаг ${attachment.step_no}` : ''}
+                            {showStep && attachment.stage_label ? ` · ${attachment.stage_label}` : ''}
                             {' · '}{fileSizeLabel(attachment.file_size)}
                             {attachment.uploaded_by_name ? ` · ${attachment.uploaded_by_name}` : ''}
                         </div>
@@ -363,7 +548,10 @@ export const FileChips = ({ attachments, apiBaseUrl, headers, showToast, label }
 
 /* «Скопировать»: реквизиты из шага 5 инициатор пересылает поставщику — одним
    щелчком, а не выделением текста мышью. */
-export const CopyButton = ({ text, label = 'Скопировать' }) => {
+const ICON_ACTION = 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition hover:bg-blue-50';
+
+/* `iconOnly` — одним значком, подпись в подсказке: для мест, где слову тесно. */
+export const CopyButton = ({ text, label = 'Скопировать', iconOnly = false }) => {
     const [done, setDone] = useState(false);
     const copy = async () => {
         try {
@@ -372,43 +560,103 @@ export const CopyButton = ({ text, label = 'Скопировать' }) => {
             setTimeout(() => setDone(false), 1600);
         } catch { /* буфер недоступен — текст можно выделить руками */ }
     };
+    if (iconOnly) {
+        return (
+            <button type="button" onClick={copy} title={done ? 'Скопировано' : label} aria-label={label} className={`${ICON_ACTION} ${done ? 'text-emerald-600' : 'text-blue-600'}`}>
+                {done ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+        );
+    }
     return (
-        <button type="button" onClick={copy} className={`${iosBtnGhost} -mr-2 py-1 text-[12.5px] ${done ? 'text-emerald-600' : 'text-blue-600'}`}>
+        <button type="button" onClick={copy} className={`${iosBtnGhost} -mr-2 ${done ? '!text-emerald-600' : ''}`}>
             {done ? <Check size={13} /> : <Copy size={13} />}
             {done ? 'Скопировано' : label}
         </button>
     );
 };
 
-/* Основание согласующего счёта под «i»: какой Приказ применён и почему, либо
-   по какому условию он не подошёл (пп. 11–12 ТЗ о Приказах). */
-export const RouteHint = ({ basis }) => {
-    if (!basis) return null;
-    const summary = routeSummary(basis);
-    const evaluations = basis.evaluations || [];
+/* Основание согласования под «i» (ТЗ, п. 6): маршрут выбирает система, а
+   человек видит, что она проверила по порядку и почему не подошло остальное. */
+export const ApprovalHint = ({ basis }) => {
+    const summary = approvalSummary(basis);
+    if (!summary || !summary.trace.length) return null;
     return (
-        <InfoHint title="Основание">
-            <div className="space-y-2 text-[12px] leading-snug">
-                <div>
-                    Стандартный согласующий: <b>{basis.standard_label || 'Учредитель'}</b>.
-                    {' '}Фактический: <b>{summary.approver}</b>.
-                </div>
-                {evaluations.length === 0 && <div>Действующих Приказов нет — счёт согласует Учредитель.</div>}
-                {evaluations.map((item) => (
-                    <div key={item.order_id} className="rounded-lg bg-slate-100 px-2 py-1.5">
-                        <div className="font-medium">Приказ №{item.number}{item.issued_on ? ` от ${item.issued_on}` : ''} — {item.applies ? 'применён' : 'не применён'}</div>
-                        <ul className="mt-0.5 space-y-0.5">
-                            {(item.checks || []).map((check) => (
-                                <li key={check.key} className={check.ok ? 'text-slate-600' : 'text-rose-700'}>
-                                    {check.ok ? '✓' : '✗'} {check.label}: {check.detail}
-                                </li>
-                            ))}
-                        </ul>
+        <InfoHint title="Как выбран согласующий">
+            <div className="space-y-1.5 text-[12px] leading-snug">
+                {summary.trace.map((step, index) => (
+                    <div key={index} className={step.ok ? 'text-slate-700' : 'text-slate-500'}>
+                        {step.ok ? '✓' : '—'} {step.text}
                     </div>
                 ))}
-                {basis.conflict && <div className="text-amber-700">Несколько действующих Приказов дают право разным людям — применён приоритетный.</div>}
+                <div className="border-t border-slate-200 pt-1.5 text-slate-500">
+                    Этап руководителя: {summary.managerStep ? 'есть' : 'не нужен'}{summary.managerReason ? ` (${summary.managerReason})` : ''}.
+                </div>
+                {summary.conflict && <div className="text-amber-700">Несколько лимитов дают право разным людям — применён приоритетный.</div>}
             </div>
         </InfoHint>
+    );
+};
+
+/* Реквизиты компании-плательщика с кнопкой «Скопировать» (ТЗ, п. 13.3):
+   инициатор пересылает их поставщику, чтобы тот выставил счёт. */
+export const RequisitesBox = ({ entity, title = 'Реквизиты компании' }) => {
+    const text = requisitesText(entity);
+    if (!text) return null;
+    return (
+        <div className="rounded-xl bg-slate-50 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{title}</span>
+                <CopyButton text={text} label="Скопировать реквизиты" />
+            </div>
+            <div className="whitespace-pre-line break-words text-[13px] leading-relaxed text-slate-800">{text}</div>
+        </div>
+    );
+};
+
+/* Номер карты: маска «•••• 1234» и, для тех, кому положено, — «показать»
+   (ТЗ, п. 5.2: полный номер доступен по правам). Полный номер раздел запрашивает
+   отдельно и держит только в этом компоненте: закрыл карточку — номера нет.
+   `compact` — для карточки доски: показанный номер занимает строку почти целиком,
+   поэтому «Скрыть» и «Скопировать» там стоят значками, а не словами (слова
+   переносились на вторую строку). */
+export const CardNumber = ({ mask, canReveal = false, load, showToast, compact = false }) => {
+    const [full, setFull] = useState('');
+    const [busy, setBusy] = useState(false);
+    useEffect(() => { setFull(''); }, [mask]);
+    const reveal = async () => {
+        if (full) { setFull(''); return; }
+        setBusy(true);
+        try {
+            const data = await load();
+            setFull(cardNumberLabel(data?.number));
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось получить номер карты', 'error');
+        } finally {
+            setBusy(false);
+        }
+    };
+    if (!mask) return null;
+    const icons = compact && Boolean(full);
+    return (
+        <span className={`inline-flex items-center gap-y-1 ${icons ? 'gap-x-1' : 'flex-wrap gap-x-2'}`}>
+            <span className={`tabular-nums text-slate-900 ${icons ? 'mr-1' : ''}`}>{full || mask}</span>
+            {canReveal && (
+                <button
+                    type="button"
+                    onClick={(event) => { event.stopPropagation(); reveal(); }}
+                    disabled={busy}
+                    title={icons ? 'Скрыть номер' : undefined}
+                    aria-label={icons ? 'Скрыть номер' : undefined}
+                    className={icons
+                        ? `${ICON_ACTION} text-blue-600`
+                        : 'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[12px] font-medium text-blue-600 transition hover:bg-blue-50'}
+                >
+                    {busy ? <Loader2 size={12} className="animate-spin" /> : (full ? <EyeOff size={icons ? 13 : 12} /> : <Eye size={12} />)}
+                    {!icons && (full ? 'Скрыть' : 'Показать номер')}
+                </button>
+            )}
+            {full && <CopyButton text={full.replace(/\s/g, '')} label={compact ? 'Скопировать номер' : 'Скопировать'} iconOnly={compact} />}
+        </span>
     );
 };
 
@@ -444,7 +692,7 @@ export const ColumnsMenu = ({ columns, value, onChange, onReset }) => {
                 <span className="hidden sm:inline">Колонки</span>
             </button>
             {open && (
-                <div role="menu" className="absolute right-0 top-full z-40 mt-1.5 w-[252px] rounded-2xl bg-white p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80">
+                <div role="menu" className="absolute right-0 top-full z-40 mt-1.5 w-[252px] rounded-2xl bg-white p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80 motion-safe:animate-popover-in">
                     <div className="max-h-[min(460px,60vh)] overflow-y-auto">
                         {columns.map((column) => {
                             const checked = value.includes(column.key);
@@ -503,9 +751,21 @@ export const NoticeBox = ({ text, tone = 'amber', children }) => {
     );
 };
 
-export const appendPayloadFiles = (formData, files) => {
+/* Файлы в форму: сами файлы, их виды и — для коммерческих предложений —
+   порядковый номер варианта поставщика, к которому относится файл. */
+const appendPayloadFiles = (formData, files) => {
     (files || []).forEach((entry) => formData.append('files', entry.file, entry.file.name));
     formData.append('kinds', JSON.stringify((files || []).map((entry) => entry.kind || 'other')));
+    formData.append('offers', JSON.stringify((files || []).map((entry) => (
+        Number.isInteger(entry.offerIndex) ? entry.offerIndex : null))));
+};
+
+/* multipart с полем payload — так сервер читает данные рядом с файлами. */
+export const multipart = (payload, files = []) => {
+    const form = new FormData();
+    form.append('payload', JSON.stringify(payload || {}));
+    appendPayloadFiles(form, files);
+    return form;
 };
 
 export const errorText = (error, fallback) => {

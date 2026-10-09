@@ -1,5 +1,6 @@
-import React, { useEffect, useLayoutEffect } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import FaIcon from './FaIcon';
+import { SCREEN_LEAVE_MS, WINDOW_LEAVE_MS, prefersReducedMotion } from '../ui/ios';
 import useIsMobileShell from './useIsMobileShell';
 import useScreenBackGesture from './useScreenBackGesture';
 
@@ -43,6 +44,24 @@ const FullscreenSheet = ({
   const isNarrowShell = useIsMobileShell();
   useScreenBackGesture(isNarrowShell && open, onClose);
 
+  /* Уход, как у IosModal: разметка живёт, пока окно гаснет (компьютер) или
+     уезжает экраном (телефон, mobile-shell.css). Работает, когда окно
+     закрывают через open={false}; снятое вместе с родителем окно уйти
+     анимацией не может — ему не в чем проиграть движение. */
+  const [leavingState, setLeaving] = useState(false);
+  const wasOpen = useRef(open);
+  const delay = isNarrowShell ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS);
+  useEffect(() => {
+    if (open) { wasOpen.current = true; setLeaving(false); return undefined; }
+    if (!wasOpen.current || !delay) { wasOpen.current = false; setLeaving(false); return undefined; }
+    wasOpen.current = false;
+    setLeaving(true);
+    const timer = setTimeout(() => setLeaving(false), delay);
+    return () => clearTimeout(timer);
+  }, [open, delay]);
+  // В такт закрытия окно уже уходит — иначе оно на кадр снималось бы и рисовалось заново (см. IosModal).
+  const leaving = leavingState || (!open && wasOpen.current && delay > 0);
+
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
@@ -74,7 +93,18 @@ const FullscreenSheet = ({
     };
   }, [open, offsetLeft]);
 
-  if (!open) return null;
+  /* Пока окно уходит, в нём остаётся то, что было в момент закрытия: хозяин окна
+     мог уже сбросить данные, и иначе уходило бы пустое полотно. */
+  const kept = useRef(null);
+  if (open) kept.current = { icon, title, subtitle, actions, children };
+  const shown = !open && kept.current ? kept.current : { icon, title, subtitle, actions, children };
+
+  if (!open && !leaving) return null;
+
+  /* Компьютер: подложка проявляется, полотно приподнимается — как окна IosModal.
+     Телефон: экран въезжает и уезжает сам (mobile-shell.css), второго движения нет. */
+  const sheetMotion = isNarrowShell ? '' : (leaving ? ' pointer-events-none motion-safe:animate-window-dim-out' : ' motion-safe:animate-window-dim-in');
+  const bodyMotion = isNarrowShell ? '' : (leaving ? ' motion-safe:animate-window-out' : ' motion-safe:animate-window-in');
 
   return (
     <div
@@ -83,14 +113,14 @@ const FullscreenSheet = ({
          шапки и накрывал крестик закрытия (см. mobile-shell.css). */
       /* На телефоне полотно непрозрачное: окно там — экран во весь экран, и сквозь
          95 % подложки проступал раздел под ним («Задачи» за «Заметками»). */
-      className={`otp-modal-root fixed inset-0 flex ${isNarrowShell ? 'bg-slate-100' : 'bg-slate-100/95 backdrop-blur-sm'}`}
+      className={`otp-modal-root fixed inset-0 flex ${isNarrowShell ? 'bg-slate-100' : 'bg-slate-100/95 backdrop-blur-sm'}${leaving ? ' is-leaving' : ''}${sheetMotion}`}
       style={{
         zIndex: z,
         // Сдвиг вправо от сайдбара; анимация та же, что у отступа контента.
         ...(offsetLeft ? { left: offsetLeft, transition: 'left 0.3s ease' } : null),
       }}
     >
-      <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
+      <div className={`flex h-full w-full min-w-0 flex-col overflow-hidden${bodyMotion}`}>
         {/* otp-modal-head — метка для мобильной оболочки: там окно едет
              экраном во весь экран, и шапке нужен отступ под вырез. */}
         {isNarrowShell ? (
@@ -113,24 +143,24 @@ const FullscreenSheet = ({
               <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
             <div className="min-w-0 flex-1">
-              <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
-              {subtitle ? <p className="truncate text-[12px] text-slate-500">{subtitle}</p> : null}
+              <h3 className="truncate text-[15px] font-semibold text-slate-900">{shown.title}</h3>
+              {shown.subtitle ? <p className="truncate text-[12px] text-slate-500">{shown.subtitle}</p> : null}
             </div>
-            {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+            {shown.actions ? <div className="flex shrink-0 items-center gap-2">{shown.actions}</div> : null}
           </div>
         ) : (
           <div className="otp-modal-head flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
             <div className="flex min-w-0 items-center gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
-                <FaIcon className={`fas ${icon}`} aria-hidden="true" />
+                <FaIcon className={`fas ${shown.icon}`} aria-hidden="true" />
               </span>
               <div className="min-w-0">
-                <h3 className="truncate text-base font-semibold text-slate-900">{title}</h3>
-                {subtitle ? <p className="truncate text-xs leading-5 text-slate-500">{subtitle}</p> : null}
+                <h3 className="truncate text-base font-semibold text-slate-900">{shown.title}</h3>
+                {shown.subtitle ? <p className="truncate text-xs leading-5 text-slate-500">{shown.subtitle}</p> : null}
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {actions}
+              {shown.actions}
               <button
                 type="button"
                 onClick={onClose}
@@ -143,7 +173,7 @@ const FullscreenSheet = ({
           </div>
         )}
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
-          <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{children}</div>
+          <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{shown.children}</div>
         </div>
       </div>
     </div>

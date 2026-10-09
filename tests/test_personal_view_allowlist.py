@@ -22,6 +22,7 @@
 
 import ast
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -270,7 +271,8 @@ class BellTests(unittest.TestCase):
         passed_by_own_predicate = {view for view in bell_views
                                    if view in own and own[view] not in asks_the_set}
         self.assertEqual(passed_by_own_predicate, set(sources.OWN_CIRCLE_VIEWS))
-        self.assertEqual(set(sources.OWN_CIRCLE_VIEWS), {'crm_tickets', 'complaints'})
+        # «Оплата счетов» (#381) — тоже свой круг: раздел открыт поимённо.
+        self.assertEqual(set(sources.OWN_CIRCLE_VIEWS), {'crm_tickets', 'complaints', 'payments'})
         # И наоборот: названный в наборе раздел со своим кругом ничего не меняет.
         self.assertEqual(sources.sources_outside_views(('baiga', 'crm_tickets')),
                          sources.sources_outside_views(('baiga',)))
@@ -321,13 +323,18 @@ class BellTests(unittest.TestCase):
                     continue
                 self.assertRegex(app, r"view === ['\"]%s['\"]" % view, (name, view))
 
-    def _viewer(self, requester_id, role, *, can_see_tasks=False, heads=(), allowlist=None):
-        """Настоящий _notifications_viewer_context с подставленными соседями."""
+    def _viewer(self, requester_id, role, *, can_see_tasks=False, heads=(), allowlist=None, payments_open=True):
+        """Настоящий _notifications_viewer_context с подставленными соседями.
+
+        payments_open — открыт ли человеку раздел «Оплата счетов»: у него свой
+        поимённый периметр (payments/access.py), к личному набору он отношения не
+        имеет, поэтому по умолчанию в проверках набора он «открыт»."""
         namespace = _server_namespace(heads=heads, allowlist=allowlist)
         namespace.update({
             '_events_viewer_scope': lambda requester_id, role: (False, 2134),
             '_four_you_access_for_requester': lambda requester_id, requester: (False, None),
             '_can_access_tasks': lambda role, requester_id: can_see_tasks,
+            '_payments_section_open_for': lambda user_id: payments_open,
             '_birthdays_viewer_scope': lambda requester_id, role, **kwargs: (False, 2134),
             '_checkpoint_scope_for_requester': lambda requester_id, requester: {},
             '_can_manage_checkpoints': lambda requester_id, requester: False,
@@ -367,7 +374,9 @@ class BellTests(unittest.TestCase):
             counts, _items, _meta = sources.collect(Cursor(), viewer)
         finally:
             sources._HANDLERS = original
-        self.assertEqual(set(called), {'birthdays', 'training_plans', 'crm', 'complaints'})
+        # Источники со своим кругом (crm, complaints, payments) набор не прячет:
+        # их гасит собственный периметр раздела — здесь он открыт.
+        self.assertEqual(set(called), {'birthdays', 'training_plans', 'crm', 'complaints', 'payments'})
         for name in viewer['hidden_sources']:
             self.assertEqual(counts[name], 0, name)
         self.assertEqual(counts['total'], 3 * len(set(called)))
@@ -396,6 +405,25 @@ class BellTests(unittest.TestCase):
         self.assertIn('        viewer_context=_notifications_viewer_context,\n', block)
         routes = _read(ROOT / 'notifications' / 'routes.py')
         self.assertIn('return viewer_context(requester_id, requester), None', routes)
+
+    def test_bell_is_silent_about_payments_outside_its_perimeter(self):
+        """«Оплата счетов» открыта поимённо: кому раздел не открыт, тому колокол о нём
+        молчит — уведомление звало бы туда, куда человека не пустят. Личный набор
+        тут ни при чём: правило своё и действует на всех."""
+        self.assertEqual(self._viewer(ANALYST_ID + 1, 'operator', payments_open=False)['hidden_sources'],
+                         ('tasks', 'payments'))
+        self.assertEqual(self._viewer(229, 'admin', can_see_tasks=True, payments_open=False)['hidden_sources'],
+                         ('payments',))
+        named = self._viewer(ANALYST_ID, 'operator', payments_open=False)['hidden_sources']
+        self.assertEqual(named.count('payments'), 1)
+        # Настоящее правило — периметр раздела, а не роль.
+        namespace = {'logging': logging}
+        exec(_function_source('_payments_section_open_for'), namespace)
+        from payments import access as payments_access
+        opened = namespace['_payments_section_open_for']
+        self.assertTrue(opened(payments_access.SECTION_ALLOWED_USER_IDS[0]))
+        self.assertFalse(opened(999999))
+        self.assertFalse(opened(None))
 
     def test_bell_of_everyone_else_is_untouched(self):
         # Сосед по отделу — оператор без личного набора: скрыты только «Задачи».

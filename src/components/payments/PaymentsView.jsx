@@ -1,73 +1,47 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Download, Loader2, Plus, Receipt, Search, SlidersHorizontal, X } from 'lucide-react';
-import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosSegmented } from '../ui/ios';
-import CustomSelect from '../ui/CustomSelect';
-import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
+import { Download, Loader2, Plus, Receipt } from 'lucide-react';
+import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, IosSegmented } from '../ui/ios';
 import PaymentRequestForm from './PaymentRequestForm';
 import PaymentRequestCard from './PaymentRequestCard';
+import PaymentsBoard from './PaymentsBoard';
+import PaymentsDesk from './PaymentsDesk';
+import PaymentsFilters from './PaymentsFilters';
+import PaymentsAssets from './PaymentsAssets';
 import PaymentsDictionaries from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
-import FixedPaymentsPanel from './FixedPaymentsPanel';
 import {
-    HINTS, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY, SOURCE_META, SOURCE_OPTIONS, STATE_FILTERS, TYPE_META, TYPE_OPTIONS,
-    cardNumberLabel, defaultRegistryColumns, dueLabel, expenseSubline, exportFileName, fmtDate, fmtDateShort, fmtMoney,
-    netAmount, normalizeRegistryColumns, registryTableMinWidth, requestState, responsibleLines, rowTone, stateMeta,
-    stepLabel, toneEdge, tonePill, toneRow, toneText,
+    DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
+    REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, defaultRegistryColumns, dueLabel, expenseSubline,
+    exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, netAmount, normalizeRegistryColumns, pageRange,
+    registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine, tonePill,
+    toneRow, toneText,
 } from './paymentsMeta';
-import { Choice, ColumnsMenu, Field, NoticeBox, StatePill, errorText } from './paymentsUi';
+import { ColumnsMenu, DueChip, NoticeBox, Pager, StatePill, TypePill, errorText, requestCardFrame } from './paymentsUi';
 
 /*
- * Раздел «Оплата счетов» — бизнес-процесс «Согласование — Оплата счетов» (#179).
+ * Раздел «Оплата счетов» — модуль «Закуп и оплата» (ТЗ #381).
  *
- * Четыре вкладки: реестр заявок (главная), календарь фиксированных платежей,
- * справочники (контрагенты, договоры, Приказы…) и участники ролей процесса.
+ * Одна заявка «Закуп товара/услуги» идёт по этапам: инициация → согласование →
+ * оплата → получение → учёт имущества → закрывающие документы → закрытие.
+ * Вкладки раздела — разные виды на одни и те же заявки, копий они не создают:
  *
- * Реестр устроен как у «Посылок»: поиск — первое, что видно (одна строка на
- * все поля: расход, контрагент, БИН, номер счёта, карта, инициатор); фильтры
- * под кнопкой; полоса-легенда, она же фильтр по состоянию, со счётчиками с
- * сервера. Строка красится только там, где цвет несёт смысл: просрочка,
- * ожидание договора, закрытая, отклонённая. Обычная заявка в работе — белая.
+ *   «Мои задачи»  — рабочий стол: только то, что ждёт действия смотрящего (п. 16);
+ *   доски         — «Согласование», «Бухгалтерия», «Финансовый отдел» (пп. 7–9),
+ *                   каждая видна тем, кто на ней работает;
+ *   «Заявки»      — реестр с поиском, фильтрами и выгрузкой в Excel;
+ *   «Имущество»   — реестр поставленного на учёт (пп. 10–12);
+ *   «Справочники» (в них и регулярные платежи), «Участники» — настройка процесса (п. 13).
  *
- * Диплинк: ?view=payments&request=<id> открывает карточку сразу — на него
- * ведут уведомления в Telegram.
+ * Набор вкладок приходит с сервера (`capabilities`): раздел рисует то, что
+ * человеку положено, а не то, что следует из его должности.
+ *
+ * Диплинк: ?view=payments&request=<id> открывает заявку сразу — на него ведут
+ * уведомления в Telegram; из колокола заявку открывает `focusRequest`.
  */
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
-
-const TABS = [
-    { value: 'requests', label: 'Заявки' },
-    // На телефоне четыре вкладки в ширину экрана: длинное название не влезает
-    // и наезжает на соседей — там оно короткое.
-    { value: 'fixed', label: <><span className="sm:hidden">Календарь</span><span className="hidden sm:inline">Фиксированные платежи</span></> },
-    { value: 'dictionaries', label: 'Справочники' },
-    { value: 'roles', label: 'Участники' },
-];
-
-const FIXED_ONLY_OPTIONS = [{ value: false, label: 'Все' }, { value: true, label: 'Фиксированные' }];
-
-const EMPTY_FILTERS = {
-    responsible_id: null, initiator_id: null, counterparty_id: null, project_id: null,
-    payment_source: '', payment_type: '', fixed_only: false, date_from: '', date_to: '',
-};
-
-const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
-    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
-    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
-    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
-    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
-
-const shiftDays = (days) => {
-    const value = new Date();
-    value.setDate(value.getDate() - days);
-    return isoDate(value);
-};
-const DATE_PRESETS = [
-    { label: 'Неделя', range: () => ({ from: shiftDays(6), to: isoDate(new Date()) }) },
-    { label: 'Месяц', range: () => ({ from: shiftDays(29), to: isoDate(new Date()) }) },
-    { label: 'Квартал', range: () => ({ from: shiftDays(90), to: isoDate(new Date()) }) },
-];
 
 const requestIdFromLocation = () => {
     try {
@@ -79,19 +53,35 @@ const requestIdFromLocation = () => {
     }
 };
 
-const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
+/* Заявку закрыли — её номер из адреса убираем: иначе обновление страницы
+   открывало бы ту же карточку снова. */
+const dropRequestFromLocation = () => {
+    try {
+        const url = new URL(window.location.href);
+        if (!url.searchParams.has('request')) return;
+        url.searchParams.delete('request');
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    } catch { /* адрес не поправить — не страшно */ }
+};
+
+const optionLabel = (options, value) => options.find((option) => option.value === value)?.label || '';
+
+const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest = null }) => {
     const headers = useCallback(() => (withAccessTokenHeader ? withAccessTokenHeader() : {}), [withAccessTokenHeader]);
 
     const [ping, setPing] = useState(null);
     const [pingError, setPingError] = useState('');
     const [dictionaries, setDictionaries] = useState(null);
     const [users, setUsers] = useState([]);
-    const [tab, setTab] = useState('requests');
+    const [tab, setTab] = useState('desk');
+    // Растёт после любого действия над заявкой: доски и рабочий стол перечитываются.
+    const [refreshKey, setRefreshKey] = useState(0);
+    const [deskCount, setDeskCount] = useState(null);
 
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [counters, setCounters] = useState({});
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
     const [downloading, setDownloading] = useState(false);
 
@@ -99,11 +89,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [search, setSearch] = useState('');
     const [query, setQuery] = useState('');
     const [filters, setFilters] = useState(EMPTY_FILTERS);
-    const [filtersOpen, setFiltersOpen] = useState(false);
 
     const [formOpen, setFormOpen] = useState(false);
     const [editing, setEditing] = useState(null);
-    const [editingItems, setEditingItems] = useState([]);
     const [openedId, setOpenedId] = useState(() => requestIdFromLocation());
 
     const toastRef = useRef(showToast);
@@ -113,6 +101,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         try {
             const response = await axios.get(`${apiBaseUrl}/api/payments/ping`, { headers: headers() });
             setPing(response.data);
+            setDeskCount(Number(response.data?.counters?.desk) || 0);
             setPingError('');
         } catch (error) {
             setPingError(errorText(error, 'Раздел недоступен'));
@@ -136,36 +125,79 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         return () => { cancelled = true; };
     }, [apiBaseUrl, headers]);
 
+    // Щелчок по уведомлению в колоколе: раздел уже открыт, нужна сама заявка.
+    useEffect(() => {
+        if (focusRequest?.requestId) setOpenedId(Number(focusRequest.requestId));
+    }, [focusRequest]);
+
     useEffect(() => {
         const timer = setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
         return () => clearTimeout(timer);
     }, [search]);
 
+    const capabilities = ping?.capabilities || {};
+    const meta = ping?.meta || null;
+    const settings = ping?.settings || dictionaries?.settings || {};
+    // За сколько дней до срока метка на карточке желтеет — та же настройка, что у напоминаний.
+    const soonDays = Number(settings.due_soon_days) || undefined;
+    const isAdmin = Boolean(capabilities.is_admin);
+    const rolesMissing = ping?.roles_missing || [];
+    const rolesReady = !rolesMissing.length;
+
+    const tabs = useMemo(() => {
+        const list = [{ value: 'desk', label: 'Мои задачи', count: deskCount ?? undefined }];
+        (capabilities.boards || []).forEach((code) => {
+            const board = (meta?.boards || []).find((item) => item.code === code);
+            if (board) list.push({ value: `board:${code}`, label: board.short });
+        });
+        list.push({ value: 'requests', label: 'Заявки' });
+        if (capabilities.can_view_assets) list.push({ value: 'assets', label: 'Имущество' });
+        // «Регулярные платежи» — один из справочников (п. 13) и живут внутри них.
+        if (isAdmin || capabilities.sees_all_requests || capabilities.can_manage_cards || capabilities.can_manage_assets) {
+            list.push({ value: 'dictionaries', label: 'Справочники' });
+        }
+        if (isAdmin) list.push({ value: 'roles', label: 'Участники' });
+        return list;
+    }, [capabilities.boards, capabilities.can_view_assets, capabilities.sees_all_requests, capabilities.can_manage_cards,
+        capabilities.can_manage_assets, isAdmin, meta, deskCount]);
+    const activeTab = tabs.some((item) => item.value === tab) ? tab : 'desk';
+    const boardCode = activeTab.startsWith('board:') ? activeTab.slice(6) : null;
+
     const selection = useMemo(() => {
-        const params = new URLSearchParams();
+        const params = filtersToParams(filters);
         if (state && state !== 'all') params.set('state', state);
         if (query) params.set('q', query);
-        Object.entries(filters).forEach(([key, value]) => {
-            if (value === '' || value === null || value === undefined || value === false) return;
-            params.set(key, String(value === true ? 1 : value));
-        });
         return params;
     }, [state, query, filters]);
 
+    /* Реестр — страницами, как списки раздела «Задачи». Номер страницы помнится
+       вместе с отбором, для которого его выбрали: новый отбор сразу начинается с
+       первой страницы, без лишнего запроса третьей страницы прежнего отбора. */
+    const selectionKey = selection.toString();
+    const [paging, setPaging] = useState({ key: '', page: 1 });
+    const page = paging.key === selectionKey ? paging.page : 1;
+    const listRef = useRef(null);
+    const goToPage = (next) => {
+        setPaging({ key: selectionKey, page: next });
+        // Листали стрелками под списком — показываем новую страницу с начала.
+        const top = listRef.current?.getBoundingClientRect().top;
+        if (top !== undefined && top < 0) listRef.current.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    };
+
     const requestRef = useRef(0);
-    const load = useCallback(async ({ append = false, from = 0 } = {}) => {
+    const load = useCallback(async (pageNumber) => {
         const ticket = requestRef.current + 1;
         requestRef.current = ticket;
         setLoading(true);
         setLoadError('');
         try {
-            const params = new URLSearchParams(selection);
+            const params = new URLSearchParams(selectionKey);
             params.set('limit', String(PAGE_SIZE));
-            params.set('offset', String(from));
+            params.set('offset', String((pageNumber - 1) * PAGE_SIZE));
             const response = await axios.get(`${apiBaseUrl}/api/payments/requests?${params}`, { headers: headers() });
             if (requestRef.current !== ticket) return;
             const data = response.data || {};
-            setItems((prev) => (append ? [...prev, ...(data.items || [])] : (data.items || [])));
+            setItems(data.items || []);
             setTotal(Number(data.total) || 0);
             setCounters(data.counters || {});
         } catch (error) {
@@ -174,27 +206,36 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         } finally {
             if (requestRef.current === ticket) setLoading(false);
         }
-    }, [apiBaseUrl, headers, selection]);
+    }, [apiBaseUrl, headers, selectionKey]);
 
-    useEffect(() => { load(); }, [load]);
+    // Реестр читается, когда открыт: на рабочем столе и досках он не нужен. После
+    // действия над заявкой (refreshKey) перечитывается та же страница.
+    useEffect(() => {
+        if (activeTab !== 'requests') return;
+        load(page);
+    }, [activeTab, load, page, refreshKey]);
 
-    /* После любого действия над заявкой список перезапрашивается: состав
-       сегментов и счётчики считает сервер, у себя их не пересчитать. Но сначала
-       строка правится на месте, чтобы список не мигал. */
+    // Страница могла уехать за конец списка (заявки закрыли, отбор сузился) — подтягиваем обратно.
+    const lastPage = pageRange(page, PAGE_SIZE, total).page;
+    useEffect(() => {
+        if (!loading && total > 0 && lastPage !== page) setPaging({ key: selectionKey, page: lastPage });
+    }, [loading, total, lastPage, page, selectionKey]);
+
+    /* После любого действия над заявкой всё, что её показывает, перечитывается:
+       состав колонок, счётчики и «мои задачи» считает сервер. Строка реестра
+       сначала правится на месте, чтобы список не мигал. */
     const applyChanged = useCallback((request) => {
-        if (!request) return;
-        if (request.deleted) {
+        if (request?.deleted) {
             setItems((prev) => prev.filter((item) => item.id !== request.id));
             setTotal((prev) => Math.max(0, prev - 1));
-        } else {
-            setItems((prev) => {
-                const exists = prev.some((item) => item.id === request.id);
-                return exists ? prev.map((item) => (item.id === request.id ? { ...item, ...request } : item)) : [request, ...prev];
-            });
+        } else if (request?.id) {
+            setItems((prev) => prev.map((item) => (item.id === request.id ? { ...item, ...request } : item)));
         }
-        load();
+        setRefreshKey((prev) => prev + 1);
         loadPing();
-    }, [load, loadPing]);
+    }, [loadPing]);
+
+    const closeCard = useCallback(() => { setOpenedId(null); dropRequestFromLocation(); }, []);
 
     const exportXlsx = useCallback(async () => {
         setDownloading(true);
@@ -214,8 +255,6 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             setDownloading(false);
         }
     }, [apiBaseUrl, headers, selection]);
-
-    const steps = ping?.steps || [];
 
     /* Набор колонок — личная настройка смотрящего, живёт в браузере. Хранилище
        может быть недоступно (приватное окно) — тогда просто набор по умолчанию. */
@@ -255,8 +294,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     </>
                 );
             }
+            case 'kind': return <div className={`truncate ${text.main}`}>{optionLabel(REQUEST_KIND_OPTIONS, request.request_kind) || '—'}</div>;
+            case 'entity': return request.legal_entity_name ? <div className={`truncate ${text.main}`}>{request.legal_entity_name}</div> : muted('—');
             case 'project': return request.project_name ? <div className={`truncate ${text.main}`}>{request.project_name}</div> : muted('—');
-            case 'branch': return request.branch ? <div className={`truncate ${text.main}`}>{request.branch}</div> : muted('—');
             case 'category':
                 return request.category_name ? (
                     <>
@@ -268,7 +308,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 return (
                     <>
                         <div className={`truncate ${text.main}`}>{request.counterparty_name || '—'}</div>
-                        {request.legal_entity_name && <div className={`truncate text-[12.5px] ${text.body}`}>от {request.legal_entity_name}</div>}
+                        {request.legal_entity_name && !columnKeys.includes('entity') && (
+                            <div className={`truncate text-[12.5px] ${text.body}`}>от {request.legal_entity_name}</div>
+                        )}
                     </>
                 );
             case 'amount':
@@ -278,14 +320,21 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         {request.refund_amount > 0 && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>возврат {fmtMoney(request.refund_amount)}</div>}
                     </div>
                 );
-            case 'source': return <div className={`truncate ${text.main}`}>{SOURCE_META[request.payment_source]?.label || '—'}</div>;
-            case 'type': return <div className={`truncate ${text.main}`}>{TYPE_META[request.payment_type]?.label || '—'}</div>;
+            case 'method':
+                return request.payment_method ? (
+                    <>
+                        <div className={`truncate ${text.main}`} title={optionLabel(PAYMENT_METHOD_OPTIONS, request.payment_method)}>{PAYMENT_METHOD_SHORT[request.payment_method]}</div>
+                        {request.payment_method === 'card' && request.card_mask && (
+                            <div className={`truncate text-[12px] leading-4 tabular-nums ${text.meta}`}>{request.card_mask}</div>
+                        )}
+                    </>
+                ) : muted('—');
             case 'period': return request.payment_period ? <div className={`truncate ${text.main}`}>{request.payment_period}</div> : muted('—');
             case 'stage':
                 return active ? (
                     <>
-                        <div className={`truncate ${text.main}`}>{stepLabel(request, steps)}</div>
-                        <div className={`truncate text-[12px] leading-4 ${text.meta}`}>шаг {request.current_step} из 12{st === 'blocked' ? ' · ожидает договор' : ''}</div>
+                        <div className={`truncate ${text.main}`}>{request.stage_label || '—'}</div>
+                        {st === 'clarification' && <div className="truncate text-[12px] leading-4 text-amber-700">{stageLine(request).toLowerCase()}</div>}
                     </>
                 ) : <StatePill request={request} />;
             case 'responsible': {
@@ -293,7 +342,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 const who = responsibleLines(request);
                 return (
                     <>
-                        <div className={`truncate ${text.main}`}>{who.name}</div>
+                        {/* Длинное название роли («Ответственный за учёт имущества») занимает обе строки ячейки. */}
+                        <div className={`${who.sub ? 'truncate' : 'line-clamp-2 leading-snug'} ${text.main}`}>{who.name}</div>
                         {who.sub && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{who.sub}</div>}
                     </>
                 );
@@ -301,7 +351,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             case 'due':
                 // Срок важен, пока заявка не оплачена; после оплаты и у закрытой
                 // строка «к 28.09.2026» только повторяла бы дату над ней.
-                if (request.due_on && active && Number(request.current_step) <= 10) {
+                if (request.due_on && active && !request.paid_on) {
                     return (
                         <div className="whitespace-nowrap">
                             <div className={`tabular-nums ${text.main}`}>{fmtDateShort(request.due_on)}</div>
@@ -320,138 +370,113 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         {request.invoice_date && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>от {fmtDate(request.invoice_date)}</div>}
                     </>
                 ) : muted('—');
-            case 'card': return request.card_number ? <div className={`truncate tabular-nums ${text.main}`}>{cardNumberLabel(request.card_number)}</div> : muted('—');
+            case 'docs':
+                // До оплаты закрывающих документов не ждут — статус «не получены»
+                // у заявки на согласовании читался бы как упрёк.
+                return request.paid_on
+                    ? <div className={`truncate ${text.main}`}>{(DOCS_STATUS_META[request.closing_docs_status] || DOCS_STATUS_META.none).label}</div>
+                    : muted('—');
             case 'notes': return request.notes ? <div className={`line-clamp-2 text-[12.5px] ${text.body}`}>{request.notes}</div> : muted('—');
             default: return null;
         }
     };
 
-    const capabilities = ping?.capabilities || {};
-    const rolesReady = ping?.roles_ready !== false;
-    const isAdmin = Boolean(capabilities.is_admin);
-
-    const filtersActive = useMemo(() => {
-        let count = 0;
-        if (filters.responsible_id) count += 1;
-        if (filters.initiator_id) count += 1;
-        if (filters.counterparty_id) count += 1;
-        if (filters.project_id) count += 1;
-        if (filters.payment_source) count += 1;
-        if (filters.payment_type) count += 1;
-        if (filters.fixed_only) count += 1;
-        if (filters.date_from || filters.date_to) count += 1;
-        return count;
-    }, [filters]);
-
-    const userOptions = useMemo(() => [{ value: null, label: 'Все' }, ...users.map((user) => ({ value: user.id, label: user.name }))], [users]);
-    const counterpartyOptions = useMemo(() => [{ value: null, label: 'Все контрагенты' }, ...(dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
-    const projectOptions = useMemo(() => [{ value: null, label: 'Все проекты' }, ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
-
-    const activeFilterChips = useMemo(() => {
-        const chips = [];
-        const nameOf = (list, id) => list.find((item) => item.value === id)?.label || id;
-        if (filters.responsible_id) chips.push({ key: 'responsible_id', name: 'Ответственный', label: nameOf(userOptions, filters.responsible_id), clear: () => setFilters((p) => ({ ...p, responsible_id: null })) });
-        if (filters.initiator_id) chips.push({ key: 'initiator_id', name: 'Инициатор', label: nameOf(userOptions, filters.initiator_id), clear: () => setFilters((p) => ({ ...p, initiator_id: null })) });
-        if (filters.counterparty_id) chips.push({ key: 'counterparty_id', name: 'Контрагент', label: nameOf(counterpartyOptions, filters.counterparty_id), clear: () => setFilters((p) => ({ ...p, counterparty_id: null })) });
-        if (filters.project_id) chips.push({ key: 'project_id', name: 'Проект', label: nameOf(projectOptions, filters.project_id), clear: () => setFilters((p) => ({ ...p, project_id: null })) });
-        if (filters.payment_source) chips.push({ key: 'payment_source', name: 'Источник', label: SOURCE_OPTIONS.find((o) => o.value === filters.payment_source)?.label, clear: () => setFilters((p) => ({ ...p, payment_source: '' })) });
-        if (filters.payment_type) chips.push({ key: 'payment_type', name: 'Тип', label: TYPE_OPTIONS.find((o) => o.value === filters.payment_type)?.label, clear: () => setFilters((p) => ({ ...p, payment_type: '' })) });
-        if (filters.fixed_only) chips.push({ key: 'fixed_only', name: 'Только', label: 'фиксированные', clear: () => setFilters((p) => ({ ...p, fixed_only: false })) });
-        if (filters.date_from || filters.date_to) chips.push({ key: 'dates', name: 'Создана', label: `${filters.date_from ? fmtDateShort(filters.date_from) : '…'} — ${filters.date_to ? fmtDateShort(filters.date_to) : '…'}`, clear: () => setFilters((p) => ({ ...p, date_from: '', date_to: '' })) });
-        return chips;
-    }, [filters, userOptions, counterpartyOptions, projectOptions]);
-
-    const openCreate = () => { setEditing(null); setEditingItems([]); setFormOpen(true); };
+    const filtersActive = activeFilterCount(filters);
+    const openCreate = () => { setEditing(null); setFormOpen(true); };
+    const narrowed = Boolean(query || filtersActive || state !== 'all');
 
     return (
-        <div className="mx-auto max-w-[1400px] px-3 pb-12 pt-3 sm:px-5" style={{ fontFamily: APPLE_FONT }}>
-            <header className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                    <h1 className="text-[22px] font-semibold tracking-tight text-slate-900">Оплата счетов</h1>
-                    <p className="mt-0.5 text-[13px] text-slate-500">
-                        Согласование закупа и оплата счетов по шагам: инициатор → руководитель → Учредитель → бухгалтерия
-                    </p>
-                </div>
-                {tab === 'requests' && (
-                    <div className="flex w-full items-center gap-2 sm:w-auto">
-                        <button type="button" className={`${iosBtnSecondary} shrink-0`} disabled={downloading || !items.length} onClick={exportXlsx} title="Выгрузка реестра в Excel по текущему отбору">
-                            {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                            <span className="hidden sm:inline">Excel</span>
-                        </button>
-                        {capabilities.can_create && (
-                            <button type="button" className={`${iosBtnPrimary} flex-1 whitespace-nowrap sm:flex-none`} onClick={openCreate} disabled={!rolesReady}>
-                                <Plus size={15} /> Новая заявка
-                            </button>
-                        )}
-                    </div>
+        // На телефоне у корня свой непрозрачный фон: область раздела там прозрачна,
+        // и фоновый логотип портала просвечивал бы серыми фигурами между карточками.
+        <div className="mx-auto min-h-screen max-w-[1400px] bg-gray-50 px-3 pb-12 pt-3 sm:px-5 md:min-h-0" style={{ fontFamily: APPLE_FONT }}>
+            <header className="flex flex-wrap items-center justify-between gap-3">
+                <h1 className="min-w-0 text-[22px] font-semibold tracking-tight text-slate-900">Оплата счетов</h1>
+                {capabilities.can_create && (
+                    <button type="button" className={`${iosBtnPrimary} w-full whitespace-nowrap sm:w-auto`} onClick={openCreate} disabled={!rolesReady}>
+                        <Plus size={15} /> Создать заявку
+                    </button>
                 )}
             </header>
 
             <div className="-mx-3 mt-4 overflow-x-auto px-3 [scrollbar-width:none] sm:mx-0 sm:px-0">
-                <IosSegmented
-                    value={tab}
-                    options={TABS.map((item) => ({ ...item, count: item.value === 'requests' ? counters.mine : undefined }))}
-                    onChange={setTab}
-                    size="lg"
-                    ariaLabel="Раздел"
-                    className="min-w-max sm:min-w-0"
-                />
+                <IosSegmented value={activeTab} options={tabs} onChange={setTab} size="lg" ariaLabel="Раздел" className="min-w-max" />
             </div>
 
             {pingError && <div className="mt-4"><NoticeBox text={pingError} /></div>}
             {ping && ping.schema_ready === false && (
                 <div className="mt-4"><NoticeBox text="Раздел разворачивается — таблицы появятся после перезапуска сервера." /></div>
             )}
-            {ping && !rolesReady && tab === 'requests' && (
+            {ping && !rolesReady && (
                 <div className="mt-4">
-                    <NoticeBox text="Чтобы заводить заявки, назначьте участников процесса: кто Учредитель и кто Бухгалтерия.">
-                        {' '}
-                        <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => setTab('roles')}>Открыть «Участники»</button>
+                    <NoticeBox text={`Заявки пока не завести: не назначены участники — ${rolesMissing.join(', ')}.`}>
+                        {isAdmin && (
+                            <>
+                                {' '}
+                                <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => setTab('roles')}>Открыть «Участники»</button>
+                            </>
+                        )}
                     </NoticeBox>
                 </div>
             )}
-            {ping && ping.storage_ready === false && tab === 'requests' && (
-                <div className="mt-3"><NoticeBox tone="slate" text="Хранилище файлов не настроено: счета и акты прикрепить не получится, пока не задан бакет." /></div>
+            {ping && ping.storage_ready === false && (
+                <div className="mt-3"><NoticeBox tone="slate" text="Хранилище файлов не настроено: счета, чеки и акты прикрепить не получится, пока не задан бакет." /></div>
+            )}
+            {ping && isAdmin && ping.legacy_pending > 0 && (
+                <div className="mt-3"><NoticeBox text={`Заявок прежней версии процесса не переведено на этапы: ${ping.legacy_pending}. Работать с ними нельзя, пока перенос не пройдёт, — причина записана в журнале сервера.`} /></div>
+            )}
+            {ping && isAdmin && ping.card_key_ready === false && (
+                <div className="mt-3"><NoticeBox tone="slate" text="Не задан ключ шифрования номеров карт: заявки на пополнение карты сохранить не получится." /></div>
             )}
 
-            {tab === 'requests' && (
-                <>
-                    <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-                        <div className="relative sm:flex-1">
-                            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                            <input
-                                type="search"
-                                className={`${iosInput} pl-9`}
-                                placeholder="Расход, контрагент, БИН, номер счёта, карта, инициатор, № заявки…"
-                                value={search}
-                                onChange={(event) => setSearch(event.target.value)}
-                            />
+            {/* Вкладка не подменяется рывком: содержимое мягко проявляется (fade-in-soft). */}
+            {activeTab === 'desk' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
+                    <PaymentsDesk apiBaseUrl={apiBaseUrl} headers={headers} refreshKey={refreshKey} soonDays={soonDays} onOpen={setOpenedId} onCount={setDeskCount} />
+                </div>
+            )}
+
+            {boardCode && meta && (
+                <div key={boardCode} className="mt-4 motion-safe:animate-fade-in-soft">
+                    <PaymentsBoard
+                        code={boardCode}
+                        apiBaseUrl={apiBaseUrl}
+                        headers={headers}
+                        dictionaries={dictionaries}
+                        users={users}
+                        meta={meta}
+                        soonDays={soonDays}
+                        refreshKey={refreshKey}
+                        requestOpen={Boolean(openedId) || formOpen}
+                        onOpen={setOpenedId}
+                        onChanged={applyChanged}
+                        showToast={showToast}
+                    />
+                </div>
+            )}
+
+            {activeTab === 'requests' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
+                    <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users}>
+                        <div className="hidden md:block">
+                            <ColumnsMenu columns={REGISTRY_COLUMNS} value={columnKeys} onChange={changeColumns} onReset={() => changeColumns(defaultRegistryColumns())} />
                         </div>
-                        <div className="flex items-center gap-2 self-start sm:self-auto">
-                            <button
-                                type="button"
-                                className={`${filtersActive ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
-                                onClick={() => setFiltersOpen((prev) => !prev)}
-                            >
-                                <SlidersHorizontal size={15} />
-                                Фильтры
-                                {filtersActive > 0 && <span className="tabular-nums">· {filtersActive}</span>}
-                            </button>
-                            <div className="hidden md:block">
-                                <ColumnsMenu columns={REGISTRY_COLUMNS} value={columnKeys} onChange={changeColumns} onReset={() => changeColumns(defaultRegistryColumns())} />
-                            </div>
-                        </div>
-                    </div>
+                        <button type="button" className={`${iosBtnSecondary} shrink-0`} disabled={downloading || !items.length} onClick={exportXlsx} title="Выгрузка реестра в Excel по текущему отбору">
+                            {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                            <span className="hidden sm:inline">Excel</span>
+                        </button>
+                    </PaymentsFilters>
 
                     <div className="mt-3 flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
                         {STATE_FILTERS.map((item) => {
                             const count = counters[item.counter];
                             const active = state === item.key;
-                            if (item.key !== 'all' && item.key !== 'mine' && item.key !== 'open' && !count && !active) return null;
+                            if (!['all', 'mine', 'open'].includes(item.key) && !count && !active) return null;
                             return (
                                 <button
                                     key={item.key}
                                     type="button"
+                                    data-state-filter={item.key}
+                                    aria-pressed={active}
                                     onClick={() => setState(item.key)}
                                     className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] transition ${active ? 'bg-slate-900 font-medium text-white' : 'text-slate-700 hover:bg-white'}`}
                                 >
@@ -463,60 +488,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         })}
                     </div>
 
-                    {filtersActive > 0 && (
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                            {activeFilterChips.map((chip) => (
-                                <button key={chip.key} type="button" onClick={chip.clear} title={`Убрать: ${chip.label}`} className="group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300 active:scale-[0.98]">
-                                    <span className="text-slate-400">{chip.name}</span>
-                                    <span className="truncate font-medium">{chip.label}</span>
-                                    <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600" />
-                                </button>
-                            ))}
-                            <button type="button" onClick={() => setFilters(EMPTY_FILTERS)} className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 transition hover:text-slate-700">сбросить всё</button>
-                        </div>
-                    )}
-
-                    {filtersOpen && (
-                        <div className={`${iosCard} mt-3 p-3.5`}>
-                            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                                <Field label="Текущий ответственный" optionalMark={false}>
-                                    <CustomSelect value={filters.responsible_id} onChange={(value) => setFilters((p) => ({ ...p, responsible_id: value || null }))} options={userOptions} placeholder="Все" variant="ios" searchable ariaLabel="Ответственный" />
-                                </Field>
-                                <Field label="Инициатор" optionalMark={false}>
-                                    <CustomSelect value={filters.initiator_id} onChange={(value) => setFilters((p) => ({ ...p, initiator_id: value || null }))} options={userOptions} placeholder="Все" variant="ios" searchable ariaLabel="Инициатор" />
-                                </Field>
-                                <Field label="Контрагент" optionalMark={false}>
-                                    <CustomSelect value={filters.counterparty_id} onChange={(value) => setFilters((p) => ({ ...p, counterparty_id: value || null }))} options={counterpartyOptions} placeholder="Все контрагенты" variant="ios" searchable ariaLabel="Контрагент" />
-                                </Field>
-                                <Field label="Проект" optionalMark={false}>
-                                    <CustomSelect value={filters.project_id} onChange={(value) => setFilters((p) => ({ ...p, project_id: value || null }))} options={projectOptions} placeholder="Все проекты" variant="ios" ariaLabel="Проект" />
-                                </Field>
-                                <Field label="Источник оплаты" optionalMark={false} hint={HINTS.source}>
-                                    <CustomSelect value={filters.payment_source} onChange={(value) => setFilters((p) => ({ ...p, payment_source: value || '' }))} options={[{ value: '', label: 'Все' }, ...SOURCE_OPTIONS]} placeholder="Все" variant="ios" ariaLabel="Источник оплаты" />
-                                </Field>
-                                <Field label="Тип оплаты" optionalMark={false} hint={HINTS.type}>
-                                    <CustomSelect value={filters.payment_type} onChange={(value) => setFilters((p) => ({ ...p, payment_type: value || '' }))} options={[{ value: '', label: 'Все' }, ...TYPE_OPTIONS]} placeholder="Все" variant="ios" ariaLabel="Тип оплаты" />
-                                </Field>
-                                <Field label="Создана" optionalMark={false}>
-                                    <IosDateRangePicker
-                                        from={filters.date_from || ''}
-                                        to={filters.date_to || ''}
-                                        max={isoDate(new Date())}
-                                        onChange={({ from, to }) => setFilters((p) => ({ ...p, date_from: from || '', date_to: to || '' }))}
-                                        presets={DATE_PRESETS}
-                                        triggerClassName={DATE_TRIGGER}
-                                    />
-                                </Field>
-                                <Field as="div" label="Платежи" optionalMark={false} hint={HINTS.fixedOnly}>
-                                    <Choice value={Boolean(filters.fixed_only)} options={FIXED_ONLY_OPTIONS} onChange={(value) => setFilters((p) => ({ ...p, fixed_only: value }))} stretch ariaLabel="Какие платежи показывать" />
-                                </Field>
-                            </div>
-                        </div>
-                    )}
-
                     {loadError && <div className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-[13px] text-red-700 ring-1 ring-red-200">{loadError}</div>}
 
                     {/* Таблица на широком экране, карточки на телефоне. */}
+                    <div ref={listRef} className="scroll-mt-4" />
                     <div className={`${iosCard} mt-4 hidden overflow-x-auto md:block`}>
                         <table className="w-full table-fixed border-collapse text-[13.5px]" style={{ minWidth: tableMinWidth }}>
                             <colgroup>
@@ -535,6 +510,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     return (
                                         <tr
                                             key={request.id}
+                                            data-request={request.id}
                                             onClick={() => setOpenedId(request.id)}
                                             className={`h-[60px] cursor-pointer transition hover:brightness-[0.97] ${index > 0 ? 'border-t border-slate-900/[0.06]' : ''} ${toneRow(tone)}`}
                                         >
@@ -552,94 +528,99 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
                                 <Receipt size={22} className="text-slate-300" />
                                 <p className="text-[13.5px] text-slate-500">
-                                    {query || filtersActive || state !== 'all' ? 'Ничего не нашлось — измените запрос или фильтры' : 'Заявок пока нет'}
+                                    {narrowed ? 'Ничего не нашлось — измените запрос или фильтры' : 'Заявок пока нет'}
                                 </p>
                             </div>
                         )}
                     </div>
 
+                    {/* Карточка — та же, что на досках: тип заявки цветом (метка и полоса у левого
+                        края), номер и срок, название, поставщик; за линией — сумма и где заявка
+                        сейчас. Кружок у этапа — того же цвета, что у фильтра над списком. */}
                     <div className="mt-4 space-y-2 md:hidden">
                         {items.map((request) => {
                             const tone = rowTone(request);
+                            const where = registryWhere(request);
                             return (
                                 <button
                                     key={request.id}
                                     type="button"
                                     onClick={() => setOpenedId(request.id)}
-                                    className={`${iosCard} relative w-full overflow-hidden p-3.5 pl-4 text-left transition active:scale-[0.99] before:absolute before:inset-y-0 before:left-0 before:w-[3px] ${toneEdge(tone)}`}
+                                    className={`${requestCardFrame(requestType(request))} block w-full py-3 pl-4 pr-3.5 text-left transition active:scale-[0.99]`}
                                 >
-                                    <div className="flex items-baseline justify-between gap-2">
-                                        <span className="truncate text-[14px] font-medium text-slate-900">{request.expense_name}</span>
+                                    <span className="flex min-h-[20px] items-center justify-between gap-2">
+                                        <span className="flex min-w-0 grow basis-0 items-center gap-2">
+                                            <TypePill request={request} />
+                                            <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">№{request.id}</span>
+                                        </span>
+                                        <DueChip request={request} soonDays={soonDays} />
+                                    </span>
+                                    {/* Без `block`: рядом с line-clamp он отменил бы обрезку. */}
+                                    <span className="mt-1 text-[14px] font-semibold leading-snug text-slate-900 line-clamp-2">{request.expense_name}</span>
+                                    {request.counterparty_name && <span className="mt-0.5 block truncate text-[12.5px] text-slate-600">{request.counterparty_name}</span>}
+                                    <span className="mt-2.5 flex items-center justify-between gap-3 border-t border-slate-100 pt-2">
                                         <span className="shrink-0 text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(netAmount(request))}</span>
-                                    </div>
-                                    <div className="mt-0.5 truncate text-[12.5px] text-slate-500">№{request.id} · {request.counterparty_name || '—'}</div>
-                                    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-slate-600">
-                                        {request.status === 'active' ? (
-                                            <span className={`rounded-full px-2 py-0.5 ${tonePill(stateMeta(requestState(request)).tone || 'current').fill}`}>
-                                                {request.current_step}/12 · {responsibleLines(request).name}
-                                            </span>
-                                        ) : <StatePill request={request} />}
-                                        {request.due_on && <span className="tabular-nums">{dueLabel(request)}</span>}
-                                    </div>
+                                        <span className="inline-flex min-w-0 grow basis-0 items-center justify-end gap-1.5 text-[12px] text-slate-500" title={where}>
+                                            {tone && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tonePill(tone).dot}`} aria-hidden="true" />}
+                                            <span className="truncate">{where}</span>
+                                        </span>
+                                    </span>
                                 </button>
                             );
                         })}
                         {!items.length && !loading && (
-                            <div className={`${iosCard} px-4 py-10 text-center text-[13.5px] text-slate-500`}>{query || filtersActive ? 'Ничего не нашлось' : 'Заявок пока нет'}</div>
+                            <div className={`${iosCard} px-4 py-10 text-center text-[13.5px] text-slate-500`}>{narrowed ? 'Ничего не нашлось' : 'Заявок пока нет'}</div>
                         )}
                     </div>
 
-                    {loading && (
+                    {loading && !items.length && (
                         <div className="mt-4 flex items-center justify-center gap-2 text-[13px] text-slate-500"><Loader2 size={15} className="animate-spin" /> Загружаем реестр…</div>
                     )}
-                    {items.length < total && (
-                        <div className="mt-4 flex flex-col items-center gap-1.5">
-                            <button type="button" className={iosBtnSecondary} disabled={loading} onClick={() => load({ append: true, from: items.length })}>Показать ещё</button>
-                            <span className="text-[12px] tabular-nums text-slate-400">{items.length} из {total}</span>
-                        </div>
-                    )}
-                </>
+                    <div className="mt-3">
+                        <Pager page={page} pageSize={PAGE_SIZE} total={total} loading={loading && items.length > 0} onPage={goToPage} hideSingle />
+                    </div>
+                </div>
             )}
 
-            {tab === 'fixed' && (
-                <div className="mt-4">
-                    <FixedPaymentsPanel
+            {activeTab === 'assets' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
+                    <PaymentsAssets
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
-                        users={users}
                         dictionaries={dictionaries}
-                        me={ping?.me}
+                        users={users}
                         showToast={showToast}
-                        canEdit={isAdmin}
-                        onRequestsChanged={() => { load(); loadPing(); }}
-                        onOpenRequest={(id) => setOpenedId(id)}
+                        onOpenRequest={setOpenedId}
                     />
                 </div>
             )}
 
-            {tab === 'dictionaries' && (
-                <div className="mt-4">
+            {activeTab === 'dictionaries' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsDictionaries
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
                         users={users}
                         dictionaries={dictionaries}
-                        roles={ping?.roles || {}}
+                        capabilities={capabilities}
+                        me={ping?.me}
                         onDictionariesChanged={loadDictionaries}
+                        onSettingsChanged={loadPing}
+                        onRequestsChanged={() => applyChanged(null)}
+                        onOpenRequest={setOpenedId}
                         showToast={showToast}
-                        canEdit={isAdmin}
                     />
                 </div>
             )}
 
-            {tab === 'roles' && (
-                <div className="mt-4">
+            {activeTab === 'roles' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsRoles
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
                         roles={ping?.roles || {}}
                         users={users}
-                        onChanged={(roles) => setPing((prev) => (prev ? { ...prev, roles, roles_ready: Boolean(roles.founder?.length) && Boolean(roles.accounting?.length) } : prev))}
+                        onChanged={(roles) => { setPing((prev) => (prev ? { ...prev, roles } : prev)); loadPing(); }}
                         showToast={showToast}
                         canEdit={isAdmin}
                     />
@@ -648,34 +629,43 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
             <PaymentRequestForm
                 open={formOpen}
-                onClose={() => { setFormOpen(false); setEditing(null); }}
+                // Доработку открывают из карточки заявки — туда же и возвращаемся, а не в список.
+                onClose={() => {
+                    const back = editing?.request?.id;
+                    setFormOpen(false);
+                    setEditing(null);
+                    if (back) setOpenedId(back);
+                }}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 dictionaries={dictionaries}
                 users={users}
                 me={ping?.me}
-                request={editing}
-                items={editingItems}
-                stepFiles={steps.find((s) => s.no === 1)?.files || []}
-                canAddCounterparty={Boolean(capabilities.can_create)}
-                onSaved={(data) => {
-                    applyChanged(data?.request);
-                    if (data?.request?.id) setOpenedId(data.request.id);
+                meta={meta}
+                settings={settings}
+                staffed={ping?.roles_staffed}
+                data={editing}
+                onSaved={(body) => {
+                    applyChanged(body?.request);
+                    // Новый поставщик мог появиться прямо в заявке — справочник перечитываем.
+                    loadDictionaries();
+                    if (body?.request?.id) setOpenedId(body.request.id);
                 }}
                 showToast={showToast}
             />
 
             <PaymentRequestCard
                 open={Boolean(openedId)}
-                onClose={() => setOpenedId(null)}
+                onClose={closeCard}
                 requestId={openedId}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 dictionaries={dictionaries}
                 users={users}
                 me={ping?.me}
+                meta={meta}
                 onChanged={applyChanged}
-                onEdit={(request, requestItems) => { setOpenedId(null); setEditing(request); setEditingItems(requestItems || []); setFormOpen(true); }}
+                onEdit={(data) => { setOpenedId(null); setEditing(data); setFormOpen(true); }}
                 showToast={showToast}
             />
         </div>

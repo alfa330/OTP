@@ -1,55 +1,23 @@
-"""SQL раздела «Оплата счетов». Только запросы и разбор строк, без Flask.
+"""SQL заявок раздела «Оплата счетов»: заявка, позиции, поставщики, подзадачи,
+история, вложения, реестр, доски. Только запросы и разбор строк, без Flask.
 
-Соглашения:
+Справочники — в directory.py, имущество — в assets.py, уведомления — в
+notices.py; общие мелочи (время, plain, разбор строки) — в sqlutil.py.
 
-* SELECT и разбор строки собираются из ОДНОГО списка полей (`_REQUEST_FIELDS` и
-  т. п.) — позиционная раскладка на сорока колонках ждёт своего часа, это
-  уже стоило 500-х «Посылкам».
-* Время в базе — настенные часы Алматы (`_NOW`), наружу — isoformat без зоны
-  (`plain()`), иначе jsonify припишет «GMT» и браузер уведёт даты на +5 часов.
-* Деньги — Decimal в базе, float наружу: фронту нужны числа, а тенге в float
-  до сотен миллиардов представляются точно с копейками.
-* Маршрут материализован: `create_request` заводит 12 строк шагов сразу,
-  дальше запросы двигают состояние по ним, а не пересчитывают.
+Маршрут материализован: подзадачи заявки лежат строками `payment_subtasks`,
+дальше запросы двигают состояние по ним, а не пересчитывают. Решения «что
+дальше» принимает flow.py по правилам workflow.py; здесь только запись.
+
+Номер карты наружу отсюда не выходит: в полях заявки только последние четыре
+цифры, полный номер читает `card_number()` — её зовёт одна ручка.
 """
-
-import json
-from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 from psycopg2.extras import Json
 
-from . import workflow
+from . import cards, workflow
+from .sqlutil import NOW_SQL as _NOW, columns, like_pattern, now_almaty, plain, row_map as _map, today_almaty
 
-_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
-_ALMATY_OFFSET = timedelta(hours=5)
-
-
-def now_almaty():
-    return datetime.utcnow() + _ALMATY_OFFSET
-
-
-def today_almaty():
-    return now_almaty().date()
-
-
-def plain(value):
-    """Рекурсивно приводит значение к тому, что jsonify отдаст без сюрпризов."""
-    if isinstance(value, dict):
-        return {key: plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [plain(item) for item in value]
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, datetime):
-        return value.replace(microsecond=0).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
-
-
-def _map(fields, row):
-    return dict(zip(fields, row)) if row else None
+__all__ = ['now_almaty', 'today_almaty', 'plain']
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,7 +59,7 @@ def load_access_context(cursor, user_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def list_users(cursor):
-    """Сотрудники для выбора руководителя, участников ролей и делегата по Приказу.
+    """Сотрудники для выбора участников ролей, согласующих и ответственных.
     Уволенных нет: право согласовывать уволенному не выдают."""
     cursor.execute(
         """
@@ -109,7 +77,7 @@ def list_users(cursor):
 
 
 def role_members(cursor):
-    """{'founder': [{user_id, name, has_telegram, department_name}], 'accounting': [...]}"""
+    """{'approver': [{user_id, name, has_telegram, department_name}], 'accounting': [...], …}"""
     cursor.execute(
         """
         SELECT m.role_code, m.user_id, u.name, (u.telegram_id IS NOT NULL), d.name, m.id
@@ -153,12 +121,23 @@ def remove_role_member(cursor, role_code, user_id):
                    (role_code, int(user_id)))
 
 
+def role_backlog(cursor, role_code):
+    """Сколько живых заявок ещё ждут эту роль: её подзадача не выполнена и не назначена лично."""
+    cursor.execute(
+        "SELECT COUNT(DISTINCT s.request_id) FROM payment_subtasks s "
+        "JOIN payment_requests r ON r.id = s.request_id "
+        "WHERE r.status = 'active' AND r.submitted_at IS NOT NULL AND s.role_code = %s "
+        "AND s.assignee_id IS NULL AND s.state IN ('pending', 'open', 'waiting')",
+        (role_code,))
+    return int(cursor.fetchone()[0] or 0)
+
+
 def user_brief(cursor, user_id):
     if not user_id:
         return None
     cursor.execute(
         """
-        SELECT u.id, u.name, u.telegram_id, u.department_id, d.name
+        SELECT u.id, u.name, u.telegram_id, u.department_id, d.name, u.status
           FROM users u LEFT JOIN departments d ON d.id = u.department_id
          WHERE u.id = %s
         """,
@@ -168,15 +147,17 @@ def user_brief(cursor, user_id):
     if not row:
         return None
     return {'id': row[0], 'name': row[1], 'telegram_id': row[2],
-            'department_id': row[3], 'department_name': row[4]}
+            'department_id': row[3], 'department_name': row[4], 'fired': row[5] == 'fired'}
 
 
 def resolve_manager(cursor, user_id):
     """Непосредственный руководитель: users.supervisor_id, иначе глава отдела.
 
-    Глава своего же отдела руководителем себе не считается. Нет ни того, ни
-    другого — None: форма попросит выбрать руководителя руками, а если инициатор
-    его не укажет, шаг 2 будет пропущен с пометкой (см. workflow.build_route).
+    ТЗ, п. 4.1: руководитель «определяется автоматически» — инициатор его не
+    выбирает (п. 6). Сам себе человек не руководитель: ни как глава своего
+    отдела, ни по ошибочной записи, где он указан собственным начальником.
+    Нет ни того, ни другого — None: этап руководителя будет пропущен с пометкой
+    (см. workflow.build_route).
     """
     cursor.execute(
         """
@@ -193,21 +174,27 @@ def resolve_manager(cursor, user_id):
     if not row:
         return None
     supervisor_id, supervisor_name, supervisor_status, head_id, head_name, head_status = row
-    if supervisor_id and supervisor_status != 'fired':
+    if supervisor_id and supervisor_id != int(user_id) and supervisor_status != 'fired':
         return {'id': supervisor_id, 'name': supervisor_name, 'source': 'supervisor'}
     if head_id and head_id != int(user_id) and head_status != 'fired':
         return {'id': head_id, 'name': head_name, 'source': 'department_head'}
     return None
 
 
-def telegram_recipients(cursor, *, user_ids=(), role_code=None, exclude=()):
-    """[{user_id, name, chat_id}] — у кого есть Telegram среди названных людей
-    или участников роли."""
-    ids = {int(x) for x in user_ids if x}
-    if role_code:
-        cursor.execute("SELECT user_id FROM payment_role_members WHERE role_code = %s", (role_code,))
-        ids |= {int(row[0]) for row in cursor.fetchall()}
-    ids -= {int(x) for x in exclude if x}
+def is_manager_somewhere(cursor, user_id):
+    """Есть ли у человека лично назначенные согласования — показывать ли ему доску
+    согласования. Это руководитель инициатора и согласующий, которого назвала
+    матрица (лимит, маршрут, поставщик), даже если роли «Утвердитель» у него нет."""
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM payment_subtasks WHERE kind = ANY(%s) AND assignee_id = %s "
+        "AND state IN ('open', 'waiting', 'done'))",
+        (list(workflow.APPROVAL_KINDS), int(user_id)))
+    return bool(cursor.fetchone()[0])
+
+
+def telegram_recipients(cursor, *, user_ids=(), exclude=()):
+    """[{user_id, name, chat_id}] — у кого из названных людей привязан Telegram."""
+    ids = {int(x) for x in user_ids if x} - {int(x) for x in exclude if x}
     if not ids:
         return []
     cursor.execute(
@@ -219,335 +206,39 @@ def telegram_recipients(cursor, *, user_ids=(), role_code=None, exclude=()):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Справочники
-# ─────────────────────────────────────────────────────────────────────────────
-
-def list_projects(cursor, include_inactive=False):
-    cursor.execute(
-        "SELECT id, name, is_active FROM payment_projects %s ORDER BY name"
-        % ('' if include_inactive else 'WHERE is_active')
-    )
-    return [{'id': r[0], 'name': r[1], 'is_active': r[2]} for r in cursor.fetchall()]
-
-
-def upsert_project(cursor, *, project_id=None, name, is_active=True, actor_id=None):
-    if project_id:
-        cursor.execute("UPDATE payment_projects SET name = %s, is_active = %s WHERE id = %s RETURNING id",
-                       (name, bool(is_active), int(project_id)))
-    else:
-        cursor.execute(
-            "INSERT INTO payment_projects (name, is_active, created_by) VALUES (%s, %s, %s) RETURNING id",
-            (name, bool(is_active), actor_id))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def find_or_create_project(cursor, name, actor_id=None):
-    cursor.execute("SELECT id FROM payment_projects WHERE lower(name) = lower(%s)", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0], False
-    return upsert_project(cursor, name=name, actor_id=actor_id), True
-
-
-def list_categories(cursor, include_inactive=False):
-    cursor.execute(
-        "SELECT id, parent_id, name, position, is_active FROM payment_categories %s "
-        "ORDER BY parent_id NULLS FIRST, position, name"
-        % ('' if include_inactive else 'WHERE is_active')
-    )
-    return [{'id': r[0], 'parent_id': r[1], 'name': r[2], 'position': r[3], 'is_active': r[4]}
-            for r in cursor.fetchall()]
-
-
-def upsert_category(cursor, *, category_id=None, parent_id=None, name, position=0, is_active=True,
-                    actor_id=None):
-    if category_id:
-        cursor.execute(
-            "UPDATE payment_categories SET parent_id = %s, name = %s, position = %s, is_active = %s "
-            "WHERE id = %s RETURNING id",
-            (parent_id, name, int(position or 0), bool(is_active), int(category_id)))
-    else:
-        cursor.execute(
-            "INSERT INTO payment_categories (parent_id, name, position, is_active, created_by) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (parent_id, name, int(position or 0), bool(is_active), actor_id))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def find_or_create_category(cursor, name, parent_id=None, actor_id=None):
-    cursor.execute(
-        "SELECT id FROM payment_categories WHERE lower(name) = lower(%s) AND COALESCE(parent_id, 0) = %s",
-        (name, int(parent_id or 0)))
-    row = cursor.fetchone()
-    if row:
-        return row[0], False
-    return upsert_category(cursor, parent_id=parent_id, name=name, actor_id=actor_id), True
-
-
-_PARTY_FIELDS = ('id', 'name', 'bin', 'kind', 'vat_payer', 'requisites', 'note', 'is_active')
-
-
-def list_legal_entities(cursor, include_inactive=False):
-    cursor.execute(
-        "SELECT %s FROM payment_legal_entities %s ORDER BY name"
-        % (', '.join(_PARTY_FIELDS), '' if include_inactive else 'WHERE is_active'))
-    return [_map(_PARTY_FIELDS, row) for row in cursor.fetchall()]
-
-
-def read_legal_entity(cursor, entity_id):
-    if not entity_id:
-        return None
-    cursor.execute("SELECT %s FROM payment_legal_entities WHERE id = %%s" % ', '.join(_PARTY_FIELDS),
-                   (int(entity_id),))
-    row = cursor.fetchone()
-    return _map(_PARTY_FIELDS, row) if row else None
-
-
-def upsert_legal_entity(cursor, *, entity_id=None, name, bin_code=None, kind=None, vat_payer=False,
-                        requisites=None, note=None, is_active=True, actor_id=None):
-    if entity_id:
-        cursor.execute(
-            "UPDATE payment_legal_entities SET name = %s, bin = %s, kind = %s, vat_payer = %s, "
-            "requisites = %s, note = %s, is_active = %s WHERE id = %s RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), requisites, note, bool(is_active), int(entity_id)))
-    else:
-        cursor.execute(
-            "INSERT INTO payment_legal_entities (name, bin, kind, vat_payer, requisites, note, is_active, "
-            "created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), requisites, note, bool(is_active), actor_id))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-_COUNTERPARTY_FIELDS = ('id', 'name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact', 'note',
-                        'is_active')
-
-
-def list_counterparties(cursor, include_inactive=False, query=None):
-    clauses, params = [], []
-    if not include_inactive:
-        clauses.append('is_active')
-    if query:
-        clauses.append("(name ILIKE %s OR COALESCE(bin, '') ILIKE %s)")
-        like = '%' + query + '%'
-        params += [like, like]
-    where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
-    cursor.execute(
-        "SELECT %s, (SELECT COUNT(*) FROM payment_contracts c WHERE c.counterparty_id = cp.id AND c.status = 'active') "
-        "FROM payment_counterparties cp %s ORDER BY name"
-        % (', '.join('cp.%s' % f for f in _COUNTERPARTY_FIELDS), where), params)
-    result = []
-    for row in cursor.fetchall():
-        item = _map(_COUNTERPARTY_FIELDS, row[:-1])
-        item['active_contracts'] = int(row[-1] or 0)
-        result.append(item)
-    return result
-
-
-def upsert_counterparty(cursor, *, counterparty_id=None, name, bin_code=None, kind=None,
-                        vat_payer=False, requisites=None, contact=None, note=None, is_active=True,
-                        actor_id=None):
-    if counterparty_id:
-        cursor.execute(
-            "UPDATE payment_counterparties SET name = %s, bin = %s, kind = %s, vat_payer = %s, "
-            "requisites = %s, contact = %s, note = %s, is_active = %s WHERE id = %s RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), requisites, contact, note, bool(is_active),
-             int(counterparty_id)))
-    else:
-        cursor.execute(
-            "INSERT INTO payment_counterparties (name, bin, kind, vat_payer, requisites, contact, note, "
-            "is_active, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), requisites, contact, note, bool(is_active), actor_id))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def find_or_create_counterparty(cursor, name, actor_id=None):
-    cursor.execute("SELECT id FROM payment_counterparties WHERE lower(name) = lower(%s)", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0], False
-    return upsert_counterparty(cursor, name=name, actor_id=actor_id), True
-
-
-_CONTRACT_FIELDS = ('id', 'counterparty_id', 'legal_entity_id', 'number', 'signed_on', 'starts_on',
-                    'ends_on', 'status', 'subject', 'note', 'created_at', 'updated_at')
-_CONTRACT_SQL = """
-    SELECT %s, cp.name, le.name
-      FROM payment_contracts c
-      LEFT JOIN payment_counterparties cp ON cp.id = c.counterparty_id
-      LEFT JOIN payment_legal_entities le ON le.id = c.legal_entity_id
-""" % ', '.join('c.%s' % f for f in _CONTRACT_FIELDS)
-
-
-def _contract_row(row):
-    item = _map(_CONTRACT_FIELDS, row[:len(_CONTRACT_FIELDS)])
-    item['counterparty_name'] = row[len(_CONTRACT_FIELDS)]
-    item['legal_entity_name'] = row[len(_CONTRACT_FIELDS) + 1]
-    return item
-
-
-def list_contracts(cursor, counterparty_id=None):
-    where, params = '', []
-    if counterparty_id:
-        where = 'WHERE c.counterparty_id = %s'
-        params.append(int(counterparty_id))
-    cursor.execute(_CONTRACT_SQL + where + " ORDER BY (c.status = 'active') DESC, c.ends_on DESC NULLS FIRST, c.id DESC",
-                   params)
-    return [_contract_row(row) for row in cursor.fetchall()]
-
-
-def read_contract(cursor, contract_id):
-    if not contract_id:
-        return None
-    cursor.execute(_CONTRACT_SQL + ' WHERE c.id = %s', (int(contract_id),))
-    row = cursor.fetchone()
-    return _contract_row(row) if row else None
-
-
-def upsert_contract(cursor, *, contract_id=None, fields, actor_id=None):
-    cols = ('counterparty_id', 'legal_entity_id', 'number', 'signed_on', 'starts_on', 'ends_on',
-            'status', 'subject', 'note')
-    values = [fields.get(col) for col in cols]
-    if contract_id:
-        cursor.execute(
-            "UPDATE payment_contracts SET %s, updated_at = %s WHERE id = %%s RETURNING id"
-            % (', '.join('%s = %%s' % col for col in cols), _NOW),
-            values + [int(contract_id)])
-    else:
-        cursor.execute(
-            "INSERT INTO payment_contracts (%s, created_by) VALUES (%s, %%s) RETURNING id"
-            % (', '.join(cols), ', '.join(['%s'] * len(cols))),
-            values + [actor_id])
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-_ORDER_FIELDS = ('id', 'number', 'issued_on', 'starts_on', 'ends_on', 'status', 'replaces_role',
-                 'delegate_user_id', 'amount_limit', 'all_projects', 'all_counterparties', 'note',
-                 'created_at', 'updated_at')
-_ORDER_SQL = """
-    SELECT %s, u.name,
-           COALESCE((SELECT array_agg(op.project_id ORDER BY op.project_id)
-                       FROM payment_order_projects op WHERE op.order_id = o.id), '{}'),
-           COALESCE((SELECT array_agg(oc.counterparty_id ORDER BY oc.counterparty_id)
-                       FROM payment_order_counterparties oc WHERE oc.order_id = o.id), '{}')
-      FROM payment_approval_orders o
-      LEFT JOIN users u ON u.id = o.delegate_user_id
-""" % ', '.join('o.%s' % f for f in _ORDER_FIELDS)
-
-
-def _order_row(row):
-    item = _map(_ORDER_FIELDS, row[:len(_ORDER_FIELDS)])
-    item['delegate_name'] = row[len(_ORDER_FIELDS)]
-    item['project_ids'] = list(row[len(_ORDER_FIELDS) + 1] or [])
-    item['counterparty_ids'] = list(row[len(_ORDER_FIELDS) + 2] or [])
-    return item
-
-
-def list_orders(cursor, only_active=False):
-    where = " WHERE o.status = 'active'" if only_active else ''
-    cursor.execute(_ORDER_SQL + where + " ORDER BY (o.status = 'active') DESC, o.issued_on DESC, o.id DESC")
-    return [_order_row(row) for row in cursor.fetchall()]
-
-
-def read_order(cursor, order_id):
-    cursor.execute(_ORDER_SQL + ' WHERE o.id = %s', (int(order_id),))
-    row = cursor.fetchone()
-    return _order_row(row) if row else None
-
-
-def upsert_order(cursor, *, order_id=None, fields, project_ids, counterparty_ids, actor_id=None):
-    cols = ('number', 'issued_on', 'starts_on', 'ends_on', 'status', 'replaces_role',
-            'delegate_user_id', 'amount_limit', 'all_projects', 'all_counterparties', 'note')
-    values = [fields.get(col) for col in cols]
-    if order_id:
-        cursor.execute(
-            "UPDATE payment_approval_orders SET %s, updated_at = %s WHERE id = %%s RETURNING id"
-            % (', '.join('%s = %%s' % col for col in cols), _NOW),
-            values + [int(order_id)])
-    else:
-        cursor.execute(
-            "INSERT INTO payment_approval_orders (%s, created_by) VALUES (%s, %%s) RETURNING id"
-            % (', '.join(cols), ', '.join(['%s'] * len(cols))),
-            values + [actor_id])
-    order_id = cursor.fetchone()[0]
-    cursor.execute("DELETE FROM payment_order_projects WHERE order_id = %s", (order_id,))
-    for project_id in sorted({int(x) for x in project_ids or []}):
-        cursor.execute("INSERT INTO payment_order_projects (order_id, project_id) VALUES (%s, %s) "
-                       "ON CONFLICT DO NOTHING", (order_id, project_id))
-    cursor.execute("DELETE FROM payment_order_counterparties WHERE order_id = %s", (order_id,))
-    for cp_id in sorted({int(x) for x in counterparty_ids or []}):
-        cursor.execute("INSERT INTO payment_order_counterparties (order_id, counterparty_id) VALUES (%s, %s) "
-                       "ON CONFLICT DO NOTHING", (order_id, cp_id))
-    return order_id
-
-
-_NAMED_TABLES = {
-    'projects': 'payment_projects', 'legal_entities': 'payment_legal_entities',
-    'counterparties': 'payment_counterparties', 'categories': 'payment_categories',
-}
-
-
-def find_duplicate_name(cursor, name, *, dictionary, row_id=None, parent_id=None):
-    """(id, название) другой записи справочника с тем же названием (без учёта регистра) или None.
-
-    Названия уникальны индексом; проверка ДО записи нужна, чтобы ответить
-    «уже есть» словами, а не упасть на нарушении индекса посреди транзакции.
-    У категорий уникальность — внутри родителя.
-    """
-    table = _NAMED_TABLES.get(dictionary)
-    if not table or not name:
-        return None
-    sql = "SELECT id, name FROM %s WHERE lower(name) = lower(%%s) AND id <> %%s" % table
-    params = [name, int(row_id or 0)]
-    if dictionary == 'categories':
-        sql += " AND COALESCE(parent_id, 0) = %s"
-        params.append(int(parent_id or 0))
-    cursor.execute(sql + " LIMIT 1", params)
-    row = cursor.fetchone()
-    return (row[0], row[1]) if row else None
-
-
-def delete_dictionary_row(cursor, table, row_id):
-    """Удаление строки справочника. Таблица — только из белого списка."""
-    allowed = {
-        'projects': 'payment_projects', 'categories': 'payment_categories',
-        'legal_entities': 'payment_legal_entities', 'counterparties': 'payment_counterparties',
-        'contracts': 'payment_contracts', 'orders': 'payment_approval_orders',
-    }
-    cursor.execute("DELETE FROM %s WHERE id = %%s" % allowed[table], (int(row_id),))
-    return cursor.rowcount
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Заявка
 # ─────────────────────────────────────────────────────────────────────────────
 
 _REQUEST_FIELDS = (
     'id', 'created_at', 'updated_at',
     'initiator_id', 'initiator_name', 'manager_id', 'manager_name', 'department_id', 'department_name',
-    'project_id', 'branch', 'expense_name', 'category_id', 'subcategory_id', 'counterparty_id',
-    'legal_entity_id', 'contract_id',
-    'amount', 'currency', 'payment_period', 'payment_source', 'payment_type', 'card_number', 'notes',
-    'due_on',
-    'invoice_requisites', 'invoice_number', 'invoice_date', 'invoice_description',
-    'needs_power_of_attorney', 'needs_payment_order', 'previous_payment_note',
-    'paid_on', 'paid_amount', 'refund_on', 'refund_amount',
+    'request_kind', 'project_id', 'branch', 'expense_name', 'justification', 'category_id', 'subcategory_id',
+    'counterparty_id', 'counterparty_account_id', 'legal_entity_id', 'contract_id',
+    'amount', 'currency', 'payment_period', 'payment_method', 'payment_purpose',
+    'card_recipient', 'card_holder_name', 'card_holder_user_id', 'card_id', 'card_last4',
+    'object_type', 'accounting_category',
+    'no_alternatives', 'no_alternatives_reason', 'no_alternatives_comment', 'supplier_choice_reason',
+    'notes', 'due_on',
+    'invoice_number', 'invoice_date', 'invoice_description',
+    'paid_on', 'paid_amount', 'paid_comment', 'refund_on', 'refund_amount',
+    'received_on', 'received_quantity', 'closing_docs_status', 'closing_docs_at',
     'supplier_kind', 'supplier_vat',
     'fixed_template_id',
-    'current_step', 'status', 'block_code', 'block_reason', 'current_role_code',
-    'current_assignee_id', 'current_assignee_name', 'approver_user_id', 'approval_order_id',
-    'route_basis', 'step_changed_at', 'closed_at', 'rejected_reason',
+    'stage', 'status', 'current_subtask_id', 'current_role_code', 'current_assignee_id',
+    'current_assignee_name', 'approver_user_id', 'approval_order_id', 'route_basis',
+    'submitted_at', 'submitted_snapshot', 'approved_at', 'approved_by', 'approved_by_name',
+    'amount_approved', 'step_changed_at', 'closed_at', 'rejected_reason', 'legacy_step',
 )
 _REQUEST_EXTRA = ('project_name', 'category_name', 'subcategory_name', 'counterparty_name',
-                  'counterparty_bin', 'legal_entity_name', 'contract_number', 'approval_order_number',
-                  'attachments_count')
+                  'counterparty_bin', 'counterparty_vat', 'legal_entity_name', 'contract_number',
+                  'template_name', 'current_kind', 'current_status', 'current_state',
+                  'clarify_reason', 'clarify_comment', 'clarify_by_name', 'clarify_from',
+                  'has_card', 'attachments_count')
 _REQUEST_SQL = """
     SELECT %s,
-           p.name, c1.name, c2.name, cp.name, cp.bin, le.name, ct.number, ao.number,
+           p.name, c1.name, c2.name, cp.name, cp.bin, cp.vat_payer, le.name, ct.number, ft.name,
+           cs.kind, cs.status, cs.state, cs.clarify_reason, cs.clarify_comment, cs.clarify_by_name, cs.outcome,
+           (r.card_number_enc IS NOT NULL),
            (SELECT COUNT(*) FROM payment_attachments a WHERE a.request_id = r.id)
       FROM payment_requests r
       LEFT JOIN payment_projects p ON p.id = r.project_id
@@ -556,21 +247,27 @@ _REQUEST_SQL = """
       LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
       LEFT JOIN payment_legal_entities le ON le.id = r.legal_entity_id
       LEFT JOIN payment_contracts ct ON ct.id = r.contract_id
-      LEFT JOIN payment_approval_orders ao ON ao.id = r.approval_order_id
-""" % ', '.join('r.%s' % f for f in _REQUEST_FIELDS)
+      LEFT JOIN payment_fixed_templates ft ON ft.id = r.fixed_template_id
+      LEFT JOIN payment_subtasks cs ON cs.id = r.current_subtask_id
+""" % columns('r', _REQUEST_FIELDS)
 
-# Поля заявки, которые заполняет инициатор в форме. Служебные (шаг, статус,
-# ответственный) сюда не входят — их двигает только маршрут.
+# Поля заявки, которые заполняет инициатор в форме. Служебные (этап, статус,
+# исполнитель) сюда не входят — их двигает только маршрут; руководителя система
+# определяет сама (п. 4.1).
 EDITABLE_FIELDS = (
-    'manager_id', 'department_id', 'project_id', 'branch', 'expense_name', 'category_id',
-    'subcategory_id', 'counterparty_id', 'legal_entity_id', 'contract_id', 'payment_period',
-    'payment_source', 'payment_type', 'card_number', 'notes', 'due_on',
-    'invoice_number', 'invoice_date', 'invoice_description', 'needs_power_of_attorney',
-    'needs_payment_order',
+    'request_kind', 'department_id', 'project_id', 'branch', 'expense_name', 'justification',
+    'category_id', 'subcategory_id', 'counterparty_id', 'counterparty_account_id', 'legal_entity_id',
+    'contract_id', 'payment_period', 'payment_method', 'payment_purpose', 'card_recipient',
+    'card_holder_name', 'card_holder_user_id', 'card_id', 'object_type', 'accounting_category',
+    'no_alternatives', 'no_alternatives_reason', 'no_alternatives_comment', 'supplier_choice_reason',
+    'notes', 'due_on', 'invoice_number', 'invoice_date', 'invoice_description', 'fixed_template_id',
 )
-# Поля шагов бухгалтерии и оплаты — их правит ответственный шага.
-STEP_FIELDS = ('invoice_requisites', 'previous_payment_note', 'paid_on', 'paid_amount',
-               'refund_on', 'refund_amount', 'supplier_kind', 'supplier_vat')
+# Поля, которые пишут действия подзадач и сам маршрут.
+PROCESS_FIELDS = (
+    'department_name', 'manager_id', 'manager_name', 'paid_on', 'paid_amount', 'paid_comment',
+    'refund_on', 'refund_amount', 'received_on', 'received_quantity', 'closing_docs_status',
+    'supplier_kind', 'supplier_vat',
+)
 
 
 def _request_row(row):
@@ -578,9 +275,12 @@ def _request_row(row):
     for key, value in zip(_REQUEST_EXTRA, row[len(_REQUEST_FIELDS):]):
         item[key] = value
     item['attachments_count'] = int(item.get('attachments_count') or 0)
+    item['has_card'] = bool(item.get('has_card'))
+    item['card_mask'] = cards.mask(item.get('card_last4'))
     # В SQL колонка current_role_code: CURRENT_ROLE — зарезервированное слово Postgres.
     # Наружу ключ остаётся current_role, как его читают фронт и Telegram.
     item['current_role'] = item.get('current_role_code')
+    item['stage_label'] = workflow.STAGE_LABELS.get(item.get('stage'))
     item['state'] = workflow.request_state(item, today_almaty())
     return item
 
@@ -592,94 +292,169 @@ def read_request(cursor, request_id, *, lock=False):
     return _request_row(row) if row else None
 
 
+def card_number(cursor, request_id):
+    """Полный номер карты заявки цифрами либо None. Зовёт одна ручка — с проверкой прав."""
+    cursor.execute("SELECT card_number_enc FROM payment_requests WHERE id = %s", (int(request_id),))
+    row = cursor.fetchone()
+    return cards.decrypt(row[0]) if row and row[0] else None
+
+
+def set_card_number(cursor, request_id, number):
+    """Записывает номер карты заявки зашифрованным. Возвращает, изменился ли он."""
+    previous = card_number(cursor, request_id)
+    number = cards.digits(number)
+    if (previous or '') == number:
+        return False
+    cursor.execute(
+        "UPDATE payment_requests SET card_number_enc = %s, card_last4 = %s WHERE id = %s",
+        (cards.encrypt(number), cards.last4(number) or None, int(request_id)))
+    return True
+
+
+def copy_card_from_directory(cursor, request_id, card_id):
+    """Номер из справочника карт → в заявку (заявка хранит свою копию: правка
+    справочника не должна менять то, что уже согласовано)."""
+    cursor.execute("SELECT card_number_enc, card_last4 FROM payment_cards WHERE id = %s", (int(card_id),))
+    row = cursor.fetchone()
+    if not row:
+        return False
+    previous = card_number(cursor, request_id)
+    cursor.execute(
+        "UPDATE payment_requests SET card_number_enc = %s, card_last4 = %s WHERE id = %s",
+        (row[0], row[1], int(request_id)))
+    return (previous or '') != (cards.decrypt(row[0]) or '')
+
+
+# ── Реестр и фильтры (п. 19) ─────────────────────────────────────────────────
+
+# Поиск: по номеру заявки, номеру счёта, поставщику и назначению платежа (п. 19);
+# название закупа и инициатор оставлены из первой версии — ими ищут чаще всего.
 _SEARCH_SQL = """
-    (r.expense_name ILIKE %(like)s
-     OR COALESCE(r.notes, '') ILIKE %(like)s
+    (CAST(r.id AS TEXT) = %(q)s
      OR COALESCE(r.invoice_number, '') ILIKE %(like)s
-     OR COALESCE(r.invoice_description, '') ILIKE %(like)s
-     OR COALESCE(r.branch, '') ILIKE %(like)s
      OR COALESCE(cp.name, '') ILIKE %(like)s
      OR COALESCE(cp.bin, '') ILIKE %(like)s
-     OR COALESCE(r.initiator_name, '') ILIKE %(like)s
-     OR COALESCE(r.current_assignee_name, '') ILIKE %(like)s
-     OR CAST(r.id AS TEXT) = %(q)s
-     OR (%(digits)s <> '' AND regexp_replace(COALESCE(r.card_number, ''), '\\D', '', 'g') LIKE %(digits_like)s)
-     OR EXISTS (SELECT 1 FROM payment_request_items i
-                 WHERE i.request_id = r.id AND i.name ILIKE %(like)s))
+     OR COALESCE(r.payment_purpose, '') ILIKE %(like)s
+     OR r.expense_name ILIKE %(like)s
+     OR COALESCE(r.initiator_name, '') ILIKE %(like)s)
 """
 
+# Что видит человек без полного реестра: заявки, где он инициатор, руководитель
+# или исполнитель (лично либо ролью).
+_VISIBLE_SQL = (
+    "(r.initiator_id = %(visible_to)s OR r.manager_id = %(visible_to)s OR EXISTS ("
+    "SELECT 1 FROM payment_subtasks vs WHERE vs.request_id = r.id AND vs.state <> 'pending' "
+    "AND vs.state <> 'skipped' AND (vs.assignee_id = %(visible_to)s OR vs.done_by = %(visible_to)s "
+    "OR (vs.assignee_id IS NULL AND vs.role_code = ANY(%(visible_roles)s)))))")
 
-def _filter_clause(params, *, query=None, state=None, responsible_id=None, responsible_roles=(),
-                   initiator_id=None, counterparty_id=None, project_id=None, payment_source=None,
-                   payment_type=None, fixed_only=False, phase=None, date_from=None, date_to=None,
-                   viewer_id=None, viewer_roles=()):
+_FILTER_KEYS = ('query', 'state', 'legal_entity_id', 'department_id', 'initiator_id', 'assignee_id',
+                'assignee_roles', 'approver_id', 'counterparty_id', 'request_kind', 'payment_method',
+                'amount_from', 'amount_to', 'date_from', 'date_to', 'overdue', 'mine',
+                'viewer_id', 'viewer_roles', 'viewer_approves_own', 'visible_to', 'visible_roles')
+
+# Заявка ждёт смотрящего: она у него лично либо у его роли. Своя заявка на
+# согласовании у роли целиком ждёт не его, а остальных утверждающих
+# (access.approves_own_request) — если только он не администратор раздела.
+_MINE_SQL = (
+    "r.status = 'active' AND (r.current_assignee_id = %(viewer_id)s "
+    "OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(viewer_roles)s) "
+    "AND (%(viewer_approves_own)s OR r.current_role_code <> 'approver' "
+    "OR r.initiator_id IS DISTINCT FROM %(viewer_id)s)))")
+
+
+def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, department_id=None,
+                   initiator_id=None, assignee_id=None, assignee_roles=(), approver_id=None,
+                   counterparty_id=None, request_kind=None, payment_method=None,
+                   amount_from=None, amount_to=None, date_from=None, date_to=None,
+                   overdue=False, mine=False, viewer_id=None, viewer_roles=(), viewer_approves_own=False,
+                   visible_to=None, visible_roles=()):
+    """Условия отбора заявок. Набор фильтров — п. 19 ТЗ: компания, отдел,
+    инициатор, исполнитель, согласующий, поставщик, тип заявки, способ оплаты,
+    статус, сумма, дата, «просрочено», «только мои».
+
+    `visible_to` — ограничение видимости: человек без полного реестра видит
+    заявки, где он инициатор, руководитель или исполнитель (лично либо ролью).
+    """
     clauses = []
-    today = today_almaty()
-    params['today'] = today
+    params['today'] = today_almaty()
+    params['viewer_id'] = int(viewer_id or 0)
+    params['viewer_roles'] = sorted(viewer_roles or [])
+    params['viewer_approves_own'] = bool(viewer_approves_own)
+    mine_sql = _MINE_SQL
+    overdue_sql = ("r.status = 'active' AND r.due_on IS NOT NULL AND r.due_on < %(today)s "
+                   "AND r.paid_on IS NULL")
+    clarify_sql = "r.status = 'active' AND r.stage = 'initiation' AND r.submitted_at IS NOT NULL"
     if query:
-        digits = ''.join(ch for ch in query if ch.isdigit())
-        params.update({'like': '%' + query.strip() + '%', 'q': query.strip(),
-                       'digits': digits, 'digits_like': '%' + digits + '%'})
+        params.update({'like': like_pattern(query.strip()), 'q': query.strip().lstrip('№#')})
         clauses.append(_SEARCH_SQL)
-    if state == 'mine':
-        params['viewer_id'] = int(viewer_id or 0)
-        params['viewer_roles'] = sorted(viewer_roles or [])
-        clauses.append("r.status = 'active' AND (r.current_assignee_id = %(viewer_id)s "
-                       "OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(viewer_roles)s)))")
-    elif state == 'active':
-        clauses.append("r.status = 'active' AND r.block_code IS NULL "
-                       "AND NOT (r.due_on IS NOT NULL AND r.due_on < %(today)s AND r.current_step <= 10)")
-    elif state == 'blocked':
-        clauses.append("r.status = 'active' AND r.block_code IS NOT NULL")
+    if state == 'mine' or mine:
+        clauses.append(mine_sql)
+    if state == 'open':
+        clauses.append("r.status = 'active'")
+    elif state == 'clarification':
+        clauses.append(clarify_sql)
     elif state == 'overdue':
-        clauses.append("r.status = 'active' AND r.block_code IS NULL AND r.due_on IS NOT NULL "
-                       "AND r.due_on < %(today)s AND r.current_step <= 10")
+        clauses.append(overdue_sql + ' AND NOT (%s)' % clarify_sql)
     elif state in ('done', 'rejected', 'cancelled'):
         params['state'] = state
         clauses.append("r.status = %(state)s")
     elif state == 'closed':
         clauses.append("r.status IN ('done', 'rejected', 'cancelled')")
-    elif state == 'open':
-        clauses.append("r.status = 'active'")
-    if responsible_id:
-        params['responsible_id'] = int(responsible_id)
-        params['responsible_roles'] = sorted(responsible_roles or [])
-        clauses.append("(r.current_assignee_id = %(responsible_id)s "
-                       "OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(responsible_roles)s)))")
-    if initiator_id:
-        params['initiator_id'] = int(initiator_id)
-        clauses.append("r.initiator_id = %(initiator_id)s")
-    if counterparty_id:
-        params['counterparty_id'] = int(counterparty_id)
-        clauses.append("r.counterparty_id = %(counterparty_id)s")
-    if project_id:
-        params['project_id'] = int(project_id)
-        clauses.append("r.project_id = %(project_id)s")
-    if payment_source:
-        params['payment_source'] = payment_source
-        clauses.append("r.payment_source = %(payment_source)s")
-    if payment_type:
-        params['payment_type'] = payment_type
-        clauses.append("r.payment_type = %(payment_type)s")
-    if fixed_only:
-        clauses.append("(r.payment_type = 'fixed' OR r.fixed_template_id IS NOT NULL)")
-    if phase:
-        steps = [item['no'] for item in workflow.STEPS if item['phase'] == phase]
-        if steps:
-            params['phase_steps'] = steps
-            clauses.append("r.status = 'active' AND r.current_step = ANY(%(phase_steps)s)")
+    if overdue:
+        clauses.append(overdue_sql)
+    for key, column, value in (
+        ('legal_entity_id', 'r.legal_entity_id', legal_entity_id),
+        ('department_id', 'r.department_id', department_id),
+        ('initiator_id', 'r.initiator_id', initiator_id),
+        ('counterparty_id', 'r.counterparty_id', counterparty_id),
+    ):
+        if value:
+            params[key] = int(value)
+            clauses.append('%s = %%(%s)s' % (column, key))
+    if assignee_id:
+        params['assignee_id'] = int(assignee_id)
+        params['assignee_roles'] = sorted(assignee_roles or [])
+        clauses.append("(r.current_assignee_id = %(assignee_id)s "
+                       "OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(assignee_roles)s)))")
+    if approver_id:
+        # Согласующий — тот, кому заявка ушла на утверждение или кто её утвердил.
+        params['approver_id'] = int(approver_id)
+        clauses.append(
+            "EXISTS (SELECT 1 FROM payment_subtasks fs WHERE fs.request_id = r.id "
+            "AND fs.kind IN ('manager_approval', 'approval') "
+            "AND (fs.assignee_id = %(approver_id)s OR fs.done_by = %(approver_id)s))")
+    if request_kind:
+        params['request_kind'] = request_kind
+        clauses.append("r.request_kind = %(request_kind)s")
+    if payment_method:
+        params['payment_method'] = payment_method
+        clauses.append("r.payment_method = %(payment_method)s")
+    if amount_from not in (None, ''):
+        params['amount_from'] = workflow.to_decimal(amount_from)
+        clauses.append("r.amount >= %(amount_from)s")
+    if amount_to not in (None, ''):
+        params['amount_to'] = workflow.to_decimal(amount_to)
+        clauses.append("r.amount <= %(amount_to)s")
     if date_from:
         params['date_from'] = date_from
         clauses.append("r.created_at >= %(date_from)s")
     if date_to:
         params['date_to'] = date_to
         clauses.append("r.created_at < (%(date_to)s::date + INTERVAL '1 day')")
+    if visible_to:
+        params['visible_to'] = int(visible_to)
+        params['visible_roles'] = sorted(visible_roles or [])
+        clauses.append(_VISIBLE_SQL)
     return (' WHERE ' + ' AND '.join('(%s)' % c for c in clauses)) if clauses else ''
+
+
+def filters_only(filters):
+    return {key: value for key, value in (filters or {}).items() if key in _FILTER_KEYS}
 
 
 def list_requests(cursor, *, limit=50, offset=0, **filters):
     params = {}
-    where = _filter_clause(params, **filters)
+    where = _filter_clause(params, **filters_only(filters))
     sql = _REQUEST_SQL.replace('SELECT ', 'SELECT COUNT(*) OVER () AS total, ', 1) + where
     sql += " ORDER BY (r.status = 'active') DESC, r.id DESC"
     if limit:
@@ -692,33 +467,43 @@ def list_requests(cursor, *, limit=50, offset=0, **filters):
     return total, [_request_row(row[1:]) for row in rows]
 
 
-def state_counters(cursor, *, viewer_id=None, viewer_roles=(), **filters):
+def state_counters(cursor, **filters):
     """Счётчики полосы-легенды по ТЕКУЩИМ фильтрам без учёта состояния."""
     params = {}
+    filters = filters_only(filters)
     filters.pop('state', None)
-    where = _filter_clause(params, viewer_id=viewer_id, viewer_roles=viewer_roles, **filters)
-    params['viewer_id'] = int(viewer_id or 0)
-    params['viewer_roles'] = sorted(viewer_roles or [])
+    filters.pop('mine', None)
+    where = _filter_clause(params, **filters)
     cursor.execute(
         """
         SELECT COUNT(*) AS all_count,
                COUNT(*) FILTER (WHERE r.status = 'active') AS open_count,
-               COUNT(*) FILTER (WHERE r.status = 'active' AND (r.current_assignee_id = %(viewer_id)s
-                        OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(viewer_roles)s)))) AS mine,
-               COUNT(*) FILTER (WHERE r.status = 'active' AND r.block_code IS NOT NULL) AS blocked,
-               COUNT(*) FILTER (WHERE r.status = 'active' AND r.block_code IS NULL AND r.due_on IS NOT NULL
-                        AND r.due_on < %(today)s AND r.current_step <= 10) AS overdue,
+               COUNT(*) FILTER (WHERE """ + _MINE_SQL + """) AS mine,
+               COUNT(*) FILTER (WHERE r.status = 'active' AND r.stage = 'initiation'
+                        AND r.submitted_at IS NOT NULL) AS clarification,
+               COUNT(*) FILTER (WHERE r.status = 'active' AND r.due_on IS NOT NULL AND r.due_on < %(today)s
+                        AND r.paid_on IS NULL
+                        AND NOT (r.stage = 'initiation' AND r.submitted_at IS NOT NULL)) AS overdue,
                COUNT(*) FILTER (WHERE r.status = 'done') AS done,
-               COUNT(*) FILTER (WHERE r.status IN ('rejected', 'cancelled')) AS rejected
+               COUNT(*) FILTER (WHERE r.status = 'rejected') AS rejected,
+               COUNT(*) FILTER (WHERE r.status = 'cancelled') AS cancelled
           FROM payment_requests r
           LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
         """ + where,
         params,
     )
-    row = cursor.fetchone() or (0,) * 7
+    row = cursor.fetchone() or (0,) * 8
     return {'all': int(row[0] or 0), 'open': int(row[1] or 0), 'mine': int(row[2] or 0),
-            'blocked': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
-            'rejected': int(row[6] or 0)}
+            'clarification': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
+            'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0)}
+
+
+def requests_by_ids(cursor, request_ids):
+    ids = sorted({int(x) for x in request_ids if x})
+    if not ids:
+        return []
+    cursor.execute(_REQUEST_SQL + ' WHERE r.id = ANY(%s) ORDER BY r.id DESC', (ids,))
+    return [_request_row(row) for row in cursor.fetchall()]
 
 
 # ── Позиции ──────────────────────────────────────────────────────────────────
@@ -763,65 +548,259 @@ def replace_items(cursor, request_id, items):
     return total
 
 
-# ── Шаги ─────────────────────────────────────────────────────────────────────
+# ── Поставщики заявки (п. 4.2) ───────────────────────────────────────────────
 
-_STEP_FIELDS = ('id', 'request_id', 'step_no', 'role_code', 'assignee_id', 'assignee_name', 'state',
-                'done_at', 'done_by', 'done_by_name', 'comment')
+_OFFER_FIELDS = ('id', 'request_id', 'position', 'counterparty_id', 'supplier_name', 'amount', 'terms',
+                 'link', 'comment', 'is_recommended')
 
 
-def list_steps(cursor, request_id):
+def list_offers(cursor, request_id):
     cursor.execute(
-        "SELECT %s FROM payment_request_steps WHERE request_id = %%s ORDER BY step_no"
-        % ', '.join(_STEP_FIELDS), (int(request_id),))
-    steps = []
+        "SELECT %s FROM payment_request_offers WHERE request_id = %%s ORDER BY position, id"
+        % ', '.join(_OFFER_FIELDS), (int(request_id),))
+    return [_map(_OFFER_FIELDS, row) for row in cursor.fetchall()]
+
+
+def offers_for_requests(cursor, request_ids):
+    ids = sorted({int(x) for x in request_ids if x})
+    if not ids:
+        return {}
+    cursor.execute(
+        "SELECT %s FROM payment_request_offers WHERE request_id = ANY(%%s) ORDER BY request_id, position, id"
+        % ', '.join(_OFFER_FIELDS), (ids,))
+    result = {}
     for row in cursor.fetchall():
-        item = _map(_STEP_FIELDS, row)
-        definition = workflow.step(item['step_no']) or {}
-        item['title'] = definition.get('title')
-        item['brief'] = definition.get('brief')
-        item['phase'] = definition.get('phase')
-        item['action'] = definition.get('action')
-        item['role_label'] = workflow.ROLE_LABELS.get(item['role_code'], item['role_code'])
-        item['files'] = list(definition.get('files') or [])
-        item['files_required'] = bool(definition.get('files_required'))
-        item['fields'] = list(definition.get('fields') or [])
-        item['can_reject'] = bool(definition.get('can_reject'))
-        item['returns_to'] = definition.get('returns_to')
-        steps.append(item)
-    return steps
+        item = _map(_OFFER_FIELDS, row)
+        result.setdefault(item['request_id'], []).append(item)
+    return result
 
 
-def _write_route(cursor, request_id, route):
+def save_offers(cursor, request_id, offers):
+    """Сохраняет варианты поставщиков заявки и возвращает их id по порядку.
+
+    Вариант с `id` правится на месте, без `id` — заводится, исчезнувший из
+    списка — удаляется. На месте, а не «стереть и записать»: к варианту
+    привязаны вложения (КП), и пересоздание оторвало бы их от поставщика.
+    """
+    existing = {item['id'] for item in list_offers(cursor, request_id)}
+    kept, ids = set(), []
+    for position, offer in enumerate(offers or []):
+        values = (position, offer.get('counterparty_id'), offer['supplier_name'], offer.get('amount'),
+                  offer.get('terms'), offer.get('link'), offer.get('comment'), bool(offer.get('is_recommended')))
+        offer_id = offer.get('id')
+        if offer_id and int(offer_id) in existing:
+            cursor.execute(
+                "UPDATE payment_request_offers SET position = %s, counterparty_id = %s, supplier_name = %s, "
+                "amount = %s, terms = %s, link = %s, comment = %s, is_recommended = %s "
+                "WHERE id = %s AND request_id = %s",
+                values + (int(offer_id), int(request_id)))
+            offer_id = int(offer_id)
+        else:
+            cursor.execute(
+                "INSERT INTO payment_request_offers (request_id, position, counterparty_id, supplier_name, "
+                "amount, terms, link, comment, is_recommended) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "RETURNING id",
+                (int(request_id),) + values)
+            offer_id = cursor.fetchone()[0]
+        kept.add(offer_id)
+        ids.append(offer_id)
+    gone = sorted(existing - kept)
+    if gone:
+        cursor.execute("DELETE FROM payment_request_offers WHERE id = ANY(%s)", (gone,))
+    return ids
+
+
+# ── Подзадачи ────────────────────────────────────────────────────────────────
+
+_SUBTASK_FIELDS = ('id', 'request_id', 'kind', 'position', 'stage', 'role_code', 'assignee_id',
+                   'assignee_name', 'state', 'status', 'status_before', 'clarify_reason',
+                   'clarify_comment', 'clarify_by', 'clarify_by_name', 'clarify_at', 'opened_at',
+                   'done_at', 'done_by', 'done_by_name', 'outcome', 'comment')
+
+
+def _subtask_row(row):
+    item = _map(_SUBTASK_FIELDS, row)
+    definition = workflow.subtask(item['kind']) or {}
+    item['title'] = definition.get('title') or item['kind']
+    item['brief'] = definition.get('brief')
+    item['board'] = definition.get('board')
+    item['stage_label'] = workflow.STAGE_LABELS.get(item['stage'])
+    item['role_label'] = workflow.ROLE_LABELS.get(item['role_code'], item['role_code'])
+    item['clarify_label'] = workflow.clarify_label(item['clarify_reason']) if item.get('clarify_reason') else None
+    return item
+
+
+def list_subtasks(cursor, request_id):
+    cursor.execute(
+        "SELECT %s FROM payment_subtasks WHERE request_id = %%s ORDER BY position, id"
+        % ', '.join(_SUBTASK_FIELDS), (int(request_id),))
+    return [_subtask_row(row) for row in cursor.fetchall()]
+
+
+def read_subtask(cursor, request_id, kind):
+    cursor.execute(
+        "SELECT %s FROM payment_subtasks WHERE request_id = %%s AND kind = %%s" % ', '.join(_SUBTASK_FIELDS),
+        (int(request_id), kind))
+    row = cursor.fetchone()
+    return _subtask_row(row) if row else None
+
+
+def subtasks_for_requests(cursor, request_ids):
+    ids = sorted({int(x) for x in request_ids if x})
+    if not ids:
+        return {}
+    cursor.execute(
+        "SELECT %s FROM payment_subtasks WHERE request_id = ANY(%%s) ORDER BY request_id, position, id"
+        % ', '.join(_SUBTASK_FIELDS), (ids,))
+    result = {}
+    for row in cursor.fetchall():
+        item = _subtask_row(row)
+        result.setdefault(item['request_id'], []).append(item)
+    return result
+
+
+def ensure_initiation(cursor, request_id, initiator, *, status='draft'):
+    """Заводит (или открывает заново) подзадачу инициатора и делает её текущей."""
+    definition = workflow.SUBTASK_BY_KIND[workflow.KIND_INITIATION]
+    cursor.execute(
+        """
+        INSERT INTO payment_subtasks (request_id, kind, position, stage, role_code, assignee_id, assignee_name,
+                                      state, status, opened_at)
+        VALUES (%%s, %%s, %%s, %%s, %%s, %%s, %%s, 'open', %%s, %s)
+        ON CONFLICT (request_id, kind) DO UPDATE
+           SET state = 'open', status = EXCLUDED.status, assignee_id = EXCLUDED.assignee_id,
+               assignee_name = EXCLUDED.assignee_name, opened_at = EXCLUDED.opened_at,
+               done_at = NULL, done_by = NULL, done_by_name = NULL
+        RETURNING id
+        """ % _NOW,
+        (int(request_id), workflow.KIND_INITIATION, definition['position'], definition['stage'],
+         definition['role'], (initiator or {}).get('id'), (initiator or {}).get('name'), status))
+    subtask_id = cursor.fetchone()[0]
+    set_current(cursor, request_id, read_subtask(cursor, request_id, workflow.KIND_INITIATION))
+    return subtask_id
+
+
+def write_route(cursor, request_id, route):
+    """Записывает маршрут заявки: подзадачи кроме инициации сбрасываются в
+    начало («не начата» либо «пропущена»). Вид, которого в маршруте нет, а в
+    заявке он остался от прежнего маршрута, помечается пропущенным."""
+    kinds = []
     for entry in route:
+        if entry['kind'] == workflow.KIND_INITIATION:
+            continue
+        kinds.append(entry['kind'])
         cursor.execute(
             """
-            INSERT INTO payment_request_steps (request_id, step_no, role_code, assignee_id, assignee_name,
-                                               state, comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (request_id, step_no) DO UPDATE
-               SET role_code = EXCLUDED.role_code, assignee_id = EXCLUDED.assignee_id,
-                   assignee_name = EXCLUDED.assignee_name, state = EXCLUDED.state,
-                   comment = EXCLUDED.comment
+            INSERT INTO payment_subtasks (request_id, kind, position, stage, role_code, assignee_id,
+                                          assignee_name, state, comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (request_id, kind) DO UPDATE
+               SET position = EXCLUDED.position, stage = EXCLUDED.stage, role_code = EXCLUDED.role_code,
+                   assignee_id = EXCLUDED.assignee_id, assignee_name = EXCLUDED.assignee_name,
+                   state = EXCLUDED.state, comment = EXCLUDED.comment, status = NULL, status_before = NULL,
+                   clarify_reason = NULL, clarify_comment = NULL, clarify_by = NULL, clarify_by_name = NULL,
+                   clarify_at = NULL, opened_at = NULL, done_at = NULL, done_by = NULL, done_by_name = NULL,
+                   outcome = NULL
             """,
-            (int(request_id), entry['step_no'], entry['role_code'], entry.get('assignee_id'),
-             entry.get('assignee_name'), entry.get('state', 'pending'), entry.get('comment')))
+            (int(request_id), entry['kind'], entry['position'], entry['stage'], entry['role_code'],
+             entry.get('assignee_id'), entry.get('assignee_name'), entry.get('state', 'pending'),
+             entry.get('comment')))
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'skipped', status = NULL, comment = %s "
+        "WHERE request_id = %s AND kind <> %s AND NOT (kind = ANY(%s))",
+        ('Этап не требуется по условиям заявки', int(request_id), workflow.KIND_INITIATION, kinds))
 
 
-def _set_current(cursor, request_id, step_no):
-    """Делает шаг текущим и переписывает денормализованного ответственного заявки."""
+def set_current(cursor, request_id, subtask):
+    """Переписывает денормализованное «где заявка сейчас»: подзадача, этап, исполнитель."""
+    subtask = subtask or {}
     cursor.execute(
-        "UPDATE payment_request_steps SET state = 'current' WHERE request_id = %s AND step_no = %s "
-        "RETURNING role_code, assignee_id, assignee_name",
-        (int(request_id), int(step_no)))
-    row = cursor.fetchone()
-    role_code, assignee_id, assignee_name = row if row else (None, None, None)
+        "UPDATE payment_requests SET current_subtask_id = %%s, current_role_code = %%s, "
+        "current_assignee_id = %%s, current_assignee_name = %%s, stage = %%s, "
+        "step_changed_at = %s, updated_at = %s WHERE id = %%s" % (_NOW, _NOW),
+        (subtask.get('id'), subtask.get('role_code'), subtask.get('assignee_id'),
+         subtask.get('assignee_name') or workflow.ROLE_LABELS.get(subtask.get('role_code')),
+         subtask.get('stage'), int(request_id)))
+
+
+def open_subtask(cursor, request_id, kind, *, status=None):
     cursor.execute(
-        "UPDATE payment_requests SET current_step = %%s, current_role_code = %%s, current_assignee_id = %%s, "
-        "current_assignee_name = %%s, step_changed_at = %s, updated_at = %s WHERE id = %%s"
+        "UPDATE payment_subtasks SET state = 'open', status = %%s, status_before = NULL, opened_at = %s "
+        "WHERE request_id = %%s AND kind = %%s RETURNING id" % _NOW,
+        (status or workflow.initial_status(kind), int(request_id), kind))
+    item = read_subtask(cursor, request_id, kind)
+    set_current(cursor, request_id, item)
+    return item
+
+
+def set_subtask_status(cursor, subtask_id, status):
+    cursor.execute("UPDATE payment_subtasks SET status = %s WHERE id = %s", (status, int(subtask_id)))
+
+
+def wait_subtask(cursor, subtask_id, *, reason, comment=None, actor=None, status_before=None):
+    """Подзадача ждёт инициатора: исполнитель запросил уточнение или вернул на доработку."""
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'waiting', status_before = COALESCE(%%s, status), "
+        "status = 'clarification', clarify_reason = %%s, clarify_comment = %%s, clarify_by = %%s, "
+        "clarify_by_name = %%s, clarify_at = %s, opened_at = COALESCE(opened_at, %s) WHERE id = %%s"
         % (_NOW, _NOW),
-        (int(step_no), role_code, assignee_id,
-         assignee_name or workflow.ROLE_LABELS.get(role_code), int(request_id)))
+        (status_before, reason, comment, (actor or {}).get('id'), (actor or {}).get('name'), int(subtask_id)))
 
+
+def resume_subtask(cursor, request_id, kind):
+    """Ответ инициатора получен: подзадача снова у исполнителя, в прежнем статусе."""
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'open', status = COALESCE(status_before, %s), "
+        "status_before = NULL, clarify_reason = NULL, clarify_comment = NULL, clarify_by = NULL, "
+        "clarify_by_name = NULL, clarify_at = NULL WHERE request_id = %s AND kind = %s",
+        (workflow.initial_status(kind), int(request_id), kind))
+    item = read_subtask(cursor, request_id, kind)
+    set_current(cursor, request_id, item)
+    return item
+
+
+def reopen_initiation(cursor, request_id, *, status, reason, comment, actor, asked_by):
+    """Заявка возвращается инициатору. `asked_by` — вид подзадачи, которая спросила:
+    к ней заявка вернётся после ответа (хранится в `outcome` подзадачи инициатора)."""
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'open', status = %%s, clarify_reason = %%s, clarify_comment = %%s, "
+        "clarify_by = %%s, clarify_by_name = %%s, clarify_at = %s, outcome = %%s, opened_at = %s, "
+        "done_at = NULL, done_by = NULL, done_by_name = NULL WHERE request_id = %%s AND kind = %%s"
+        % (_NOW, _NOW),
+        (status, reason, comment, (actor or {}).get('id'), (actor or {}).get('name'), asked_by,
+         int(request_id), workflow.KIND_INITIATION))
+    item = read_subtask(cursor, request_id, workflow.KIND_INITIATION)
+    set_current(cursor, request_id, item)
+    return item
+
+
+def complete_subtask(cursor, subtask_id, actor, *, outcome=None, comment=None):
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'done', done_at = %s, done_by = %%s, done_by_name = %%s, "
+        "outcome = %%s, comment = %%s WHERE id = %%s" % _NOW,
+        ((actor or {}).get('id'), (actor or {}).get('name'), outcome, comment, int(subtask_id)))
+
+
+def set_subtask_assignee(cursor, request_id, kind, user, actor, *, reason=None):
+    """Переназначить исполнителя подзадачи (None — вернуть её роли)."""
+    cursor.execute(
+        "UPDATE payment_subtasks SET assignee_id = %s, assignee_name = %s WHERE request_id = %s AND kind = %s "
+        "RETURNING id, state, role_code",
+        ((user or {}).get('id'), (user or {}).get('name'), int(request_id), kind))
+    row = cursor.fetchone()
+    if row and row[1] == 'open':
+        cursor.execute(
+            "UPDATE payment_requests SET current_assignee_id = %s, current_assignee_name = %s "
+            "WHERE id = %s AND current_subtask_id = %s",
+            ((user or {}).get('id'), (user or {}).get('name') or workflow.ROLE_LABELS.get(row[2]),
+             int(request_id), row[0]))
+    log_event(cursor, request_id, 'reassigned', actor, comment=reason,
+              payload={'kind': kind, 'assignee_id': (user or {}).get('id'),
+                       'assignee_name': (user or {}).get('name')})
+    return row[0] if row else None
+
+
+# ── История (п. 18) ──────────────────────────────────────────────────────────
 
 def log_event(cursor, request_id, kind, actor, *, step_no=None, comment=None, payload=None):
     cursor.execute(
@@ -832,58 +811,48 @@ def log_event(cursor, request_id, kind, actor, *, step_no=None, comment=None, pa
 
 
 _EVENT_FIELDS = ('id', 'kind', 'step_no', 'actor_id', 'actor_name', 'created_at', 'comment', 'payload')
+# В общей ленте карточки этих событий нет: это журнал доступа к номеру карты, а не
+# действие над заявкой. Показывается он администратору раздела.
+HIDDEN_EVENT_KINDS = ('card_revealed',)
 
 
-def list_events(cursor, request_id):
+def list_events(cursor, request_id, *, with_hidden=False):
+    """Лента заявки. `with_hidden` — вместе с обращениями к номеру карты: их
+    видит администратор раздела (кто и когда смотрел номер)."""
     cursor.execute(
-        "SELECT %s FROM payment_events WHERE request_id = %%s ORDER BY id" % ', '.join(_EVENT_FIELDS),
-        (int(request_id),))
+        "SELECT %s FROM payment_events WHERE request_id = %%s AND NOT (kind = ANY(%%s)) ORDER BY id"
+        % ', '.join(_EVENT_FIELDS),
+        (int(request_id), [] if with_hidden else list(HIDDEN_EVENT_KINDS)))
     return [_map(_EVENT_FIELDS, row) for row in cursor.fetchall()]
 
 
-def create_request(cursor, *, fields, items, actor, initiator, manager, route, first_step_done=False,
-                   system_comment=None):
-    """Заводит заявку, позиции и маршрут. Возвращает id.
+# ── Создание и правка ────────────────────────────────────────────────────────
 
-    first_step_done — заявка создана календарём фиксированных платежей: шаг 1
-    (документы к закупу) ей не нужен — это уже согласованный ранее регулярный
-    платёж, — поэтому она сразу ждёт руководителя или Учредителя.
+def create_request(cursor, *, fields, items, actor, initiator, system_comment=None):
+    """Заводит заявку с позициями и подзадачей инициатора. Возвращает id.
+
+    Заявка рождается у инициатора (этап «Инициация»); на согласование её
+    отправляет flow.submit — он же строит маршрут.
     """
-    cols = ['initiator_id', 'initiator_name', 'manager_id', 'manager_name'] + [
-        col for col in EDITABLE_FIELDS if col not in ('manager_id',)]
-    values = {
-        'initiator_id': initiator.get('id'), 'initiator_name': initiator.get('name'),
-        'manager_id': (manager or {}).get('id'), 'manager_name': (manager or {}).get('name'),
-    }
+    cols = ['initiator_id', 'initiator_name'] + list(EDITABLE_FIELDS)
+    values = {'initiator_id': initiator.get('id'), 'initiator_name': initiator.get('name')}
     for col in EDITABLE_FIELDS:
-        if col == 'manager_id':
-            continue
         values[col] = fields.get(col)
-    if fields.get('department_name'):
-        cols.append('department_name')
-        values['department_name'] = fields['department_name']
-    if fields.get('fixed_template_id'):
-        cols.append('fixed_template_id')
-        values['fixed_template_id'] = fields['fixed_template_id']
-    for flag in ('needs_power_of_attorney', 'needs_payment_order'):
-        values[flag] = bool(values.get(flag))
+    values['no_alternatives'] = bool(values.get('no_alternatives'))
+    for extra in ('department_name', 'supplier_kind', 'supplier_vat'):
+        if fields.get(extra) is not None:
+            cols.append(extra)
+            values[extra] = fields[extra]
+    cols.append('stage')
+    values['stage'] = workflow.STAGE_INITIATION
     cursor.execute(
         "INSERT INTO payment_requests (%s) VALUES (%s) RETURNING id"
         % (', '.join(cols), ', '.join(['%%(%s)s' % col for col in cols])),
         values)
     request_id = cursor.fetchone()[0]
     replace_items(cursor, request_id, items)
-    _write_route(cursor, request_id, route)
-    log_event(cursor, request_id, 'created', actor, step_no=1, comment=system_comment)
-    if first_step_done:
-        cursor.execute(
-            "UPDATE payment_request_steps SET state = 'done', done_at = %s, done_by = %%s, done_by_name = %%s, "
-            "comment = %%s WHERE request_id = %%s AND step_no = 1" % _NOW,
-            (actor.get('id'), actor.get('name'), system_comment, request_id))
-        next_no = workflow.next_open_step(route, 1)
-        _set_current(cursor, request_id, next_no or 1)
-    else:
-        _set_current(cursor, request_id, workflow.FIRST_STEP)
+    ensure_initiation(cursor, request_id, initiator)
+    log_event(cursor, request_id, 'created', actor, comment=system_comment)
     return request_id
 
 
@@ -891,7 +860,7 @@ def update_request_fields(cursor, request_id, fields):
     """Правит перечисленные поля заявки. Возвращает {поле: (было, стало)}."""
     if not fields:
         return {}
-    cols = [col for col in fields if col in EDITABLE_FIELDS + STEP_FIELDS + ('department_name',)]
+    cols = [col for col in fields if col in EDITABLE_FIELDS + PROCESS_FIELDS]
     if not cols:
         return {}
     cursor.execute("SELECT %s FROM payment_requests WHERE id = %%s" % ', '.join(cols), (int(request_id),))
@@ -908,85 +877,59 @@ def update_request_fields(cursor, request_id, fields):
     return changes
 
 
-def complete_step(cursor, request_id, step_no, actor, comment=None):
-    """Отписка на шаге: шаг закрыт, следующий незапропущенный открыт.
-    Возвращает номер следующего шага или None, если маршрут пройден."""
-    cursor.execute(
-        "UPDATE payment_request_steps SET state = 'done', done_at = %s, done_by = %%s, done_by_name = %%s, "
-        "comment = %%s WHERE request_id = %%s AND step_no = %%s" % _NOW,
-        (actor.get('id'), actor.get('name'), comment, int(request_id), int(step_no)))
-    cursor.execute(
-        "SELECT step_no, state FROM payment_request_steps WHERE request_id = %s ORDER BY step_no",
-        (int(request_id),))
-    route = [{'step_no': row[0], 'state': row[1]} for row in cursor.fetchall()]
-    next_no = workflow.next_open_step(route, int(step_no))
-    log_event(cursor, request_id, 'step_done', actor, step_no=int(step_no), comment=comment)
-    if next_no is None:
-        cursor.execute(
-            "UPDATE payment_requests SET status = 'done', closed_at = %s, updated_at = %s, current_role_code = NULL, "
-            "current_assignee_id = NULL, current_assignee_name = NULL, current_step = %%s WHERE id = %%s"
-            % (_NOW, _NOW),
-            (int(step_no), int(request_id)))
-        return None
-    _set_current(cursor, request_id, next_no)
-    return next_no
+def mark_submitted(cursor, request_id, *, snapshot, basis=None, manager=None, set_manager=False,
+                   reset_approval=False):
+    """Заявка ушла от инициатора: снимок условий; при новом маршруте — ещё и
+    руководитель с основанием согласования."""
+    sets = ["submitted_at = %s" % _NOW, "submitted_snapshot = %s", "updated_at = %s" % _NOW]
+    params = [Json(plain(snapshot))]
+    if set_manager:
+        sets += ["manager_id = %s", "manager_name = %s"]
+        params += [(manager or {}).get('id'), (manager or {}).get('name')]
+    if basis is not None:
+        sets += ["route_basis = %s", "approver_user_id = %s", "approval_order_id = %s"]
+        params += [Json(plain(basis)), basis.get('approver_user_id'), basis.get('limit_id')]
+    if reset_approval:
+        sets += ["approved_at = NULL", "approved_by = NULL", "approved_by_name = NULL", "amount_approved = NULL"]
+    cursor.execute("UPDATE payment_requests SET %s WHERE id = %%s" % ', '.join(sets), params + [int(request_id)])
 
 
-def return_to_step(cursor, request_id, to_step, actor, comment):
-    """Возврат на доработку: шаги от целевого до текущего снова ждут, целевой — текущий."""
-    cursor.execute(
-        "UPDATE payment_request_steps SET state = 'pending', done_at = NULL, done_by = NULL, done_by_name = NULL "
-        "WHERE request_id = %s AND step_no >= %s AND state IN ('done', 'current')",
-        (int(request_id), int(to_step)))
-    _set_current(cursor, request_id, to_step)
-    log_event(cursor, request_id, 'returned', actor, step_no=int(to_step), comment=comment)
+def touch_snapshot(cursor, request_id, snapshot):
+    cursor.execute("UPDATE payment_requests SET submitted_snapshot = %s WHERE id = %s",
+                   (Json(plain(snapshot)), int(request_id)))
 
 
-def close_request(cursor, request_id, status, actor, comment):
+def mark_snapshot_stale(cursor, request_id):
+    """Номер карты сменили — снимок условий устарел: заявка согласуется заново."""
     cursor.execute(
-        "UPDATE payment_requests SET status = %%s, rejected_reason = %%s, closed_at = %s, updated_at = %s "
+        "UPDATE payment_requests SET submitted_snapshot = submitted_snapshot || '{\"stale\": true}'::jsonb "
+        "WHERE id = %s AND submitted_snapshot IS NOT NULL", (int(request_id),))
+
+
+def mark_approved(cursor, request_id, actor, amount):
+    cursor.execute(
+        "UPDATE payment_requests SET approved_at = %s, approved_by = %%s, approved_by_name = %%s, "
+        "amount_approved = %%s, updated_at = %s WHERE id = %%s" % (_NOW, _NOW),
+        ((actor or {}).get('id'), (actor or {}).get('name'), amount, int(request_id)))
+
+
+def set_closing_docs(cursor, request_id, status):
+    cursor.execute(
+        "UPDATE payment_requests SET closing_docs_status = %%s, closing_docs_at = %s, updated_at = %s "
         "WHERE id = %%s" % (_NOW, _NOW),
-        (status, comment, int(request_id)))
-    log_event(cursor, request_id, status, actor, comment=comment)
+        (status, int(request_id)))
 
 
-def set_block(cursor, request_id, code, reason, actor):
+def close_request(cursor, request_id, status, actor, comment=None):
+    """Закрывает заявку: done — пройдена, rejected — отклонена, cancelled — отменена."""
     cursor.execute(
-        "UPDATE payment_requests SET block_code = %%s, block_reason = %%s, updated_at = %s WHERE id = %%s" % _NOW,
-        (code, reason, int(request_id)))
-    log_event(cursor, request_id, 'blocked', actor, comment=reason, payload={'code': code})
-
-
-def clear_block(cursor, request_id, actor):
-    cursor.execute(
-        "UPDATE payment_requests SET block_code = NULL, block_reason = NULL, updated_at = %s "
-        "WHERE id = %%s AND block_code IS NOT NULL" % _NOW,
-        (int(request_id),))
-    if cursor.rowcount:
-        log_event(cursor, request_id, 'unblocked', actor)
-
-
-def set_step_assignee(cursor, request_id, step_no, user, actor, *, reason=None, kind='reassigned'):
-    """Переназначить ответственного шага (None — вернуть шаг роли)."""
-    cursor.execute(
-        "UPDATE payment_request_steps SET assignee_id = %s, assignee_name = %s WHERE request_id = %s AND step_no = %s "
-        "RETURNING state, role_code",
-        ((user or {}).get('id'), (user or {}).get('name'), int(request_id), int(step_no)))
-    row = cursor.fetchone()
-    if row and row[0] == 'current':
-        cursor.execute(
-            "UPDATE payment_requests SET current_assignee_id = %s, current_assignee_name = %s WHERE id = %s",
-            ((user or {}).get('id'), (user or {}).get('name') or workflow.ROLE_LABELS.get(row[1]),
-             int(request_id)))
-    log_event(cursor, request_id, kind, actor, step_no=int(step_no), comment=reason,
-              payload={'assignee_id': (user or {}).get('id'), 'assignee_name': (user or {}).get('name')})
-
-
-def set_route_basis(cursor, request_id, basis):
-    cursor.execute(
-        "UPDATE payment_requests SET route_basis = %s, approver_user_id = %s, approval_order_id = %s WHERE id = %s",
-        (Json(plain(basis)) if basis is not None else None, (basis or {}).get('approver_user_id'),
-         (basis or {}).get('order_id'), int(request_id)))
+        "UPDATE payment_requests SET status = %%s, rejected_reason = %%s, closed_at = %s, updated_at = %s, "
+        "stage = CASE WHEN %%s = 'done' THEN 'closed' ELSE stage END, "
+        "current_subtask_id = CASE WHEN %%s = 'done' THEN NULL ELSE current_subtask_id END, "
+        "current_role_code = NULL, current_assignee_id = NULL, current_assignee_name = NULL "
+        "WHERE id = %%s" % (_NOW, _NOW),
+        (status, comment if status != 'done' else None, status, status, int(request_id)))
+    log_event(cursor, request_id, 'closed' if status == 'done' else status, actor, comment=comment)
 
 
 def delete_request(cursor, request_id):
@@ -998,20 +941,23 @@ def delete_request(cursor, request_id):
 
 # ── Вложения ─────────────────────────────────────────────────────────────────
 
-_ATTACHMENT_FIELDS = ('id', 'request_id', 'step_no', 'kind', 'file_name', 'content_type', 'file_size',
-                      'bucket', 'blob_path', 'uploaded_by', 'uploaded_by_name', 'uploaded_at')
+_ATTACHMENT_FIELDS = ('id', 'request_id', 'step_no', 'subtask_kind', 'offer_id', 'kind', 'file_name',
+                      'content_type', 'file_size', 'bucket', 'blob_path', 'uploaded_by',
+                      'uploaded_by_name', 'uploaded_at')
+
+
+def _attachment_row(row):
+    item = _map(_ATTACHMENT_FIELDS, row)
+    item['kind_label'] = workflow.ATTACHMENT_LABELS.get(item['kind'], item['kind'])
+    item['stage_label'] = workflow.subtask_title(item['subtask_kind']) if item.get('subtask_kind') else None
+    return item
 
 
 def list_attachments(cursor, request_id):
     cursor.execute(
-        "SELECT %s FROM payment_attachments WHERE request_id = %%s ORDER BY step_no NULLS LAST, id"
+        "SELECT %s FROM payment_attachments WHERE request_id = %%s ORDER BY id"
         % ', '.join(_ATTACHMENT_FIELDS), (int(request_id),))
-    items = []
-    for row in cursor.fetchall():
-        item = _map(_ATTACHMENT_FIELDS, row)
-        item['kind_label'] = workflow.ATTACHMENT_LABELS.get(item['kind'], item['kind'])
-        items.append(item)
-    return items
+    return [_attachment_row(row) for row in cursor.fetchall()]
 
 
 def public_attachment(item):
@@ -1019,19 +965,20 @@ def public_attachment(item):
     return {key: value for key, value in item.items() if key not in ('bucket', 'blob_path')}
 
 
-def add_attachment(cursor, request_id, *, step_no, kind, file_name, content_type, file_size, bucket,
-                   blob_path, actor):
+def add_attachment(cursor, request_id, *, kind, file_name, content_type, file_size, bucket, blob_path,
+                   actor, subtask_kind=None, offer_id=None):
     cursor.execute(
         """
-        INSERT INTO payment_attachments (request_id, step_no, kind, file_name, content_type, file_size,
-                                         bucket, blob_path, uploaded_by, uploaded_by_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        INSERT INTO payment_attachments (request_id, subtask_kind, offer_id, kind, file_name, content_type,
+                                         file_size, bucket, blob_path, uploaded_by, uploaded_by_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
         """,
-        (int(request_id), step_no, kind, file_name, content_type, int(file_size or 0), bucket, blob_path,
-         actor.get('id'), actor.get('name')))
+        (int(request_id), subtask_kind, offer_id, kind, file_name, content_type, int(file_size or 0),
+         bucket, blob_path, (actor or {}).get('id'), (actor or {}).get('name')))
     attachment_id = cursor.fetchone()[0]
-    log_event(cursor, request_id, 'attachment_added', actor, step_no=step_no,
-              payload={'file_name': file_name, 'kind': kind, 'attachment_id': attachment_id})
+    log_event(cursor, request_id, 'attachment_added', actor,
+              payload={'file_name': file_name, 'kind': kind, 'attachment_id': attachment_id,
+                       'subtask_kind': subtask_kind})
     return attachment_id
 
 
@@ -1040,7 +987,7 @@ def read_attachment(cursor, attachment_id):
         "SELECT %s FROM payment_attachments WHERE id = %%s" % ', '.join(_ATTACHMENT_FIELDS),
         (int(attachment_id),))
     row = cursor.fetchone()
-    return _map(_ATTACHMENT_FIELDS, row) if row else None
+    return _attachment_row(row) if row else None
 
 
 def remove_attachment(cursor, attachment_id, actor):
@@ -1048,9 +995,224 @@ def remove_attachment(cursor, attachment_id, actor):
     if not item:
         return None
     cursor.execute("DELETE FROM payment_attachments WHERE id = %s", (int(attachment_id),))
-    log_event(cursor, item['request_id'], 'attachment_removed', actor, step_no=item['step_no'],
+    log_event(cursor, item['request_id'], 'attachment_removed', actor,
               payload={'file_name': item['file_name'], 'kind': item['kind']})
     return item
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Дубль счёта (п. 8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_duplicates(cursor, request, *, visible_to=None, visible_roles=()):
+    """Другие заявки с тем же поставщиком, номером счёта, суммой и датой счёта.
+
+    ТЗ, п. 8: «система должна предупреждать о возможном дубле при совпадении
+    поставщика, номера счёта, суммы и даты счёта» — совпасть должны все четыре.
+    Отменённые и отклонённые заявки не считаются: по ним не платили.
+
+    `visible_to` — граница видимости того, кому реестр целиком не положен: ему
+    предупреждение называет только его же заявки, чужие он не видит и здесь.
+    """
+    number = str((request or {}).get('invoice_number') or '').strip()
+    if not (request and request.get('counterparty_id') and number and request.get('invoice_date')):
+        return []
+    params = {'id': int(request['id']), 'cp': int(request['counterparty_id']), 'number': number,
+              'date': request['invoice_date'], 'amount': workflow.to_decimal(request.get('amount'))}
+    scope = ''
+    if visible_to:
+        params.update({'visible_to': int(visible_to), 'visible_roles': sorted(visible_roles or [])})
+        scope = ' AND ' + _VISIBLE_SQL
+    cursor.execute(
+        """
+        SELECT r.id, r.expense_name, r.status, r.stage, r.paid_on, r.paid_amount, r.amount, r.initiator_name,
+               r.created_at
+          FROM payment_requests r
+         WHERE r.id <> %(id)s AND r.counterparty_id = %(cp)s AND lower(btrim(r.invoice_number)) = lower(%(number)s)
+           AND r.invoice_date = %(date)s AND r.amount = %(amount)s AND r.status IN ('active', 'done')
+        """ + scope + " ORDER BY r.id DESC LIMIT 10",
+        params)
+    return [{'id': row[0], 'expense_name': row[1], 'status': row[2], 'stage': row[3],
+             'stage_label': workflow.STAGE_LABELS.get(row[3]), 'paid_on': row[4], 'paid_amount': row[5],
+             'amount': row[6], 'initiator_name': row[7], 'created_at': row[8]} for row in cursor.fetchall()]
+
+
+def duplicate_request_ids(cursor, request_ids):
+    """Какие из заявок имеют возможный дубль — для отметки на доске бухгалтерии."""
+    ids = sorted({int(x) for x in request_ids if x})
+    if not ids:
+        return set()
+    cursor.execute(
+        """
+        SELECT DISTINCT a.id
+          FROM payment_requests a
+          JOIN payment_requests b
+            ON b.id <> a.id AND b.counterparty_id = a.counterparty_id
+           AND lower(btrim(b.invoice_number)) = lower(btrim(a.invoice_number))
+           AND b.invoice_date = a.invoice_date AND b.amount = a.amount
+           AND b.status IN ('active', 'done')
+         WHERE a.id = ANY(%s) AND a.invoice_number IS NOT NULL AND btrim(a.invoice_number) <> ''
+           AND a.invoice_date IS NOT NULL AND a.counterparty_id IS NOT NULL
+        """,
+        (ids,))
+    return {row[0] for row in cursor.fetchall()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Доски и рабочий стол (пп. 7–9, п. 16)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Сколько дней закрытая заявка остаётся в итоговых колонках доски. Доска — про
+# текущую работу; историю смотрят в реестре.
+BOARD_CLOSED_DAYS = 30
+BOARD_MAX_REQUESTS = 600
+
+
+def board_requests(cursor, board_code, *, own_user_id=None, own_roles=(), **filters):
+    """Заявки доски вместе с их подзадачами: [(заявка, [подзадачи])].
+
+    `own_user_id` — показывать только заявки, где у человека своя подзадача этой
+    доски (доска согласования, п. 16). Без него — все заявки доски: задача
+    подразделения видна каждому его участнику (п. 9).
+    """
+    board = workflow.board(board_code)
+    params = {'kinds': list(board['kinds']), 'closed_days': BOARD_CLOSED_DAYS}
+    where = _filter_clause(params, **filters_only(filters))
+    scope = ''
+    if own_user_id:
+        params['own_user_id'] = int(own_user_id)
+        params['own_roles'] = sorted(own_roles or [])
+        # Своя заявка у роли целиком — не «моё согласование»: её утверждают другие.
+        scope = (" AND (bs.assignee_id = %(own_user_id)s OR bs.done_by = %(own_user_id)s "
+                 "OR (bs.assignee_id IS NULL AND bs.role_code = ANY(%(own_roles)s) "
+                 "AND r.initiator_id IS DISTINCT FROM %(own_user_id)s))")
+    exists = ("EXISTS (SELECT 1 FROM payment_subtasks bs WHERE bs.request_id = r.id "
+              "AND bs.kind = ANY(%(kinds)s) AND bs.state IN ('open', 'waiting', 'done')" + scope + ")")
+    recent = ("(r.status = 'active' OR r.closed_at IS NULL "
+              "OR r.closed_at >= %s - make_interval(days => %%(closed_days)s))" % _NOW)
+    where = (where + ' AND ' if where else ' WHERE ') + exists + ' AND ' + recent
+    params['board_limit'] = BOARD_MAX_REQUESTS
+    # Живые заявки — первыми: предел выборки не должен вытеснить с доски старую незакрытую.
+    cursor.execute(_REQUEST_SQL + where + " ORDER BY (r.status = 'active') DESC, r.id DESC "
+                   'LIMIT %(board_limit)s', params)
+    requests = [_request_row(row) for row in cursor.fetchall()]
+    by_request = subtasks_for_requests(cursor, [item['id'] for item in requests])
+    return [(item, by_request.get(item['id'], [])) for item in requests]
+
+
+# Открытая подзадача ждёт человека: назначена ему либо его роли. Согласование
+# СВОЕЙ заявки у роли целиком его не ждёт — её утверждают другие (п. 16: «только
+# те задачи, по которым от него требуется действие»); `approves_own` — исключение
+# для администратора раздела, который на пилоте проходит маршрут за все роли.
+_WAITS_FOR_ME_SQL = (
+    "r.status = 'active' AND s.state = 'open' AND (s.assignee_id = %(user_id)s "
+    "OR (s.assignee_id IS NULL AND s.role_code = ANY(%(roles)s) "
+    "AND (%(approves_own)s OR s.kind <> ALL(%(approval_kinds)s) "
+    "OR r.initiator_id IS DISTINCT FROM %(user_id)s)))")
+
+
+def _desk_params(user_id, roles, approves_own):
+    return {'user_id': int(user_id), 'roles': sorted(roles or []), 'approves_own': bool(approves_own),
+            'approval_kinds': list(workflow.APPROVAL_KINDS), 'closing': workflow.KIND_CLOSING}
+
+
+def desk_pairs(cursor, user_id, roles, approves_own=False):
+    """Открытые подзадачи, которые ждут ЭТОГО человека, в порядке рабочего стола:
+    [(id заявки, вид подзадачи)]. Сами заявки читает `desk_page` — только для
+    страницы, которую показывают.
+
+    П. 16: «каждый пользователь должен видеть только те задачи, по которым от
+    него требуется действие» — лично назначенные и задачи его подразделения.
+    Последние ключи сортировки — ради постраничного показа: при равных сроке и
+    времени строки не должны меняться местами между запросами страниц.
+    """
+    cursor.execute(
+        """
+        SELECT s.request_id, s.kind
+          FROM payment_subtasks s
+          JOIN payment_requests r ON r.id = s.request_id
+         WHERE """ + _WAITS_FOR_ME_SQL + """
+         ORDER BY r.due_on NULLS LAST, s.opened_at, s.request_id, s.kind
+        """,
+        _desk_params(user_id, roles, approves_own))
+    return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def desk_page(cursor, pairs):
+    """(заявка, подзадача) для пар страницы — в том же порядке."""
+    requests = {item['id']: item for item in requests_by_ids(cursor, sorted({pair[0] for pair in pairs}))}
+    by_request = subtasks_for_requests(cursor, list(requests))
+    rows = []
+    for request_id, kind in pairs:
+        subtask = next((s for s in by_request.get(request_id, []) if s['kind'] == kind), None)
+        if request_id in requests and subtask:
+            rows.append((requests[request_id], subtask))
+    return rows
+
+
+def desk_rows(cursor, user_id, roles, approves_own=False):
+    """Все задачи стола разом: (заявка, подзадача)."""
+    return desk_page(cursor, desk_pairs(cursor, user_id, roles, approves_own))
+
+
+def desk_count(cursor, user_id, roles, approves_own=False):
+    """Сколько задач ждут человека — число для вкладки «Мои задачи»."""
+    cursor.execute(
+        """
+        SELECT (SELECT COUNT(*) FROM payment_subtasks s JOIN payment_requests r ON r.id = s.request_id
+                 WHERE """ + _WAITS_FOR_ME_SQL + """)
+             + (SELECT COUNT(*) FROM payment_requests r
+                  JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %(closing)s AND s.state = 'open'
+                 WHERE r.status = 'active' AND r.initiator_id = %(user_id)s AND r.closing_docs_status = 'none')
+        """,
+        _desk_params(user_id, roles, approves_own))
+    return int(cursor.fetchone()[0] or 0)
+
+
+def docs_wanted_ids(cursor, user_id):
+    """Заявки инициатора, по которым бухгалтерия ждёт закрывающие документы,
+    а он их ещё не приложил (п. 17: «необходимость приложить закрывающие документы»)."""
+    cursor.execute(
+        """
+        SELECT r.id FROM payment_requests r
+          JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %s AND s.state = 'open'
+         WHERE r.status = 'active' AND r.initiator_id = %s AND r.closing_docs_status = 'none'
+         ORDER BY r.id
+        """,
+        (workflow.KIND_CLOSING, int(user_id)))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def docs_wanted(cursor, user_id):
+    return requests_by_ids(cursor, docs_wanted_ids(cursor, user_id))
+
+
+def participates(cursor, request_id, user_id, roles):
+    """Есть ли у человека своя подзадача в заявке — лично или ролью."""
+    cursor.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM payment_subtasks s
+             WHERE s.request_id = %(request_id)s AND s.state NOT IN ('pending', 'skipped')
+               AND (s.assignee_id = %(user_id)s OR s.done_by = %(user_id)s
+                    OR (s.assignee_id IS NULL AND s.role_code = ANY(%(roles)s))))
+        """,
+        {'request_id': int(request_id), 'user_id': int(user_id), 'roles': sorted(roles or [])})
+    return bool(cursor.fetchone()[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Сроки (п. 17: «приближении срока», «просрочке»)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def due_requests(cursor, today, soon_days):
+    """Неоплаченные живые заявки со сроком: (заявка, 'soon' | 'overdue')."""
+    cursor.execute(
+        "SELECT id, due_on FROM payment_requests WHERE status = 'active' AND paid_on IS NULL "
+        "AND due_on IS NOT NULL AND due_on <= %s::date + make_interval(days => %s)",
+        (today, int(soon_days)))
+    marks = {row[0]: ('overdue' if row[1] < today else 'soon') for row in cursor.fetchall()}
+    return [(item, marks[item['id']]) for item in requests_by_ids(cursor, list(marks))]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1058,10 +1220,15 @@ def remove_attachment(cursor, attachment_id, actor):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def payment_history(cursor, *, counterparty_id=None, category_id=None, subcategory_id=None,
-                    expense_name=None, exclude_request_id=None, limit=5):
+                    expense_name=None, exclude_request_id=None, limit=5, visible_to=None, visible_roles=()):
     """Ранее ОПЛАЧЕННЫЕ заявки, похожие на заводимую: по контрагенту, по
     категории/подкатегории, по названию расхода. У каждой — дата последней
-    оплаты, сумма и цена за единицу первой позиции (п. 9 дополнения)."""
+    оплаты, сумма и цена за единицу первой позиции (п. 9 дополнения Дмитриевой;
+    ТЗ «Закуп и оплата», п. 8: бухгалтер проверяет «историю предыдущих оплат»).
+
+    `visible_to` — граница видимости того, кому реестр целиком не положен: он
+    видит прошлые оплаты только по своим заявкам, как и в реестре.
+    """
     clauses, params = [], {'limit': int(limit)}
     if counterparty_id:
         params['cp'] = int(counterparty_id)
@@ -1074,7 +1241,7 @@ def payment_history(cursor, *, counterparty_id=None, category_id=None, subcatego
         clauses.append("r.category_id = %(cat)s")
     name = str(expense_name or '').strip()
     if len(name) >= 3:
-        params['name_like'] = '%' + name + '%'
+        params['name_like'] = like_pattern(name)
         clauses.append("r.expense_name ILIKE %(name_like)s")
     if not clauses:
         return []
@@ -1082,6 +1249,9 @@ def payment_history(cursor, *, counterparty_id=None, category_id=None, subcatego
     if exclude_request_id:
         params['exclude'] = int(exclude_request_id)
         where += ' AND r.id <> %(exclude)s'
+    if visible_to:
+        params.update({'visible_to': int(visible_to), 'visible_roles': sorted(visible_roles or [])})
+        where += ' AND ' + _VISIBLE_SQL
     cursor.execute(
         """
         SELECT r.id, r.expense_name, r.paid_on, r.paid_amount, r.amount, r.counterparty_id, cp.name,
@@ -1115,92 +1285,3 @@ def payment_history(cursor, *, counterparty_id=None, category_id=None, subcatego
             'quantity': row[11], 'matched': matched,
         })
     return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Календарь фиксированных платежей
-# ─────────────────────────────────────────────────────────────────────────────
-
-_TEMPLATE_FIELDS = ('id', 'name', 'amount', 'periodicity', 'interval_days', 'next_due_on', 'lead_days',
-                    'project_id', 'branch', 'responsible_user_id', 'category_id', 'subcategory_id',
-                    'counterparty_id', 'legal_entity_id', 'payment_source', 'note', 'is_active',
-                    'last_generated_on', 'created_at', 'updated_at')
-_TEMPLATE_EXTRA = ('responsible_name', 'project_name', 'category_name', 'subcategory_name',
-                   'counterparty_name', 'legal_entity_name', 'requests_count', 'open_request_id')
-_TEMPLATE_SQL = """
-    SELECT %s, u.name, p.name, c1.name, c2.name, cp.name, le.name,
-           (SELECT COUNT(*) FROM payment_requests r WHERE r.fixed_template_id = t.id),
-           (SELECT r.id FROM payment_requests r WHERE r.fixed_template_id = t.id AND r.status = 'active'
-             ORDER BY r.id DESC LIMIT 1)
-      FROM payment_fixed_templates t
-      LEFT JOIN users u ON u.id = t.responsible_user_id
-      LEFT JOIN payment_projects p ON p.id = t.project_id
-      LEFT JOIN payment_categories c1 ON c1.id = t.category_id
-      LEFT JOIN payment_categories c2 ON c2.id = t.subcategory_id
-      LEFT JOIN payment_counterparties cp ON cp.id = t.counterparty_id
-      LEFT JOIN payment_legal_entities le ON le.id = t.legal_entity_id
-""" % ', '.join('t.%s' % f for f in _TEMPLATE_FIELDS)
-
-
-def _template_row(row):
-    item = _map(_TEMPLATE_FIELDS, row[:len(_TEMPLATE_FIELDS)])
-    for key, value in zip(_TEMPLATE_EXTRA, row[len(_TEMPLATE_FIELDS):]):
-        item[key] = value
-    return item
-
-
-def list_templates(cursor, include_inactive=True):
-    where = '' if include_inactive else ' WHERE t.is_active'
-    cursor.execute(_TEMPLATE_SQL + where + ' ORDER BY t.is_active DESC, t.next_due_on, t.name')
-    return [_template_row(row) for row in cursor.fetchall()]
-
-
-def read_template(cursor, template_id, *, lock=False):
-    cursor.execute(_TEMPLATE_SQL + ' WHERE t.id = %s' + (' FOR UPDATE OF t' if lock else ''),
-                   (int(template_id),))
-    row = cursor.fetchone()
-    return _template_row(row) if row else None
-
-
-def upsert_template(cursor, *, template_id=None, fields, actor_id=None):
-    cols = ('name', 'amount', 'periodicity', 'interval_days', 'next_due_on', 'lead_days', 'project_id',
-            'branch', 'responsible_user_id', 'category_id', 'subcategory_id', 'counterparty_id',
-            'legal_entity_id', 'payment_source', 'note', 'is_active')
-    values = [fields.get(col) for col in cols]
-    if template_id:
-        cursor.execute(
-            "UPDATE payment_fixed_templates SET %s, updated_at = %s WHERE id = %%s RETURNING id"
-            % (', '.join('%s = %%s' % col for col in cols), _NOW),
-            values + [int(template_id)])
-    else:
-        cursor.execute(
-            "INSERT INTO payment_fixed_templates (%s, created_by) VALUES (%s, %%s) RETURNING id"
-            % (', '.join(cols), ', '.join(['%s'] * len(cols))),
-            values + [actor_id])
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def advance_template(cursor, template_id, *, next_due_on, generated_on):
-    cursor.execute(
-        "UPDATE payment_fixed_templates SET next_due_on = %%s, last_generated_on = %%s, updated_at = %s "
-        "WHERE id = %%s" % _NOW,
-        (next_due_on, generated_on, int(template_id)))
-
-
-def delete_template(cursor, template_id):
-    cursor.execute("DELETE FROM payment_fixed_templates WHERE id = %s", (int(template_id),))
-    return cursor.rowcount
-
-
-def department_brief(cursor, department_id):
-    if not department_id:
-        return None
-    cursor.execute("SELECT id, name FROM departments WHERE id = %s", (int(department_id),))
-    row = cursor.fetchone()
-    return {'id': row[0], 'name': row[1]} if row else None
-
-
-def list_departments(cursor):
-    cursor.execute("SELECT id, name FROM departments WHERE is_active ORDER BY name")
-    return [{'id': row[0], 'name': row[1]} for row in cursor.fetchall()]

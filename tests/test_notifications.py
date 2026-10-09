@@ -1038,7 +1038,10 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            # и они спрашивают /api/news/pending. Без строки
                            # здесь обратная проверка ниже нашла бы «лишний»
                            # триггер и упала.
-                           'news_posts')
+                           'news_posts',
+                           # «Оплата счетов» (#381): уведомления процесса закупа —
+                           # новая задача, согласовано, оплачено, срок.
+                           'payment_notifications')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

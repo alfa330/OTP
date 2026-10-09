@@ -51,6 +51,7 @@ import ProfileView from './components/profile/ProfileView';
 import LegacyProfileView from './components/profile/LegacyProfileView';
 import { usesRedesignedProfile } from './components/profile/profileScope';
 import MyDataCard from './components/profile/MyDataCard';
+import MyAssetsCard from './components/profile/MyAssetsCard';
 import { canEditOwnData } from './components/profile/myData';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
@@ -747,6 +748,11 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     // самого (кнопка «Доступ») — человеку, группе, отделу, и тренер под выдачу
     // попадает. Без выдачи его уводит своя ветка раздела в гарде ниже.
     'baiga',
+    // «Оплата счетов» (#381): заявку на закуп заводит любой сотрудник, которому
+    // открыт раздел, а роль процесса (например, учёт имущества) выдают во
+    // вкладке «Участники» — тренеру в том числе. Без выдачи раздел закрыт
+    // своим предикатом (canAccessPaymentsForUser).
+    'payments',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
@@ -42923,6 +42929,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [pinnedTaskPipRequestId, setPinnedTaskPipRequestId] = useState(0);
             const [pinnedTaskActionLoadingKey, setPinnedTaskActionLoadingKey] = useState('');
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
+            // Клик по уведомлению «Оплаты счетов»: раздел открывает заявку из уведомления.
+            const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
             // Клик по уведомлению о заявке на изменение смены: раздел один,
             // а открывать его надо по-разному оператору и руководителю.
             const [shiftRequestFocus, setShiftRequestFocus] = useState(null);
@@ -52696,6 +52704,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                диплинке ?view=tasks&task=N условие не срабатывает. */
             useEffect(() => {
                 if (view !== 'tasks') setTaskFocusRequest(null);
+                if (view !== 'payments') setPaymentsFocusRequest(null);
             }, [view]);
 
             useEffect(() => {
@@ -52932,6 +52941,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setTaskFocusRequest((prev) => ({
                         taskId: Number(target),
                         requestId: Number(prev?.requestId || 0) + 1,
+                    }));
+                }
+                // «Оплата счетов»: target — номер заявки (notifications/sources.py: payments).
+                if (nextView === 'payments' && Number(target)) {
+                    setPaymentsFocusRequest((prev) => ({
+                        requestId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }
                 /* Заявки по сменам: один и тот же раздел открывается по-разному
@@ -55013,6 +55029,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
                                         </>
+                                    )}
+
+                                    {/* «Оплата счетов» у остальных ролей (оператор, тренер, бэк-офис):
+                                        заявку на закуп заводит любой сотрудник, которому открыт
+                                        раздел (ТЗ #381, п. 3 — «Инициатор»). У админов и
+                                        руководителей пункт стоит в их блоках выше; без этой
+                                        строки рядовой сотрудник попадал бы в раздел только
+                                        по ссылке из уведомления. */}
+                                    {canAccessPaymentsSection && !isAdminLikeRole && !isDepartmentManager && (
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'payments')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'payments' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-file-invoice"></FaIcon> <span className="sidebar-text">Оплата счетов</span>
+                                            </button>
+                                        </li>
                                     )}
 
                                     {renderDividerIfInner(
@@ -57519,6 +57553,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    focusRequest={paymentsFocusRequest}
                                 />
                             </Suspense>
                         ))}
@@ -58536,9 +58571,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           showToast={showToast}
                                         />
                                       ) : null}
+                                      // Имущество, числящееся за сотрудником (ТЗ #381, п. 12).
+                                      myAssets={(
+                                        <MyAssetsCard
+                                          apiBaseUrl={API_BASE_URL}
+                                          userId={user?.id}
+                                          withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                      )}
                                     />
                                   );
                                 })()}
+                                {/* То же имущество в прежнем виде «Профиля» (остальные отделы):
+                                    блок стоит под карточкой профиля. */}
+                                {view === 'profile' && !usesRedesignedProfile(user) && (
+                                    <MyAssetsCard
+                                        legacy
+                                        apiBaseUrl={API_BASE_URL}
+                                        userId={user?.id}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                    />
+                                )}
                                 {( view === "trainings" && (
                                     <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренингов…</div>}>
                                         <TrainingsView

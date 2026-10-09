@@ -1,5 +1,9 @@
 """Выгрузка реестра заявок в xlsx (дополнение Дмитриевой, п. 8: «все поля, включая скрытые»).
 
+Колонки — поля заявки по ТЗ «Закуп и оплата» (п. 4, п. 5): тип заявки, этап,
+компания, тип объекта, способ оплаты, варианты поставщиков, согласование,
+получение, закрывающие документы.
+
 Соглашения те же, что у выгрузок «Посылок» и «Касаний»:
 
 * первым идёт лист «Контекст» — когда собрано, что отобрано, сколько строк;
@@ -39,66 +43,71 @@ MONEY_FORMAT = '#,##0.00'
 
 STATE_LABELS = {
     'active': 'В работе',
-    'blocked': 'Ожидает договор',
+    'clarification': 'Требуется уточнение',
     'overdue': 'Просрочена',
     'done': 'Закрыта',
     'rejected': 'Отклонена',
     'cancelled': 'Отменена',
 }
-SOURCE_LABELS = {'too': 'ТОО', 'wallet': 'Кошелёк', 'cash': 'Наличные'}
-TYPE_LABELS = {'fixed': 'Фиксированный', 'monthly': 'Ежемесячный', 'one_time': 'Разовый'}
 
 # (заголовок, ключ, вид) — вид: 'text' | 'money' | 'date' | 'datetime' | 'plain'
 COLUMNS = (
     ('№', 'id', 'plain'),
     ('Дата заявки', 'created_at', 'datetime'),
+    ('Тип заявки', 'kind_label', 'plain'),
     ('Состояние', 'state_label', 'plain'),
-    ('Этап', 'step_label', 'plain'),
-    ('Текущий ответственный', 'current_assignee_name', 'plain'),
+    ('Этап', 'stage_text', 'plain'),
+    ('Текущий исполнитель', 'current_assignee_name', 'plain'),
     ('Инициатор', 'initiator_name', 'plain'),
     ('Руководитель', 'manager_name', 'plain'),
-    ('Отдел', 'department_name', 'plain'),
+    ('Подразделение', 'department_name', 'plain'),
+    ('Компания-плательщик', 'legal_entity_name', 'plain'),
     ('Проект', 'project_name', 'plain'),
     ('Таксопарк / филиал / регион', 'branch', 'plain'),
-    ('Наименование расхода', 'expense_name', 'plain'),
+    ('Наименование закупа', 'expense_name', 'plain'),
+    ('Описание и обоснование', 'justification', 'plain'),
+    ('Тип объекта', 'object_label', 'plain'),
+    ('Категория учёта', 'accounting_label', 'plain'),
     ('Позиции', 'items_text', 'plain'),
-    ('Сумма расхода', 'amount', 'money'),
+    ('Сумма', 'amount', 'money'),
+    ('Согласованная сумма', 'amount_approved', 'money'),
     ('Сумма возврата', 'refund_amount', 'money'),
     ('Дата возврата', 'refund_on', 'date'),
     ('Итоговая сумма', 'total_amount', 'money'),
-    ('Категория', 'category_name', 'plain'),
+    ('Категория закупа', 'category_name', 'plain'),
     ('Подкатегория', 'subcategory_name', 'plain'),
-    ('Контрагент', 'counterparty_name', 'plain'),
-    ('БИН контрагента', 'counterparty_bin', 'text'),
-    ('Форма поставщика', 'supplier_kind_label', 'plain'),
-    ('НДС поставщика', 'supplier_vat_label', 'plain'),
-    ('Юр. лицо (плательщик)', 'legal_entity_name', 'plain'),
+    ('Поставщик', 'counterparty_name', 'plain'),
+    ('БИН поставщика', 'counterparty_bin', 'text'),
+    ('Варианты поставщиков', 'offers_text', 'plain'),
+    ('Альтернативы', 'alternatives_label', 'plain'),
+    ('Обоснование выбора поставщика', 'supplier_choice_reason', 'plain'),
     ('Договор', 'contract_number', 'text'),
-    ('Источник оплаты', 'source_label', 'plain'),
-    ('Тип оплаты', 'type_label', 'plain'),
-    ('Номер карты', 'card_number', 'text'),
+    ('Способ оплаты', 'method_label', 'plain'),
+    ('Получатель по карте', 'card_label', 'plain'),
+    ('Карта', 'card_mask', 'text'),
+    ('Назначение платежа', 'payment_purpose', 'plain'),
     ('Период оплаты', 'payment_period', 'plain'),
-    ('Срок оплаты', 'due_on', 'date'),
-    ('Дата платежа', 'paid_on', 'date'),
-    ('Оплачено', 'paid_amount', 'money'),
+    ('Срок', 'due_on', 'date'),
+    ('Согласовал', 'approved_by_name', 'plain'),
+    ('Дата согласования', 'approved_at', 'datetime'),
+    ('Основание согласования', 'approver_label', 'plain'),
     ('Номер счёта', 'invoice_number', 'text'),
     ('Дата счёта', 'invoice_date', 'date'),
-    ('Реквизиты для счёта', 'invoice_requisites', 'plain'),
-    ('Описание счёта', 'invoice_description', 'plain'),
-    ('Проверка бухгалтерии', 'previous_payment_note', 'plain'),
-    ('Согласующий счёта', 'approver_label', 'plain'),
-    ('Приказ', 'approval_order_number', 'text'),
-    ('Доверенность', 'needs_power_of_attorney_label', 'plain'),
-    ('Платёжное поручение', 'needs_payment_order_label', 'plain'),
+    ('Дата оплаты', 'paid_on', 'date'),
+    ('Оплачено', 'paid_amount', 'money'),
+    ('Дата получения', 'received_on', 'date'),
+    ('Получено', 'received_quantity', 'plain'),
+    ('Закрывающие документы', 'docs_label', 'plain'),
     ('Примечания', 'notes', 'plain'),
     ('Причина отклонения', 'rejected_reason', 'plain'),
     ('Закрыта', 'closed_at', 'datetime'),
 )
 
 WIDTHS = {
-    '№': 7, 'Дата заявки': 16, 'Состояние': 16, 'Этап': 30, 'Наименование расхода': 34, 'Позиции': 40,
-    'Сумма расхода': 15, 'Итоговая сумма': 15, 'Контрагент': 26, 'Описание счёта': 40,
-    'Реквизиты для счёта': 30, 'Проверка бухгалтерии': 30, 'Примечания': 30,
+    '№': 7, 'Дата заявки': 16, 'Тип заявки': 20, 'Состояние': 20, 'Этап': 26, 'Наименование закупа': 34,
+    'Описание и обоснование': 40, 'Позиции': 40, 'Сумма': 15, 'Итоговая сумма': 15, 'Поставщик': 26,
+    'Варианты поставщиков': 46, 'Обоснование выбора поставщика': 36, 'Назначение платежа': 34,
+    'Основание согласования': 34, 'Закрывающие документы': 22, 'Примечания': 30,
 }
 
 
@@ -146,17 +155,17 @@ def _date_cell(ws, value, fmt):
     return cell
 
 
-def enrich(request, items):
+def enrich(request, items, offers=()):
     """Поля, которых нет в строке базы: подписи и производные суммы."""
     row = dict(request)
     row['state_label'] = STATE_LABELS.get(request.get('state'), request.get('state'))
-    if request.get('status') == 'active':
-        row['step_label'] = 'Шаг %s из %s · %s' % (request.get('current_step'), workflow.LAST_STEP,
-                                                   workflow.step_title(request.get('current_step')))
-    else:
-        row['step_label'] = ''
-    row['source_label'] = SOURCE_LABELS.get(request.get('payment_source'), '')
-    row['type_label'] = TYPE_LABELS.get(request.get('payment_type'), '')
+    row['kind_label'] = workflow.REQUEST_KIND_LABELS.get(request.get('request_kind'), '')
+    # Этап — у живой заявки; у закрытой он уже сказан состоянием.
+    row['stage_text'] = (workflow.STAGE_LABELS.get(request.get('stage'), '')
+                         if request.get('status') == 'active' else '')
+    row['object_label'] = workflow.OBJECT_TYPE_LABELS.get(request.get('object_type'), '')
+    row['accounting_label'] = workflow.ACCOUNTING_CATEGORY_LABELS.get(request.get('accounting_category'), '')
+    row['method_label'] = workflow.PAYMENT_METHOD_LABELS.get(request.get('payment_method'), '')
     amount = workflow.to_decimal(request.get('amount'))
     refund = workflow.to_decimal(request.get('refund_amount'))
     row['total_amount'] = amount - refund
@@ -168,19 +177,31 @@ def enrich(request, items):
                                  _plain_money(item.get('unit_price')),
                                  _plain_money(workflow.item_total(item)))
         for item in (items or []))
-    basis = request.get('route_basis') or {}
-    if basis.get('approver_name'):
-        row['approver_label'] = '%s (по Приказу №%s вместо Учредителя)' % (basis['approver_name'],
-                                                                           basis.get('order_number') or '—')
+    # Варианты поставщиков — как их сравнивал инициатор; рекомендуемый помечен.
+    row['offers_text'] = '\n'.join(
+        '%s%s — %s%s' % ('★ ' if offer.get('is_recommended') else '', offer.get('supplier_name') or '—',
+                         _plain_money(offer.get('amount')) if offer.get('amount') is not None else 'цена не указана',
+                         ('; ' + offer['terms']) if offer.get('terms') else '')
+        for offer in (offers or []))
+    if request.get('no_alternatives'):
+        reason = workflow.NO_ALTERNATIVES_LABELS.get(request.get('no_alternatives_reason'), '')
+        comment = request.get('no_alternatives_comment') or ''
+        row['alternatives_label'] = 'Отсутствуют: %s' % '; '.join(part for part in (reason, comment) if part)
     else:
-        row['approver_label'] = 'Учредитель'
-    # Форма поставщика и НДС выбраны на шаге 4; до него колонки пустые, а не «без НДС».
-    row['supplier_kind_label'] = workflow.SUPPLIER_KIND_LABELS.get(
-        str(request.get('supplier_kind') or '').lower(), '')
-    vat = request.get('supplier_vat')
-    row['supplier_vat_label'] = '' if vat is None else ('С НДС' if vat else 'Без НДС')
-    row['needs_power_of_attorney_label'] = 'Да' if request.get('needs_power_of_attorney') else ''
-    row['needs_payment_order_label'] = 'Да' if request.get('needs_payment_order') else ''
+        row['alternatives_label'] = ''
+    # Номер карты в выгрузку не попадает — только маска (п. 5.2: полный номер
+    # доступен по правам, а файл выгрузки уходит из раздела).
+    if request.get('payment_method') == workflow.METHOD_CARD:
+        row['card_label'] = ' · '.join(part for part in (
+            workflow.CARD_RECIPIENT_LABELS.get(request.get('card_recipient'), ''),
+            request.get('card_holder_name') or '') if part)
+    else:
+        row['card_label'] = ''
+        row['card_mask'] = ''
+    basis = request.get('route_basis') or {}
+    row['approver_label'] = basis.get('basis') or ''
+    row['docs_label'] = (workflow.CLOSING_DOC_LABELS.get(request.get('closing_docs_status'), '')
+                         if request.get('paid_on') or request.get('received_on') else '')
     return row
 
 
@@ -198,15 +219,15 @@ def _qty(value):
     return str(number.normalize())
 
 
-def build_workbook(requests, items_by_request, *, generated_at=None, filters_text='', total=None,
-                   truncated=False, text_warning_patch=None):
+def build_workbook(requests, items_by_request, *, offers_by_request=None, generated_at=None, filters_text='',
+                   total=None, truncated=False, text_warning_patch=None):
     generated_at = generated_at or datetime.now(ALMATY)
     workbook = Workbook(write_only=True)
 
     context = workbook.create_sheet('Контекст')
     context.column_dimensions['A'].width = 28
     context.column_dimensions['B'].width = 80
-    title = WriteOnlyCell(context, value='Реестр заявок на оплату')
+    title = WriteOnlyCell(context, value='Реестр заявок на закуп и оплату')
     title.font = TITLE_FONT
     context.append([title])
     context.append(['Собрано', generated_at.strftime('%d.%m.%Y %H:%M')])
@@ -218,9 +239,10 @@ def build_workbook(requests, items_by_request, *, generated_at=None, filters_tex
         context.append(['Внимание', 'Файл обрезан по потолку строк — сузьте отбор'])
     context.append([])
     context.append(['Как читать', 'Позиции: «товар — количество × цена за единицу = сумма строки». '
-                                  'Сумма расхода — сумма строк; итоговая сумма = сумма − возврат. '
-                                  'Форма и НДС поставщика выбираются на шаге 4 — до него пусто. '
-                                  'БИН, номер карты и номера документов лежат текстом.'])
+                                  'Сумма — сумма строк; итоговая сумма = сумма − возврат. '
+                                  'Варианты поставщиков: рекомендуемый отмечен звёздочкой. '
+                                  'Карта — только последние четыре цифры: полного номера в выгрузке нет. '
+                                  'БИН и номера документов лежат текстом.'])
 
     sheet = workbook.create_sheet('Заявки')
     sheet.freeze_panes = 'C2'
@@ -236,7 +258,8 @@ def build_workbook(requests, items_by_request, *, generated_at=None, filters_tex
     sheet.append(header_cells)
 
     for request in requests:
-        row = enrich(request, items_by_request.get(request['id']) or [])
+        row = enrich(request, items_by_request.get(request['id']) or [],
+                     (offers_by_request or {}).get(request['id']) or [])
         cells = []
         for _header, key, kind in COLUMNS:
             value = row.get(key)
@@ -268,4 +291,4 @@ def build_workbook(requests, items_by_request, *, generated_at=None, filters_tex
 
 def file_name(generated_at=None):
     generated_at = generated_at or datetime.now(ALMATY)
-    return 'Заявки на оплату %s.xlsx' % generated_at.strftime('%Y-%m-%d')
+    return 'Заявки на закуп и оплату %s.xlsx' % generated_at.strftime('%Y-%m-%d')

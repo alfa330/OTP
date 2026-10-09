@@ -6,7 +6,21 @@ import useScreenBackGesture from '../common/useScreenBackGesture';
 /* Сколько экран уезжает вправо при закрытии. Дублируется в mobile-shell.css
    (анимация otp-screen-out) — равенство сторожит тест: разойдясь, они дадут
    либо обрубленную анимацию, либо застывший на кадр пустой экран. */
-const SCREEN_LEAVE_MS = 300;
+export const SCREEN_LEAVE_MS = 300;
+
+/* Сколько окно гаснет при закрытии на компьютере — столько же, сколько анимация
+   window-out в tailwind.config.cjs (равенство сторожит тест). Мгновенное
+   исчезновение читалось как рывок; уход короче прихода, ждать он не заставляет. */
+export const WINDOW_LEAVE_MS = 200;
+
+/* «Уменьшить движение» в системе: окно снимается сразу, без анимации ухода. */
+export const prefersReducedMotion = () => {
+    try {
+        return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    } catch {
+        return false;
+    }
+};
 
 /*
  * Общие iOS / macOS примитивы дизайн-системы.
@@ -400,8 +414,11 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
        только две вещи, которых стилями не сделать: задержка размонтирования
        под анимацию ухода и шеврон «назад» вместо крестика.
 
-       На компьютере ничего не изменилось: там isNarrow всегда false, окно
-       появляется и исчезает мгновенно, как раньше. */
+       На компьютере окно тоже не выскакивает и не пропадает рывком (просьба
+       владельца 09.10.2026: «слишком резкое закрытие и открытие»): затемнение
+       проявляется, панель приподнимается по кривой macOS, при закрытии —
+       обратное движение короче (window-* в tailwind.config.cjs). При «Уменьшить
+       движение» в системе — как раньше, мгновенно. */
     const isNarrow = useIsMobileShell();
     /* Системное «назад» (свайп от края в iOS, кнопка в Android) закрывает
        экран. Только на телефоне: на компьютере «назад» означает «предыдущая
@@ -410,40 +427,58 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
     /* Пока идёт анимация ухода, разметка обязана оставаться в дереве — иначе
        анимировать нечего. Держим её только на телефоне: на компьютере лишний
        кадр жизни закрытого окна ничем не оправдан. */
-    const [leaving, setLeaving] = React.useState(false);
+    const [leavingState, setLeaving] = React.useState(false);
     const wasOpen = React.useRef(open);
+    // Телефон — уход экраном (SCREEN_LEAVE_MS), компьютер — угасание окна.
+    const delay = isNarrow ? SCREEN_LEAVE_MS : (prefersReducedMotion() ? 0 : WINDOW_LEAVE_MS);
     React.useEffect(() => {
         if (open) { wasOpen.current = true; setLeaving(false); return undefined; }
-        if (!wasOpen.current || !isNarrow) { wasOpen.current = false; setLeaving(false); return undefined; }
+        if (!wasOpen.current || !delay) { wasOpen.current = false; setLeaving(false); return undefined; }
         wasOpen.current = false;
         setLeaving(true);
-        const timer = setTimeout(() => setLeaving(false), SCREEN_LEAVE_MS);
+        const timer = setTimeout(() => setLeaving(false), delay);
         return () => clearTimeout(timer);
-    }, [open, isNarrow]);
+    }, [open, delay]);
+    /* В такт закрытия окно уже «уходит», хотя эффект ещё не успел это записать:
+       иначе эта отрисовка вернула бы null, React снял бы окно и следующим кадром
+       нарисовал заново — на компьютере мигание, на телефоне оболочка провожала бы
+       снятый узел вторым уезжающим экраном (mobileScreenExit.js). */
+    const leaving = leavingState || (!open && wasOpen.current && delay > 0);
+
+    /* Пока окно уходит, в нём остаётся то, что было в момент закрытия: хозяин окна
+       к этому времени обычно уже сбросил данные (закрыл заявку), и иначе гасло бы
+       пустое окно с одной шапкой. */
+    const kept = React.useRef(null);
+    if (open) kept.current = { title, subtitle, children, footer, onBack };
+    const shown = !open && kept.current ? kept.current : { title, subtitle, children, footer, onBack };
 
     if (!open && !leaving) return null;
+    /* Движение окна — только на компьютере: на телефоне окно едет экраном
+       (mobile-shell.css), и второе движение полотна внутри него — дёрганость. */
+    const dimMotion = isNarrow ? '' : (leaving ? ' pointer-events-none motion-safe:animate-window-dim-out' : ' motion-safe:animate-window-dim-in');
+    const panelMotion = isNarrow ? '' : (leaving ? ' motion-safe:animate-window-out' : ' motion-safe:animate-window-in');
     return (
         <div
             /* otp-modal-root — метка для мобильной оболочки: по ней окно
                поднимается над баром разделов и угловым колоколом, колокол
                на это время прячется, а само окно превращается в экран
                (см. mobile-shell.css). */
-            className={`otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}`}
+            className={`otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}${dimMotion}`}
             style={{ fontFamily: APPLE_FONT }}
-            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
+            onMouseDown={(e) => { if (!leaving && e.target === e.currentTarget) onClose?.(); }}
         >
-            <div className={`otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
+            <div className={`otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl${panelMotion}`}>
                 <div className="otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
                     {/* Шеврон «назад» слева — на телефоне он и закрывает экран:
                         крестик в правом углу читается как «отменить», а уход с
                         экрана в мессенджере делают именно им. Внутренний onBack
                         (второй уровень ВНУТРИ окна) старше: пока он есть, шеврон
                         ведёт на предыдущий уровень, а не наружу. */}
-                    {(onBack || isNarrow) && (
+                    {(shown.onBack || isNarrow) && (
                         <button
                             type="button"
-                            onClick={onBack || onClose}
-                            className={onBack || !isNarrow
+                            onClick={shown.onBack || onClose}
+                            className={shown.onBack || !isNarrow
                                 ? 'grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95'
                                 : 'otp-modal-back grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60'}
                             aria-label="Назад"
@@ -457,8 +492,8 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                         </button>
                     )}
                     <div className="min-w-0 flex-1">
-                        <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
-                        {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
+                        <h3 className="truncate text-[15px] font-semibold text-slate-900">{shown.title}</h3>
+                        {shown.subtitle && <p className="truncate text-[12px] text-slate-500">{shown.subtitle}</p>}
                     </div>
                     {/* Крестик на телефоне не нужен: уход с экрана уже сделан
                         шевроном слева, а две кнопки «закрыть» в одной шапке —
@@ -480,14 +515,14 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                     thin-scroll: полоса в 3 px, как у остальных тонких скроллов
                     портала (styles.css), а не системная в ~15 px вдоль окна. */}
                 <div className={bodyClassName}>
-                    {children}
+                    {shown.children}
                 </div>
                 {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,
                     но и ряд действий над записью — на телефоне он не влезал в
                     строку и выдавливал главную кнопку за край. */}
-                {footer && (
+                {shown.footer && (
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-5">
-                        {footer}
+                        {shown.footer}
                     </div>
                 )}
             </div>
@@ -617,7 +652,7 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                         zIndex: 99999,
                         fontFamily: APPLE_FONT,
                     }}
-                    className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl animate-[fadeIn_.12s_ease]"
+                    className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl motion-safe:animate-popover-in"
                 >
                     {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore }) => (
                         <React.Fragment key={key}>

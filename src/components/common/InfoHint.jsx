@@ -171,7 +171,7 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
             maxWidth: `min(${MAX_WIDTH}px, calc(100vw - 16px))`,
             transform: pos.flipUp ? 'translateY(-100%)' : undefined,
           }}
-          className="z-[200] rounded-2xl border border-slate-200/80 bg-white/95 p-3.5 text-left text-xs leading-5 text-slate-600 shadow-xl ring-1 ring-black/5 backdrop-blur"
+          className="z-[200] rounded-2xl border border-slate-200/80 bg-white/95 p-3.5 text-left text-xs leading-5 text-slate-600 shadow-xl ring-1 ring-black/5 backdrop-blur motion-safe:animate-popover-in"
         >
           {title ? <div className="mb-1 text-[13px] font-semibold text-slate-800">{title}</div> : null}
           {body}

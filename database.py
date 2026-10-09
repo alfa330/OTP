@@ -7282,6 +7282,12 @@ class Database:
                             targets := targets || ARRAY[NEW.asker_id];
                         END IF;
                     END IF;
+                ELSIF TG_TABLE_NAME = 'payment_notifications' THEN
+                    -- «Оплата счетов»: уведомление адресное, будим только
+                    -- его получателя — и когда оно появилось, и когда погасло
+                    -- (дело сделано, заявку открыли), чтобы бейдж обновился
+                    -- во всех его вкладках.
+                    targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -7388,6 +7394,15 @@ class Database:
                 )""",
             ),
             ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),
+            # «Оплата счетов» (ТЗ «Закуп и оплата», п. 17). UPDATE — только
+            # погашение: других правок у строки уведомления не бывает.
+            ('trg_bell_payment_notifications_insert', 'payment_notifications', 'AFTER INSERT', ''),
+            (
+                'trg_bell_payment_notifications',
+                'payment_notifications',
+                'AFTER UPDATE OF read_at',
+                'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
+            ),
             # Смена состава исполнителей саму задачу не трогает (UPDATE tasks не
             # происходит), поэтому trg_bell_tasks об этом не узнает — нужен свой
             # триггер, иначе добавленный соисполнитель не увидит задачу в колоколе

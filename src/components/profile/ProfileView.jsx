@@ -424,7 +424,7 @@ function DesktopTop({
  * для прямого ребёнка-кнопки, а его старый нижний отступ снят.
  */
 export default function ProfileView(props) {
-    const { isMobileShell, loading, profile, rateBanner = null, myData = null } = props;
+    const { isMobileShell, loading, profile, rateBanner = null, myData = null, myAssets = null } = props;
     const firstLoad = Boolean(loading && !profile);
     const failed = !loading && !profile;
     return (
@@ -443,6 +443,7 @@ export default function ProfileView(props) {
                 ? <PhoneTop {...props} firstLoad={firstLoad} failed={failed} />
                 : <DesktopTop {...props} firstLoad={firstLoad} failed={failed} />}
             {failed ? null : myData}
+            {failed ? null : myAssets}
         </div>
     );
 }

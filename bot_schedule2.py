@@ -66017,12 +66017,12 @@ def _baiga_section_open_for(user_id, profile=None):
         return False
 
 
-# ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
+# ── Раздел «Оплата счетов» (задачи #179 и #381: ТЗ «Закуп и оплата») ──
 # Тот же приём, что у вики, обращений и посылок. Периметр на время выката —
-# один человек (payments/access.py), поэтому QR-гейта здесь нет: раздел открыт
-# только владельцу, а участники ролей процесса раздаются внутри раздела.
+# поимённый список (payments/access.py), поэтому QR-гейта здесь нет: раздел
+# открыт только названным, а участники ролей процесса раздаются внутри раздела.
 #
-# Telegram-уведомления «наступил ваш шаг» уходят тем же отправителем, что у
+# Telegram-уведомления о новой задаче уходят тем же отправителем, что у
 # задач; ссылка ведёт на ?view=payments&request=<id> того же адреса, куда ведут
 # ссылки из задач (TASK_WEB_APP_BASE_URL). Файлы заявок — счета, КП, платёжки —
 # лежат в бакете вложений задач (свой env GOOGLE_CLOUD_STORAGE_BUCKET_PAYMENTS
@@ -66051,6 +66051,39 @@ try:
     logging.info("Раздел «Оплата счетов»: Blueprint подключён на /api/payments")
 except Exception:
     logging.exception("Раздел «Оплата счетов»: Blueprint НЕ подключён")
+
+
+def _payments_section_open_for(user_id):
+    """Открыт ли человеку раздел «Оплата счетов» — то же правило, что у его ручек."""
+    try:
+        from payments import access as payments_access
+        return bool(payments_access.can_open_section({'user_id': user_id}))
+    except Exception:
+        logging.exception("Оплата счетов: не удалось определить доступ для %s", user_id)
+        return False
+
+
+def payments_deadline_reminders_job():
+    """Напоминания о приближении срока оплаты и о просрочке (ТЗ «Закуп и оплата», п. 17).
+
+    Раз в сутки утром: строка в колокол тому, у кого заявка сейчас, и инициатору.
+    Одно напоминание на срок — повторный прогон ничего не дублирует.
+    """
+    try:
+        from payments import flow as payments_flow
+
+        with db._get_cursor() as cursor:
+            payments_flow.remind_deadlines(cursor, base_url=TASK_WEB_APP_BASE_URL)
+    except Exception:
+        logging.exception("Оплата счетов: напоминания о сроках не отработали")
+
+
+async def payments_deadline_reminders_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, payments_deadline_reminders_job)
+    except Exception:
+        logging.exception("payments deadline reminders failed")
 
 
 def payments_fixed_generation_job():
@@ -66812,6 +66845,10 @@ def _notifications_viewer_context(requester_id, requester):
     checkpoints_scope['is_manager'] = bool(_can_manage_checkpoints(requester_id, requester))
 
     hidden_sources = () if can_see_tasks else ('tasks',)
+    # «Оплата счетов» открыта поимённо: кому раздел не открыт, тому колокол о
+    # нём молчит — уведомление звало бы туда, куда человека не пустят.
+    if not _payments_section_open_for(requester_id):
+        hidden_sources += ('payments',)
     # Личный набор разделов: источники, которые зовут только в скрытые разделы,
     # молчат — иначе бейдж висел бы над уведомлением, которое некуда открыть.
     personal_views = _personal_views_for(requester_id, role)
@@ -70073,6 +70110,16 @@ if __name__ == '__main__':
         payments_fixed_generation_async,
         CronTrigger(hour=6, minute=5, timezone=ZoneInfo('Asia/Almaty')),
         id='payments_fixed_generation_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Оплата счетов»: напоминания о сроке и просрочке — к началу рабочего дня.
+    scheduler.add_job(
+        payments_deadline_reminders_async,
+        CronTrigger(hour=9, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='payments_deadline_reminders_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

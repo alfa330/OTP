@@ -33,7 +33,10 @@ from datetime import datetime, time as day_time, timedelta
 #
 # «Вопросы операторов» — сразу за задачами: на той стороне оператор, которому
 # помощник не ответил, и ответ ему нужен сейчас, а не к дедлайну.
-SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests',
+#
+# «Оплата счетов» — сразу за задачами: это те же «сделайте к сроку» (согласовать,
+# оплатить, приложить чек), только из процесса закупа.
+SOURCES = ('wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'shift_requests',
            'crm', 'complaints', 'training_plans', 'lms', 'surveys', 'events', 'four_you',
            'birthdays')
 
@@ -47,6 +50,7 @@ SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests
 SOURCE_VIEWS = {
     'wiki_ack': ('wiki',),
     'tasks': ('tasks',),
+    'payments': ('payments',),
     'wiki_questions': ('wiki',),
     'checkpoints': ('evaluation', 'call_evaluation'),
     'shift_requests': ('work_schedules',),
@@ -63,7 +67,9 @@ SOURCE_VIEWS = {
 # Разделы со своим кругом доступа: личный набор их в меню не прячет (гард
 # «Этап 10» в App.jsx пропускает их своим предикатом раньше набора), поэтому и
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints'})
+# «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
+# набор, а _notifications_viewer_context: тому, кто в раздел не входит.
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments'})
 
 
 def sources_outside_views(allowed_views):
@@ -611,6 +617,31 @@ def training_plans(cursor, viewer, limit):
     return total, items
 
 
+def payments(cursor, viewer, limit):
+    """«Оплата счетов»: уведомления процесса закупа и оплаты (ТЗ, п. 17).
+
+    Строки лежат готовыми в payment_notifications — их пишет сам процесс в
+    момент события (payments/flow.py), поэтому здесь нет ни правил, ни границ
+    доступа: уведомление адресное. Сначала идёт то, что ждёт действия человека
+    (новая задача, чек, закрывающие документы), потом сведения (согласовано,
+    оплачено, срок). «Ждёт действия» просмотром не гасится — только сделанным
+    делом; сведения гаснут, когда человек открыл заявку.
+    """
+    from payments import notices
+
+    total, rows = notices.bell(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'payments',
+        'id': row['id'],
+        'title': row['title'],
+        'body': row['body'] or '',
+        'at': _iso(row['created_at']),
+        'view': 'payments',
+        'target': row['request_id'],
+        'tone': 'warning' if row['tone'] == 'warning' else 'default',
+    } for row in rows]
+
+
 def _complaint_author_items(cursor, viewer, limit):
     """Ответ для водителя и вопрос группы по своим жалобам — для источника crm.
 
@@ -1013,6 +1044,7 @@ def wiki_questions(cursor, viewer, limit):
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
+    'payments': payments,
     'wiki_questions': wiki_questions,
     'checkpoints': checkpoints,
     'shift_requests': shift_requests,

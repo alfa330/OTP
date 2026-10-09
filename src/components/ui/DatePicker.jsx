@@ -213,6 +213,7 @@ export default function IosDatePicker({
         <div
             ref={panelRef}
             role="dialog"
+            className="motion-safe:animate-popover-in"
             style={{
                 position: 'fixed',
                 left: coords.left,
