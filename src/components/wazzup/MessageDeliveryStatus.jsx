@@ -15,12 +15,12 @@ const STATUSES = {
     unknown: { Icon: AlertCircle, label: 'Отправка не подтверждена', color: 'text-amber-600' },
 };
 
-export default function MessageDeliveryStatus({ status }) {
+export default function MessageDeliveryStatus({ status, size = 16 }) {
     const item = STATUSES[status];
     if (!item) return null;
     const { Icon, label, color } = item;
     // data-status — тема чатов красит «прочитано» под цвет своего пузыря (chatThemes.css).
     return <span role="img" aria-label={label} title={label} data-status={status} className={`inline-flex items-center ${color}`}>
-        <Icon size={16} strokeWidth={2} aria-hidden="true" />
+        <Icon size={size} strokeWidth={2} aria-hidden="true" />
     </span>;
 }

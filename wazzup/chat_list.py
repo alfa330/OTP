@@ -10,7 +10,22 @@
 
 ITEM_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone',
                'lastMessageAt', 'lastMessageText', 'lastMessageIsEcho',
-               'messagesCount', 'inboundCount', 'outboundCount', 'unreadCount')
+               'messagesCount', 'inboundCount', 'outboundCount', 'unreadCount',
+               'lastMessageId', 'lastMessageStatus')
+
+# Последнее сообщение чата — тем же правилом, что и превью в сводке
+# (database._refresh_wazzup_chat_tx): последнее неудалённое по времени. Его id
+# и статус дают галочки в строке списка, а id — сопоставление с живыми
+# статусами доставки. Скалярные подзапросы считаются после LIMIT — только для
+# строк страницы, по индексу (channel_id, chat_id, dt).
+LAST_MESSAGE_SQL = ('(SELECT x.{column} FROM wazzup_messages x WHERE x.channel_id = {alias}.channel_id'
+                    ' AND x.chat_id = {alias}.chat_id AND NOT x.is_deleted'
+                    ' ORDER BY x.dt DESC, x.message_id DESC LIMIT 1)')
+
+
+def last_message_columns(alias):
+    return ', '.join(LAST_MESSAGE_SQL.format(column=column, alias=alias)
+                     for column in ('message_id', 'status'))
 
 
 def escape_like(value):
@@ -45,7 +60,8 @@ def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0):
     page = (f"""
         SELECT c.channel_id, c.chat_id, c.chat_type, c.contact_name, c.contact_phone,
                c.last_message_at, c.last_message_text, c.last_message_is_echo,
-               c.messages_count, c.inbound_count, c.outbound_count, {waiting}
+               c.messages_count, c.inbound_count, c.outbound_count, {waiting},
+               {last_message_columns('c')}
           FROM wazzup_chats c{join}
          WHERE {condition}
          ORDER BY {order}

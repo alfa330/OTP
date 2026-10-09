@@ -1,6 +1,9 @@
 // Keep loaded history while applying webhook updates, including edits/deletions.
 const STATUS_ORDER = { queued: 0, pending: 0, sent: 1, error: 2, delivered: 3, read: 4 };
 
+// Статус доставки не откатывается: опоздавшее «доставлено» не гасит «прочитано».
+export const laterStatus = (current, next) => ((STATUS_ORDER[current] ?? -1) > (STATUS_ORDER[next] ?? -1) ? current : next);
+
 export const GLOBAL_CHANNEL_IDS = new Set([
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',

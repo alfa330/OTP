@@ -104,6 +104,9 @@ class RealtimeDeliveryTests(unittest.TestCase):
         self.assertEqual('Test name', chat['contactName'])
         self.assertEqual('70000000000', chat['contactPhone'])
         self.assertEqual(12, chat['messagesCount'])
+        # Галочки строки списка: последнее сообщение чата и его статус. У обоих
+        # сообщений фикстуры одно время — при равенстве решает id, как в запросе.
+        self.assertEqual(('original', 'read'), (chat['lastMessageId'], chat['lastMessageStatus']))
         self.assertEqual(2, len(self.archive.calls), 'One shared hydration query and one history query')
 
     def test_icore_send_reaches_live_and_history_with_the_same_client_id(self):

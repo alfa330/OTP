@@ -21,10 +21,11 @@ T0 = dt.datetime(2026, 10, 9, 8, 0, tzinfo=dt.timezone.utc)
 
 def test_row_maps_to_the_list_item_with_the_waiting_count():
     row = ('ch', '77000000001', 'whatsapp', 'Клиент', '77000000001', T0, 'Здравствуйте',
-           False, 3, 2, 1, 2)
+           False, 3, 2, 1, 2, 'm3', 'inbound')
     item = chat_list_item(row)
     assert item['lastMessageAt'] == '2026-10-09T08:00:00+00:00'
     assert (item['chatId'], item['unreadCount'], item['outboundCount']) == ('77000000001', 2, 1)
+    assert (item['lastMessageId'], item['lastMessageStatus']) == ('m3', 'inbound')
     assert chat_list_item(row[:5] + (None,) + row[6:])['lastMessageAt'] is None
 
 
@@ -84,11 +85,12 @@ def chat(cursor, chat_id, minutes, account='op', channel='ch-a', name='Клие�
                    (account, channel, chat_id, name, chat_id, T0 + dt.timedelta(minutes=minutes)))
 
 
-def message(cursor, chat_id, minutes, echo=False, author=None, channel='ch-a'):
+def message(cursor, chat_id, minutes, echo=False, author=None, channel='ch-a', message_id=None,
+            status=None, deleted=False):
     cursor.execute('''INSERT INTO wazzup_messages(message_id, account, channel_id, chat_id, chat_type, dt,
-            is_echo, author_name, status) VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s)''',
-                   (uuid.uuid4().hex, channel, chat_id, T0 + dt.timedelta(minutes=minutes), echo, author,
-                    'sent' if echo else None))
+            is_echo, author_name, status, is_deleted) VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s,%s)''',
+                   (message_id or uuid.uuid4().hex, channel, chat_id, T0 + dt.timedelta(minutes=minutes), echo,
+                    author, status or ('sent' if echo else None), deleted))
 
 
 def page(cursor, account='op', **filters):
@@ -138,3 +140,23 @@ def test_filters_apply_to_both_queries_and_other_accounts_keep_time_order(pg):
     chat(cursor, '77000000007', 50, account='potok')
     chat(cursor, '77000000008', 60, account='potok')
     assert page(cursor, account='potok') == (2, [('77000000008', 0), ('77000000007', 0)])
+
+
+@needs_pg
+def test_rows_carry_the_last_message_status_by_the_preview_rule(pg):
+    """Галочки строки — у того же сообщения, что и превью: последнее неудалённое."""
+    cursor = pg
+    chat(cursor, '77000000001', 30)
+    message(cursor, '77000000001', 10, message_id='in-1')
+    message(cursor, '77000000001', 20, echo=True, author='Оператор', message_id='out-1', status='read')
+    message(cursor, '77000000001', 25, echo=True, author='Оператор', message_id='out-2', status='delivered',
+            deleted=True)
+    chat(cursor, '77000000002', 5)
+    message(cursor, '77000000002', 5, message_id='in-2', status='inbound')
+    chat(cursor, '77000000003', 1)
+    count, rows = chat_list_queries('op')
+    cursor.execute(*rows)
+    items = {item['chatId']: item for item in map(chat_list_item, cursor.fetchall())}
+    assert (items['77000000001']['lastMessageId'], items['77000000001']['lastMessageStatus']) == ('out-1', 'read')
+    assert (items['77000000002']['lastMessageId'], items['77000000002']['lastMessageStatus']) == ('in-2', 'inbound')
+    assert (items['77000000003']['lastMessageId'], items['77000000003']['lastMessageStatus']) == (None, None)

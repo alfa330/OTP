@@ -58,3 +58,28 @@ test('"waiting only" shows just the top block; loading stays loading; other acco
     assert.equal(orderChatList(loaded, null), loaded);
     assert.equal(waitingCount(waitingOld, null), 0);
 });
+
+test('a later copy of the same row never turns "read" back into "delivered"', async () => {
+    const { mergeChatRow } = await import('../src/components/wazzup/chatListOrder.js');
+    const read = row('77000000001', 30, { lastMessageId: 'm9', lastMessageStatus: 'read' });
+    const stale = { ...read, lastMessageStatus: 'delivered', contactName: 'Новое имя' };
+    const merged = mergeChatRow(read, stale);
+    assert.equal(merged.lastMessageStatus, 'read');
+    assert.equal(merged.contactName, 'Новое имя', 'the rest of the row is still the newer copy');
+    const newMessage = { ...read, lastMessageId: 'm10', lastMessageStatus: 'sent' };
+    assert.equal(mergeChatRow(read, newMessage), newMessage, 'a new last message brings its own status');
+    assert.equal(mergeChatRow(undefined, newMessage), newMessage);
+});
+
+test('delivery events reach only the row whose last message they concern', async () => {
+    const { applyDeliveryToRows } = await import('../src/components/wazzup/chatListOrder.js');
+    const rows = [row('77000000001', 30, { lastMessageId: 'm1', lastMessageStatus: 'sent' }),
+        row('77000000002', 20, { lastMessageId: 'm2', lastMessageStatus: 'delivered' })];
+    const event = (chatId, messageId, status) => ({ channelId: 'ch-a', chatId, messageId, status, statusOnly: true });
+    const next = applyDeliveryToRows(rows, [event('77000000001', 'm1', 'delivered'), event('77000000001', 'm1', 'read'),
+        event('77000000002', 'm-old', 'read'), { ...event('77000000002', 'm2', 'read'), statusOnly: false }]);
+    assert.deepEqual(next.map((item) => item.lastMessageStatus), ['read', 'delivered']);
+    assert.equal(next[1], rows[1], 'untouched rows keep their identity');
+    assert.equal(applyDeliveryToRows(rows, [event('77000000002', 'm2', 'sent')]), rows, 'a late "sent" changes nothing');
+    assert.equal(applyDeliveryToRows(null, [event('77000000001', 'm1', 'read')]), null);
+});

@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime
 
+from .chat_list import last_message_columns
 from .notes import note_item
 
 CHANNEL = 'wazzup_pilot_events'
@@ -25,7 +26,8 @@ _MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
 _CHAT_OFFSET = len(_MESSAGE_FIELDS)
 _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone',
                 'lastMessageAt', 'lastMessageText', 'lastMessageIsEcho',
-                'messagesCount', 'inboundCount', 'outboundCount')
+                'messagesCount', 'inboundCount', 'outboundCount',
+                'lastMessageId', 'lastMessageStatus')
 
 _HYDRATE_SQL = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
@@ -34,7 +36,8 @@ _HYDRATE_SQL = """
            CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,o.request_id,
            c.channel_id,c.chat_id,c.chat_type,c.contact_name,c.contact_phone,
            c.last_message_at,c.last_message_text,c.last_message_is_echo,
-           c.messages_count,c.inbound_count,c.outbound_count
+           c.messages_count,c.inbound_count,c.outbound_count,
+           {last_message}
       FROM wazzup_messages m
       LEFT JOIN wazzup_pilot_outbox o
         ON o.message_id=m.message_id AND o.account=m.account
@@ -43,7 +46,7 @@ _HYDRATE_SQL = """
       LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
         AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
      WHERE m.account='op' AND m.message_id=ANY(%s)
-"""
+""".replace('{last_message}', last_message_columns('m'))
 
 _HYDRATE_NOTES_SQL = """
     SELECT id,created_at,text,author_name,author_id,channel_id,chat_id

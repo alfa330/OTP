@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
-    ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
+    ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
 } from 'lucide-react';
 import {
@@ -24,7 +24,7 @@ import {
     takeBackMessage, useChatOutbox, useOutbox,
 } from './sendQueue';
 import { chatListDraft, useChatDrafts } from './chatDrafts';
-import { orderChatList, waitingCount } from './chatListOrder';
+import { applyDeliveryToRows, mergeChatRow, orderChatList, waitingCount } from './chatListOrder';
 import ChatThemeMenu from './ChatThemeMenu';
 import { chatThemeStyle, useChatTheme, useNightMenus, usePortalDark } from './chatThemes';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
@@ -1182,7 +1182,7 @@ function ChatsWorkspace(props) {
                 const chat = event.chat;
                 const query = q.trim().toLowerCase();
                 if ((!channel || chat.channelId === channel) && (!query || [chat.contactName, chat.contactPhone, chat.chatId]
-                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, chat);
+                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, mergeChatRow(responseItems.get(key), chat));
                 else responseItems.delete(key);
             }
             r.data.items = [...responseItems.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
@@ -1194,7 +1194,10 @@ function ChatsWorkspace(props) {
             setChats((prev) => {
                 if (!silent && reset) return r.data.items || [];
                 const byId = new Map((prev || []).map((chat) => [pilotChatKey(accountRef.current, chat), chat]));
-                (r.data.items || []).forEach((chat) => byId.set(pilotChatKey(accountRef.current, chat), chat));
+                (r.data.items || []).forEach((chat) => {
+                    const key = pilotChatKey(accountRef.current, chat);
+                    byId.set(key, mergeChatRow(byId.get(key), chat));
+                });
                 return [...byId.values()].sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
             });
             return r.data.items || [];
@@ -1329,12 +1332,15 @@ function ChatsWorkspace(props) {
                     const q = appliedSearch.trim().toLowerCase();
                     const matches = (!channelId || chat.channelId === channelId)
                         && (!q || [chat.contactName, chat.contactPhone, chat.chatId].some((s) => String(s || '').toLowerCase().includes(q)));
-                    if (matches) byId.set(pilotChatKey('op', chat), chat);
+                    if (matches) byId.set(pilotChatKey('op', chat), mergeChatRow(byId.get(pilotChatKey('op', chat)), chat));
                     else byId.delete(pilotChatKey('op', chat));
                 }
                 return [...byId.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
             });
         }
+        // Доставлено/прочитано последнего сообщения — сразу в галочки строки списка.
+        const deliveries = relevant.filter((event) => event.statusOnly === true && event.status);
+        if (deliveries.length) setChats((prev) => applyDeliveryToRows(prev, deliveries));
         return {
             notes: noteChanges.some((event) => !event.note),
             thread: current.some((event) => !event.statusOnly && (!event.message || snapshot.thread === null)),
@@ -1838,24 +1844,20 @@ function ChatsWorkspace(props) {
                                                     <span className="truncate" data-testid="wazzup-chat-draft">
                                                         <ChatMessageText text={draftText} links={false} />
                                                     </span>
-                                                </> : <>
-                                                    {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
-                                                    <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>
-                                                </>}
-                                                {draftText &&
-                                                    <FilePen size={13} className="ml-auto shrink-0 text-slate-400"
-                                                        role="img" aria-label="Черновик" />}
-                                                {waitingReplies > 0 &&
-                                                    <span className={`${draftText ? '' : 'ml-auto '}rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white`}
-                                                        title="Ждут ответа" data-testid="wazzup-chat-waiting">
-                                                        {waitingReplies}
-                                                    </span>}
+                                                </> : <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>}
+                                                {/* Справа под временем, как в мессенджерах: черновик, иначе
+                                                    галочки своего последнего сообщения; счётчик ждущих — следом. */}
+                                                <span className="ml-auto flex shrink-0 items-center gap-1 pl-1">
+                                                    {draftText
+                                                        ? <FilePen size={13} className="text-slate-400" role="img" aria-label="Черновик" />
+                                                        : chat.lastMessageIsEcho && <MessageDeliveryStatus status={chat.lastMessageStatus} size={15} />}
+                                                    {waitingReplies > 0 &&
+                                                        <span className="rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white"
+                                                            title="Ждут ответа" data-testid="wazzup-chat-waiting">
+                                                            {waitingReplies}
+                                                        </span>}
+                                                </span>
                                             </div>
-                                            {!channelId && (
-                                                <div className="truncate text-[10px] text-slate-400">
-                                                    {channelName[chat.channelId] || chat.channelId}
-                                                </div>
-                                            )}
                                         </div>
                                     </div>
                                 </button>

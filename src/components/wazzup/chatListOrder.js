@@ -1,4 +1,4 @@
-import { pilotChatKey } from './chatPilot.js';
+import { laterStatus, pilotChatKey } from './chatPilot.js';
 
 /* Порядок списка чатов: где клиент ждёт ответа команды — вверху, дальше — по
  * времени последнего сообщения (решение владельца 09.10.2026). Ответ в соседнем
@@ -26,6 +26,37 @@ export function waitingCount(chat, unread) {
     const live = unread.items?.[pilotChatKey('op', chat)];
     if (live) return live.unreadCount || 0;
     return unread.ready ? 0 : chat.unreadCount || 0;
+}
+
+/* Галочки в строке — статус последнего сообщения чата (lastMessageId/
+   lastMessageStatus, wazzup/chat_list.py). Строка приходит и страницей списка,
+   и сводкой из живого потока, а статус — ещё и отдельными событиями доставки;
+   пришедшая позже копия той же строки не откатывает «прочитано» к «доставлено». */
+export function mergeChatRow(previous, next) {
+    if (!previous || !next || previous.lastMessageId !== next.lastMessageId) return next;
+    const status = laterStatus(previous.lastMessageStatus, next.lastMessageStatus);
+    return status === next.lastMessageStatus ? next : { ...next, lastMessageStatus: status };
+}
+
+// События доставки (statusOnly) — к строкам, чьё последнее сообщение они касаются.
+export function applyDeliveryToRows(rows, events) {
+    if (!rows?.length) return rows;
+    const latest = new Map();
+    for (const event of events || []) {
+        if (event?.statusOnly !== true || !event.status || !event.messageId) continue;
+        const key = `${pilotChatKey('op', event)}:${event.messageId}`;
+        latest.set(key, laterStatus(latest.get(key), event.status));
+    }
+    if (!latest.size) return rows;
+    let changed = false;
+    const next = rows.map((row) => {
+        const status = latest.get(`${pilotChatKey('op', row)}:${row.lastMessageId}`);
+        const merged = status ? laterStatus(row.lastMessageStatus, status) : row.lastMessageStatus;
+        if (merged === row.lastMessageStatus) return row;
+        changed = true;
+        return { ...row, lastMessageStatus: merged };
+    });
+    return changed ? next : rows;
 }
 
 /* chats — загруженные строки (по времени), null — список ещё грузится.
