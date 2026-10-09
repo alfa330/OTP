@@ -18,7 +18,7 @@ class Archive:
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
                 author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
             );
-            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT);
+            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT, request_id TEXT);
             CREATE TABLE wazzup_chats (
                 account TEXT, channel_id TEXT, chat_id TEXT, chat_type TEXT, contact_name TEXT,
                 contact_phone TEXT, last_message_at TEXT, last_message_text TEXT,
@@ -29,14 +29,14 @@ class Archive:
 
     def add(self, message_id, *, account='op', status='read', text='Complete message', author=None,
             channel='channel', chat='chat', deleted=False, reply_to=None,
-            provider_author='Provider author'):
+            provider_author='Provider author', request_id=None):
         self.connection.execute('INSERT INTO wazzup_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (account, channel, chat, message_id, '2026-10-06T10:00:00+00:00', True, 'text', text,
              None, provider_author, None, status, False, deleted, None))
-        if author or reply_to:
+        if author or reply_to or request_id:
             self.connection.execute('''INSERT INTO wazzup_pilot_outbox
-                (account,message_id,author_name,reply_to_message_id) VALUES (?,?,?,?)''',
-                (account, message_id, author, reply_to))
+                (account,message_id,author_name,reply_to_message_id,request_id) VALUES (?,?,?,?,?)''',
+                (account, message_id, author, reply_to, request_id))
 
     def summary(self):
         self.connection.execute('INSERT INTO wazzup_chats VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -105,6 +105,20 @@ class RealtimeDeliveryTests(unittest.TestCase):
         self.assertEqual('70000000000', chat['contactPhone'])
         self.assertEqual(12, chat['messagesCount'])
         self.assertEqual(2, len(self.archive.calls), 'One shared hydration query and one history query')
+
+    def test_icore_send_reaches_live_and_history_with_the_same_client_id(self):
+        # The sender's optimistic bubble is matched by this id even when the
+        # archive row arrives over SSE before the send request returns.
+        self.archive.add('accepted', text='Sent from iCORE', author='Operator', request_id='client-uuid')
+        self.archive.add('vendor-ui', text='Sent from the Wazzup window')
+        self.archive.summary()
+
+        message, chat = self.quote_from_delivery_and_history('accepted')
+        foreign, _ = self.quote_from_delivery_and_history('vendor-ui')
+
+        self.assertEqual('client-uuid', message['clientMessageId'])
+        self.assertIsNone(foreign['clientMessageId'])
+        self.assertEqual('Test name', chat['contactName'], 'chat summary offset follows the new field')
 
     def test_reply_quote_never_reads_original_from_another_account_channel_or_chat(self):
         for label, scope in (

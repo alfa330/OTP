@@ -25,11 +25,16 @@ function harness(overrides = {}) {
         const id = ++timerId; timers.set(id, { fn, at: now + delay, interval, delay }); return id;
     };
     const clear = (id) => timers.delete(id);
-    const fetch = async (_, { signal }) => {
+    const fetch = async (url, { signal }) => {
         let pending;
         const frames = [];
-        const stream = { signal, emit(frame) {
+        const stream = { url, signal, emit(frame) {
             const chunk = { done: false, value: new TextEncoder().encode(frame) };
+            if (pending) { const resolve = pending.resolve; pending = null; resolve(chunk); }
+            else frames.push(chunk);
+        }, end() {
+            // The server closes the response itself (its ~2 minute re-auth cycle).
+            const chunk = { done: true, value: undefined };
             if (pending) { const resolve = pending.resolve; pending = null; resolve(chunk); }
             else frames.push(chunk);
         } };
@@ -71,10 +76,11 @@ function harness(overrides = {}) {
     };
     return { calls, streams, timers, options, flush,
         get output() { return output; },
-        async emit(event, data = {}) {
-            streams.at(-1).emit(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        async emit(event, data = {}, id = null) {
+            streams.at(-1).emit(`${id === null ? '' : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             await flush();
         },
+        async end() { streams.at(-1).end(); await flush(); },
         async tick(ms) {
             const end = now + ms;
             for (;;) {
@@ -190,6 +196,92 @@ test('DB outage backs off; a late rejected refresh cannot schedule work after un
     await h.tick(5000); assert.equal(attempts, 2);
     await h.close(); reject(new Error('late failure')); await h.flush();
     assert.equal(h.timers.size, 0);
+});
+
+test('a planned server close reconnects at once from the last frame, quietly and without re-reading panes', async () => {
+    const applied = [];
+    const h = harness({ onChanges: (changes) => { applied.push(...changes); return { thread: false, list: false }; } });
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 5, resumed: false });
+    await h.tick(1000);
+    const reconciled = { ...h.calls };
+    assert.deepEqual([reconciled.thread, reconciled.list], [1, 1], 'the first connection reconciles');
+    await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm1', statusOnly: true, status: 'sent' }] }, 7);
+    for (let beat = 0; beat < 6; beat += 1) {   // the server's 20 s heartbeats until its 120 s close
+        await h.tick(19000);
+        h.streams.at(-1).emit(': heartbeat\n\n'); await h.flush();
+    }
+    assert.equal(h.streams.length, 1);
+    const states = [];
+    await h.end();
+    states.push(h.output.connection);
+    await h.tick(0);
+    states.push(h.output.connection);
+    assert.equal(h.streams.length, 2, 'reconnects immediately');
+    assert.match(h.streams[1].url, /[?&]epoch=process-1&after=7$/);
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 7, resumed: true });
+    states.push(h.output.connection);
+    await h.tick(1500);
+    assert.deepEqual(states, ['live', 'live', 'live'], 'no "Восстанавливаем связь…" for a planned close');
+    assert.deepEqual(h.calls, { ...reconciled, capability: reconciled.capability + 1 },
+        'only the auth/capability check; the gap was replayed by the server');
+    await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm2', statusOnly: true, status: 'read' }] }, 9);
+    assert.deepEqual(applied.map((event) => event.messageId), ['m1', 'm2']);
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('a cursor the server no longer knows reconciles; a stream that dies young backs off', async () => {
+    const h = harness();
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 3, resumed: false });
+    await h.tick(1000);
+    await h.end();
+    assert.equal(h.output.connection, 'reconnecting', 'an early close is a fault, not a plan');
+    await h.tick(500);
+    assert.equal(h.streams.length, 1, 'no instant reconnect loop');
+    await h.tick(1000);
+    assert.equal(h.streams.length, 2);
+    assert.match(h.streams[1].url, /epoch=process-1&after=3$/);
+    // A deploy restarted the server: another epoch, the gap is unknown.
+    await h.emit('connected', { ready: true, epoch: 'process-2', seq: 0, resumed: false });
+    await h.tick(1000);
+    assert.equal(h.calls.thread, 2); assert.equal(h.calls.list, 2);
+    await h.visible(false); await h.visible(true);
+    assert.match(h.streams[2].url, /epoch=process-2&after=0$/, 'a hidden tab resumes too');
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('a re-read asked for but not finished before the tab hides is not skipped by the resumed stream', async () => {
+    const h = harness();
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 4, resumed: false });
+    await h.tick(100);                     // reconcile scheduled: thread 350 ms, list 1000 ms
+    await h.visible(false);
+    assert.deepEqual([h.calls.thread, h.calls.list], [0, 0]);
+    await h.visible(true);
+    assert.doesNotMatch(h.streams.at(-1).url, /epoch=/, 'the next stream starts fresh');
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 9, resumed: false });
+    await h.tick(1000);
+    assert.deepEqual([h.calls.thread, h.calls.list], [1, 1]);
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('after a recovered fault the backoff starts small again', async () => {
+    const h = harness();
+    await h.flush();
+    for (let fault = 0; fault < 4; fault += 1) {   // four young streams in a row: 1, 2, 4, 8 s
+        const count = h.streams.length;
+        await h.end();
+        while (h.streams.length === count) await h.tick(100);
+    }
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 1, resumed: false });
+    await h.tick(1000);
+    const before = h.streams.length;
+    await h.end();                                  // a young stream again: a fault, not a plan
+    assert.equal(h.output.connection, 'reconnecting');
+    await h.tick(1400);
+    assert.equal(h.streams.length, before + 1, 'reconnects within ~1 s, not after 15 s');
+    await h.close(); assert.equal(h.timers.size, 0);
 });
 
 test('stalled stream is aborted and reconnected after heartbeat deadline', async () => {

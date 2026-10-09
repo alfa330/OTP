@@ -106,7 +106,7 @@ class RefreshDatabase:
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
                 author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
             );
-            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT);
+            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT, request_id TEXT);
         ''')
 
     def get_user(self, **_):
@@ -383,6 +383,195 @@ class PilotRoutesTests(unittest.TestCase):
         self.assertEqual(503, response.status_code)
         self.assertEqual(pilot.STREAM_LIMIT, self.broker.streams)
 
+    @staticmethod
+    def frame_parts(frame):
+        lines = frame.decode().strip().split('\n')
+        fields = dict(line.split(': ', 1) for line in lines if not line.startswith(':'))
+        return fields.get('id'), fields.get('event'), json.loads(fields.get('data', 'null'))
+
+    def test_reconnect_resumes_after_the_last_seen_frame_and_loses_nothing(self):
+        response = self.client.get('/api/wazzup/pilot/stream', buffered=False)
+        frames = iter(response.response)
+        _, event, connected = self.frame_parts(next(frames))
+        self.assertEqual(('connected', False), (event, connected['resumed']))
+        seen = dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='seen', status='sent')
+        self.broker.publish(seen)
+        last_id, event, payload = self.frame_parts(next(frames))
+        self.assertEqual(('change', [seen]), (event, payload['changes']))
+        response.close()
+        # Published while the browser was reconnecting (the 120 s re-auth cycle).
+        missed = [dict(seen, messageId='missed', status='pending'), dict(seen, status='delivered')]
+        for change in missed:
+            self.broker.publish(change)
+        response = self.client.get(f'/api/wazzup/pilot/stream?epoch={connected["epoch"]}&after={last_id}',
+                                   buffered=False)
+        frames = iter(response.response)
+        _, event, resumed = self.frame_parts(next(frames))
+        self.assertEqual(('connected', True, int(last_id)), (event, resumed['resumed'], resumed['seq']))
+        frame_id, event, payload = self.frame_parts(next(frames))
+        self.assertEqual('change', event)
+        self.assertEqual({'missed': 'pending', 'seen': 'delivered'},
+                         {change['messageId']: change['status'] for change in payload['changes']})
+        self.assertEqual(self.broker.current_seq(), int(frame_id))
+        response.close()
+        self.assertEqual(0, self.broker.streams)
+
+    def test_cursor_of_another_process_or_beyond_the_buffer_reconciles(self):
+        broker = EventBroker(capacity=2)
+        app, _, _, _ = fixture(broker=broker)
+        client = app.test_client()
+        for number in range(4):
+            broker.publish({'messageId': str(number)})
+        for query, label in ((f'epoch=old-process&after=3', 'restarted process'),
+                             (f'epoch={broker.epoch}&after=1', 'cursor older than the buffer'),
+                             (f'epoch={broker.epoch}&after=9', 'cursor from the future'),
+                             (f'epoch={broker.epoch}&after=x', 'malformed cursor'),
+                             ('', 'first connection')):
+            with self.subTest(label):
+                response = client.get('/api/wazzup/pilot/stream?' + query, buffered=False)
+                _, event, connected = self.frame_parts(next(iter(response.response)))
+                self.assertEqual(('connected', False, 4), (event, connected['resumed'], connected['seq']))
+                response.close()
+        response = client.get(f'/api/wazzup/pilot/stream?epoch={broker.epoch}&after=2', buffered=False)
+        _, _, connected = self.frame_parts(next(iter(response.response)))
+        self.assertTrue(connected['resumed'], 'the oldest buffered point is still resumable')
+        response.close()
+
+    def test_reload_and_unavailable_frames_carry_the_cursor_too(self):
+        response = self.client.get('/api/wazzup/pilot/stream', buffered=False)
+        frames = iter(response.response)
+        next(frames)
+        self.broker.set_ready(True)
+        frame_id, event, _ = self.frame_parts(next(frames))
+        self.assertEqual(('reload', self.broker.current_seq()), (event, int(frame_id)))
+        self.broker.set_ready(False)
+        frame_id, event, _ = self.frame_parts(next(frames))
+        self.assertEqual(('unavailable', self.broker.current_seq()), (event, int(frame_id)))
+        response.close()
+
+    def test_change_frames_keep_cyrillic_readable_and_compact(self):
+        response = self.client.get('/api/wazzup/pilot/stream', buffered=False)
+        frames = iter(response.response)
+        next(frames)
+        self.broker.publish(dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='m1',
+                                 message={'messageId': 'm1', 'text': 'Здравствуйте'}))
+        raw = next(frames)
+        self.assertIn('Здравствуйте'.encode('utf-8'), raw)
+        self.assertNotIn(b'\\u0417', raw)
+        response.close()
+
+    def test_a_too_long_gap_is_reconciled_instead_of_replayed_as_one_huge_frame(self):
+        from wazzup import realtime
+        broker = EventBroker(capacity=realtime.RESUME_MAX_EVENTS + 50)
+        for number in range(realtime.RESUME_MAX_EVENTS + 10):
+            broker.publish({'messageId': str(number)})
+        self.assertEqual((broker.seq, False), broker.resume_from(broker.epoch, broker.seq - realtime.RESUME_MAX_EVENTS - 1))
+        self.assertEqual((broker.seq - realtime.RESUME_MAX_EVENTS, True),
+                         broker.resume_from(broker.epoch, broker.seq - realtime.RESUME_MAX_EVENTS))
+
+    def test_every_process_has_its_own_epoch(self):
+        self.assertNotEqual(EventBroker().epoch, EventBroker().epoch)
+
+    def test_missing_send_key_is_a_definite_failure_not_a_lost_answer(self):
+        with patch.object(pilot.accounts, 'api_key', return_value=''):
+            response = self.client.post('/api/wazzup/pilot/send', json=self.body)
+        self.assertEqual(503, response.status_code)
+        self.assertEqual(('failed', 'SEND_KEY_MISSING'), (response.get_json()['state'], response.get_json()['code']))
+        self.transport.post.assert_not_called()
+        self.assertEqual({}, self.db.outbox)
+
+    def test_send_reports_its_stages_in_server_timing(self):
+        timings = []
+
+        @self.app.after_request
+        def capture(response):
+            from flask import g
+            timings.extend(name for name, _ in getattr(g, 'server_timings', []))
+            return response
+
+        self.assertEqual(201, self.client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        self.assertEqual(['wz-access', 'wz-checks', 'wz-post', 'wz-store'], timings)
+
+    def test_default_transport_is_the_shared_keep_alive_pool(self):
+        response = Mock(status_code=201)
+        response.json.return_value = {'messageId': 'pooled-message'}
+        with patch.object(pilot.wazzup_transport, 'post', return_value=response) as post:
+            app = Flask(__name__)
+            app.register_blueprint(pilot.build_pilot_blueprint(
+                db=MemoryDatabase(), require_api_key=lambda fn: fn, guard=lambda: (42, None),
+                channels=lambda account: [{'channelId': CHANNEL, 'state': 'active', 'transport': 'whatsapp'}],
+                preflight=lambda: ('', 204), event_broker=EventBroker()))
+            sent = app.test_client().post('/api/wazzup/pilot/send', json=self.body)
+        self.assertEqual(201, sent.status_code)
+        post.assert_called_once()
+        self.assertEqual('https://api.wazzup24.com/v3/message', post.call_args.args[0])
+
+
+class KeepAliveTransportTests(unittest.TestCase):
+    def test_reuses_one_pool_while_warm_and_replaces_it_after_idle(self):
+        sessions = []
+
+        def factory():
+            sessions.append(Mock())
+            return sessions[-1]
+
+        transport = pilot.KeepAliveTransport(idle_seconds=45, factory=factory)
+        with patch.object(pilot.time, 'monotonic', side_effect=[100.0, 130.0, 176.0, 177.0]):
+            for _ in range(4):
+                transport.post('https://api.wazzup24.com/v3/message', json={}, timeout=(5, 20))
+        # 100 → 130 reuses (30 s idle); 130 → 176 exceeds 45 s: a new pool, reused at 177.
+        self.assertEqual(2, len(sessions))
+        self.assertEqual(2, sessions[0].post.call_count)
+        self.assertEqual(2, sessions[1].post.call_count)
+        sessions[0].close.assert_not_called()
+
+    def test_every_use_keeps_the_pool_warm(self):
+        sessions = []
+
+        def factory():
+            sessions.append(Mock())
+            return sessions[-1]
+
+        transport = pilot.KeepAliveTransport(idle_seconds=45, factory=factory)
+        with patch.object(pilot.time, 'monotonic', side_effect=[100.0, 140.0, 180.0, 220.0]):
+            for _ in range(4):
+                transport.post('https://api.wazzup24.com/v3/message', json={}, timeout=(5, 20))
+        # 40 s between sends, 120 s in all: still one pool, because each send refreshes it.
+        self.assertEqual(1, len(sessions))
+        self.assertEqual(4, sessions[0].post.call_count)
+
+    def test_vendor_idle_limit_is_above_the_reuse_window(self):
+        # Measured 09.10.2026: the vendor still answered after 65 s idle and closed at 90 s.
+        self.assertLess(pilot.WAZZUP_IDLE_REUSE_SECONDS, 65)
+
+    def test_the_pool_keeps_one_idle_connection_so_none_ages_unseen(self):
+        # urllib3 hands pooled connections out LIFO: with more than one slot a
+        # buried connection could be reused long after the pool's last use.
+        adapter = pilot.wazzup_session().get_adapter(pilot.WAZZUP_API_ORIGIN + '/v3/message')
+        self.assertEqual(1, adapter._pool_maxsize)
+        self.assertIs(pilot.wazzup_session, pilot.KeepAliveTransport().__dict__['_factory'])
+
+    def test_only_the_expected_one_slot_warning_is_silenced(self):
+        import logging
+        quiet = pilot._OneSlotPoolFilter()
+
+        def record(host):
+            return logging.LogRecord('urllib3.connectionpool', logging.WARNING, __file__, 1,
+                                     'Connection pool is full, discarding connection: %s. Connection pool size: %s',
+                                     (host, 1), None)
+
+        self.assertFalse(quiet.filter(record('api.wazzup24.com')))
+        self.assertTrue(quiet.filter(record('example.org')))
+        self.assertIn(quiet.__class__, {type(f) for f in logging.getLogger('urllib3.connectionpool').filters})
+
+
+class MessageItemTests(unittest.TestCase):
+    def test_client_message_id_is_serialised_for_json(self):
+        request_id = uuid.uuid4()
+        item = pilot.message_item(['m'] + [None] * 14 + [request_id])
+        self.assertEqual(str(request_id), item['clientMessageId'])
+        self.assertEqual(len(pilot.MESSAGE_FIELDS), len(pilot.message_item([None] * 16)))
+
 
 class EventBrokerTests(unittest.TestCase):
     def test_idle_stream_does_not_request_reload(self):
@@ -475,6 +664,17 @@ class RefreshTests(unittest.TestCase):
                                     json=dict(self.body, messageIds=['m-10'] * 2001))
         self.assertEqual(400, response.status_code)
         self.assertFalse(self.db.statements)
+
+    def test_iCORE_send_carries_its_client_id_only_into_its_own_chat(self):
+        self.db.add(10)
+        self.db.add(11)
+        self.db.add(12, account='potok')
+        self.db.connection.executemany('INSERT INTO wazzup_pilot_outbox VALUES (?,?,?,?,?)', [
+            ('op', 'm-10', 'Оператор', None, 'client-id-10'),
+            ('op', 'm-12', 'Чужой аккаунт', None, 'client-id-12')])
+        items = self.client.post('/api/wazzup/pilot/refresh', json=self.body).get_json()['items']
+        self.assertEqual({'m-10': 'client-id-10', 'm-11': None},
+                         {item['messageId']: item['clientMessageId'] for item in items})
 
 
 if __name__ == '__main__':

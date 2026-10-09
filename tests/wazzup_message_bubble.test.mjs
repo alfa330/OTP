@@ -76,6 +76,41 @@ test('continuing an operator group hides only the author label and aligns the re
     assert.match(continuation, /Ответить на сообщение/);
 });
 
+const buttonsOf = (node, found = []) => {
+    if (!node || typeof node !== 'object') return found;
+    if (node.type === 'button') found.push(node);
+    React.Children.toArray(node.props?.children).forEach((child) => buttonsOf(child, found));
+    return found;
+};
+const label = (button) => React.Children.toArray(button.props.children).join('');
+
+test('a failed or unconfirmed own message offers one fix and one way out under the bubble, wired to the right action', () => {
+    const local = (state, editable) => ({ ...msg, messageId: 'local:x', clientMessageId: 'x', isEcho: true,
+        status: state, local: { state, error: 'Причина от сервера', pinned: false, editable } });
+    for (const [state, editable, expected] of [
+        ['failed', true, { Повторить: 'retry', Изменить: 'edit' }],
+        ['failed', false, { Повторить: 'retry', Убрать: 'discard' }],
+        ['unknown', false, { Проверить: 'retry', Убрать: 'discard' }]]) {
+        const calls = [];
+        const tree = Bubble.type({ msg: local(state, editable), onRetry: (id) => calls.push(['retry', id]),
+            onEdit: (id) => calls.push(['edit', id]), onDiscard: (id) => calls.push(['discard', id]) });
+        const row = find(tree, (node) => node.props?.['data-testid'] === 'wazzup-send-problem');
+        assert.ok(row, `${state}: a problem row`);
+        assert.equal(row.props.role, 'alert');
+        const buttons = buttonsOf(row);
+        assert.deepEqual(buttons.map(label), Object.keys(expected));
+        buttons.forEach((button) => button.props.onClick());
+        assert.deepEqual(calls, Object.values(expected).map((action) => [action, 'x']));
+        assert.match(renderToStaticMarkup(React.createElement(Bubble, { msg: local(state, editable) })), /Причина от сервера/);
+    }
+    for (const state of ['queued', 'sending', 'sent']) {
+        const tree = Bubble.type({ msg: { ...local(state, false), status: 'queued' } });
+        assert.equal(find(tree, (node) => node.props?.['data-testid'] === 'wazzup-send-problem'), null, `${state}: no row`);
+    }
+    const queued = renderToStaticMarkup(React.createElement(Bubble, { msg: { ...local('sending', false), status: 'queued' } }));
+    assert.match(queued, /aria-label="Отправляется"/);
+});
+
 const imageOutput = join(cache, 'wazzup-stable-image.mjs');
 await build({ entryPoints: ['src/components/wazzup/ChatMessageImage.jsx'], outfile: imageOutput,
     bundle: true, platform: 'node', format: 'esm', external: ['lucide-react'],

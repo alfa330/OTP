@@ -5,6 +5,7 @@ import logging
 import select
 import threading
 import time
+import uuid
 from datetime import datetime
 
 from .notes import note_item
@@ -12,12 +13,16 @@ from .notes import note_item
 CHANNEL = 'wazzup_pilot_events'
 HEARTBEAT_SECONDS = 20
 HYDRATE_BATCH_SIZE = 100
+# A longer gap is cheaper to reconcile over HTTP than to replay as one huge frame.
+RESUME_MAX_EVENTS = 500
 MAX_EVENT_BYTES = 256 * 1024
 MAX_BUFFER_BYTES = 8 * 1024 * 1024
 _DELIVERY_RANK = {'pending': 0, 'sent': 1, 'error': 2, 'delivered': 3, 'read': 4}
+# The same fields, in the same order, as the history endpoints (pilot.MESSAGE_FIELDS).
 _MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
                    'authorName', 'authorId', 'status', 'isEdited', 'isDeleted', 'wazzupDt',
-                   'replyToMessageId', 'replyText', 'replyAuthorName')
+                   'replyToMessageId', 'replyText', 'replyAuthorName', 'clientMessageId')
+_CHAT_OFFSET = len(_MESSAGE_FIELDS)
 _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone',
                 'lastMessageAt', 'lastMessageText', 'lastMessageIsEcho',
                 'messagesCount', 'inboundCount', 'outboundCount')
@@ -26,7 +31,7 @@ _HYDRATE_SQL = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
            m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
-           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,
+           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,o.request_id,
            c.channel_id,c.chat_id,c.chat_type,c.contact_name,c.contact_phone,
            c.last_message_at,c.last_message_text,c.last_message_is_echo,
            c.messages_count,c.inbound_count,c.outbound_count
@@ -70,8 +75,14 @@ def merge_changes(previous, current):
     return merged
 
 
+def _json_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if isinstance(value, uuid.UUID) else value
+
+
 def _json_item(fields, row):
-    return dict(zip(fields, (v.isoformat() if isinstance(v, datetime) else v for v in row)))
+    return dict(zip(fields, (_json_value(v) for v in row)))
 
 
 def broadcast_changes(cursor, changes, event_broker):
@@ -109,9 +120,9 @@ def broadcast_changes(cursor, changes, event_broker):
                 continue
             row = rows.get(event['messageId'])
             if row is not None and event.get('statusOnly') is not True:
-                event = dict(event, message=_json_item(_MESSAGE_FIELDS, row[:15]), status=row[8])
-                if row[15] is not None:
-                    event['chat'] = _json_item(_CHAT_FIELDS, row[15:])
+                event = dict(event, message=_json_item(_MESSAGE_FIELDS, row[:_CHAT_OFFSET]), status=row[8])
+                if row[_CHAT_OFFSET] is not None:
+                    event['chat'] = _json_item(_CHAT_FIELDS, row[_CHAT_OFFSET:])
             event_broker.publish(event)
 
     for event in changes:
@@ -133,6 +144,27 @@ class EventBroker:
         self.seq = 0
         self.streams = 0
         self.ready = False
+        # Sequence numbers are only meaningful within one process: a client
+        # resuming after a restart or a deploy must reconcile, not continue.
+        self.epoch = uuid.uuid4().hex
+
+    def resume_from(self, epoch, after):
+        """(cursor, resumed) for a stream that starts now.
+
+        A reconnecting client continues after the last sequence it saw when that
+        point is still in this broker's buffer and the gap is short: everything
+        it missed is replayed and it needs no reconciliation. Otherwise it starts
+        at the current sequence and must reconcile."""
+        with self.condition:
+            try:
+                after = int(after)
+            except (TypeError, ValueError):
+                after = None
+            oldest = self.events[0][0] if self.events else self.seq + 1
+            if (epoch == self.epoch and after is not None and oldest - 1 <= after <= self.seq
+                    and self.seq - after <= RESUME_MAX_EVENTS):
+                return after, True
+            return self.seq, False
 
     def set_ready(self, ready):
         with self.condition:

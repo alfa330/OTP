@@ -18,7 +18,11 @@ import { lateDeliveryNote, localDayKey } from './messageTime';
 import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
-import { mergePilotMessages, pilotChatKey } from './chatPilot';
+import { mergePilotMessages, outboxMessages, pilotChatKey } from './chatPilot';
+import {
+    chatKeyOf, configureSendQueue, discardMessage, enqueueMessage, outboxProblems, retryMessage, settleOutbox,
+    takeBackMessage, useChatOutbox, useOutbox,
+} from './sendQueue';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -258,11 +262,15 @@ function MediaContent({ msg, light, onAttachment }) {
         : <span className={chip}><Icon size={13} /> {label}</span>;
 }
 
-/* Исходящие — мягко-зелёные справа, входящие — белые слева. */
-const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, showAuthor = true }) {
+/* Исходящие — мягко-зелёные справа, входящие — белые слева.
+ * Своё ещё не подтверждённое сообщение (msg.local, sendQueue.js) рисуется тем
+ * же пузырём; сбой отправки — строкой под ним с действиями. */
+const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, onRetry, onDiscard,
+    onEdit, showAuthor = true }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
+    const stuck = msg.local && (msg.local.state === 'failed' || msg.local.state === 'unknown') ? msg.local.state : null;
     return (
         <div data-message-id={msg.messageId} data-message-date={msg.dt}
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
@@ -312,6 +320,24 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     {out && <MessageDeliveryStatus status={msg.status} />}
                 </div>
             </div>
+            {stuck && <div role="alert" data-testid="wazzup-send-problem"
+                className="mt-1 flex max-w-full flex-wrap items-center justify-end gap-x-2.5 gap-y-0.5 px-1 text-[12px] leading-4">
+                <span className={stuck === 'failed' ? 'text-rose-600' : 'text-amber-700'}>
+                    {msg.local.error || (stuck === 'failed' ? 'Не отправлено' : 'Отправка не подтверждена')}
+                </span>
+                <button type="button" onClick={() => onRetry?.(msg.clientMessageId)}
+                    title={stuck === 'failed' ? 'Отправить это сообщение ещё раз'
+                        : 'Спросить сервер об этой же отправке — второй раз сообщение не уйдёт'}
+                    className="font-semibold text-blue-600 hover:underline">
+                    {stuck === 'failed' ? 'Повторить' : 'Проверить'}
+                </button>
+                {msg.local.editable
+                    ? <button type="button" onClick={() => onEdit?.(msg.clientMessageId)}
+                        title="Вернуть текст в поле ввода, чтобы исправить его"
+                        className="font-semibold text-slate-500 hover:underline">Изменить</button>
+                    : <button type="button" onClick={() => onDiscard?.(msg.clientMessageId)}
+                        className="font-semibold text-slate-500 hover:underline">Убрать</button>}
+            </div>}
             </div>
             {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
                 aria-label="Ответить на сообщение" title="Ответить на сообщение"
@@ -946,6 +972,15 @@ function ChatsWorkspace(props) {
        (attachmentCache.js) — и принадлежат одному человеку: вошёл другой, и
        накопленное сбрасывается. */
     useEffect(() => { attachmentCache.setOwner(user?.id); }, [user?.id]);
+    /* Очередь исходящих (sendQueue.js) одна на вкладку и принадлежит человеку:
+       вошёл другой — неотправленное прежнего под его учёткой не уйдёт. */
+    const tokenHeaders = useRef(withAccessTokenHeader);
+    tokenHeaders.current = withAccessTokenHeader;
+    useEffect(() => {
+        if (!mayProcess) return;
+        configureSendQueue({ apiBaseUrl, ownerId: user?.id ?? null, authorName: user?.name || '',
+            headers: () => (tokenHeaders.current ? tokenHeaders.current() : {}) });
+    }, [mayProcess, apiBaseUrl, user?.id, user?.name]);
     const [mainTab, setMainTab] = useState('chats');
 
     /* Аккаунт Wazzup, в который смотрит раздел. Стартовый — из ссылки на чат
@@ -1056,6 +1091,28 @@ function ChatsWorkspace(props) {
         };
     }, [selectedKey]);
     const searchDebounce = useRef(null);
+    const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
+    // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
+    const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
+    // Строка архива пришла — локальная копия больше не нужна.
+    useEffect(() => { if (thread && outbox.length) settleOutbox(thread); }, [thread, outbox]);
+    /* Сбой отправки виден не только в своём чате: оператор, нажав Enter, уже в
+       следующем. Отметка в списке держится, пока сбой не решён, и одно
+       уведомление — на каждый новый сбой не в открытом чате. */
+    const allOutbox = useOutbox();
+    const sendProblems = useMemo(() => (mayProcess ? outboxProblems(allOutbox) : []), [allOutbox, mayProcess]);
+    const problemChats = useMemo(() => new Set(sendProblems.map(chatKeyOf)), [sendProblems]);
+    const toastRef = useRef(showToast);
+    toastRef.current = showToast;
+    const chatsRef = useRef(chats);
+    chatsRef.current = chats;
+    const notifiedProblems = useRef(null);
+    // «Изменить» у отклонённого сообщения: его текст возвращается в поле этого чата.
+    const [draftRestore, setDraftRestore] = useState(null);
+    const editFailed = useCallback((clientMessageId) => {
+        const text = takeBackMessage(clientMessageId);
+        if (text !== null) setDraftRestore({ key: selectedKey, id: clientMessageId, text });
+    }, [selectedKey]);
     const pilotView = useRef({});
     pilotView.current = { key: pilotChatKey(account, selected), thread, selected, account, mainTab };
     const pilotRefresh = useRef({ id: 0, controller: null });
@@ -1274,6 +1331,64 @@ function ChatsWorkspace(props) {
     const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
         onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh() });
+    /* Принятое сервером сообщение приходит строкой архива по живому потоку за
+       доли секунды, поэтому после отправки лента и список больше не
+       перечитываются. Страховка — только если строки нет: без потока сразу,
+       с потоком — если событие всё же потерялось. */
+    const acceptedIds = localMessages.filter((message) => message.local.state === 'sent')
+        .map((message) => message.clientMessageId).join('|');
+    const live = pilot.connection === 'live';
+    const refreshers = useRef({});
+    refreshers.current = { thread: refreshPilotThread, list: () => loadChats({ silent: true }) };
+    useEffect(() => {
+        if (!acceptedIds) return undefined;
+        // Каждое новое принятое сообщение заводит свою проверку: сверка, ушедшая
+        // раньше ответа на него, его строку принести не могла.
+        let attempts = 0;
+        let timer = setTimeout(function check() {
+            attempts += 1;
+            refreshers.current.thread().catch(() => {});
+            if (!live) Promise.resolve(refreshers.current.list()).catch(() => {});
+            if (attempts < 3) timer = setTimeout(check, 3000);
+        }, live ? 4000 : 600);
+        // Строка так и не пришла — локальная копия всё равно уходит по сроку.
+        const expiry = setTimeout(() => settleOutbox(pilotView.current.thread || []), 2 * 60 * 1000 + 1000);
+        return () => { clearTimeout(timer); clearTimeout(expiry); };
+    }, [acceptedIds, live]);
+    useEffect(() => {
+        const seen = notifiedProblems.current;
+        if (seen === null) {
+            // Сбои, которые были до открытия раздела, уже отмечены в списке.
+            notifiedProblems.current = new Set(sendProblems.map((item) => item.clientMessageId));
+            return;
+        }
+        for (const item of sendProblems) {
+            if (seen.has(item.clientMessageId)) continue;
+            seen.add(item.clientMessageId);
+            const key = chatKeyOf(item);
+            if (key === pilotView.current.key && pilotView.current.mainTab === 'chats') continue;
+            const chat = (chatsRef.current || []).find((row) => pilotChatKey('op', row) === key);
+            const who = chat?.contactName || chat?.contactPhone || item.chatId;
+            toastRef.current?.(item.state === 'failed'
+                ? `Сообщение для ${who} не отправлено — откройте этот чат`
+                : `Сообщение для ${who} не подтверждено — откройте этот чат`, 'error');
+        }
+    }, [sendProblems]);
+    /* Своё новое сообщение всегда видно: лента прокручивается к нему. Строка
+       сбоя под пузырём появляется позже — её докручиваем, только если человек
+       и так внизу, а не читает историю выше. */
+    const localSignature = localMessages.map((message) => `${message.messageId}:${message.local.state}`).join('|');
+    const lastLocalCount = useRef(0);
+    useEffect(() => {
+        const box = threadBox.current;
+        const grew = localMessages.length > lastLocalCount.current;
+        lastLocalCount.current = localMessages.length;
+        if (!box || !localSignature) return;
+        if (grew || box.scrollHeight - box.scrollTop - box.clientHeight < 200) requestAnimationFrame(() => {
+            box.scrollTop = box.scrollHeight;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [localSignature]);
     const attachmentAllowed = Boolean(attachmentSelection
         && attachmentSelection.account === account && attachmentSelection.ownerId === user?.id
         && attachmentSelection.apiBaseUrl === apiBaseUrl
@@ -1523,22 +1638,24 @@ function ChatsWorkspace(props) {
         if (!thread) return [];
         const out = [];
         let lastDay = null;
-        const entries = [...thread, ...notes.items.map((note) => ({
+        // Сообщения в пути — в конце ленты; сбой — на своём времени (chatPilot.js).
+        const entries = [...thread, ...localMessages.filter((m) => !m.local.pinned), ...notes.items.map((note) => ({
             _note: note, messageId: `note:${note.id}`, dt: note.createdAt,
         }))].sort((a, b) => new Date(a.dt) - new Date(b.dt) || a.messageId.localeCompare(b.messageId));
-        entries.forEach((m) => {
+        [...entries, ...localMessages.filter((m) => m.local.pinned)].forEach((m) => {
             const day = localDayKey(m.dt);
             if (day && day !== lastDay) { out.push({ _day: fmtDay(m.dt), messageId: `day-${day}` }); lastDay = day; }
             out.push(m);
         });
         return out;
-    }, [thread, notes.items]);
+    }, [thread, notes.items, localMessages]);
     // Read the current displayed order without changing every bubble's click handler on SSE updates.
     attachmentThread.current = threadWithDays;
     const threadQuotes = useMemo(() => {
         const byId = new Map((thread || []).map((message) => [message.messageId, message]));
-        return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
-    }, [thread]);
+        return new Map([...(thread || []), ...localMessages]
+            .map((message) => [message.messageId, messageQuote(message, byId)]));
+    }, [thread, localMessages]);
     const lastIncomingMessageId = useMemo(() => {
         for (let index = (thread?.length || 0) - 1; index >= 0; index -= 1) {
             const message = thread[index];
@@ -1695,6 +1812,10 @@ function ChatsWorkspace(props) {
                                                 <span className="shrink-0 text-[11px] text-slate-400">{fmtListDate(chat.lastMessageAt)}</span>
                                             </div>
                                             <div className="flex items-center gap-1 text-[12px] text-slate-500">
+                                                {problemChats.has(pilotChatKey('op', chat)) && account === 'op' &&
+                                                    <AlertCircle size={12} className="shrink-0 text-rose-600"
+                                                        role="img" aria-label="Есть неотправленное сообщение"
+                                                        data-testid="wazzup-chat-send-problem" />}
                                                 {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
                                                 <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>
                                                 {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
@@ -1861,8 +1982,9 @@ function ChatsWorkspace(props) {
                                     <React.Fragment key={m.messageId}>
                                         <MessageBubble msg={m} quote={threadQuotes.get(m.messageId)}
                                             showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
-                                            onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
-                                            onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                                            onReply={pilotCanSend && !m.local ? chooseReply : undefined} onQuote={jumpToQuote}
+                                            onRetry={retryMessage} onDiscard={discardMessage} onEdit={editFailed}
+                                            onAttachment={m.local ? undefined : pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
                                                 ? openAttachment : attachmentPreviewKind(m) === 'video' ? (message) => openAttachment(message, true) : undefined} />
                                         {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&
                                             <div className="flex justify-start px-3 sm:px-4">
@@ -1877,7 +1999,7 @@ function ChatsWorkspace(props) {
                                             </div>}
                                     </React.Fragment>
                                 ))}
-                                {thread !== null && thread.length === 0 && notes.items.length === 0 && (
+                                {thread !== null && thread.length === 0 && notes.items.length === 0 && localMessages.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
                                 )}
                             </div>
@@ -1903,10 +2025,10 @@ function ChatsWorkspace(props) {
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
                                     onCancelReply={cancelReply}
-                                    onSent={() => {
-                                        refreshPilotThread().catch(() => showToast?.('Обновите переписку для проверки отправки', 'error'));
-                                        loadChats({ silent: true }).catch(() => {});
-                                    }} />
+                                    authorName={user?.name || ''}
+                                    restore={draftRestore?.key === selectedKey ? draftRestore : null}
+                                    onRestored={(id) => setDraftRestore((current) => (current?.id === id ? null : current))}
+                                    onSend={enqueueMessage} />
                             )}
                         </>
                     )}
