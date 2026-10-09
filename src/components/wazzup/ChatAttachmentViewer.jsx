@@ -8,6 +8,7 @@ import ChatAttachmentStrip from './ChatAttachmentStrip';
 import { attachmentCache } from './attachmentCache';
 import useAttachmentPip from './useAttachmentPip';
 import { moveAttachmentHost } from './moveAttachmentHost';
+import { renderPdfCanvas } from './renderPdfCanvas';
 
 const iconButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-35';
 const actionButton = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40';
@@ -66,7 +67,7 @@ function PdfPage({ document: pdf, library, number, zoom, onReady, onError, hostW
             layer.style.setProperty('--scale-factor', view.scale);
             layer.style.setProperty('--total-scale-factor', view.scale * (view.userUnit || 1));
             setSize({ width: view.width, height: view.height });
-            render = page.render({ canvasContext: target.getContext('2d'), viewport: view,
+            render = renderPdfCanvas(page, { canvas: target, viewport: view,
                 transform: [pixels.scale, 0, 0, pixels.scale, 0, 0], background: '#fff' });
             const [content] = await Promise.all([page.getTextContent(), render.promise]);
             if (cancelled) return;
