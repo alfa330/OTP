@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -23,6 +23,7 @@ import {
     chatKeyOf, configureSendQueue, discardMessage, enqueueMessage, outboxProblems, retryMessage, settleOutbox,
     takeBackMessage, useChatOutbox, useOutbox,
 } from './sendQueue';
+import { chatListDraft, useChatDrafts } from './chatDrafts';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -1091,6 +1092,9 @@ function ChatsWorkspace(props) {
         };
     }, [selectedKey]);
     const searchDebounce = useRef(null);
+    // Личные черновики (chatDrafts.js): «Черновик: …» в списке видит только их автор.
+    const draftOwner = account === 'op' && mayProcess ? user?.id ?? null : null;
+    const drafts = useChatDrafts(draftOwner);
     const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
     // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
     const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
@@ -1798,6 +1802,7 @@ function ChatsWorkspace(props) {
                         )}
                         {(visibleChats || []).map((chat) => {
                             const isSel = selected && selected.chatId === chat.chatId && selected.channelId === chat.channelId;
+                            const draftText = chatListDraft(drafts, pilotChatKey('op', chat), { owner: draftOwner, open: isSel });
                             return (
                                 <button key={`${chat.channelId}:${chat.chatId}`} onClick={() => openChat(chat)}
                                         className={`mx-1.5 block w-[calc(100%-12px)] rounded-xl px-2.5 py-2 text-left transition ${
@@ -1816,10 +1821,20 @@ function ChatsWorkspace(props) {
                                                     <AlertCircle size={12} className="shrink-0 text-rose-600"
                                                         role="img" aria-label="Есть неотправленное сообщение"
                                                         data-testid="wazzup-chat-send-problem" />}
-                                                {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
-                                                <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>
+                                                {draftText ? <>
+                                                    <span className="shrink-0 text-rose-600">Черновик:</span>
+                                                    <span className="truncate" data-testid="wazzup-chat-draft">
+                                                        <ChatMessageText text={draftText} links={false} />
+                                                    </span>
+                                                </> : <>
+                                                    {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
+                                                    <span className="truncate"><ChatMessageText text={previewText(chat.lastMessageText)} links={false} /></span>
+                                                </>}
+                                                {draftText &&
+                                                    <FilePen size={13} className="ml-auto shrink-0 text-slate-400"
+                                                        role="img" aria-label="Черновик" />}
                                                 {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
-                                                    <span className="ml-auto rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white">
+                                                    <span className={`${draftText ? '' : 'ml-auto '}rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white`}>
                                                         {unread.items[pilotChatKey('op', chat)].unreadCount}
                                                     </span>}
                                             </div>
@@ -2026,6 +2041,7 @@ function ChatsWorkspace(props) {
                                     replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
                                     onCancelReply={cancelReply}
                                     authorName={user?.name || ''}
+                                    draftOwner={draftOwner}
                                     restore={draftRestore?.key === selectedKey ? draftRestore : null}
                                     onRestored={(id) => setDraftRestore((current) => (current?.id === id ? null : current))}
                                     onSend={enqueueMessage} />

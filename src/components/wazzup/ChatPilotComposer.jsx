@@ -6,11 +6,22 @@ import ChatComposerTools from './ChatComposerTools';
 import useWabaWindowExpired from './useWabaWindowExpired';
 import ChatMessageText from './ChatMessageText';
 import { UPLOAD_ACCEPT, uploadedAttachment, uploadFileError, uploadSizeLabel } from './chatUploads.js';
+import { notifyChatDrafts, readChatDraft, writeChatDraft } from './chatDrafts.js';
 
-const readDraft = (key) => {
+const EMPTY_DRAFT = { text: '', preview: '', attachment: null };
+
+/* Черновик поля — личный, в chatDrafts.js (owner — id человека, chatKey — чат).
+   legacyKey — черновик прежней версии в sessionStorage этой вкладки: читается,
+   пока в личном хранилище пусто, и убирается первой же правкой. */
+const readDraft = ({ owner, chatKey, legacyKey }) => {
+    const stored = readChatDraft(owner, chatKey);
+    if (stored) {
+        return { text: stored.text, preview: typeof stored.preview === 'string' ? stored.preview : '',
+            attachment: uploadedAttachment(stored.attachment) };
+    }
     try {
-        const saved = JSON.parse(sessionStorage.getItem(key) || 'null');
-        if (!saved || typeof saved.text !== 'string') return { text: '', preview: '', attachment: null };
+        const saved = JSON.parse(sessionStorage.getItem(legacyKey) || 'null');
+        if (!saved || typeof saved.text !== 'string') return EMPTY_DRAFT;
         // Неясную отправку прежнего поля ввода (pending) забирает очередь со
         // СВОИМ id (sendQueue.js); её текст не должен стать новым черновиком —
         // Enter отправил бы его второй раз под новым id.
@@ -21,16 +32,14 @@ const readDraft = (key) => {
             attachment: legacy?.attachmentId ? null : uploadedAttachment(saved.attachment),
         };
     } catch {
-        return { text: '', preview: '', attachment: null };
+        return EMPTY_DRAFT;
     }
 };
 
-const writeDraft = (key, text, preview = '', replyTo = null, attachment = null) => {
-    try {
-        if (text || attachment) sessionStorage.setItem(key, JSON.stringify({ text, pending: null, preview, replyTo,
-            attachment: uploadedAttachment(attachment) }));
-        else sessionStorage.removeItem(key);
-    } catch { /* Private browsing can disable storage; the mounted draft still works. */ }
+const writeDraft = (slot, text, preview = '', replyTo = null, attachment = null) => {
+    writeChatDraft(slot.owner, slot.chatKey, { text, preview, replyTo, attachment: uploadedAttachment(attachment) },
+        { notify: false });
+    try { sessionStorage.removeItem(slot.legacyKey); } catch { /* Старого черновика может и не быть. */ }
 };
 
 /* Поле ответа. Отправка отдаёт сообщение очереди (onSend → sendQueue.js) и
@@ -42,8 +51,8 @@ const writeDraft = (key, text, preview = '', replyTo = null, attachment = null) 
 const FILE_SUBMIT_GUARD_MS = 1000;
 
 function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInboundAt, onSend, onSent, replyTo,
-    onCancelReply, restore = null, onRestored, authorName = '', maxLength = 4096 }) {
-    const storageKey = pilotDraftStorageKey(chat);
+    onCancelReply, restore = null, onRestored, draftOwner = null, authorName = '', maxLength = 4096 }) {
+    const storageKey = { owner: draftOwner, chatKey: pilotChatKey('op', chat), legacyKey: pilotDraftStorageKey(chat) };
     const [saved] = useState(() => readDraft(storageKey));
     const [text, setText] = useState(saved.text);
     const [preview, setPreview] = useState(saved.preview);
@@ -70,7 +79,11 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
 
     useEffect(() => {
         mountedRef.current = true;
-        return () => { mountedRef.current = false; assistRef.current?.abort(); uploadRef.current?.abort(); };
+        return () => {
+            mountedRef.current = false; assistRef.current?.abort(); uploadRef.current?.abort();
+            // Человек ушёл из чата: теперь его черновик нужен списку («Черновик: …»).
+            notifyChatDrafts();
+        };
     }, []);
 
     /* «Изменить» у отклонённого Wazzup сообщения возвращает его текст сюда.

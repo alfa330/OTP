@@ -8,6 +8,7 @@ import {
     classifyPilotSendFailure, GLOBAL_CHANNEL_IDS, mergePilotMessages,
     pilotChatKey, pilotDraftStorageKey, splitPilotEvents,
 } from '../src/components/wazzup/chatPilot.js';
+import { chatDraftStorageKey } from '../src/components/wazzup/chatDrafts.js';
 import { prepareTemplate } from '../src/components/wazzup/chatTemplates.js';
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_IMAGE_BYTES, uploadedAttachment, uploadFileError } from '../src/components/wazzup/chatUploads.js';
 import { File } from 'node:buffer';
@@ -123,7 +124,9 @@ test('a legacy uncertain draft is not offered for a second send: its text is lef
 // No browser, network or extra test renderer is needed for the send state machine.
 const interactiveOutput = join(cache, 'ChatPilotComposerInteractive.mjs');
 await build({
-    entryPoints: [join(process.cwd(), 'src/components/wazzup/ChatPilotComposer.jsx')],
+    stdin: { contents: `export { default } from './ChatPilotComposer.jsx';
+        export { resetChatDraftsForTests } from './chatDrafts.js';`,
+        resolveDir: join(process.cwd(), 'src/components/wazzup'), loader: 'js' },
     outfile: interactiveOutput, bundle: true, format: 'esm', platform: 'node', target: 'node18',
     external: ['lucide-react'],
     plugins: [{ name: 'pilot-state-harness', setup(build) {
@@ -133,6 +136,7 @@ await build({
                export const useState=(...args)=>h().useState(...args);
                export const useRef=(...args)=>h().useRef(...args);
                export const useEffect=(...args)=>h().useEffect(...args);
+               export const useSyncExternalStore=(subscribe,get)=>get();
                export const memo=(component)=>component;
                export const lazy=()=>function LazyFixture(){return null;};
                export const Suspense=({children})=>children;
@@ -142,7 +146,17 @@ await build({
         }));
     } }],
 });
-const { default: InteractiveComposer } = await import(pathToFileURL(interactiveOutput));
+const { default: InteractiveComposer, resetChatDraftsForTests } = await import(pathToFileURL(interactiveOutput));
+// Личный черновик поля — под этим человеком (chatDrafts.js).
+const OWNER = 7;
+const draftKey = chatDraftStorageKey(OWNER, pilotChatKey('op', chat));
+const mapStorage = (storage) => ({
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: (key) => storage.delete(key),
+    key: (index) => [...storage.keys()][index] ?? null,
+    get length() { return storage.size; },
+});
 
 const createHarness = (post, { storage = new Map(), props = {} } = {}) => {
     const slots = [];
@@ -172,7 +186,8 @@ const createHarness = (post, { storage = new Map(), props = {} } = {}) => {
         render(nextProps) {
             if (nextProps) Object.assign(props, nextProps);
             index = 0;
-            const wrapper = InteractiveComposer({ apiBaseUrl: '/test-only', headers: () => ({}), chat, ...props });
+            const wrapper = InteractiveComposer({ apiBaseUrl: '/test-only', headers: () => ({}), chat,
+                draftOwner: OWNER, ...props });
             const result = wrapper.type(wrapper.props);
             const pendingEffects = effects;
             effects = [];
@@ -183,11 +198,10 @@ const createHarness = (post, { storage = new Map(), props = {} } = {}) => {
         storage,
     };
     globalThis.__wazzupPilotHarness = harness;
-    globalThis.sessionStorage = {
-        getItem: (key) => storage.get(key) || null,
-        setItem: (key, value) => storage.set(key, value),
-        removeItem: (key) => storage.delete(key),
-    };
+    // One map for both: the legacy draft lived in sessionStorage, the personal one lives in localStorage.
+    globalThis.sessionStorage = mapStorage(storage);
+    globalThis.localStorage = mapStorage(storage);
+    resetChatDraftsForTests();
     return harness;
 };
 
@@ -241,7 +255,7 @@ test('a queue that refuses the message leaves the text in the field and says so'
         const form = h.render();
         assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Не потерять');
         assert.ok(findElement(form, (el) => el.props?.role === 'alert'));
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Не потерять');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, 'Не потерять');
     } finally {
         delete globalThis.__wazzupPilotHarness;
         if (previousStorage === undefined) delete globalThis.sessionStorage;
@@ -264,7 +278,7 @@ test('approved template is shown as text but queued as its Wazzup code', () => {
         const field = findElement(form, (el) => el.type === 'textarea');
         assert.equal(field.props.value, 'Здравствуйте, Алия!');
         assert.equal(field.props.readOnly, true);
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).preview, 'Здравствуйте, Алия!');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).preview, 'Здравствуйте, Алия!');
         form.props.onSubmit();
         assert.equal(queued.length, 1);
         assert.equal(queued[0].text, '[[welcome]][[Алия]]');
@@ -294,13 +308,13 @@ test('emoji replaces the selected text and uses UTF-16 cursor position without a
         findElement(form, (el) => typeof el.props?.onEmoji === 'function').props.onEmoji('🙂');
         form = h.render();
         assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Привет, 👋🏽🙂!');
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Привет, 👋🏽🙂!');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, 'Привет, 👋🏽🙂!');
         findElement(form, (el) => typeof el.props?.onChoose === 'function').props.onChoose({ text: '[[code]]', preview: 'Одобренный текст' });
         form = h.render();
         findElement(form, (el) => typeof el.props?.onEmoji === 'function').props.onEmoji('🙂');
         form = h.render();
         assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Одобренный текст');
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, '[[code]]');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, '[[code]]');
     } finally {
         delete globalThis.__wazzupPilotHarness;
         if (previousStorage === undefined) delete globalThis.sessionStorage;
@@ -371,7 +385,7 @@ test('AI translation and paraphrase edit a draft only, support undo and preserve
         assert.equal(field(form).props.value, 'Сәлеметсіз бе!');
         assert.match(requests[0].url, /\/assist$/);
         assert.deepEqual(requests[0].body, { account: 'op', action: 'kk', text: 'привет' });
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).replyTo.messageId, 'original');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).replyTo.messageId, 'original');
         action(form, 'Вернуть исходный текст').props.onClick();
         assert.equal(field(h.render()).props.value, 'привет');
         await action(h.render(), 'Перефразировать').props.onClick();
@@ -414,7 +428,7 @@ test('leaving a chat cancels AI without changing its persisted draft', async () 
         assert.equal(request.config.signal.aborted, true);
         request.resolve({ data: { text: 'Поздний ответ' } });
         await pending;
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Оставить этот черновик');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, 'Оставить этот черновик');
     });
 });
 
@@ -494,16 +508,16 @@ test('paperclip uploads a file without sending, locks conflicting tools, and sto
         assert.equal(requests.length, 1);
         finishUpload({ data: { attachment: { ...attachmentFixture, contentUri: 'https://private.invalid/file', blob: 'not persisted' } } });
         await upload;
-        const stored = JSON.parse(h.storage.get(pilotDraftStorageKey(chat)));
+        const stored = JSON.parse(h.storage.get(draftKey));
         assert.deepEqual(stored.attachment, attachmentFixture);
         assert.equal(stored.text, 'Черновик после файла');
-        assert.equal(stored.pending, null);
+        assert.equal('pending' in stored, false);
         assert.equal(requests.length, 1);
         assert.equal(action(h.render(), 'Отправить').props.disabled, false);
         action(h.render(), 'Убрать файл').props.onClick();
         assert.equal(field(h.render()).props.value, 'Черновик после файла');
         assert.equal(field(h.render()).props.readOnly, false);
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
+        assert.equal(JSON.parse(h.storage.get(draftKey)).attachment, null);
     }, { props: { headers: () => ({ 'Content-Type': 'application/json', Authorization: 'test' }) } });
     const html = render();
     assert.ok(html.indexOf('Прикрепить файл') < html.indexOf('Шаблоны'));
@@ -538,10 +552,10 @@ test('sending an attachment queues no caption or template text and preserves the
         assert.equal(field(h.render()).props.value, 'Отдельное сообщение 🙂');
         assert.equal(field(h.render()).props.readOnly, false);
         assert.equal(findElement(h.render(), (el) => el.props?.['data-testid'] === 'wazzup-file-preview'), null);
-        const stored = JSON.parse(h.storage.get(pilotDraftStorageKey(chat)));
+        const stored = JSON.parse(h.storage.get(draftKey));
         assert.equal(stored.text, 'Отдельное сообщение 🙂');
         assert.equal(stored.attachment, null);
-        assert.equal(stored.pending, null);
+        assert.equal('pending' in stored, false);
     }, { props: { replyTo: { messageId: 'reply-file', text: 'Вопрос' }, onSend: (message) => queued.push(message),
         onCancelReply: (id) => cleared.push(id) } });
 });
@@ -557,13 +571,13 @@ test('removing a file or leaving a chat aborts upload and ignores late completio
         uploads[0].resolve({ data: { attachment: attachmentFixture } });
         await first;
         assert.equal(action(h.render(), 'Отправить').props.disabled, true);
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
+        assert.equal(JSON.parse(h.storage.get(draftKey)).attachment, null);
         h.unmount();
         assert.equal(uploads[1].config.signal.aborted, true);
         uploads[1].resolve({ data: { attachment: attachmentFixture } });
         await second;
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).attachment, null);
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Оставить текст');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).attachment, null);
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, 'Оставить текст');
     });
 });
 
@@ -607,7 +621,7 @@ test('«Изменить» returns a rejected text to the field once, in front o
         assert.equal(field(h.render()).props.value, 'Новое', 'the same restore is applied once');
         h.render({ restore: { id: 'failed-2', text: 'Второй' } });
         assert.equal(field(h.render()).props.value, 'Второй\nНовое');
-        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Второй\nНовое');
+        assert.equal(JSON.parse(h.storage.get(draftKey)).text, 'Второй\nНовое');
         assert.deepEqual(restored, ['failed-1', 'failed-2']);
     }, { props: { onRestored: (id) => restored.push(id) } });
 });
