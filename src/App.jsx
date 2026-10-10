@@ -324,9 +324,12 @@ const AI_QA_OP_DEPARTMENT_ID = 367;
 const ICORE_PHONE_DEPARTMENT_IDS = new Set([367, 560]);
 // Главы этих отделов тоже скачивают программу, хотя сам отдел на телефоне не
 // работает: глава СЗоВ сажает людей на линии удалённого КЦ (раздел «Удаленный КЦ»)
-// и раздаёт им телефон — решение владельца 07.10.2026. Сотрудникам СЗоВ кнопка не
-// положена. Та же константа на бэкенде — ICORE_PHONE_HEAD_DEPARTMENT_CODES.
+// и раздаёт им телефон — решение владельца 07.10.2026. Рядовым сотрудникам СЗоВ кнопка
+// не положена. Та же константа на бэкенде — ICORE_PHONE_HEAD_DEPARTMENT_CODES.
 const ICORE_PHONE_HEAD_DEPARTMENT_CODES = new Set(['szov']);
+// Супервайзерам этих отделов кнопка тоже положена (решение владельца 10.10.2026).
+// Та же константа на бэкенде — ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES, и решающая она.
+const ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES = new Set(['szov']);
 // Отделы, которые ОЦЕНИВАЕТ раздел «ИИ-оценка»: у каждого свои направления,
 // своя телефония и свой источник переписки. Та же константа на бэкенде
 // (AI_QA_SUBJECT_DEPARTMENT_CODES в bot_schedule2.py -> call_qa.config).
@@ -454,7 +457,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ), отдел
- *   удалённого КЦ и СЗоВ, чей глава раздаёт программу (canDownloadIcorePhone);
+ *   удалённого КЦ и СЗоВ, чьи глава и СВ раздают программу (canDownloadIcorePhone);
  *   работа с линией (графики, часы, оценки, шкала, зарплата) — по
  *   DEPARTMENT_VIEW_ALLOWLIST: у бэк-офиса и маркетинга ни смен, ни часов,
  *   ни оценок нет.
@@ -42983,6 +42986,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Глава СЗоВ: сажает людей на линии удалённого КЦ и раздаёт им программу.
                 || (isDepartmentHead(user)
                     && aiQaHeadDepartmentCodesOf(user).some((code) => ICORE_PHONE_HEAD_DEPARTMENT_CODES.has(code)))
+                // Супервайзеры СЗоВ (ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES) — с 10.10.2026.
+                || (isSupervisorRole(currentUserRole)
+                    && ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES.has(
+                        normalizeDepartmentCode(user?.department_code ?? user?.departmentCode)))
                 // Сотрудник любого отдела, которого посадили на линию во вкладке «Линии»
                 // раздела «Удаленный КЦ»: флаг считает сервер и отдаёт с профилем.
                 || user?.dial_list_line_member === true;

@@ -3,6 +3,7 @@
 // Запрос владельца 07.10.2026: кнопку — главе отдела СЗоВ и всем сотрудникам,
 // которых посадили на линию в разделе «Удаленный КЦ» (вкладка «Линии»). Прежний
 // круг — отдел продаж, Тез КЦ, отдел удалённого КЦ и глобальные админы — остаётся.
+// 10.10.2026: «всем супервайзерам СЗоВ добавить кнопку Скачать icore phone».
 //
 // Исполняем НАСТОЯЩЕЕ объявление canDownloadIcorePhone из App.jsx над профилем в том
 // виде, в каком его отдаёт сервер (_get_user_payload), а не переписываем условие в
@@ -50,7 +51,8 @@ const declarationOf = (name) => {
 
 /* Константы уровня модуля и флаги человека — настоящие объявления App.jsx. */
 const MODULE_NAMES = ['ICORE_PHONE_DEPARTMENT_IDS', 'ICORE_PHONE_HEAD_DEPARTMENT_CODES',
-    'DIAL_LIST_DEPARTMENT_CODES', 'normalizeDepartmentCode', 'aiQaHeadDepartmentCodesOf'];
+    'ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES', 'DIAL_LIST_DEPARTMENT_CODES', 'normalizeDepartmentCode',
+    'aiQaHeadDepartmentCodesOf'];
 const FLAG_NAMES = ['currentUserRole', 'isSuperAdmin', 'isDepartmentHeadUser', 'scopedDepartmentId',
     'isScopedDepartmentHead', 'isAdminLikeRole'];
 const evaluateGate = new Function(
@@ -85,10 +87,32 @@ test('глава СЗоВ видит кнопку — при любой базо
     assert.equal(flags.isScopedDepartmentHead, true);
 });
 
-test('рядовым сотрудникам и супервайзерам СЗоВ кнопка не положена', () => {
+test('рядовым сотрудникам и тренерам СЗоВ кнопка не положена', () => {
     assert.equal(canDownload(profile()), false);
-    assert.equal(canDownload(profile({ role: 'sv' })), false);
+    assert.equal(canDownload(profile({ role: 'trainee' })), false);
     assert.equal(canDownload(profile({ role: 'trainer' })), false);
+});
+
+test('супервайзеры СЗоВ видят кнопку (с 10.10.2026)', () => {
+    for (const role of ['sv', 'supervisor', ' SV ']) {
+        assert.equal(canDownload(profile({ role })), true, role);
+    }
+    // Код в карточке отдела бывает записан как угодно.
+    assert.equal(canDownload(profile({ role: 'sv', department_code: ' SZOV ' })), true);
+    // СВ отделов без телефона и СВ без отдела — нет.
+    for (const [id, code] of [[909, 'front_office'], [1499, 'hr'], [1041, 'marketing']]) {
+        assert.equal(canDownload(profile({ role: 'sv', department_id: id, department_code: code })), false, code);
+    }
+    assert.equal(canDownload(profile({ role: 'sv', department_id: null, department_code: null })), false);
+});
+
+test('список отделов СВ один и тот же на фронте и на сервере', () => {
+    const front = /const ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES = new Set\(\[([^\]]*)\]\);/.exec(appSource);
+    const back = /^ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES = \(([^)]*)\)/m.exec(readLf('bot_schedule2.py'));
+    assert.ok(front && back, 'константа пропала с одной из сторон');
+    const codes = (text) => [...text.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    assert.deepEqual(codes(front[1]), codes(back[1]));
+    assert.deepEqual(codes(front[1]), ['szov']);
 });
 
 test('глава другого отдела кнопку не получает', () => {

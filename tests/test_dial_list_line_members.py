@@ -11,7 +11,8 @@
     «Ограничитель») — привязка живёт в dial_list_line_members;
   * пока привязка действует, раздел и телефон считают его сотрудником отдела линии:
     тот же режим обзвона, та же база, те же показатели;
-  * программу iCORE Phone скачивают глава СЗоВ и все, кого посадили на линию.
+  * программу iCORE Phone скачивают глава СЗоВ, СВ СЗоВ (с 10.10.2026) и все, кого
+    посадили на линию.
 
 Без базы: поддельные курсоры и разбор исходников, как в tests/test_dial_list.py.
 Люди и логины в тестах выдуманы.
@@ -821,11 +822,30 @@ class LinesRoutesTests(unittest.TestCase):
 
 
 class IcorePhoneDownloadTests(unittest.TestCase):
-    """Кнопка и сама ссылка: глава СЗоВ и все, кого посадили на линию в разделе."""
+    """Кнопка и сама ссылка: глава СЗоВ, СВ СЗоВ (с 10.10.2026) и все, кого посадили
+    на линию в разделе."""
+
+    # Коды отделов, как их отдаёт db.get_user_department (код в карточке бывает неаккуратным).
+    DEPARTMENT_CODES = {HOME_DEPARTMENT: ' SZOV ', 367: 'op', 560: 'tez', LINE_DEPARTMENT: 'remote_cc',
+                        909: 'front_office', 5: 'archive'}
+
+    # Функции монолита, которые исполняются в проверке: само правило и то, что оно зовёт.
+    GATE_FUNCTIONS = ['_heads_icore_phone_department', '_can_download_icore_phone',
+                      '_normalize_user_role', '_is_supervisor_role', '_department_code_of_user']
+
+    @classmethod
+    def _constants(cls):
+        return {
+            'ICORE_PHONE_DEPARTMENT_IDS': _bot_constant('ICORE_PHONE_DEPARTMENT_IDS'),
+            'ICORE_PHONE_HEAD_DEPARTMENT_CODES': _bot_constant('ICORE_PHONE_HEAD_DEPARTMENT_CODES'),
+            'ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES': _bot_constant('ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES'),
+            'AI_QA_OP_DEPARTMENT_ID': 367,
+        }
 
     def _gate(self, *, headed=None, headed_departments=(), member=None, department=None, role='operator',
-              dial_departments=(LINE_DEPARTMENT,)):
+              dial_departments=(LINE_DEPARTMENT,), reads=None):
         import logging
+        codes = self.DEPARTMENT_CODES
 
         class Db:
             @staticmethod
@@ -836,16 +856,38 @@ class IcorePhoneDownloadTests(unittest.TestCase):
             def get_user_department_id(user_id):
                 return department
 
-        namespace = _bot_functions(['_heads_icore_phone_department', '_can_download_icore_phone'], {
-            'logging': logging, 'db': Db,
-            'ICORE_PHONE_DEPARTMENT_IDS': _bot_constant('ICORE_PHONE_DEPARTMENT_IDS'),
-            'ICORE_PHONE_HEAD_DEPARTMENT_CODES': _bot_constant('ICORE_PHONE_HEAD_DEPARTMENT_CODES'),
+            @staticmethod
+            def get_user_department(user_id):
+                if reads is not None:
+                    reads.append(user_id)
+                return (department, codes.get(department)) if department is not None else (None, None)
+
+        namespace = _bot_functions(self.GATE_FUNCTIONS, {
+            'logging': logging, 'db': Db, **self._constants(),
             '_is_admin_role': lambda r: r in ('admin', 'super_admin'),
             '_headed_department_id': lambda uid: headed,
             '_dial_list_department_allowed': lambda dep: dep in dial_departments,
             '_dial_list_line_member': lambda uid: member,
         })
         return namespace['_can_download_icore_phone'](77, role)
+
+    def test_szov_supervisors_download(self):
+        """Решение владельца 10.10.2026: «всем супервайзерам СЗоВ добавить кнопку Скачать icore phone»."""
+        for role in ('sv', 'supervisor', 'SV'):
+            self.assertTrue(self._gate(role=role, department=HOME_DEPARTMENT), role)
+        # Рядовым сотрудникам и тренерам СЗоВ — по-прежнему нет.
+        for role in ('operator', 'trainee', 'trainer'):
+            self.assertFalse(self._gate(role=role, department=HOME_DEPARTMENT), role)
+        # СВ отдела без телефона и СВ без отдела — нет.
+        self.assertFalse(self._gate(role='sv', department=909))
+        self.assertFalse(self._gate(role='sv', department=None))
+
+    def test_department_is_read_only_for_supervisors(self):
+        reads = []
+        self.assertFalse(self._gate(role='operator', department=HOME_DEPARTMENT, reads=reads))
+        self.assertEqual(reads, [], 'рядовому отдел ради СВ-правила читать незачем')
+        self.assertTrue(self._gate(role='sv', department=HOME_DEPARTMENT, reads=reads))
+        self.assertEqual(reads, [77])
 
     def test_szov_head_downloads_whatever_his_base_role(self):
         szov = [{"id": HOME_DEPARTMENT, "name": "СЗоВ", "code": "szov"}]
@@ -877,10 +919,12 @@ class IcorePhoneDownloadTests(unittest.TestCase):
             def get_user_department_id(user_id):
                 return HOME_DEPARTMENT
 
-        namespace = _bot_functions(['_heads_icore_phone_department', '_can_download_icore_phone'], {
-            'logging': logging, 'db': Db,
-            'ICORE_PHONE_DEPARTMENT_IDS': _bot_constant('ICORE_PHONE_DEPARTMENT_IDS'),
-            'ICORE_PHONE_HEAD_DEPARTMENT_CODES': _bot_constant('ICORE_PHONE_HEAD_DEPARTMENT_CODES'),
+            @staticmethod
+            def get_user_department(user_id):
+                return (HOME_DEPARTMENT, 'szov')
+
+        namespace = _bot_functions(self.GATE_FUNCTIONS, {
+            'logging': logging, 'db': Db, **self._constants(),
             '_is_admin_role': lambda r: False,
             '_headed_department_id': lambda uid: None,
             '_dial_list_department_allowed': lambda dep: False,
@@ -901,6 +945,13 @@ class IcorePhoneDownloadTests(unittest.TestCase):
     def test_head_codes_match_on_both_sides(self):
         back = set(_bot_constant('ICORE_PHONE_HEAD_DEPARTMENT_CODES'))
         front = re.search(r"ICORE_PHONE_HEAD_DEPARTMENT_CODES = new Set\(\[([^\]]*)\]\)", _read(APP_PATH))
+        self.assertIsNotNone(front, 'константа пропала из src/App.jsx')
+        self.assertEqual(back, set(re.findall(r"'([a-z_]+)'", front.group(1))))
+        self.assertEqual(back, {'szov'})
+
+    def test_supervisor_codes_match_on_both_sides(self):
+        back = set(_bot_constant('ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES'))
+        front = re.search(r"ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES = new Set\(\[([^\]]*)\]\)", _read(APP_PATH))
         self.assertIsNotNone(front, 'константа пропала из src/App.jsx')
         self.assertEqual(back, set(re.findall(r"'([a-z_]+)'", front.group(1))))
         self.assertEqual(back, {'szov'})

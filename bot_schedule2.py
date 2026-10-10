@@ -31188,9 +31188,13 @@ ICORE_PHONE_PREFIX = 'icore_phone'
 ICORE_PHONE_DEPARTMENT_IDS = (367, 560)
 # Главы этих отделов получают дистрибутив, хотя сам отдел на телефоне не работает:
 # глава СЗоВ сажает людей на линии удалённого КЦ (раздел «Удаленный КЦ») и раздаёт им
-# программу — решение владельца 07.10.2026. Сотрудникам СЗоВ это телефон не выдаёт.
+# программу — решение владельца 07.10.2026. Рядовым сотрудникам СЗоВ это телефон не выдаёт.
 # Та же константа на фронте (ICORE_PHONE_HEAD_DEPARTMENT_CODES в src/App.jsx).
 ICORE_PHONE_HEAD_DEPARTMENT_CODES = ('szov',)
+# Супервайзеры этих отделов — тоже (решение владельца 10.10.2026: «всем супервайзерам
+# СЗоВ добавить кнопку Скачать icore phone»). Отдел — тот, где СВ числится. Та же
+# константа на фронте (ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES в src/App.jsx).
+ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES = ('szov',)
 # Час, а не 15 минут как у аватаров: телефон может проснуться на медленной машине,
 # и протухшая на полпути ссылка означала бы, что обновление не доедет.
 ICORE_PHONE_URL_TTL_MINUTES = 60
@@ -31229,7 +31233,8 @@ def _heads_icore_phone_department(requester_id) -> bool:
 
 def _can_download_icore_phone(requester_id, role) -> bool:
     """Дистрибутив телефона: администраторы, отдел продаж и Тез КЦ (см. ICORE_PHONE_DEPARTMENT_IDS),
-    отдел удалённого КЦ, глава СЗоВ и все, кого посадили на линию в разделе «Удаленный КЦ».
+    отдел удалённого КЦ, глава и супервайзеры СЗоВ и все, кого посадили на линию в разделе
+    «Удаленный КЦ».
 
     Глава разрешённого отдела проходит даже если его собственный department_id пуст —
     у глав он не всегда заполнен, а отдел за ними закреплён отдельно.
@@ -31246,6 +31251,10 @@ def _can_download_icore_phone(requester_id, role) -> bool:
     except Exception:
         logging.warning("iCORE Phone: не удалось определить отдел главы %s", requester_id)
     if _heads_icore_phone_department(requester_id):
+        return True
+    # СВ СЗоВ (ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES). Отдел читаем только у СВ:
+    # остальным лишний запрос на каждое обновление телефона ни к чему.
+    if _is_supervisor_role(role) and _department_code_of_user(requester_id) in ICORE_PHONE_SUPERVISOR_DEPARTMENT_CODES:
         return True
     # Сотрудник любого отдела, посаженный на линию удалённого КЦ: без этого он не
     # скачал бы телефон, а установленный ловил бы 403 на автообновлении. Стоит выше
