@@ -407,6 +407,11 @@ const DIAL_LIST_PILOT_LOGINS = new Set();
 // крылом СЗоВ (решение владельца 25.09.2026). Тот же список на бэкенде —
 // dial_list.service.DIAL_LIST_OVERSEER_DEPARTMENT_CODES, и решающий он.
 const DIAL_LIST_OVERSEER_DEPARTMENT_CODES = new Set(['szov']);
+// Супервайзеры этих отделов работают в разделе так же, как глава СЗоВ (решение
+// владельца 10.10.2026: «открыть раздел удаленный КЦ всем супервайзерам СЗоВ с
+// полным доступом»). Тот же список на бэкенде —
+// dial_list.service.DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES, и решающий он.
+const DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = new Set(['szov']);
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -42952,11 +42957,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // DIAL_LIST_DEPARTMENT_CODES. Периметр отделов и права на бэкенде
             // считает сам раздел (dial_list.service.manager_scope).
             // Плюс главы отделов-кураторов (СЗоВ, DIAL_LIST_OVERSEER_DEPARTMENT_CODES) —
-            // им сервер отдаёт весь раздел, как админам.
+            // им сервер отдаёт весь раздел, как админам. И СВ СЗоВ
+            // (DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES) — с тем же, что у главы.
             const canAccessDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
                 || (isDepartmentHead(user)
                     && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code)
-                        || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code))));
+                        || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)))
+                || (isSupervisorRole(currentUserRole)
+                    && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
+                        normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));
             // Раздел один, провайдер выбирается внутри. Порядок важен: первым
             // открывается первый доступный, и главе ТЭЗ это должен быть Binotel.
             const sipSettingsProviders = [

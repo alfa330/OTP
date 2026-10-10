@@ -4,8 +4,8 @@
 Что защищаем:
 
   * сажать на линию и снимать с неё сотрудника другого отдела вправе только глава
-    СЗоВ и суперадмины; остальным руководителям раздела сервер отказывает и список
-    чужих сотрудников не отдаёт;
+    СЗоВ и суперадмины (с 10.10.2026 и СВ СЗоВ — tests/test_dial_list_szov_supervisors.py);
+    остальным руководителям раздела сервер отказывает и список чужих сотрудников не отдаёт;
   * собственные SIP-настройки такого сотрудника не трогаются: в users.sip_number у
     него телефония его отдела (у СЗоВ это логин Oktell, по нему работают табло и
     «Ограничитель») — привязка живёт в dial_list_line_members;
@@ -688,14 +688,14 @@ class LinesRoutesTests(unittest.TestCase):
         def __init__(self):
             self.calls = []
 
-        def manager_scope(self, is_admin, heads, login=None):
+        def manager_scope(self, is_admin, heads, login=None, supervisor_department_code=None):
             # Как на проде: админ и глава СЗоВ видят весь раздел, глава отдела линии —
-            # только свой отдел, остальные — ничего.
+            # только свой отдел, остальные — ничего. СВ здесь не проводятся (код None).
             if is_admin or 1 in list(heads):
                 return None
             return [LINE_DEPARTMENT] if LINE_DEPARTMENT in list(heads) else []
 
-        def can_seat_anyone(self, is_super_admin, heads):
+        def can_seat_anyone(self, is_super_admin, heads, supervisor_department_code=None):
             self.calls.append(('right', bool(is_super_admin), list(heads)))
             return bool(is_super_admin) or 1 in list(heads)      # отдел 1 — СЗоВ
 

@@ -24,17 +24,17 @@
                                                              тип итога: ключа нет (телефон до типов) — без типа;
                                                              ключ есть — у итога с включёнными типами обязателен
 
-Ручки руководителя. Круг свой, не от «Настроек SIP»: админ видит все отделы
-раздела, глава отдела — свои отделы, если они в периметре (Binotel, заведённые
-настройки обзвона или код из DIAL_LIST_DEPARTMENT_CODES):
+Ручки руководителя. Круг свой, не от «Настроек SIP»: админ, глава и СВ СЗоВ видят
+все отделы раздела, глава отдела — свои отделы, если они в периметре (Binotel,
+заведённые настройки обзвона или код из DIAL_LIST_DEPARTMENT_CODES):
     GET     /api/dial_list/departments                       отделы раздела в моей зоне
     GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
     GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
                                                              посадить (candidates — сотрудники других
-                                                             отделов: только главе СЗоВ и суперадмину)
+                                                             отделов: только главе и СВ СЗоВ и суперадмину)
     POST    /api/dial_list/departments/<id>/lines/assign     {user_id, internal_number}; сотрудника
-                                                             другого отдела — те же двое, иначе 403
+                                                             другого отдела — только они же, иначе 403
     POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
                                                              ИИН обязателен, после загрузки — проверка подписания
@@ -83,11 +83,14 @@ LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
 
 def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               resolve_requester, is_admin_role, headed_department_ids,
-                              is_super_admin_role=None, service=None):
+                              is_super_admin_role=None, is_supervisor_role=None,
+                              department_code_of=None, service=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
     is_super_admin_role(role) -> bool — кому, кроме главы СЗоВ, можно сажать на линию
-    сотрудника другого отдела (не передан — суперадминов для раздела нет)."""
+    сотрудника другого отдела (не передан — суперадминов для раздела нет);
+    is_supervisor_role(role) -> bool и department_code_of(user_id) -> код отдела —
+    по ним СВ СЗоВ получает раздел целиком (не переданы — СВ раздела не получают)."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -105,13 +108,21 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError(message, status)
         return int(requester_id), requester
 
+    def _supervisor_department_code(requester_id, role):
+        """Код отдела, где числится запросивший, — только у супервайзера (правило —
+        svc.full_access_supervisor); у остальных None и без лишнего запроса."""
+        if is_supervisor_role is None or department_code_of is None or not is_supervisor_role(role):
+            return None
+        return department_code_of(requester_id)
+
     def _manager(department_id=None):
         """Руководитель раздела и его зона (None — все отделы раздела)."""
         requester_id, requester = _operator()
         role = requester[3]
         # Логин — восьмое поле строки get_user (u.login); по нему работает пилот.
         login = requester[7] if len(requester) > 7 else None
-        scope = svc.manager_scope(bool(is_admin_role(role)), headed_department_ids(requester_id), login=login)
+        scope = svc.manager_scope(bool(is_admin_role(role)), headed_department_ids(requester_id), login=login,
+                                  supervisor_department_code=_supervisor_department_code(requester_id, role))
         if scope is not None and not scope:
             raise DialListError("Раздел «Удаленный КЦ» вам недоступен", 403)
         if department_id is not None and scope is not None and int(department_id) not in set(scope):
@@ -120,11 +131,13 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     def _seats_anyone():
         """Может ли запросивший сажать на линию сотрудника ДРУГОГО отдела и снимать
-        его: суперадмин или глава СЗоВ (svc.can_seat_anyone). Зовётся после _manager —
-        сам по себе доступа к разделу не даёт."""
+        его: суперадмин, глава или СВ СЗоВ (svc.can_seat_anyone). Зовётся после
+        _manager — сам по себе доступа к разделу не даёт."""
         requester_id, requester = _operator()
-        is_super = bool(is_super_admin_role and is_super_admin_role(requester[3]))
-        return svc.can_seat_anyone(is_super, headed_department_ids(requester_id))
+        role = requester[3]
+        is_super = bool(is_super_admin_role and is_super_admin_role(role))
+        return svc.can_seat_anyone(is_super, headed_department_ids(requester_id),
+                                   supervisor_department_code=_supervisor_department_code(requester_id, role))
 
     def _error(exc):
         return jsonify({"error": str(exc)}), exc.status
@@ -321,8 +334,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """Линии Binotel компании отдела и сотрудники для назначения. Без секретов.
 
         users — сотрудники отдела и те, кто уже сидит на его линиях. candidates —
-        сотрудники ДРУГИХ отделов для выбора по ФИО: только главе СЗоВ и суперадмину
-        (can_seat_anyone), остальным список пуст, а сервер чужого не посадит."""
+        сотрудники ДРУГИХ отделов для выбора по ФИО: только главе и СВ СЗоВ и
+        суперадмину (can_seat_anyone), остальным список пуст, а сервер чужого не посадит."""
         _manager(department_id)
         anyone = _seats_anyone()
         return jsonify({

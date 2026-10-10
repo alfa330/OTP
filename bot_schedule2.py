@@ -66879,6 +66879,10 @@ try:
         # Сажать на линию сотрудника другого отдела — суперадмину и главе СЗоВ
         # (dial_list.service.can_seat_anyone); обычной роли «админ» этого мало.
         is_super_admin_role=_is_super_admin_role,
+        # СВ СЗоВ — весь раздел и посадка на линию, как у главы СЗоВ (решение
+        # владельца 10.10.2026, dial_list.service.full_access_supervisor).
+        is_supervisor_role=_is_supervisor_role,
+        department_code_of=_department_code_of_user,
     )
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service

@@ -185,7 +185,14 @@ DIAL_LIST_OVERSEER_DEPARTMENT_CODES = frozenset({"szov"})
 # не DIAL_LIST_OVERSEER_DEPARTMENT_CODES: новый отдел-куратор не должен получить
 # это молча, заодно с доступом к разделу.
 DIAL_LIST_SEAT_ANYONE_HEAD_CODES = frozenset({"szov"})
-SEAT_ANYONE_DENIED = "Сотрудника другого отдела сажают на линию и снимают с неё глава СЗоВ и суперадмины"
+
+# Супервайзеры этих отделов работают в разделе так же, как глава СЗоВ: весь раздел и
+# посадка на линию сотрудника другого отдела (решение владельца 10.10.2026: «открыть
+# раздел удаленный КЦ всем супервайзерам СЗоВ с полным доступом»). Отдел — тот, где
+# СВ числится (users.department_id). Тот же список на фронте — в App.jsx.
+DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = frozenset({"szov"})
+SEAT_ANYONE_DENIED = ("Сотрудника другого отдела сажают на линию и снимают с неё глава и супервайзеры СЗоВ "
+                      "и суперадмины")
 # «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
 MEMBER_NOT_GIVEN = object()
 
@@ -195,6 +202,13 @@ def pilot_allows(login):
     if not DIAL_LIST_PILOT_LOGINS:
         return True
     return str(login or "").strip().lower() in DIAL_LIST_PILOT_LOGINS
+
+
+def full_access_supervisor(supervisor_department_code):
+    """СВ отдела из DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES. Код отдела
+    передают только для супервайзера: у остальных он None."""
+    code = str(supervisor_department_code or "").strip().lower()
+    return code in DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES
 
 
 class DialListError(Exception):
@@ -477,14 +491,15 @@ class DialListService:
         log.info("dial_list: отдел %s подключён к разделу (пользователь %s)", department_id, changed_by)
         return self.department_settings(department_id)
 
-    def manager_scope(self, is_admin, headed_department_ids, login=None):
+    def manager_scope(self, is_admin, headed_department_ids, login=None, supervisor_department_code=None):
         """Что видит руководитель: None — всё (админ; глава отдела из
-        DIAL_LIST_OVERSEER_DEPARTMENT_CODES, то есть СЗоВ); список id — глава отдела
-        периметра видит свои отделы; [] — раздел не его. Пилот (DIAL_LIST_PILOT_LOGINS)
-        снят 25.09.2026: список пуст, правило общее для всех."""
+        DIAL_LIST_OVERSEER_DEPARTMENT_CODES, то есть СЗоВ; СВ СЗоВ —
+        full_access_supervisor); список id — глава отдела периметра видит свои
+        отделы; [] — раздел не его. Пилот (DIAL_LIST_PILOT_LOGINS) снят 25.09.2026:
+        список пуст, правило общее для всех."""
         if not pilot_allows(login):
             return []
-        if is_admin:
+        if is_admin or full_access_supervisor(supervisor_department_code):
             return None
         headed = sorted({int(x) for x in (headed_department_ids or [])})
         if not headed:
@@ -506,11 +521,12 @@ class DialListService:
                         ([int(x) for x in department_ids],))
             return any((r[0] or "") in codes for r in cur.fetchall())
 
-    def can_seat_anyone(self, is_super_admin, headed_department_ids):
+    def can_seat_anyone(self, is_super_admin, headed_department_ids, supervisor_department_code=None):
         """Можно ли запросившему сажать на линию сотрудника ДРУГОГО отдела и снимать
-        его с неё: суперадмин либо глава отдела из DIAL_LIST_SEAT_ANYONE_HEAD_CODES
-        (СЗоВ). Роль «админ» сама по себе этого не даёт — решение владельца 07.10.2026."""
-        if is_super_admin:
+        его с неё: суперадмин, глава отдела из DIAL_LIST_SEAT_ANYONE_HEAD_CODES (СЗоВ)
+        либо СВ СЗоВ (full_access_supervisor, с 10.10.2026). Роль «админ» сама по себе
+        этого не даёт — решение владельца 07.10.2026."""
+        if is_super_admin or full_access_supervisor(supervisor_department_code):
             return True
         headed = sorted({int(x) for x in (headed_department_ids or [])})
         return self._heads_department_with_code(headed, DIAL_LIST_SEAT_ANYONE_HEAD_CODES)

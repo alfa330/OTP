@@ -11,7 +11,7 @@ import { assignedToast, buildLinePickerOptions, canReleaseHolder, defaultPickedU
  * Назначение — одна кнопка: сервер сам связывает линию с сотрудником, дальше тот
  * входит в iCORE Phone логином iCORE и регистрируется на этой линии.
  *
- * Сидеть на линии может сотрудник любого отдела: глава СЗоВ и суперадмины выбирают
+ * Сидеть на линии может сотрудник любого отдела: глава и СВ СЗоВ и суперадмины выбирают
  * его по ФИО из всей компании (право и список считает сервер — can_seat_anyone,
  * candidates), остальные руководители раздела — только из сотрудников отдела линии.
  * Что кому предлагать — в linePicker.js.
@@ -103,7 +103,7 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
     };
 
     const users = data?.users || [];
-    // Сажать на линию сотрудника другого отдела — глава СЗоВ и суперадмины; признак
+    // Сажать на линию сотрудника другого отдела — глава и СВ СЗоВ и суперадмины; признак
     // и список таких сотрудников (candidates) приходят с сервера.
     const canSeatAnyone = data?.can_seat_anyone === true;
     const pickerOptions = useMemo(() => buildLinePickerOptions({

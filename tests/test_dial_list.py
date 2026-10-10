@@ -367,6 +367,10 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(svc.manager_scope(False, [], login='user'), [])       # обычная роль — ничего
         self.assertEqual(svc.manager_scope(False, [5, 99], login='head'), [5])  # глава — свои отделы из периметра
         self.assertIsNone(svc.manager_scope(False, [7], login='szov_head'))    # глава СЗоВ — весь раздел
+        # СВ СЗоВ (с 10.10.2026) — весь раздел, как глава СЗоВ; СВ других отделов — ничего.
+        self.assertIsNone(svc.manager_scope(False, [], login='szov_sv', supervisor_department_code='szov'))
+        self.assertEqual(svc.manager_scope(False, [], login='op_sv', supervisor_department_code='op'), [])
+        self.assertEqual(svc.manager_scope(False, [5], login='op_sv_head', supervisor_department_code='op'), [5])
         overseer = inspect.getsource(dial_service.DialListService._heads_overseer)
         self.assertIn('DIAL_LIST_OVERSEER_DEPARTMENT_CODES', overseer)
         self.assertIn('szov', dial_service.DIAL_LIST_OVERSEER_DEPARTMENT_CODES)
@@ -1159,7 +1163,7 @@ class OutcomeSubtypesTests(unittest.TestCase):
         seen = []
 
         class Svc:
-            def manager_scope(self, is_admin, heads, login=None):
+            def manager_scope(self, is_admin, heads, login=None, supervisor_department_code=None):
                 return None
 
             def leads_journal(self, department_id, **kwargs):
