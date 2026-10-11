@@ -44,3 +44,19 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-
 html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-seek::-webkit-slider-thumb {
     box-shadow: 0 0 0 3px rgba(187, 64, 120, .1);
 }
+
+/* Выбор эмодзи — у библиотеки свои переменные; синие акценты — в тон темы. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPickerReact {
+    --epr-bg-color: #fff7fa;
+    --epr-category-label-bg-color: rgba(255, 247, 250, .95);
+    --epr-highlight-color: #ad3a6e;
+    --epr-hover-bg-color: #f9e4ec;
+    --epr-hover-bg-color-reduced-opacity: rgba(249, 228, 236, .5);
+    --epr-focus-bg-color: #f2d3df;
+    --epr-search-input-bg-color: #fdf0f5;
+    --epr-search-input-bg-color-active: #fff7fa;
+    --epr-search-border-color: #eed0dc;
+    --epr-search-border-color-active: #e07ca4;
+    --epr-picker-border-color: #f5e0e8;
+    --epr-category-icon-active-color: #bb4078;
+}
