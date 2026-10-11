@@ -66,6 +66,8 @@ def contrast(a, b):
 class ChatRoseThemeTests(unittest.TestCase):
     def test_every_rule_stays_inside_the_rose_window(self):
         scope = builder().SCOPE
+        self.assertIn('.wz-workspace[data-chat-theme="rose"]', scope)
+        self.assertIn('body[data-wz-chat-rose] > [role="menu"]', scope)
         allowed = (scope + ' ',
                    "html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose']",
                    "html:not([data-otp-theme='dark']) body[data-wz-chat-rose] > [role='menu']")
@@ -83,6 +85,15 @@ class ChatRoseThemeTests(unittest.TestCase):
         for name in ('.bg-white ', '.bg-slate-100 ', '.text-slate-900 ', '.text-slate-500 ',
                      '.border-slate-200 ', '.hover\\:bg-slate-100:hover', '.bg-blue-600 ', '.text-blue-600 '):
             self.assertIn(name, css, 'В слое «Розы» нет %s' % name)
+
+    def test_blue_accent_becomes_rose(self):
+        rose = builder()
+        css = LAYER.read_text(encoding='utf-8')
+        for prop, color, value in (('bg', 'blue-600', 'background-color: %s' % rose.ACCENT['600']),
+                                   ('text', 'blue-600', 'color: %s' % rose.ACCENT_TEXT['600']),
+                                   ('ring', 'blue-500', '--tw-ring-color: %s' % rose.ACCENT['500'])):
+            self.assertEqual(rose.declaration(prop, color, None), value)
+            self.assertIn('.%s-%s { %s !important; }' % (prop, color, value), css)
 
     def test_meaningful_colours_stay_as_they_are(self):
         """Ждут ответа, статус смены, ошибка, заметка, «прочитано» — цвет здесь смысл."""

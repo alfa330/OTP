@@ -124,6 +124,19 @@ test('an owner who had picked a theme before still gets the personal one once', 
     assert.equal((await freshTab(storage)).useChatTheme(241).selected, 'sand');
 });
 
+test('storage refusing the one-time mark leaves the owner\'s own choice alone', async () => {
+    const storage = memory();
+    storage.setItem('icore.wazzup.chatTheme.241', 'sand');
+    const setItem = storage.setItem;
+    storage.setItem = (key, value) => {
+        if (key.startsWith('icore.wazzup.chatTheme.personal.')) throw new Error('QuotaExceededError');
+        setItem(key, value);
+    };
+    const themes = await freshTab(storage);
+    themes.useChatTheme(241);
+    assert.equal(storage.map.get('icore.wazzup.chatTheme.241'), 'sand');
+});
+
 test('Rose, like Night, shows only after its stylesheet arrived', async () => {
     const themes = await freshTab(memory());
     const before = themes.useChatTheme(241);

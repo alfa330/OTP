@@ -103,9 +103,10 @@ function readChatTheme(owner) {
     try {
         const store = storage();
         const personal = themes.find((theme) => theme.owners);
+        // Сначала метка: не записалась — выбор человека остаётся нетронутым.
         if (personal && store && store.getItem(PERSONAL + owner) !== personal.id) {
-            store.setItem(PREFIX + owner, personal.id);
             store.setItem(PERSONAL + owner, personal.id);
+            store.setItem(PREFIX + owner, personal.id);
         }
         const stored = store?.getItem(PREFIX + owner);
         if (themes.some((theme) => theme.id === stored)) id = stored;
