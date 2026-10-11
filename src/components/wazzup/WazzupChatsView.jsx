@@ -30,7 +30,7 @@ import { chatListDraft, useChatDrafts } from './chatDrafts';
 import { applyDeliveryToRows, mergeChatRow, orderChatList, waitingCount } from './chatListOrder';
 import ChatThemeMenu from './ChatThemeMenu';
 import ChatChannelsOfNumber from './ChatChannelsOfNumber';
-import { chatThemeStyle, useChatTheme, useNightMenus, usePortalDark } from './chatThemes';
+import { chatThemeStyle, useChatTheme, usePortalDark, useThemeMenus } from './chatThemes';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -1101,7 +1101,7 @@ function ChatsWorkspace(props) {
     const portalDark = usePortalDark();
     const chatTheme = useChatTheme(user?.id ?? null);
     const themed = !portalDark && chatTheme.applied.id !== 'standard';
-    useNightMenus(themed && chatTheme.applied.id === 'night');
+    useThemeMenus(themed ? chatTheme.applied.id : null);
     const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
     // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
     const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
@@ -1765,7 +1765,7 @@ function ChatsWorkspace(props) {
                     </>}
                     {toolbar}
                     {mainTab === 'chats' && !portalDark &&
-                        <ChatThemeMenu selected={chatTheme.selected} onChoose={chatTheme.choose} />}
+                        <ChatThemeMenu selected={chatTheme.selected} themes={chatTheme.themes} onChoose={chatTheme.choose} />}
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить

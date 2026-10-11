@@ -1,0 +1,148 @@
+/* ЭТОТ ФАЙЛ СОБРАН СКРИПТОМ. Правки вносить в scripts/build_chat_rose_theme.py
+   и scripts/chat_rose_theme_chrome.css, затем прогнать:
+       python3 scripts/build_chat_rose_theme.py
+
+   Тема «Роза» раздела «Чаты ОП»: розовое окно раздела с data-chat-theme="rose"
+   и его меню. Тема личная (owners в chatThemes.js), слой грузится по
+   требованию (loadThemeLayer в chatThemes.js). */
+
+/* «Роза» — то, что живёт вне утилит Tailwind. Склеивается в начало
+ * src/components/wazzup/chatThemeRose.css скриптом build_chat_rose_theme.py,
+ * поэтому адреса — относительно ТОГО файла (./chatThemeRose.svg лежит рядом
+ * с ним). Пузыри и плашки дат красят переменные темы (chatThemes.css). */
+
+/* Полотно окна: шапка раздела лежит прямо на нём. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] {
+    background-color: #fff7fa;
+}
+
+/* Мозаика на подложке переписки — тонкие контурные цветы, сердечки и искры.
+ * Лежит неподвижно, лента прокручивается поверх, сообщения её закрывают.
+ * Селектор на ступень точнее общего правила подложки (chatThemes.css): оба с
+ * !important, и порядок, в котором загрузились файлы, победителя не решает. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wz-columns .wz-chat-pane {
+    background: url('./chatThemeRose.svg') 0 0 / 320px 320px repeat, var(--wz-wall) !important;
+}
+
+/* Меню раздела рисуются в портал (useThemeMenus в chatThemes.js): подложка
+ * меню — здесь, пункты — утилитами ниже. */
+html:not([data-otp-theme='dark']) body[data-wz-chat-rose] > [role='menu'] {
+    background-color: rgba(255, 247, 250, 0.97) !important;
+    --tw-ring-color: rgba(209, 160, 181, 0.55) !important;
+}
+
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar) {
+    scrollbar-color: #e6bfcf transparent;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar)::-webkit-scrollbar-thumb {
+    background: #e6bfcf;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar)::-webkit-scrollbar-thumb:hover {
+    background: #d29db4;
+}
+
+/* Плеер голосовых — акцентом темы, а не зелёным стандартной. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio {
+    --audio-accent: #bb4078;
+    --audio-track: rgba(187, 64, 120, .2);
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-caption { color: #875b6d; }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-speed { background: rgba(187, 64, 120, .08); }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-speed:hover { background: rgba(187, 64, 120, .15); }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-seek::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(187, 64, 120, .1);
+}
+
+/* ═══ Утилиты Tailwind окна раздела ═══════════════════════════════════ */
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-50 { background-color: #fdedf3 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-500 { background-color: #d0568b !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-500\/10 { background-color: rgba(208, 86, 139, 0.1) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-600 { background-color: #bb4078 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-gray-100 { background-color: #f9e4ec !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-gray-50 { background-color: #fdf0f5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-100 { background-color: #f9e4ec !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-100\/80 { background-color: rgba(249, 228, 236, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-200 { background-color: #f2d3df !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-200\/70 { background-color: rgba(242, 211, 223, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-200\/80 { background-color: rgba(242, 211, 223, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-300 { background-color: #e8bfd0 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-400 { background-color: #d29fb5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-50 { background-color: #fdf0f5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-500\/10 { background-color: rgba(183, 129, 153, 0.1) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-50\/70 { background-color: rgba(253, 240, 245, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-slate-50\/90 { background-color: rgba(253, 240, 245, 0.9) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-white { background-color: #fff7fa !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-white\/80 { background-color: rgba(255, 247, 250, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-white\/85 { background-color: rgba(255, 247, 250, 0.85) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-white\/95 { background-color: rgba(255, 247, 250, 0.95) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-blue-400 { border-color: #e07ca4 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-blue-500 { border-color: #d0568b !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-gray-100 { border-color: #f5e0e8 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-gray-200 { border-color: #eed0dc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-gray-300 { border-color: #e3bccc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-100 { border-color: #f5e0e8 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200 { border-color: #eed0dc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200\/70 { border-color: rgba(238, 208, 220, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #f5e0e8 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:bg-blue-50:focus-visible { background-color: #fdedf3 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:ring-blue-400:focus-visible { --tw-ring-color: #e07ca4 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:ring-blue-500\/60:focus-visible { --tw-ring-color: rgba(208, 86, 139, 0.6) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-within\:border-slate-300:focus-within { border-color: #e3bccc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:bg-white:focus { background-color: #fff7fa !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:border-blue-400:focus { border-color: #e07ca4 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-100:focus { --tw-ring-color: #fadbe7 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-500\/60:focus { --tw-ring-color: rgba(208, 86, 139, 0.6) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-500\/70:focus { --tw-ring-color: rgba(208, 86, 139, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-100:hover { background-color: #fadbe7 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-500\/15:hover { background-color: rgba(208, 86, 139, 0.15) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-50:hover { background-color: #fdedf3 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-600:hover { background-color: #bb4078 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-700:hover { background-color: #9e3263 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-gray-100:hover { background-color: #f9e4ec !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-gray-50:hover { background-color: #fdf0f5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-100:hover { background-color: #f9e4ec !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-200:hover { background-color: #f2d3df !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-200\/70:hover { background-color: rgba(242, 211, 223, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-200\/80:hover { background-color: rgba(242, 211, 223, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-300\/80:hover { background-color: rgba(232, 191, 208, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-50:hover { background-color: #fdf0f5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-50\/80:hover { background-color: rgba(253, 240, 245, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:border-gray-400:hover { border-color: #d1a0b5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:border-slate-400:hover { border-color: #d1a0b5 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-blue-600:hover { color: #ad3a6e !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-gray-700:hover { color: #5a3747 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-slate-600:hover { color: #6f4758 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-slate-700:hover { color: #5a3747 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-slate-800:hover { color: #452a37 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .placeholder-slate-400::placeholder { color: #b08294 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .placeholder\:text-slate-400::placeholder { color: #b08294 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-100 { --tw-ring-color: #fadbe7 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-300 { --tw-ring-color: #ee9fbe !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500 { --tw-ring-color: #d0568b !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500\/40 { --tw-ring-color: rgba(208, 86, 139, 0.4) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500\/60 { --tw-ring-color: rgba(208, 86, 139, 0.6) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500\/70 { --tw-ring-color: rgba(208, 86, 139, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-slate-200 { --tw-ring-color: #eed0dc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-slate-200\/60 { --tw-ring-color: rgba(238, 208, 220, 0.6) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-slate-200\/70 { --tw-ring-color: rgba(238, 208, 220, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-slate-200\/80 { --tw-ring-color: rgba(238, 208, 220, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-slate-900\/10 { --tw-ring-color: rgba(90, 56, 73, 0.1) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-blue-100 { color: #fde6ef !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-blue-500 { color: #c24a80 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-blue-600 { color: #ad3a6e !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-blue-700 { color: #8f2f5c !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-gray-400 { color: #b08294 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-gray-500 { color: #875b6d !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-gray-700 { color: #5a3747 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-gray-900 { color: #331e28 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-300 { color: #d4abbd !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-400 { color: #b08294 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-500 { color: #875b6d !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-600 { color: #6f4758 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-700 { color: #5a3747 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-800 { color: #452a37 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .text-slate-900 { color: #331e28 !important; }
+
+@media (min-width: 768px) {
+    :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .md\:border-slate-200 { border-color: #eed0dc !important; }
+}

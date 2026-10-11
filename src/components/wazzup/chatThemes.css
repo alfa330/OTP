@@ -3,8 +3,9 @@
  * атрибута не ставит, и ни одно правило ниже её не касается.
  *
  * В тёмном режиме портала окно и так тёмное — там темы не действуют.
- * !important: правила спорят с утилитами Tailwind того же элемента и со слоем
- * «Ночи», который перекрывает их сам с !important. */
+ * !important: правила спорят с утилитами Tailwind того же элемента и со слоями
+ * тем на всё окно («Ночь», «Роза»), которые перекрывают их сами с !important.
+ * Рукописная часть «Розы» — в её слое (scripts/chat_rose_theme_chrome.css). */
 
 html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme] .wz-chat-pane {
     background: var(--wz-wall) !important;

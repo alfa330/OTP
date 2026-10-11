@@ -1,0 +1,46 @@
+/* «Роза» — то, что живёт вне утилит Tailwind. Склеивается в начало
+ * src/components/wazzup/chatThemeRose.css скриптом build_chat_rose_theme.py,
+ * поэтому адреса — относительно ТОГО файла (./chatThemeRose.svg лежит рядом
+ * с ним). Пузыри и плашки дат красят переменные темы (chatThemes.css). */
+
+/* Полотно окна: шапка раздела лежит прямо на нём. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] {
+    background-color: #fff7fa;
+}
+
+/* Мозаика на подложке переписки — тонкие контурные цветы, сердечки и искры.
+ * Лежит неподвижно, лента прокручивается поверх, сообщения её закрывают.
+ * Селектор на ступень точнее общего правила подложки (chatThemes.css): оба с
+ * !important, и порядок, в котором загрузились файлы, победителя не решает. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wz-columns .wz-chat-pane {
+    background: url('./chatThemeRose.svg') 0 0 / 320px 320px repeat, var(--wz-wall) !important;
+}
+
+/* Меню раздела рисуются в портал (useThemeMenus в chatThemes.js): подложка
+ * меню — здесь, пункты — утилитами ниже. */
+html:not([data-otp-theme='dark']) body[data-wz-chat-rose] > [role='menu'] {
+    background-color: rgba(255, 247, 250, 0.97) !important;
+    --tw-ring-color: rgba(209, 160, 181, 0.55) !important;
+}
+
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar) {
+    scrollbar-color: #e6bfcf transparent;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar)::-webkit-scrollbar-thumb {
+    background: #e6bfcf;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] :is(.wazzup-scrollbar, .wazzup-thin-scrollbar)::-webkit-scrollbar-thumb:hover {
+    background: #d29db4;
+}
+
+/* Плеер голосовых — акцентом темы, а не зелёным стандартной. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio {
+    --audio-accent: #bb4078;
+    --audio-track: rgba(187, 64, 120, .2);
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-caption { color: #875b6d; }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-speed { background: rgba(187, 64, 120, .08); }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-speed:hover { background: rgba(187, 64, 120, .15); }
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .wazzup-audio-seek::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(187, 64, 120, .1);
+}
