@@ -142,3 +142,32 @@ test('вложенный уровень: выбранная кампания п�
   }));
   assert.ok(html.includes('cp:spring'));
 });
+
+/* ── Просторный вид для больших экранов ────────────────────────────────────
+ *
+ * `roomy` появился 12.10.2026, когда раздел «Учёт воды» набрали крупно для
+ * большого монитора: кнопка списка в 48 px раскрывала бы строки кеглем 12.5 px.
+ * Договор: без параметра разметка прежняя до символа; добавки несут префикс
+ * брейкпоинта от xl, так что до 1280 px и в остальных разделах их нет; у старого вида
+ * (variant="default") параметр ничего не делает.
+ */
+test('roomy: без параметра кнопка прежняя, с ним — те же классы плюс добавки с префиксом', () => {
+  const plain = render({ value: '1', variant: 'ios' });
+  const roomy = render({ value: '1', variant: 'ios', roomy: true });
+  assert.ok(!/(?:md|lg|xl|2xl):/.test(plain), 'обычный список не несёт ступеней размера');
+  assert.ok(roomy.includes('xl:py-2.5') && roomy.includes('2xl:py-3'), 'кнопка растёт с xl и с 2xl');
+  assert.ok(roomy.includes('2xl:text-[16px]'), 'кегль кнопки — вслед за её ростом');
+  // Убрав добавки, получаем прежнюю кнопку: ничего, кроме них, не изменилось.
+  assert.equal(roomy.replace(/ (?:xl|2xl):[^\s"]+/g, ''), plain);
+});
+
+test('roomy: свой кегль кнопки (textClassName) остаётся за вызывающим', () => {
+  const html = render({ value: '1', variant: 'ios', roomy: true, textClassName: 'text-[15px] text-slate-900' });
+  assert.ok(html.includes('text-[15px]'));
+  assert.ok(!html.includes('2xl:text-[16px]'), 'кегль просторного вида не должен спорить со своим');
+  assert.ok(html.includes('2xl:py-3'), 'рост кнопки при этом остаётся просторным');
+});
+
+test('roomy: старому виду (variant="default") параметр ничего не меняет', () => {
+  assert.equal(render({ value: '1', roomy: true }), render({ value: '1' }));
+});

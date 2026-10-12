@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Check, Loader2, Minus, Plus, RotateCcw, X } from 'lucide-react';
-import { IosToggle, iosBtnGhost, iosBtnPrimary, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
+import { IosToggle, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { driverAccountUrl, extractAccountId, fmtDate, fmtDateTime, fmtPhone } from '../parcels/parcelMeta';
 import {
     blocksWord, defaultOfficeId, kindLabel, nextIssueLine, readLastOffice, rememberOffice,
     stockStatus, tariffLabel, verdictBasis, verdictHeadline,
 } from './waterMeta';
+import { T, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill } from './waterUi';
 
 /*
  * «Выдача» — экран у стойки фронт-офиса.
@@ -40,6 +41,9 @@ const programWeekOrders = (orders, carTariffs, programTariffs) => {
         .filter(([code, count]) => count > 0 || carTariffs.includes(code));
 };
 
+/* ФИО водителя — главная строка карточки: по ней сверяют человека у стойки. */
+const NAME = 'xl:text-[17px] 2xl:text-[22px] 2xl:tracking-tight';
+
 const DriverCard = ({ driver, programTariffs }) => {
     const account = driverAccountUrl({ driver_account_id: driver.account_id, driver_park_id: driver.park_id });
     const statusNote = driver.fired ? 'Уволен из парка'
@@ -54,23 +58,23 @@ const DriverCard = ({ driver, programTariffs }) => {
         .map(([code, count]) => `${tariffLabel(code)} ${count}${more}`.replace(/ /g, ' '))
         .join(', ');
     return (
-        <div className="space-y-2">
-            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <div className="space-y-2 2xl:space-y-3">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 2xl:gap-x-3">
                 {account ? (
                     <a href={account} target="_blank" rel="noopener noreferrer"
-                       className="text-[16px] font-semibold text-slate-900 underline decoration-transparent underline-offset-2 transition hover:decoration-inherit">
+                       className={`text-[16px] font-semibold text-slate-900 underline decoration-transparent underline-offset-2 transition hover:decoration-inherit ${NAME}`}>
                         {driver.name || 'Без имени'}
                     </a>
                 ) : (
-                    <span className="text-[16px] font-semibold text-slate-900">{driver.name || 'Без имени'}</span>
+                    <span className={`text-[16px] font-semibold text-slate-900 ${NAME}`}>{driver.name || 'Без имени'}</span>
                 )}
                 {driver.phone && (
-                    <a href={`tel:${driver.phone}`} className="tabular-nums text-[13px] text-slate-500">
+                    <a href={`tel:${driver.phone}`} className={`tabular-nums text-[13px] text-slate-500 ${T.body}`}>
                         {fmtPhone(driver.phone)}
                     </a>
                 )}
             </div>
-            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[12.5px] text-slate-500">
+            <div className={`flex flex-wrap gap-x-3 gap-y-0.5 text-[12.5px] text-slate-500 2xl:gap-x-4 2xl:gap-y-1 ${T.sub}`}>
                 {driver.park && <span>{driver.park}</span>}
                 {driver.registered_at && <span>Регистрация {fmtDate(driver.registered_at)}</span>}
                 <span className="tabular-nums">
@@ -80,11 +84,11 @@ const DriverCard = ({ driver, programTariffs }) => {
                 {statusNote && <span className="font-medium text-rose-600">{statusNote}</span>}
             </div>
             {driver.tariffs?.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex flex-wrap gap-1.5 2xl:gap-2">
                     {driver.tariffs.map((code) => (
                         <span
                             key={code}
-                            className={`rounded-full px-2 py-0.5 text-[11.5px] font-medium ${
+                            className={`rounded-full px-2 py-0.5 text-[11.5px] font-medium ${wPill} ${
                                 programTariffs.includes(code)
                                     ? 'bg-slate-900 text-white'
                                     : 'bg-slate-100 text-slate-500'
@@ -99,18 +103,25 @@ const DriverCard = ({ driver, programTariffs }) => {
     );
 };
 
+/* Плашка на месте списка офисов (загрузка, сбой, «офисов нет») — ростом с поле
+   рядом: 41 px на компьютере (с xl), 48 px на большом экране. */
+const NOTE = `px-4 py-3 text-[13px] xl:py-2.5 2xl:px-5 2xl:py-3 ${T.body}`;
+
+const STEP = 'grid h-9 w-9 place-items-center rounded-[10px] text-slate-600 transition hover:bg-white '
+    + 'disabled:opacity-30 xl:size-[37px] 2xl:size-11';
+
 const Stepper = ({ value, max, onChange }) => (
     <div className="inline-flex items-center rounded-xl bg-slate-100 p-0.5">
         <button type="button" aria-label="Меньше" disabled={value <= 1}
                 onClick={() => onChange(Math.max(1, value - 1))}
-                className="grid h-9 w-9 place-items-center rounded-[10px] text-slate-600 transition hover:bg-white disabled:opacity-30">
-            <Minus size={15} />
+                className={STEP}>
+            <Minus size={15} className={wIcon} />
         </button>
-        <span className="min-w-[2.5rem] text-center text-[15px] font-semibold tabular-nums text-slate-900">{value}</span>
+        <span className="min-w-[2.5rem] text-center text-[15px] font-semibold tabular-nums text-slate-900 2xl:px-1.5 2xl:text-[18px]">{value}</span>
         <button type="button" aria-label="Больше" disabled={value >= max}
                 onClick={() => onChange(Math.min(max, value + 1))}
-                className="grid h-9 w-9 place-items-center rounded-[10px] text-slate-600 transition hover:bg-white disabled:opacity-30">
-            <Plus size={15} />
+                className={STEP}>
+            <Plus size={15} className={wIcon} />
         </button>
     </div>
 );
@@ -251,142 +262,177 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
         meta: blocksWord(item.stock),
     }));
 
-    return (
-        <div className="max-w-2xl space-y-3">
-            {canIssue && (
-                <div className="space-y-1.5">
-                    <span className={iosGroupLabel}>Офис</span>
-                    {!officesReady ? (
-                        <div className={`${iosCard} px-4 py-3 text-[13px] ${offices === 'error' ? 'text-rose-600' : 'text-slate-500'}`}>
-                            {offices === 'error' ? 'Не удалось загрузить офисы — обновите страницу' : 'Загружаем офисы…'}
-                        </div>
-                    ) : activeOffices.length ? (
-                        <CustomSelect
-                            value={officeId}
-                            onChange={(value) => { setOfficeId(value); rememberOffice(value); }}
-                            options={officeOptions}
-                            placeholder="Выберите офис"
-                            variant="ios"
-                            ariaLabel="Офис"
-                        />
-                    ) : (
-                        <div className={`${iosCard} px-4 py-3 text-[13px] text-slate-500`}>
-                            Офисы ещё не заведены в учёт.{capabilities?.can_manage
-                                ? ' Добавьте их во вкладке «Остатки».'
-                                : ' Их заводит региональный руководитель.'}
-                        </div>
-                    )}
-                </div>
-            )}
+    /* Ряд «Офис | Водитель» — когда офис есть из чего выбирать. Пока офисов в
+       учёте нет, на месте списка стоит пояснение в две строки, и рядом с полем
+       в одну строку оно смотрелось бы ступенькой: тогда блоки идут друг под другом. */
+    const fieldsRow = canIssue && (!officesReady || activeOffices.length > 0);
+    const granted = verdict?.allowed || issued;
+    const showFk = needsFk && !issued;
+    const showIssue = canIssue && Boolean(verdict?.allowed) && !issued;
 
-            <div className="space-y-1.5">
-                <span className={iosGroupLabel}>Водитель</span>
-                <div className="relative">
-                    <input
-                        ref={inputRef}
-                        className={`${iosInput} pr-10`}
-                        placeholder="Ссылка на водителя во Флите или его ID"
-                        value={link}
-                        onChange={(event) => setLink(event.target.value)}
-                        disabled={(canIssue && !officeId) || issuing}
-                    />
-                    {(link || checking) && (
-                        <button type="button" onClick={clear} aria-label="Очистить" disabled={issuing}
-                                className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600">
-                            {checking ? <Loader2 size={15} className="animate-spin" /> : <X size={15} />}
-                        </button>
+    return (
+        <div className="max-w-2xl space-y-3 xl:space-y-4 xl:max-w-none 2xl:space-y-5">
+            {/* На широком экране (с xl) офис и водитель — один ряд во всю колонку
+                раздела, как строка поиска в журнале; ответ встаёт под ним. Доли
+                ряда — 5 и 7 из двенадцати, а не сетка в квадратных скобках: её
+                оболочка телефона ловит по подстроке «grid-cols-[» и складывает в
+                одну колонку (низкое широкое окно тоже считается телефоном).
+                min-w-0 у блоков обязателен: без него колонка сетки растёт под
+                длинное название офиса, и список выезжает за правый край поля
+                (на телефоне — на 7 px при названии в 36 знаков). */}
+            <div className={`grid gap-3 xl:gap-4 2xl:gap-6 ${fieldsRow ? 'xl:grid-cols-12' : ''}`}>
+                {canIssue && (
+                    <div className={`min-w-0 space-y-1.5 2xl:space-y-2 ${fieldsRow ? 'xl:col-span-5' : ''}`}>
+                        <span className={wLabel}>Офис</span>
+                        {!officesReady ? (
+                            <div className={`${iosCard} ${NOTE} ${offices === 'error' ? 'text-rose-600' : 'text-slate-500'}`}>
+                                {offices === 'error' ? 'Не удалось загрузить офисы — обновите страницу' : 'Загружаем офисы…'}
+                            </div>
+                        ) : activeOffices.length ? (
+                            <CustomSelect
+                                value={officeId}
+                                onChange={(value) => { setOfficeId(value); rememberOffice(value); }}
+                                options={officeOptions}
+                                placeholder="Выберите офис"
+                                variant="ios"
+                                roomy
+                                ariaLabel="Офис"
+                            />
+                        ) : (
+                            <div className={`${iosCard} ${NOTE} text-slate-500`}>
+                                Офисы ещё не заведены в учёт.{capabilities?.can_manage
+                                    ? ' Добавьте их во вкладке «Остатки».'
+                                    : ' Их заводит региональный руководитель.'}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <div className={`min-w-0 space-y-1.5 2xl:space-y-2 ${fieldsRow ? 'xl:col-span-7' : ''}`}>
+                    <span className={wLabel}>Водитель</span>
+                    <div className="relative">
+                        <input
+                            ref={inputRef}
+                            className={`${wInput} pr-10 2xl:pr-12`}
+                            placeholder="Ссылка на водителя во Флите или его ID"
+                            value={link}
+                            onChange={(event) => setLink(event.target.value)}
+                            disabled={(canIssue && !officeId) || issuing}
+                        />
+                        {(link || checking) && (
+                            <button type="button" onClick={clear} aria-label="Очистить" disabled={issuing}
+                                    className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600 2xl:right-2.5 2xl:h-8 2xl:w-8">
+                                {checking ? <Loader2 size={15} className={`animate-spin ${wIcon}`} /> : <X size={15} className={wIcon} />}
+                            </button>
+                        )}
+                    </div>
+                    {link.trim() && !accountId && (
+                        <p className={`px-1 text-[12px] text-slate-500 ${T.note}`}>
+                            Не похоже на ссылку на водителя — нужен адрес карточки во Флите или ID из 32 символов
+                        </p>
                     )}
                 </div>
-                {link.trim() && !accountId && (
-                    <p className="px-1 text-[12px] text-slate-500">
-                        Не похоже на ссылку на водителя — нужен адрес карточки во Флите или ID из 32 символов
-                    </p>
-                )}
             </div>
 
             {error && (
-                <div className={`${iosCard} flex items-center justify-between gap-3 px-4 py-3`}>
-                    <span className="text-[13px] text-rose-600">{error}</span>
-                    <button type="button" className={iosBtnGhost}
+                <div className={`${iosCard} flex items-center justify-between gap-3 px-4 py-3 2xl:px-6 2xl:py-4`}>
+                    <span className={`text-[13px] text-rose-600 ${T.body}`}>{error}</span>
+                    <button type="button" className={wBtnGhost}
                             onClick={() => check(accountId, canIssue ? officeId : null)}>
-                        <RotateCcw size={14} /> Ещё раз
+                        <RotateCcw size={14} className={wIcon} /> Ещё раз
                     </button>
                 </div>
             )}
 
             {driver && verdict && (
-                <div className={`${iosCard} space-y-4 p-4`}>
-                    <DriverCard driver={driver} programTariffs={settings?.tariffs || []} />
-
-                    <div className={`rounded-xl px-3.5 py-3 ${verdict.allowed || issued ? 'bg-emerald-50' : 'bg-slate-50'}`}>
-                        <div className={`text-[14px] font-semibold ${verdict.allowed || issued ? 'text-emerald-700' : 'text-slate-900'}`}>
-                            {issued ? `Выдано: ${blocksWord(issued.blocks)} · ${kindLabel(issued.kind).toLowerCase()}` : verdictHeadline(verdict)}
+                /* На телефоне и в узком окне — столбик: водитель, ответ, прошлые
+                   выдачи, действие. На широком экране (с xl) — две колонки: слева
+                   «кто» (водитель и его выдачи), справа «что делать» (ответ и
+                   кнопка). Колонки — обёртки, которые до xl растворены (contents),
+                   а порядок в столбике держат order-классы: так ответ остаётся над
+                   историей, а в колонках высоты не зависят друг от друга. */
+                <div className={`${iosCard} flex flex-col gap-4 p-4 xl:p-5 xl:grid xl:grid-cols-2 xl:items-start xl:gap-x-8 xl:gap-y-0 2xl:gap-x-12 2xl:p-8`}>
+                    <div className="contents xl:flex xl:flex-col xl:gap-5 2xl:gap-7">
+                        <div className="order-1">
+                            <DriverCard driver={driver} programTariffs={settings?.tariffs || []} />
                         </div>
-                        {!issued && verdict.allowed && (
-                            <div className="mt-0.5 text-[12.5px] text-emerald-700/80">{verdictBasis(verdict)}</div>
-                        )}
-                        {!verdict.allowed && !issued && (
-                            <ul className="mt-1 space-y-0.5 text-[13px] text-slate-600">
-                                {verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
-                            </ul>
-                        )}
-                        {issued && nextIssueLine(verdict) && (
-                            <div className="mt-0.5 text-[12.5px] text-emerald-700/80">{nextIssueLine(verdict)}</div>
+
+                        {result.history?.length > 0 && (
+                            <div className="order-3 space-y-1 2xl:space-y-1.5">
+                                <div className={wLabel}>Выдачи этому водителю</div>
+                                <ul className={`divide-y divide-slate-100 text-[12.5px] ${T.sub}`}>
+                                    {result.history.slice(0, 3).map((item) => (
+                                        <li key={item.id} className="flex flex-wrap justify-between gap-x-3 py-1.5 xl:py-2 2xl:py-2.5">
+                                            <span className="text-slate-700">
+                                                {fmtDateTime(item.created_at)} · {kindLabel(item.kind).toLowerCase()} · {blocksWord(item.blocks)}
+                                            </span>
+                                            <span className="text-slate-400">{item.office_name}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
                         )}
                     </div>
 
-                    {result.history?.length > 0 && (
-                        <div className="space-y-1">
-                            <div className={iosGroupLabel}>Выдачи этому водителю</div>
-                            <ul className="divide-y divide-slate-100 text-[12.5px]">
-                                {result.history.slice(0, 3).map((item) => (
-                                    <li key={item.id} className="flex flex-wrap justify-between gap-x-3 py-1.5">
-                                        <span className="text-slate-700">
-                                            {fmtDateTime(item.created_at)} · {kindLabel(item.kind).toLowerCase()} · {blocksWord(item.blocks)}
-                                        </span>
-                                        <span className="text-slate-400">{item.office_name}</span>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    )}
-
-                    {needsFk && !issued && (canIssue ? (
-                        <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
-                            <span className="min-w-0">
-                                <span className="block text-[13.5px] text-slate-800">ФК пройден — проверил во Флите</span>
-                                <span className="block text-[11.5px] text-slate-500">В CRM статуса фотоконтроля нет</span>
-                            </span>
-                            <IosToggle checked={fkChecked} onChange={setFkChecked} />
-                        </label>
-                    ) : (
-                        <p className="text-[12.5px] text-slate-500">Статуса ФК в CRM нет — его проверят в офисе при выдаче</p>
-                    ))}
-
-                    {canIssue && verdict.allowed && !issued && (
-                        <div className="flex flex-wrap items-center gap-3">
-                            {blocksMax > 1 && <Stepper value={blocks} max={blocksMax} onChange={setBlocks} />}
-                            <button type="button" className={`${iosBtnPrimary} flex-1 sm:flex-none`}
-                                    onClick={issue}
-                                    disabled={issuing || checking || !office || accountId !== driver.account_id
-                                        || (needsFk && !fkChecked)}>
-                                {issuing ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
-                                {`Выдать ${blocksWord(blocks)}`}
-                            </button>
-                            {office && (
-                                <span className={`text-[12px] ${office.status === 'enough'
-                                    ? 'text-slate-400' : stockStatus(office.status).text}`}>
-                                    В офисе {blocksWord(office.stock)}
-                                </span>
+                    <div className="contents xl:flex xl:flex-col xl:gap-4 2xl:gap-5">
+                        <div className={`order-2 rounded-xl px-3.5 py-3 xl:px-4 2xl:rounded-2xl 2xl:px-6 2xl:py-5 ${granted ? 'bg-emerald-50' : 'bg-slate-50'}`}>
+                            <div className={`text-[14px] font-semibold xl:text-[15px] 2xl:text-[19px] ${granted ? 'text-emerald-700' : 'text-slate-900'}`}>
+                                {issued ? `Выдано: ${blocksWord(issued.blocks)} · ${kindLabel(issued.kind).toLowerCase()}` : verdictHeadline(verdict)}
+                            </div>
+                            {!issued && verdict.allowed && (
+                                <div className={`mt-0.5 text-[12.5px] text-emerald-700/80 2xl:mt-1 ${T.sub}`}>{verdictBasis(verdict)}</div>
+                            )}
+                            {!verdict.allowed && !issued && (
+                                <ul className={`mt-1 space-y-0.5 text-[13px] text-slate-600 2xl:mt-2 2xl:space-y-1 ${T.body}`}>
+                                    {verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                                </ul>
+                            )}
+                            {issued && nextIssueLine(verdict) && (
+                                <div className={`mt-0.5 text-[12.5px] text-emerald-700/80 2xl:mt-1 ${T.sub}`}>{nextIssueLine(verdict)}</div>
                             )}
                         </div>
-                    )}
 
-                    {issued && (
-                        <button type="button" className={iosBtnGhost} onClick={clear}>
-                            Следующий водитель
-                        </button>
-                    )}
+                        {(showFk || showIssue || issued) && (
+                            <div className="order-4 space-y-4 2xl:space-y-5">
+                                {showFk && (canIssue ? (
+                                    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 xl:px-4 xl:py-3 2xl:rounded-2xl 2xl:px-6 2xl:py-4">
+                                        <span className="min-w-0">
+                                            <span className={`block text-[13.5px] text-slate-800 ${T.body}`}>ФК пройден — проверил во Флите</span>
+                                            <span className={`block text-[11.5px] text-slate-500 ${T.note}`}>В CRM статуса фотоконтроля нет</span>
+                                        </span>
+                                        <IosToggle checked={fkChecked} onChange={setFkChecked} />
+                                    </label>
+                                ) : (
+                                    <p className={`text-[12.5px] text-slate-500 ${T.sub}`}>Статуса ФК в CRM нет — его проверят в офисе при выдаче</p>
+                                ))}
+
+                                {showIssue && (
+                                    <div className="flex flex-wrap items-center gap-3 2xl:gap-4">
+                                        {blocksMax > 1 && <Stepper value={blocks} max={blocksMax} onChange={setBlocks} />}
+                                        <button type="button" className={`${wBtnPrimary} flex-1 sm:flex-none 2xl:!px-8`}
+                                                onClick={issue}
+                                                disabled={issuing || checking || !office || accountId !== driver.account_id
+                                                    || (needsFk && !fkChecked)}>
+                                            {issuing ? <Loader2 size={15} className={`animate-spin ${wIcon}`} /> : <Check size={15} className={wIcon} />}
+                                            {`Выдать ${blocksWord(blocks)}`}
+                                        </button>
+                                        {office && (
+                                            <span className={`text-[12px] ${T.sub} ${office.status === 'enough'
+                                                ? 'text-slate-400' : stockStatus(office.status).text}`}>
+                                                В офисе {blocksWord(office.stock)}
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
+
+                                {issued && (
+                                    <button type="button" className={wBtnGhost} onClick={clear}>
+                                        Следующий водитель
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

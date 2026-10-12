@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Download, Droplet, Loader2, Search, SlidersHorizontal, Undo2, X } from 'lucide-react';
-import { IosModal, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
+import { IosModal, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangeCalendar, IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import { driverAccountUrl, fmtDateTime, fmtPhone, rangeDays, shiftDaysBack, todayISO } from '../parcels/parcelMeta';
 import { EXPORT_MAX_DAYS, blocksWord, exportFileName, kindLabel, tariffLabel } from './waterMeta';
+import {
+    ModalSubtitle, ModalTitle, T, wBtnDanger, wBtnPrimary, wBtnSecondary, wChip, wIcon, wInput, wLabel, wPill,
+    wTable, wTd, wTdSub, wTh, wThead,
+} from './waterUi';
 
 /*
  * «Журнал» — история выдач (ТЗ, раздел 5): колонки и фильтры из ТЗ, выгрузка
@@ -24,7 +28,9 @@ const EMPTY_FILTERS = {
 const CHIP = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 text-left text-[12.5px] '
     + 'font-medium text-slate-700 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] '
     + 'transition-all hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
-    + '[&>span]:flex-1 [&>span]:truncate [&>span]:text-left';
+    + `[&>span]:flex-1 [&>span]:truncate [&>span]:text-left ${wChip}`;
+
+const FIELD = 'block space-y-1.5 2xl:space-y-2';
 
 const DATE_PRESETS = [
     { label: 'Сегодня', range: () => ({ from: todayISO(), to: todayISO() }) },
@@ -59,7 +65,22 @@ const DriverName = ({ item, muted = false }) => {
     ) : <div className={`truncate ${tone}`}>{name}</div>;
 };
 
-const CANCELED_PILL = 'inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11.5px] font-medium text-slate-500';
+/* Потолок ширины у ФИО и парка: без него длинное ФИО забирало бы ширину у
+   офиса, и его название ломалось на четыре строки. На большом экране потолок
+   выше в два шага — в окне 1536 px колонка раздела ещё узкая. */
+const WIDE_CELL = 'max-w-[220px] 2xl:max-w-[240px] min-[1800px]:max-w-[320px]';
+/* То же у первой колонки: дата не переносится, а сотрудник под ней обрезается
+   (полное ФИО — в подсказке). С ФИО в три слова колонка вырастала до 340 px. */
+const DATE_CELL = 'xl:max-w-[190px] 2xl:max-w-[205px] min-[1800px]:max-w-[280px]';
+/* И встречная мера на большом экране: у офиса есть наименьшая ширина, под
+   которую его название встаёт в две строки. До 2xl её нет — там таблица входит
+   в карточку как раз за счёт того, что эта колонка сжимается.
+   Сумма потолков и наименьших ширин на ступени 2xl — около 1305 px: столько
+   есть в окне 1536 px и с классической полосой прокрутки Windows (1337 px);
+   с прежними 230/250/230 таблица при длинных ФИО выходила на 1365 px. */
+const OFFICE_CELL = '2xl:min-w-[215px]';
+
+const CANCELED_PILL = `inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11.5px] font-medium text-slate-500 ${wPill}`;
 
 /* Карточка выдачи у руководителя — и отмена ошибочной (01.10.2026).
  *
@@ -104,43 +125,44 @@ const IssueSheet = ({ item, onClose, apiBaseUrl, headers, onCanceled, showToast 
         <IosModal
             open={Boolean(item)}
             onClose={onClose}
-            title={item.driver_name || 'Выдача'}
-            subtitle={fmtDateTime(item.created_at)}
+            title={<ModalTitle>{item.driver_name || 'Выдача'}</ModalTitle>}
+            subtitle={<ModalSubtitle>{fmtDateTime(item.created_at)}</ModalSubtitle>}
+            maxWidth="max-w-lg 2xl:max-w-[640px]"
             footer={canceled ? null : (
                 <button
                     type="button"
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-[13.5px] font-semibold text-white transition hover:bg-red-700 active:scale-[0.98] disabled:opacity-50"
+                    className={wBtnDanger}
                     disabled={!reason.trim() || saving}
                     onClick={submit}
                 >
-                    {saving ? <Loader2 size={15} className="animate-spin" /> : <Undo2 size={15} />}
+                    {saving ? <Loader2 size={15} className={`animate-spin ${wIcon}`} /> : <Undo2 size={15} className={wIcon} />}
                     Отменить выдачу
                 </button>
             )}
         >
-            <div className="space-y-4">
-                <dl className="divide-y divide-slate-100 rounded-2xl bg-white px-4 ring-1 ring-slate-200/70">
+            <div className="space-y-4 2xl:space-y-5">
+                <dl className="divide-y divide-slate-100 rounded-2xl bg-white px-4 ring-1 ring-slate-200/70 2xl:px-5">
                     {rows.map(([label, value]) => (
-                        <div key={label} className="flex justify-between gap-4 py-2.5 text-[13px]">
+                        <div key={label} className={`flex justify-between gap-4 py-2.5 text-[13px] xl:py-3 2xl:py-3.5 ${T.body}`}>
                             <dt className="text-slate-500">{label}</dt>
                             <dd className="text-right text-slate-900">{value}</dd>
                         </div>
                     ))}
                 </dl>
                 {canceled ? (
-                    <div className="rounded-xl bg-slate-100 px-3.5 py-3 text-[13px] text-slate-700">
+                    <div className={`rounded-xl bg-slate-100 px-3.5 py-3 text-[13px] text-slate-700 2xl:rounded-2xl 2xl:px-5 2xl:py-4 ${T.body}`}>
                         <div className="font-medium">
                             Отменена {fmtDateTime(item.canceled_at)}{item.canceled_by_name ? ` · ${item.canceled_by_name}` : ''}
                         </div>
                         {item.cancel_reason && <div className="mt-0.5 text-slate-600">{item.cancel_reason}</div>}
                     </div>
                 ) : (
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Причина отмены</span>
-                        <input className={iosInput} value={reason} maxLength={500}
+                    <label className={FIELD}>
+                        <span className={wLabel}>Причина отмены</span>
+                        <input className={wInput} value={reason} maxLength={500}
                                onChange={(event) => setReason(event.target.value)}
                                placeholder="Например: ошиблись водителем" />
-                        <span className="block px-1 text-[11.5px] text-slate-500">
+                        <span className={`block px-1 text-[11.5px] text-slate-500 ${T.note}`}>
                             Блоки вернутся на остаток офиса, а водителю эта выдача перестанет засчитываться.
                         </span>
                     </label>
@@ -296,23 +318,25 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
     const exportTooLong = exportDays > EXPORT_MAX_DAYS;
 
     return (
-        <div className="space-y-3">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        /* Столбик держит gap, а не space-y: окно выдачи — ребёнок этого же блока,
+           и отступ space-y сдвигал бы его затемнение вниз от края экрана. */
+        <div className="flex flex-col gap-3 xl:gap-4 2xl:gap-5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:gap-3 2xl:gap-4">
                 <div className="relative sm:flex-1">
-                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input type="search" className={`${iosInput} pl-9`} value={search}
+                    <Search size={15} className={`pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 2xl:left-4 ${wIcon}`} />
+                    <input type="search" className={`${wInput} pl-9 2xl:pl-12`} value={search}
                            onChange={(event) => setSearch(event.target.value)}
                            placeholder="Водитель: ФИО, телефон или ID" />
                 </div>
-                <div className="flex items-center gap-2">
-                    <button type="button" className={chips.length ? iosBtnPrimary : iosBtnSecondary}
+                <div className="flex items-center gap-2 xl:gap-3 2xl:gap-4">
+                    <button type="button" className={chips.length ? wBtnPrimary : wBtnSecondary}
                             onClick={() => setFiltersOpen((prev) => !prev)}>
-                        <SlidersHorizontal size={15} /> Фильтры{chips.length ? ` · ${chips.length}` : ''}
+                        <SlidersHorizontal size={15} className={wIcon} /> Фильтры{chips.length ? ` · ${chips.length}` : ''}
                     </button>
                     <div ref={exportRef} className="relative">
-                        <button type="button" className={`${iosBtnSecondary} ${exportOpen ? 'bg-slate-200 text-slate-900' : ''}`}
+                        <button type="button" className={`${wBtnSecondary} ${exportOpen ? 'bg-slate-200 text-slate-900' : ''}`}
                                 onClick={() => setExportOpen((value) => !value)} disabled={downloading}>
-                            {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                            {downloading ? <Loader2 size={15} className={`animate-spin ${wIcon}`} /> : <Download size={15} className={wIcon} />}
                             {downloading ? 'Готовим файл…' : 'Выгрузить'}
                         </button>
                         {exportOpen && (
@@ -320,6 +344,7 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                                правому краю уводила календарь за левый край экрана. */
                             <div className="absolute -left-24 top-full z-[60] mt-2 sm:left-auto sm:right-0">
                                 <IosDateRangeCalendar
+                                    roomy
                                     from={exportRange.from}
                                     to={exportRange.to}
                                     max={todayISO()}
@@ -327,12 +352,12 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                                     onChange={(next) => setExportRange({ from: next.from || next.to, to: next.to || next.from })}
                                     footer={(
                                         <div className="mt-2.5 border-t border-slate-100 pt-2.5">
-                                            <button type="button" className={`${iosBtnPrimary} w-full`}
+                                            <button type="button" className={`${wBtnPrimary} w-full`}
                                                     disabled={!exportDays || exportTooLong}
                                                     onClick={() => download(exportRange.from, exportRange.to)}>
-                                                <Download size={15} /> Подтвердить
+                                                <Download size={15} className={wIcon} /> Подтвердить
                                             </button>
-                                            <p className={`mt-1.5 text-center text-[11px] ${exportTooLong ? 'text-rose-500' : 'text-slate-400'}`}>
+                                            <p className={`mt-1.5 text-center text-[11px] ${T.note} ${exportTooLong ? 'text-rose-500' : 'text-slate-400'}`}>
                                                 {exportTooLong ? 'Не больше года за раз' : `${rangeLabel(exportRange.from, exportRange.to)} · по дате выдачи`}
                                             </p>
                                         </div>
@@ -345,27 +370,28 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
             </div>
 
             {chips.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5 2xl:gap-2">
                     {chips.map((chip) => (
                         <button key={chip.key} type="button" onClick={chip.clear}
-                                className="group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300">
+                                className={`group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300 2xl:gap-2 2xl:px-3.5 2xl:py-1.5 ${T.sub}`}>
                             <span className="text-slate-400">{chip.name}</span>
                             <span className="truncate font-medium">{chip.label}</span>
-                            <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600" />
+                            <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600 2xl:h-3.5 2xl:w-3.5" />
                         </button>
                     ))}
                     <button type="button" onClick={() => setFilters(EMPTY_FILTERS)}
-                            className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-700">
+                            className={`px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-700 ${T.sub}`}>
                         сбросить всё
                     </button>
                 </div>
             )}
 
             {filtersOpen && (
-                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Период</span>
+                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 xl:gap-4 xl:p-4 lg:grid-cols-3 2xl:grid-cols-6 2xl:gap-5 2xl:p-6`}>
+                    <label className={FIELD}>
+                        <span className={wLabel}>Период</span>
                         <IosDateRangePicker
+                            roomy
                             from={filters.date_from}
                             to={filters.date_to}
                             max={todayISO()}
@@ -374,35 +400,35 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                             triggerClassName={CHIP}
                         />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Город</span>
-                        <CustomSelect value={filters.city} variant="ios" ariaLabel="Город"
+                    <label className={FIELD}>
+                        <span className={wLabel}>Город</span>
+                        <CustomSelect roomy value={filters.city} variant="ios" ariaLabel="Город"
                                       onChange={(value) => setFilters((prev) => ({ ...prev, city: value, water_office_id: null }))}
                                       options={[{ value: '', label: 'Все города' }, ...cities.map((city) => ({ value: city, label: city }))]} />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Офис</span>
-                        <CustomSelect value={filters.water_office_id} variant="ios" ariaLabel="Офис" placeholder="Все офисы"
+                    <label className={FIELD}>
+                        <span className={wLabel}>Офис</span>
+                        <CustomSelect roomy value={filters.water_office_id} variant="ios" ariaLabel="Офис" placeholder="Все офисы"
                                       onChange={(value) => setFilters((prev) => ({ ...prev, water_office_id: value || null }))}
                                       options={[{ value: null, label: 'Все офисы' }, ...officeOptions]} />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Сотрудник</span>
-                        <CustomSelect value={filters.issued_by} variant="ios" ariaLabel="Сотрудник" searchable placeholder="Все сотрудники"
+                    <label className={FIELD}>
+                        <span className={wLabel}>Сотрудник</span>
+                        <CustomSelect roomy value={filters.issued_by} variant="ios" ariaLabel="Сотрудник" searchable placeholder="Все сотрудники"
                                       onChange={(value) => setFilters((prev) => ({ ...prev, issued_by: value || null }))}
                                       options={[{ value: null, label: 'Все сотрудники' },
                                           ...values.staff.map((person) => ({ value: person.id, label: person.name }))]} />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Парк</span>
-                        <CustomSelect value={filters.park} variant="ios" ariaLabel="Парк" searchable
+                    <label className={FIELD}>
+                        <span className={wLabel}>Парк</span>
+                        <CustomSelect roomy value={filters.park} variant="ios" ariaLabel="Парк" searchable
                                       onChange={(value) => setFilters((prev) => ({ ...prev, park: value || '' }))}
                                       options={[{ value: '', label: 'Все парки' },
                                           ...values.parks.map((park) => ({ value: park, label: park }))]} />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Вид выдачи</span>
-                        <CustomSelect value={filters.kind} variant="ios" ariaLabel="Вид выдачи"
+                    <label className={FIELD}>
+                        <span className={wLabel}>Вид выдачи</span>
+                        <CustomSelect roomy value={filters.kind} variant="ios" ariaLabel="Вид выдачи"
                                       onChange={(value) => setFilters((prev) => ({ ...prev, kind: value || '' }))}
                                       options={[{ value: '', label: 'Все' },
                                           { value: 'welcome', label: kindLabel('welcome') },
@@ -411,19 +437,22 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                 </div>
             )}
 
-            {error && <div className="text-[13px] text-rose-600">{error}</div>}
+            {error && <div className={`text-[13px] text-rose-600 ${T.body}`}>{error}</div>}
 
+            {/* Наименьшая ширина таблицы на большом экране — та, при которой название
+                офиса встаёт в две строки, а не в четыре: если колонка раздела уже
+                (закреплён сайдбар), таблица прокручивается вбок, а не ломает строки. */}
             <div className={`${iosCard} hidden overflow-x-auto md:block`}>
-                <table className="w-full text-left text-[13px]">
-                    <thead className="bg-slate-50/80 text-[11.5px] uppercase tracking-wide text-slate-500">
+                <table className={`${wTable} 2xl:min-w-[1310px]`}>
+                    <thead className={wThead}>
                         <tr>
-                            <th className="px-3.5 py-2.5 font-semibold">Дата и время</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Офис</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Водитель</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Парк · тариф</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Заказы</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Вид</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Блоков</th>
+                            <th className={wTh}>Дата и время</th>
+                            <th className={wTh}>Офис</th>
+                            <th className={wTh}>Водитель</th>
+                            <th className={wTh}>Парк · тариф</th>
+                            <th className={wTh}>Заказы</th>
+                            <th className={wTh}>Вид</th>
+                            <th className={`${wTh} text-right`}>Блоков</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -439,34 +468,41 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                                 <tr key={item.id}
                                     onClick={canManage ? () => setOpened(item) : undefined}
                                     className={`${index ? 'border-t border-slate-100' : ''} ${canManage ? 'cursor-pointer transition hover:bg-slate-50' : ''}`}>
-                                    <td className="whitespace-nowrap px-3.5 py-2.5 align-top">
-                                        <div className={`tabular-nums ${main}`}>{fmtDateTime(item.created_at)}</div>
-                                        <div className={`text-[12px] ${meta}`}>{item.issued_by_name}</div>
+                                    <td className={`${DATE_CELL} ${wTd} align-top`}>
+                                        <div className={`whitespace-nowrap tabular-nums ${main}`}>{fmtDateTime(item.created_at)}</div>
+                                        <div className={`truncate text-[12px] ${wTdSub} ${meta}`} title={item.issued_by_name || undefined}>
+                                            {item.issued_by_name}
+                                        </div>
                                     </td>
-                                    <td className="px-3.5 py-2.5 align-top">
+                                    <td className={`${OFFICE_CELL} ${wTd} align-top`}>
                                         <div className={main}>{item.office_name}</div>
-                                        <div className={`text-[12px] ${meta}`}>{item.city}</div>
+                                        <div className={`text-[12px] ${wTdSub} ${meta}`}>{item.city}</div>
                                     </td>
-                                    <td className="max-w-[220px] px-3.5 py-2.5 align-top">
+                                    <td className={`${WIDE_CELL} ${wTd} align-top`}>
                                         <DriverName item={item} muted={off} />
                                         {item.driver_phone && (
-                                            <a href={`tel:${item.driver_phone}`} onClick={(event) => event.stopPropagation()}
-                                               className={`tabular-nums text-[12.5px] ${meta}`}>
-                                                {fmtPhone(item.driver_phone)}
-                                            </a>
+                                            /* Строка своя: без обёртки ссылка вставала в строку ростом
+                                               с ФИО и на крупном кегле уезжала ниже соседних подписей.
+                                               Кегль обёртке — только на большом экране: до него строка прежняя. */
+                                            <div className={wTdSub}>
+                                                <a href={`tel:${item.driver_phone}`} onClick={(event) => event.stopPropagation()}
+                                                   className={`tabular-nums text-[12.5px] ${wTdSub} ${meta}`}>
+                                                    {fmtPhone(item.driver_phone)}
+                                                </a>
+                                            </div>
                                         )}
                                     </td>
-                                    <td className="max-w-[220px] px-3.5 py-2.5 align-top">
+                                    <td className={`${WIDE_CELL} ${wTd} align-top`}>
                                         <div className={`truncate ${body}`}>{item.driver_park || '—'}</div>
-                                        <div className={`truncate text-[12px] ${meta}`}>
+                                        <div className={`truncate text-[12px] ${wTdSub} ${meta}`}>
                                             {(item.driver_tariffs || []).map(tariffLabel).join(', ') || '—'}
                                         </div>
                                     </td>
-                                    <td className={`whitespace-nowrap px-3.5 py-2.5 align-top tabular-nums ${body}`}>{ordersLabel(item)}</td>
-                                    <td className={`whitespace-nowrap px-3.5 py-2.5 align-top ${body}`}>
+                                    <td className={`whitespace-nowrap ${wTd} align-top tabular-nums ${body}`}>{ordersLabel(item)}</td>
+                                    <td className={`whitespace-nowrap ${wTd} align-top ${body}`}>
                                         {off ? <span className={CANCELED_PILL}>Отменена</span> : kindLabel(item.kind)}
                                     </td>
-                                    <td className={`px-3.5 py-2.5 text-right align-top font-semibold tabular-nums ${off ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
+                                    <td className={`${wTd} text-right align-top font-semibold tabular-nums ${off ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
                                         {item.blocks}
                                     </td>
                                 </tr>
@@ -475,9 +511,9 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                     </tbody>
                 </table>
                 {!items.length && !loading && (
-                    <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
-                        <Droplet size={22} className="text-slate-300" />
-                        <p className="text-[13.5px] text-slate-500">
+                    <div className="flex flex-col items-center gap-2 px-4 py-12 text-center 2xl:gap-3 2xl:py-16">
+                        <Droplet size={22} className="text-slate-300 2xl:h-7 2xl:w-7" />
+                        <p className={`text-[13.5px] text-slate-500 ${T.body}`}>
                             {query || chips.length ? 'Ничего не нашлось — попробуйте изменить запрос' : 'Выдач пока не было'}
                         </p>
                     </div>
@@ -516,8 +552,8 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
             </div>
 
             {loading && (
-                <div className="flex items-center justify-center gap-2 text-[13px] text-slate-500">
-                    <Loader2 size={15} className="animate-spin" /> Загружаем журнал…
+                <div className={`flex items-center justify-center gap-2 text-[13px] text-slate-500 ${T.body}`}>
+                    <Loader2 size={15} className={`animate-spin ${wIcon}`} /> Загружаем журнал…
                 </div>
             )}
 
@@ -538,11 +574,11 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
             )}
 
             {items.length < total && !loading && (
-                <div className="flex flex-col items-center gap-1.5">
-                    <button type="button" className={iosBtnSecondary} onClick={() => load({ append: true, from: items.length })}>
+                <div className="flex flex-col items-center gap-1.5 2xl:gap-2">
+                    <button type="button" className={wBtnSecondary} onClick={() => load({ append: true, from: items.length })}>
                         Показать ещё
                     </button>
-                    <span className="text-[12px] tabular-nums text-slate-400">{items.length} из {total}</span>
+                    <span className={`text-[12px] tabular-nums text-slate-400 ${T.sub}`}>{items.length} из {total}</span>
                 </div>
             )}
         </div>

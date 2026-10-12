@@ -52,9 +52,18 @@ export const rangeLabel = (from, to) => {
  *
  * Черновик выбора инициализируется при МОНТИРОВАНИИ: обе обёртки рисуют
  * календарь только раскрытым, поэтому закрытие и открытие сами возвращают его
- * в исходное состояние — отдельная синхронизация по `open` не нужна. */
+ * в исходное состояние — отдельная синхронизация по `open` не нужна.
+ *
+ * `roomy` — просторный вид для больших экранов (окно от 1536 px, ступень 2xl):
+ * день 42 px и кегль 15 px вместо 36 и 13. Нужен разделу, который на большом
+ * мониторе набран крупно («Учёт воды»): под полем в 48 px календарь прежнего
+ * размера читался деталью с другого экрана. Все добавки — с префиксом 2xl,
+ * поэтому до этой ширины и у остальных разделов календарь прежний. В режиме
+ * `portal` обёртки-чипа ширина панели считается прежней константой: с roomy
+ * этот режим пока никто не сочетает, первому такому вызывающему — перейти на
+ * замер ширины карточки. */
 export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null,
-                                      single = false, initialMonth = null }) {
+                                      single = false, initialMonth = null, roomy = false }) {
     const today = isoDate(new Date());
     const [draft, setDraft] = useState({ from, to });   // выбор внутри календаря
     const [step, setStep] = useState(0);                // 0 — ждём начало, 1 — конец
@@ -109,17 +118,22 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
 
     const cells = [];
     const lead = firstWeekday(view.y, view.m);
-    for (let i = 0; i < lead; i += 1) cells.push(<div key={`e${i}`} className="h-9 w-9" />);
+    /* Ширину ячейка берёт у колонки сетки (2xl:w-full), а не своим числом в
+       скобках: оболочка телефона правит всё, в чьём классе есть «w-[», и
+       добавка с префиксом 2xl меняла бы календарь на телефоне. */
+    const cellSize = roomy ? ' 2xl:h-[42px] 2xl:w-full' : '';
+    for (let i = 0; i < lead; i += 1) cells.push(<div key={`e${i}`} className={`h-9 w-9${cellSize}`} />);
     for (let d = 1; d <= daysInMonth(view.y, view.m); d += 1) {
         const iso = `${view.y}-${String(view.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const disabled = Boolean((max && iso > max) || (min && iso < min));
         const isEnd = iso === lo || iso === hi;
         const inBand = hasRange && iso > lo && iso < hi;
-        let wrap = 'relative flex h-9 w-9 items-center justify-center';
+        let wrap = `relative flex h-9 w-9 items-center justify-center${cellSize}`;
         if (inBand) wrap += ' bg-blue-500/10';
         else if (hasRange && iso === lo) wrap += ' rounded-l-full bg-blue-500/10';
         else if (hasRange && iso === hi) wrap += ' rounded-r-full bg-blue-500/10';
-        let btn = 'flex h-8 w-8 items-center justify-center rounded-full text-[13px] transition ';
+        let btn = `flex h-8 w-8 items-center justify-center rounded-full text-[13px] transition ${
+            roomy ? '2xl:size-[38px] 2xl:text-[15px] ' : ''}`;
         if (disabled) btn += 'cursor-not-allowed text-slate-300';
         else if (isEnd) btn += 'bg-blue-500 font-semibold text-white shadow-sm';
         else if (inBand) btn += 'text-blue-700 hover:bg-blue-500/15';
@@ -136,6 +150,7 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
         );
     }
 
+    const navSize = roomy ? ' 2xl:h-8 2xl:w-8' : '';
     const footerPresets = presets || (single
         ? [{ label: 'Сегодня', range: () => ({ from: today, to: today }) }]
         : [
@@ -144,23 +159,24 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
         ]);
 
     return (
-        <div className="w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70">
+        <div className={`w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70${roomy ? ' 2xl:w-[326px] 2xl:p-4' : ''}`}>
             <div className="mb-2 flex items-center justify-between">
                 <button type="button" onClick={prevMonth}
-                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
+                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100${navSize}`}>
                     <ChevronLeft size={16} />
                 </button>
-                <span className="text-[13.5px] font-semibold text-slate-900">
+                <span className={`text-[13.5px] font-semibold text-slate-900${roomy ? ' 2xl:text-[15.5px]' : ''}`}>
                     {MONTHS_RU[view.m]} {view.y}
                 </span>
                 <button type="button" onClick={nextMonth}
-                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
+                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100${navSize}`}>
                     <ChevronRight size={16} />
                 </button>
             </div>
             <div className="mb-1 grid grid-cols-7">
                 {DAYS_SHORT.map((d) => (
-                    <div key={d} className="flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400">
+                    <div key={d} className={`flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400${
+                        roomy ? ' 2xl:h-8 2xl:w-full 2xl:text-[12px]' : ''}`}>
                         {d}
                     </div>
                 ))}
@@ -169,7 +185,8 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
             <div className="mt-2.5 flex items-center gap-2 border-t border-slate-100 pt-2.5">
                 {footerPresets.map((p) => (
                     <button key={p.label} type="button" onClick={() => setPreset(p.range())}
-                            className="flex-1 rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200/80">
+                            className={`flex-1 rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200/80${
+                                roomy ? ' 2xl:py-2 2xl:text-[13.5px]' : ''}`}>
                         {p.label}
                     </button>
                 ))}
@@ -178,7 +195,7 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
                 надо знать, какой из них он сейчас делает. Над одиночной датой
                 это была бы строка ради строки. */}
             {!single && (
-                <p className="mt-2 text-center text-[11px] text-slate-400">
+                <p className={`mt-2 text-center text-[11px] text-slate-400${roomy ? ' 2xl:text-[12.5px]' : ''}`}>
                     {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
                 </p>
             )}
@@ -211,7 +228,7 @@ const EDGE_GAP = 8;
  * модалок остаётся прежний absolute-поповер: там резать нечем, а портал —
  * лишние слушатели прокрутки. */
 export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
-                                    triggerClassName = '', portal = false }) {
+                                    triggerClassName = '', portal = false, roomy = false }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const ref = useRef(null);
@@ -278,7 +295,7 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
 
     const calendar = (
         <IosDateRangeCalendar
-            from={from} to={to} max={max} min={min} presets={presets}
+            from={from} to={to} max={max} min={min} presets={presets} roomy={roomy}
             onChange={(next) => { onChange(next); setOpen(false); }}
         />
     );

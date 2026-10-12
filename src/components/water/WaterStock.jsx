@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Loader2, Plus } from 'lucide-react';
-import {
-    IosMenu, IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
-} from '../ui/ios';
+import { IosMenu, IosModal, IosSegmented, IosToggle, iosCard } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import { fmtDateTime, shiftDaysBack, todayISO } from '../parcels/parcelMeta';
 import CountInput from './CountInput';
 import { blocksWord, fmtAvg, forecastLabel, officePlace, parseCount, plural, stockStatus } from './waterMeta';
+import {
+    ModalSubtitle, ModalTitle, T, wBtnPrimary, wBtnSecondary, wChip, wIcon, wInput, wLabel, wPill, wSegments,
+    wTable, wTd, wTdSub, wTh, wThead,
+} from './waterUi';
 
 /*
  * «Остатки» — дашборд по офисам (ТЗ, разделы 6–7) и карточка офиса.
@@ -30,7 +32,7 @@ const PERIOD_PRESETS = [
 
 const CHIP = 'flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-left text-[12.5px] '
     + 'font-medium text-slate-700 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] '
-    + 'transition-all hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/60';
+    + `transition-all hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/60 ${wChip}`;
 
 const MOVEMENT_LABELS = { intake: 'Поступление', recount: 'Пересчёт' };
 
@@ -47,13 +49,15 @@ const StatusPill = ({ status }) => {
     if (status === 'enough') return null;
     const meta = stockStatus(status);
     return (
-        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] font-medium ${meta.pill}`}>
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] font-medium ${wPill} ${meta.pill}`}>
             {meta.label}
         </span>
     );
 };
 
 const errorOf = (requestError, fallback) => requestError?.response?.data?.error || fallback;
+
+const FIELD = 'block space-y-1.5 2xl:space-y-2';
 
 /* ── Карточка офиса ─────────────────────────────────────────────────────── */
 
@@ -165,102 +169,128 @@ const OfficeSheet = ({
     };
 
     const ownThresholds = office.own_low_threshold !== null || office.own_buy_threshold !== null;
+    // Две колонки — только когда есть форма: без неё слева осталось бы одно число.
+    const twoPane = canManage && office.is_active;
     const recountMenu = canManage && movements.some((item) => item.kind === 'recount');
 
     return (
-        <IosModal open={open} onClose={onClose} title={office.name} subtitle={officePlace(office)} maxWidth="max-w-lg">
-            <div className="space-y-4">
-                <div className="flex items-end justify-between gap-3">
-                    <div>
-                        <div className={iosGroupLabel}>Остаток</div>
-                        <div className={`text-[28px] font-semibold leading-tight tabular-nums ${stockStatus(office.status).text}`}>
-                            {blocksWord(office.stock)}
+        <IosModal open={open} onClose={onClose} title={<ModalTitle>{office.name}</ModalTitle>}
+                  subtitle={<ModalSubtitle>{officePlace(office)}</ModalSubtitle>}
+                  maxWidth={twoPane ? 'max-w-lg xl:max-w-[920px] 2xl:max-w-[1080px]' : 'max-w-lg 2xl:max-w-[680px]'}>
+            {/* На телефоне и в узком окне — столбик: остаток, форма, движения, «В
+                учёте». На широком экране (с xl) у руководителя окно в две колонки:
+                слева остаток с формой и «В учёте», справа движения. Список движений
+                бывает длинным (до 30 строк), и в одной колонке форма уезжала за
+                край уже на пяти строках; левая колонка липкая — форма остаётся на
+                месте, пока список прокручивается. Обёртка левой колонки до xl
+                растворена (contents), порядок в столбике держат order-классы. */}
+            <div className={`flex flex-col gap-4 2xl:gap-6 ${twoPane ? 'xl:grid xl:grid-cols-2 xl:items-start xl:gap-x-8 xl:gap-y-0 2xl:gap-x-10' : ''}`}>
+                <div className={twoPane ? 'contents xl:sticky xl:top-4 xl:flex xl:flex-col xl:gap-4 2xl:gap-6' : 'contents'}>
+                    <div className="order-1 flex items-end justify-between gap-3">
+                        <div>
+                            <div className={wLabel}>Остаток</div>
+                            <div className={`text-[28px] font-semibold leading-tight tabular-nums xl:text-[32px] 2xl:text-[40px] 2xl:tracking-tight ${stockStatus(office.status).text}`}>
+                                {blocksWord(office.stock)}
+                            </div>
+                        </div>
+                        <div className={`text-right text-[12px] text-slate-500 ${T.sub}`}>
+                            <div>Низкий остаток — {office.low_threshold} и меньше</div>
+                            <div>Закупка — {office.buy_threshold} и меньше</div>
+                            {!ownThresholds && <div className="text-slate-400">пороги общие</div>}
                         </div>
                     </div>
-                    <div className="text-right text-[12px] text-slate-500">
-                        <div>Низкий остаток — {office.low_threshold} и меньше</div>
-                        <div>Закупка — {office.buy_threshold} и меньше</div>
-                        {!ownThresholds && <div className="text-slate-400">пороги общие</div>}
-                    </div>
+
+                    {canManage && office.is_active && (
+                        <div className={`${iosCard} order-2 space-y-3 p-3.5 xl:p-4 2xl:space-y-4 2xl:p-5`}>
+                            <IosSegmented
+                                value={mode}
+                                onChange={setMode}
+                                stretch
+                                className={wSegments}
+                                options={[
+                                    { value: 'intake', label: 'Поступление' },
+                                    { value: 'recount', label: 'Пересчёт' },
+                                    { value: 'thresholds', label: 'Пороги' },
+                                ]}
+                            />
+                            {mode !== 'thresholds' ? (
+                                <>
+                                    <label className={FIELD}>
+                                        <span className={wLabel}>
+                                            {mode === 'intake' ? 'Поступило блоков' : 'Сколько блоков на самом деле'}
+                                        </span>
+                                        <CountInput key={mode} className={wInput} value={amount} onChange={setAmount}
+                                                    placeholder={mode === 'intake' ? 'Блок — 16 бутылок по 0,5 л' : `Сейчас в учёте ${office.stock}`} />
+                                    </label>
+                                    <label className={FIELD}>
+                                        <span className={wLabel}>
+                                            {mode === 'intake' ? 'Накладная или комментарий' : 'Причина пересчёта'}
+                                        </span>
+                                        <input className={wInput} value={comment} maxLength={500}
+                                               onChange={(event) => setComment(event.target.value)}
+                                               placeholder={mode === 'intake' ? 'Необязательно' : 'Например: пересчитали полку'} />
+                                    </label>
+                                    {mode === 'recount' && (
+                                        <div className="flex items-center justify-between gap-3 px-1">
+                                            <span className={`flex items-center gap-1.5 text-[13px] text-slate-800 ${T.body}`}>
+                                                {INTAKE_FLAG_LABEL}
+                                                <InfoHint side="left" text={INTAKE_FLAG_HINT} />
+                                            </span>
+                                            <IosToggle checked={adjustsIntake} onChange={setAdjustsIntake} disabled={saving} />
+                                        </div>
+                                    )}
+                                    <button type="button" className={`${wBtnPrimary} w-full`}
+                                            disabled={saving || !amountValid || (mode === 'recount' && !comment.trim())}
+                                            onClick={submitMovement}>
+                                        {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
+                                        {mode === 'intake' ? 'Провести поступление' : 'Сохранить пересчёт'}
+                                    </button>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="grid grid-cols-2 gap-3 2xl:gap-4">
+                                        <label className={FIELD}>
+                                            <span className={wLabel}>Низкий остаток</span>
+                                            <CountInput className={wInput} value={low} onChange={setLow}
+                                                        placeholder={`Общий: ${settings?.low_threshold ?? '—'}`} />
+                                        </label>
+                                        <label className={FIELD}>
+                                            <span className={wLabel}>Требуется закупка</span>
+                                            <CountInput className={wInput} value={buy} onChange={setBuy}
+                                                        placeholder={`Общий: ${settings?.buy_threshold ?? '—'}`} />
+                                        </label>
+                                    </div>
+                                    <p className={`text-[11.5px] text-slate-500 ${T.note}`}>
+                                        Пустое поле — действует общий порог из настроек.
+                                    </p>
+                                    <button type="button" className={`${wBtnPrimary} w-full`}
+                                            disabled={saving || !thresholdsValid} onClick={submitThresholds}>
+                                        {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
+                                        Сохранить пороги
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    )}
+
+                    {canManage && (
+                        <div className="order-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3 2xl:pt-4">
+                            <div>
+                                <div className={`text-[13px] text-slate-800 ${T.body}`}>В учёте</div>
+                                <div className={`text-[11.5px] text-slate-500 ${T.note}`}>
+                                    Выведенный офис не виден в выдаче и остатках, журнал сохраняется
+                                </div>
+                            </div>
+                            <IosToggle checked={office.is_active} onChange={toggleActive} disabled={saving} />
+                        </div>
+                    )}
                 </div>
 
-                {canManage && office.is_active && (
-                    <div className={`${iosCard} space-y-3 p-3.5`}>
-                        <IosSegmented
-                            value={mode}
-                            onChange={setMode}
-                            stretch
-                            options={[
-                                { value: 'intake', label: 'Поступление' },
-                                { value: 'recount', label: 'Пересчёт' },
-                                { value: 'thresholds', label: 'Пороги' },
-                            ]}
-                        />
-                        {mode !== 'thresholds' ? (
-                            <>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>
-                                        {mode === 'intake' ? 'Поступило блоков' : 'Сколько блоков на самом деле'}
-                                    </span>
-                                    <CountInput key={mode} className={iosInput} value={amount} onChange={setAmount}
-                                                placeholder={mode === 'intake' ? 'Блок — 16 бутылок по 0,5 л' : `Сейчас в учёте ${office.stock}`} />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>
-                                        {mode === 'intake' ? 'Накладная или комментарий' : 'Причина пересчёта'}
-                                    </span>
-                                    <input className={iosInput} value={comment} maxLength={500}
-                                           onChange={(event) => setComment(event.target.value)}
-                                           placeholder={mode === 'intake' ? 'Необязательно' : 'Например: пересчитали полку'} />
-                                </label>
-                                {mode === 'recount' && (
-                                    <div className="flex items-center justify-between gap-3 px-1">
-                                        <span className="flex items-center gap-1.5 text-[13px] text-slate-800">
-                                            {INTAKE_FLAG_LABEL}
-                                            <InfoHint side="left" text={INTAKE_FLAG_HINT} />
-                                        </span>
-                                        <IosToggle checked={adjustsIntake} onChange={setAdjustsIntake} disabled={saving} />
-                                    </div>
-                                )}
-                                <button type="button" className={`${iosBtnPrimary} w-full`}
-                                        disabled={saving || !amountValid || (mode === 'recount' && !comment.trim())}
-                                        onClick={submitMovement}>
-                                    {saving && <Loader2 size={15} className="animate-spin" />}
-                                    {mode === 'intake' ? 'Провести поступление' : 'Сохранить пересчёт'}
-                                </button>
-                            </>
-                        ) : (
-                            <>
-                                <div className="grid grid-cols-2 gap-3">
-                                    <label className="block space-y-1.5">
-                                        <span className={iosGroupLabel}>Низкий остаток</span>
-                                        <CountInput className={iosInput} value={low} onChange={setLow}
-                                                    placeholder={`Общий: ${settings?.low_threshold ?? '—'}`} />
-                                    </label>
-                                    <label className="block space-y-1.5">
-                                        <span className={iosGroupLabel}>Требуется закупка</span>
-                                        <CountInput className={iosInput} value={buy} onChange={setBuy}
-                                                    placeholder={`Общий: ${settings?.buy_threshold ?? '—'}`} />
-                                    </label>
-                                </div>
-                                <p className="text-[11.5px] text-slate-500">
-                                    Пустое поле — действует общий порог из настроек.
-                                </p>
-                                <button type="button" className={`${iosBtnPrimary} w-full`}
-                                        disabled={saving || !thresholdsValid} onClick={submitThresholds}>
-                                    {saving && <Loader2 size={15} className="animate-spin" />}
-                                    Сохранить пороги
-                                </button>
-                            </>
-                        )}
-                    </div>
-                )}
-
-                <div className="space-y-1.5">
-                    <div className={iosGroupLabel}>Поступления и пересчёты</div>
+                <div className="order-3 space-y-1.5">
+                    <div className={wLabel}>Поступления и пересчёты</div>
                     {loading ? (
-                        <div className="flex items-center gap-2 py-3 text-[12.5px] text-slate-500">
-                            <Loader2 size={14} className="animate-spin" /> Загружаем…
+                        <div className={`flex items-center gap-2 py-3 text-[12.5px] text-slate-500 ${T.sub}`}>
+                            <Loader2 size={14} className={`animate-spin ${wIcon}`} /> Загружаем…
                         </div>
                     ) : movements.length ? (
                         <ul className="divide-y divide-slate-100">
@@ -269,7 +299,7 @@ const OfficeSheet = ({
                                    ряды с gap, и у строки с длинной подписью число с меню падало
                                    под текст, к левому краю. Классом её правило не перебить. */
                                 <li key={item.id} style={{ flexWrap: 'nowrap' }}
-                                    className="flex items-start justify-between gap-3 py-2 text-[12.5px]">
+                                    className="flex items-start justify-between gap-3 py-2 text-[12.5px] xl:py-2.5 xl:text-[13.5px] 2xl:py-3 2xl:text-[15px]">
                                     <div className="min-w-0">
                                         {/* Отметка и дата не рвутся посередине: на узком экране
                                             строка переносится между ними, а не внутри даты. */}
@@ -289,7 +319,7 @@ const OfficeSheet = ({
                                             <div className={item.delta > 0 ? 'text-emerald-700' : 'text-slate-700'}>
                                                 {item.delta > 0 ? `+${item.delta}` : item.delta}
                                             </div>
-                                            <div className="text-[11.5px] text-slate-400">стало {item.stock_after}</div>
+                                            <div className={`text-[11.5px] text-slate-400 ${T.note}`}>стало {item.stock_after}</div>
                                         </div>
                                         {/* Меню — у пересчётов; у поступлений на его месте пусто той же
                                             ширины, чтобы числа стояли в один столбец. */}
@@ -309,21 +339,9 @@ const OfficeSheet = ({
                             ))}
                         </ul>
                     ) : (
-                        <p className="py-2 text-[12.5px] text-slate-500">Пока ничего не было</p>
+                        <p className={`py-2 text-[12.5px] text-slate-500 ${T.sub}`}>Пока ничего не было</p>
                     )}
                 </div>
-
-                {canManage && (
-                    <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
-                        <div>
-                            <div className="text-[13px] text-slate-800">В учёте</div>
-                            <div className="text-[11.5px] text-slate-500">
-                                Выведенный офис не виден в выдаче и остатках, журнал сохраняется
-                            </div>
-                        </div>
-                        <IosToggle checked={office.is_active} onChange={toggleActive} disabled={saving} />
-                    </div>
-                )}
             </div>
         </IosModal>
     );
@@ -366,17 +384,18 @@ const AddOffice = ({ open, onClose, directory, apiBaseUrl, headers, onAdded, sho
         <IosModal
             open={open}
             onClose={onClose}
-            title="Офис в учёт"
+            title={<ModalTitle>Офис в учёт</ModalTitle>}
+            maxWidth="max-w-lg 2xl:max-w-[600px]"
             footer={(
-                <button type="button" className={`${iosBtnPrimary} w-full`} disabled={!valid || saving} onClick={save}>
-                    {saving && <Loader2 size={15} className="animate-spin" />}
+                <button type="button" className={`${wBtnPrimary} w-full`} disabled={!valid || saving} onClick={save}>
+                    {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
                     Добавить
                 </button>
             )}
         >
-            <div className="space-y-3">
-                <label className="block space-y-1.5">
-                    <span className={iosGroupLabel}>Офис</span>
+            <div className="space-y-3 2xl:space-y-4">
+                <label className={FIELD}>
+                    <span className={wLabel}>Офис</span>
                     <CustomSelect
                         value={officeId}
                         onChange={setOfficeId}
@@ -386,13 +405,14 @@ const AddOffice = ({ open, onClose, directory, apiBaseUrl, headers, onAdded, sho
                         placeholder={(directory || []).length ? 'Выберите офис' : 'Все офисы Алматы и Астаны уже в учёте'}
                         disabled={!(directory || []).length}
                         variant="ios"
+                        roomy
                         searchable
                         ariaLabel="Офис"
                     />
                 </label>
-                <label className="block space-y-1.5">
-                    <span className={iosGroupLabel}>Сколько блоков сейчас в офисе</span>
-                    <CountInput className={iosInput} value={stock} onChange={setStock}
+                <label className={FIELD}>
+                    <span className={wLabel}>Сколько блоков сейчас в офисе</span>
+                    <CountInput className={wInput} value={stock} onChange={setStock}
                                 placeholder="Блок — 16 бутылок по 0,5 л" />
                 </label>
             </div>
@@ -441,10 +461,14 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
     };
 
     return (
-        <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
+        /* Столбик держит gap, а не space-y: окна карточки офиса и «Офис в учёт»
+           лежат детьми этого же блока, и отступ space-y доставался и им —
+           затемнение начиналось ниже верхнего края экрана на его величину. */
+        <div className="flex flex-col gap-3 xl:gap-4 2xl:gap-5">
+            <div className="flex flex-wrap items-center gap-2 xl:gap-3 2xl:gap-4">
                 <div className="w-full sm:w-auto">
                     <IosDateRangePicker
+                        roomy
                         from={range.from}
                         to={range.to}
                         max={todayISO()}
@@ -454,57 +478,59 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
                     />
                 </div>
                 {needBuy > 0 && (
-                    <span className="text-[12.5px] font-medium text-rose-600">
+                    <span className="text-[12.5px] font-medium text-rose-600 xl:text-[13.5px] 2xl:text-[15px]">
                         Требуется закупка: {needBuy} {plural(needBuy, 'офис', 'офиса', 'офисов')}
                     </span>
                 )}
                 {canManage && (
-                    <button type="button" className={`${iosBtnSecondary} ml-auto`} onClick={() => setAdding(true)}>
-                        <Plus size={15} /> Офис в учёт
+                    <button type="button" className={`${wBtnSecondary} ml-auto`} onClick={() => setAdding(true)}>
+                        <Plus size={15} className={wIcon} /> Офис в учёт
                     </button>
                 )}
             </div>
 
-            {error && <div className="text-[13px] text-rose-600">{error}</div>}
+            {error && <div className={`text-[13px] text-rose-600 ${T.body}`}>{error}</div>}
 
-            <div className={`${iosCard} hidden overflow-hidden md:block`}>
-                <table className="w-full text-left text-[13px]">
-                    <thead className="bg-slate-50/80 text-[11.5px] uppercase tracking-wide text-slate-500">
+            {/* Прокрутка вбок — запас: с закреплённым сайдбаром колонка раздела
+                уже окна на 220 px, и крупная таблица могла бы не войти. */}
+            <div className={`${iosCard} hidden overflow-x-auto md:block`}>
+                <table className={wTable}>
+                    <thead className={wThead}>
                         <tr>
-                            <th className="px-3.5 py-2.5 font-semibold">Офис</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Остаток</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Поступило</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Выдано</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Выдач</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Расход в день</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Прогноз закупки</th>
+                            <th className={wTh}>Офис</th>
+                            <th className={wTh}>Остаток</th>
+                            <th className={`${wTh} text-right`}>Поступило</th>
+                            <th className={`${wTh} text-right`}>Выдано</th>
+                            <th className={`${wTh} text-right`}>Выдач</th>
+                            <th className={`${wTh} text-right`}>Расход в день</th>
+                            <th className={wTh}>Прогноз закупки</th>
                         </tr>
                     </thead>
                     <tbody>
                         {rows.map((row, index) => (
                             <tr key={row.id} onClick={() => setOpenedId(row.id)}
                                 className={`cursor-pointer transition hover:bg-slate-50 ${index ? 'border-t border-slate-100' : ''}`}>
-                                <td className="px-3.5 py-2.5">
+                                <td className={wTd}>
                                     <div className="text-slate-900">{row.name}</div>
-                                    <div className="text-[12px] text-slate-500">{officePlace(row)}</div>
+                                    <div className={`text-[12px] text-slate-500 ${wTdSub}`}>{officePlace(row)}</div>
                                 </td>
-                                <td className="px-3.5 py-2.5">
-                                    <div className="flex items-center gap-2">
-                                        <span className={`font-semibold tabular-nums ${stockStatus(row.status).text}`}>{row.stock}</span>
+                                <td className={wTd}>
+                                    <div className="flex items-center gap-2 2xl:gap-3">
+                                        <span className={`font-semibold tabular-nums 2xl:text-[18px] ${stockStatus(row.status).text}`}>{row.stock}</span>
                                         <StatusPill status={row.status} />
                                     </div>
                                 </td>
-                                <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-700">{row.intake_blocks}</td>
-                                <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-700">{row.issued_blocks}</td>
-                                <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-700">{row.issues}</td>
-                                <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-700">{fmtAvg(row.avg_daily)}</td>
-                                <td className="px-3.5 py-2.5 text-slate-600">{forecastLabel(row)}</td>
+                                <td className={`${wTd} text-right tabular-nums text-slate-700`}>{row.intake_blocks}</td>
+                                <td className={`${wTd} text-right tabular-nums text-slate-700`}>{row.issued_blocks}</td>
+                                <td className={`${wTd} text-right tabular-nums text-slate-700`}>{row.issues}</td>
+                                <td className={`${wTd} text-right tabular-nums text-slate-700`}>{fmtAvg(row.avg_daily)}</td>
+                                <td className={`${wTd} text-slate-600 2xl:whitespace-nowrap`}>{forecastLabel(row)}</td>
                             </tr>
                         ))}
                     </tbody>
                 </table>
                 {!rows.length && !loading && (
-                    <div className="px-4 py-10 text-center text-[13.5px] text-slate-500">
+                    <div className={`px-4 py-10 text-center text-[13.5px] text-slate-500 2xl:py-14 ${T.body}`}>
                         {canManage ? 'Офисов в учёте пока нет — добавьте первый' : 'Офисов в учёте пока нет'}
                     </div>
                 )}
@@ -541,19 +567,19 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
             </div>
 
             {loading && (
-                <div className="flex items-center justify-center gap-2 text-[13px] text-slate-500">
-                    <Loader2 size={15} className="animate-spin" /> Загружаем остатки…
+                <div className={`flex items-center justify-center gap-2 text-[13px] text-slate-500 ${T.body}`}>
+                    <Loader2 size={15} className={`animate-spin ${wIcon}`} /> Загружаем остатки…
                 </div>
             )}
 
             {!loading && rows.length > 0 && (
-                <p className="px-1 text-[11.5px] text-slate-400">
+                <p className={`px-1 text-[11.5px] text-slate-400 ${T.note}`}>
                     За период {rangeLabel(range.from, range.to)}. Прогноз — через сколько дней при среднем расходе остаток дойдёт до порога закупки.
                 </p>
             )}
 
             {canManage && inactive.length > 0 && (
-                <div className="px-1 text-[12.5px] text-slate-500">
+                <div className={`px-1 text-[12.5px] text-slate-500 ${T.sub}`}>
                     Выведены из учёта:{' '}
                     {inactive.map((office, index) => (
                         <React.Fragment key={office.id}>

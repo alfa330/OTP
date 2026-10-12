@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Loader2 } from 'lucide-react';
-import { IosSection, iosBtnPrimary } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { fmtDateTime } from '../parcels/parcelMeta';
 import { COUNT_HINT, useCountInput } from './CountInput';
 import { KNOWN_TARIFFS, parseCount, tariffLabel } from './waterMeta';
+import { T, WaterGroup, wBtnPrimary, wIcon } from './waterUi';
 
 /*
  * «Настройки» — условия программы и пороги остатка (ТЗ 3.2, 6, 7).
@@ -31,19 +31,20 @@ const THRESHOLD_FIELDS = [
 ];
 
 const NUMBER_INPUT = 'w-20 shrink-0 rounded-xl border-0 bg-slate-100 px-3 py-2 text-center text-[14px] '
-    + 'tabular-nums text-slate-900 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
+    + 'tabular-nums text-slate-900 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70 '
+    + '2xl:w-24 2xl:py-2.5 2xl:text-[16px]';
 
 const Field = ({ label, hint, value, onChange }) => {
     // Только цифры (CountInput). Подсказка «Только цифры» встаёт на место
     // пояснения слева: под узким полем справа ей не уместиться.
     const { rejected, inputProps } = useCountInput(onChange);
     return (
-        <label className="flex items-center justify-between gap-3">
+        <label className="flex items-center justify-between gap-3 2xl:gap-4">
             <span className="min-w-0">
-                <span className="block text-[13.5px] text-slate-800">{label}</span>
+                <span className={`block text-[13.5px] text-slate-800 ${T.body}`}>{label}</span>
                 {rejected
-                    ? <span className="block text-[11.5px] text-rose-600">{COUNT_HINT}</span>
-                    : hint && <span className="block text-[11.5px] text-slate-500">{hint}</span>}
+                    ? <span className={`block text-[11.5px] text-rose-600 ${T.note}`}>{COUNT_HINT}</span>
+                    : hint && <span className={`block text-[11.5px] text-slate-500 ${T.note}`}>{hint}</span>}
             </span>
             {/* Не iosInput: в нём w-full, и узкое поле растягивалось на всю
                 строку, сжимая подпись в столбик по слову. */}
@@ -77,11 +78,11 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
         return [...KNOWN_TARIFFS, ...extra];
     }, [draft?.tariffs]);
 
-    if (error) return <div className="text-[13px] text-rose-600">{error}</div>;
+    if (error) return <div className={`text-[13px] text-rose-600 ${T.body}`}>{error}</div>;
     if (!draft) {
         return (
-            <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500">
-                <Loader2 size={15} className="animate-spin" /> Загружаем настройки…
+            <div className={`flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500 ${T.body}`}>
+                <Loader2 size={15} className={`animate-spin ${wIcon}`} /> Загружаем настройки…
             </div>
         );
     }
@@ -126,42 +127,48 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
             : 'Пока никто не выбран — уведомление никому не уйдёт';
 
     return (
-        <div className="max-w-2xl space-y-5">
-            <IosSection title="Право на воду">
+        /* На широком экране группы встают сеткой во всю ширину раздела: с xl —
+           две колонки, на большом экране — три: «Право на воду» и «Тарифы
+           программы» по колонке, пороги с получателями уведомления друг под
+           другом в третьей. */
+        <div className="max-w-2xl space-y-5 xl:grid xl:max-w-none xl:grid-cols-2 xl:items-start xl:gap-5 xl:space-y-0 2xl:grid-cols-3 2xl:gap-6">
+            <WaterGroup title="Право на воду" className="2xl:row-span-2">
                 {NUMBER_FIELDS.map(([name, label, hint]) => (
                     <Field key={name} label={label} hint={hint} value={draft[name] ?? ''} onChange={(value) => set(name, value)} />
                 ))}
-            </IosSection>
+            </WaterGroup>
 
-            <IosSection title="Тарифы программы" hint="Вода положена водителю, у машины которого есть хотя бы один из отмеченных тарифов">
-                <div className="flex flex-wrap gap-1.5">
+            <WaterGroup title="Тарифы программы" className="2xl:row-span-2"
+                        hint="Вода положена водителю, у машины которого есть хотя бы один из отмеченных тарифов">
+                <div className="flex flex-wrap gap-1.5 2xl:gap-2">
                     {tariffs.map((code) => {
                         const on = (draft.tariffs || []).includes(code);
                         return (
                             <button key={code} type="button" onClick={() => toggleTariff(code)} aria-pressed={on}
-                                    className={`rounded-full px-3 py-1.5 text-[12.5px] font-medium transition active:scale-[0.98] ${
+                                    className={`rounded-full px-3 py-1.5 text-[12.5px] font-medium transition active:scale-[0.98] xl:text-[13px] 2xl:px-4 2xl:py-2 2xl:text-[14px] ${
                                         on ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
                                 {tariffLabel(code)}
                             </button>
                         );
                     })}
                 </div>
-            </IosSection>
+            </WaterGroup>
 
-            <IosSection title="Пороги остатка" hint="Общие для всех офисов. Свой порог офиса задаётся в его карточке во вкладке «Остатки»">
+            <WaterGroup title="Пороги остатка" hint="Общие для всех офисов. Свой порог офиса задаётся в его карточке во вкладке «Остатки»">
                 {THRESHOLD_FIELDS.map(([name, label, hint]) => (
                     <Field key={name} label={label} hint={hint} value={draft[name] ?? ''} onChange={(value) => set(name, value)} />
                 ))}
                 {parsed.buy_threshold > parsed.low_threshold && (
-                    <p className="text-[12px] text-rose-600">Порог закупки не может быть больше порога «низкий остаток»</p>
+                    <p className={`text-[12px] text-rose-600 ${T.note}`}>Порог закупки не может быть больше порога «низкий остаток»</p>
                 )}
-            </IosSection>
+            </WaterGroup>
 
-            <IosSection title="«Требуется закупка» в Telegram" hint={recipientHint}>
+            <WaterGroup title="«Требуется закупка» в Telegram" hint={recipientHint}>
                 <CustomSelect
                     multiple
                     searchable
                     variant="ios"
+                    roomy
                     /* CustomSelect в режиме multiple держит ключи строками —
                        сравниваем строками, храним числами (как SessionModal). */
                     value={recipients.map(String)}
@@ -179,15 +186,15 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
                         : 'Выберите сотрудников')}
                     ariaLabel="Получатели"
                 />
-            </IosSection>
+            </WaterGroup>
 
-            <div className="flex flex-wrap items-center gap-3">
-                <button type="button" className={iosBtnPrimary} disabled={!dirty || invalid || saving} onClick={save}>
-                    {saving && <Loader2 size={15} className="animate-spin" />}
+            <div className="flex flex-wrap items-center gap-3 xl:col-span-2 2xl:col-span-3 2xl:gap-4">
+                <button type="button" className={`${wBtnPrimary} 2xl:!px-8`} disabled={!dirty || invalid || saving} onClick={save}>
+                    {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
                     Сохранить
                 </button>
                 {loaded?.updated_by_name && (
-                    <span className="text-[12px] text-slate-400">
+                    <span className={`text-[12px] text-slate-400 ${T.sub}`}>
                         Изменил {loaded.updated_by_name}, {fmtDateTime(loaded.updated_at)}
                     </span>
                 )}

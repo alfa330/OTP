@@ -7,6 +7,7 @@ import WaterIssue from './WaterIssue';
 import WaterJournal from './WaterJournal';
 import WaterSettings from './WaterSettings';
 import WaterStock from './WaterStock';
+import { T, wIcon, wTabs } from './waterUi';
 
 /*
  * «Учёт воды» — выдача питьевой воды водителям и остатки по фронт-офисам
@@ -114,26 +115,26 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
     const activeTab = tabs.some((item) => item.value === tab) ? tab : tabs[0]?.value;
 
     if (error) {
-        return <div className={`${iosCard} p-6 text-center text-[13.5px] text-slate-600`}>{error}</div>;
+        return <div className={`${iosCard} p-6 text-center text-[13.5px] text-slate-600 ${T.body}`}>{error}</div>;
     }
     if (!capabilities) {
         return (
-            <div className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-500">
-                <Loader2 size={15} className="animate-spin" /> Открываем учёт воды…
+            <div className={`flex items-center justify-center gap-2 py-12 text-[13px] text-slate-500 ${T.body}`}>
+                <Loader2 size={15} className={`animate-spin ${wIcon}`} /> Открываем учёт воды…
             </div>
         );
     }
     if (!schemaReady) {
         return (
-            <div className="rounded-2xl bg-amber-50 px-4 py-3 text-[13px] text-amber-800 ring-1 ring-amber-200">
+            <div className={`rounded-2xl bg-amber-50 px-4 py-3 text-[13px] text-amber-800 ring-1 ring-amber-200 2xl:px-5 2xl:py-4 ${T.body}`}>
                 Учёт воды разворачивается — он появится после перезапуска сервера.
             </div>
         );
     }
 
     return (
-        <div className="space-y-4">
-            <IosSegmented value={activeTab} onChange={setTab} options={tabs} ariaLabel="Учёт воды" />
+        <div className="space-y-4 xl:space-y-5 2xl:space-y-6">
+            <IosSegmented value={activeTab} onChange={setTab} options={tabs} ariaLabel="Учёт воды" className={wTabs} />
 
             {activeTab === 'issue' && (
                 <WaterIssue

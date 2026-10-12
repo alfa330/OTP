@@ -37,6 +37,13 @@ import { APPLE_FONT } from './ios';
  *                       вместо мелкого 12.5 px по умолчанию: когда список стоит
  *                       в одной форме с полями ввода, текст должен совпадать с
  *                       ними (форма «Мои данные» в «Профиле»).
+ *   roomy             — (только variant="ios") просторный вид для больших
+ *                       экранов: с xl (окно от 1280 px) кнопка ростом с поле
+ *                       ввода (41 px), с 2xl (от 1536 px) — 48 px и крупный
+ *                       кегль, строки списка крупнее вслед за кнопкой. Без него
+ *                       на большом мониторе крупная кнопка раскрывала бы список
+ *                       кеглем 12.5 px. До 1280 px вид прежний. Кегль кнопки,
+ *                       заданный через textClassName, остаётся за вызывающим.
  *   bulkActions       — (только multiple) строка «Выбрать все · Сбросить» над
  *                       списком. При строке поиска «Выбрать» берёт найденные,
  *                       а не весь список: набрал «Астана» — отметил Астану.
@@ -57,6 +64,19 @@ import { APPLE_FONT } from './ios';
  *   muted             — приглушённая строка: выбрать можно, но видно, что за ней
  *                       ничего нет (значение без разборов).
  */
+/* Добавки просторного вида (roomy), по месту в разметке. Все — с префиксом
+   брейкпоинта от xl, поэтому до 1280 px (телефон в любом положении, планшет)
+   вид прежний; включаются только через roomyAdd, так что у списка без roomy в
+   классах нет ни одной из них. */
+const ROOMY = {
+  trigger: ' xl:px-3.5 xl:py-2.5 2xl:px-4 2xl:py-3',
+  triggerText: ' xl:text-[14px] 2xl:text-[16px]',
+  chevron: ' 2xl:h-4 2xl:w-4',
+  search: ' xl:text-[13.5px] 2xl:px-3 2xl:py-2.5 2xl:text-[15px]',
+  option: ' xl:text-[13.5px] 2xl:py-3 2xl:text-[15px]',
+  meta: ' xl:text-[12px] 2xl:text-[13px]',
+};
+
 export default function CustomSelect({
   value,
   onChange,
@@ -74,6 +94,7 @@ export default function CustomSelect({
   maxSelected = 0,
   bulkActions = false,
   textClassName = '',
+  roomy = false,
   expandLabel = 'вложенные',
 }) {
   const [open, setOpen] = useState(false);
@@ -172,6 +193,8 @@ export default function CustomSelect({
   const hasSelection = multiple ? selectedValues.length > 0 : Boolean(selected);
   const limitReached = multiple && maxSelected > 0 && selectedValues.length >= maxSelected;
   const isIos = variant === 'ios';
+  const roomyOn = isIos && roomy;
+  const roomyAdd = (place) => (roomyOn ? ROOMY[place] : '');
 
   /* Подсветку строки при ОТКРЫТИИ ставим по текущему выбору, но зависеть от
      выбора эффект не должен: в мультирежиме каждый щелчок менял бы selectedSet и
@@ -331,7 +354,7 @@ export default function CustomSelect({
             disabled
               ? 'cursor-not-allowed opacity-50 ring-slate-200/70'
               : 'cursor-pointer ring-slate-200/70 hover:bg-slate-50 active:scale-[0.99]'
-          } ${open ? 'ring-2 ring-blue-500/60' : 'shadow-[0_1px_2px_rgba(15,23,42,0.04)]'}`
+          } ${open ? 'ring-2 ring-blue-500/60' : 'shadow-[0_1px_2px_rgba(15,23,42,0.04)]'}${roomyAdd('trigger')}${textClassName ? '' : roomyAdd('triggerText')}`
           : `flex w-full items-center justify-between gap-2 rounded-lg border bg-white px-3 py-2 text-left text-sm text-gray-900 transition-all ${
             disabled
               ? 'cursor-not-allowed border-gray-200 opacity-60'
@@ -347,7 +370,7 @@ export default function CustomSelect({
         </span>
         <svg
           width="14" height="14" viewBox="0 0 20 20" fill="none"
-          className={`shrink-0 text-gray-400 transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
+          className={`shrink-0 text-gray-400 transition-transform duration-150 ${open ? 'rotate-180' : ''}${roomyAdd('chevron')}`}
         >
           <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -395,7 +418,7 @@ export default function CustomSelect({
                 aria-controls={listboxId}
                 aria-activedescendant={activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined}
                 className={isIos
-                  ? 'w-full rounded-xl border-0 bg-slate-100 px-2.5 py-2 text-[12.5px] text-slate-900 outline-none placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-500/60'
+                  ? `w-full rounded-xl border-0 bg-slate-100 px-2.5 py-2 text-[12.5px] text-slate-900 outline-none placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-500/60${roomyAdd('search')}`
                   : 'w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 focus:bg-white'}
               />
             </div>
@@ -408,7 +431,7 @@ export default function CustomSelect({
                 disabled={!pickable.length || allPicked}
                 onClick={pickAll}
                 className={`rounded-lg px-2 py-1 font-medium transition disabled:cursor-default disabled:opacity-40 ${
-                  isIos ? 'text-[12px] text-blue-600 hover:bg-blue-50' : 'text-xs text-blue-600 hover:bg-blue-50'}`}
+                  isIos ? 'text-[12px] text-blue-600 hover:bg-blue-50' : 'text-xs text-blue-600 hover:bg-blue-50'}${roomyAdd('meta')}`}
               >
                 {searching ? `Выбрать найденные · ${pickable.length}` : `Выбрать все · ${pickable.length}`}
               </button>
@@ -417,7 +440,7 @@ export default function CustomSelect({
                 disabled={!selectedValues.length}
                 onClick={() => onChange?.([])}
                 className={`rounded-lg px-2 py-1 font-medium transition disabled:cursor-default disabled:opacity-40 ${
-                  isIos ? 'text-[12px] text-slate-500 hover:bg-slate-100' : 'text-xs text-gray-500 hover:bg-gray-100'}`}
+                  isIos ? 'text-[12px] text-slate-500 hover:bg-slate-100' : 'text-xs text-gray-500 hover:bg-gray-100'}${roomyAdd('meta')}`}
               >
                 Сбросить
               </button>
@@ -435,7 +458,7 @@ export default function CustomSelect({
             aria-label={ariaLabel ? `${ariaLabel}: варианты` : undefined}
           >
             {filtered.length === 0 ? (
-              <div className={`px-3 py-2 ${isIos ? 'text-[12.5px] text-slate-400' : 'text-sm text-gray-400'}`}>
+              <div className={`px-3 py-2 ${isIos ? 'text-[12.5px] text-slate-400' : 'text-sm text-gray-400'}${roomyAdd('option')}`}>
                 {query ? 'Ничего не найдено' : 'Нет вариантов'}
               </div>
             ) : (
@@ -464,7 +487,7 @@ export default function CustomSelect({
                         isSel
                           ? 'bg-blue-50 text-blue-700'
                           : isActive ? 'bg-slate-100 text-slate-800' : 'text-slate-700 hover:bg-slate-50'
-                      } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`
+                      } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}${roomyAdd('option')}`
                       : `flex w-full min-w-0 items-center justify-between gap-2 ${isChild ? 'pl-7 pr-3' : 'px-3'} py-2 text-left text-sm transition-colors ${
                         isSel
                           ? 'bg-blue-50 text-blue-700'
@@ -473,7 +496,7 @@ export default function CustomSelect({
                   >
                     <span className={`truncate ${o.muted && !isSel ? (isIos ? 'text-slate-400' : 'text-gray-400') : ''}`}>{o.label}</span>
                     {o.meta != null && o.meta !== '' && (
-                      <span className={`ml-auto shrink-0 tabular-nums ${isIos ? 'text-[11.5px]' : 'text-xs'} ${isSel ? 'text-blue-500' : 'text-slate-400'}`}>
+                      <span className={`ml-auto shrink-0 tabular-nums ${isIos ? 'text-[11.5px]' : 'text-xs'} ${isSel ? 'text-blue-500' : 'text-slate-400'}${roomyAdd('meta')}`}>
                         {o.meta}
                       </span>
                     )}

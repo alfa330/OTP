@@ -22,6 +22,7 @@ PARCELS_VIEW = ROOT / 'src' / 'components' / 'parcels' / 'ParcelsView.jsx'
 APP_JSX = ROOT / 'src' / 'App.jsx'
 META = ROOT / 'src' / 'components' / 'water' / 'waterMeta.js'
 PANEL = ROOT / 'src' / 'components' / 'water' / 'WaterPanel.jsx'
+WATER = ROOT / 'src' / 'components' / 'water'
 
 
 def _read(path):
@@ -31,6 +32,26 @@ def _read(path):
 def _js_object(source, name):
     block = source.split('export const %s = {' % name)[1].split('};')[0]
     return dict(re.findall(r"(\w+):\s*'([^']*)'", block))
+
+
+def _jsx_tags(source, name):
+    """Открывающие теги <name …> целиком. В атрибутах стоят стрелки (=>), поэтому
+    конец тега ищется по балансу фигурных скобок, а не по первой «>»."""
+    tags, at = [], source.find('<' + name)
+    while at >= 0:
+        depth, index = 0, at
+        while index < len(source):
+            char = source[index]
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+            elif char == '>' and depth == 0:
+                break
+            index += 1
+        tags.append(source[at:index + 1])
+        at = source.find('<' + name, index)
+    return tags
 
 
 class SectionWiringTests(unittest.TestCase):
@@ -225,7 +246,7 @@ class PanelTests(unittest.TestCase):
         одно название «Бизнес» есть и в Алматы, и в Астане."""
         stock = _read(ROOT / 'src' / 'components' / 'water' / 'WaterStock.jsx')
         self.assertEqual(stock.count('{officePlace(row)}'), 2)  # таблица и карточки на телефоне
-        self.assertIn('subtitle={officePlace(office)}', stock)
+        self.assertIn('subtitle={<ModalSubtitle>{officePlace(office)}</ModalSubtitle>}', stock)
 
     def test_recount_can_be_counted_in_intake(self):
         """«В случае пересчёта регулировать „Поступило“» (05.10.2026): отметка —
@@ -266,6 +287,204 @@ class PanelTests(unittest.TestCase):
             source = _read(path)
             self.assertNotIn('<select', source, path.name)
             self.assertNotIn('type="date"', source, path.name)
+
+
+class LargeScreenTests(unittest.TestCase):
+    """«Раздел мелкий — и шрифты, и сами блоки; на большом экране смотрится не
+    очень» (владелец, 12.10.2026). Размеры раздела растут двумя ступенями — xl
+    (окно от 1280 px) и 2xl (от 1536 px): шкала в waterUi.jsx, раскладки в
+    экранах. До 1280 px вид прежний пиксель в пиксель (сверено кадрами)."""
+
+    def setUp(self):
+        self.ui = _read(WATER / 'waterUi.jsx')
+        self.screens = {path.name: _read(path) for path in WATER.glob('*.jsx')
+                        if path.name != 'waterUi.jsx'}
+
+    def test_scale_never_reaches_the_phone(self):
+        """Добавки размера — только с префиксом xl или 2xl. Не md: оболочка
+        телефона включается и у телефона боком (844–956 px ширины), и ровно на
+        768 px, где md уже действует. Не lg: в окне 1024–1279 px таблицам тесно
+        и с прежним кеглем. Утилита без префикса поменяла бы телефон, а поверх
+        готового ios-класса того же свойства ещё и молча проиграла бы: побеждает
+        порядок правил в сборке, а не порядок в строке."""
+        addons = re.findall(r"'([^']*)'", self.ui.split('export const T = {')[1].split('};')[0])
+        self.assertEqual(len(addons), 6)
+        for name in ('BUTTON', 'wChip', 'wPill', 'wIcon', 'wTabs', 'wSegments'):
+            block = re.search(r"const %s = ((?:\s*\+?\s*'[^']*')+);" % name, self.ui)
+            self.assertIsNotNone(block, name)
+            addons += re.findall(r"'([^']*)'", block.group(1))
+        for name in ('wInput', 'wBtnGhost'):
+            block = re.search(r"export const %s = `\$\{ios\w+\}([^`]*)`;" % name, self.ui)
+            self.assertIsNotNone(block, name)
+            addons.append(block.group(1))
+        utilities = ' '.join(addons).split()
+        self.assertGreater(len(utilities), 40)
+        for utility in utilities:
+            self.assertRegex(utility, r'^(xl|2xl):', utility)
+            # Оболочка телефона правит всё, в чьём классе есть «w-[», — даже с префиксом.
+            self.assertNotRegex(utility, r':(min-)?w-\[', utility)
+        # Ступеней ниже xl в разделе нет: из sm, md и lg остались только прежние
+        # переключатели раскладки (таблица на компьютере — карточки на телефоне,
+        # ряд поиска, сетка фильтров, поля рамки раздела).
+        low = sorted(re.findall(r'(?<![\w-])(?:sm|md|lg):[^\s`\'"]+', ' '.join(self.screens.values()) + self.ui))
+        self.assertEqual(low, ['lg:grid-cols-3', 'md:block', 'md:block', 'md:hidden', 'md:hidden',
+                               'sm:flex-1', 'sm:flex-none', 'sm:flex-row', 'sm:grid-cols-2', 'sm:items-center',
+                               'sm:left-auto', 'sm:px-5', 'sm:py-6', 'sm:right-0', 'sm:w-auto'])
+
+    def test_base_classes_are_carried_over_untouched(self):
+        """Классы без префикса в шкале — те, что стояли в разметке до правки:
+        они и есть вид раздела до 1280 px (таблицы видны с 768)."""
+        # Таблицы растут только с 2xl: в окне 1280 px журнал с кеглем 14 px и
+        # полями шире уезжал вбок на 45 px (замер 12.10.2026), прежним — входит.
+        self.assertIn("export const wTable = 'w-full text-left text-[13px] 2xl:text-[16px]';", self.ui)
+        self.assertIn("export const wThead = 'bg-slate-50/80 text-[11.5px] uppercase tracking-wide text-slate-500 2xl:text-[12.5px]';", self.ui)
+        self.assertIn("export const wTh = 'px-3.5 py-2.5 font-semibold 2xl:whitespace-nowrap 2xl:px-5 2xl:py-3.5';", self.ui)
+        self.assertIn("export const wTd = 'px-3.5 py-2.5 2xl:px-5 2xl:py-4';", self.ui)
+        self.assertIn("export const wTdSub = '2xl:text-[14px]';", self.ui)
+        self.assertIn("export const wPill = '2xl:px-2.5 2xl:py-1 2xl:text-[13px]';", self.ui)
+        journal = self.screens['WaterJournal.jsx']
+        self.assertIn("<table className={`${wTable} 2xl:min-w-[1310px]`}>", journal)
+        self.assertIn("const OFFICE_CELL = '2xl:min-w-[215px]';", journal)
+        self.assertIn("const WIDE_CELL = 'max-w-[220px] 2xl:max-w-[240px] min-[1800px]:max-w-[320px]';", journal)
+        # Длинное ФИО сотрудника не отнимает ширину у офиса: дата не переносится,
+        # сотрудник под ней обрезается, полное имя — в подсказке.
+        self.assertIn("const DATE_CELL = 'xl:max-w-[190px] 2xl:max-w-[205px] min-[1800px]:max-w-[280px]';", journal)
+        self.assertIn("<div className={`whitespace-nowrap tabular-nums ${main}`}>{fmtDateTime(item.created_at)}</div>", journal)
+        self.assertIn("<div className={`truncate text-[12px] ${wTdSub} ${meta}`} title={item.issued_by_name || undefined}>", journal)
+        # Группа — двойник IosSection: те же отступы и кегль пояснения.
+        ios = _read(ROOT / 'src' / 'components' / 'ui' / 'ios.jsx')
+        self.assertIn('<section className="space-y-1.5">', ios)
+        self.assertIn("<div className={`${iosCard} p-4 space-y-3`}>", ios)
+        self.assertIn('<div className="px-1 text-[11px] text-slate-500">{hint}</div>', ios)
+        self.assertIn("<section className={`space-y-1.5 2xl:space-y-2 ${className}`}>", self.ui)
+        self.assertIn("<div className={`${iosCard} space-y-3 p-4 xl:p-5 2xl:space-y-4 2xl:p-6`}>", self.ui)
+        self.assertIn("<div className={`px-1 text-[11px] text-slate-500 ${T.note}`}>{hint}</div>", self.ui)
+        # Красная кнопка отмены — прежняя строка классов плюс добавки кнопки.
+        self.assertIn("'inline-flex items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 '", self.ui)
+        self.assertIn("'text-[13.5px] font-semibold text-white transition hover:bg-red-700 active:scale-[0.98] disabled:opacity-50 '", self.ui)
+
+    def test_controls_of_one_row_share_one_height(self):
+        """Поле, список, чип периода, кнопка и полоса вкладок стоят в одних рядах:
+        41 px на компьютере с xl (кегль 14 px, поля по 10) и 48 px на большом экране
+        (строка 24 px, поля по 12). Замер в браузере 12.10.2026 — 41 и 48 у всех."""
+        self.assertIn("export const wInput = `${iosInput} 2xl:px-4 2xl:py-3 2xl:text-[16px]`;", self.ui)
+        self.assertIn("const BUTTON = 'xl:text-[14px] 2xl:px-5 2xl:py-3 2xl:text-[15px] 2xl:leading-6';", self.ui)
+        self.assertIn("export const wChip = 'xl:px-3.5 xl:py-2.5 xl:text-[14px] 2xl:gap-2.5 2xl:px-4 2xl:py-3 2xl:text-[16px] '", self.ui)
+        self.assertIn("export const wTabs = 'xl:[&>button]:px-4 xl:[&>button]:py-[7px] xl:[&>button]:text-[14px] '", self.ui)
+        self.assertIn("'2xl:[&>button]:text-[15px] 2xl:[&>button]:leading-6'", self.ui)
+        self.assertIn("2xl:[&>button]:py-2 '", self.ui)
+        select = _read(ROOT / 'src' / 'components' / 'ui' / 'CustomSelect.jsx')
+        self.assertIn("  trigger: ' xl:px-3.5 xl:py-2.5 2xl:px-4 2xl:py-3',", select)
+        self.assertIn("  triggerText: ' xl:text-[14px] 2xl:text-[16px]',", select)
+
+    def test_wide_layouts_keep_the_stacked_order_below_xl(self):
+        """С xl карточка водителя и окно офиса — в две колонки. Колонки — обёртки,
+        до xl растворённые (contents), а порядок в столбике держат order-классы:
+        ответ остаётся над прошлыми выдачами, «В учёте» — под движениями."""
+        issue = self.screens['WaterIssue.jsx']
+        self.assertEqual(issue.count('<div className="contents xl:flex xl:flex-col '), 2)
+        card = issue[issue.index('{driver && verdict && ('):]
+        orders = re.findall(r'className=\{?[`"]order-(\d)', card)
+        self.assertEqual(orders, ['1', '3', '2', '4'])  # в разметке: водитель, выдачи | ответ, действие
+        # Ряд «Офис | Водитель» — доли из двенадцати: сетку в квадратных скобках
+        # оболочка телефона складывает в одну колонку по подстроке «grid-cols-[».
+        self.assertIn("${fieldsRow ? 'xl:grid-cols-12' : ''}", issue)
+        # min-w-0 у обоих блоков: без него колонка сетки растёт под длинное
+        # название офиса, и на телефоне список выезжал за край поля на 7 px
+        # (поймано попиксельным сравнением с прежней сборкой).
+        self.assertIn("<div className={`min-w-0 space-y-1.5 2xl:space-y-2 ${fieldsRow ? 'xl:col-span-5' : ''}`}>", issue)
+        self.assertIn("<div className={`min-w-0 space-y-1.5 2xl:space-y-2 ${fieldsRow ? 'xl:col-span-7' : ''}`}>", issue)
+        stock = self.screens['WaterStock.jsx']
+        self.assertIn("const twoPane = canManage && office.is_active;", stock)
+        self.assertIn("twoPane ? 'contents xl:sticky xl:top-4 xl:flex xl:flex-col xl:gap-4 2xl:gap-6' : 'contents'", stock)
+        sheet = stock[stock.index('<IosModal open={open} onClose={onClose} title={<ModalTitle>{office.name}'):]
+        sheet = sheet[:sheet.index('</IosModal>')]
+        self.assertEqual(re.findall(r'order-(\d)', sheet), ['1', '2', '4', '3'])  # остаток, форма, «В учёте» | движения
+        # Сеток без префикса в экранах не прибавилось (на телефоне это были бы колонки):
+        # прежняя одна — два порога в карточке офиса.
+        for name, source in self.screens.items():
+            source = re.sub(r'/\*[\s\S]*?\*/', '', source)  # в комментариях подстрока названа словами
+            self.assertNotIn('grid-cols-[', source, name)
+            bare = re.findall(r'(?<![\w:-])grid-cols-\d+', source)
+            self.assertEqual(bare, ['grid-cols-2'] if name == 'WaterStock.jsx' else [], name)
+
+    def test_screens_take_shared_classes_through_the_scale(self):
+        """Поле, кнопка и подпись приходят из waterUi.jsx, а не из ui/ios напрямую:
+        иначе новое поле раздела снова вышло бы мелким рядом с крупными."""
+        for name, source in self.screens.items():
+            imported = re.search(r"import \{([^}]*)\} from '\.\./ui/ios';", source)
+            if not imported:
+                continue
+            for shared in ('iosInput', 'iosBtnPrimary', 'iosBtnSecondary', 'iosBtnGhost',
+                           'iosGroupLabel', 'IosSection'):
+                self.assertNotIn(shared, imported.group(1), '%s берёт %s мимо waterUi' % (name, shared))
+
+    def test_every_list_and_calendar_is_roomy(self):
+        """Крупная кнопка не раскрывает список кеглем 12,5 px, а чип периода —
+        календарь прежнего размера: у общих пикеров для этого параметр roomy."""
+        seen = {}
+        for name, source in self.screens.items():
+            for tag_name in ('CustomSelect', 'IosDateRangePicker', 'IosDateRangeCalendar'):
+                for tag in _jsx_tags(source, tag_name):
+                    seen[tag_name] = seen.get(tag_name, 0) + 1
+                    self.assertRegex(tag, r'\broomy\b', '%s: %s' % (name, tag[:70]))
+        self.assertEqual(seen, {'CustomSelect': 8, 'IosDateRangePicker': 2, 'IosDateRangeCalendar': 1})
+
+    def test_shared_pickers_are_unchanged_without_the_flag(self):
+        select = _read(ROOT / 'src' / 'components' / 'ui' / 'CustomSelect.jsx')
+        self.assertIn('  roomy = false,\n', select)
+        self.assertIn('const roomyOn = isIos && roomy;', select)
+        # Список рисуется только раскрытым, рендер-тест его строк не видит. Поэтому
+        # все ступени размера живут в одной таблице и включаются одной функцией:
+        # вне таблицы в коде компонента нет ни одной утилиты с брейкпоинтом.
+        self.assertIn("const roomyAdd = (place) => (roomyOn ? ROOMY[place] : '');", select)
+        table = select.split('const ROOMY = {')[1].split('};')[0]
+        utilities = ' '.join(re.findall(r"'([^']*)'", table)).split()
+        self.assertGreater(len(utilities), 12)
+        for utility in utilities:
+            self.assertRegex(utility, r'^(xl|2xl):', utility)
+        code = re.sub(r'/\*[\s\S]*?\*/|//[^\n]*', '', select.replace(table, ''))
+        self.assertNotRegex(code, r'\b(sm|md|lg|xl|2xl):')
+        self.assertEqual(len(re.findall(r'ROOMY\b', code)), 2)  # объявление и roomyAdd
+        picker = _read(ROOT / 'src' / 'components' / 'ui' / 'DateRangePicker.jsx')
+        self.assertEqual(picker.count('roomy = false'), 2)  # календарь и обёртка-чип
+        self.assertIn('presets={presets} roomy={roomy}', picker)
+        addons = ' '.join(re.findall(r"roomy \? '([^']*)'", picker)).split()
+        self.assertGreater(len(addons), 12)
+        for utility in addons:
+            self.assertTrue(utility.startswith('2xl:'), utility)
+        # Ширину ячейке даёт колонка сетки (w-full): «w-[» в классе ловит оболочка
+        # телефона и правит календарь даже по добавке с префиксом. У самой
+        # карточки «w-[268px]» стояло и раньше.
+        self.assertEqual([u for u in addons if ':w-[' in u], ['2xl:w-[326px]'])
+
+    def test_windows_start_at_the_top_edge(self):
+        """Окно — ребёнок столбика экрана. Отступ space-y доставался и ему:
+        затемнение начиналось на 12 px ниже верхнего края (замер 12.10.2026 —
+        окно стояло с 12-го пикселя, а не с нулевого). У столбика с gap такого
+        отступа нет."""
+        for name, windows in (('WaterStock.jsx', ('<OfficeSheet', '<AddOffice')),
+                              ('WaterJournal.jsx', ('<IssueSheet',))):
+            body = self.screens[name]
+            body = body[body.rindex('\n    return (\n'):]  # возврат самого экрана, не строки списка
+            root = body.split('<div className="', 1)[1].split('"', 1)[0]
+            self.assertTrue(root.startswith('flex flex-col gap-3 '), '%s: %s' % (name, root))
+            self.assertNotIn('space-y-', root)
+            for window in windows:
+                self.assertIn(window, body, name)
+
+    def test_section_column_grows_to_the_profile_width(self):
+        view = _read(WATER / 'WaterView.jsx')
+        # До 1280 px потолок прежний, с xl — 1280, на большом экране — как у «Профиля».
+        self.assertIn(' max-w-[1180px] px-3 py-4 sm:px-5 sm:py-6 xl:max-w-[1280px] 2xl:max-w-[1800px] ', view)
+        self.assertEqual(len(re.findall(r'max-w-\[', view)), 3)
+        profile = _read(ROOT / 'src' / 'components' / 'profile' / 'ProfileView.jsx')
+        self.assertIn('max-w-[1800px]', profile)
+
+    def test_big_screen_step_is_the_stock_tailwind_one(self):
+        """Порог большого экрана в расчётах раздела — 1536 px, то есть 2xl из
+        набора Tailwind по умолчанию. Свой `screens` в конфиге сдвинул бы его молча."""
+        self.assertNotIn('screens', _read(ROOT / 'tailwind.config.cjs'))
 
 
 class JournalCancelTests(unittest.TestCase):

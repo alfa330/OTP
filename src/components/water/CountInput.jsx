@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { COUNT_MAX_DIGITS, isCountDraft } from './waterMeta';
+import { T } from './waterUi';
 
 /*
  * Поле количества — блоки, пороги, поездки, дни. Принимает только цифры
@@ -39,7 +40,7 @@ export const useCountInput = (onChange) => {
 };
 
 export const CountHint = () => (
-    <span className="block text-[11.5px] text-rose-600">{COUNT_HINT}</span>
+    <span className={`block text-[11.5px] text-rose-600 ${T.note}`}>{COUNT_HINT}</span>
 );
 
 const CountInput = ({ value, onChange, className, ...rest }) => {
