@@ -13,7 +13,10 @@ import os
 import pathlib
 import re
 import sys
+import threading
+import time
 import unittest
+import unittest.mock
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -388,6 +391,178 @@ class SignCheckRunTests(unittest.TestCase):
         src = inspect.getsource(sign_check.SignChecker.request)
         self.assertIn('ThreadPoolExecutor(max_workers=1', src)
         self.assertNotIn('run_in_executor', inspect.getsource(sign_check))
+
+
+class CheckNowTests(unittest.TestCase):
+    """Проверка «сейчас» (владелец, 11.10.2026: «подписавших не выдавать»): её ждёт
+    оператор, поэтому параллельно, с таймаутом на запрос и сроком на всё; Sapar лежит —
+    не ждём его и какое-то время не спрашиваем. Итог пишется так же, как у прогона.
+    Sapar подменён, потоки — настоящие."""
+
+    NOW = datetime(2026, 10, 11, 9, 0, tzinfo=timezone.utc)
+    BASE = date(2026, 10, 1)
+
+    def _checker(self, fetch, configured=True):
+        checker = sign_check.SignChecker(db=None, fetch=fetch, configured=lambda: configured, sleep=lambda s: None)
+        written, resolved = [], []
+        checker._write = lambda items, now: written.extend(items)
+        checker.resolve_successes = lambda now=None, lead_ids=None: resolved.append((now, list(lead_ids))) or 0
+        return checker, written, resolved
+
+    def _check(self, checker, leads, **kwargs):
+        params = dict(timeout=3, workers=4, budget_sec=5, max_systemic=2, now=self.NOW)
+        params.update(kwargs)
+        return checker.check_now(leads, **params)
+
+    @staticmethod
+    def _wait_lanes():
+        """Дождаться, пока потоки проверки доработают (их не ждёт сама проверка)."""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not any(t.name.startswith('dial-sign-now') and t.is_alive() for t in threading.enumerate()):
+                return
+            time.sleep(0.01)
+
+    def test_not_configured_asks_nothing(self):
+        calls = []
+        checker, written, _ = self._checker(lambda *a, **k: calls.append(a), configured=False)
+        summary = self._check(checker, [('l1', VALID, self.BASE)])
+        self.assertEqual((summary['stopped'], calls, written), ('not_configured', [], []))
+
+    def test_one_request_per_iin_and_month_and_verdicts_like_the_run(self):
+        docs = {'iin-signed': [_doc('Подписано', '2026-10-10T05:00:00')],
+                'iin-wait': [_doc('Подписано'), _doc('НаПодписанииУЯндекса')],
+                'iin-no': [_doc('НаПодписанииУВодителя')]}
+        calls, lock = [], threading.Lock()
+
+        def fetch(iin, month, year, session=None, timeout=None):
+            with lock:
+                calls.append((iin, month, year, timeout))
+            return {'ok': True, 'yandex': docs[iin]}
+
+        checker, written, resolved = self._checker(fetch)
+        leads = [('l1', 'iin-signed', self.BASE), ('l2', 'iin-signed', self.BASE), ('l3', 'iin-wait', self.BASE),
+                 ('l4', 'iin-no', self.BASE), ('l5', '', self.BASE), ('l6', 'iin-signed', date(2026, 9, 1))]
+        summary = self._check(checker, leads)
+        # Один запрос на (ИИН, месяц документов): база октября — документы сентября; без ИИН — никак.
+        self.assertEqual(sorted(calls), [('iin-no', 9, 2026, 3), ('iin-signed', 8, 2026, 3),
+                                         ('iin-signed', 9, 2026, 3), ('iin-wait', 9, 2026, 3)])
+        self.assertEqual(sorted(summary['signed']), ['l1', 'l2', 'l6'])
+        self.assertEqual(summary['processing'], ['l3'])
+        self.assertEqual((summary['checked'], summary['errors'], summary['stopped']), (5, 0, ''))
+        # Записи для _write — те же, что у прогона: ok, лид, статус, документы, момент подписи.
+        by_lead = {w[1]: w for w in written}
+        self.assertEqual(set(by_lead), {'l1', 'l2', 'l3', 'l4', 'l6'})
+        self.assertEqual(by_lead['l1'][2], signing.SIGNED)
+        self.assertEqual(by_lead['l1'][4], datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc))
+        self.assertEqual((by_lead['l3'][2], by_lead['l3'][4]), (signing.PROCESSING, None))
+        self.assertEqual(by_lead['l4'][2], signing.UNSIGNED)
+        # Успешка — сразу и только по новым подписавшим.
+        self.assertEqual([(now, sorted(ids)) for now, ids in resolved], [(self.NOW, ['l1', 'l2', 'l6'])])
+
+    def test_parallel_workers_each_with_own_session(self):
+        barrier, lock = threading.Barrier(4, timeout=5), threading.Lock()
+        seen, sessions = [], []
+
+        class Session:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        def new_session():
+            session = Session()
+            with lock:
+                sessions.append(session)
+            return session
+
+        def fetch(iin, month, year, session=None, timeout=None):
+            barrier.wait()          # пройти можно только вчетвером — запросы идут одновременно
+            with lock:
+                seen.append(session)
+            return {'ok': True, 'yandex': []}
+
+        checker, _, _ = self._checker(fetch)
+        with unittest.mock.patch.object(sign_check, '_new_session', new_session):
+            summary = self._check(checker, [(f'l{n}', f'iin-{n}', self.BASE) for n in range(4)], workers=4)
+            self._wait_lanes()
+        self.assertEqual((summary['checked'], summary['errors']), (4, 0))
+        self.assertEqual(len({id(s) for s in seen}), 4)          # у каждого потока свой Session
+        self.assertEqual(len(sessions), 4)
+        self.assertTrue(all(s.closed for s in sessions))          # и поток закрывает его сам
+
+    def test_sapar_down_stops_early_and_backs_off(self):
+        gate, calls = threading.Event(), []
+
+        def fetch(iin, month, year, session=None, timeout=None):
+            calls.append(iin)
+            if len(calls) > 2:
+                gate.wait(5)        # третий запрос «висит», пока проверка не кончится
+            return {'ok': False, 'error': 'timeout', 'systemic': True}
+
+        checker, written, resolved = self._checker(fetch)
+        leads = [(f'l{n}', f'iin-{n}', self.BASE) for n in range(6)]
+        try:
+            summary = self._check(checker, leads, workers=1, max_systemic=2)
+        finally:
+            gate.set()
+        self._wait_lanes()
+        self.assertEqual((summary['stopped'], summary['systemic'], summary['errors']), ('sapar_unavailable', 2, 2))
+        self.assertLessEqual(len(calls), 3)                       # остальных не спрашивали
+        # Сетевой сбой — как у прогона: ошибка с systemic, время проверки не сдвигается.
+        self.assertEqual([(w[0], w[3]) for w in written], [('error', True), ('error', True)])
+        self.assertEqual(resolved, [])
+        # Пока Sapar «лежит», следующие проверки его не спрашивают и не ждут.
+        asked = len(calls)
+        again = self._check(checker, leads[:1])
+        self.assertEqual((again['stopped'], len(calls)), ('backoff', asked))
+        # Пауза прошла — спрашиваем снова (у проверки перед звонком хватает одного сбоя).
+        checker._now_backoff_until = 0.0
+        self.assertEqual(self._check(checker, leads[:1], max_systemic=1)['stopped'], 'sapar_unavailable')
+        self.assertEqual(len(calls), asked + 1)
+        self.assertEqual(sign_check.NOW_BACKOFF_SEC, 30)
+
+    def test_budget_does_not_wait_for_a_hung_request(self):
+        gate = threading.Event()
+
+        def fetch(iin, month, year, session=None, timeout=None):
+            if iin == 'iin-slow':
+                gate.wait(5)
+            return {'ok': True, 'yandex': [_doc('НаПодписанииУВодителя')]}
+
+        checker, written, _ = self._checker(fetch)
+        leads = [('l-slow', 'iin-slow', self.BASE), ('l1', 'iin-1', self.BASE), ('l2', 'iin-2', self.BASE)]
+        started = time.monotonic()
+        try:
+            summary = self._check(checker, leads, workers=2, budget_sec=1)
+        finally:
+            gate.set()
+        self.assertLess(time.monotonic() - started, 4)            # не ждали «зависший» запрос (5 с)
+        self._wait_lanes()
+        self.assertEqual(summary['stopped'], 'budget')
+        self.assertEqual(sorted(w[1] for w in written), ['l1', 'l2'])      # что пришло к сроку — записано
+        self.assertEqual(checker._now_backoff_until, 0.0)                    # медленный — не значит «лежит»
+
+    def test_fetch_exception_is_a_systemic_error(self):
+        def fetch(iin, month, year, session=None, timeout=None):
+            raise RuntimeError('обрыв соединения')
+
+        checker, written, _ = self._checker(fetch)
+        summary = self._check(checker, [('l1', 'iin-1', self.BASE)])
+        self.assertEqual((summary['errors'], summary['systemic'], summary['stopped']), (1, 1, ''))
+        self.assertEqual(written, [('error', 'l1', 'обрыв соединения', True)])
+
+    def test_same_reading_as_the_run(self):
+        now_src = inspect.getsource(sign_check.SignChecker.check_now)
+        run_src = inspect.getsource(sign_check.SignChecker.run)
+        self.assertIn('result.get("yandex")', now_src)
+        self.assertNotIn('park', now_src)
+        for src in (now_src, run_src):
+            self.assertIn('_package_verdict(', src)
+        self.assertIn('self._write(pending, now)', now_src)
+        self.assertIn('self.resolve_successes(now, lead_ids=summary["signed"])', now_src)
+        # Строки со списков снимает вызывающий: пул выдачи, проверка в транзакции звонка.
+        self.assertNotIn('close_signed_rows', now_src)
 
 
 class SchemaAndWiringTests(unittest.TestCase):

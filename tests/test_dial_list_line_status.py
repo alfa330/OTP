@@ -6,6 +6,10 @@ click-to-call обзвона полчаса отвечал «Can't call to the e
 «не в сети» при снятии регистрации по событию «сеть изменилась» и вернул в сеть
 только своим обходом в 17:17. Подсказка «проверьте регистрацию» отправляла оператора
 чинить исправный телефон. Теперь текст берёт статус линии у самого Binotel.
+
+11.10.2026 разбор журналов линии 913 (роутер с SIP ALG) поправил объяснение: после
+сорванного плеча линия возвращается со следующей регистрацией телефона, за минуты, а не
+«обходом Binotel за 30–40 минут»; если так после каждого звонка — режет роутер.
 """
 
 import inspect
@@ -51,13 +55,18 @@ class LineStatusHintTests(unittest.TestCase):
         svc._binotel_employees = employees
         return svc
 
-    def test_offline_line_explains_binotel_monitoring(self):
+    def test_offline_line_explains_next_registration_and_sip_alg(self):
         svc = self._svc([_line("904", "offline", _ts(16, 47), _ts(16, 42))])
         hint = svc._line_status_hint(7, "904")
         self.assertIn("не в сети с 16:47", hint)
         self.assertIn("последний раз в сети 16:42", hint)
-        self.assertIn("30–40 минут", hint)
+        self.assertIn("со следующей регистрацией телефона", hint)
+        self.assertIn("до 5 минут", hint)
         self.assertIn("подождите и повторите", hint)
+        # Падает после каждого звонка — роутер режет SIP: это надо сказать оператору.
+        self.assertIn("после каждого звонка", hint)
+        self.assertIn("SIP ALG", hint)
+        self.assertNotIn("30–40", hint)
 
     def test_online_line_says_retry(self):
         svc = self._svc([_line("904", "online", _ts(17, 17), _ts(17, 17))])

@@ -21,6 +21,19 @@
 поставить нельзя. Если же водитель ответил и оператор сам положил трубку —
 это обычный разговор, итог обязателен.
 
+Отметка `ring_timeout_at` (владелец, 11.10.2026): телефон сам положил плечо, когда
+водитель за пять гудков не взял трубку (событие `ring_timeout`, затем `ended` с
+`ring_timeout`). Это не отбой оператора: попытка не отменяется, а считается
+обычным недозвоном («Не поднял трубку») — строке и лиду, как недозвон от Binotel, —
+и итог по ней не нужен. Ответил водитель в последний момент — это разговор, итог
+обязателен.
+
+Подписавшим не звоним (владелец, 11.10.2026): из пула уходят и подписавшие
+(signed_at), и «на проверке у Яндекса» (sign_status 'processing' — водитель уже
+подписал, ждём Яндекс). Перед «Ещё» и перед звонком сервер сам спрашивает Sapar о
+тех, чья проверка устарела (SIGN_PRECHECK_*, SIGN_CALL_*), — тоже вне транзакций.
+Sapar лежит или не настроен — выдаём и звоним, как раньше.
+
 Строка выдачи (assignment) считается обработанной после ПЕРВОЙ попытки с
 подтверждённым исходом — любым: дозвонились, занято, не ответил. Не
 дозвонились — лид вернётся в общий пул через retry_after_hours, пока попыток
@@ -75,6 +88,42 @@ POLL_MIN_AGE_SEC = 10
 POLL_MAX_PER_REQUEST = 10
 # Одновременно у оператора живёт одна попытка; «живая» — моложе этого порога.
 ACTIVE_ATTEMPT_WINDOW_MINUTES = 3
+# Плечо, которое телефон так и не подтвердил (ACK от АТС не дошёл — роутер с SIP ALG,
+# 11.10.2026), но Binotel соединил водителя: разговор был, итог по нему нужен. Долг
+# возникает только по свежим попыткам — старые, до появления итогов, тоже без
+# leg_answered_at, и разом записать их оператору в долг было бы неправдой.
+UNCONFIRMED_LEG_OUTCOME_HOURS = 12
+# Сброс плеча без ответа водителя (владелец, 11.10.2026: «на пятом гудке — сброс,
+# записать как „Не поднял трубку“»). Сколько гудков — в «Настройках SIP» отдела
+# (sip_department_config.ring_timeout_rings): NULL — по умолчанию, 0 — не сбрасывать.
+# Гудок в СНГ — секунда сигнала и четыре паузы, то есть 5 с на гудок. Те же числа —
+# у «Настроек SIP» (SIP_RING_*): правятся вместе.
+RING_TIMEOUT_RINGS_DEFAULT = 5
+RING_TIMEOUT_RINGS_MAX = 20
+RING_SECONDS_PER_RING = 5
+# Подписание — до выдачи (владелец, 11.10.2026: «подписавших не выдавать»). Перед «Ещё»
+# сервер спрашивает Sapar о тех, кто попадёт в порцию (с запасом), если их проверка
+# старше SIGN_PRECHECK_FRESH_MINUTES или кончилась ошибкой; подписавшие и «на проверке
+# у Яндекса» из пула уходят, порцию добирают следующие. Не больше SIGN_PRECHECK_ROUNDS
+# кругов за SIGN_PRECHECK_BUDGET_SEC — оператор ждёт ответа; Sapar не настроен или
+# лежит (SIGN_PRECHECK_MAX_SYSTEMIC сетевых сбоев) — порция выдаётся как раньше.
+SIGN_PRECHECK_ROUNDS = 3
+SIGN_PRECHECK_BUDGET_SEC = 8
+SIGN_PRECHECK_FRESH_MINUTES = 15
+SIGN_PRECHECK_WORKERS = 4
+SIGN_PRECHECK_TIMEOUT_SEC = 3
+SIGN_PRECHECK_MAX_SYSTEMIC = 2
+# Перед звонком — то же для одного водителя: пачка лежит на экране часами.
+SIGN_CALL_FRESH_MINUTES = 30
+SIGN_CALL_TIMEOUT_SEC = 3
+SIGNED_ROW_CLOSED = "Водитель уже подписал документы — звонить не нужно. Строка убрана из списка."
+# Почему проверка не дошла до конца (SignChecker.check_now → stopped) — для журнала сервера.
+SIGN_NOW_STOPPED = {
+    "not_configured": "Sapar не настроен",
+    "backoff": "Sapar недавно не ответил, не спрашиваем",
+    "sapar_unavailable": "Sapar не отвечает",
+    "budget": "не уложились в срок, остальных проверит прогон",
+}
 
 # disposition Binotel → итог строки. Список пополняется по живым звонкам:
 # в call-details 'ONLINE' — идёт разговор, пусто — ещё набирается.
@@ -116,7 +165,9 @@ COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 # operator_hangup — оператор сам нажал «Завершить» (телефон шлёт до BYE);
 # ended может нести by_operator/leg_sec — страховка, если operator_hangup не дошёл.
-PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup")
+# ring_timeout — телефон досчитал гудки до сброса и спрашивает, класть ли плечо;
+# ended с ring_timeout — положил: водитель не взял трубку.
+PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup", "ring_timeout")
 # Для SQL `UPPER(disposition) IN %s` (psycopg2 разворачивает tuple в список).
 ANSWERED_SQL = tuple(sorted(ANSWERED_DISPOSITIONS))
 
@@ -231,6 +282,68 @@ def map_disposition(disposition):
     if value in NO_ANSWER_DISPOSITIONS:
         return "no_answer"
     return "other"
+
+
+def ring_timeout_rings(value):
+    """Гудков до сброса из sip_department_config.ring_timeout_rings: NULL (не задано)
+    и мусор — по умолчанию, иначе 0..RING_TIMEOUT_RINGS_MAX (0 — не сбрасывать)."""
+    if value is None or isinstance(value, bool):
+        return RING_TIMEOUT_RINGS_DEFAULT
+    try:
+        rings = int(value)
+    except (TypeError, ValueError):
+        return RING_TIMEOUT_RINGS_DEFAULT
+    return max(0, min(rings, RING_TIMEOUT_RINGS_MAX))
+
+
+def sign_check_due(iin, checked_at, sign_error, now, fresh_minutes):
+    """Спросить ли Sapar о водителе прямо сейчас: ИИН есть, а проверки не было, она
+    старше fresh_minutes или кончилась ошибкой. Время проверки сдвигает и отказ Sapar
+    по ИИН, поэтому «проверен недавно» без пустой ошибки ничего не значит."""
+    if not str(iin or "").strip():
+        return False
+    if checked_at is None or str(sign_error or "").strip():
+        return True
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    return checked_at < now - timedelta(minutes=fresh_minutes)
+
+
+# «Перезвонить» раньше срока (владелец, 11.10.2026) — только своему водителю с итогом
+# «Перезвонить». Решение одно и для ручки recall, и для кнопки на вкладке итога
+# (operator_worked → can_recall): recall_verdict по колонкам _RECALL_COLUMNS.
+RECALL_OK = "ok"
+RECALL_ISSUED_MINE = "issued_mine"
+RECALL_REFUSALS = {
+    "signed": "Водитель уже подписал документы — звонить не нужно",
+    "excluded": "Руководитель исключил водителя из обзвона",
+    "issued_other": "Водитель уже в списке у другого оператора",
+    "not_own": "Перезвонить раньше срока можно только своему водителю с итогом «Перезвонить»",
+    "taken": "Этим водителем уже занимается другой оператор",
+}
+
+
+def recall_verdict(columns, operator_id):
+    """Можно ли оператору перезвонить водителю раньше срока. columns — значения
+    _RECALL_COLUMNS по порядку: подписал (или на проверке у Яндекса), исключён, открытая
+    строка (id и чья), чей последний итог (не отменённой попытки), «перезвонить» ли он,
+    звонил ли после него другой оператор.
+
+    RECALL_OK — можно; RECALL_ISSUED_MINE — водитель и так в списке этого оператора;
+    иначе ключ RECALL_REFUSALS. Порядок — как у ручки: подпись и исключение первыми."""
+    signed, excluded, _issued_id, issued_to, owner_id, owner_requeue, taken_after = columns
+    operator_id = int(operator_id)
+    if signed:
+        return "signed"
+    if excluded:
+        return "excluded"
+    if issued_to is not None:
+        return RECALL_ISSUED_MINE if int(issued_to) == operator_id else "issued_other"
+    if owner_id is None:
+        return "not_own"
+    if int(owner_id) != operator_id or taken_after:
+        return "taken"
+    return RECALL_OK if owner_requeue else "not_own"
 
 
 def resolve_enabled(personal, department):
@@ -381,6 +494,9 @@ LEAD_STAGES = {
     "excluded": "Исключён",
     # Подписал документы (Sapar) — обзвон для него окончен, в пул не вернётся.
     "signed": "Подписал документы",
+    # Документы «на проверке у Яндекса»: водитель уже подписал (владелец, 11.10.2026),
+    # в пул не попадает; Яндекс подтвердит — станет «Подписал документы».
+    "sign_wait": "На проверке у Яндекса",
 }
 # Фильтр журнала «Документы» — по состоянию подписания (signing.py). «Не подписал»
 # собирает всё, где подписи нет и она ещё возможна или уже не будет по вине
@@ -425,7 +541,7 @@ class DialListService:
                (SELECT COUNT(*) FROM dial_list_leads l WHERE l.department_id = d.id) AS leads_total,
                (SELECT COUNT(*) FROM dial_list_leads l
                  WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')
-                   AND l.signed_at IS NULL) AS leads_open
+                   AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open
         FROM departments d
         LEFT JOIN sip_department_config dc ON dc.department_id = d.id
         LEFT JOIN dial_list_department_settings s ON s.department_id = d.id
@@ -741,13 +857,15 @@ class DialListService:
         """Что Binotel сам думает о линии оператора — для текста ошибки при коде 150.
 
         Код 150 «Can't call to the ext» приходит и у ЗАРЕГИСТРИРОВАННОГО телефона:
-        Binotel помечает линию «не в сети» при снятии регистрации (смена сети,
-        перерегистрация) и возвращает в сеть только своим обходом — до 30–40 минут
-        (25.09.2026, линия 904: не в сети 16:43–17:17 при живом REGISTER и ответах на
-        OPTIONS). Оператору нужно знать, ждать или чинить: «проверьте регистрацию» в
-        первом случае отправляет его чинить исправное. Статус читаем из
-        settings/list-of-employees → endpointData.status; не получили — прежняя
-        подсказка про регистрацию. Подсказка, не условие: любая ошибка здесь гасится.
+        Binotel помечает линию «не в сети», когда перестаёт до неё доходить (25.09.2026,
+        линия 904: не в сети 16:43–17:17 при живом REGISTER и ответах на OPTIONS).
+        Разбор журналов 11.10.2026 (линия 913, роутер с SIP ALG): после сорванного плеча
+        Binotel не достаёт до телефона до его следующей регистрации — это минуты (до ~5),
+        а не «свой обход Binotel за 30–40 минут», как считалось раньше; срывается каждое
+        плечо — режет роутер оператора. Оператору нужно знать, ждать или чинить:
+        «проверьте регистрацию» в первом случае отправляет его чинить исправное. Статус
+        читаем из settings/list-of-employees → endpointData.status; не получили —
+        прежняя подсказка про регистрацию. Подсказка, не условие: любая ошибка здесь гасится.
         """
         def hhmm(unix_ts):
             try:
@@ -768,10 +886,10 @@ class DialListService:
                 if state in ("online", "inuse"):
                     return "Binotel при этом видит линию в сети — повторите через минуту."
                 return (f"Binotel считает линию не в сети с {hhmm(sip.get('updatedAt'))} "
-                        f"(последний раз в сети {hhmm(ep.get('wasOnlineAt'))}). Так бывает после "
-                        "смены сети или перерегистрации: Binotel обновляет статус линии сам, обычно "
-                        "за 30–40 минут. Телефон зарегистрирован — подождите и повторите; нет — "
-                        "проверьте регистрацию.")
+                        f"(последний раз в сети {hhmm(ep.get('wasOnlineAt'))}). Обычно линия "
+                        "возвращается в сеть со следующей регистрацией телефона — это до 5 минут, "
+                        "подождите и повторите. Если так после каждого звонка, скорее всего, ваш роутер "
+                        "режет SIP (SIP ALG): отключите SIP ALG в роутере или подключитесь к другой сети.")
         except Exception as exc:
             log.warning("dial_list: статус линии %s у Binotel не получен: %s", number, exc)
         return "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите"
@@ -1265,7 +1383,8 @@ class DialListService:
             cur.execute("""
                 SELECT period, COUNT(*),
                        COUNT(*) FILTER (WHERE status = 'done' AND answered_at IS NOT NULL),
-                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress') AND signed_at IS NULL),
+                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress') AND signed_at IS NULL
+                                          AND sign_status <> 'processing'),
                        COUNT(*) FILTER (WHERE signed_at IS NOT NULL)
                 FROM dial_list_leads WHERE department_id = %s
                 GROUP BY period ORDER BY period DESC
@@ -1483,19 +1602,31 @@ class DialListService:
         Если оператор сам положил трубку (operator_hangup_at), долг возникает только
         когда Binotel подтвердил, что водитель ответил: до финального исхода — не
         известно, был ли разговор; не ответил — попытка отменена (cancelled) и итога
-        по ней не будет."""
+        по ней не будет. Сброс на гудках (ring_timeout_at) — то же правило, только без
+        отмены: водитель не ответил — это недозвон, итог по нему не нужен.
+
+        Плечо, которое телефон так и не подтвердил (leg_answered_at пуст: ACK от АТС
+        не дошёл), — долг только если Binotel подтвердил ответ водителя, телефон сообщил
+        конец плеча и попытка свежая (UNCONFIRMED_LEG_OUTCOME_HOURS)."""
         cur.execute("""
             SELECT t.id, l.full_name, COALESCE(t.phone_ended_at, t.finished_at, t.updated_at), t.requested_at
             FROM dial_list_attempts t
             JOIN dial_list_assignments a ON a.id = t.assignment_id
             JOIN dial_list_leads l ON l.id = a.lead_id
-            WHERE t.operator_id = %s AND t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL
-              AND NOT t.cancelled
-              AND ((t.operator_hangup_at IS NULL AND t.state IN ('ended', 'finished'))
-                   OR (t.operator_hangup_at IS NOT NULL AND t.state = 'finished'
-                       AND UPPER(t.disposition) IN %s))
+            WHERE t.operator_id = %s AND NOT t.cancelled
+              AND ((t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL
+                    AND ((t.operator_hangup_at IS NULL AND t.ring_timeout_at IS NULL
+                          AND t.state IN ('ended', 'finished'))
+                         OR (t.operator_hangup_at IS NOT NULL AND t.state = 'finished'
+                             AND UPPER(t.disposition) IN %s)
+                         OR (t.ring_timeout_at IS NOT NULL AND t.state = 'finished'
+                             AND UPPER(t.disposition) IN %s)))
+                   OR (t.outcome_id IS NULL AND t.leg_answered_at IS NULL
+                       AND t.phone_ended_at IS NOT NULL AND t.state = 'finished'
+                       AND UPPER(t.disposition) IN %s
+                       AND t.requested_at >= CURRENT_TIMESTAMP - make_interval(hours => %s)))
             ORDER BY t.requested_at DESC LIMIT 1
-        """, (int(user_id), ANSWERED_SQL))
+        """, (int(user_id), ANSWERED_SQL, ANSWERED_SQL, ANSWERED_SQL, UNCONFIRMED_LEG_OUTCOME_HOURS))
         r = cur.fetchone()
         if not r:
             return None
@@ -1525,7 +1656,8 @@ class DialListService:
             raise DialListError("Выберите итог звонка")
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT t.state, a.lead_id, t.outcome_id, t.cancelled, t.operator_hangup_at, t.disposition
+                SELECT t.state, a.lead_id, t.outcome_id, t.cancelled, t.operator_hangup_at, t.disposition,
+                       t.ring_timeout_at
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 WHERE t.id = %s AND t.operator_id = %s FOR UPDATE OF t
@@ -1539,7 +1671,15 @@ class DialListService:
             # иначе «повесил трубку на гудках и поставил итог» прошло бы.
             if row[3]:
                 raise DialListError("Звонок завершён до ответа водителя — итог не ставится", 409)
-            if row[4] is not None and not (row[0] == "finished" and map_disposition(row[5]) == "answered"):
+            answered = row[0] == "finished" and map_disposition(row[5]) == "answered"
+            # Телефон сам положил плечо на гудках: водитель не ответил — это недозвон,
+            # итога у него нет; ответил в последний момент — обычный разговор.
+            if row[6] is not None and not answered:
+                if row[0] == "finished":
+                    raise DialListError("Водитель не взял трубку — итог не нужен", 409)
+                raise DialListError("Звонок сброшен на гудках: итог нужен, только если водитель успел "
+                                    "ответить. Дождитесь исхода от АТС", 409)
+            if row[4] is not None and not answered:
                 raise DialListError("Вы завершили звонок сами: итог можно указать только по "
                                     "состоявшемуся разговору. Дождитесь исхода от АТС", 409)
             cur.execute("""
@@ -1625,6 +1765,7 @@ class DialListService:
                    l.success_resolved_at,
                    CASE
                        WHEN l.signed_at IS NOT NULL THEN 'signed'
+                       WHEN l.sign_status = 'processing' THEN 'sign_wait'
                        WHEN l.status = 'excluded' THEN 'excluded'
                        WHEN oa.operator_id IS NOT NULL THEN 'issued'
                        WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
@@ -1976,7 +2117,7 @@ class DialListService:
                        a.id, a.result, a.state, a.created_at,
                        o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at,
                        t.cancelled, t.operator_hangup_at, t.leg_sec,
-                       os.id, os.name
+                       os.id, os.name, t.ring_timeout_at
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
@@ -1998,6 +2139,9 @@ class DialListService:
                     # Оператор сам завершил звонок (когда — operator_hangup_at); cancelled —
                     # водитель при этом не ответил, попытка не засчитана.
                     "cancelled": bool(r[24]), "operator_hangup_at": _iso(r[25]), "leg_sec": int(r[26] or 0),
+                    # Телефон сам положил плечо на гудках — водитель не взял трубку. У ответившего
+                    # в последний момент (разговор) и у отменённой попытки флага нет.
+                    "ring_timeout": r[29] is not None and result not in ("answered", "cancelled"),
                     "id": _sid(r[0]), "requested_at": _iso(r[1]),
                     "operator": {"id": r[2], "name": r[3]}, "internal_number": r[4] or "",
                     "state": state, "disposition": disposition, "result": result,
@@ -2084,13 +2228,15 @@ class DialListService:
         ближайшей порцией."""
         lead_id = str(lead_id)
         with self.db._get_cursor() as cur:
-            cur.execute("SELECT department_id, status, signed_at FROM dial_list_leads WHERE id = %s FOR UPDATE",
-                        (lead_id,))
+            cur.execute("""
+                SELECT department_id, status, signed_at, sign_status FROM dial_list_leads WHERE id = %s FOR UPDATE
+            """, (lead_id,))
             row = cur.fetchone()
             if not row:
                 raise DialListError("Водитель не найден в журнале", 404)
-            if row[2] is not None:
-                # Правило владельца 29.09.2026: подписавший в список не возвращается.
+            if row[2] is not None or row[3] == signing.PROCESSING:
+                # Правило владельца 29.09.2026: подписавший в список не возвращается. «На
+                # проверке у Яндекса» — тоже подписал (11.10.2026): пул его не выдаст.
                 raise DialListError("Водитель уже подписал документы — звонить ему незачем", 409)
             cur.execute("SELECT 1 FROM dial_list_assignments WHERE lead_id = %s AND state = 'issued'", (lead_id,))
             if cur.fetchone():
@@ -2126,14 +2272,37 @@ class DialListService:
         latest = cur.fetchone()
         if not latest or str(latest[0]) != str(last[1]):
             return False
+        self._reopen_row(cur, last[0], last[1])
+        log.info("dial_list: водитель %s возвращён в список — строка снова у оператора %s", lead_id, last[2])
+        return True
+
+    def _reopen_row(self, cur, assignment_id, portion_id):
+        """Обработанная строка → снова issued, её выдача открыта обратно. Так же строку
+        возвращает «Перезвонить» оператора (recall_lead). В транзакции вызывающего."""
         cur.execute("""
             UPDATE dial_list_assignments
             SET state = 'issued', result = '', done_at = NULL
             WHERE id = %s
-        """, (str(last[0]),))
-        cur.execute("UPDATE dial_list_portions SET closed_at = NULL WHERE id = %s", (str(last[1]),))
-        log.info("dial_list: водитель %s возвращён в список — строка снова у оператора %s", lead_id, last[2])
-        return True
+        """, (str(assignment_id),))
+        cur.execute("UPDATE dial_list_portions SET closed_at = NULL WHERE id = %s", (str(portion_id),))
+
+    def _close_row(self, cur, assignment_id):
+        """Строку, по которой звонка не будет, — закрыть без результата («другое»), а
+        выдачу — если обрабатывать в ней больше нечего. Так снимает строку «Исключить» и
+        звонок подписавшему (start_call). В транзакции вызывающего."""
+        cur.execute("""
+            UPDATE dial_list_assignments
+            SET state = 'done', result = 'other', done_at = CURRENT_TIMESTAMP
+            WHERE id = %s RETURNING portion_id
+        """, (str(assignment_id),))
+        portion = cur.fetchone()
+        if portion:
+            cur.execute("""
+                UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND closed_at IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM dial_list_assignments
+                                  WHERE portion_id = %s AND state = 'issued')
+            """, (str(portion[0]), str(portion[0])))
 
     def exclude_lead(self, lead_id, actor_id, note=""):
         """Исключить водителя из обзвона. Если строка у оператора — снимаем её с его
@@ -2157,19 +2326,7 @@ class DialListService:
                 """, (str(open_assignment[0]),))
                 if cur.fetchone():
                     raise DialListError("Оператор сейчас звонит этому водителю — дождитесь окончания", 409)
-                cur.execute("""
-                    UPDATE dial_list_assignments
-                    SET state = 'done', result = 'other', done_at = CURRENT_TIMESTAMP
-                    WHERE id = %s RETURNING portion_id
-                """, (str(open_assignment[0]),))
-                portion = cur.fetchone()
-                if portion:
-                    cur.execute("""
-                        UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP
-                        WHERE id = %s AND closed_at IS NULL
-                          AND NOT EXISTS (SELECT 1 FROM dial_list_assignments
-                                          WHERE portion_id = %s AND state = 'issued')
-                    """, (str(portion[0]), str(portion[0])))
+                self._close_row(cur, open_assignment[0])
             cur.execute("""
                 UPDATE dial_list_leads
                 SET status = 'excluded', updated_at = CURRENT_TIMESTAMP,
@@ -2226,6 +2383,9 @@ class DialListService:
     # выдачи (с блокировкой) и для подсчёта (без неё), чтобы цифра «доступно»
     # совпадала с тем, что реально выдаётся. Подписавший документы (signed_at) в
     # пул не возвращается никогда: обрабатывать его незачем (владелец, 29.09.2026).
+    # «На проверке у Яндекса» (sign_status 'processing') — тоже: водитель уже
+    # подписал, ждём только Яндекс (владелец, 11.10.2026). Те же условия — у этапа
+    # журнала (CASE в _JOURNAL_BASE_SQL) и у leads_open отдела.
     _POOL_SQL = """
         SELECT l.id
         FROM dial_list_leads l
@@ -2233,6 +2393,7 @@ class DialListService:
           AND l.period = %s
           AND l.status IN ('new', 'in_progress')
           AND l.signed_at IS NULL
+          AND l.sign_status <> 'processing'
           AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a
                           WHERE a.lead_id = l.id AND a.state = 'issued')
           AND (l.last_attempt_at IS NULL
@@ -2241,6 +2402,11 @@ class DialListService:
         ORDER BY l.attempts_total ASC, l.last_attempt_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %s {lock}
     """
+    # Кандидаты проверки подписания перед выдачей (_precheck_signatures): тот же пул —
+    # те же условия и порядок, — только с тем, что нужно проверке, и без блокировки.
+    # ИИН нужен лишь запросу в Sapar и из сервера не уходит.
+    _POOL_CANDIDATES_SQL = _POOL_SQL.replace(
+        "SELECT l.id", "SELECT l.id, l.iin, l.period, l.sign_checked_at, l.sign_error", 1).format(lock="")
 
     # ------------------------------------------------------------ оператор
     def operator_context(self, user_id):
@@ -2268,6 +2434,14 @@ class DialListService:
             "internal_number": internal_number,
             "settings": settings,
         }
+
+    def _lock_operator(self, cur, user_id):
+        """Выдача строк оператору — по одной за раз: второй «Ещё» (повтор запроса,
+        двойной клик — с проверкой подписания «Ещё» идёт секунды) или «Перезвонить»
+        ждёт первый и видит уже его выдачу. Без замка оба проходили проверку открытой
+        выдачи, и у оператора появлялись две, а строки старшей висели невидимыми.
+        Замок живёт до конца транзакции этого курсора."""
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"dial_list_operator:{int(user_id)}",))
 
     def _open_portion(self, cur, user_id):
         cur.execute("""
@@ -2351,6 +2525,28 @@ class DialListService:
         return {"attempt_id": str(r[0]), "assignment_id": str(r[1]), "state": r[2],
                 "general_call_id": r[3], "requested_at": _iso(r[4]), "full_name": r[5] or ""}
 
+    def _ring_timeout_sec(self, department_id):
+        """Сколько секунд плечо обзвона ждёт ответа водителя, прежде чем телефон его
+        положит; 0 — не класть. Отсчёт у телефона — от принятия плеча, когда Binotel
+        начинает набирать водителя, поэтому без поправки обычного исходящего на первый
+        гудок: 5 гудков — 25 с.
+
+        Отдельной короткой транзакцией: колонки ring_timeout_rings может ещё не быть (её
+        заводит схема «Настроек SIP»), а упавший запрос оборвал бы транзакцию состояния.
+        Не прочитали — действует умолчание: состояние телефона из-за этого не ломается."""
+        rings = RING_TIMEOUT_RINGS_DEFAULT
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute("SELECT ring_timeout_rings FROM sip_department_config WHERE department_id = %s",
+                            (int(department_id),))
+                row = cur.fetchone()
+            if row:
+                rings = ring_timeout_rings(row[0])
+        except Exception as exc:
+            log.debug("dial_list: гудки до сброса у отдела %s не прочитаны (%s) — по умолчанию %d",
+                      department_id, exc, RING_TIMEOUT_RINGS_DEFAULT)
+        return rings * RING_SECONDS_PER_RING
+
     def get_state(self, user_id):
         ctx = self.operator_context(user_id)
         self.reconcile(ctx)
@@ -2371,11 +2567,15 @@ class DialListService:
             sv = cur.fetchone()
             script_version = int(sv[0]) if sv else 0
         pending = sum(1 for i in items if i["state"] == "issued")
+        ring_timeout_sec = self._ring_timeout_sec(ctx["department_id"])
         return {
             "enabled": True,
             "operator": {"id": ctx["user_id"], "name": ctx["name"], "internal_number": ctx["internal_number"]},
             "portion_size": settings["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
+            # Сброс на гудках: через столько секунд после принятия плеча, если водитель не
+            # ответил, телефон кладёт плечо сам (событие ring_timeout); 0 — не кладёт.
+            "ring_timeout_sec": ring_timeout_sec,
             "period": settings["period"],
             "period_label": settings["period_label"],
             "portion": None if not portion else {
@@ -2579,11 +2779,56 @@ class DialListService:
         GROUP BY t.outcome_id, s.id, s.name
         ORDER BY cnt DESC, s.name
     """
+    # Конверсия оператора (владелец, 11.10.2026: показать в «Моём прогрессе») — ровно то
+    # же, что у руководителя в «Аналитике» по операторам (analytics._OPERATORS_SQL): база
+    # обзваниваемого месяца отдела; поговорившие — водители, с которыми ЭТОТ оператор
+    # говорил (попытка завершена, водитель ответил, не короче SUCCESS_MIN_BILLSEC);
+    # успешки — подписавшие, засчитанные ему. Только счётчики: номер лида читает лишь
+    # условие «Реестра тестовых номеров», как и в аналитике.
+    _PROGRESS_CONVERSION_SQL = """
+        SELECT
+            (SELECT COUNT(DISTINCT a.lead_id)
+             FROM dial_list_attempts t
+             JOIN dial_list_assignments a ON a.id = t.assignment_id
+             JOIN dial_list_leads l ON l.id = a.lead_id
+             WHERE t.operator_id = %(operator_id)s
+               AND l.department_id = %(department_id)s AND l.period = %(period)s
+               AND t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+               AND t.billsec >= %(min_sec)s
+               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """) AS leads_talked,
+            (SELECT COUNT(*)
+             FROM dial_list_leads l
+             WHERE l.success_operator_id = %(operator_id)s AND l.success_attempt_id IS NOT NULL
+               AND l.department_id = %(department_id)s AND l.period = %(period)s
+               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """) AS successes
+    """
+
+    def _operator_conversion(self, ctx):
+        """Конверсия оператора за базу обзваниваемого месяца (_PROGRESS_CONVERSION_SQL)."""
+        period = (ctx.get("settings") or {}).get("_period") or current_period()
+        params = {"operator_id": ctx["user_id"], "department_id": ctx["department_id"], "period": period,
+                  "answered": ANSWERED_SQL, "min_sec": signing.SUCCESS_MIN_BILLSEC}
+        with self.db._get_cursor() as cur:
+            cur.execute(self._PROGRESS_CONVERSION_SQL, params)
+            r = cur.fetchone() or (0, 0)
+        talked, successes = int(r[0] or 0), int(r[1] or 0)
+        return {
+            "successes": successes,
+            "leads_talked": talked,
+            # Как _pct аналитики: доля с одним знаком; не с кем было говорить — пусто.
+            "percent": round(100.0 * successes / talked, 1) if talked else None,
+            "period": period.isoformat(),
+            "period_label": period_label(period),
+        }
 
     def operator_progress(self, user_id):
         """«Мой прогресс» на телефоне: сколько строк выдано и обработано, попыток,
         дозвонов, минут разговора и какие итоги ставил оператор — за текущий месяц
-        (по Алматы) и отдельно за сегодня. Никаких ФИО и номеров — только счётчики."""
+        (по Алматы) и отдельно за сегодня. Никаких ФИО и номеров — только счётчики.
+
+        conversion — конверсия за базу обзваниваемого месяца, как в «Аналитике»
+        руководителя (_operator_conversion). Не посчиталась — ключа нет, остальное
+        приходит как всегда."""
         ctx = self.operator_context(user_id)
         month = current_period()
         today = datetime.now(PERIOD_TZ).date()
@@ -2602,7 +2847,7 @@ class DialListService:
                 if parent is not None:
                     parent["subtypes"].append({"id": _sid(s[1]), "name": s[2], "count": int(s[3] or 0),
                                                "count_today": int(s[4] or 0)})
-        return {
+        progress = {
             "operator": {"id": ctx["user_id"], "name": ctx["name"]},
             "period": month.isoformat(),
             "period_label": period_label(month),
@@ -2617,12 +2862,57 @@ class DialListService:
             },
             "outcomes": outcomes,
         }
+        # Своей транзакцией: сбой конверсии не трогает счётчики выше.
+        try:
+            progress["conversion"] = self._operator_conversion(ctx)
+        except Exception as exc:
+            log.warning("dial_list: конверсия оператора %s не посчитана: %s", ctx["user_id"], exc)
+        return progress
+
+    # «Перезвонить» раньше срока (владелец, 11.10.2026): всё, что решает recall_verdict, —
+    # одним куском SQL и для ручки recall (_RECALL_LEAD_SQL), и для кнопки на вкладке итога
+    # (_WORKED_SQL): кнопка не врёт. Чей водитель — по последней попытке с итогом (не
+    # отменённой): её оператор, «перезвонить» ли итог и звонил ли после неё ДРУГОЙ
+    # оператор; свои недозвоны и сбои после итога не в счёт. Лид — под алиасом l,
+    # оператор — параметр %(operator_id)s.
+    _RECALL_JOINS_SQL = """
+        LEFT JOIN LATERAL (
+            SELECT rt.operator_id AS owner_id, COALESCE(ro.requeue, FALSE) AS owner_requeue,
+                   EXISTS (SELECT 1 FROM dial_list_attempts rt2
+                           JOIN dial_list_assignments ra2 ON ra2.id = rt2.assignment_id
+                           WHERE ra2.lead_id = l.id AND rt2.operator_id <> %(operator_id)s
+                             AND rt2.requested_at > rt.requested_at) AS taken_after
+            FROM dial_list_attempts rt
+            JOIN dial_list_assignments ra ON ra.id = rt.assignment_id
+            LEFT JOIN dial_list_outcomes ro ON ro.id = rt.outcome_id
+            WHERE ra.lead_id = l.id AND rt.outcome_id IS NOT NULL AND NOT rt.cancelled
+            ORDER BY rt.requested_at DESC LIMIT 1
+        ) rc ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT rx.id AS issued_id, rx.operator_id AS issued_to
+            FROM dial_list_assignments rx
+            WHERE rx.lead_id = l.id AND rx.state = 'issued'
+            ORDER BY rx.created_at DESC LIMIT 1
+        ) ri ON TRUE
+    """
+    # Колонки к нему — в том порядке, в каком их разбирает recall_verdict.
+    _RECALL_COLUMNS = """(l.signed_at IS NOT NULL OR l.sign_status = 'processing'), l.status = 'excluded',
+               ri.issued_id, ri.issued_to, rc.owner_id, rc.owner_requeue, rc.taken_after"""
+    _RECALL_LEAD_SQL = """
+        SELECT l.id, """ + _RECALL_COLUMNS + """
+        FROM dial_list_leads l
+        """ + _RECALL_JOINS_SQL + """
+        WHERE l.id = %(lead_id)s AND l.department_id = %(department_id)s
+        FOR UPDATE OF l
+    """
 
     # Отработанные за месяц: по каждому водителю — ПОСЛЕДНЯЯ строка этого оператора
     # (пере-выданный водитель уходит туда, куда его отнесла последняя обработка) и её
     # последняя попытка. Месяц — строки, выданные или обработанные с 1-го числа, плюс
     # открытые: пачка живёт до «Ещё», и выданная 30-го, а обработанная 1-го строка иначе
     # ушла бы из очереди телефона, не появившись ни на одной вкладке.
+    # Колонки читаются по номерам (operator_worked) — новые только в конец: r[17] —
+    # «перезвонить» ли итог строки, r[18:25] — _RECALL_COLUMNS (кнопка «Перезвонить»).
     _WORKED_SQL = """
         WITH latest AS (
             SELECT DISTINCT ON (a.lead_id)
@@ -2636,7 +2926,9 @@ class DialListService:
         )
         SELECT s.id, s.lead_id, l.full_name, s.state, s.result, s.done_at, s.created_at,
                t.outcome_id, t.outcome_at, t.operator_comment, t.state,
-               o.name, o.color, o.position, l.status, st.name, (l.signed_at IS NOT NULL)
+               o.name, o.color, o.position, l.status, st.name,
+               (l.signed_at IS NOT NULL OR l.sign_status = 'processing'),
+               COALESCE(o.requeue, FALSE), """ + _RECALL_COLUMNS + """
         FROM latest s
         JOIN dial_list_leads l ON l.id = s.lead_id
         LEFT JOIN LATERAL (
@@ -2646,7 +2938,7 @@ class DialListService:
         ) t ON TRUE
         LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
         LEFT JOIN dial_list_outcome_subtypes st ON st.id = t.outcome_subtype_id
-    """
+    """ + _RECALL_JOINS_SQL
 
     def operator_worked(self, user_id):
         """Вкладки итогов на телефоне: кого оператор отработал за месяц и с каким итогом.
@@ -2654,6 +2946,9 @@ class DialListService:
         Вкладка на каждый включённый итог отдела (в порядке справочника, даже пустая —
         набор вкладок не прыгает), выключенный — только если по нему кто-то есть, и
         последней «Не дозвонились». Только ФИО, время и свой комментарий — номера нет.
+
+        can_recall (11.10.2026) — можно ли нажать «Перезвонить» раньше срока: итог
+        строки — «перезвонить», а водитель свой и свободен (recall_verdict, как у ручки).
         """
         ctx = self.operator_context(user_id)
         month = current_period()
@@ -2672,7 +2967,7 @@ class DialListService:
                 continue
             if tab == WORKED_NO_ANSWER and r[4] == "other" and (r[14] == "excluded" or r[16]):
                 # Строку закрыл руководитель («Исключить») или сервер, увидев подпись
-                # документов (sign_check), а не АТС: это не недозвон.
+                # документов (sign_check, звонок подписавшему), а не АТС: это не недозвон.
                 continue
             if tab != WORKED_NO_ANSWER and tab not in tabs:
                 # Итог выключили уже после звонка — вкладка живёт, пока по ней кто-то есть.
@@ -2688,6 +2983,7 @@ class DialListService:
                 # Тип итога (29.09.2026): вкладка по-прежнему одна на итог, тип — в строке.
                 "subtype_name": (r[15] or "") if tab != WORKED_NO_ANSWER else "",
                 "at": _iso(at), "at_label": at_label(at, today), "_sort": at,
+                "can_recall": bool(r[17]) and recall_verdict(r[18:25], ctx["user_id"]) == RECALL_OK,
             })
         no_answer = {"key": WORKED_NO_ANSWER, "name": WORKED_NO_ANSWER_NAME, "color": WORKED_NO_ANSWER_COLOR,
                      "count": 0}
@@ -2711,23 +3007,102 @@ class DialListService:
             "items": shown,
         }
 
+    def _refuse_next_portion(self, cur, ctx):
+        """Почему «Ещё» нельзя: в открытой выдаче остались строки или итог прошлого
+        разговора не указан — 409. Выдачи не меняет; возвращает открытую выдачу (уже без
+        необработанных строк) или None."""
+        portion = self._open_portion(cur, ctx["user_id"])
+        if portion:
+            cur.execute("""
+                SELECT COUNT(*) FROM dial_list_assignments WHERE portion_id = %s AND state = 'issued'
+            """, (portion["id"],))
+            pending = int(cur.fetchone()[0])
+            if pending:
+                raise DialListError(
+                    f"Сначала обработайте текущий список: осталось {pending}", 409)
+        self._require_outcome_done(cur, ctx)
+        return portion
+
+    def _precheck_signatures(self, ctx):
+        """Перед «Ещё» — свежая проверка подписания тех, кто попадёт в порцию, и запаса
+        им на замену (SIGN_PRECHECK_*). Вне транзакций: Sapar отвечает по сети.
+
+        Круг: кандидаты пула без блокировки → устаревшие (sign_check_due) параллельно в
+        Sapar (SignChecker.check_now: итог в базу, успешки по новым подписавшим) →
+        подписавшие и «на проверке у Яндекса» выпали из пула, их место заняли следующие —
+        их проверит следующий круг. Хватит, когда первые portion_size кандидатов свежие.
+        Возвращает сводку — она же одна строка журнала сервера."""
+        settings = ctx["settings"]
+        size = int(settings["portion_size"])
+        params = (ctx["department_id"], settings["_period"], settings["retry_after_hours"],
+                  settings["max_attempts"], size + max(5, size // 2))
+        checker = self.sign_checker
+        totals = {"rounds": 0, "checked": 0, "signed": 0, "processing": 0, "errors": 0, "systemic": 0,
+                  "stopped": "" if checker.configured() else "not_configured"}
+        started = time.monotonic()
+        # Кого уже спрашивали в этот раз: отказ Sapar по ИИН или сбой — не повод спрашивать снова.
+        asked = set()
+        while not totals["stopped"] and totals["rounds"] < SIGN_PRECHECK_ROUNDS:
+            left = SIGN_PRECHECK_BUDGET_SEC - (time.monotonic() - started)
+            if left <= 0:
+                totals["stopped"] = "budget"
+                break
+            now = _utcnow()
+            with self.db._get_cursor() as cur:
+                cur.execute(self._POOL_CANDIDATES_SQL, params)
+                rows = cur.fetchall()
+            due = [r for r in rows if str(r[0]) not in asked
+                   and sign_check_due(r[1], r[3], r[4], now, SIGN_PRECHECK_FRESH_MINUTES)]
+            head = {str(r[0]) for r in rows[:size]}
+            if not any(str(r[0]) in head for r in due):
+                break
+            asked.update(str(r[0]) for r in due)
+            totals["rounds"] += 1
+            result = checker.check_now([(r[0], r[1], r[2]) for r in due], now=now,
+                                       timeout=SIGN_PRECHECK_TIMEOUT_SEC, workers=SIGN_PRECHECK_WORKERS,
+                                       budget_sec=left,
+                                       max_systemic=SIGN_PRECHECK_MAX_SYSTEMIC - totals["systemic"])
+            for key in ("checked", "errors", "systemic"):
+                totals[key] += result[key]
+            totals["signed"] += len(result["signed"])
+            totals["processing"] += len(result["processing"])
+            totals["stopped"] = result["stopped"]
+            if not result["signed"] and not result["processing"]:
+                # Из пула никто не выпал — голова та же, и спрашивать в ней больше некого.
+                break
+        totals["elapsed_sec"] = round(time.monotonic() - started, 1)
+        log.info("dial_list: подписание перед выдачей оператору %s: проверено %d, подписали %d, на проверке "
+                 "у Яндекса %d, ошибок %d, %.1f с%s", ctx["user_id"], totals["checked"], totals["signed"],
+                 totals["processing"], totals["errors"], totals["elapsed_sec"],
+                 f"; {SIGN_NOW_STOPPED.get(totals['stopped'], totals['stopped'])} — выдаём как есть"
+                 if totals["stopped"] else "")
+        return totals
+
     def issue_next_portion(self, user_id):
+        """«Ещё»: следующая порция из пула.
+
+        Отказы — сначала, одним чтением: «Ещё», которому откажут, не ждёт Sapar. Затем,
+        вне транзакций, проверка подписания тех, кто попадёт в порцию
+        (_precheck_signatures): подписавшие и «на проверке у Яндекса» уходят из пула, и
+        порцию добирают следующие. Затем выдача — под замком оператора (_lock_operator)
+        и с повторной проверкой отказов: за секунды проверки мог прийти второй «Ещё»."""
         ctx = self.operator_context(user_id)
         settings = ctx["settings"]
         with self.db._get_cursor() as cur:
-            portion = self._open_portion(cur, user_id)
+            self._refuse_next_portion(cur, ctx)
+        try:
+            self._precheck_signatures(ctx)
+        except Exception:
+            # Проверка — страховка, а не условие выдачи: её сбой не оставит оператора без списка.
+            log.exception("dial_list: проверка подписания перед выдачей оператору %s упала — выдаём без неё",
+                          ctx["user_id"])
+        with self.db._get_cursor() as cur:
+            self._lock_operator(cur, ctx["user_id"])
+            portion = self._refuse_next_portion(cur, ctx)
             if portion:
-                cur.execute("""
-                    SELECT COUNT(*) FROM dial_list_assignments WHERE portion_id = %s AND state = 'issued'
-                """, (portion["id"],))
-                pending = int(cur.fetchone()[0])
-                if pending:
-                    raise DialListError(
-                        f"Сначала обработайте текущий список: осталось {pending}", 409)
                 # Все строки закрыты, а выдача почему-то открыта — закрываем здесь.
                 cur.execute("UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP WHERE id = %s",
                             (portion["id"],))
-            self._require_outcome_done(cur, ctx)
             cur.execute(self._POOL_SQL.format(lock="FOR UPDATE SKIP LOCKED"), (
                 ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"],
                 settings["portion_size"]))
@@ -2747,14 +3122,137 @@ class DialListService:
         log.info("dial_list: оператору %s выдано %d строк (порция %s)", ctx["user_id"], len(lead_ids), portion_id)
         return self.get_state(user_id)
 
+    def recall_lead(self, user_id, lead_id):
+        """«Перезвонить» раньше срока (владелец, 11.10.2026): свой водитель с итогом
+        «Перезвонить» снова в списке оператора, телефон тут же ему звонит.
+
+        Кому можно — recall_verdict; то же решение даёт кнопке на вкладке итога
+        (can_recall). Водитель и так в списке этого оператора — отдаём его строку
+        (прошлый «Перезвонить» мог упереться в отказ АТС). Иначе строка встаёт в
+        последнюю выдачу оператора (_recall_row). Статус и попытки лида не трогаем: из
+        пула его убирает сама открытая строка. Одна транзакция, без сети. Ответ —
+        состояние телефона и assignment_id строки, по которой звонить."""
+        ctx = self.operator_context(user_id)
+        try:
+            lead_id = str(uuid.UUID(str(lead_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise DialListError("Водитель не найден", 404)
+        params = {"lead_id": lead_id, "department_id": ctx["department_id"], "operator_id": ctx["user_id"]}
+        how = "уже был в списке"
+        try:
+            with self.db._get_cursor() as cur:
+                self._lock_operator(cur, ctx["user_id"])
+                cur.execute(self._RECALL_LEAD_SQL, params)
+                row = cur.fetchone()
+                if not row:
+                    raise DialListError("Водитель не найден", 404)
+                verdict = recall_verdict(row[1:8], ctx["user_id"])
+                if verdict in ("signed", "excluded"):
+                    raise DialListError(RECALL_REFUSALS[verdict], 409)
+                active = self._active_attempt(cur, ctx["user_id"])
+                if active:
+                    raise DialListError(
+                        f"Идёт звонок ({active['full_name']}). Дождитесь его завершения", 409)
+                self._require_outcome_done(cur, ctx)
+                if verdict == RECALL_ISSUED_MINE:
+                    assignment_id = str(row[3])
+                elif verdict != RECALL_OK:
+                    raise DialListError(RECALL_REFUSALS[verdict], 409)
+                else:
+                    assignment_id, how = self._recall_row(cur, ctx, lead_id)
+        except psycopg2.errors.UniqueViolation:
+            # Водителя только что выдали другому оператору: открытая строка у лида одна.
+            raise DialListError(RECALL_REFUSALS["issued_other"], 409)
+        log.info("dial_list: оператор %s перезванивает водителю %s раньше срока — строка %s (%s)",
+                 ctx["user_id"], lead_id, assignment_id, how)
+        return {"assignment_id": assignment_id, **self.get_state(user_id)}
+
+    def _recall_row(self, cur, ctx, lead_id):
+        """Строка для «Перезвонить» — в последней выдаче оператора (_last_portion, её
+        и показывает телефон): его обработанная строка этого водителя там — снова issued,
+        как при «Вернуть в список» (_reopen_row); нет — новая строка в конец выдачи;
+        выдачи нет вовсе — новая выдача из одной строки. Выдача открывается: пока строка
+        не обработана, «Ещё» следующую не выдаст. Возвращает (assignment_id, что сделали)."""
+        user_id = ctx["user_id"]
+        portion = self._last_portion(cur, user_id)
+        if not portion:
+            cur.execute("""
+                INSERT INTO dial_list_portions (operator_id, department_id, size)
+                VALUES (%s, %s, 1) RETURNING id
+            """, (user_id, ctx["department_id"]))
+            portion_id, position, how = str(cur.fetchone()[0]), 1, "новая выдача"
+        else:
+            portion_id = portion["id"]
+            cur.execute("""
+                SELECT id, portion_id FROM dial_list_assignments
+                WHERE lead_id = %s AND operator_id = %s AND state = 'done'
+                ORDER BY created_at DESC LIMIT 1
+            """, (lead_id, user_id))
+            last = cur.fetchone()
+            if last and str(last[1]) == portion_id:
+                self._reopen_row(cur, last[0], last[1])
+                return str(last[0]), "строка переоткрыта"
+            cur.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM dial_list_assignments WHERE portion_id = %s",
+                        (portion_id,))
+            position, how = int(cur.fetchone()[0]), "строка в конце выдачи"
+            cur.execute("UPDATE dial_list_portions SET size = size + 1, closed_at = NULL WHERE id = %s",
+                        (portion_id,))
+        cur.execute("""
+            INSERT INTO dial_list_assignments (portion_id, lead_id, operator_id, position)
+            VALUES (%s, %s, %s, %s) RETURNING id
+        """, (portion_id, lead_id, user_id, position))
+        return str(cur.fetchone()[0]), how
+
+    def _precheck_call_signature(self, ctx, assignment_id):
+        """Перед звонком — свежая проверка подписания этого водителя, если прошлая
+        старше SIGN_CALL_FRESH_MINUTES или кончилась ошибкой: пачка лежит на экране
+        часами. Вне транзакций; подписал — строку снимет транзакция звонка, она читает
+        уже записанный итог. Sapar не настроен или лежит — звоним как раньше.
+        Возвращает сводку проверки или None, если не спрашивали."""
+        checker = self.sign_checker
+        if not checker.configured():
+            return None
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT l.id, l.iin, l.period, l.sign_checked_at, l.sign_error
+                FROM dial_list_assignments a
+                JOIN dial_list_leads l ON l.id = a.lead_id
+                WHERE a.id = %s AND a.operator_id = %s AND a.state = 'issued'
+                  AND l.signed_at IS NULL AND l.sign_status <> 'processing'
+            """, (assignment_id, ctx["user_id"]))
+            row = cur.fetchone()
+        now = _utcnow()
+        if not row or not sign_check_due(row[1], row[3], row[4], now, SIGN_CALL_FRESH_MINUTES):
+            return None
+        summary = checker.check_now([(row[0], row[1], row[2])], now=now, timeout=SIGN_CALL_TIMEOUT_SEC,
+                                    workers=1, budget_sec=SIGN_CALL_TIMEOUT_SEC, max_systemic=1)
+        if summary["signed"] or summary["processing"] or summary["errors"] or summary["stopped"]:
+            verdict = ("подписал" if summary["signed"] else "на проверке у Яндекса" if summary["processing"]
+                       else SIGN_NOW_STOPPED.get(summary["stopped"]) or "Sapar отказал")
+            log.info("dial_list: подписание перед звонком, строка %s: %s (%.1f с)", assignment_id, verdict,
+                     summary["elapsed_sec"])
+        return summary
+
     def start_call(self, user_id, assignment_id):
-        """Клик «Позвонить»: попытка + звонок через Binotel. Возвращает попытку."""
+        """Клик «Позвонить»: попытка + звонок через Binotel. Возвращает попытку.
+
+        Подписавшему (и «на проверке у Яндекса» — водитель уже подписал) не звоним
+        (владелец, 11.10.2026): строка снимается со списка, оператору — 409. Проверка
+        подписания устарела — сначала спрашиваем Sapar про этого водителя, вне
+        транзакций (_precheck_call_signature), а транзакция звонка смотрит на её итог."""
         ctx = self.operator_context(user_id)
         settings = ctx["settings"]
         assignment_id = str(assignment_id)
+        try:
+            self._precheck_call_signature(ctx, assignment_id)
+        except Exception:
+            # Страховка, а не условие звонка: сбой проверки звонок не останавливает.
+            log.exception("dial_list: проверка подписания перед звонком (строка %s) упала — звоним без неё",
+                          assignment_id)
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT a.id, a.state, a.attempts, l.phone_norm, l.full_name, l.id
+                SELECT a.id, a.state, a.attempts, l.phone_norm, l.full_name, l.id,
+                       (l.signed_at IS NOT NULL OR l.sign_status = 'processing')
                 FROM dial_list_assignments a
                 JOIN dial_list_leads l ON l.id = a.lead_id
                 WHERE a.id = %s AND a.operator_id = %s
@@ -2770,15 +3268,26 @@ class DialListService:
                 raise DialListError(
                     f"Идёт звонок ({active['full_name']}). Дождитесь его завершения", 409)
             self._require_outcome_done(cur, ctx)
-            phone_norm, full_name, lead_id = row[3], row[4] or "", str(row[5])
-            cur.execute("""
-                INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number)
-                VALUES (%s, %s, %s) RETURNING id, requested_at
-            """, (assignment_id, ctx["user_id"], ctx["internal_number"]))
-            attempt_id, requested_at = cur.fetchone()
-            attempt_id = str(attempt_id)
-            cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s", (assignment_id,))
-            attempts_now = int(row[2] or 0) + 1
+            signed = bool(row[6])
+            if signed:
+                # Водитель уже подписал: звонка не будет, строка уходит со списка, как при
+                # «Исключить». Отказ — после фиксации: исключение откатило бы закрытие.
+                self._close_row(cur, assignment_id)
+            else:
+                phone_norm, full_name, lead_id = row[3], row[4] or "", str(row[5])
+                cur.execute("""
+                    INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number)
+                    VALUES (%s, %s, %s) RETURNING id, requested_at
+                """, (assignment_id, ctx["user_id"], ctx["internal_number"]))
+                attempt_id, requested_at = cur.fetchone()
+                attempt_id = str(attempt_id)
+                cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s",
+                            (assignment_id,))
+                attempts_now = int(row[2] or 0) + 1
+        if signed:
+            log.info("dial_list: оператор %s → строка %s: водитель уже подписал, строка снята со списка",
+                     ctx["user_id"], assignment_id)
+            raise DialListError(SIGNED_ROW_CLOSED, 409)
 
         # Что линия оператора увидит во From. Без подмены Binotel ставит туда номер
         # водителя — и он виден в SIP-пакете (Wireshark), что и было главным
@@ -2849,24 +3358,33 @@ class DialListService:
                 self._close_assignment(cur, assignment_id, lead_id, "failed", answered=False, count_attempt=True)
 
     # ------------------------------------------------------------ исходы
-    def phone_event(self, user_id, attempt_id, event, at=None, by_operator=False, leg_sec=0):
+    def phone_event(self, user_id, attempt_id, event, at=None, by_operator=False, leg_sec=0,
+                    ring_timeout=False, ring_sec=0):
         """Подсказка телефона: плечо пришло / принято / разговор кончился / плеча не было /
-        оператор сам нажал «Завершить».
+        оператор сам нажал «Завершить» / гудки до сброса кончились (ring_timeout).
 
         В ответе телефон получает решение по итогу: `outcome_required` — true (открывать
         окно итога), false (итог не нужен: попытка отменена или разговора не было),
         None (исход АТС ещё не известен — телефон ждёт `pending_outcome` из состояния);
-        `cancelled` — попытка отменена и не засчитана."""
+        `cancelled` — попытка отменена и не засчитана.
+
+        ring_timeout у ended — телефон сам положил плечо на гудках, водитель не взял
+        трубку. Это не отбой оператора: by_operator тогда не учитывается, попытка —
+        обычный недозвон (ring_timeout_at). Событие ring_timeout — _ring_timeout_event."""
         event = str(event or "").strip().lower()
         if event not in PHONE_EVENTS:
             raise DialListError(f"Неизвестное событие: {event!r}")
         ctx = self.operator_context(user_id)
         attempt_id = str(attempt_id)
-        by_operator = bool(by_operator) or event == "operator_hangup"
+        if event == "ring_timeout":
+            return self._ring_timeout_event(ctx, attempt_id, ring_sec)
+        ring_timeout = bool(ring_timeout) and event == "ended"
+        by_operator = (bool(by_operator) or event == "operator_hangup") and not ring_timeout
         leg_sec = max(0, min(_to_int(leg_sec, 0), 24 * 3600))
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT state, general_call_id, assignment_id, cancelled, disposition FROM dial_list_attempts
+                SELECT state, general_call_id, assignment_id, cancelled, disposition, ring_timeout_at
+                FROM dial_list_attempts
                 WHERE id = %s AND operator_id = %s FOR UPDATE
             """, (attempt_id, ctx["user_id"]))
             row = cur.fetchone()
@@ -2884,8 +3402,14 @@ class DialListService:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (leg_sec, leg_sec, attempt_id))
-                if state == "finished" and not row[3] and map_disposition(row[4]) not in ("", "answered"):
+                # Сброс на гудках сильнее отбоя: такая попытка — недозвон, а не отмена.
+                if (state == "finished" and not row[3] and row[5] is None
+                        and map_disposition(row[4]) not in ("", "answered")):
                     self._cancel_attempt(cur, attempt_id, str(row[2]), late=True)
+            if ring_timeout:
+                # Отметку ставим и по закрытой попытке: вебхук мог обогнать телефон, а
+                # недозвон без неё ждал бы итога, как разговор.
+                self._mark_ring_timeout(cur, attempt_id, leg_sec)
             if state in ("finished", "failed"):
                 cancelled, required = self._outcome_decision(cur, attempt_id)
                 return {"attempt_id": attempt_id, "state": state, "final": True,
@@ -2925,6 +3449,84 @@ class DialListService:
             cancelled, required = self._outcome_decision(cur, attempt_id)
         result.update({"cancelled": cancelled, "outcome_required": required})
         return result
+
+    def _ring_timeout_event(self, ctx, attempt_id, ring_sec=0):
+        """Телефон досчитал гудки до сброса (ring_timeout_sec состояния) и спрашивает,
+        класть ли плечо. Решает свежий call-details: водитель уже говорит (ONLINE) — не
+        класть (talking); исход финальный — закрыть попытку как обычно и класть, если
+        водитель не ответил; набор ещё идёт, звонка не видно или АТС не ответила —
+        класть. Когда плечо кладут, попытка помечается сбросом (ring_timeout_at): она
+        засчитается недозвоном, итог по ней не нужен. operator_hangup_at здесь не
+        ставится — это не отбой оператора.
+
+        Ответ — как у других событий (attempt_id, state, final, [disposition], cancelled,
+        outcome_required) плюс hangup — класть ли плечо — и talking."""
+        ring_sec = max(0, min(_to_int(ring_sec, 0), 3600))
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT state, general_call_id, disposition, cancelled FROM dial_list_attempts
+                WHERE id = %s AND operator_id = %s
+            """, (attempt_id, ctx["user_id"]))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Попытка не найдена", 404)
+            state, general_call_id, disposition, cancelled = row
+            if state in ("finished", "failed"):
+                # Исход уже есть. Водитель не ответил — плечо всё равно кончится: телефон
+                # кладёт его сам и без окна итога (недозвон помечаем сбросом).
+                answered = state == "finished" and map_disposition(disposition) == "answered"
+                if state == "finished" and not answered and not cancelled:
+                    self._mark_ring_timeout(cur, attempt_id)
+                decided, required = self._outcome_decision(cur, attempt_id)
+                return {"attempt_id": attempt_id, "state": state, "final": True,
+                        "disposition": disposition or "", "cancelled": decided,
+                        "outcome_required": required, "hangup": not answered, "talking": False}
+        # Свежий call-details, мимо кэша карточки звонка (_live_cache): класть трубку по
+        # ответу четырёхсекундной давности нельзя. Частоту запросов к Binotel держит общий
+        # замок клиента. Вне транзакций — правило модуля.
+        live, call = "", None
+        if general_call_id:
+            try:
+                details = self._client(ctx["department_id"]).call_details(general_call_id)
+                call = details.get(str(general_call_id)) or None
+                live = str((call or {}).get("disposition") or "").strip().upper()
+            except Exception as exc:
+                log.info("dial_list: call-details на гудках не удались (%s) — кладём плечо", exc)
+                live, call = "", None
+        talking = live == "ONLINE"
+        final = map_disposition(live) if call else ""
+        hangup = not talking and final != "answered"
+        if hangup:
+            # Сначала отметка: закрытие ниже (_finish_attempt) уже видит сброс на гудках и
+            # засчитывает недозвон, даже если отбой оператора каким-то путём тоже записан.
+            with self.db._get_cursor() as cur:
+                self._mark_ring_timeout(cur, attempt_id)
+        if final:
+            self._finish_by_call(attempt_id, call, "poll")
+        with self.db._get_cursor() as cur:
+            decided, required = self._outcome_decision(cur, attempt_id)
+        log.info("dial_list: попытка %s — гудки кончились (у телефона %d с), Binotel: %s — %s", attempt_id,
+                 ring_sec, live or "нет данных",
+                 "водитель говорит, плечо не кладём" if talking else ("кладём плечо" if hangup else "не кладём"))
+        result = {"attempt_id": attempt_id, "state": "finished" if final else state, "final": bool(final),
+                  "cancelled": decided, "outcome_required": required, "hangup": hangup, "talking": talking}
+        if live:
+            result["disposition"] = live
+        return result
+
+    def _mark_ring_timeout(self, cur, attempt_id, leg_sec=0):
+        """Телефон кладёт (или уже положил) плечо на гудках: запомнить время первого
+        такого сигнала, а у ended — и сколько секунд плечо было принято. Проваленную и
+        отменённую попытку не трогаем: звонка по ним нет либо он уже не в счёт. В
+        транзакции вызывающего."""
+        leg_sec = int(leg_sec or 0)
+        cur.execute("""
+            UPDATE dial_list_attempts
+            SET ring_timeout_at = COALESCE(ring_timeout_at, CURRENT_TIMESTAMP),
+                leg_sec = CASE WHEN %s > 0 THEN %s ELSE leg_sec END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND state <> 'failed' AND NOT cancelled
+        """, (leg_sec, leg_sec, str(attempt_id)))
 
     # Живое состояние попытки для карточки звонка. Телефон принимает плечо от АТС
     # сразу, а водителя АТС набирает после — «разговор» на карточке появлялся, когда
@@ -3074,9 +3676,12 @@ class DialListService:
             # Оператор сам положил трубку, а водитель так и не ответил: попытка
             # отменяется — не считается ни строке, ни лиду, строка остаётся в работе.
             # (Решение владельца 24.09.2026: «повесил трубку до ответа — не засчитывать».)
-            cur.execute("SELECT operator_hangup_at FROM dial_list_attempts WHERE id = %s", (str(attempt_id),))
+            # Сброс на гудках (ring_timeout_at) сильнее отбоя: плечо положил телефон,
+            # потому что водитель не брал трубку, — это обычный недозвон, он в счёт.
+            cur.execute("SELECT operator_hangup_at, ring_timeout_at FROM dial_list_attempts WHERE id = %s",
+                        (str(attempt_id),))
             hung = cur.fetchone()
-            if hung and hung[0] is not None and result != "answered":
+            if hung and hung[0] is not None and hung[1] is None and result != "answered":
                 self._cancel_attempt(cur, str(attempt_id), assignment_id, late=False)
                 return True
             # Оператор мог успеть выбрать итог «перезвонить» раньше, чем приехал исход
@@ -3214,20 +3819,29 @@ class DialListService:
     def _outcome_decision(self, cur, attempt_id):
         """(cancelled, outcome_required) по попытке — что телефону делать после разговора.
         outcome_required: True — открыть окно итога; False — итог не нужен; None — исход
-        от АТС ещё не известен (оператор сам положил трубку, ждём Binotel)."""
+        от АТС ещё не известен (оператор сам положил трубку, ждём Binotel).
+
+        Сброс на гудках (ring_timeout_at) решается как отбой оператора, только без
+        отмены: водитель ответил — итог нужен, не ответил — не нужен, исхода нет — None.
+
+        Плечо телефон не подтвердил (leg_answered_at пуст — ACK не дошёл), а Binotel
+        подтвердил ответ водителя — разговор был, итог нужен (как в _pending_outcome)."""
         cur.execute("""
-            SELECT state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id
+            SELECT state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id,
+                   ring_timeout_at
             FROM dial_list_attempts WHERE id = %s
         """, (str(attempt_id),))
         r = cur.fetchone()
         if not r:
             return False, False
-        state, disposition, cancelled, hung_up, leg_answered, outcome_id = r
+        state, disposition, cancelled, hung_up, leg_answered, outcome_id, ring_timeout_at = r
         if cancelled:
             return True, False
-        if outcome_id is not None or leg_answered is None or state == "failed":
+        if outcome_id is not None or state == "failed":
             return False, False
-        if hung_up is None:
+        if leg_answered is None:
+            return False, state == "finished" and map_disposition(disposition) == "answered"
+        if hung_up is None and ring_timeout_at is None:
             return False, True
         if state == "finished":
             return False, map_disposition(disposition) == "answered"

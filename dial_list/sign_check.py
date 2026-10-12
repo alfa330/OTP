@@ -23,9 +23,16 @@
 пуле бота из четырёх мест он держал бы четверть приложения (см. заметку про
 executor_pool). Запросы на проверку склеиваются: пока идёт прогон, следующий
 запрос лишь просит пройти ещё раз после него.
+
+Проверка «сейчас» (check_now, владелец 11.10.2026: «подписавших не выдавать») —
+другое дело: её ждёт человек — оператор нажал «Ещё» или «Позвонить». Поэтому
+несколько водителей сразу, параллельно, с коротким таймаутом и жёстким сроком;
+не успели — выдача идёт как раньше, остальных проверит прогон. Sapar не ответил —
+NOW_BACKOFF_SEC секунд её не пробуем: пока он лежит, каждый клик ждал бы таймаута.
 """
 import json
 import logging
+import queue
 import threading
 import time
 from collections import OrderedDict
@@ -55,6 +62,8 @@ WRITE_CHUNK = 200
 # Звонок в «живом» состоянии старше этого — зависший (телефон выключен, reconcile
 # не бежал), ждать его исхода для засчитывания успешки не нужно.
 IN_FLIGHT_MAX_AGE_MINUTES = 90
+# Проверка «сейчас» упёрлась в лежащий Sapar — столько секунд следующие не пробуем.
+NOW_BACKOFF_SEC = 30
 
 ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 IN_FLIGHT_STATES = ("requested", "leg_ringing", "leg_answered", "ended")
@@ -64,13 +73,32 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-def _default_fetch(iin, month, year, session=None):
-    return sapar.driver_documents(iin, month, year, session=session, timeout=REQUEST_TIMEOUT_SEC)
+def _default_fetch(iin, month, year, session=None, timeout=REQUEST_TIMEOUT_SEC):
+    return sapar.driver_documents(iin, month, year, session=session, timeout=timeout)
+
+
+def _new_session():
+    """Свой requests.Session: соединение с Sapar держится между запросами потока."""
+    try:
+        import requests
+        return requests.Session()
+    except Exception:  # pragma: no cover — requests есть всегда, но проверка не должна от него зависеть
+        return None
+
+
+def _package_verdict(documents, now):
+    """Документы Яндекса → (общий статус, документы для карточки, момент подписи —
+    только у подписавшего). Одно толкование у прогона и у проверки «сейчас»: итог
+    пишется одинаково."""
+    code = signing.aggregate(documents)
+    signed_at = signing.signed_moment(documents, now) if code == signing.SIGNED else None
+    return code, json.dumps(signing.document_rows(documents), ensure_ascii=False), signed_at
 
 
 class SignChecker:
-    """Проверка подписания для всего раздела. `fetch(iin, month, year, session)` —
-    подменяется в тестах; по умолчанию crm.sapar.driver_documents."""
+    """Проверка подписания для всего раздела. `fetch(iin, month, year, session,
+    timeout=…)` — подменяется в тестах; по умолчанию crm.sapar.driver_documents
+    (прогон таймаут не передаёт — у него свой, REQUEST_TIMEOUT_SEC)."""
 
     def __init__(self, db, fetch=None, configured=None, sleep=time.sleep):
         self.db = db
@@ -82,6 +110,8 @@ class SignChecker:
         self._running = False
         self._again = False
         self.last_run = None
+        # До какого момента (time.monotonic) проверку «сейчас» не пробуем: Sapar лежит.
+        self._now_backoff_until = 0.0
 
     def configured(self):
         """Есть ли доступ к Sapar (SAPAR_API в окружении сервера)."""
@@ -159,12 +189,7 @@ class SignChecker:
             groups.setdefault((str(iin), signing.doc_month_for(period)), []).append(str(lead_id))
 
         started = time.monotonic()
-        session = None
-        try:
-            import requests
-            session = requests.Session()
-        except Exception:  # pragma: no cover — requests есть всегда, но прогон не должен от него зависеть
-            session = None
+        session = _new_session()
         pending, newly_signed = [], []
         systemic_in_row = 0
         first = True
@@ -189,9 +214,7 @@ class SignChecker:
                     continue
                 systemic_in_row = 0
                 documents = result.get("yandex") or []
-                code = signing.aggregate(documents)
-                signed_at = signing.signed_moment(documents, now) if code == signing.SIGNED else None
-                docs_json = json.dumps(signing.document_rows(documents), ensure_ascii=False)
+                code, docs_json, signed_at = _package_verdict(documents, now)
                 for lid in ids:
                     pending.append(("ok", lid, code, docs_json, signed_at))
                     summary["checked"] += 1
@@ -216,6 +239,108 @@ class SignChecker:
                      f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
         if lead_ids is None:
             self.last_run = summary
+        return summary
+
+    # ------------------------------------------------------------ проверка «сейчас»
+    def check_now(self, leads, *, timeout, workers, budget_sec, max_systemic, now=None):
+        """Проверить этих водителей сразу — их ждёт оператор (выдача порции, звонок).
+
+        leads — [(lead_id, ИИН, база месяца)]; без ИИН не спрашиваем. Один запрос на
+        пару (ИИН, месяц документов), как у прогона, но параллельно: `workers` потоков,
+        у каждого свой requests.Session. `timeout` — на запрос, `budget_sec` — на всё:
+        что пришло к сроку, записано, остальных проверит прогон. После `max_systemic`
+        сетевых сбоев Sapar лежит — дальше не спрашиваем и NOW_BACKOFF_SEC не пробуем.
+        Итог пишется как у прогона (_write); по новым подписавшим — успешка, только по
+        ним. Строки со списков операторов здесь не снимаются: это решает вызывающий
+        (пул выдачи, проверка перед звонком).
+
+        Возвращает сводку: checked; signed и processing — id лидов (подписал / на
+        проверке у Яндекса); errors, systemic, successes; stopped — '' | not_configured |
+        backoff | sapar_unavailable | budget; elapsed_sec."""
+        summary = {"checked": 0, "signed": [], "processing": [], "errors": 0, "systemic": 0,
+                   "successes": 0, "stopped": "", "elapsed_sec": 0.0}
+        if not self.configured():
+            summary["stopped"] = "not_configured"
+            return summary
+        groups = OrderedDict()
+        for lead_id, iin, period in leads or ():
+            if str(iin or "").strip():
+                groups.setdefault((str(iin).strip(), signing.doc_month_for(period)), []).append(str(lead_id))
+        if not groups:
+            return summary
+        if time.monotonic() < self._now_backoff_until:
+            summary["stopped"] = "backoff"
+            return summary
+        now = now or _utcnow()
+        started = time.monotonic()
+        work, answers, stop = queue.Queue(), queue.Queue(), threading.Event()
+        for key in groups:
+            work.put(key)
+
+        def lane():
+            session = _new_session()
+            try:
+                while not stop.is_set():
+                    try:
+                        key = work.get_nowait()
+                    except queue.Empty:
+                        return
+                    iin, (month, year) = key
+                    try:
+                        result = self._fetch(iin, month, year, session=session, timeout=timeout)
+                    except Exception as exc:  # sapar.driver_documents не бросает, подменённый fetch — может
+                        result = {"ok": False, "error": str(exc), "systemic": True}
+                    answers.put((key, result))
+            finally:
+                if session is not None:
+                    session.close()
+
+        lanes = max(1, min(int(workers), len(groups)))
+        executor = ThreadPoolExecutor(max_workers=lanes, thread_name_prefix="dial-sign-now")
+        try:
+            for _ in range(lanes):
+                executor.submit(lane)
+        finally:
+            # Потоки не ждём: запрос, переживший срок, доработает сам — его ответ уже не нужен.
+            executor.shutdown(wait=False)
+        pending = []
+        try:
+            for _ in range(len(groups)):
+                # Срок вышел — забираем только то, что уже пришло.
+                left = max(0.0, budget_sec - (time.monotonic() - started))
+                try:
+                    key, result = answers.get(timeout=left)
+                except queue.Empty:
+                    summary["stopped"] = "budget"
+                    break
+                ids = groups[key]
+                if not result.get("ok"):
+                    summary["errors"] += len(ids)
+                    error = str(result.get("error") or "Sapar не ответил")[:300]
+                    pending.extend(("error", lid, error, bool(result.get("systemic"))) for lid in ids)
+                    if result.get("systemic"):
+                        summary["systemic"] += 1
+                        if summary["systemic"] >= max(1, int(max_systemic)):
+                            summary["stopped"] = "sapar_unavailable"
+                            break
+                    continue
+                code, docs_json, signed_at = _package_verdict(result.get("yandex") or [], now)
+                for lid in ids:
+                    pending.append(("ok", lid, code, docs_json, signed_at))
+                    summary["checked"] += 1
+                    if signed_at is not None:
+                        summary["signed"].append(lid)
+                    elif code == signing.PROCESSING:
+                        summary["processing"].append(lid)
+        finally:
+            stop.set()
+        if summary["stopped"] == "sapar_unavailable":
+            self._now_backoff_until = time.monotonic() + NOW_BACKOFF_SEC
+        if pending:
+            self._write(pending, now)
+        if summary["signed"]:
+            summary["successes"] = self.resolve_successes(now, lead_ids=summary["signed"])
+        summary["elapsed_sec"] = round(time.monotonic() - started, 1)
         return summary
 
     def _write(self, items, now):

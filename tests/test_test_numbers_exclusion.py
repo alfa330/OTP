@@ -286,11 +286,14 @@ class PackageSqlTests(unittest.TestCase):
         cursor.sql.clear()
         svc.operator_context = lambda uid: {'user_id': uid, 'department_id': 1954, 'name': 'Оператор'}
         svc.operator_progress(7)
-        progress, outcomes, subtypes = cursor.sql
+        # Четвёртый запрос (11.10.2026) — конверсия: поговорившие и успешки, у каждого
+        # подзапроса своё соединение с лидом и своё условие реестра.
+        progress, outcomes, subtypes, conversion = cursor.sql
         self.assertEqual(progress.count(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL), 1)
         self.assertEqual(progress.count(keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL), 1)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, outcomes)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, subtypes)
+        self.assertEqual(conversion.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
 
     def test_resource_fte_chat(self):
         from resource_fte import chat

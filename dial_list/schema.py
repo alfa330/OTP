@@ -252,6 +252,10 @@ DDL = [
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_hangup_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS leg_sec INTEGER NOT NULL DEFAULT 0",
+    # Сброс на гудках (владелец, 11.10.2026): телефон сам положил плечо, потому что
+    # водитель за пять гудков не взял трубку. Это недозвон, а не отбой оператора:
+    # попытка в счёт, итог по ней не нужен (если водитель так и не ответил).
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS ring_timeout_at TIMESTAMP WITH TIME ZONE",
     # Типы итога (запрос владельца 29.09.2026): у итога может быть свой список
     # вложенных типов («Отказ» → «Дорого», «Уже работает в другом парке»), чтобы
     # типизировать сами итоги. Отдельная таблица, а не parent_id в

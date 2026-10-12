@@ -9,9 +9,13 @@ import contextlib
 import inspect
 import json
 import os
+import re
 import sys
 import unittest
 import unittest.mock
+from datetime import date, datetime, timedelta, timezone
+
+import psycopg2.errors
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,6 +60,90 @@ def _routed_db(cursor):
         def _get_cursor(self):
             yield cursor
     return Db()
+
+
+def _writes(statements):
+    """Пишущие запросы среди выполненных (SELECT … FOR UPDATE записью не считается)."""
+    return [sql for sql in statements if sql.lstrip().upper().startswith(('UPDATE', 'INSERT', 'DELETE'))]
+
+
+class _TxDb:
+    """База-подделка с границами транзакций: каждый блок `with _get_cursor()` — своя
+    транзакция, как в database.py. in_tx — идёт ли транзакция сейчас (по нему подделка
+    клиента Binotel проверяет правило модуля «сеть — вне транзакций»); transactions —
+    SQL каждой транзакции по порядку; rolled_back — откатилась ли она (блок вышел
+    исключением, как rollback в database.py)."""
+
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.in_tx = False
+        self.transactions = []
+        self.rolled_back = []
+
+    @contextlib.contextmanager
+    def _get_cursor(self):
+        start = len(self.cursor.executed)
+        self.in_tx = True
+        failed = False
+        try:
+            yield self.cursor
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            self.in_tx = False
+            self.transactions.append([sql for sql, _ in self.cursor.executed[start:]])
+            self.rolled_back.append(failed)
+
+
+class _FakeSignChecker:
+    """Проверка подписания для сервиса — без Sapar. answers — сводки check_now по
+    очереди (dict поверх пустой сводки или исключение); calls — с чем спрашивали и шла
+    ли в это время транзакция (правило модуля: сеть — вне транзакций)."""
+
+    EMPTY = {"checked": 0, "signed": [], "processing": [], "errors": 0, "systemic": 0, "successes": 0,
+             "stopped": "", "elapsed_sec": 0.0}
+
+    def __init__(self, db=None, configured=True, answers=()):
+        self.db, self._configured, self.answers, self.calls = db, configured, list(answers), []
+
+    def configured(self):
+        return self._configured
+
+    def check_now(self, leads, **kwargs):
+        self.calls.append(dict(kwargs, leads=[tuple(x) for x in leads], in_tx=getattr(self.db, 'in_tx', None)))
+        answer = self.answers.pop(0) if self.answers else {}
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(self.EMPTY, **answer)
+
+
+class _CallDetailsClient:
+    """Клиент Binotel для событий телефона: call-details по generalCallID. answer —
+    ответ или исключение. inside_tx — шла ли транзакция при каждом запросе (assert тут
+    не годится: сервис гасит любую ошибку call-details)."""
+
+    def __init__(self, db, answer):
+        self.db, self.answer = db, answer
+        self.calls, self.inside_tx = [], []
+
+    def call_details(self, general_call_id):
+        self.calls.append(general_call_id)
+        self.inside_tx.append(self.db.in_tx)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+class _OriginateClient:
+    """Клиент Binotel для «Позвонить»: запоминает звонки и шла ли тогда транзакция."""
+
+    def __init__(self, db):
+        self.db, self.calls = db, []
+
+    def originate_internal_to_external(self, internal_number, external_number, **extra):
+        self.calls.append((internal_number, external_number, extra, self.db.in_tx))
+        return 'gc-1'
 
 
 class DispositionMappingTests(unittest.TestCase):
@@ -160,9 +248,16 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
     """Телефон не должен получить номер водителя ни в одном ответе."""
 
     def test_operator_facing_queries_do_not_select_phone(self):
-        for name in ('_portion_items', '_active_attempt', 'get_state', 'issue_next_portion', 'operator_worked'):
+        for name in ('_portion_items', '_active_attempt', 'get_state', 'issue_next_portion', 'operator_worked',
+                     '_ring_timeout_sec', '_ring_timeout_event', '_operator_conversion', '_refuse_next_portion',
+                     '_precheck_signatures', '_precheck_call_signature', 'recall_lead', '_recall_row'):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
             self.assertNotIn('phone_norm', src, f'{name} выбирает номер — он уедет в телефон')
+        for name in ('_RECALL_JOINS_SQL', '_RECALL_COLUMNS', '_POOL_CANDIDATES_SQL'):
+            self.assertNotIn('phone_norm', getattr(dial_service.DialListService, name), name)
+        # ИИН читает только проверка подписания — для Sapar; в ответы телефону он не идёт.
+        for name in ('_RECALL_JOINS_SQL', '_RECALL_COLUMNS', '_WORKED_SQL'):
+            self.assertNotIn('iin', getattr(dial_service.DialListService, name), name)
 
     def test_start_call_returns_no_phone(self):
         src = inspect.getsource(dial_service.DialListService.start_call)
@@ -432,13 +527,18 @@ class LeadsJournalTests(unittest.TestCase):
                          "l.attempts_total >= %(max_attempts)s", "l.status = 'excluded'"):
             self.assertIn(fragment, sql)
         self.assertEqual(set(dial_service.LEAD_STAGES),
-                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded', 'signed'})
+                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded', 'signed', 'sign_wait'})
         # Подписавший — первым: из пула он ушёл (signed_at в _POOL_SQL), и «В очереди»
-        # у него было бы неправдой (владелец, 29.09.2026).
+        # у него было бы неправдой (владелец, 29.09.2026). Сразу за ним — «на проверке у
+        # Яндекса» (11.10.2026): водитель уже подписал и из пула ушёл так же.
         case = sql[sql.index('CASE'):sql.index('END AS stage')]
-        self.assertLess(case.index("WHEN l.signed_at IS NOT NULL THEN 'signed'"),
-                        case.index("WHEN l.status = 'excluded'"))
+        signed_at = case.index("WHEN l.signed_at IS NOT NULL THEN 'signed'")
+        wait_at = case.index("WHEN l.sign_status = 'processing' THEN 'sign_wait'")
+        self.assertLess(signed_at, wait_at)
+        self.assertLess(wait_at, case.index("WHEN l.status = 'excluded'"))
         self.assertIn('AND l.signed_at IS NULL', dial_service.DialListService._POOL_SQL)
+        self.assertIn("AND l.sign_status <> 'processing'", dial_service.DialListService._POOL_SQL)
+        self.assertEqual(dial_service.LEAD_STAGES['sign_wait'], 'На проверке у Яндекса')
         svc = dial_service.DialListService(db=None)
         with self.assertRaises(dial_service.DialListError):
             svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24,
@@ -581,9 +681,12 @@ class LeadsJournalTests(unittest.TestCase):
         self.assertEqual(dial_service.period_label(dt.date(2026, 9, 1)), 'Сентябрь 2026')
 
     def test_outcome_is_required_before_next_call_or_portion(self):
-        for name in ('start_call', 'issue_next_portion'):
+        for name in ('start_call', 'recall_lead', '_refuse_next_portion'):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
             self.assertIn('_require_outcome_done', src, f'{name} не проверяет итог предыдущего звонка')
+        # «Ещё» (11.10.2026) проверяет отказы дважды: до Sapar и в транзакции выдачи.
+        nxt = inspect.getsource(dial_service.DialListService.issue_next_portion)
+        self.assertEqual(nxt.count('self._refuse_next_portion(cur, ctx)'), 2)
         state = inspect.getsource(dial_service.DialListService.get_state)
         self.assertIn('"pending_outcome"', state)
         self.assertIn('"outcomes"', state)
@@ -685,15 +788,27 @@ class OperatorHangupTests(unittest.TestCase):
             def fetchone(self):
                 return self.row
 
-        # (state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id)
-        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'CANCEL', True, 't', 't', None)), 'x'), (True, False))
-        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, None, 't', None)), 'x'), (False, True))
-        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, 't', 't', None)), 'x'), (False, None))
-        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, 't', 't', None)), 'x'), (False, True))
-        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'NOANSWER', False, 't', 't', None)), 'x'), (False, False))
-        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, None, 't', 'o')), 'x'), (False, False))
-        self.assertEqual(svc._outcome_decision(_Cur(('failed', '', False, None, None, None)), 'x'), (False, False))
+        # (state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id, ring_timeout_at)
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'CANCEL', True, 't', 't', None, None)), 'x'), (True, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, None, 't', None, None)), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, 't', 't', None, None)), 'x'), (False, None))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, 't', 't', None, None)), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'NOANSWER', False, 't', 't', None, None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, None, 't', 'o', None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('failed', '', False, None, None, None, None)), 'x'), (False, False))
         self.assertEqual(svc._outcome_decision(_Cur(None), 'x'), (False, False))
+        # Сброс на гудках (11.10.2026) — как отбой оператора, только без отмены: водитель не
+        # ответил — итог не нужен, ответил в последний момент — нужен, исхода ещё нет — ждём.
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'CANCEL', False, None, 't', None, 't')), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWER', False, None, 't', None, 't')), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, None, 't', None, 't')), 'x'), (False, None))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'NOANSWER', False, 't', 't', None, 't')), 'x'), (False, False))
+        # Плечо телефон не подтвердил (ACK не дошёл, 11.10.2026): итог нужен, только если
+        # Binotel подтвердил ответ водителя; исход ещё не известен или не ответил — не нужен.
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWER', False, None, None, None, None)), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'CANCEL', False, None, None, None, None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, None, None, None, None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWER', False, None, None, 'o', None)), 'x'), (False, False))
 
 
 class PortionStaysVisibleTests(unittest.TestCase):
@@ -706,10 +821,13 @@ class PortionStaysVisibleTests(unittest.TestCase):
         last = inspect.getsource(dial_service.DialListService._last_portion)
         self.assertIn('ORDER BY closed_at IS NULL DESC, issued_at DESC', last)
         self.assertNotIn('phone_norm', last)
-        # Выдача следующей — по-прежнему только через открытую порцию без issued.
+        # Выдача следующей — по-прежнему только через открытую порцию без issued
+        # (проверка с 11.10.2026 — в _refuse_next_portion, её зовёт «Ещё»).
         nxt = inspect.getsource(dial_service.DialListService.issue_next_portion)
-        self.assertIn('_open_portion', nxt)
-        self.assertIn("state = 'issued'", nxt)
+        self.assertIn('_refuse_next_portion', nxt)
+        refuse = inspect.getsource(dial_service.DialListService._refuse_next_portion)
+        self.assertIn('_open_portion', refuse)
+        self.assertIn("state = 'issued'", refuse)
         items = inspect.getsource(dial_service.DialListService._portion_items)
         self.assertIn('"cancelled"', items)
 
@@ -723,9 +841,12 @@ class PortionStaysVisibleTests(unittest.TestCase):
         reopen = inspect.getsource(dial_service.DialListService._reopen_in_latest_portion)
         self.assertIn("a.state = 'done'", reopen)
         self.assertIn('ORDER BY issued_at DESC LIMIT 1', reopen)      # только последняя выдача оператора
-        self.assertIn("SET state = 'issued', result = '', done_at = NULL", reopen)
-        self.assertIn('SET closed_at = NULL', reopen)
+        self.assertIn('self._reopen_row(', reopen)
         self.assertNotIn('phone_norm', reopen)
+        # Само переоткрытие — общее с «Перезвонить» оператора (recall_lead, 11.10.2026).
+        row = inspect.getsource(dial_service.DialListService._reopen_row)
+        self.assertIn("SET state = 'issued', result = '', done_at = NULL", row)
+        self.assertIn('SET closed_at = NULL', row)
         # Строку, которая и так у оператора, возврат не дублирует (уникальный индекс).
         self.assertIn("Строка сейчас у оператора", src)
 
@@ -758,6 +879,19 @@ class OperatorProgressTests(unittest.TestCase):
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SQL))
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_OUTCOMES_SQL))
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SUBTYPES_SQL))
+        # Конверсия (11.10.2026) — единственный запрос прогресса, которому нужна таблица
+        # лидов: база месяца и засчитанные оператору успешки. Поэтому сторож у неё свой:
+        # только счётчики — внешний SELECT из двух подзапросов, оба COUNT, — и ни ФИО, ни
+        # номера, ни ИИН (номер читает лишь условие реестра, у каждого подзапроса своё).
+        conversion = svc._PROGRESS_CONVERSION_SQL
+        self.assertEqual(conversion.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        bare = conversion.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
+        for forbidden in ('phone_norm', 'full_name', 'iin'):
+            self.assertNotIn(forbidden, bare)
+            self.assertNotIn(forbidden, inspect.getsource(svc._operator_conversion))
+        heads = [bare[m.end():].split(None, 1)[0] for m in re.finditer(r'\bSELECT\b', bare)]
+        self.assertEqual(heads, ['(SELECT', 'COUNT(DISTINCT', 'COUNT(*)'])
+        self.assertEqual(re.findall(r'\bAS (\w+)', bare), ['leads_talked', 'successes'])
         # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
         self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
         self.assertIn('disp IN %(answered)s', dial_service.DialListService._PROGRESS_SQL)
@@ -1057,8 +1191,9 @@ class OutcomeSubtypesTests(unittest.TestCase):
 
     # ── телефон: выбор итога ────────────────────────────────────────────────
     def _outcome_svc(self, subtype_row=None, has_active=False):
+        # (state, lead_id, outcome_id, cancelled, operator_hangup_at, disposition, ring_timeout_at)
         cur = _RoutedCursor([
-            ('FOR UPDATE OF t', {'one': ('ended', 'lead-1', None, False, None, '')}),
+            ('FOR UPDATE OF t', {'one': ('ended', 'lead-1', None, False, None, '', None)}),
             ('SELECT id, name FROM dial_list_outcome_subtypes', {'one': subtype_row}),
             ('SELECT 1 FROM dial_list_outcome_subtypes', {'one': (1,) if has_active else None}),
             ('FROM dial_list_outcomes', {'one': (self.R, 'Отказ', '#FF3B30', False)}),
@@ -1122,7 +1257,7 @@ class OutcomeSubtypesTests(unittest.TestCase):
     def test_existing_outcome_checks_come_first(self):
         # Отменённая попытка — прежняя 409, до любых проверок типа.
         svc, cur = self._outcome_svc(has_active=True)
-        cur.rules[0] = ('FOR UPDATE OF t', {'one': ('finished', 'lead-1', None, True, 't', 'CANCEL')})
+        cur.rules[0] = ('FOR UPDATE OF t', {'one': ('finished', 'lead-1', None, True, 't', 'CANCEL', None)})
         with self.assertRaises(dial_service.DialListError) as ctx:
             svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id='abc')
         self.assertEqual(ctx.exception.status, 409)
@@ -1326,9 +1461,10 @@ class OutcomeSubtypesTests(unittest.TestCase):
         header = self._journal_row('lead-1', self.R, self.S1, 1)
         base = ['att', None, 3, 'Оператор', '901', 'finished', 'ANSWER', 30, 5, '', 'webhook', None, None, None,
                 True, 'asg', 'answered', 'done', None, self.R, 'Отказ', '#FF3B30', 'дорого', None, False, None, 0]
+        # Последняя колонка — ring_timeout_at (сброс на гудках, 11.10.2026).
         cur = _RoutedCursor([
             ('l.id = %(lead_id)s', {'one': header}),
-            ('os.id, os.name', {'all': [tuple(base + [self.S1, 'Дорого']), tuple(base + [None, None])]}),
+            ('os.id, os.name', {'all': [tuple(base + [self.S1, 'Дорого', None]), tuple(base + [None, None, None])]}),
         ])
         svc = dial_service.DialListService(db=_routed_db(cur))
         svc.lead_department = lambda lid: 1
@@ -1413,6 +1549,16 @@ class WorkedTabsTests(unittest.TestCase):
         with unittest.mock.patch.object(dial_service, 'WORKED_TAB_LIMIT', limit or 300):
             return svc.operator_worked(7)
 
+    # Хвост строки _WORKED_SQL (новые колонки — только в конец): r[16] — подписал или на
+    # проверке у Яндекса, r[17] — «перезвонить» ли итог строки, r[18:25] —
+    # _RECALL_COLUMNS: подписал, исключён, открытая строка (id, чья), чей последний итог,
+    # «перезвонить» ли он, звонил ли после него другой оператор (11.10.2026).
+    NO_RECALL = (False, False, None, None, None, False, False)
+
+    @classmethod
+    def _row(cls, *head, signed=False, requeue=False, recall=None):
+        return head + (signed, requeue) + (recall or cls.NO_RECALL)
+
     def test_tabs_follow_directory_and_newest_first(self):
         from datetime import datetime as dt, timezone as tz
         at = lambda h: dt(2026, 9, 24, h, 0, tzinfo=tz.utc)
@@ -1422,14 +1568,15 @@ class WorkedTabsTests(unittest.TestCase):
                      [{'id': 's1', 'name': 'Дорого', 'position': 1, 'is_active': True, 'used': 1}])]
         # s.id, lead, name, state, result, done_at, created_at, outcome_id, outcome_at, comment, t.state, o.name, o.color,
         # o.pos, l.status, тип итога
+        row = self._row
         rows = [
-            ('a1', 'l1', 'Иванов', 'done', 'answered', at(9), at(8), 'o2', at(9), 'дорого', 'finished', 'Отказ', '#FF3B30', 2, 'done', 'Дорого'),
-            ('a2', 'l2', 'Петров', 'done', 'answered', at(10), at(8), 'o2', at(11), '', 'finished', 'Отказ', '#FF3B30', 2, 'done', None),
-            ('a3', 'l3', '', 'done', 'busy', at(12), at(8), None, None, 'старый', 'finished', None, None, None, 'in_progress', None),
-            ('a4', 'l4', 'Сидоров', 'done', 'answered', at(13), at(8), 'old', at(13), '', 'finished', 'Думает', '#AF52DE', 9, 'done', None),
+            row('a1', 'l1', 'Иванов', 'done', 'answered', at(9), at(8), 'o2', at(9), 'дорого', 'finished', 'Отказ', '#FF3B30', 2, 'done', 'Дорого'),
+            row('a2', 'l2', 'Петров', 'done', 'answered', at(10), at(8), 'o2', at(11), '', 'finished', 'Отказ', '#FF3B30', 2, 'done', None),
+            row('a3', 'l3', '', 'done', 'busy', at(12), at(8), None, None, 'старый', 'finished', None, None, None, 'in_progress', None),
+            row('a4', 'l4', 'Сидоров', 'done', 'answered', at(13), at(8), 'old', at(13), '', 'finished', 'Думает', '#AF52DE', 9, 'done', None),
             # Исключил руководитель: строка закрыта без звонка — это не недозвон.
-            ('a6', 'l6', 'Исключённый', 'done', 'other', at(14), at(8), None, None, '', None, None, None, None, 'excluded', None),
-            ('a5', 'l5', 'В очереди', 'issued', '', None, at(8), None, None, '', None, None, None, None, 'in_progress', None),
+            row('a6', 'l6', 'Исключённый', 'done', 'other', at(14), at(8), None, None, '', None, None, None, None, 'excluded', None),
+            row('a5', 'l5', 'В очереди', 'issued', '', None, at(8), None, None, '', None, None, None, None, 'in_progress', None),
         ]
         res = self._worked(rows, outcomes)
         # Включённые — в порядке справочника, даже пустые; выключенный — пока по нему есть люди; недозвон — последний.
@@ -1450,12 +1597,51 @@ class WorkedTabsTests(unittest.TestCase):
     def test_tab_is_capped_but_count_is_true(self):
         from datetime import datetime as dt, timezone as tz
         outcomes = [('o1', 'Отказ', '#FF3B30', 1, False, True, 0, [])]
-        rows = [(f'a{n}', f'l{n}', f'Водитель {n}', 'done', 'answered', None, dt(2026, 9, 2, tzinfo=tz.utc),
-                 'o1', dt(2026, 9, 2, n % 24, tzinfo=tz.utc), '', 'finished', 'Отказ', '#FF3B30', 1, 'done', None)
+        rows = [self._row(f'a{n}', f'l{n}', f'Водитель {n}', 'done', 'answered', None, dt(2026, 9, 2, tzinfo=tz.utc),
+                          'o1', dt(2026, 9, 2, n % 24, tzinfo=tz.utc), '', 'finished', 'Отказ', '#FF3B30', 1, 'done', None)
                 for n in range(5)]
         res = self._worked(rows, outcomes, limit=3)
         self.assertEqual(res['tabs'][0]['count'], 5)
         self.assertEqual(len(res['items']), 3)
+
+    def test_can_recall_follows_the_recall_rule(self):
+        # Кнопка «Перезвонить» (11.10.2026): итог строки — «перезвонить», а водитель свой и
+        # свободен — то же решение, что у ручки recall (recall_verdict), кнопка не врёт.
+        from datetime import datetime as dt, timezone as tz
+        outcomes = [('cb', 'Перезвонить позже', '#FF9F0A', 1, True, True, 0, []),
+                    ('no', 'Отказ', '#FF3B30', 2, False, True, 0, [])]
+        own = (False, False, None, None, 7, True, False)
+
+        def row(name, recall, requeue=True, outcome='cb', hour=9):
+            at = dt(2026, 10, 11, hour, tzinfo=tz.utc)
+            return self._row(f'a-{name}', f'l-{name}', name, 'done', 'answered', at, at, outcome, at, '', 'finished',
+                             None, None, None, 'in_progress', None, requeue=requeue, recall=recall)
+
+        rows = [
+            row('свой', own, hour=9),
+            row('подписал', (True,) + own[1:], hour=10),
+            row('исключён', (False, True) + own[2:], hour=11),
+            row('у другого', own[:2] + ('a-x', 8) + own[4:], hour=12),
+            row('уже у меня', own[:2] + ('a-y', 7) + own[4:], hour=13),
+            row('чужой итог', own[:4] + (8, True, False), hour=14),
+            row('звонил другой', own[:6] + (True,), hour=15),
+            row('не перезвонить', own[:5] + (False, False), hour=16),
+            row('вкладка отказа', own, requeue=False, outcome='no', hour=17),
+        ]
+        res = self._worked(rows, outcomes)
+        self.assertEqual({i['full_name']: i['can_recall'] for i in res['items']}, {
+            'свой': True, 'подписал': False, 'исключён': False, 'у другого': False, 'уже у меня': False,
+            'чужой итог': False, 'звонил другой': False, 'не перезвонить': False, 'вкладка отказа': False})
+        # «Не дозвонились» — без кнопки: итога «перезвонить» у строки нет.
+        nothing = self._row('a-n', 'l-n', 'Недозвон', 'done', 'no_answer', None, None, None, None, '', 'finished',
+                            None, None, None, 'in_progress', None, recall=own)
+        self.assertIs(self._worked([nothing], outcomes)['items'][0]['can_recall'], False)
+        # Колонки — в конце строки, после прежних 17: r[17] — «перезвонить» ли итог строки.
+        sql = dial_service.DialListService._WORKED_SQL
+        select = sql[sql.index('SELECT s.id'):sql.index('FROM latest s')]
+        self.assertTrue(select.rstrip().endswith(
+            "COALESCE(o.requeue, FALSE), " + dial_service.DialListService._RECALL_COLUMNS))
+        self.assertIn("(l.signed_at IS NOT NULL OR l.sign_status = 'processing'),\n", select)
 
     def test_at_label_today_and_other_days(self):
         from datetime import date, datetime as dt, timezone as tz
@@ -1463,6 +1649,978 @@ class WorkedTabsTests(unittest.TestCase):
         self.assertEqual(dial_service.at_label(now, date(2026, 9, 25)), 'сегодня, 14:05')
         self.assertEqual(dial_service.at_label(now, date(2026, 9, 26)), '25.09, 14:05')
         self.assertEqual(dial_service.at_label(None, date(2026, 9, 25)), '')
+
+
+class RingTimeoutTests(unittest.TestCase):
+    """Сброс на гудках (владелец, 11.10.2026): водитель за пять гудков не взял трубку —
+    телефон сам кладёт плечо, а попытка считается обычным недозвоном «Не поднял трубку»:
+    не отменяется, итог по ней не нужен. Отбой оператора — другое правило (отмена)."""
+
+    DEP = 1954
+    OUTCOME = ('o-1', 'Отказ', '#FF3B30', 1, False, True, 0, [])
+    MARK = 'ring_timeout_at = COALESCE(ring_timeout_at, CURRENT_TIMESTAMP)'
+
+    def _ctx(self, uid):
+        from datetime import date
+        return {"user_id": uid, "department_id": self.DEP, "name": "Оператор", "internal_number": "913",
+                "settings": {"portion_size": 20, "period": "2026-10-01", "period_label": "Октябрь 2026",
+                             "_period": date(2026, 10, 1), "retry_after_hours": 24, "max_attempts": 3}}
+
+    # ── настройка отдела → секунды в состоянии телефона ─────────────────────
+    def test_rings_from_department_column(self):
+        rings = dial_service.ring_timeout_rings
+        self.assertEqual(rings(None), 5)           # не задано — по умолчанию пять гудков
+        self.assertEqual(rings(0), 0)              # отдел выключил сброс
+        self.assertEqual(rings(3), 3)
+        self.assertEqual(rings(99), 20)            # больше предела не бывает
+        self.assertEqual(rings(-2), 0)
+        self.assertEqual(rings('мусор'), 5)
+        self.assertEqual(rings(True), 5)
+        self.assertEqual(dial_service.RING_SECONDS_PER_RING, 5)
+
+    def _state(self, cursor):
+        db = _TxDb(cursor)
+        svc = dial_service.DialListService(db=db)
+        svc.operator_context = self._ctx
+        svc.reconcile = lambda ctx: None
+        return svc.get_state(7), db
+
+    def test_state_carries_ring_timeout_of_line_department(self):
+        # Отсчёт телефона — от принятия плеча (АТС начинает набирать водителя): 5 гудков — 25 с.
+        for row, expected in (((None,), 25), (None, 25), ((0,), 0), ((3,), 15), ((40,), 100)):
+            cur = _RoutedCursor([('FROM sip_department_config', {'one': row}),
+                                 ('FROM dial_list_outcomes o', {'all': [self.OUTCOME]})])
+            state, db = self._state(cur)
+            self.assertEqual(state["ring_timeout_sec"], expected, row)
+            self.assertEqual(state["leg_timeout_sec"], dial_service.LEG_TIMEOUT_SEC)
+            ring = cur.sql_with('FROM sip_department_config')
+            self.assertEqual(len(ring), 1)
+            self.assertIn('ring_timeout_rings', ring[0][0])
+            self.assertEqual(ring[0][1], (self.DEP,))       # отдел из контекста: у сидящего — отдел линии
+            # Своей короткой транзакцией: упавший запрос не оборвёт транзакцию состояния.
+            self.assertIn([ring[0][0]], db.transactions)
+
+    def test_state_survives_missing_ring_column(self):
+        # Колонку заводит схема «Настроек SIP»; её ещё нет или запрос упал — пять гудков.
+        class _NoColumn(_RoutedCursor):
+            def execute(self, sql, params=None):
+                if 'ring_timeout_rings' in sql:
+                    raise RuntimeError('column "ring_timeout_rings" does not exist')
+                super().execute(sql, params)
+
+        state, _ = self._state(_NoColumn([('FROM dial_list_outcomes o', {'all': [self.OUTCOME]})]))
+        self.assertEqual(state["ring_timeout_sec"], 25)
+        self.assertEqual(state["outcomes"][0]["name"], 'Отказ')
+
+    def test_schema_and_event(self):
+        ddl = dial_schema.DDL
+        at = next(i for i, s in enumerate(ddl) if 'ADD COLUMN IF NOT EXISTS ring_timeout_at' in s)
+        first_index = next(i for i, s in enumerate(ddl) if 'CREATE INDEX' in s or 'CREATE UNIQUE INDEX' in s)
+        self.assertLess(at, first_index)
+        self.assertIn('ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS ring_timeout_at '
+                      'TIMESTAMP WITH TIME ZONE', ddl[at])
+        self.assertIn('ring_timeout', dial_service.PHONE_EVENTS)
+        svc = dial_service.DialListService(db=None)
+        svc.operator_context = self._ctx
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.phone_event(7, 'att-1', 'ring')
+        self.assertEqual(ctx.exception.status, 400)
+
+    # ── событие ring_timeout: класть ли плечо ────────────────────────────────
+    def _event_svc(self, row, decision, answer=None):
+        """row — (state, general_call_id, disposition, cancelled) попытки; decision — строка
+        _outcome_decision после события; answer — ответ call-details (или исключение)."""
+        cur = _RoutedCursor([
+            ('general_call_id, disposition, cancelled FROM dial_list_attempts', {'one': row}),
+            ('leg_answered_at, outcome_id', {'one': decision}),
+        ])
+        db = _TxDb(cur)
+        svc = dial_service.DialListService(db=db)
+        svc.operator_context = self._ctx
+        client = _CallDetailsClient(db, {} if answer is None else answer)
+        svc._client = lambda dep: client
+        finished = []
+        svc._finish_by_call = lambda aid, call, source: finished.append((aid, call, source, len(cur.executed)))
+        return svc, cur, client, finished
+
+    # Строки решения: (state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id,
+    # ring_timeout_at).
+    def test_dialing_still_goes_hang_up_and_mark(self):
+        # Binotel всё ещё набирает водителя — класть плечо; попытка помечена сбросом.
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('leg_answered', '', False, None, 't', None, 't'),
+            {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'CALLING'}})
+        res = svc.phone_event(7, 'att-1', 'ring_timeout', ring_sec=25)
+        self.assertEqual(res, {"attempt_id": "att-1", "state": "leg_answered", "final": False,
+                               "disposition": "CALLING", "cancelled": False, "outcome_required": None,
+                               "hangup": True, "talking": False})
+        self.assertEqual(client.calls, ['gc-1'])
+        self.assertEqual(client.inside_tx, [False])               # сеть — вне транзакций
+        self.assertEqual([p for _, p in cur.sql_with(self.MARK)], [(0, 0, 'att-1')])
+        self.assertEqual(cur.sql_with('operator_hangup_at = COALESCE'), [])   # это не отбой оператора
+        self.assertEqual(finished, [])
+
+    def test_unknown_or_error_hangs_up(self):
+        # Звонка у Binotel не видно, АТС ответила ошибкой, generalCallID ещё нет — класть.
+        for row, answer, asked in ((('leg_answered', 'gc-1', '', False), {}, ['gc-1']),
+                                   (('leg_answered', 'gc-1', '', False), RuntimeError('Binotel недоступен'), ['gc-1']),
+                                   (('requested', None, '', False), {}, [])):
+            svc, cur, client, finished = self._event_svc(row, (row[0], '', False, None, 't', None, 't'), answer)
+            res = svc.phone_event(7, 'att-1', 'ring_timeout')
+            self.assertEqual((res["hangup"], res["talking"], res["final"]), (True, False, False), answer)
+            self.assertNotIn("disposition", res)
+            self.assertEqual(client.calls, asked)
+            self.assertEqual(len(cur.sql_with(self.MARK)), 1)
+            self.assertEqual(finished, [])
+
+    def test_driver_talking_keeps_the_leg(self):
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('leg_answered', '', False, None, 't', None, None),
+            {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'online'}})
+        res = svc.phone_event(7, 'att-1', 'ring_timeout', ring_sec=25)
+        self.assertEqual((res["talking"], res["hangup"], res["final"]), (True, False, False))
+        self.assertEqual(res["disposition"], 'ONLINE')
+        self.assertEqual(cur.sql_with(self.MARK), [])               # не сброс — отметки нет
+        self.assertEqual(finished, [])
+
+    def test_answer_is_fresh_not_from_live_cache(self):
+        # Класть ли трубку — по свежему ответу АТС, а не по кэшу карточки звонка (4 с).
+        import time
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('leg_answered', '', False, None, 't', None, None),
+            {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'ONLINE'}})
+        with unittest.mock.patch.dict(dial_service.DialListService._live_cache,
+                                      {'att-1': (time.monotonic(), 'CALLING')}):
+            res = svc.phone_event(7, 'att-1', 'ring_timeout')
+        self.assertEqual(client.calls, ['gc-1'])
+        self.assertTrue(res["talking"])
+
+    def test_final_no_answer_closes_attempt_after_marking(self):
+        # Исход уже финальный, водитель не ответил: закрыть попытку как обычно и класть плечо.
+        # Отметка — ДО закрытия: закрытие не примет такую попытку за отбой оператора.
+        call = {'general_call_id': 'gc-1', 'disposition': 'NOANSWER', 'billsec': 0, 'waitsec': 25}
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('finished', 'NOANSWER', False, None, 't', None, 't'),
+            {'gc-1': call})
+        res = svc.phone_event(7, 'att-1', 'ring_timeout')
+        self.assertEqual(res, {"attempt_id": "att-1", "state": "finished", "final": True,
+                               "disposition": "NOANSWER", "cancelled": False, "outcome_required": False,
+                               "hangup": True, "talking": False})
+        self.assertEqual([f[:3] for f in finished], [('att-1', call, 'poll')])
+        mark_at = next(i for i, (sql, _) in enumerate(cur.executed) if self.MARK in sql)
+        self.assertLess(mark_at, finished[0][3])
+
+    def test_final_answer_does_not_hang_up(self):
+        # Водитель ответил и разговор уже кончился — класть нечего, итог обязателен.
+        call = {'general_call_id': 'gc-1', 'disposition': 'ANSWER', 'billsec': 4, 'waitsec': 20}
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('finished', 'ANSWER', False, None, 't', None, None),
+            {'gc-1': call})
+        res = svc.phone_event(7, 'att-1', 'ring_timeout')
+        self.assertEqual((res["final"], res["hangup"], res["outcome_required"]), (True, False, True))
+        self.assertEqual(cur.sql_with(self.MARK), [])
+        self.assertEqual(len(finished), 1)
+
+    def test_closed_attempt_answers_from_db(self):
+        # Попытку уже закрыли (вебхук, опрос): в Binotel не ходим, отвечаем как обычно.
+        cases = (
+            # попытка, строка решения, hangup, отметок сброса
+            (('finished', 'gc-1', 'NOANSWER', False), ('finished', 'NOANSWER', False, None, 't', None, 't'), True, 1),
+            (('finished', 'gc-1', 'ANSWER', False), ('finished', 'ANSWER', False, None, 't', None, None), False, 0),
+            (('finished', 'gc-1', 'CANCEL', True), ('finished', 'CANCEL', True, 't', 't', None, None), True, 0),
+            (('failed', 'gc-1', '', False), ('failed', '', False, None, None, None, None), True, 0),
+        )
+        for row, decision, hangup, marks in cases:
+            svc, cur, client, finished = self._event_svc(row, decision)
+            res = svc.phone_event(7, 'att-1', 'ring_timeout')
+            self.assertEqual((res["final"], res["hangup"], res["talking"]), (True, hangup, False), row)
+            self.assertEqual(res["cancelled"], bool(decision[2]))
+            self.assertEqual(len(cur.sql_with(self.MARK)), marks, row)
+            self.assertEqual(client.calls, [])
+            self.assertEqual(finished, [])
+        # Не ответил — окна итога нет; ответил — итог обязателен.
+        svc, _, _, _ = self._event_svc(cases[0][0], cases[0][1])
+        self.assertIs(svc.phone_event(7, 'att-1', 'ring_timeout')["outcome_required"], False)
+        svc, _, _, _ = self._event_svc(cases[1][0], cases[1][1])
+        self.assertIs(svc.phone_event(7, 'att-1', 'ring_timeout')["outcome_required"], True)
+
+    def test_unknown_attempt_is_404(self):
+        svc, _, client, _ = self._event_svc(None, None)
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.phone_event(7, 'att-x', 'ring_timeout')
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertEqual(client.calls, [])
+
+    # ── ended с ring_timeout: телефон положил плечо сам ──────────────────────
+    def _ended_svc(self, row, decision, answer=None):
+        cur = _RoutedCursor([
+            ('general_call_id, assignment_id, cancelled, disposition, ring_timeout_at', {'one': row}),
+            ('leg_answered_at, outcome_id', {'one': decision}),
+        ])
+        db = _TxDb(cur)
+        svc = dial_service.DialListService(db=db)
+        svc.operator_context = self._ctx
+        client = _CallDetailsClient(db, {} if answer is None else answer)
+        svc._client = lambda dep: client
+        finished, cancelled = [], []
+        svc._finish_by_call = lambda aid, call, source: finished.append((aid, call['disposition']))
+        svc._cancel_attempt = lambda cur, aid, asg, late=False: cancelled.append((aid, late)) or True
+        return svc, cur, finished, cancelled
+
+    def test_ended_after_ring_timeout_is_not_operator_hangup(self):
+        # by_operator не учитывается, даже если пришёл; отметка сброса и секунды плеча — в
+        # попытку, исход — сразу у Binotel, закрытие — обычный недозвон без окна итога.
+        svc, cur, finished, cancelled = self._ended_svc(
+            ('leg_answered', 'gc-1', 'asg-1', False, '', None), ('finished', 'CANCEL', False, None, 't', None, 't'),
+            {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'CANCEL', 'billsec': 0, 'waitsec': 26}})
+        res = svc.phone_event(7, 'att-1', 'ended', by_operator=True, leg_sec=27, ring_timeout=True)
+        self.assertEqual(cur.sql_with('operator_hangup_at = COALESCE'), [])
+        self.assertEqual([p for _, p in cur.sql_with(self.MARK)], [(27, 27, 'att-1')])
+        self.assertEqual(finished, [('att-1', 'CANCEL')])
+        self.assertEqual(cancelled, [])
+        self.assertEqual((res["final"], res["cancelled"], res["outcome_required"]), (True, False, False))
+
+    def test_ended_on_closed_attempt_still_marks_no_answer(self):
+        # Вебхук обогнал телефон и уже закрыл попытку «не ответил»: отметка снимает с неё
+        # окно итога, отмены нет.
+        svc, cur, finished, cancelled = self._ended_svc(
+            ('finished', 'gc-1', 'asg-1', False, 'NOANSWER', None), ('finished', 'NOANSWER', False, None, 't', None, 't'))
+        res = svc.phone_event(7, 'att-1', 'ended', leg_sec=26, ring_timeout=True)
+        self.assertEqual(len(cur.sql_with(self.MARK)), 1)
+        self.assertEqual((res["final"], res["cancelled"], res["outcome_required"]), (True, False, False))
+        self.assertEqual((finished, cancelled), ([], []))
+
+    def test_ring_timeout_flag_means_nothing_without_ended(self):
+        svc, cur, _, _ = self._ended_svc(
+            ('leg_ringing', 'gc-1', 'asg-1', False, '', None), ('leg_answered', '', False, None, 't', None, None))
+        svc.phone_event(7, 'att-1', 'answered', ring_timeout=True)
+        self.assertEqual(cur.sql_with(self.MARK), [])
+
+    def test_stray_operator_hangup_does_not_cancel_ring_timeout(self):
+        # Отбой оператора по закрытой попытке «не ответил» — отмена (как было), но если
+        # телефон уже сбросил её на гудках — сброс сильнее: попытка остаётся недозвоном.
+        for ring_at, expected in ((None, [('att-1', True)]), ('t', [])):
+            svc, cur, finished, cancelled = self._ended_svc(
+                ('finished', 'gc-1', 'asg-1', False, 'NOANSWER', ring_at),
+                ('finished', 'NOANSWER', False, 't', 't', None, ring_at))
+            svc.phone_event(7, 'att-1', 'operator_hangup')
+            self.assertEqual(cancelled, expected)
+
+    def _client(self, svc):
+        import flask
+        requester = (5, 'Оператор', 'x', 'operator', None, None, None, 'op')
+        bp = dial_routes.build_dial_list_blueprint(
+            db=None, require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (5, requester, None), is_admin_role=lambda role: False,
+            headed_department_ids=lambda rid: [], service=svc)
+        app = flask.Flask('dial_list_ring_test')
+        app.register_blueprint(bp)
+        return app.test_client()
+
+    def test_route_passes_ring_timeout_keys(self):
+        seen = []
+
+        class Svc:
+            def phone_event(self, user_id, attempt_id, event, at=None, by_operator=False, leg_sec=0,
+                            ring_timeout=False, ring_sec=0):
+                seen.append((event, by_operator, leg_sec, ring_timeout, ring_sec))
+                return {"attempt_id": attempt_id, "hangup": True, "talking": False}
+
+        client = self._client(Svc())
+        url = '/api/operator/dial_list/attempts/att-1/phone_event'
+        resp = client.post(url, json={"event": "ring_timeout", "ring_sec": 25})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual((resp.get_json()["hangup"], resp.get_json()["talking"]), (True, False))
+        client.post(url, json={"event": "ended", "by_operator": False, "leg_sec": 27, "ring_timeout": True})
+        client.post(url, json={"event": "ended", "by_operator": True, "leg_sec": 3})   # старый телефон
+        self.assertEqual(seen, [('ring_timeout', False, 0, False, 25), ('ended', False, 27, True, 0),
+                                ('ended', True, 3, False, 0)])
+
+    # ── закрытие попытки: сброс — недозвон, не отмена ────────────────────────
+    def _finish(self, hangup_row, disposition, assignment=('lead-1', 'issued')):
+        cur = _RoutedCursor([
+            ("SET state = 'finished'", {'one': ('asg-1',)}),
+            ('SELECT operator_hangup_at, ring_timeout_at', {'one': hangup_row}),
+            ('COALESCE(o.requeue, FALSE)', {'one': (False,)}),
+            ('SELECT lead_id, state FROM dial_list_assignments', {'one': assignment}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        calls = []
+        svc._cancel_attempt = lambda cur, aid, asg, late=False: calls.append(('cancel', asg, late)) or True
+        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False:
+                                 calls.append(('close', asg, lead, result, answered, count_attempt)))
+        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False:
+                           calls.append(('touch', lead, answered, count_attempt)))
+        svc._finish_attempt('att-1', disposition, 0, 25, 'poll')
+        return calls
+
+    def test_ring_timeout_no_answer_is_counted_never_cancelled(self):
+        # Отбой оператора без сброса — отмена (правило 24.09.2026, как было).
+        self.assertEqual(self._finish(('t', None), 'CANCEL'), [('cancel', 'asg-1', False)])
+        # Сброс на гудках — обычный недозвон: строка закрыта «не ответил», лиду +1 попытка,
+        # даже если отбой оператора каким-то путём тоже записан.
+        for hung in (None, 't'):
+            self.assertEqual(self._finish((hung, 't'), 'CANCEL'),
+                             [('close', 'asg-1', 'lead-1', 'no_answer', False, True)])
+        # Водитель ответил в последний момент — обычный разговор.
+        self.assertEqual(self._finish((None, 't'), 'ANSWER'), [('close', 'asg-1', 'lead-1', 'answered', True, True)])
+        # Строку уже закрыла прошлая попытка — недозвон всё равно у лида.
+        self.assertEqual(self._finish(('t', 't'), 'NOANSWER', assignment=('lead-1', 'done')),
+                         [('touch', 'lead-1', False, True)])
+
+    # ── долг итога и сам итог ───────────────────────────────────────────────
+    def test_pending_outcome_only_for_answered_ring_timeout(self):
+        cur = _RoutedCursor([])
+        self.assertIsNone(dial_service.DialListService(db=None)._pending_outcome(cur, 7))
+        sql, params = cur.executed[0]
+        # Обычный конец разговора — долг сразу; отбой оператора и сброс на гудках — только
+        # когда Binotel подтвердил, что водитель ответил.
+        self.assertIn("t.operator_hangup_at IS NULL AND t.ring_timeout_at IS NULL", sql)
+        self.assertIn("(t.ring_timeout_at IS NOT NULL AND t.state = 'finished'", sql)
+        # Плечо без ACK (роутер с SIP ALG), но Binotel соединил водителя — долг, только по
+        # свежим попыткам: старые, до итогов, тоже без leg_answered_at.
+        self.assertIn("t.outcome_id IS NULL AND t.leg_answered_at IS NULL", sql)
+        self.assertIn("t.phone_ended_at IS NOT NULL AND t.state = 'finished'", sql)
+        self.assertIn("make_interval(hours => %s)", sql)
+        self.assertEqual(params, (7, dial_service.ANSWERED_SQL, dial_service.ANSWERED_SQL,
+                                  dial_service.ANSWERED_SQL, dial_service.UNCONFIRMED_LEG_OUTCOME_HOURS))
+        self.assertEqual(dial_service.UNCONFIRMED_LEG_OUTCOME_HOURS, 12)
+
+    def _outcome_svc(self, row):
+        cur = _RoutedCursor([
+            ('FOR UPDATE OF t', {'one': row}),
+            ('FROM dial_list_outcomes', {'one': ('o-1', 'Отказ', '#FF3B30', False)}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1}
+        return svc, cur
+
+    def test_no_outcome_for_ring_timeout_without_answer(self):
+        # (state, lead_id, outcome_id, cancelled, operator_hangup_at, disposition, ring_timeout_at)
+        svc, cur = self._outcome_svc(('finished', 'lead-1', None, False, None, 'CANCEL', 't'))
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.set_attempt_outcome(7, 'att-1', 'o-1')
+        self.assertEqual((str(ctx.exception), ctx.exception.status), ("Водитель не взял трубку — итог не нужен", 409))
+        self.assertEqual(cur.sql_with('UPDATE dial_list_attempts'), [])
+        # Исхода от АТС ещё нет — ждать его, как при отбое оператора.
+        svc, cur = self._outcome_svc(('ended', 'lead-1', None, False, None, '', 't'))
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.set_attempt_outcome(7, 'att-1', 'o-1')
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn('Дождитесь исхода от АТС', str(ctx.exception))
+        self.assertEqual(cur.sql_with('UPDATE dial_list_attempts'), [])
+        # Водитель успел ответить — итог обязателен и принимается.
+        svc, cur = self._outcome_svc(('finished', 'lead-1', None, False, None, 'ANSWER', 't'))
+        self.assertEqual(svc.set_attempt_outcome(7, 'att-1', 'o-1')["outcome"]["name"], 'Отказ')
+        self.assertEqual(len(cur.sql_with('SET outcome_id = %s')), 1)
+
+    # ── карточка водителя ────────────────────────────────────────────────────
+    def test_lead_card_marks_auto_reset_attempts(self):
+        r = [None] * dial_service.DialListService._JOURNAL_COLUMN_COUNT
+        r[0], r[1], r[2], r[3], r[4], r[5], r[10], r[29] = 'lead-1', 1, 'Иванов', '77011234567', 'in_progress', 1, 1, 'queue'
+
+        def attempt(disposition, ring_at, cancelled=False):
+            return ('att', None, 3, 'Оператор', '913', 'finished', disposition, 0, 25, '', 'poll', None, None, None,
+                    True, 'asg', 'no_answer', 'done', None, None, None, None, '', None, cancelled, None, 27,
+                    None, None, ring_at)
+
+        cur = _RoutedCursor([
+            ('l.id = %(lead_id)s', {'one': tuple(r) + (1,)}),
+            ('os.id, os.name', {'all': [attempt('CANCEL', 't'), attempt('ANSWER', 't'), attempt('NOANSWER', None),
+                                        attempt('CANCEL', 't', cancelled=True)]}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.lead_department = lambda lid: 1
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24}
+        card = svc.lead_card('lead-1')
+        # Флаг — только у сброшенных без ответа: ответивший в последний момент — разговор.
+        self.assertEqual([a['ring_timeout'] for a in card['attempts']], [True, False, False, False])
+        self.assertEqual([a['result'] for a in card['attempts']], ['no_answer', 'answered', 'no_answer', 'cancelled'])
+        self.assertIn('t.ring_timeout_at', cur.sql_with('os.id, os.name')[0][0])
+
+
+class OperatorConversionTests(unittest.TestCase):
+    """Конверсия в «Моём прогрессе» (владелец, 11.10.2026): ровно та, что у руководителя в
+    «Аналитике» по операторам, — база обзваниваемого месяца, успешки из поговоривших."""
+
+    def _progress(self, row, period=None, cursor_cls=None):
+        from datetime import date
+        cur = (cursor_cls or _RoutedCursor)([
+            ('AS issued', {'one': (1, 1, 0, 2, 0, 1, 0, 30, 0, 0)}),
+            ('AS leads_talked', {'one': row}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        settings = {"_period": period or date(2026, 9, 1)}
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1954, "name": "Оператор",
+                                            "settings": settings}
+        return svc.operator_progress(7), cur
+
+    def test_progress_carries_conversion_of_active_base(self):
+        from datetime import date
+        res, cur = self._progress((40, 5), period=date(2026, 9, 1))
+        self.assertEqual(res["conversion"], {"successes": 5, "leads_talked": 40, "percent": 12.5,
+                                             "period": "2026-09-01", "period_label": "Сентябрь 2026"})
+        # Остальные счётчики — как были: календарный месяц.
+        self.assertEqual(res["period"], dial_service.current_period().isoformat())
+        self.assertEqual(res["month"]["issued"], 1)
+        sql, params = cur.sql_with('AS leads_talked')[0]
+        self.assertEqual(params, {"operator_id": 7, "department_id": 1954, "period": date(2026, 9, 1),
+                                  "answered": dial_service.ANSWERED_SQL,
+                                  "min_sec": dial_service.signing.SUCCESS_MIN_BILLSEC})
+
+    def test_percent_like_manager_analytics(self):
+        from dial_list import analytics
+        for talked, successes in ((40, 5), (7, 3), (3, 0), (0, 0)):
+            res, _ = self._progress((talked, successes))
+            self.assertEqual(res["conversion"]["percent"], analytics._pct(successes, talked))
+        self.assertEqual(self._progress((7, 3))[0]["conversion"]["percent"], 42.9)
+        self.assertIsNone(self._progress((0, 0))[0]["conversion"]["percent"])    # «—» на телефоне
+        self.assertIsNone(self._progress(None)[0]["conversion"]["percent"])
+
+    def test_conversion_failure_never_breaks_progress(self):
+        class _Broken(_RoutedCursor):
+            def execute(self, sql, params=None):
+                if 'AS leads_talked' in sql:
+                    raise RuntimeError('canceling statement due to statement timeout')
+                super().execute(sql, params)
+
+        res, _ = self._progress((40, 5), cursor_cls=_Broken)
+        self.assertNotIn("conversion", res)
+        self.assertEqual(res["month"]["issued"], 1)
+        self.assertEqual(res["month"]["talk_sec"], 30)
+
+    def test_definition_matches_manager_analytics(self):
+        from dial_list import analytics
+        from test_numbers import keys as test_keys
+        sql = dial_service.DialListService._PROGRESS_CONVERSION_SQL
+        for fragment in ("COUNT(DISTINCT a.lead_id)", "t.operator_id = %(operator_id)s",
+                         "l.department_id = %(department_id)s AND l.period = %(period)s",
+                         "t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s",
+                         "t.billsec >= %(min_sec)s",
+                         "l.success_operator_id = %(operator_id)s AND l.success_attempt_id IS NOT NULL"):
+            self.assertIn(fragment, sql)
+        # Тестовые номера — то же условие, что у аналитики, у каждого подзапроса своё.
+        self.assertEqual(sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertIn(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, analytics._LEADS_CTE)
+        # Определение аналитики, с которым прогресс обязан совпадать: поменяли там — тест
+        # напомнит поменять и здесь.
+        self.assertEqual(set(analytics.ANSWERED_SQL), set(dial_service.ANSWERED_SQL))
+        self.assertIn("AND t.billsec >= %(min_sec)s) AS talked", analytics._LEADS_CTE)
+        self.assertIn("COUNT(DISTINCT lead_id) FILTER (WHERE talked) AS leads_talked", analytics._OPERATORS_SQL)
+        self.assertIn("FROM leads WHERE success_attempt_id IS NOT NULL GROUP BY success_operator_id",
+                      analytics._OPERATORS_SQL)
+
+
+class SignedDriversNeverIssuedTests(unittest.TestCase):
+    """«Подписавших не выдавать» (владелец, 11.10.2026). «На проверке у Яндекса» — тоже
+    подписал: пул, этап журнала, счётчики отдела и «Вернуть в список» держат одно
+    правило; перед «Ещё» и перед звонком сервер сам спрашивает Sapar, вне транзакций,
+    а Sapar лежит или не настроен — выдаёт и звонит, как раньше."""
+
+    DEP = 1954
+    IIN = '900101300007'
+    PERIOD = date(2026, 10, 1)
+    NOW = datetime(2026, 10, 11, 9, 0, tzinfo=timezone.utc)
+
+    def _ctx(self, uid, size=4):
+        return {"user_id": uid, "department_id": self.DEP, "name": "Оператор", "internal_number": "913",
+                "settings": {"portion_size": size, "period": "2026-10-01", "period_label": "Октябрь 2026",
+                             "_period": self.PERIOD, "retry_after_hours": 24, "max_attempts": 3,
+                             "caller_id_for_employee": ""}}
+
+    def _lead(self, lead_id, checked_min_ago=None, error='', iin=None):
+        """Кандидат пула: (id, ИИН, база, когда проверяли, ошибка проверки)."""
+        checked = None if checked_min_ago is None else self.NOW - timedelta(minutes=checked_min_ago)
+        return (lead_id, self.IIN if iin is None else iin, self.PERIOD, checked, error)
+
+    def _now(self):
+        return unittest.mock.patch.object(dial_service, '_utcnow', return_value=self.NOW)
+
+    # ── правило пула и его зеркала ──────────────────────────────────────────
+    def test_pool_and_its_mirrors_skip_processing(self):
+        svc = dial_service.DialListService
+        self.assertIn("AND l.signed_at IS NULL", svc._POOL_SQL)
+        self.assertIn("AND l.sign_status <> 'processing'", svc._POOL_SQL)
+        self.assertIn("AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open",
+                      svc._DEPARTMENTS_SQL)
+        self.assertIn("AND sign_status <> 'processing'", inspect.getsource(svc.leads_summary))
+        # Кандидаты проверки перед выдачей — тот же пул: те же условия и порядок, без замка.
+        cand = svc._POOL_CANDIDATES_SQL
+        self.assertTrue(cand.strip().startswith('SELECT l.id, l.iin, l.period, l.sign_checked_at, l.sign_error\n'))
+        self.assertEqual(cand.split('FROM dial_list_leads l', 1)[1],
+                         svc._POOL_SQL.format(lock='').split('FROM dial_list_leads l', 1)[1])
+        self.assertNotIn('FOR UPDATE', cand)
+        # Подсчёт «доступно» в состоянии телефона — тот же текст пула.
+        self.assertIn('self._POOL_SQL.format(lock="")', inspect.getsource(svc.get_state))
+
+    def test_journal_stage_and_filter_know_sign_wait(self):
+        svc = dial_service.DialListService(db=None)
+        r = [None] * svc._JOURNAL_COLUMN_COUNT
+        r[0], r[1], r[2], r[3], r[4], r[5], r[10] = 'lead-1', 1, 'Иванов', '77011234567', 'in_progress', 0, 1
+        r[29], r[39], r[40] = 'sign_wait', self.IIN, 'processing'
+        row = svc._journal_row(tuple(r), 3)
+        self.assertEqual((row['stage'], row['stage_label']), ('sign_wait', 'На проверке у Яндекса'))
+        self.assertEqual(row['sign']['status'], 'processing')
+        executed = []
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                executed.append((sql, params))
+
+            def fetchall(self):
+                return [(None,) * PAGE_WIDTH + ([['sign_wait', None, None, 2, 2]],)] \
+                    if 'counts.summary' in executed[-1][0] else []
+
+        svc.db = _routed_db(Cursor())
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24, "period": "2026-10-01",
+                                             "_period": self.PERIOD}
+        res = svc.leads_journal(1, stage='sign_wait')
+        self.assertEqual(executed[0][1]['stage'], 'sign_wait')
+        self.assertEqual(res['by_stage']['sign_wait'], 2)
+        self.assertEqual(res['stages']['sign_wait'], 'На проверке у Яндекса')
+
+    def test_requeue_refuses_processing_like_signed(self):
+        for row in ((self.DEP, 'in_progress', None, 'processing'), (self.DEP, 'done', self.NOW, 'signed')):
+            cur = _RoutedCursor([('sign_status FROM dial_list_leads WHERE id = %s FOR UPDATE', {'one': row})])
+            svc = dial_service.DialListService(db=_routed_db(cur))
+            with self.assertRaises(dial_service.DialListError) as ctx:
+                svc.requeue_lead('lead-1', 5)
+            self.assertEqual((str(ctx.exception), ctx.exception.status),
+                             ("Водитель уже подписал документы — звонить ему незачем", 409))
+            self.assertEqual(_writes(sql for sql, _ in cur.executed), [])
+
+    def test_due_rule(self):
+        due, now = dial_service.sign_check_due, self.NOW
+        self.assertFalse(due('', None, '', now, 15))                                 # без ИИН не спросить
+        self.assertTrue(due(self.IIN, None, '', now, 15))                            # не проверяли
+        self.assertTrue(due(self.IIN, now - timedelta(minutes=16), '', now, 15))     # устарела
+        self.assertFalse(due(self.IIN, now - timedelta(minutes=14), '', now, 15))    # свежая
+        # Отказ Sapar по ИИН тоже сдвигает время проверки — «свежая» с ошибкой не свежая.
+        self.assertTrue(due(self.IIN, now - timedelta(minutes=1), 'Code 500', now, 15))
+        self.assertTrue(due(self.IIN, (now - timedelta(minutes=20)).replace(tzinfo=None), '', now, 15))
+        self.assertEqual((dial_service.SIGN_PRECHECK_ROUNDS, dial_service.SIGN_PRECHECK_BUDGET_SEC,
+                          dial_service.SIGN_PRECHECK_FRESH_MINUTES, dial_service.SIGN_PRECHECK_WORKERS,
+                          dial_service.SIGN_PRECHECK_TIMEOUT_SEC, dial_service.SIGN_PRECHECK_MAX_SYSTEMIC,
+                          dial_service.SIGN_CALL_FRESH_MINUTES, dial_service.SIGN_CALL_TIMEOUT_SEC),
+                         (3, 8, 15, 4, 3, 2, 30, 3))
+
+    # ── проверка перед «Ещё» ─────────────────────────────────────────────────
+    def _precheck(self, rounds, answers=(), configured=True, size=4):
+        queue = [list(r) for r in rounds]
+        cur = _RoutedCursor([('SELECT l.id, l.iin, l.period',
+                              {'all': lambda params: queue.pop(0) if queue else []})])
+        db = _TxDb(cur)
+        checker = _FakeSignChecker(db, configured=configured, answers=answers)
+        svc = dial_service.DialListService(db=db, sign_checker=checker)
+        with self._now():
+            totals = svc._precheck_signatures(self._ctx(7, size=size))
+        return totals, cur, checker
+
+    def test_checks_stale_head_with_margin_and_tops_up(self):
+        lead = self._lead
+        first = [lead('l1', 5), lead('l2'), lead('l3', 20), lead('l4', 2, 'Code 500'), lead('l5', iin=''),
+                 lead('l6')]
+        # l3 подписал, l2 «на проверке у Яндекса» — из пула ушли, в голову встал l7.
+        second = [lead('l1', 5), lead('l4', 2, 'Code 500'), lead('l5', iin=''), lead('l7'), lead('l6'),
+                  lead('l8', 1)]
+        totals, cur, checker = self._precheck(
+            [first, second], answers=[{"checked": 4, "signed": ['l3'], "processing": ['l2']}, {"checked": 1}])
+        # l1 свежий и l5 без ИИН — не спрашиваем; l4 с ошибкой — спрашиваем; l6 — запас на замену.
+        # Второй круг: l4 и l6 в этот раз уже спрашивали, l8 проверен минуту назад.
+        self.assertEqual([[x[0] for x in c['leads']] for c in checker.calls], [['l2', 'l3', 'l4', 'l6'], ['l7']])
+        call = checker.calls[0]
+        self.assertEqual(call['leads'][0], ('l2', self.IIN, self.PERIOD))
+        self.assertEqual((call['timeout'], call['workers'], call['max_systemic'], call['now']), (3, 4, 2, self.NOW))
+        self.assertTrue(0 < call['budget_sec'] <= dial_service.SIGN_PRECHECK_BUDGET_SEC)
+        self.assertEqual([c['in_tx'] for c in checker.calls], [False, False])     # Sapar — вне транзакций
+        selects = cur.sql_with('SELECT l.id, l.iin, l.period')
+        # Порция 4 + запас max(5, 4 // 2) = 9; остальное — как у выдачи.
+        self.assertEqual([p for _, p in selects], [(self.DEP, self.PERIOD, 24, 3, 9)] * 2)
+        self.assertEqual({k: totals[k] for k in ('rounds', 'checked', 'signed', 'processing', 'stopped')},
+                         {'rounds': 2, 'checked': 5, 'signed': 1, 'processing': 1, 'stopped': ''})
+
+    def test_fresh_head_needs_no_sapar(self):
+        # l5 стоит в запасе: в порцию не попадёт, его не спрашиваем.
+        rows = [self._lead('l1', 5), self._lead('l2', 14), self._lead('l3', iin=''), self._lead('l4', 1),
+                self._lead('l5')]
+        totals, cur, checker = self._precheck([rows])
+        self.assertEqual((checker.calls, totals['rounds']), ([], 0))
+        self.assertEqual(len(cur.sql_with('SELECT l.id, l.iin')), 1)
+
+    def test_margin_is_at_least_five(self):
+        _, cur, _ = self._precheck([[]], size=20)
+        self.assertEqual(cur.sql_with('SELECT l.id, l.iin')[0][1][-1], 30)          # 20 + 20 // 2
+        _, cur, _ = self._precheck([[]], size=1)
+        self.assertEqual(cur.sql_with('SELECT l.id, l.iin')[0][1][-1], 6)           # 1 + 5
+
+    def test_no_sapar_means_issue_as_before(self):
+        # Sapar не настроен — ни кандидатов, ни запросов.
+        totals, cur, checker = self._precheck([[self._lead('l1')]], configured=False)
+        self.assertEqual((cur.executed, checker.calls, totals['stopped']), ([], [], 'not_configured'))
+        # Sapar лежит — после первого круга больше не спрашиваем.
+        totals, cur, checker = self._precheck(
+            [[self._lead('l1'), self._lead('l2')]] * 3,
+            answers=[{"errors": 2, "systemic": 2, "stopped": "sapar_unavailable"}])
+        self.assertEqual((len(checker.calls), totals['stopped'], totals['systemic']), (1, 'sapar_unavailable', 2))
+        # Срок вышел — даже кандидатов не читаем.
+        with unittest.mock.patch.object(dial_service, 'SIGN_PRECHECK_BUDGET_SEC', 0):
+            totals, cur, checker = self._precheck([[self._lead('l1')]])
+        self.assertEqual((cur.executed, checker.calls, totals['stopped']), ([], [], 'budget'))
+
+    def test_rounds_and_systemic_allowance_are_shared(self):
+        rounds = [[self._lead(f'r{n}a'), self._lead(f'r{n}b')] for n in range(5)]
+        answers = [{"checked": 1, "errors": 1, "systemic": 1, "signed": [f'r{n}a']} if n == 0
+                   else {"checked": 2, "signed": [f'r{n}a']} for n in range(5)]
+        totals, _, checker = self._precheck(rounds, answers=answers, size=2)
+        self.assertEqual(len(checker.calls), dial_service.SIGN_PRECHECK_ROUNDS)
+        # Один сетевой сбой в первом круге — на остальные круги остаётся один.
+        self.assertEqual([c['max_systemic'] for c in checker.calls], [2, 1, 1])
+        self.assertEqual((totals['rounds'], totals['signed'], totals['systemic']), (3, 3, 1))
+
+    # ── «Ещё»: отказы → проверка → выдача под замком ─────────────────────────
+    def _next(self, open_portion=None, pending=0, pending_outcome=None, candidates=(), answers=(),
+              pool=(('lead-a',), ('lead-b',))):
+        cur = _RoutedCursor([
+            ('WHERE operator_id = %s AND closed_at IS NULL', {'one': open_portion}),
+            ("WHERE portion_id = %s AND state = 'issued'", {'one': (pending,)}),
+            ('FROM dial_list_outcomes o', {'all': [RingTimeoutTests.OUTCOME]}),
+            ('t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL', {'one': pending_outcome}),
+            ('SELECT l.id, l.iin, l.period', {'all': list(candidates)}),
+            ('FOR UPDATE SKIP LOCKED', {'all': list(pool)}),
+            ('INSERT INTO dial_list_portions', {'one': ('portion-new',)}),
+        ])
+        db = _TxDb(cur)
+        checker = _FakeSignChecker(db, answers=answers)
+        svc = dial_service.DialListService(db=db, sign_checker=checker)
+        svc.operator_context = self._ctx
+        svc.get_state = lambda uid: {"portion": "новая"}
+        return svc, cur, db, checker
+
+    def test_refusals_come_before_sapar(self):
+        stale = [self._lead('l1')]
+        for kwargs, text in (({"open_portion": ('p-1', 20, None), "pending": 3},
+                              "Сначала обработайте текущий список: осталось 3"),
+                             ({"pending_outcome": ('att-9', 'Петров', None, None)},
+                              "Сначала укажите итог звонка: Петров")):
+            svc, cur, db, checker = self._next(candidates=stale, **kwargs)
+            with self._now(), self.assertRaises(dial_service.DialListError) as ctx:
+                svc.issue_next_portion(7)
+            self.assertEqual((str(ctx.exception), ctx.exception.status), (text, 409))
+            # Одно чтение — до Sapar и до выдачи дело не дошло.
+            self.assertEqual((checker.calls, cur.sql_with('SELECT l.id, l.iin')), ([], []))
+            self.assertEqual(len(db.transactions), 1)
+            self.assertEqual(_writes(db.transactions[0]), [])
+
+    def test_precheck_runs_between_refusals_and_locked_claim(self):
+        svc, cur, db, checker = self._next(candidates=[self._lead('l1'), self._lead('l2', 5)],
+                                           answers=[{"checked": 1, "signed": ['l1']}])
+        with self._now():
+            self.assertEqual(svc.issue_next_portion(7), {"portion": "новая"})
+        self.assertEqual([c['leads'] for c in checker.calls], [[('l1', self.IIN, self.PERIOD)]])
+        self.assertIs(checker.calls[0]['in_tx'], False)
+        refusals, *checks, claim = db.transactions
+        self.assertEqual(_writes(refusals), [])
+        self.assertTrue(checks and all(t == [self._candidates_sql()] for t in checks))
+        # Выдача: первым — замок оператора, затем отказы ещё раз и пул с SKIP LOCKED.
+        self.assertIn('pg_advisory_xact_lock(hashtext(%s))', claim[0])
+        self.assertEqual(cur.sql_with('pg_advisory_xact_lock')[0][1], ('dial_list_operator:7',))
+        self.assertTrue(any('WHERE operator_id = %s AND closed_at IS NULL' in s for s in claim[1:]))
+        self.assertTrue(any('FOR UPDATE SKIP LOCKED' in s for s in claim))
+        self.assertEqual([p for _, p in cur.sql_with('INSERT INTO dial_list_assignments')],
+                         [('portion-new', 'lead-a', 7, 1), ('portion-new', 'lead-b', 7, 2)])
+        self.assertEqual(db.rolled_back, [False] * len(db.transactions))
+
+    def _candidates_sql(self):
+        return dial_service.DialListService._POOL_CANDIDATES_SQL
+
+    def test_stale_open_portion_is_closed_only_under_lock(self):
+        svc, cur, db, _ = self._next(open_portion=('p-old', 20, None), pending=0)
+        with self._now():
+            svc.issue_next_portion(7)
+        closes = [i for i, t in enumerate(db.transactions)
+                  if any('SET closed_at = CURRENT_TIMESTAMP WHERE id = %s' in s for s in t)]
+        self.assertEqual(closes, [len(db.transactions) - 1])
+
+    def test_precheck_failure_never_blocks_portion(self):
+        svc, cur, db, checker = self._next(candidates=[self._lead('l1')], answers=[RuntimeError('Sapar упал')])
+        with self._now(), self.assertLogs('dial_list.service', level='ERROR'):
+            self.assertEqual(svc.issue_next_portion(7), {"portion": "новая"})
+        self.assertEqual(len(cur.sql_with('INSERT INTO dial_list_assignments')), 2)
+
+    # ── «Позвонить»: свежая проверка и отказ подписавшему ───────────────────
+    def _call(self, jit_row=None, signed=False, configured=True, answers=(), active=None):
+        cur = _RoutedCursor([
+            ("AND l.signed_at IS NULL AND l.sign_status <> 'processing'", {'one': jit_row}),
+            ('FOR UPDATE OF a', {'one': ('asg-1', 'issued', 0, '77010000001', 'Иванов', 'lead-1', signed)}),
+            ('make_interval(mins => %s)', {'one': active}),
+            ('FROM dial_list_outcomes o', {'all': [RingTimeoutTests.OUTCOME]}),
+            ("SET state = 'done', result = 'other'", {'one': ('portion-1',)}),
+            ('INSERT INTO dial_list_attempts', {'one': ('att-1', None)}),
+        ])
+        db = _TxDb(cur)
+        checker = _FakeSignChecker(db, configured=configured, answers=answers)
+        svc = dial_service.DialListService(db=db, sign_checker=checker)
+        svc.operator_context = self._ctx
+        client = _OriginateClient(db)
+        svc._client = lambda dep: client
+        return svc, cur, db, checker, client
+
+    def test_signed_driver_row_is_closed_and_not_called(self):
+        # Проверка перед звонком нашла подпись — транзакция звонка видит её и снимает строку.
+        stale = ('lead-1', self.IIN, self.PERIOD, None, '')
+        svc, cur, db, checker, client = self._call(jit_row=stale, signed=True, answers=[{"signed": ['lead-1']}])
+        with self._now(), self.assertRaises(dial_service.DialListError) as ctx:
+            svc.start_call(7, 'asg-1')
+        self.assertEqual((str(ctx.exception), ctx.exception.status), (dial_service.SIGNED_ROW_CLOSED, 409))
+        self.assertEqual(len(checker.calls), 1)
+        self.assertIn("(l.signed_at IS NOT NULL OR l.sign_status = 'processing')",
+                      cur.sql_with('FOR UPDATE OF a')[0][0])
+        self.assertEqual([p for _, p in cur.sql_with("SET state = 'done', result = 'other'")], [('asg-1',)])
+        self.assertEqual(len(cur.sql_with('UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP')), 1)
+        self.assertEqual((cur.sql_with('INSERT INTO dial_list_attempts'), client.calls), ([], []))
+        # Закрытие зафиксировано: отказ поднят уже после транзакции и её не откатил.
+        self.assertEqual(db.rolled_back, [False, False])
+
+    def test_guard_keeps_existing_gates_first(self):
+        svc, cur, db, _, client = self._call(signed=True, configured=False,
+                                             active=('att-0', 'asg-0', 'leg_answered', 'gc', None, 'Петров'))
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.start_call(7, 'asg-1')
+        self.assertIn('Идёт звонок (Петров)', str(ctx.exception))
+        self.assertEqual(cur.sql_with("SET state = 'done', result = 'other'"), [])
+
+    def test_unsigned_driver_is_called_as_before(self):
+        svc, cur, db, checker, client = self._call(configured=False)
+        attempt = svc.start_call(7, 'asg-1')
+        self.assertEqual((attempt['attempt_id'], attempt['general_call_id']), ('att-1', 'gc-1'))
+        self.assertEqual(client.calls, [('913', '77010000001', {"callerIdForEmployee": '913'}, False)])
+        # Sapar не настроен — водителя для проверки даже не читаем.
+        self.assertEqual(cur.sql_with("AND l.sign_status <> 'processing'"), [])
+
+    def test_stale_check_runs_before_call_outside_transactions(self):
+        stale = ('lead-1', self.IIN, self.PERIOD, None, '')
+        svc, cur, db, checker, client = self._call(jit_row=stale)
+        with self._now():
+            svc.start_call(7, 'asg-1')
+        self.assertEqual(len(checker.calls), 1)
+        call = checker.calls[0]
+        self.assertEqual(call['leads'], [('lead-1', self.IIN, self.PERIOD)])
+        self.assertEqual((call['timeout'], call['workers'], call['budget_sec'], call['max_systemic']), (3, 1, 3, 1))
+        self.assertIs(call['in_tx'], False)
+        sqls = [sql for sql, _ in cur.executed]
+        jit_at = next(i for i, s in enumerate(sqls) if "AND l.sign_status <> 'processing'" in s)
+        self.assertLess(jit_at, next(i for i, s in enumerate(sqls) if 'FOR UPDATE OF a' in s))
+        self.assertEqual(cur.sql_with("AND l.sign_status <> 'processing'")[0][1], ('asg-1', 7))
+        self.assertEqual(len(client.calls), 1)
+
+    def test_check_only_when_stale_or_failed(self):
+        for minutes, error, asked in ((10, '', 0), (29, '', 0), (31, '', 1), (1, 'Code 500', 1)):
+            row = ('lead-1', self.IIN, self.PERIOD, self.NOW - timedelta(minutes=minutes), error)
+            svc, cur, db, checker, client = self._call(jit_row=row)
+            with self._now():
+                svc.start_call(7, 'asg-1')
+            self.assertEqual(len(checker.calls), asked, (minutes, error))
+            self.assertEqual(len(client.calls), 1)
+
+    def test_check_failure_still_calls(self):
+        stale = ('lead-1', self.IIN, self.PERIOD, None, '')
+        svc, cur, db, checker, client = self._call(jit_row=stale, answers=[RuntimeError('Sapar упал')])
+        with self._now(), self.assertLogs('dial_list.service', level='ERROR'):
+            svc.start_call(7, 'asg-1')
+        self.assertEqual(len(client.calls), 1)
+
+
+class RecallTests(unittest.TestCase):
+    """«Перезвонить» раньше срока (владелец, 11.10.2026): только своему водителю с итогом
+    «Перезвонить», одной транзакцией и без сети; кнопка на вкладке итога решается тем же
+    правилом (recall_verdict) — она не врёт."""
+
+    LEAD = '66666666-6666-6666-6666-666666666666'
+    # подписал, исключён, открытая строка (id, чья), чей последний итог, «перезвонить», звонил другой
+    OWN = (False, False, None, None, 7, True, False)
+
+    def _ctx(self, uid):
+        return {"user_id": uid, "department_id": 1954, "name": "Оператор", "internal_number": "913",
+                "settings": {"portion_size": 20, "_period": date(2026, 10, 1), "retry_after_hours": 24,
+                             "max_attempts": 3}}
+
+    def _svc(self, cols=OWN, found=True, active=None, pending_outcome=None, last_portion=('portion-1', 3, None, None),
+             last_done=None, insert_error=None):
+        class _Cur(_RoutedCursor):
+            def execute(self, sql, params=None):
+                super().execute(sql, params)
+                if insert_error is not None and 'INSERT INTO dial_list_assignments' in sql:
+                    raise insert_error
+
+        cur = _Cur([
+            ('FOR UPDATE OF l', {'one': (self.LEAD,) + tuple(cols) if found else None}),
+            ('make_interval(mins => %s)', {'one': active}),
+            ('FROM dial_list_outcomes o', {'all': [RingTimeoutTests.OUTCOME]}),
+            ('t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL', {'one': pending_outcome}),
+            ('ORDER BY closed_at IS NULL DESC, issued_at DESC', {'one': last_portion}),
+            ("WHERE lead_id = %s AND operator_id = %s AND state = 'done'", {'one': last_done}),
+            ('COALESCE(MAX(position), 0) + 1', {'one': (4,)}),
+            ('INSERT INTO dial_list_portions', {'one': ('portion-new',)}),
+            ('INSERT INTO dial_list_assignments', {'one': ('asg-new',)}),
+        ])
+        db = _TxDb(cur)
+        svc = dial_service.DialListService(db=db, sign_checker=_FakeSignChecker(db, configured=False))
+        svc.operator_context = self._ctx
+        svc.get_state = lambda uid: {"portion": {"id": "portion-1"}}
+        return svc, cur, db
+
+    def _refused(self, svc, lead_id=None):
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.recall_lead(7, lead_id or self.LEAD)
+        return str(ctx.exception), ctx.exception.status
+
+    def _writes(self, cur):
+        return _writes(sql for sql, _ in cur.executed)
+
+    def test_verdict_rules(self):
+        verdict, own = dial_service.recall_verdict, self.OWN
+        self.assertEqual(verdict(own, 7), 'ok')
+        self.assertEqual(verdict((True,) + own[1:], 7), 'signed')                 # подписал или ждёт Яндекс
+        self.assertEqual(verdict((False, True) + own[2:], 7), 'excluded')
+        self.assertEqual(verdict((True, True) + own[2:], 7), 'signed')            # подпись — первой
+        self.assertEqual(verdict(own[:2] + ('a', 7) + (None, False, False), 7), 'issued_mine')   # без проверки итога
+        self.assertEqual(verdict(own[:2] + ('a', 8) + own[4:], 7), 'issued_other')
+        self.assertEqual(verdict(own[:4] + (None, False, False), 7), 'not_own')    # итога не было
+        self.assertEqual(verdict(own[:4] + (7, False, False), 7), 'not_own')       # итог свой, но не «перезвонить»
+        self.assertEqual(verdict(own[:4] + (8, True, False), 7), 'taken')          # последний итог — чужой
+        self.assertEqual(verdict(own[:6] + (True,), 7), 'taken')                   # после итога звонил другой
+        self.assertEqual(set(dial_service.RECALL_REFUSALS), {'signed', 'excluded', 'issued_other', 'not_own', 'taken'})
+
+    def test_lead_must_be_in_operator_department(self):
+        svc, cur, _ = self._svc()
+        self.assertEqual(self._refused(svc, 'не-uuid'), ("Водитель не найден", 404))
+        self.assertEqual(cur.executed, [])                                         # до базы не дошло
+        svc, cur, _ = self._svc(found=False)
+        self.assertEqual(self._refused(svc, self.LEAD.upper()), ("Водитель не найден", 404))
+        params = cur.sql_with('FOR UPDATE OF l')[0][1]
+        self.assertEqual(params, {"lead_id": self.LEAD, "department_id": 1954, "operator_id": 7})
+
+    def test_signed_and_excluded_refused_before_other_gates(self):
+        busy = ('att-0', 'asg-0', 'leg_answered', 'gc', None, 'Петров')
+        for cols, text in (((True,) + self.OWN[1:], "Водитель уже подписал документы — звонить не нужно"),
+                           ((False, True) + self.OWN[2:], "Руководитель исключил водителя из обзвона")):
+            svc, cur, _ = self._svc(cols=cols, active=busy, pending_outcome=('att-1', 'Петров', None, None))
+            self.assertEqual(self._refused(svc), (text, 409))
+            self.assertEqual(self._writes(cur), [])
+
+    def test_call_and_outcome_gates(self):
+        svc, cur, _ = self._svc(active=('att-0', 'asg-0', 'leg_answered', 'gc', None, 'Петров'))
+        self.assertEqual(self._refused(svc), ("Идёт звонок (Петров). Дождитесь его завершения", 409))
+        svc, cur, _ = self._svc(pending_outcome=('att-1', 'Сидоров', None, None))
+        self.assertEqual(self._refused(svc), ("Сначала укажите итог звонка: Сидоров", 409))
+        self.assertEqual(self._writes(cur), [])
+
+    def test_already_in_my_list_returns_that_row(self):
+        # Прошлый «Перезвонить» упёрся в отказ АТС — строка так и осталась у оператора.
+        svc, cur, _ = self._svc(cols=(False, False, 'asg-open', 7, None, False, False))
+        res = svc.recall_lead(7, self.LEAD)
+        self.assertEqual(res, {"assignment_id": "asg-open", "portion": {"id": "portion-1"}})
+        self.assertEqual(self._writes(cur), [])
+
+    def test_issued_to_other_and_ownership_refusals(self):
+        cases = (
+            (self.OWN[:2] + ('asg-x', 8) + self.OWN[4:], "Водитель уже в списке у другого оператора"),
+            (self.OWN[:4] + (None, False, False),
+             "Перезвонить раньше срока можно только своему водителю с итогом «Перезвонить»"),
+            (self.OWN[:4] + (7, False, False),
+             "Перезвонить раньше срока можно только своему водителю с итогом «Перезвонить»"),
+            (self.OWN[:4] + (8, True, False), "Этим водителем уже занимается другой оператор"),
+            (self.OWN[:6] + (True,), "Этим водителем уже занимается другой оператор"),
+        )
+        for cols, text in cases:
+            svc, cur, _ = self._svc(cols=cols)
+            self.assertEqual(self._refused(svc), (text, 409), cols)
+            self.assertEqual(self._writes(cur), [])
+
+    def test_reopens_my_done_row_in_latest_portion(self):
+        svc, cur, _ = self._svc(last_done=('asg-old', 'portion-1'))
+        self.assertEqual(svc.recall_lead(7, self.LEAD)["assignment_id"], 'asg-old')
+        self.assertEqual(cur.sql_with("SET state = 'issued', result = '', done_at = NULL")[0][1], ('asg-old',))
+        self.assertEqual(cur.sql_with('SET closed_at = NULL WHERE id')[0][1], ('portion-1',))
+        self.assertEqual(cur.sql_with('INSERT'), [])
+        self.assertEqual(cur.sql_with("state = 'done'")[0][1], (self.LEAD, 7))     # строка именно этого оператора
+
+    def test_appends_to_latest_portion(self):
+        # Его строка — в старой выдаче (или её нет вовсе): новая строка в конец последней.
+        for last_done in (('asg-old', 'portion-0'), None):
+            svc, cur, _ = self._svc(last_done=last_done)
+            self.assertEqual(svc.recall_lead(7, self.LEAD)["assignment_id"], 'asg-new')
+            self.assertEqual(cur.sql_with('SET size = size + 1, closed_at = NULL')[0][1], ('portion-1',))
+            self.assertEqual(cur.sql_with('INSERT INTO dial_list_assignments')[0][1],
+                             ('portion-1', self.LEAD, 7, 4))
+            self.assertEqual(cur.sql_with('INSERT INTO dial_list_portions'), [])
+            self.assertEqual(cur.sql_with("SET state = 'issued'"), [])
+            # Лид не трогаем: из пула его убирает сама открытая строка.
+            self.assertEqual(cur.sql_with('UPDATE dial_list_leads'), [])
+
+    def test_creates_portion_when_operator_has_none(self):
+        svc, cur, _ = self._svc(last_portion=None)
+        self.assertEqual(svc.recall_lead(7, self.LEAD)["assignment_id"], 'asg-new')
+        portion = cur.sql_with('INSERT INTO dial_list_portions')[0]
+        self.assertIn('VALUES (%s, %s, 1)', portion[0])
+        self.assertEqual(portion[1], (7, 1954))
+        self.assertEqual(cur.sql_with('INSERT INTO dial_list_assignments')[0][1], ('portion-new', self.LEAD, 7, 1))
+
+    def test_race_with_another_operator_is_409(self):
+        svc, cur, db = self._svc(insert_error=psycopg2.errors.UniqueViolation())
+        self.assertEqual(self._refused(svc), ("Водитель уже в списке у другого оператора", 409))
+        self.assertEqual(db.rolled_back, [True])
+
+    def test_one_transaction_under_operator_lock(self):
+        svc, cur, db = self._svc()
+        svc.recall_lead(7, self.LEAD)
+        self.assertEqual(len(db.transactions), 1)
+        self.assertEqual(db.rolled_back, [False])
+        self.assertIn('pg_advisory_xact_lock(hashtext(%s))', db.transactions[0][0])
+        self.assertEqual(cur.sql_with('pg_advisory_xact_lock')[0][1], ('dial_list_operator:7',))
+        self.assertIn('FOR UPDATE OF l', db.transactions[0][1])
+        src = inspect.getsource(dial_service.DialListService.recall_lead)
+        self.assertNotIn('_client(', src)                                          # без сети
+
+    def test_button_and_endpoint_share_one_rule(self):
+        svc = dial_service.DialListService
+        for sql in (svc._WORKED_SQL, svc._RECALL_LEAD_SQL):
+            self.assertIn(svc._RECALL_JOINS_SQL, sql)
+            self.assertIn(svc._RECALL_COLUMNS, sql)
+        self.assertIn('recall_verdict(r[18:25]', inspect.getsource(svc.operator_worked))
+        self.assertIn('recall_verdict(row[1:8]', inspect.getsource(svc.recall_lead))
+        joins = svc._RECALL_JOINS_SQL
+        for fragment in ('rt.outcome_id IS NOT NULL AND NOT rt.cancelled', 'ORDER BY rt.requested_at DESC LIMIT 1',
+                         'rt2.operator_id <> %(operator_id)s', 'rt2.requested_at > rt.requested_at',
+                         "rx.state = 'issued'", 'COALESCE(ro.requeue, FALSE)'):
+            self.assertIn(fragment, joins)
+        self.assertEqual(len([c for c in svc._RECALL_COLUMNS.split(',') if c.strip()]), 7)
+
+    def test_route_is_in_operator_zone(self):
+        import flask
+        seen = []
+
+        class Svc:
+            def recall_lead(self, user_id, lead_id):
+                seen.append((user_id, lead_id))
+                return {"assignment_id": "asg-new", "portion": None}
+
+        requester = (5, 'Оператор', 'x', 'operator', None, None, None, 'op')
+        bp = dial_routes.build_dial_list_blueprint(
+            db=None, require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (5, requester, None), is_admin_role=lambda role: False,
+            headed_department_ids=lambda rid: [], service=Svc())
+        app = flask.Flask('dial_list_recall_test')
+        app.register_blueprint(bp)
+        resp = app.test_client().post(f'/api/operator/dial_list/leads/{self.LEAD}/recall', json={})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), {"status": "success", "assignment_id": "asg-new", "portion": None})
+        self.assertEqual(seen, [(5, self.LEAD)])
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        chunk = operator_part[operator_part.index("'/api/operator/dial_list/leads/<lead_id>/recall'"):]
+        self.assertIn('@require_api_key', chunk[:300])
+        self.assertIn('@_guard', chunk[:300])
 
 
 if __name__ == '__main__':

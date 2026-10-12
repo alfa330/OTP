@@ -5,19 +5,27 @@
 сам подключает этот модуль (как op_funnel/routes.py, oktell_guard/routes.py).
 
 Ручки телефона (bearer оператора, как /api/operator/sip_settings):
-    GET  /api/operator/dial_list                             текущая порция и состояние
+    GET  /api/operator/dial_list                             текущая порция и состояние (ring_timeout_sec —
+                                                             через сколько секунд гудков телефон кладёт плечо)
     GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
-                                                             (outcomes[].subtypes — счётчики по типам итога)
+                                                             (outcomes[].subtypes — счётчики по типам итога,
+                                                             conversion — конверсия за базу месяца)
     GET  /api/operator/dial_list/worked                      вкладки итогов: отработанные за месяц
-                                                             (items[].subtype_name — тип итога)
+                                                             (items[].subtype_name — тип итога,
+                                                             items[].can_recall — можно «Перезвонить»)
     GET  /api/operator/dial_list/script                      скрипт разговора отдела (текст + вопросы)
     GET  /api/operator/dial_list/attempts/<attempt_id>/live  набираем / разговор / финал по Binotel
-    POST /api/operator/dial_list/next                        выдать следующую порцию
+    POST /api/operator/dial_list/next                        выдать следующую порцию (подписавших сервер
+                                                             перед выдачей отсеивает сам)
     POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
+    POST /api/operator/dial_list/leads/<lead_id>/recall      «Перезвонить» раньше срока своему водителю с
+                                                             итогом «Перезвонить» → assignment_id + состояние
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
-                                                             {event: ringing|answered|ended|no_leg|operator_hangup,
-                                                              by_operator?, leg_sec?} → в ответе outcome_required /
-                                                             cancelled — нужен ли итог после разговора
+                                                             {event: ringing|answered|ended|no_leg|operator_hangup|
+                                                              ring_timeout, by_operator?, leg_sec?, ring_timeout?,
+                                                              ring_sec?} → в ответе outcome_required /
+                                                             cancelled — нужен ли итог после разговора; на
+                                                             ring_timeout — ещё hangup (класть ли плечо) и talking
     POST /api/operator/dial_list/attempts/<attempt_id>/outcome
                                                              {outcome_id, subtype_id?, comment} — итог разговора
                                                              (обязателен перед следующим звонком). subtype_id —
@@ -212,6 +220,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         user_id, _ = _operator()
         return jsonify({"status": "success", "attempt": svc.start_call(user_id, assignment_id)}), 200
 
+    @bp.route('/api/operator/dial_list/leads/<lead_id>/recall', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_recall(lead_id):
+        """«Перезвонить» раньше срока: свой водитель с итогом «Перезвонить» снова в списке
+        оператора; в ответе — состояние и assignment_id строки, по которой телефон звонит."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.recall_lead(user_id, lead_id)}), 200
+
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/phone_event', methods=['POST', 'OPTIONS'])
     @require_api_key
     @_guard
@@ -219,9 +236,12 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         user_id, _ = _operator()
         payload = request.get_json(silent=True) or {}
         # by_operator/leg_sec — у события ended: оператор ли положил трубку и сколько
-        # секунд плечо было принято телефоном (см. service.phone_event).
+        # секунд плечо было принято телефоном (см. service.phone_event). ring_timeout — у
+        # ended: плечо положил сам телефон на гудках; ring_sec — у события ring_timeout:
+        # сколько секунд гудков телефон отсчитал.
         result = svc.phone_event(user_id, attempt_id, payload.get('event'), payload.get('at'),
-                                 by_operator=bool(payload.get('by_operator')), leg_sec=payload.get('leg_sec', 0))
+                                 by_operator=bool(payload.get('by_operator')), leg_sec=payload.get('leg_sec', 0),
+                                 ring_timeout=bool(payload.get('ring_timeout')), ring_sec=payload.get('ring_sec', 0))
         return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/outcome', methods=['POST', 'OPTIONS'])
