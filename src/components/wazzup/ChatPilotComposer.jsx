@@ -8,6 +8,7 @@ import ChatMessageText from './ChatMessageText';
 import { UPLOAD_ACCEPT, uploadedAttachment, uploadFileError, uploadSizeLabel } from './chatUploads.js';
 import { notifyChatDrafts, readChatDraft, writeChatDraft } from './chatDrafts.js';
 import useChatTypingSender from './useChatTypingSender.js';
+import { focusOnChatEntry } from './chatEntryFocus.js';
 
 const EMPTY_DRAFT = { text: '', preview: '', attachment: null };
 
@@ -88,6 +89,9 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
             notifyChatDrafts();
         };
     }, []);
+
+    // Поле живёт по ключу чата: смонтировалось — значит, вошли в чат (chatEntryFocus.js).
+    useEffect(() => { focusOnChatEntry(textareaRef.current); }, []);
 
     /* «Изменить» у отклонённого Wazzup сообщения возвращает его текст сюда.
        Набранное с тех пор не теряется: возвращённый текст встаёт перед ним. */
