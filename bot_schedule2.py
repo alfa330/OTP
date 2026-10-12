@@ -51764,9 +51764,11 @@ def shift_change_requests():
 
     GET:  свои заявки (свежие сверху) + счётчик ожидающих.
     POST: подать заявку.
-          {kind: 'shorten'|'extra', shift_date: 'YYYY-MM-DD', payload: {...}, comment?}
+          {kind: 'shorten'|'extra'|'change'|'day_off', shift_date: 'YYYY-MM-DD', payload: {...}, comment?}
           payload для 'shorten': {segment:{start,end}, newStart, newEnd}
           payload для 'extra':   {start, end}
+          payload для 'change':  {segment:{start,end}, newDate?, newStart, newEnd}
+          payload для 'day_off': не нужен — снимок смен дня берёт сервер
 
     Отделу front_office раздел ДОСТУПЕН, в отличие от обменов: обмен показывает
     смены коллег, а здесь оператор просит только про себя и только у своего

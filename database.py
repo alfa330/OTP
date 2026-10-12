@@ -876,7 +876,7 @@ WORK_SHIFT_CHANGE_SOURCES = (
     'auction_topup_cancel',  # оператор отменил свой добор
     'auction_admin',       # смену с аукциона выдал/снял администратор
     'swap',                # обмен сменами между операторами
-    'shift_request',       # заявка оператора на сокращение/доп. часть смены
+    'shift_request',       # заявка оператора по своей смене: сократить, доп. часть, перенос, выходной
     'import',              # загрузка графика из файла
     'status_period',       # отпуск/больничный/увольнение стирает смены периода
     'system',              # источник не определён
@@ -4026,10 +4026,40 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT work_shift_change_requests_kind_check
-                        CHECK (request_kind IN ('shorten', 'extra')),
+                        CHECK (request_kind IN ('shorten', 'extra', 'change', 'day_off')),
                     CONSTRAINT work_shift_change_requests_status_check
                         CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled'))
                 );
+            """)
+            # Виды «change» и «day_off» добавлены задачей #349. Ограничение,
+            # заведённое прежним кодом с двумя видами, снимаем и заводим заново —
+            # но только пока в его определении нет самого свежего вида. DROP + ADD
+            # на каждом старте держал бы ACCESS EXCLUSIVE на таблице до конца всей
+            # инициализации, а её читает колокол каждого пользователя.
+            # Добавляешь вид — меняй и ключ поиска здесь, иначе прежний CHECK
+            # переживёт деплой и отвергнет новое значение.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'work_shift_change_requests'::regclass
+                          AND conname = 'work_shift_change_requests_kind_check'
+                          AND position('''day_off''' IN pg_get_constraintdef(oid)) = 0
+                    ) THEN
+                        ALTER TABLE work_shift_change_requests
+                            DROP CONSTRAINT work_shift_change_requests_kind_check;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conrelid = 'work_shift_change_requests'::regclass
+                          AND conname = 'work_shift_change_requests_kind_check'
+                    ) THEN
+                        ALTER TABLE work_shift_change_requests
+                            ADD CONSTRAINT work_shift_change_requests_kind_check
+                            CHECK (request_kind IN ('shorten', 'extra', 'change', 'day_off'));
+                    END IF;
+                END $$;
             """)
             # Подписка главы отдела на уведомления о заявках по сменам.
             #
@@ -51066,7 +51096,7 @@ class Database:
     # Заявки на изменение своей смены (оператор -> руководитель), задача #17
     # ------------------------------------------------------------------
     #
-    # Два вида, оба сводятся к одной операции над интервалами дня:
+    # Первые два вида сводятся к одной операции над интервалами дня:
     #   shorten — у существующего куска смены двигаются границы ВНУТРЬ
     #             (прийти позже и/или уйти раньше);
     #   extra   — в день добавляется ещё один кусок, в том числе в выходной.
@@ -51074,8 +51104,22 @@ class Database:
     # Арифметику берём ту же, что у обменов: окно из трёх суток (вчера/сегодня/
     # завтра) и склейка интервалов. Иначе ночная смена 17:00-02:00 распадалась бы
     # на два несвязанных куска, и «уйти на час раньше» упиралось бы в полночь.
+    #
+    # Ещё два вида (задача #349) пишутся ТОЧЕЧНО, без перезаписи окна:
+    #   change  — кусок смены переезжает на любые другие начало и конец, в том
+    #             числе в другой день; короче он станет, длиннее или останется
+    #             прежним — не важно;
+    #   day_off — снимаются все смены дня, в графике встаёт выходной.
+    # Окно здесь не годится: оно склеивает смены, соприкасающиеся в полночь, в
+    # одну строку, а опустевший соседний день помечает выходным. У сокращения
+    # новые границы лежат внутри старых и до соседей не дотягиваются; перенос
+    # двигает их свободно, и такой стык стал бы обычным делом.
 
-    SHIFT_CHANGE_REQUEST_KINDS = ('shorten', 'extra')
+    SHIFT_CHANGE_REQUEST_KINDS = ('shorten', 'extra', 'change', 'day_off')
+    # Виды, которые не уживаются с другой ожидающей заявкой на тот же день:
+    # оба сверяют смену со снимком точно, и чужое одобрение раньше своего
+    # оставило бы такую заявку висеть с ошибкой «смена изменилась».
+    SHIFT_CHANGE_EXCLUSIVE_KINDS = ('change', 'day_off')
     SHIFT_CHANGE_REQUEST_STATUSES = ('pending', 'approved', 'rejected', 'cancelled')
     # Окно, внутри которого заявка вообще имеет смысл. Смена дальше чем через
     # полтора месяца ещё не факт что останется в графике, а прошедшую менять
@@ -51085,7 +51129,8 @@ class Database:
     def _normalize_shift_change_kind(self, value):
         kind = str(value or '').strip().lower()
         if kind not in self.SHIFT_CHANGE_REQUEST_KINDS:
-            raise ValueError("request_kind must be 'shorten' or 'extra'")
+            # Текст уходит оператору как есть, поэтому по-русски и без перечня видов.
+            raise ValueError("Неизвестный вид заявки")
         return kind
 
     def _shift_change_minutes(self, start_value, end_value):
@@ -51126,12 +51171,13 @@ class Database:
         )
         return day_map, window
 
-    def _normalize_shift_change_payload(self, kind, raw_payload):
+    def _normalize_shift_change_payload(self, kind, raw_payload, shift_date_obj=None):
         """Привести тело заявки к каноничному виду и проверить его самосогласованность.
 
         Проверка «а есть ли такая смена на самом деле» здесь НЕ делается: она
         нужна и при подаче, и повторно при согласовании (график мог измениться),
-        поэтому живёт в _validate_shift_change_against_schedule.
+        поэтому живёт в _validate_shift_change_against_schedule и в сверках
+        переноса и выходного.
         """
         payload = raw_payload if isinstance(raw_payload, dict) else {}
         if kind == 'extra':
@@ -51144,6 +51190,13 @@ class Database:
                 'startMin': start_min,
                 'endMin': end_min,
             }
+        if kind == 'day_off':
+            # Что именно снимется, клиент не присылает: снимок смен дня берёт
+            # сервер из графика (_shift_change_day_off_payload), иначе в заявке
+            # можно было бы показать руководителю одно, а снять другое.
+            return {}
+        if kind not in ('shorten', 'change'):
+            raise ValueError("Неизвестный вид заявки")
 
         segment = payload.get('segment') if isinstance(payload.get('segment'), dict) else {}
         seg_start_min, seg_end_min = self._shift_change_minutes(
@@ -51152,6 +51205,34 @@ class Database:
         new_start_min, new_end_min = self._shift_change_minutes(
             payload.get('newStart'), payload.get('newEnd')
         )
+        if kind == 'change':
+            if shift_date_obj is None:
+                raise ValueError("shift_date is required")
+            new_date_raw = payload.get('newDate')
+            new_date_obj = (
+                self._normalize_schedule_date(new_date_raw) if new_date_raw else shift_date_obj
+            )
+            day_shift = (new_date_obj - shift_date_obj).days
+            # Начало всегда относится к новому дню, конец может уйти за полночь.
+            # «01:00» в координаты старого куска здесь НЕ поднимаем, как это
+            # делает сокращение: перенос на раннее утро и хвост ночной смены
+            # иначе не различить. Хвост просят сокращением либо следующим днём.
+            if day_shift == 0 and new_start_min == seg_start_min and new_end_min == seg_end_min:
+                raise ValueError("Смена не изменилась")
+            return {
+                'segment': {
+                    'start': _minutes_to_time(seg_start_min),
+                    'end': _minutes_to_time(seg_end_min),
+                    'startMin': seg_start_min,
+                    'endMin': seg_end_min,
+                },
+                'newDate': new_date_obj.strftime('%Y-%m-%d'),
+                'dayShift': day_shift,
+                'newStart': _minutes_to_time(new_start_min),
+                'newEnd': _minutes_to_time(new_end_min),
+                'newStartMin': new_start_min,
+                'newEndMin': new_end_min,
+            }
         # Ночная смена: кусок 17:00-02:00 приезжает как 1020-1560, а новые
         # границы оператор выбирает из того же списка времён, поэтому 01:00
         # доедет как 60. Поднимаем их в систему координат самого куска.
@@ -51190,6 +51271,10 @@ class Database:
             if self._swap_extract_interval(window_intervals, start_min, end_min):
                 raise ValueError("В это время у оператора уже есть смена")
             return
+        if kind != 'shorten':
+            # Перенос и выходной сверяются своими функциями ниже: молча принять
+            # их здесь за сокращение значило бы проверить не то, что просили.
+            raise ValueError("Неизвестный вид заявки")
 
         seg = payload['segment']
         if not self._swap_is_interval_fully_covered(
@@ -51197,16 +51282,286 @@ class Database:
         ):
             raise ValueError("Смена изменилась — заявка больше не соответствует графику")
 
+    def _shift_change_pending_conflict(self, kind, pending_kinds):
+        """Мешает ли новой заявке вида kind уже ожидающая заявка на тот же день.
+
+        pending_kinds — виды ожидающих заявок оператора на этот день.
+        """
+        pending = {str(item) for item in (pending_kinds or ())}
+        if not pending:
+            return False
+        if kind in pending:
+            return True
+        exclusive = set(self.SHIFT_CHANGE_EXCLUSIVE_KINDS)
+        return kind in exclusive or bool(pending & exclusive)
+
+    def _shift_change_day_pieces(self, day_shifts):
+        """Смены одного дня кусками — так, как их видит оператор в «Моих сменах».
+
+        Соприкасающиеся строки слиты, минуты считаются от полуночи этого дня,
+        конец ночной смены уходит за 1440.
+        """
+        intervals = []
+        for seg in (day_shifts or []):
+            if not isinstance(seg, dict) or not seg.get('start') or not seg.get('end'):
+                continue
+            start_min, end_min = self._schedule_interval_minutes(seg['start'], seg['end'])
+            if int(end_min) > int(start_min):
+                intervals.append({'start': int(start_min), 'end': int(end_min)})
+        return [
+            {
+                'start': _minutes_to_time(item['start']),
+                'end': _minutes_to_time(item['end']),
+                'startMin': int(item['start']),
+                'endMin': int(item['end']),
+            }
+            for item in self._merge_break_intervals(intervals)
+        ]
+
+    def _shift_change_started(self, day_obj, start_min, now):
+        """Наступило ли уже время start_min (минуты от полуночи дня day_obj).
+
+        now — «сейчас» по Алматы без пояса. Одобрение бывает и через сутки после
+        подачи; снять или увезти смену, которая уже идёт или прошла, значит
+        обнулить отработанные часы — они считаются как пересечение смены со статусами.
+        """
+        start_dt = datetime.combine(day_obj, dt_time(0, 0)) + timedelta(minutes=int(start_min))
+        return start_dt <= now
+
+    def _shift_change_target_date(self, shift_date_obj, payload):
+        """День, в который переезжает смена по заявке-переносу."""
+        raw = (payload or {}).get('newDate')
+        return self._normalize_schedule_date(raw) if raw else shift_date_obj
+
+    def _validate_shift_change_move(self, shift_date_obj, payload, day_map, now):
+        """Сверить перенос с ГРАФИКОМ НА СЕЙЧАС — при подаче и при согласовании.
+
+        day_map — смены оператора по дням ('YYYY-MM-DD' -> смены), как их отдаёт
+        _load_operator_shift_map_for_period_tx: нужны день заявки, новый день и
+        по соседнему дню с каждой его стороны.
+        """
+        seg = payload['segment']
+        seg_start = int(seg['startMin'])
+        seg_end = int(seg['endMin'])
+        # Точное совпадение, а не «кусок покрыт графиком», как у сокращения:
+        # перенос вычитает старый кусок целиком, и если смену успели продлить
+        # или сдвинуть, от неё остался бы обрубок.
+        if not any(
+            piece['startMin'] == seg_start and piece['endMin'] == seg_end
+            for piece in self._shift_change_day_pieces(
+                day_map.get(shift_date_obj.strftime('%Y-%m-%d'))
+            )
+        ):
+            raise ValueError("Смена изменилась — заявка больше не соответствует графику")
+        if self._shift_change_started(shift_date_obj, seg_start, now):
+            raise ValueError("Смена уже началась — перенести её нельзя")
+
+        target_date_obj = self._shift_change_target_date(shift_date_obj, payload)
+        new_start = int(payload['newStartMin'])
+        new_end = int(payload['newEndMin'])
+        if self._shift_change_started(target_date_obj, new_start, now):
+            raise ValueError("Новое время смены уже прошло")
+
+        # Остальные смены вокруг нового дня — в минутах от его полуночи. Сам
+        # переносимый кусок в них не входит: сдвиг на пару часов законно
+        # пересекается со своим прежним местом.
+        occupied = []
+        for offset in (-1, 0, 1):
+            neighbour = target_date_obj + timedelta(days=offset)
+            for piece in self._shift_change_day_pieces(
+                day_map.get(neighbour.strftime('%Y-%m-%d'))
+            ):
+                if (
+                    neighbour == shift_date_obj
+                    and piece['startMin'] == seg_start
+                    and piece['endMin'] == seg_end
+                ):
+                    continue
+                occupied.append({
+                    'start': piece['startMin'] + offset * 1440,
+                    'end': piece['endMin'] + offset * 1440,
+                })
+        if self._swap_extract_interval(occupied, new_start, new_end):
+            raise ValueError("В это время у оператора уже есть смена")
+
+    def _shift_change_day_off_payload(self, day_shifts):
+        """Снимок смен дня для заявки на выходной: что именно снимется.
+
+        Берётся из графика, а не от клиента, и хранится в заявке — руководитель
+        видит цену решения, а одобрение сверяет, что день с тех пор не менялся.
+        """
+        pieces = self._shift_change_day_pieces(day_shifts)
+        return {
+            'shifts': pieces,
+            'totalMin': sum(piece['endMin'] - piece['startMin'] for piece in pieces),
+        }
+
+    def _validate_shift_change_day_off(self, shift_date_obj, payload, day_shifts, now):
+        """Сверить заявку на выходной с графиком на сейчас. День берётся по
+        строкам смен ЭТОГО дня, а не по окну: хвост вчерашней ночной смены
+        принадлежит вчерашнему дню и выходным не снимается."""
+        current = sorted(
+            (piece['startMin'], piece['endMin'])
+            for piece in self._shift_change_day_pieces(day_shifts)
+        )
+        if not current:
+            raise ValueError("В этот день смен нет")
+        snapshot = sorted(
+            (int(item.get('startMin') or 0), int(item.get('endMin') or 0))
+            for item in ((payload or {}).get('shifts') or [])
+            if isinstance(item, dict)
+        )
+        if snapshot != current:
+            raise ValueError("Смена изменилась — заявка больше не соответствует графику")
+        if self._shift_change_started(shift_date_obj, current[0][0], now):
+            raise ValueError("Смена уже началась — выходной на этот день взять нельзя")
+
+    def _load_shift_change_move_map_tx(self, cursor, operator_id, shift_date_obj, payload):
+        """Смены оператора для сверки переноса: от дня до старого куска и нового
+        дня до дня после — одним запросом."""
+        target_date_obj = self._shift_change_target_date(shift_date_obj, payload)
+        return self._load_operator_shift_map_for_period_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            start_date_obj=min(shift_date_obj, target_date_obj) - timedelta(days=1),
+            end_date_obj=max(shift_date_obj, target_date_obj) + timedelta(days=1)
+        )
+
+    def _apply_shift_change_move_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id):
+        """Перенести кусок смены по одобренной заявке. Возвращает затронутые даты.
+
+        Пишем точечно: строки старого куска удаляются, новый кусок сохраняет
+        _save_shift_tx. Остальные смены обоих дней не перезаписываются — их вид
+        и перерывы остаются как были.
+        """
+        operator_id = int(operator_id)
+        now = self._almaty_now()
+        day_map = self._load_shift_change_move_map_tx(cursor, operator_id, shift_date_obj, payload)
+        self._validate_shift_change_move(shift_date_obj, payload, day_map, now.replace(tzinfo=None))
+
+        target_date_obj = self._shift_change_target_date(shift_date_obj, payload)
+        affected_dates = sorted({shift_date_obj, target_date_obj})
+        # Перерывы уезжают из базы каскадом вместе со строкой смены, поэтому
+        # снимок нового дня снимаем до удаления старого куска.
+        target_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, target_date_obj)
+        audit_actor = self._schedule_change_actor(
+            cursor, actor_id=actor_id, source='shift_request'
+        )
+        audit_before = self._snapshot_schedule_days_tx(
+            cursor, [(operator_id, day_obj) for day_obj in affected_dates]
+        )
+
+        seg = payload['segment']
+        seg_start = int(seg['startMin'])
+        seg_end = int(seg['endMin'])
+        cursor.execute(
+            """
+            SELECT id, start_time, end_time, shift_type
+            FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+            ORDER BY start_time
+            """,
+            (operator_id, shift_date_obj)
+        )
+        piece_ids = []
+        piece_type = None
+        for shift_id, row_start, row_end, row_type in (cursor.fetchall() or []):
+            row_start_min, row_end_min = self._schedule_interval_minutes(row_start, row_end)
+            if row_start_min < seg_start or row_end_min > seg_end:
+                continue
+            piece_ids.append(int(shift_id))
+            # Кусок бывает слит из нескольких строк — вид берём самый
+            # специфичный, как при слиянии для показа (_merge_shifts_for_date).
+            if piece_type is None or (
+                _work_shift_type_priority(row_type) > _work_shift_type_priority(piece_type)
+            ):
+                piece_type = row_type
+        if not piece_ids:
+            raise ValueError("Смена изменилась — заявка больше не соответствует графику")
+        cursor.execute("DELETE FROM work_shifts WHERE id = ANY(%s)", (piece_ids,))
+
+        # Свой INSERT в work_shifts здесь был бы дырой: именно _save_shift_tx
+        # раскладывает перерывы по правилам направления и снимает выходной.
+        self._save_shift_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            shift_date=target_date_obj,
+            start_time=self._normalize_schedule_time(payload['newStart'], 'start_time'),
+            end_time=self._normalize_schedule_time(payload['newEnd'], 'end_time'),
+            shift_type=piece_type,
+            breaks=None,
+            now=now,
+            day_breaks_snapshot=target_breaks_snapshot
+        )
+
+        # День, из которого смена уехала целиком, — выходной, а не пустая
+        # ячейка: пустая читается как «график ещё не составили» (задача #37).
+        if target_date_obj != shift_date_obj:
+            cursor.execute(
+                "SELECT 1 FROM work_shifts WHERE operator_id = %s AND shift_date = %s LIMIT 1",
+                (operator_id, shift_date_obj)
+            )
+            if not cursor.fetchone():
+                self._set_day_off_tx(cursor, operator_id, shift_date_obj)
+
+        self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+        for day_obj in affected_dates:
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=day_obj,
+                end_date=day_obj
+            )
+        return affected_dates
+
+    def _apply_shift_change_day_off_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id):
+        """Поставить выходной по одобренной заявке. Трогает только день заявки."""
+        operator_id = int(operator_id)
+        day_map = self._load_operator_shift_map_for_period_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            start_date_obj=shift_date_obj,
+            end_date_obj=shift_date_obj
+        )
+        self._validate_shift_change_day_off(
+            shift_date_obj,
+            payload,
+            day_map.get(shift_date_obj.strftime('%Y-%m-%d')),
+            self._almaty_now().replace(tzinfo=None)
+        )
+        audit_actor = self._schedule_change_actor(
+            cursor, actor_id=actor_id, source='shift_request'
+        )
+        audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date_obj)])
+        self._set_day_off_tx(cursor, operator_id, shift_date_obj)
+        self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+        self._recalculate_auto_daily_hours_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=shift_date_obj,
+            end_date=shift_date_obj
+        )
+        return [shift_date_obj]
+
     def _apply_shift_change_request_tx(self, cursor, operator_id, shift_date_obj,
                                        kind, payload, actor_id):
         """Вписать одобренную заявку в график. Возвращает список затронутых дат.
 
-        Пишем ровно тем же путём, что и обмен сменами: снимок дня до правки,
-        очистка затронутых дней, _save_shift_tx на каждый кусок, запись в
-        историю изменений. Свой INSERT в work_shifts здесь был бы дырой —
-        именно _save_shift_tx чистит пересечения, раскладывает перерывы по
-        правилам направления и снимает выходной.
+        Сокращение и доп. часть пишем ровно тем же путём, что и обмен сменами:
+        снимок дня до правки, очистка затронутых дней, _save_shift_tx на каждый
+        кусок, запись в историю изменений. Свой INSERT в work_shifts здесь был
+        бы дырой — именно _save_shift_tx чистит пересечения, раскладывает
+        перерывы по правилам направления и снимает выходной. Перенос и выходной
+        уходят в свои функции: им перезапись окна противопоказана.
         """
+        if kind == 'change':
+            return self._apply_shift_change_move_tx(
+                cursor, operator_id, shift_date_obj, payload, actor_id
+            )
+        if kind == 'day_off':
+            return self._apply_shift_change_day_off_tx(
+                cursor, operator_id, shift_date_obj, payload, actor_id
+            )
         day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
         self._validate_shift_change_against_schedule(kind, payload, window)
 
@@ -51389,7 +51744,12 @@ class Database:
         if kind == 'extra':
             before_min = 0
             after_min = max(0, int(payload.get('endMin') or 0) - int(payload.get('startMin') or 0))
+        elif kind == 'day_off':
+            # Снимаются все смены дня: «было» — их сумма из снимка, «станет» — ноль.
+            before_min = max(0, int(payload.get('totalMin') or 0))
+            after_min = 0
         else:
+            # shorten и change: кусок смены и его новые границы.
             seg = payload.get('segment') if isinstance(payload.get('segment'), dict) else {}
             before_min = max(0, int(seg.get('endMin') or 0) - int(seg.get('startMin') or 0))
             after_min = max(0, int(payload.get('newEndMin') or 0) - int(payload.get('newStartMin') or 0))
@@ -51445,15 +51805,16 @@ class Database:
 
     def create_shift_change_request(self, operator_id, request_kind, shift_date,
                                     payload, request_comment=None):
-        """Подать заявку на сокращение смены или на доп. часть смены."""
+        """Подать заявку по своей смене: сократить, добавить часть, перенести или взять выходной."""
         operator_id = int(operator_id)
         kind = self._normalize_shift_change_kind(request_kind)
         shift_date_obj = self._normalize_schedule_date(shift_date)
-        normalized_payload = self._normalize_shift_change_payload(kind, payload)
+        normalized_payload = self._normalize_shift_change_payload(kind, payload, shift_date_obj)
 
         comment = str(request_comment or '').strip() or None
 
-        today = self._almaty_now().date()
+        now = self._almaty_now()
+        today = now.date()
         if shift_date_obj < today:
             raise ValueError("Прошедшую смену изменить нельзя")
         if (shift_date_obj - today).days > self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS:
@@ -51461,6 +51822,16 @@ class Database:
                 f"Смена слишком далеко: заявки принимаются на "
                 f"{self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS} дней вперёд"
             )
+        if kind == 'change':
+            # Новый день живёт в том же окне, что и день заявки.
+            target_date_obj = self._shift_change_target_date(shift_date_obj, normalized_payload)
+            if target_date_obj < today:
+                raise ValueError("Перенести смену на прошедший день нельзя")
+            if (target_date_obj - today).days > self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS:
+                raise ValueError(
+                    f"Новый день слишком далеко: смену можно перенести не дальше чем на "
+                    f"{self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS} дней вперёд"
+                )
 
         with self._get_cursor() as cursor:
             cursor.execute("SELECT id, role FROM users WHERE id = %s", (operator_id,))
@@ -51473,22 +51844,46 @@ class Database:
             # Один незакрытый запрос на день и вид. Второй такой же — это не
             # новая просьба, а повтор: руководитель увидел бы в очереди две
             # строки об одном и том же и не понял бы, какую разбирать.
+            # Перенос и выходной не уживаются и с заявкой другого вида на тот же
+            # день (SHIFT_CHANGE_EXCLUSIVE_KINDS); сокращение с доп. частью
+            # вместе подавать можно, как и раньше.
             cursor.execute(
                 """
-                SELECT id FROM work_shift_change_requests
-                WHERE operator_id = %s AND shift_date = %s
-                  AND request_kind = %s AND status = 'pending'
-                LIMIT 1
+                SELECT request_kind FROM work_shift_change_requests
+                WHERE operator_id = %s AND shift_date = %s AND status = 'pending'
                 """,
-                (operator_id, shift_date_obj, kind)
+                (operator_id, shift_date_obj)
             )
-            if cursor.fetchone():
+            if self._shift_change_pending_conflict(
+                kind, {str(row[0]) for row in (cursor.fetchall() or [])}
+            ):
                 raise ValueError("По этому дню уже есть заявка на рассмотрении")
 
-            _day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
-            if kind == 'shorten' and not window:
-                raise ValueError("В этот день смен нет")
-            self._validate_shift_change_against_schedule(kind, normalized_payload, window)
+            if kind == 'change':
+                self._validate_shift_change_move(
+                    shift_date_obj,
+                    normalized_payload,
+                    self._load_shift_change_move_map_tx(
+                        cursor, operator_id, shift_date_obj, normalized_payload
+                    ),
+                    now.replace(tzinfo=None)
+                )
+            elif kind == 'day_off':
+                day_shifts = self._load_operator_shift_map_for_period_tx(
+                    cursor=cursor,
+                    operator_id=operator_id,
+                    start_date_obj=shift_date_obj,
+                    end_date_obj=shift_date_obj
+                ).get(shift_date_obj.strftime('%Y-%m-%d'))
+                normalized_payload = self._shift_change_day_off_payload(day_shifts)
+                self._validate_shift_change_day_off(
+                    shift_date_obj, normalized_payload, day_shifts, now.replace(tzinfo=None)
+                )
+            else:
+                _day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
+                if kind == 'shorten' and not window:
+                    raise ValueError("В этот день смен нет")
+                self._validate_shift_change_against_schedule(kind, normalized_payload, window)
 
             # Отдел берём этим же курсором. get_user_department_id открыл бы
             # ВТОРОЕ соединение, пока первое ещё держит транзакцию, а пул тут

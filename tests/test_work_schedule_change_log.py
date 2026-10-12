@@ -342,6 +342,9 @@ class ScheduleChangeActorWiringTests(unittest.TestCase):
             # respond_shift_change_request, а этот приватный шаг — историю
             # сторожим там, где происходит сама запись.
             "_apply_shift_change_request_tx",
+            # Перенос и выходной по заявке пишут график своими функциями.
+            "_apply_shift_change_move_tx",
+            "_apply_shift_change_day_off_tx",
             "save_shift",
             "delete_shift",
             "toggle_day_off",

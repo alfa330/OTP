@@ -870,6 +870,8 @@ def checkpoints(cursor, viewer, limit):
 _SHIFT_REQUEST_KIND_LABELS = {
     'shorten': 'сокращение смены',
     'extra': 'дополнительная часть смены',
+    'change': 'изменение смены',
+    'day_off': 'выходной',
 }
 
 _SHIFT_REQUEST_DECISION_LABELS = {

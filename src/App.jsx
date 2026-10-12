@@ -74,6 +74,8 @@ import {
     PHONE_BUTTON, PHONE_ICONS, PHONE_TIME_INPUT, PhoneDayStrip, PhoneField, PhoneGroup,
     PhoneLinkRow, PhoneRow, useLastPresent
 } from './components/schedule/MyShiftsMobile';
+import ShiftRequestComment from './components/schedule/ShiftRequestComment';
+import { momentPassed, moveTimeline, occupiedAroundDay, overlapsAny, requestIntervalText } from './components/schedule/shiftChangeForm';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { buildMyShiftsTrackLayout, describeMyShiftsTrack, formatTrackDuration, formatTrackTime } from './components/schedule/myShiftsTrackLayout';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
@@ -1672,6 +1674,43 @@ const DateRangePicker = ({ value, onChange, disabled = false, buttonClassName = 
         </>
     );
 };
+
+/* Виды заявки оператора по своей смене (задача #349). Чем вид отличается в
+ * форме, решают эти перечни, а не сравнения по месту: с двумя видами хватало
+ * «shorten, иначе extra», с четырьмя такая развилка молча превращает новый вид
+ * в чужой. Подписи в формах — действием («Сократить смену»), в списках и в
+ * очереди — названием заявки (SHIFT_CHANGE_KIND_LABELS).
+ */
+const SHIFT_CHANGE_KIND_OPTIONS = [
+    { value: 'shorten', label: 'Сократить смену' },
+    { value: 'extra', label: 'Добавить часть смены' },
+    { value: 'change', label: 'Изменить смену' },
+    { value: 'day_off', label: 'Взять выходной' },
+];
+const SHIFT_CHANGE_KIND_VALUES = SHIFT_CHANGE_KIND_OPTIONS.map((option) => option.value);
+// Виды, у которых заявка относится к одному куску смены дня.
+const SHIFT_CHANGE_SEGMENT_KINDS = ['shorten', 'change'];
+const SHIFT_CHANGE_KIND_LABELS = {
+    shorten: 'Сокращение смены',
+    extra: 'Дополнительная часть смены',
+    change: 'Изменение смены',
+    day_off: 'Выходной',
+};
+// Значок и плитка вида в списках телефона (ключи значков — PHONE_ICONS).
+const SHIFT_CHANGE_PHONE_TILES = {
+    shorten: { icon: 'shorten', tile: 'bg-blue-500' },
+    extra: { icon: 'extra', tile: 'bg-emerald-500' },
+    change: { icon: 'change', tile: 'bg-indigo-500' },
+    day_off: { icon: 'dayOff', tile: 'bg-slate-500' },
+};
+// По строке на вид — под «i» у выбора: текст нужен один раз, когда человек не
+// понял, чем виды отличаются, и мешал бы всё остальное время.
+const SHIFT_CHANGE_KIND_HINTS = [
+    'Сократить — прийти позже или уйти раньше в пределах своей смены.',
+    'Добавить часть — выйти дополнительно в любой день, если время не занято другой сменой.',
+    'Изменить — поставить смене другое время или перенести её на другой день.',
+    'Выходной — снять все смены дня.',
+];
 
 /* Таймлайн заявки по смене: что стоит в графике и что просят изменить.
  *
@@ -16485,6 +16524,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 segment: null,
                 newStart: '',
                 newEnd: '',
+                // День, на который переезжает смена («Изменить смену»). По
+                // умолчанию тот же, что и день смены.
+                newDate: '',
                 start: '',
                 end: '',
                 comment: ''
@@ -25630,10 +25672,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 [shiftChangeShiftsForDate, shiftChangeForm?.date]
             );
 
-            /* Какой кусок смены сокращаем. Когда кусок в дне один, выбор не
-               спрашиваем — это был бы вопрос с единственным ответом. */
+            /* Какой кусок смены сокращаем или переносим. Когда кусок в дне один,
+               выбор не спрашиваем — это был бы вопрос с единственным ответом. */
             const shiftChangeSelectedSegment = useMemo(() => {
-                if (shiftChangeForm?.kind !== 'shorten') return null;
+                if (!SHIFT_CHANGE_SEGMENT_KINDS.includes(shiftChangeForm?.kind)) return null;
                 const list = shiftChangeDayShifts;
                 if (list.length === 0) return null;
                 const found = list.find(seg => shiftChangeSegmentKey(seg) === shiftChangeForm?.segmentKey);
@@ -25646,12 +25688,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const openShiftChangeModal = useCallback((kind, dayCard = null, seg = null) => {
                 const dateStr = String(dayCard?.date || '');
+                const nextKind = SHIFT_CHANGE_KIND_VALUES.includes(kind) ? kind : 'shorten';
+                const withSegment = SHIFT_CHANGE_SEGMENT_KINDS.includes(nextKind) && seg;
                 setShiftChangeForm({
-                    kind: kind === 'extra' ? 'extra' : 'shorten',
+                    kind: nextKind,
                     date: dateStr,
                     segmentKey: seg ? `${seg.start || ''}|${seg.end || ''}` : '',
-                    newStart: (kind !== 'extra' && seg) ? String(seg.start || '') : '',
-                    newEnd: (kind !== 'extra' && seg) ? String(seg.end || '') : '',
+                    newStart: withSegment ? String(seg.start || '') : '',
+                    newEnd: withSegment ? String(seg.end || '') : '',
+                    newDate: dateStr,
                     start: '',
                     end: '',
                     comment: ''
@@ -25673,6 +25718,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     segmentKey: only ? `${only.start}|${only.end}` : '',
                     newStart: only ? String(only.start || '') : '',
                     newEnd: only ? String(only.end || '') : '',
+                    // Новый день переноса идёт за днём смены: оставшись на
+                    // прежней дате, он молча превратил бы «сдвинуть время» в
+                    // «увезти смену в другой день».
+                    newDate: dateStr,
                 }));
                 setShiftChangeError('');
             }, [shiftChangeShiftsForDate]);
@@ -25688,16 +25737,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
 
             const setShiftChangeKind = useCallback((nextKind) => {
+                if (!SHIFT_CHANGE_KIND_VALUES.includes(nextKind)) return;
                 setShiftChangeForm(prev => {
                     if (prev.kind === nextKind) return prev;
                     const list = shiftChangeShiftsForDate(prev.date);
-                    const only = list.length === 1 ? list[0] : null;
+                    /* Кусок смены переживает переход «Сократить ↔ Изменить»:
+                       человек уже сказал, о какой смене речь. Границы при этом
+                       возвращаются к её собственным — правила у видов разные,
+                       и «внутри смены» от сокращения в переносе не нужно. */
+                    const kept = SHIFT_CHANGE_SEGMENT_KINDS.includes(prev.kind)
+                        ? list.find(seg => `${seg.start}|${seg.end}` === prev.segmentKey)
+                        : null;
+                    const seg = SHIFT_CHANGE_SEGMENT_KINDS.includes(nextKind)
+                        ? (kept || (list.length === 1 ? list[0] : null))
+                        : null;
                     return {
                         ...prev,
                         kind: nextKind,
-                        segmentKey: nextKind === 'shorten' && only ? `${only.start}|${only.end}` : '',
-                        newStart: nextKind === 'shorten' && only ? String(only.start || '') : '',
-                        newEnd: nextKind === 'shorten' && only ? String(only.end || '') : '',
+                        segmentKey: seg ? `${seg.start}|${seg.end}` : '',
+                        newStart: seg ? String(seg.start || '') : '',
+                        newEnd: seg ? String(seg.end || '') : '',
+                        newDate: prev.date,
                         start: '',
                         end: '',
                     };
@@ -25714,18 +25774,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .filter(Boolean)
             ), [shiftChangeDayShifts, shiftChangeMinutes]);
 
-            /* Предлагаемый интервал в тех же координатах, или null. Для «доп.
-               части» это то, что просят добавить; для сокращения — то, что
-               останется от смены. */
+            /* Предлагаемый интервал, или null. Для «доп. части» это то, что
+               просят добавить; для сокращения — то, что останется от смены; для
+               переноса — новое место смены. Минуты считаются от полуночи дня,
+               в котором интервал начинается: у переноса это новый день, у
+               остальных — день заявки. */
             const shiftChangeProposed = useMemo(() => {
                 const form = shiftChangeForm;
                 if (form?.kind === 'extra') {
                     return form.start && form.end ? shiftChangeMinutes(form.start, form.end) : null;
                 }
+                if (!SHIFT_CHANGE_SEGMENT_KINDS.includes(form?.kind)) return null;
                 const seg = shiftChangeSelectedSegment;
                 if (!seg || !form?.newStart || !form?.newEnd) return null;
                 const bounds = shiftChangeMinutes(form.newStart, form.newEnd);
                 if (!bounds) return null;
+                // Перенос: начало относится к новому дню как есть. «01:00» у
+                // ночной смены здесь — раннее утро, а не её хвост (правило сервера).
+                if (form.kind === 'change') return bounds;
                 let { startMin, endMin } = bounds;
                 if (startMin < seg.startMin && startMin + 1440 <= seg.endMin) {
                     startMin += 1440;
@@ -25735,18 +25801,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return { startMin, endMin };
             }, [shiftChangeForm, shiftChangeSelectedSegment, shiftChangeMinutes]);
 
-            /* Доп. часть поверх существующей смены сервер не примет. Раньше это
-               выяснялось только после отправки — теперь видно сразу, и полоса
-               на таймлайне краснеет. */
-            const shiftChangeExtraConflict = useMemo(() => {
-                if (shiftChangeForm?.kind !== 'extra' || !shiftChangeProposed) return false;
+            /* День, в который переезжает смена, и другой ли он, чем день смены. */
+            const shiftChangeTargetDate = String(
+                (shiftChangeForm?.kind === 'change' && shiftChangeForm?.newDate) || shiftChangeForm?.date || ''
+            );
+            const shiftChangeMovesDay = shiftChangeForm?.kind === 'change'
+                && !!shiftChangeTargetDate
+                && shiftChangeTargetDate !== String(shiftChangeForm?.date || '');
+
+            /* Чем занят новый день переноса: его собственные смены, хвост
+               вчерашней ночной и утро завтрашнего дня — в минутах от его
+               полуночи. Сам переносимый кусок сюда не входит: сдвиг на пару
+               часов законно пересекается со своим прежним местом. */
+            const shiftChangeTargetOccupied = useMemo(() => {
+                if (shiftChangeForm?.kind !== 'change') return [];
+                const seg = shiftChangeSelectedSegment;
+                return occupiedAroundDay(
+                    shiftChangeTargetDate,
+                    shiftChangeShiftsForDate,
+                    shiftChangeMinutes,
+                    seg ? { date: shiftChangeForm.date, startMin: seg.startMin, endMin: seg.endMin } : null
+                );
+            }, [shiftChangeForm?.kind, shiftChangeForm?.date, shiftChangeTargetDate,
+                shiftChangeSelectedSegment, shiftChangeShiftsForDate, shiftChangeMinutes]);
+
+            /* Новую часть или новое место смены поверх другой смены сервер не
+               примет. Раньше это выяснялось только после отправки — теперь
+               видно сразу, и полоса на таймлайне краснеет. */
+            const shiftChangeConflict = useMemo(() => {
+                if (!shiftChangeProposed) return false;
                 const { startMin, endMin } = shiftChangeProposed;
-                return shiftChangeDayIntervals.some(seg => seg.startMin < endMin && startMin < seg.endMin);
-            }, [shiftChangeForm?.kind, shiftChangeProposed, shiftChangeDayIntervals]);
+                const busy = shiftChangeForm?.kind === 'extra'
+                    ? shiftChangeDayIntervals
+                    : (shiftChangeForm?.kind === 'change' ? shiftChangeTargetOccupied : []);
+                return overlapsAny(busy, startMin, endMin);
+            }, [shiftChangeForm?.kind, shiftChangeProposed, shiftChangeDayIntervals, shiftChangeTargetOccupied]);
+
+            /* Наступил ли уже момент «день + минуты от его полуночи» — по
+               Алматы, как считает сервер. Нужен, чтобы человек узнал об этом до
+               отправки; решает всё равно сервер. */
+            const shiftChangeMomentPassed = useCallback((dayKey, minutes) => {
+                const now = almatyNowParts();
+                const nowKey = `${now.year}-${String(now.month).padStart(2, '0')}-${String(now.day).padStart(2, '0')}`;
+                return momentPassed(dayKey, minutes, nowKey, now.hour * 60 + now.minute);
+            }, []);
 
             const shiftChangeTimeline = useMemo(() => {
+                const kind = shiftChangeForm?.kind;
                 const base = shiftChangeDayIntervals.map(s => ({ start: s.startMin, end: s.endMin }));
-                if (shiftChangeForm?.kind === 'extra') {
+                if (kind === 'extra') {
                     return {
                         base,
                         cut: [],
@@ -25754,25 +25857,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ? [{ start: shiftChangeProposed.startMin, end: shiftChangeProposed.endMin }]
                             : [],
                         addTone: 'emerald',
-                        conflict: shiftChangeExtraConflict,
+                        conflict: shiftChangeConflict,
                     };
+                }
+                if (kind === 'day_off') {
+                    // Снимаются все смены дня: каждая полоса — «уходит».
+                    return { base: [], cut: base, add: [], addTone: 'blue', conflict: false };
                 }
                 const seg = shiftChangeSelectedSegment;
                 if (!seg || !shiftChangeProposed) return { base, cut: [], add: [], addTone: 'blue', conflict: false };
+                const proposed = shiftChangeProposed;
+                if (kind === 'change') {
+                    // Ось — новый день; старое место при переносе в другой день
+                    // названо строкой «Сейчас» над полосой (см. moveTimeline).
+                    return moveTimeline({
+                        seg,
+                        proposed,
+                        occupied: shiftChangeTargetOccupied,
+                        movesDay: shiftChangeMovesDay,
+                        conflict: shiftChangeConflict,
+                    });
+                }
                 // Отрезаться может и начало, и конец — поэтому кусков до двух.
                 const cut = [
-                    { start: seg.startMin, end: shiftChangeProposed.startMin },
-                    { start: shiftChangeProposed.endMin, end: seg.endMin },
+                    { start: seg.startMin, end: proposed.startMin },
+                    { start: proposed.endMin, end: seg.endMin },
                 ].filter(s => s.end > s.start);
                 return {
                     base,
                     cut,
-                    add: [{ start: shiftChangeProposed.startMin, end: shiftChangeProposed.endMin }],
+                    add: [{ start: proposed.startMin, end: proposed.endMin }],
                     addTone: 'blue',
                     conflict: false,
                 };
             }, [shiftChangeDayIntervals, shiftChangeForm?.kind, shiftChangeProposed,
-                shiftChangeSelectedSegment, shiftChangeExtraConflict]);
+                shiftChangeSelectedSegment, shiftChangeConflict, shiftChangeTargetOccupied,
+                shiftChangeMovesDay]);
 
             /* Что именно не так с заполненной формой, или null. Одно место на
                подсказку под формой и на блокировку кнопки: два независимых
@@ -25787,12 +25907,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (bounds.endMin <= bounds.startMin) return 'Конец должен быть позже начала';
                     // Ту же проверку делает сервер — здесь она ради того, чтобы
                     // человек увидел конфликт до отправки, а не после.
-                    if (shiftChangeExtraConflict) return 'В это время у вас уже есть смена';
+                    if (shiftChangeConflict) return 'В это время у вас уже есть смена';
                     return null;
                 }
-                if (shiftChangeDayShifts.length === 0) return 'В этот день смен нет';
+                if (shiftChangeDayShifts.length === 0) {
+                    // Куда идти вместо этого, говорим тут же — отдельная плашка
+                    // над этой строкой повторяла бы «смен нет» дважды.
+                    return form.kind === 'shorten'
+                        ? 'В этот день смен нет. Чтобы выйти дополнительно, выберите «Добавить часть смены»'
+                        : 'В этот день смен нет';
+                }
+                if (form.kind === 'day_off') {
+                    const firstStart = Math.min(...shiftChangeDayIntervals.map(s => s.startMin));
+                    if (shiftChangeMomentPassed(form.date, firstStart)) {
+                        return 'Смена уже началась — выходной на этот день взять нельзя';
+                    }
+                    return null;
+                }
                 const seg = shiftChangeSelectedSegment;
                 if (!seg) return 'Выберите смену';
+                if (form.kind === 'change') {
+                    if (!form.newStart || !form.newEnd) return 'Укажите новое время';
+                    const bounds = shiftChangeMinutes(form.newStart, form.newEnd);
+                    if (!bounds) return 'Смена не может быть длиннее суток';
+                    if (!shiftChangeMovesDay && bounds.startMin === seg.startMin && bounds.endMin === seg.endMin) {
+                        return 'Смена не изменилась';
+                    }
+                    if (shiftChangeMomentPassed(form.date, seg.startMin)) {
+                        return 'Смена уже началась — перенести её нельзя';
+                    }
+                    if (shiftChangeMomentPassed(shiftChangeTargetDate, bounds.startMin)) {
+                        return 'Новое время смены уже прошло';
+                    }
+                    if (shiftChangeConflict) return 'В это время у вас уже есть смена';
+                    return null;
+                }
                 if (!form.newStart || !form.newEnd) return 'Укажите новые границы';
                 const bounds = shiftChangeMinutes(form.newStart, form.newEnd);
                 if (!bounds) return 'Смена не может быть длиннее суток';
@@ -25811,15 +25960,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return 'Границы смены не изменились';
                 }
                 return null;
-            }, [shiftChangeForm, shiftChangeMinutes, shiftChangeDayShifts,
-                shiftChangeSelectedSegment, shiftChangeExtraConflict]);
+            }, [shiftChangeForm, shiftChangeMinutes, shiftChangeDayShifts, shiftChangeDayIntervals,
+                shiftChangeSelectedSegment, shiftChangeConflict, shiftChangeMovesDay,
+                shiftChangeTargetDate, shiftChangeMomentPassed]);
 
             const submitShiftChangeRequest = useCallback(async () => {
                 if (shiftChangeFormProblem || shiftChangeSubmitting) return;
                 const form = shiftChangeForm;
-                const payload = form.kind === 'extra'
-                    ? { start: form.start, end: form.end }
-                    : {
+                let payload;
+                if (form.kind === 'extra') {
+                    payload = { start: form.start, end: form.end };
+                } else if (form.kind === 'day_off') {
+                    // Что снимется, сервер берёт из графика сам.
+                    payload = {};
+                } else {
+                    payload = {
                         segment: {
                             start: shiftChangeSelectedSegment.start,
                             end: shiftChangeSelectedSegment.end
@@ -25827,6 +25982,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         newStart: form.newStart,
                         newEnd: form.newEnd
                     };
+                    if (form.kind === 'change') payload.newDate = shiftChangeTargetDate;
+                }
                 setShiftChangeSubmitting(true);
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/requests`, {
@@ -25857,7 +26014,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setShiftChangeSubmitting(false);
                 }
             }, [shiftChangeForm, shiftChangeFormProblem, shiftChangeSubmitting,
-                shiftChangeSelectedSegment, loadShiftChangeRequests]);
+                shiftChangeSelectedSegment, shiftChangeTargetDate, loadShiftChangeRequests]);
 
             const cancelShiftChangeRequest = useCallback(async (requestId) => {
                 if (!requestId || shiftChangeCancellingId) return;
@@ -26124,12 +26281,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ));
             }, [reviewVisibleRequests, user?.id]);
 
-            /* Подписи вида и статуса — один словарь на оба экрана. Две копии
+            /* Подписи статуса — один словарь на оба экрана (подписи вида лежат
+               рядом с перечнем видов, SHIFT_CHANGE_KIND_LABELS). Две копии
                разошлись бы на первой же правке формулировки. */
-            const SHIFT_CHANGE_KIND_LABELS = {
-                shorten: 'Сокращение смены',
-                extra: 'Дополнительная часть смены'
-            };
             const SHIFT_CHANGE_STATUS_META = {
                 pending: { label: 'На рассмотрении', tone: 'amber' },
                 approved: { label: 'Одобрена', tone: 'green' },
@@ -26138,14 +26292,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             /* Что именно просят — одной строкой. Считаем из payload, а не из
                minutesBefore/After: человеку нужны времена, а не только дельта. */
-            const shiftChangeIntervalText = useCallback((item) => {
-                const payload = item?.payload || {};
-                if (item?.kind === 'extra') {
-                    return `${payload.start || '—'} — ${payload.end || '—'}`;
-                }
-                const seg = payload.segment || {};
-                return `${seg.start || '—'} — ${seg.end || '—'} → ${payload.newStart || '—'} — ${payload.newEnd || '—'}`;
-            }, []);
+            const shiftChangeIntervalText = useCallback(
+                (item) => requestIntervalText(item, formatDateRuDayMonth), []
+            );
 
             // Если сменам коллег закрыт доступ — не даём остаться на скрытых табах.
             // «Запросы» сюда НЕ входят: там оператор просит про свою же смену у
@@ -27630,19 +27779,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                     >
                                         <div className="space-y-4">
-                                            <IosSegmented
-                                                value={shiftChangeForm.kind}
-                                                onChange={setShiftChangeKind}
-                                                stretch
-                                                ariaLabel="Что нужно изменить"
-                                                options={[
-                                                    { value: 'shorten', label: 'Сократить' },
-                                                    { value: 'extra', label: 'Доп. часть' },
-                                                ]}
-                                            />
+                                            {/* Четыре вида — списком, а не сегментами: четыре русские
+                                                подписи в полосу на телефоне не помещаются, а сегменты
+                                                в проекте — для двух-трёх вариантов. Чем виды
+                                                отличаются, сказано под «i». */}
+                                            <div className="space-y-1.5">
+                                                {/* «i» стоит рядом с подписью, а не внутри неё: подпись
+                                                    набрана прописными, и пузырёк унаследовал бы их. */}
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className={iosGroupLabel}>Что нужно</span>
+                                                    <IosHint
+                                                        align="left"
+                                                        text={SHIFT_CHANGE_KIND_HINTS.map(line => (
+                                                            <span key={line} className="block [&+span]:mt-1">{line}</span>
+                                                        ))}
+                                                    />
+                                                </div>
+                                                <CustomSelect
+                                                    variant="ios"
+                                                    className="w-full"
+                                                    textClassName="text-[14px] text-slate-900"
+                                                    value={shiftChangeForm.kind}
+                                                    onChange={setShiftChangeKind}
+                                                    options={SHIFT_CHANGE_KIND_OPTIONS}
+                                                    ariaLabel="Что нужно изменить"
+                                                />
+                                            </div>
 
                                             <div className="space-y-1.5">
-                                                <div className={iosGroupLabel}>День</div>
+                                                <div className={iosGroupLabel}>{shiftChangeForm.kind === 'change' ? 'День смены' : 'День'}</div>
                                                 <IosDatePicker
                                                     value={shiftChangeForm.date}
                                                     onChange={setShiftChangeDate}
@@ -27652,70 +27817,84 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                             </div>
 
-                                            {shiftChangeForm.kind === 'shorten' ? (
+                                            {SHIFT_CHANGE_SEGMENT_KINDS.includes(shiftChangeForm.kind) && shiftChangeDayShifts.length > 0 && (
                                                 <>
-                                                    {shiftChangeDayShifts.length === 0 ? (
-                                                        <div className="rounded-xl bg-slate-100 px-3.5 py-2.5 text-[12.5px] text-slate-500">
-                                                            В этот день смен нет. Чтобы выйти дополнительно, переключитесь на «Доп. часть».
-                                                        </div>
-                                                    ) : (
-                                                        <>
-                                                            {/* Выбор куска показываем только когда их правда несколько:
-                                                                вопрос с одним ответом — тот самый лишний шум. */}
-                                                            {shiftChangeDayShifts.length > 1 && (
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Какая смена</div>
-                                                                    <div className="flex flex-wrap gap-1.5">
-                                                                        {shiftChangeDayShifts.map((seg, idx) => {
-                                                                            const key = `${seg.start}|${seg.end}`;
-                                                                            const active = shiftChangeSegmentKey(shiftChangeSelectedSegment || {}) === key;
-                                                                            return (
-                                                                                <button
-                                                                                    key={`scr-seg-${idx}`}
-                                                                                    type="button"
-                                                                                    onClick={() => selectShiftChangeSegment(seg)}
-                                                                                    className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium tabular-nums transition active:scale-[0.98] ${
-                                                                                        active
-                                                                                            ? 'bg-blue-600 text-white shadow-sm'
-                                                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                                                    }`}
-                                                                                >
-                                                                                    {seg.start} — {seg.end}
-                                                                                </button>
-                                                                            );
-                                                                        })}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                            <div className="grid grid-cols-2 gap-3">
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Начало</div>
-                                                                    <IosTimePicker
-                                                                        value={shiftChangeForm.newStart}
-                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newStart: v }))}
-                                                                        ariaLabel="Новое начало смены"
-                                                                    />
-                                                                </div>
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Конец</div>
-                                                                    <IosTimePicker
-                                                                        value={shiftChangeForm.newEnd}
-                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newEnd: v }))}
-                                                                        ariaLabel="Новый конец смены"
-                                                                    />
-                                                                </div>
+                                                    {/* Выбор куска показываем только когда их правда несколько:
+                                                        вопрос с одним ответом — тот самый лишний шум. */}
+                                                    {shiftChangeDayShifts.length > 1 && (
+                                                        <div className="space-y-1.5">
+                                                            <div className={iosGroupLabel}>Какая смена</div>
+                                                            <div className="flex flex-wrap gap-1.5">
+                                                                {shiftChangeDayShifts.map((seg, idx) => {
+                                                                    const key = `${seg.start}|${seg.end}`;
+                                                                    const active = shiftChangeSegmentKey(shiftChangeSelectedSegment || {}) === key;
+                                                                    return (
+                                                                        <button
+                                                                            key={`scr-seg-${idx}`}
+                                                                            type="button"
+                                                                            onClick={() => selectShiftChangeSegment(seg)}
+                                                                            className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium tabular-nums transition active:scale-[0.98] ${
+                                                                                active
+                                                                                    ? 'bg-blue-600 text-white shadow-sm'
+                                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                                            }`}
+                                                                        >
+                                                                            {seg.start} — {seg.end}
+                                                                        </button>
+                                                                    );
+                                                                })}
                                                             </div>
-                                                            {shiftChangeSelectedSegment && (
-                                                                <div className="text-[12px] tabular-nums text-slate-500">
-                                                                    Сейчас {shiftChangeSelectedSegment.start} — {shiftChangeSelectedSegment.end}
-                                                                    <span className="text-slate-400"> · </span>
-                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
-                                                                </div>
-                                                            )}
-                                                        </>
+                                                        </div>
+                                                    )}
+                                                    {/* Перенос: куда. По умолчанию тот же день — тогда это
+                                                        просто другое время. */}
+                                                    {shiftChangeForm.kind === 'change' && (
+                                                        <div className="space-y-1.5">
+                                                            <div className={iosGroupLabel}>Новый день</div>
+                                                            <IosDatePicker
+                                                                value={shiftChangeTargetDate}
+                                                                onChange={(v) => {
+                                                                    setShiftChangeForm(prev => ({ ...prev, newDate: String(v || '') }));
+                                                                    setShiftChangeError('');
+                                                                }}
+                                                                min={todayDateStr(new Date())}
+                                                                max={todayDateStr(addDays(new Date(), 45))}
+                                                                ariaLabel="Новый день смены"
+                                                            />
+                                                        </div>
+                                                    )}
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div className="space-y-1.5">
+                                                            <div className={iosGroupLabel}>Начало</div>
+                                                            <IosTimePicker
+                                                                value={shiftChangeForm.newStart}
+                                                                onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newStart: v }))}
+                                                                ariaLabel="Новое начало смены"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <div className={iosGroupLabel}>Конец</div>
+                                                            <IosTimePicker
+                                                                value={shiftChangeForm.newEnd}
+                                                                onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newEnd: v }))}
+                                                                ariaLabel="Новый конец смены"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    {shiftChangeSelectedSegment && (
+                                                        <div className="text-[12px] tabular-nums text-slate-500">
+                                                            {/* Дата — только когда смена уезжает в другой день:
+                                                                иначе она уже стоит в поле «День смены». */}
+                                                            Сейчас {shiftChangeMovesDay ? `${formatDateRuDayMonth(shiftChangeForm.date)}, ` : ''}
+                                                            {shiftChangeSelectedSegment.start} — {shiftChangeSelectedSegment.end}
+                                                            <span className="text-slate-400"> · </span>
+                                                            {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
+                                                        </div>
                                                     )}
                                                 </>
-                                            ) : (
+                                            )}
+
+                                            {shiftChangeForm.kind === 'extra' && (
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <div className="space-y-1.5">
                                                         <div className={iosGroupLabel}>Начало</div>
@@ -27736,15 +27915,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
 
+                                            {/* Причина стоит среди полей, а не последней строкой под
+                                                таймлайном: там её не замечали — писали причину меньше
+                                                чем в половине заявок (задача #349). Обязательной она
+                                                не стала, поэтому кнопку не держит. */}
+                                            <div className="space-y-1.5">
+                                                <div className={iosGroupLabel}>Причина</div>
+                                                <textarea
+                                                    rows={2}
+                                                    value={shiftChangeForm.comment}
+                                                    onChange={(e) => setShiftChangeForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                    placeholder="Почему нужна заявка — руководителю будет проще решить"
+                                                    aria-label="Причина заявки"
+                                                    className={`${iosInput} resize-none`}
+                                                />
+                                            </div>
+
                                             {/* Таймлайн дня: серым то, что стоит в графике, розовым
-                                                отрезаемое, цветным итог. Числа под ним — только
+                                                уходящее, цветным итог. Числа под ним — только
                                                 «было → станет», без повтора самих границ: они уже
-                                                стоят в полях выше. */}
-                                            {(shiftChangeTimeline.base.length > 0 || shiftChangeTimeline.add.length > 0) && (
+                                                стоят в полях выше. У выходного полей времени нет,
+                                                поэтому снимаемые смены названы здесь же. */}
+                                            {(shiftChangeTimeline.base.length > 0 || shiftChangeTimeline.add.length > 0
+                                                || shiftChangeTimeline.cut.length > 0) && (
                                                 <div className="space-y-2 rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
                                                     <ShiftChangeTimeline {...shiftChangeTimeline} />
                                                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-slate-500">
-                                                        {shiftChangeForm.kind === 'shorten' && shiftChangeSelectedSegment && (
+                                                        {shiftChangeForm.kind === 'day_off' && (
+                                                            <span>
+                                                                Снимется <span className="font-semibold text-slate-700">
+                                                                    {formatMinutesOnly(shiftChangeDayIntervals.reduce((sum, s) => sum + (s.endMin - s.startMin), 0))}
+                                                                </span>
+                                                                <span className="text-slate-400"> · </span>
+                                                                {shiftChangeDayShifts.map(seg => `${seg.start} — ${seg.end}`).join(', ')}
+                                                            </span>
+                                                        )}
+                                                        {SHIFT_CHANGE_SEGMENT_KINDS.includes(shiftChangeForm.kind) && shiftChangeSelectedSegment && (
                                                             <span>
                                                                 Было <span className="font-semibold text-slate-700">
                                                                     {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
@@ -27754,14 +27960,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         {shiftChangeProposed && (
                                                             <span>
                                                                 {shiftChangeForm.kind === 'extra' ? 'Добавится ' : 'Станет '}
-                                                                <span className={`font-semibold ${shiftChangeExtraConflict ? 'text-rose-600' : 'text-slate-700'}`}>
+                                                                <span className={`font-semibold ${shiftChangeConflict ? 'text-rose-600' : 'text-slate-700'}`}>
                                                                     {formatMinutesOnly(shiftChangeProposed.endMin - shiftChangeProposed.startMin)}
                                                                 </span>
                                                             </span>
                                                         )}
                                                         {/* Про склейку говорим прямо: иначе «доп. часть впритык»
                                                             выглядит как вторая смена, а в графике станет одной. */}
-                                                        {shiftChangeForm.kind === 'extra' && !shiftChangeExtraConflict && shiftChangeProposed
+                                                        {shiftChangeForm.kind === 'extra' && !shiftChangeConflict && shiftChangeProposed
                                                             && shiftChangeDayIntervals.some(seg =>
                                                                 seg.endMin === shiftChangeProposed.startMin
                                                                 || seg.startMin === shiftChangeProposed.endMin) && (
@@ -27770,17 +27976,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                 </div>
                                             )}
-
-                                            <div className="space-y-1.5">
-                                                <div className={iosGroupLabel}>Комментарий · необязательно</div>
-                                                <textarea
-                                                    rows={2}
-                                                    value={shiftChangeForm.comment}
-                                                    onChange={(e) => setShiftChangeForm(prev => ({ ...prev, comment: e.target.value }))}
-                                                    placeholder="Причина — руководителю будет понятнее"
-                                                    className={`${iosInput} resize-none`}
-                                                />
-                                            </div>
 
                                             {/* Одна строка на всё: и почему кнопка недоступна, и что
                                                 ответил сервер. Два разных места под одну мысль
@@ -28164,7 +28359,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     icon={PHONE_ICONS.plus}
                                     tileClassName="bg-blue-600"
                                     title="Новый запрос"
-                                    subtitle="Сократить или добавить часть смены"
+                                    subtitle="Изменить смену или взять выходной"
                                     onClick={() => openShiftChangeModal('shorten', { date: phoneToday })}
                                 />
                             </PhoneGroup>
@@ -28179,16 +28374,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
                                     const deltaMin = Number(item?.minutesDelta) || 0;
                                     const deltaText = deltaMin !== 0 ? ` (${deltaMin > 0 ? '+' : '−'}${formatMinutesOnly(Math.abs(deltaMin))})` : '';
+                                    const phoneTile = SHIFT_CHANGE_PHONE_TILES[item.kind] || SHIFT_CHANGE_PHONE_TILES.shorten;
                                     return (
                                         <MyShiftsRequestCard
                                             key={`phone-scr-${item.id}`}
-                                            icon={item.kind === 'extra' ? PHONE_ICONS.extra : PHONE_ICONS.shorten}
-                                            tileClassName={item.kind === 'extra' ? 'bg-emerald-500' : 'bg-blue-500'}
+                                            icon={PHONE_ICONS[phoneTile.icon]}
+                                            tileClassName={phoneTile.tile}
                                             title={SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
                                             badge={statusMeta.label}
                                             badgeTone={statusMeta.tone}
                                             subtitle={`${formatDateRuDayMonth(parseDateStr(item.shiftDate))} · ${shiftChangeIntervalText(item)}${deltaText}`}
-                                            notes={[item.requestComment || null, item.responseComment ? `Ответ: ${item.responseComment}` : null]}
+                                            comment={item.requestComment}
+                                            notes={[item.responseComment ? `Ответ: ${item.responseComment}` : null]}
                                             actions={item.status === 'pending' ? [{
                                                 key: 'cancel',
                                                 label: 'Отозвать',
@@ -29299,7 +29496,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <span className="ml-1.5 inline-flex align-middle">
                                                         <IosHint
                                                             align="left"
-                                                            text="Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Заявки принимаются на сегодня и на 45 дней вперёд."
+                                                            text="Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Изменить смену — поставить ей другое время или перенести на другой день. Выходной снимает все смены дня. Перенос и выходной просят до начала смены. Заявки принимаются на сегодня и на 45 дней вперёд."
                                                         />
                                                     </span>
                                                 </div>
@@ -29323,7 +29520,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                     <div className="text-[14px] font-semibold text-slate-700">Заявок пока нет</div>
                                                     <div className="mt-0.5 text-[12.5px] text-slate-500">
-                                                        Сократить смену или попросить дополнительную часть можно кнопкой «Новый запрос».
+                                                        Заявку по своей смене можно подать кнопкой «Новый запрос».
                                                     </div>
                                                 </div>
                                             ) : (
@@ -29351,11 +29548,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                 </span>
                                                                             )}
                                                                         </div>
-                                                                        {item.requestComment && (
-                                                                            <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                                                                {item.requestComment}
-                                                                            </div>
-                                                                        )}
+                                                                        <ShiftRequestComment text={item.requestComment} className="mt-1.5" />
                                                                         {item.responseComment && (
                                                                             <div className="mt-1 text-[12px] leading-snug text-slate-600">
                                                                                 <span className="text-slate-400">Ответ: </span>
@@ -31314,7 +31507,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     open={showReviewModal}
                     onClose={() => setShowReviewModal(false)}
                     title="Запросы по сменам"
-                    subtitle="Заявки операторов на сокращение смены и дополнительную часть"
+                    subtitle="Заявки операторов на изменение своих смен"
                     maxWidth="max-w-2xl"
                     footer={(
                         <div className="flex w-full items-center justify-between gap-2">
@@ -31347,7 +31540,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex items-center gap-1.5">
                                 <IosHint
                                     align="right"
-                                    text="Одобрение сразу правит график: смена сокращается или в день добавляется новая часть, перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
+                                    text="Одобрение сразу правит график: смена сокращается, переезжает на новое время или в день добавляется новая часть; выходной снимает все смены дня. Перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Смену, которая уже началась, перенести или снять нельзя — такую заявку можно только отклонить. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
                                 />
                                 <button
                                     type="button"
@@ -31454,11 +31647,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </span>
                                                                 )}
                                                             </div>
-                                                            {item.requestComment && (
-                                                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                                                    {item.requestComment}
-                                                                </div>
-                                                            )}
+                                                            <ShiftRequestComment text={item.requestComment} className="mt-1.5" />
                                                             {item.status !== 'pending' && item.responseComment && (
                                                                 <div className="mt-1 text-[12px] leading-snug text-slate-600">
                                                                     <span className="text-slate-400">Ответ: </span>
@@ -31880,7 +32069,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         title: 'Запросы',
                         subtitle: reviewPendingCount > 0
                             ? `Ожидают решения: ${reviewPendingCount}`
-                            : 'Заявки на сокращение и доп. часть',
+                            : 'Заявки операторов по своим сменам',
                         onClick: () => {
                             setReviewError('');
                             setShowReviewModal(true);
@@ -33454,7 +33643,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             loadReviewRequests({ silent: true });
                                         }}
                                         className={PLANNER_TOOLBAR_BTN}
-                                        title="Заявки операторов на сокращение смены и дополнительную часть"
+                                        title="Заявки операторов на изменение своих смен"
                                     >
                                         <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-inbox'} text-slate-400`}></FaIcon>
                                         Запросы

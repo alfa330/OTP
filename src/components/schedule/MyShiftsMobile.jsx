@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowLeftRight, CalendarPlus, Check, ChevronLeft, ChevronRight, Coffee, Plus, Scissors, UserRound } from 'lucide-react';
+import { ArrowLeftRight, CalendarClock, CalendarOff, CalendarPlus, Check, ChevronLeft, ChevronRight, Coffee, Plus, Scissors, UserRound } from 'lucide-react';
 import FaIcon from '../common/FaIcon';
 import { IosBadge, IosToggle, iosCard } from '../ui/ios';
 import {
@@ -16,6 +16,7 @@ import {
 } from '../resources/ShiftAuctionMobile';
 import { resolveTrackTap } from './myShiftsTrackLayout';
 import '../resources/shift-auction-mobile.css';
+import ShiftRequestComment from './ShiftRequestComment';
 import './my-shifts-mobile.css';
 
 /*
@@ -64,6 +65,8 @@ export const PHONE_ICONS = {
   replace: UserRound,
   shorten: Scissors,
   extra: CalendarPlus,
+  change: CalendarClock,
+  dayOff: CalendarOff,
 };
 
 /* Строка над полосой дней — как в календаре на компьютере: стрелки парой слева,
@@ -567,6 +570,7 @@ export const MyShiftsRequestCard = ({
   badge = null,
   badgeTone = 'slate',
   subtitle = null,
+  comment = null,
   notes = [],
   actions = [],
 }) => (
@@ -586,6 +590,14 @@ export const MyShiftsRequestCard = ({
         {badge ? <IosBadge tone={badgeTone} className="mr-1.5 align-[1px]">{badge}</IosBadge> : null}
         {subtitle}
       </p>
+    ) : null}
+    {/* Слова автора заявки — цитатой, а не ещё одной серой строкой среди
+        пояснений: иначе причина и ответ руководителя неразличимы. Отступ под
+        плитку значка держит обёртка: цитата сама шире места не становится. */}
+    {String(comment || '').trim() ? (
+      <div className="mt-1.5 pl-[42px]">
+        <ShiftRequestComment text={comment} />
+      </div>
     ) : null}
     {notes.filter(Boolean).map((note, index) => (
       // Пояснения статичны — индекс честный ключ.
