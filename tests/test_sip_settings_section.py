@@ -20,12 +20,14 @@
 
 import ast
 import json
+import logging
 import re
 import textwrap
 import unittest
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
 from tests import source_cache
 
@@ -64,14 +66,16 @@ def _source_of(node, source):
     return "\n".join(line for line in text.splitlines() if not line.startswith("@"))
 
 
-def _select_columns(select_sql):
+def _select_columns(select_sql, from_clause="FROM users"):
     """Колонки SELECT'а по порядку — позиционный маппер читает row строго по нему.
 
     Резать по запятым «в лоб» нельзя: внутри COALESCE(...) их полно. Считаем
     глубину скобок и режем только на верхнем уровне, а строки-комментарии
-    выбрасываем — колонками они не являются.
+    выбрасываем — колонками они не являются. from_clause — где список колонок
+    кончается: у списка отделов это FROM departments (FROM users там есть
+    только ниже, в подзапросах).
     """
-    head = select_sql.split("FROM users", 1)[0]
+    head = select_sql.split(from_clause, 1)[0]
     head = "\n".join(
         line for line in head.splitlines() if not line.strip().startswith("--")
     ).strip()
@@ -93,8 +97,11 @@ def _select_columns(select_sql):
     return columns
 
 
-def _max_row_index(method_name):
-    """Наибольший row[N], который читает позиционный маппер Database."""
+def _max_row_index(method_name, row_name="row"):
+    """Наибольший row[N], который читает позиционный маппер Database.
+
+    row_name — имя строки в маппере: get_sip_department_configs зовёт её r.
+    """
     node = next(
         n for n in DATABASE_CLASS.body
         if isinstance(n, ast.FunctionDef) and n.name == method_name
@@ -102,7 +109,7 @@ def _max_row_index(method_name):
     return max(
         n.slice.value for n in ast.walk(node)
         if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
-        and n.value.id == "row" and isinstance(n.slice, ast.Constant)
+        and n.value.id == row_name and isinstance(n.slice, ast.Constant)
     )
 
 
@@ -114,7 +121,9 @@ def _database_namespace(method_names):
     """Исполняет методы Database без импорта модуля (он поднимает пул к БД)."""
     # Optional нужен настоящий: аннотация `-> Optional[dict]` вычисляется прямо
     # при exec'е, и заглушка None падала бы на `None[dict]`.
-    ns = {"json": json, "re": re, "Optional": Optional,
+    # logging — для веток сбоя: чтение яруса автосброса отдела линии пишет в лог,
+    # а не роняет регистрацию.
+    ns = {"json": json, "re": re, "Optional": Optional, "logging": logging,
           "execute_values": _fake_execute_values}
     for node in DATABASE_MODULE.body:
         # BINOTEL_ — не прихоть: BINOTEL_CABINET_URL_DEFAULT нужен
@@ -130,6 +139,9 @@ def _database_namespace(method_names):
             # Трёхпозиционный автоприём: «как у отдела» третьим состоянием.
             "is_sip_inherit", "parse_sip_flag_tri", "parse_sip_delay_tri",
             "resolve_sip_auto_answer", "resolve_sip_auto_answer_delay",
+            # Автосброс исходящего без ответа: ярус только отдела.
+            "parse_sip_ring_timeout_rings", "resolve_sip_ring_timeout_rings",
+            "sip_ring_timeout_seconds",
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
@@ -173,6 +185,22 @@ class _FakeCursor:
         return False
 
 
+class _RawSqlCursor(_FakeCursor):
+    """Курсор, который помнит SQL дословно — с переводами строк и комментариями.
+
+    _FakeCursor сжимает пробелы в одну строку, и тогда «-- …» уже не отрезать
+    построчно: запятые из комментариев _select_columns принял бы за колонки.
+    """
+
+    def __init__(self, rows=None):
+        super().__init__(rows)
+        self.raw_sql = []
+
+    def execute(self, sql, params=None):
+        self.raw_sql.append(str(sql))
+        super().execute(sql, params)
+
+
 class _StubDb:
     """Достаточный кусок Database, чтобы гонять методы без базы."""
 
@@ -196,6 +224,12 @@ class _StubDb:
         """Привязок к линиям раздела «Удаленный КЦ» у этих тестов нет; сама проверка —
         в SaveUserSipSettingsSeatedLineTests."""
         return None
+
+    def _sip_department_ring_timeout_rings(self, department_id):
+        """Ярус автосброса отдела линии: настоящий метод, если тест его исполнил,
+        иначе «не задано» — сама проверка в RingTimeoutReachesThePhoneTests."""
+        method = self._ns.get("_sip_department_ring_timeout_rings")
+        return method(self, department_id) if method else None
 
     def call(self, name, *args, **kwargs):
         return self._ns[name](self, *args, **kwargs)
@@ -231,6 +265,8 @@ OPERATOR_STATE = {
     # Учётка кабинета Oktell — у отделов локальной АТС. Пароль наружу не
     # отдаётся никогда, поэтому в строке сотрудника только логин и признак.
     "oktell_cabinet_login": "", "has_oktell_cabinet_password": False,
+    # Автосброс исходящего — ярус только отдела (None = не задано, действуют 5 гудков).
+    "department_ring_timeout_rings": None,
 }
 
 
@@ -600,9 +636,12 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.assertTrue(columns[35].endswith("AS oktell_cabinet_login"), columns[35])
         self.assertTrue(
             columns[36].endswith("AS has_oktell_cabinet_password"), columns[36])
-        # Код отдела дописан следующим и стал новым хвостом: по нему карточка
-        # узнаёт отдел, чья телефония — кабинет Oktell.
-        self.assertTrue(columns[-1].endswith("AS department_code"), columns[-1])
+        # Код отдела дописан следующим: по нему карточка узнаёт отдел, чья
+        # телефония — кабинет Oktell.
+        self.assertTrue(columns[37].endswith("AS department_code"), columns[37])
+        # Ярус автосброса исходящего (11.10.2026) — новый хвост, за кодом отдела.
+        self.assertTrue(
+            columns[-1].endswith("AS department_ring_timeout_rings"), columns[-1])
 
     def test_the_auto_answer_columns_are_read_raw_and_not_collapsed(self):
         """COALESCE(s.auto_answer, FALSE) схлопнул бы «как у отдела» с «выключено».
@@ -615,6 +654,18 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.assertIn("s.auto_answer_delay AS auto_answer_delay", sql)
         self.assertNotIn("COALESCE(s.auto_answer, FALSE)", sql)
         self.assertNotIn("COALESCE(s.auto_answer_delay", sql)
+
+    def test_the_ring_timeout_tier_is_read_raw_and_not_collapsed(self):
+        """COALESCE(dc.ring_timeout_rings, 0) молча выключил бы автосброс всем.
+
+        NULL здесь — «отдел не задавал», и действуют пять гудков: сброс включён
+        у всех по умолчанию (решение владельца), 0 — «не сбрасывать». Схлопни
+        одно в другое — и каждый отдел, где поле не трогали, остался бы без
+        сброса. Тесты резолвера этого не заметят: они кормят его готовой строкой.
+        """
+        sql = " ".join(self.ns["_SIP_OPERATOR_SELECT"].split())
+        self.assertIn("dc.ring_timeout_rings AS department_ring_timeout_rings", sql)
+        self.assertNotIn("COALESCE(dc.ring_timeout_rings", sql)
 
     def test_the_direction_join_never_drops_anyone(self):
         """Направление подтягиваем ТОЛЬКО левым join'ом.
@@ -1535,6 +1586,8 @@ class DepartmentSipConfigTests(unittest.TestCase):
             "auto_answer": None, "auto_answer_delay": None,
             "binotel_cabinet_url": "",
             "own_auto_answer_count": 0,
+            # Автосброс исходящего: None = не задано, действуют 5 гудков.
+            "ring_timeout_rings": None,
         }
         self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
 
@@ -1545,15 +1598,15 @@ class DepartmentSipConfigTests(unittest.TestCase):
         # Колонки: id, имя, код, сервер, база пароля, код автодозвона, его
         # сервер и база, ПРОВАЙДЕР, configured, updated_at, автор, счётчик,
         # автоприём отдела, его задержка, адрес кабинета, сколько человек с
-        # личной настройкой. provider встал перед configured — все флаги за ним
-        # сдвинулись; ярус автоприёма дописан в хвост.
+        # личной настройкой, гудки автосброса. provider встал перед configured —
+        # все флаги за ним сдвинулись; ярусы автоприёма и автосброса дописаны в хвост.
         db = _StubDb(self.ns, _FakeCursor([
             (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7,
-             None, None, '', 0),
+             None, None, '', 0, None),
             (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', 'dialer.sales',
-             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3, None, None, '', 0),
+             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3, None, None, '', 0, None),
             (900, 'Тез КЦ', 'tez', '', '', '', '', '', 'binotel', True, None, 'Админ', 5,
-             True, 3, 'https://my.binotel.kz', 2),
+             True, 3, 'https://my.binotel.kz', 2, 0),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual([False, True, True], [r["configured"] for r in rows])
@@ -1572,6 +1625,24 @@ class DepartmentSipConfigTests(unittest.TestCase):
         # раздел не смог бы решить, в какую половину их показать.
         self.assertIn("COALESCE(c.provider, 'asterisk') AS provider", sql)
         self.assertEqual(["operator", "trainee"], params[0])   # считаем только тех, у кого телефон
+
+    def test_listing_columns_line_up_with_the_positional_mapper(self):
+        """get_sip_department_configs читает строку по индексам r[N] — порядок
+        колонок здесь такой же контракт, как у _SIP_OPERATOR_SELECT.
+
+        Фикстуры выше — готовые кортежи, сдвига они не увидят. А колонка,
+        вставленная в середину, сдвинула бы всё за ней: карточка отдела
+        показала бы задержку автоприёма числом гудков, счётчик людей — адресом
+        кабинета и так далее.
+        """
+        cursor = _RawSqlCursor()
+        self.ns["get_sip_department_configs"](_StubDb(self.ns, cursor))
+        columns = _select_columns(cursor.raw_sql[0], "FROM departments")
+        # Столько колонок, сколько индексов читает маппер: лишняя (или забытая)
+        # колонка — это и есть сдвиг.
+        self.assertEqual(_max_row_index("get_sip_department_configs", "r") + 1, len(columns))
+        # Гудки автосброса (11.10.2026) дописаны в хвост, а не в середину.
+        self.assertEqual("c.ring_timeout_rings", columns[-1])
 
     def test_saving_upserts_and_validates_the_autodial_code(self):
         self.ns["update_sip_department_config"](self.db, 12, {"sip_server": "pbx.sales", "autodial_code": "*7 7"}, user_id=5)
@@ -2797,6 +2868,7 @@ class DepartmentAutoAnswerStorageTests(unittest.TestCase):
             "configured": True, "updated_at": None, "updated_by_name": None,
             "operators_count": 19, "auto_answer": None, "auto_answer_delay": None,
             "binotel_cabinet_url": "", "own_auto_answer_count": 19,
+            "ring_timeout_rings": None,
         }
         self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
 
@@ -2853,7 +2925,7 @@ class DepartmentAutoAnswerStorageTests(unittest.TestCase):
         """
         db = _StubDb(self.ns, _FakeCursor([
             (560, 'Тез КЦ', 'tez', 'sip52.binotel.com', '', '', '', '', 'binotel',
-             True, None, 'Админ', 19, True, 3, 'https://my.binotel.kz', 19),
+             True, None, 'Админ', 19, True, 3, 'https://my.binotel.kz', 19, None),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual(19, rows[0]["own_auto_answer_count"])
@@ -3392,3 +3464,415 @@ class SzovSupervisorAccessTests(unittest.TestCase):
         self.assertFalse(can(33, 'sv'), 'СВ Тез КЦ раздела не просил')
         self.assertFalse(can(34, 'sv'), 'СВ фронт-офисов — телефонии нет')
         self.assertFalse(can(31, 'operator'), 'рядовой сотрудник СЗоВ')
+
+
+class _BrokenCursor(_FakeCursor):
+    """Курсор, на котором любой запрос падает: «база недоступна»."""
+
+    def execute(self, sql, params=None):
+        raise RuntimeError("база недоступна")
+
+
+class RingTimeoutParseTests(unittest.TestCase):
+    """Автосброс исходящего без ответа (запрос владельца 11.10.2026): разбор и расчёт.
+
+    Ярус один — отдел. NULL — «не задано», и действует умолчание: пять гудков,
+    то есть сброс включён у всех сразу (решение владельца). 0 — не сбрасывать,
+    явное число — от 0 до 20.
+    """
+
+    def setUp(self):
+        self.ns = _database_namespace(set())
+
+    def test_the_constants_are_the_agreed_ones(self):
+        """Пять гудков по пять секунд — то, о чём договорились с телефоном."""
+        self.assertEqual(5, self.ns["SIP_RING_TIMEOUT_RINGS_DEFAULT"])
+        self.assertEqual(5, self.ns["SIP_RING_SECONDS_PER_RING"])
+        self.assertEqual(20, self.ns["SIP_RING_TIMEOUT_RINGS_MAX"])
+
+    def test_empty_null_and_inherit_mean_the_default(self):
+        """Пустое поле здесь — «по умолчанию», а не «оставить как было».
+
+        Так поле и подписано («Пусто — 5»), и иначе вернуть отдел к умолчанию
+        было бы нечем.
+        """
+        parse = self.ns["parse_sip_ring_timeout_rings"]
+        for value in (None, "", "   ", "inherit", " INHERIT "):
+            self.assertIsNone(parse(value, 7), repr(value))
+
+    def test_numbers_are_clamped_instead_of_refused(self):
+        parse = self.ns["parse_sip_ring_timeout_rings"]
+        self.assertEqual(7, parse("7", None))
+        self.assertEqual(7, parse(7.9, None))
+        # Ноль — осмысленное «не сбрасывать», а не пустота.
+        self.assertEqual(0, parse(0, 5))
+        self.assertEqual(0, parse("0", 5))
+        self.assertEqual(0, parse("-3", 5))
+        self.assertEqual(20, parse(99, None))
+
+    def test_a_bool_or_garbage_keeps_the_previous_value(self):
+        """Сорванная валидация на фронте не повод молча выключить сброс отделу.
+
+        bool — тоже int: ring_timeout_rings: true не должно стать «1 гудок».
+        """
+        parse = self.ns["parse_sip_ring_timeout_rings"]
+        self.assertEqual(7, parse(True, 7))
+        self.assertIsNone(parse(False, None))
+        self.assertEqual(7, parse("пять", 7))
+        self.assertEqual(7, parse(float("nan"), 7))
+        # Infinity json.loads пропускает — OverflowError не должен уронить ручку в 500.
+        self.assertEqual(7, parse(float("inf"), 7))
+
+    def test_the_effective_value_falls_back_to_five_rings(self):
+        resolve = self.ns["resolve_sip_ring_timeout_rings"]
+        self.assertEqual(5, resolve(None))
+        self.assertEqual(0, resolve(0))
+        self.assertEqual(7, resolve(7))
+        # Ручная правка в базе не уедет в телефон за пределами диапазона.
+        self.assertEqual(20, resolve(99))
+
+    def test_the_phone_counts_seconds_from_the_first_ring(self):
+        """Пять гудков — 22 с от первого 180/183: пятый отзвучал, шестой не начался."""
+        seconds = self.ns["sip_ring_timeout_seconds"]
+        self.assertEqual(22, seconds(5))
+        self.assertEqual(2, seconds(1))
+        self.assertEqual(97, seconds(20))
+        self.assertEqual(0, seconds(0))
+        self.assertEqual(0, seconds(None))
+
+
+class RingTimeoutMigrationTests(unittest.TestCase):
+    """Схема: колонка в строке отдела, без дефолта и без простановки значений."""
+
+    def test_the_column_is_nullable_and_has_no_default(self):
+        """NULL и есть «пять гудков»: проставлять отделам ничего не нужно."""
+        statement = "ADD COLUMN IF NOT EXISTS ring_timeout_rings SMALLINT;"
+        self.assertEqual(1, DATABASE_SOURCE.count(statement))
+        head = DATABASE_SOURCE.split(statement, 1)[0]
+        self.assertTrue(head.rstrip().endswith("ALTER TABLE sip_department_config"),
+                        head.rstrip()[-60:])
+
+    def test_nothing_is_backfilled(self):
+        """Простановка, как у автоприёма, здесь лишняя: NULL уже и есть умолчание.
+
+        Хуже того, она превратила бы «как по умолчанию» в явные «5» у каждого
+        отдела — и смена умолчания до них больше не доехала бы.
+        """
+        self.assertNotIn("SET ring_timeout_rings", DATABASE_SOURCE)
+
+    def test_it_sits_next_to_the_auto_answer_tier_of_the_department(self):
+        tier = DATABASE_SOURCE.index("ADD COLUMN IF NOT EXISTS auto_answer_delay SMALLINT;")
+        ring = DATABASE_SOURCE.index("ADD COLUMN IF NOT EXISTS ring_timeout_rings SMALLINT;")
+        cabinet = DATABASE_SOURCE.index(
+            "ADD COLUMN IF NOT EXISTS binotel_cabinet_url VARCHAR(255) NOT NULL DEFAULT '';")
+        self.assertLess(tier, ring)
+        self.assertLess(ring, cabinet)
+
+
+class DepartmentRingTimeoutStorageTests(unittest.TestCase):
+    """Хранение автосброса в строке отдела: карточка «Настройки SIP», история."""
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "get_sip_department_configs", "update_sip_department_config", "_mask_sip_secret",
+        })
+        self.db = _StubDb(self.ns, _FakeCursor([]))
+        self.state = {
+            "department_id": 367, "department_name": "Отдел продаж", "department_code": "op",
+            "sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": "",
+            "autodial_base_password": "", "provider": "asterisk",
+            "configured": False, "updated_at": None, "updated_by_name": None,
+            "operators_count": 40, "auto_answer": None, "auto_answer_delay": None,
+            "binotel_cabinet_url": "", "own_auto_answer_count": 0,
+            "ring_timeout_rings": None,
+        }
+        self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
+
+    def _save(self, payload):
+        return self.ns["update_sip_department_config"](self.db, 367, payload, user_id=5)
+
+    def _upsert(self):
+        return next((s, p) for s, p in self.db.cursor.calls
+                    if "INSERT INTO sip_department_config" in s)
+
+    def _snapshot(self):
+        _, params = next((s, p) for s, p in self.db.cursor.calls
+                         if "INSERT INTO sip_config_history" in s)
+        return json.loads(params[2])
+
+    def test_the_listing_keeps_unset_apart_from_zero(self):
+        """NULL («по умолчанию», 5 гудков) и 0 («не сбрасывать») — противоположности.
+
+        COALESCE схлопнул бы одно с другим, и карточка отдела показала бы
+        выключенный сброс у тех, у кого он включён по умолчанию.
+        """
+        db = _StubDb(self.ns, _FakeCursor([
+            (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7,
+             None, None, '', 0, None),
+            (367, 'Отдел продаж', 'op', 'pbx.sales', '', '', '', '', 'asterisk', True, None,
+             'Админ', 40, None, None, '', 0, 0),
+            (560, 'Тез КЦ', 'tez', 'sip52.binotel.com', '', '', '', '', 'binotel', True, None,
+             'Админ', 19, True, 3, '', 0, 7),
+        ]))
+        rows = self.ns["get_sip_department_configs"](db)
+        self.assertEqual([None, 0, 7], [r["ring_timeout_rings"] for r in rows])
+        sql, _ = db.cursor.calls[0]
+        self.assertIn("c.ring_timeout_rings", sql)
+        self.assertNotIn("COALESCE(c.ring_timeout_rings", sql)
+
+    def test_the_value_is_clamped_and_stored_with_the_department(self):
+        self._save({"sip_server": "pbx.sales", "ring_timeout_rings": "25"})
+        sql, params = self._upsert()
+        self.assertIn("ring_timeout_rings = EXCLUDED.ring_timeout_rings", sql)
+        self.assertEqual(20, params[10])
+        self.assertEqual(5, params[11])      # автор правки — за новой колонкой
+
+    def test_an_empty_field_returns_the_department_to_the_default(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 7})
+        self._save({"ring_timeout_rings": ""})
+        _, params = self._upsert()
+        self.assertIsNone(params[10])
+        self.assertIsNone(self._snapshot()["ring_timeout_rings"])
+
+    def test_an_explicit_null_is_the_default_too(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 7})
+        self._save({"ring_timeout_rings": None})
+        _, params = self._upsert()
+        self.assertIsNone(params[10])
+
+    def test_a_form_without_the_field_keeps_the_value(self):
+        """Старая вкладка сайта поле не шлёт — и выключенный сброс не должен ожить.
+
+        «Не прислали» здесь — отсутствие ключа: пустота у этого поля занята под
+        «по умолчанию», и сохранение сервера из старой формы иначе молча
+        вернуло бы отделу пять гудков.
+        """
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 0})
+        self._save({"sip_server": "pbx.new"})
+        _, params = self._upsert()
+        self.assertEqual(0, params[10])
+
+    def test_a_bool_does_not_touch_the_value(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 7})
+        self._save({"sip_server": "pbx.new", "ring_timeout_rings": True})
+        _, params = self._upsert()
+        self.assertEqual(7, params[10])
+
+    def test_zero_alone_keeps_the_row_of_a_local_pbx_department(self):
+        """Выключенный сброс — настройка, а не пустая строка: строку удалять нельзя.
+
+        keep_row считался по текстовым полям, и отдел на локальной АТС, у которого
+        задан ТОЛЬКО ноль, потерял бы строку — а с ней и выключатель.
+        """
+        self._save({"ring_timeout_rings": 0})
+        sql = [s for s, _ in self.db.cursor.calls]
+        self.assertFalse(any("DELETE FROM sip_department_config" in s for s in sql))
+        self.assertTrue(any("INSERT INTO sip_department_config" in s for s in sql))
+
+    def test_an_unchanged_value_writes_nothing(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 7})
+        result = self._save({"ring_timeout_rings": "7"})
+        self.assertEqual([], self.db.cursor.calls)
+        self.assertEqual(7, result["ring_timeout_rings"])
+
+    def test_returning_to_the_default_is_not_a_no_op(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True, "ring_timeout_rings": 0})
+        self._save({"ring_timeout_rings": "inherit"})
+        self.assertTrue(any("INSERT INTO sip_department_config" in s
+                            for s, _ in self.db.cursor.calls))
+
+    def test_the_value_is_written_to_history(self):
+        """Выключенный у отдела сброс меняет звонки всем — «кто выключил» спросят первым."""
+        self._save({"ring_timeout_rings": 0})
+        self.assertEqual(0, self._snapshot()["ring_timeout_rings"])
+
+
+class RingTimeoutReachesThePhoneTests(unittest.TestCase):
+    """Эффективное значение доезжает до телефона в обоих ответах резолвера."""
+
+    MEMBER = {
+        "user_id": 41, "department_id": 1954, "internal_number": "905",
+        "sip_login": "sip-fixture-905", "sip_password": "L1nePassw0rd",
+        "provider": "binotel", "sip_server": "sip53.binotel.com",
+        "auto_answer": None, "auto_answer_delay": None,
+    }
+
+    def setUp(self):
+        self.ns = _database_namespace({"get_user_sip_account", "_sip_department_ring_timeout_rings"})
+
+    def _account(self, line_member=None, cursor=None, **over):
+        state = dict(OPERATOR_STATE)
+        state.update(over)
+        db = _StubDb(self.ns, cursor or _FakeCursor([]))
+        db.get_sip_operator = lambda uid: state
+        db.get_binotel_account = lambda uid: None
+        return self.ns["get_user_sip_account"](db, 41, line_member=line_member), db
+
+    def test_a_department_without_a_value_gets_five_rings(self):
+        """Включено у всех сразу: отдел, который ничего не задавал, получает умолчание."""
+        account, _ = self._account()
+        self.assertEqual((5, 22), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+
+    def test_zero_switches_the_reset_off(self):
+        account, _ = self._account(department_ring_timeout_rings=0)
+        self.assertEqual((0, 0), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+
+    def test_both_provider_branches_carry_the_same_value(self):
+        """У резолвера два независимых return'а — забыть поле в одном легко."""
+        account, _ = self._account(department_ring_timeout_rings=7)
+        self.assertEqual((7, 32), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+        account, _ = self._account(
+            department_provider='binotel', sip_login='sip-fixture-912',
+            sip_password='secret', sip_domain='sip52.binotel.com',
+            department_ring_timeout_rings=7)
+        self.assertEqual('binotel', account["provider"])
+        self.assertEqual((7, 32), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+
+    def test_a_line_sitter_follows_the_line_department(self):
+        """Сидящий на линии другого отдела звонит по правилам отдела ЛИНИИ.
+
+        Своя строка у него от его отдела (тут ноль), а значение берётся у отдела
+        линии — тем же отделом, на чьей учётке он регистрируется.
+        """
+        cursor = _FakeCursor([(3,)])
+        account, db = self._account(line_member=dict(self.MEMBER), cursor=cursor,
+                                    department_ring_timeout_rings=0)
+        self.assertEqual("binotel", account["provider"])
+        self.assertEqual((3, 12), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+        sql, params = db.cursor.calls[0]
+        # Курсор отвечает (3,) на любой запрос, так что какую колонку читают, видно
+        # только по тексту: соседняя auto_answer_delay прошла бы и тут.
+        self.assertIn(
+            "SELECT ring_timeout_rings FROM sip_department_config WHERE department_id = %s", sql)
+        self.assertEqual((1954,), params)
+
+    def test_a_line_department_without_a_value_gets_the_default(self):
+        account, _ = self._account(line_member=dict(self.MEMBER), cursor=_FakeCursor([(None,)]),
+                                   department_ring_timeout_rings=0)
+        self.assertEqual(5, account["ring_timeout_rings"])
+
+    def test_a_value_carried_by_the_binding_is_used_without_a_query(self):
+        member = dict(self.MEMBER, ring_timeout_rings=0)
+        account, db = self._account(line_member=member)
+        self.assertEqual((0, 0), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+        self.assertEqual([], db.cursor.calls)
+
+    def test_a_failed_lookup_never_costs_the_line_registration(self):
+        """Сбой чтения — умолчание, а не исключение.
+
+        _dial_list_line_account на исключении молча откатил бы человека на
+        телефонию его собственного отдела — то есть увёл бы его с линии.
+        """
+        with self.assertLogs(level="ERROR") as logs:
+            account, _ = self._account(line_member=dict(self.MEMBER), cursor=_BrokenCursor())
+        # Молча глотать сбой тоже нельзя: в логе видно, у какого отдела не прочиталось.
+        self.assertIn("1954", logs.output[0])
+        self.assertEqual("binotel", account["provider"])
+        self.assertIsNotNone(account["main"])
+        self.assertEqual((5, 22), (account["ring_timeout_rings"], account["ring_timeout_sec"]))
+
+
+class RingTimeoutEndpointTests(unittest.TestCase):
+    """Ответ телефону собирается dict-литералом: новое поле само не «просочится»."""
+
+    def _settings(self, account):
+        node = source_cache.function_copy(BOT_PATH, "operator_sip_settings_endpoint")
+        node.decorator_list = []
+        module = ast.Module(body=[node], type_ignores=[])
+        ast.fix_missing_locations(module)
+        unknown = object()
+
+        class _Db:
+            @staticmethod
+            def get_user_sip_account(user_id):
+                return account
+
+        namespace = {
+            "request": mock.Mock(method="GET"),
+            "jsonify": lambda value: value,
+            "logging": logging,
+            "db": _Db,
+            "_get_authenticated_requester": lambda: (5, {}, None),
+            "_dial_list_line_account": lambda user_id: None,
+            "_dial_list_phone_settings": lambda user_id: {"enabled": False},
+            "SIP_AUTO_ANSWER_DELAY_DEFAULT": 2,
+            "_ICORE_PHONE_PROFILE_UNKNOWN": unknown,
+            "_icore_phone_status_profile": lambda user_id, provider: None,
+        }
+        exec(compile(module, "<sip-settings-endpoint>", "exec"), namespace)
+        body, code = namespace["operator_sip_settings_endpoint"]()
+        self.assertEqual(200, code)
+        return body["settings"]
+
+    @staticmethod
+    def _account(**over):
+        account = {"provider": "asterisk",
+                   "main": {"server": "pbx", "password": "p", "number": "1024"}}
+        account.update(over)
+        return account
+
+    def test_the_effective_values_travel_to_the_phone(self):
+        settings = self._settings(self._account(ring_timeout_rings=5, ring_timeout_sec=22))
+        self.assertEqual((5, 22), (settings["ring_timeout_rings"], settings["ring_timeout_sec"]))
+
+    def test_a_switched_off_reset_travels_as_zero(self):
+        settings = self._settings(self._account(ring_timeout_rings=0, ring_timeout_sec=0))
+        self.assertEqual((0, 0), (settings["ring_timeout_rings"], settings["ring_timeout_sec"]))
+
+    def test_the_endpoint_invents_no_default_of_its_own(self):
+        """Оба числа уже эффективные — их считает get_user_sip_account. Своё
+        умолчание в ручке перебило бы настройку отдела; без ключей сброса нет."""
+        settings = self._settings(self._account())
+        self.assertEqual((0, 0), (settings["ring_timeout_rings"], settings["ring_timeout_sec"]))
+
+
+class RingTimeoutFrontendTests(unittest.TestCase):
+    """Поле «Сброс исходящего без ответа, гудков» в карточке отдела."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+
+    def test_the_constants_match_the_backend(self):
+        """Умолчание и потолок продублированы на фронте — разъехаться им нельзя."""
+        ns = _database_namespace(set())
+        for front, back in (("RING_TIMEOUT_RINGS_DEFAULT", "SIP_RING_TIMEOUT_RINGS_DEFAULT"),
+                            ("RING_TIMEOUT_RINGS_MAX", "SIP_RING_TIMEOUT_RINGS_MAX"),
+                            ("RING_SECONDS_PER_RING", "SIP_RING_SECONDS_PER_RING")):
+            match = re.search(r"const %s = (\d+);" % front, self.view)
+            self.assertIsNotNone(match, front)
+            self.assertEqual(ns[back], int(match.group(1)), front)
+
+    def test_the_field_lives_in_the_shared_part_of_the_department_card(self):
+        """Одна секция на оба раздела: сбрасывает сам телефон, провайдер ни при чём."""
+        self.assertEqual(1, self.view.count("Сброс исходящего без ответа, гудков"))
+        card = self.view.split("{/* Настройки отдела */}", 1)[1].split("{/* Массовое изменение", 1)[0]
+        # Общий автоприём стоит уже ПОСЛЕ развилки провайдера — значит, и поле за ним.
+        self.assertLess(card.index("deptForm.provider === 'binotel' ? ("),
+                        card.index("Общий автоприём звонка"))
+        self.assertLess(card.index("Общий автоприём звонка"),
+                        card.index("Сброс исходящего без ответа, гудков"))
+        self.assertIn("placeholder={String(RING_TIMEOUT_RINGS_DEFAULT)}", card)
+        self.assertIn("max={RING_TIMEOUT_RINGS_MAX}", card)
+        self.assertIn("≈5 секунд на гудок. 0 — не сбрасывать. Пусто — {RING_TIMEOUT_RINGS_DEFAULT} (по умолчанию).",
+                      card)
+
+    def test_the_value_is_saved_and_reset_with_the_department(self):
+        self.assertIn("ring_timeout_rings: ringTimeoutToPayload(deptForm.ring_timeout_rings),", self.view)
+        reset = self.view.split("const body = reset", 1)[1].split(": {", 1)[0]
+        self.assertIn("ring_timeout_rings: INHERIT", reset)
+        # Пустое поле — «по умолчанию», а не «не менять»: иначе вернуть отдел к
+        # умолчанию было бы нечем.
+        self.assertIn(
+            "const ringTimeoutToPayload = (raw) => (String(raw ?? '').trim() === '' ? INHERIT", self.view)
+        self.assertIn("department_ring_timeout_rings: saved.ring_timeout_rings,", self.view)
+
+    def test_the_default_is_named_and_never_reads_as_off(self):
+        """Пустое поле с серой «5» легко принять за «выключено» — умолчание называем словами."""
+        self.assertIn("`по умолчанию: ${RING_TIMEOUT_RINGS_DEFAULT}`", self.view)
+        self.assertIn("ringTimeoutHint(deptForm.ring_timeout_rings)", self.view)
+        # Список отделов (обе ветки провайдера) и история — одной подписью.
+        self.assertEqual(2, self.view.count("ringTimeoutLabel(dept.ring_timeout_rings),"))
+        self.assertIn("ringTimeoutLabel(s.ring_timeout_rings),", self.view)
+        # И в «Данных для телефона» карточки сотрудника — в обоих разделах.
+        self.assertEqual(2, self.view.count(
+            "value={ringTimeoutEffective(editing?.department_ring_timeout_rings)}"))

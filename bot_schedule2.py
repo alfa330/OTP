@@ -31145,6 +31145,15 @@ def operator_sip_settings_endpoint():
                 "auto_answer": bool(account.get("auto_answer", False)),
                 "auto_answer_delay": int(account.get(
                     "auto_answer_delay", SIP_AUTO_ANSWER_DELAY_DEFAULT)),
+                # Автосброс исходящего без ответа (запрос владельца 11.10.2026):
+                # после скольких гудков и через сколько секунд от первого
+                # 180/183 телефон кладёт трубку сам; 0 — не сбрасывать. Оба числа
+                # уже ЭФФЕКТИВНЫЕ (отдел → 5 гудков) — их считает
+                # get_user_sip_account, и своего умолчания здесь нет по той же
+                # причине, что у автоприёма: нет ключа — 0, то есть прежнее
+                # поведение телефона, без сброса.
+                "ring_timeout_rings": int(account.get("ring_timeout_rings") or 0),
+                "ring_timeout_sec": int(account.get("ring_timeout_sec") or 0),
                 # Обзвон из телефона (раздел dial_list): вкладка со списком ФИО и
                 # звонок через Binotel API. Только у Binotel и только тем, кому
                 # включили (персонально → отдела → выключено). Сбой раздела не

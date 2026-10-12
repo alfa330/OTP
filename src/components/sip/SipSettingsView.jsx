@@ -40,6 +40,9 @@ import { dialListManagedDepartmentIds } from './dialListDepartments';
  * и персональная у сотрудника. Персональная всегда сильнее и общей не
  * затирается; «как у отдела» — отдельное, третье положение переключателя, а не
  * синоним «выключено».
+ *
+ * Автосброс исходящего без ответа — наоборот, только у отдела, личного нет:
+ * пустое поле — умолчание (5 гудков, сброс ВКЛЮЧЁН), 0 — не сбрасывать.
  */
 
 // Провайдер телефонии отдела. Переезд между этими двумя значениями и есть
@@ -86,6 +89,13 @@ const BINOTEL_CABINET_URL_DEFAULT = 'https://my.binotel.kz';
 // Совпадает с SIP_AUTO_ANSWER_DELAY_DEFAULT в database.py — менять вместе.
 const AUTO_ANSWER_DELAY_DEFAULT = 2;
 const AUTO_ANSWER_DELAY_MAX = 30;
+
+// Автосброс исходящего без ответа: после стольких гудков телефон кладёт трубку
+// сам. Совпадают с SIP_RING_TIMEOUT_RINGS_DEFAULT / _MAX и
+// SIP_RING_SECONDS_PER_RING в database.py — менять вместе (сверяет тест).
+const RING_TIMEOUT_RINGS_DEFAULT = 5;
+const RING_TIMEOUT_RINGS_MAX = 20;
+const RING_SECONDS_PER_RING = 5;
 
 // Третье положение автопринятия. Слово то же, что понимает бэкенд
 // (SIP_INHERIT_TOKEN в database.py): пустотой это не выразить — у флага пустая
@@ -254,6 +264,52 @@ const deptAutoAnswerLabel = (dept) => {
     return `автоприём ${delay} с`;
 };
 
+// «гудок / гудка / гудков» — по последним цифрам числа.
+const ringsWord = (n) => {
+    const a = Math.abs(n) % 100;
+    const b = a % 10;
+    if (a > 10 && a < 20) return 'гудков';
+    if (b === 1) return 'гудок';
+    if (b >= 2 && b <= 4) return 'гудка';
+    return 'гудков';
+};
+
+// Автосброс исходящего в списке отделов и в истории. Умолчание (null) не
+// подписываем — по той же причине, что и незаданный автоприём: оно у всех, и
+// слово в каждой строке было бы шумом. Видно своё число гудков и выключение.
+const ringTimeoutLabel = (rings) => {
+    if (typeof rings !== 'number') return null;
+    if (rings === 0) return 'без автосброса исходящих';
+    return `сброс исходящих через ${rings} ${ringsWord(rings)}`;
+};
+
+// То же — в «Данных для телефона» карточки сотрудника. Здесь умолчание как раз
+// называем: строка отвечает на вопрос «что получит телефон», и пустота в ней
+// читалась бы как «не сбрасывается».
+const ringTimeoutEffective = (rings) => {
+    if (typeof rings !== 'number') {
+        return `через ${RING_TIMEOUT_RINGS_DEFAULT} ${ringsWord(RING_TIMEOUT_RINGS_DEFAULT)} (по умолчанию)`;
+    }
+    return rings === 0 ? 'не сбрасывается' : `через ${rings} ${ringsWord(rings)}`;
+};
+
+// Подпись под полем в карточке отдела: что будет действовать после сохранения.
+// Серую «5» в пустом поле легко принять за «выключено» — поэтому словами.
+const ringTimeoutHint = (raw) => {
+    const text = String(raw ?? '').trim();
+    if (text === '') return `по умолчанию: ${RING_TIMEOUT_RINGS_DEFAULT}`;
+    const rings = Math.trunc(Number(text));
+    if (!Number.isFinite(rings)) return '';
+    // Тот же кламп, что на бэкенде: показываем то, что ляжет в базу.
+    const clamped = Math.max(0, Math.min(RING_TIMEOUT_RINGS_MAX, rings));
+    return clamped === 0 ? 'не сбрасывать' : `≈${clamped * RING_SECONDS_PER_RING} с`;
+};
+
+// Пустое поле гудков — «по умолчанию» (NULL на бэкенде), а не «не менять», как
+// у секунд автоприёма: так поле и подписано, и иначе вернуть отдел к умолчанию
+// было бы нечем. Едет токеном INHERIT — тем же «не задано» яруса отдела.
+const ringTimeoutToPayload = (raw) => (String(raw ?? '').trim() === '' ? INHERIT : String(raw).trim());
+
 const hasPersonalParams = (op) => Boolean(
     op?.sip_password || op?.sip_domain || op?.autodial_password || op?.autodial_domain
 );
@@ -382,6 +438,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         binotel_cabinet_url: '',
         // Ярус отдела — тоже трёхпозиционный: «не задано» это не «выключено».
         auto_answer: INHERIT, auto_answer_delay: '',
+        // Гудки до автосброса строкой, как и секунды: пусто — умолчание.
+        ring_timeout_rings: '',
     });
     const [deptSaving, setDeptSaving] = useState(false);
 
@@ -1073,6 +1131,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             auto_answer_delay: typeof dept.auto_answer_delay === 'number'
                 ? String(dept.auto_answer_delay)
                 : '',
+            // Ноль — значение («не сбрасывать»), а не пустота: проверяем тип, а
+            // не истинность, иначе выключенный сброс открылся бы пустым полем.
+            ring_timeout_rings: typeof dept.ring_timeout_rings === 'number'
+                ? String(dept.ring_timeout_rings)
+                : '',
         });
     };
 
@@ -1084,9 +1147,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 ? {
                     sip_server: '', base_password: '', autodial_code: '', autodial_server: '',
                     autodial_base_password: '', binotel_cabinet_url: '',
-                    // Сброс обязан снимать и автоприём: иначе «Вернуть общие»
-                    // оставляло бы отдел с половиной старых значений.
+                    // Сброс обязан снимать и автоприём, и автосброс исходящих:
+                    // иначе «Вернуть общие» оставляло бы отдел с половиной
+                    // старых значений.
                     auto_answer: INHERIT, auto_answer_delay: INHERIT,
+                    ring_timeout_rings: INHERIT,
                 }
                 : {
                     sip_server: deptForm.sip_server.trim(),
@@ -1100,6 +1165,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     binotel_cabinet_url: deptForm.binotel_cabinet_url.trim(),
                     auto_answer: modeToPayload(deptForm.auto_answer),
                     auto_answer_delay: delayToPayload(deptForm.auto_answer, deptForm.auto_answer_delay),
+                    ring_timeout_rings: ringTimeoutToPayload(deptForm.ring_timeout_rings),
                 };
             const resp = await fetch(`${apiBaseUrl}/api/sip_config/departments/${deptEditing.department_id}`, {
                 method: 'PUT',
@@ -1128,6 +1194,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 department_auto_answer: saved.auto_answer,
                 department_auto_answer_delay: saved.auto_answer_delay,
                 department_binotel_cabinet_url: saved.binotel_cabinet_url,
+                department_ring_timeout_rings: saved.ring_timeout_rings,
             } : op)));
             historyLoadedRef.current = false;
             showToastRef.current?.(reset ? 'Настройки отдела сброшены' : 'Настройки отдела сохранены', 'success');
@@ -1654,6 +1721,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                             ? `кабинет ${dept.binotel_cabinet_url.replace(/^https?:\/\//, '')}`
                                                             : null,
                                                         deptAutoAnswerLabel(dept),
+                                                        ringTimeoutLabel(dept.ring_timeout_rings),
                                                     ] : [
                                                         dept.sip_server ? `домен ${dept.sip_server}` : 'домен не задан',
                                                         dept.autodial_server ? `автодозвон ${dept.autodial_server}` : null,
@@ -1661,6 +1729,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                         dept.autodial_base_password ? 'свой пароль автодозвона' : null,
                                                         dept.autodial_code ? `код ${dept.autodial_code}` : null,
                                                         deptAutoAnswerLabel(dept),
+                                                        ringTimeoutLabel(dept.ring_timeout_rings),
                                                     ]).filter(Boolean).join(' · ')
                                                     : 'телефония не настроена'}
                                             </div>
@@ -1823,6 +1892,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         s.auto_answer === true
                                             ? `общий автоприём ${s.auto_answer_delay ?? AUTO_ANSWER_DELAY_DEFAULT} с`
                                             : (s.auto_answer === false ? 'общий автоприём выключен' : null),
+                                        // Автосброс исходящих: своё число гудков или
+                                        // выключение; умолчание (null) молчит, а в
+                                        // старых снимках ключа нет вовсе.
+                                        ringTimeoutLabel(s.ring_timeout_rings),
                                     ];
                                 const icon = h.target_user_id ? 'fa-user' : (h.department_id ? 'fa-building' : 'fa-globe');
                                 const title = h.target_user_id
@@ -2042,6 +2115,40 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     </span>
                                 </p>
                             )}
+                        </div>
+                    </section>
+
+                    {/* Автосброс исходящего без ответа (запрос владельца 11.10.2026).
+                        Ярус один — отдел, личной настройки нет, поэтому поле только
+                        здесь. Секция общая для обоих провайдеров: трубку кладёт сам
+                        телефон, АТС в этом не участвует. Пустое поле — умолчание, и
+                        сброс при нём ВКЛЮЧЁН: выключает только явный ноль. */}
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Исходящие звонки</div>
+                        <div className={`${iosCard} space-y-2 p-4`}>
+                            <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                                <span className="min-w-0">
+                                    <span className="block text-[13px] text-slate-700">Сброс исходящего без ответа, гудков</span>
+                                    <span className="block text-[11.5px] text-slate-400">{ringTimeoutHint(deptForm.ring_timeout_rings)}</span>
+                                </span>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    max={RING_TIMEOUT_RINGS_MAX}
+                                    value={deptForm.ring_timeout_rings}
+                                    onChange={(e) => setDeptForm((f) => ({ ...f, ring_timeout_rings: e.target.value }))}
+                                    placeholder={String(RING_TIMEOUT_RINGS_DEFAULT)}
+                                    disabled={!canEdit}
+                                    className={`${iosInput} w-20 shrink-0 text-center font-mono`}
+                                />
+                            </div>
+                            <p className="text-[11.5px] leading-relaxed text-slate-500">
+                                ≈5 секунд на гудок. 0 — не сбрасывать. Пусто — {RING_TIMEOUT_RINGS_DEFAULT} (по умолчанию).
+                                Если абонент не взял трубку, телефон сотрудника кладёт её сам и
+                                записывает звонок как «Не поднял трубку» — и обычный исходящий,
+                                и звонок водителю из обзвона. Настройка доезжает до телефонов в
+                                течение 10 минут.
+                            </p>
                         </div>
                     </section>
                     <p className="px-1 text-[11.5px] text-slate-500">
@@ -2462,6 +2569,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                             ? `через ${autoAnswerEffectiveDelay} с${autoAnswerInherits ? ' (как у отдела)' : ''}`
                                             : `выключено${autoAnswerInherits ? ' (как у отдела)' : ''}`}
                                     />
+                                    <EffectiveRow
+                                        label="Сброс исходящего"
+                                        value={ringTimeoutEffective(editing?.department_ring_timeout_rings)}
+                                    />
                                 </div>
                             </section>
                         )}
@@ -2825,6 +2936,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         value={autoAnswerEffectiveOn
                                             ? `через ${autoAnswerEffectiveDelay} с${autoAnswerInherits ? ' (как у отдела)' : ''}`
                                             : `выключено${autoAnswerInherits ? ' (как у отдела)' : ''}`}
+                                    />
+                                    <EffectiveRow
+                                        label="Сброс исходящего"
+                                        value={ringTimeoutEffective(editing?.department_ring_timeout_rings)}
                                     />
                                     {form.autodial_number.trim() && (
                                         <>

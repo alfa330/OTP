@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Ban, Check, ChevronRight, Clock3, FileCheck2, Hourglass, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing,
-    Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
+    Ban, Check, ChevronRight, Clock3, FileCheck2, FileClock, Hourglass, Loader2, PhoneCall, PhoneMissed, PhoneOff,
+    PhoneOutgoing, Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosHint, IosModal,
@@ -48,6 +48,15 @@ import { operatorsForFilter } from './linePicker';
  * меняет действия: «на проверке у Яндекса» (водитель уже подписал) и «срок
  * подписания истёк» (звонить поздно). Обычное «не подписал» не пишется — это
  * состояние почти всех строк, и на каждой оно было бы шумом.
+ *
+ * С 11.10.2026 «на проверке у Яндекса» — свой этап «sign_wait», а не пометка в
+ * строке: такой водитель уже подписал, из обзвона он ушёл так же, как
+ * подписавший, но успешка ещё не засчитана — документы ещё у Яндекса.
+ * Пометка остаётся для сервера, который этапа ещё не знает.
+ *
+ * Недозвон пишется «Не поднял трубку», и под ним видно, если трубку положил сам
+ * телефон оператора (автосброс, по умолчанию — после пятого гудка): это обычная
+ * засчитанная попытка, а не отмена оператором.
  */
 
 const PAGE = 50;
@@ -62,6 +71,10 @@ const STAGES = [
     { value: 'answered', label: 'Дозвонились', dot: 'bg-emerald-500' },
     { value: 'exhausted', label: 'Не дозвонились', dot: 'bg-rose-500' },
     { value: 'excluded', label: 'Исключены', dot: 'bg-slate-300' },
+    // Водитель подписал, ждём Яндекс — шаг перед «Подписали». Голубая точка — в
+    // тон синему «на проверке у Яндекса» в статусах документов (signStatus.js).
+    // onlyIfReported — чип только у сервера, который этап знает (см. StageStrip).
+    { value: 'sign_wait', label: 'На проверке у Яндекса', dot: 'bg-sky-500', onlyIfReported: true },
     { value: 'signed', label: 'Подписали', dot: 'bg-emerald-600', check: true },
 ];
 const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
@@ -70,7 +83,7 @@ const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
 const SIGN_NOTE = { processing: 'на проверке у Яндекса', expired: 'срок подписания истёк', no_iin: 'нет ИИН' };
 
 const RESULT_LABEL = {
-    answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не ответил', other: 'Не состоялся', failed: 'Ошибка АТС',
+    answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не поднял трубку', other: 'Не состоялся', failed: 'Ошибка АТС',
     // Оператор сам завершил звонок до ответа водителя — попытка не засчитана.
     cancelled: 'Отменён до ответа',
 };
@@ -94,6 +107,7 @@ const TONE = {
     amber: 'bg-amber-50 text-amber-600',
     red: 'bg-rose-50 text-rose-500',
     blue: 'bg-blue-50 text-blue-600',
+    sky: 'bg-sky-50 text-sky-600',
     slate: 'bg-slate-100 text-slate-500',
 };
 
@@ -229,6 +243,8 @@ const stageDetail = (lead) => {
             return lead.attempts_total
                 ? `${lead.attempts_total} ${plural(lead.attempts_total, 'попытка', 'попытки', 'попыток')} без ответа`
                 : result;
+        case 'sign_wait':
+            return 'водитель подписал, ждём Яндекс';
         case 'signed':
             return successText(lead.sign);
         default:
@@ -247,7 +263,9 @@ const successText = (sign) => {
 /** Этап и его подробность одной строкой + состояние документов, когда оно важно. */
 const detailWithSign = (lead) => {
     const detail = stageDetail(lead);
-    const note = lead.stage !== 'signed' ? SIGN_NOTE[lead.sign?.status] : '';
+    // У подписавшего и у ждущего Яндекс состояние документов уже названо этапом —
+    // второй раз «на проверке у Яндекса» в той же строке был бы повтором.
+    const note = lead.stage !== 'signed' && lead.stage !== 'sign_wait' ? SIGN_NOTE[lead.sign?.status] : '';
     return [detail, note].filter(Boolean).join(' · ');
 };
 
@@ -362,10 +380,16 @@ const LeadRow = ({ lead, onOpen, showMonth }) => {
 
 /* Полоса этапов — фильтр и легенда разом (как статусы в «Посылках»): точка в
    ней того же цвета, что точка в строке. Переносится по строкам, а не уезжает
-   вбок: на телефоне прокрутка вбок прятала половину этапов за край. */
+   вбок: на телефоне прокрутка вбок прятала половину этапов за край.
+   Этап с onlyIfReported показываем, только когда он есть в by_stage: сервер
+   кладёт туда все свои этапы, и нулевые тоже, а сервер, который этапа ещё не
+   знает, на отбор по нему ответил бы 400 «stage: неизвестный этап». Выбранный
+   чип не прячем — иначе отбор было бы нечем снять. */
 const StageStrip = ({ value, onChange, counts }) => {
-    const all = STAGES.reduce((sum, s) => sum + (Number(counts[s.value]) || 0), 0);
-    const items = [{ value: '', label: 'Все', count: all }, ...STAGES.map((s) => ({ ...s, count: Number(counts[s.value]) || 0 }))];
+    const stages = STAGES.filter((s) => !s.onlyIfReported || value === s.value
+        || Object.prototype.hasOwnProperty.call(counts, s.value));
+    const all = stages.reduce((sum, s) => sum + (Number(counts[s.value]) || 0), 0);
+    const items = [{ value: '', label: 'Все', count: all }, ...stages.map((s) => ({ ...s, count: Number(counts[s.value]) || 0 }))];
     return (
         <div role="tablist" aria-label="Этап" className="flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 p-1">
             {items.map((item) => {
@@ -507,6 +531,13 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
     // не идёт в счёт ни строке, ни водителю, поэтому подпись объясняет это явно.
     const cancelledHint = result === 'cancelled'
         ? ' · оператор завершил звонок до ответа водителя, попытка не засчитана' : '';
+    // Автосброс: трубку положил сам телефон оператора, не дождавшись ответа за
+    // заданное отделом число гудков (по умолчанию пять). Это обычный недозвон,
+    // попытка засчитана — поэтому и подпись своя, не «отмена».
+    // Если водитель всё же успел ответить в последний момент, звонок — разговор,
+    // и подпись была бы неправдой.
+    const ringTimeoutHint = attempt.ring_timeout && result !== 'answered' && result !== 'cancelled'
+        ? ' · сброшен автоматически: водитель не взял трубку' : '';
     const rec = recording || {};
     return (
         <li className="relative flex gap-3 py-3">
@@ -537,6 +568,7 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
                     {attempt.operator?.name || 'Оператор'}
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
                     {cancelledHint}
+                    {ringTimeoutHint}
                 </div>
                 {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
                 {attempt.comment && <Bubble>{attempt.comment}</Bubble>}
@@ -644,6 +676,7 @@ const STAGE_BADGE = {
     answered: { Icon: PhoneCall, tone: 'green' },
     exhausted: { Icon: PhoneMissed, tone: 'red' },
     excluded: { Icon: Ban, tone: 'slate' },
+    sign_wait: { Icon: FileClock, tone: 'sky' },
     signed: { Icon: FileCheck2, tone: 'green' },
 };
 
@@ -850,7 +883,10 @@ const LeadSheet = ({
     const historyReady = Array.isArray(lead?.attempts);
     const canRequeue = canEdit && historyReady && ['answered', 'exhausted', 'waiting', 'excluded'].includes(lead.stage);
     // Подписавшему ни возврат, ни исключение не нужны: обзвон для него окончен.
-    const canExclude = canEdit && historyReady && lead.stage !== 'excluded' && lead.stage !== 'signed';
+    // Ждущему Яндекс — тоже: из обзвона он ушёл, а этап «На проверке у Яндекса»
+    // сервер ставит раньше «Исключён», так что исключение не было бы видно.
+    const canExclude = canEdit && historyReady && lead.stage !== 'excluded' && lead.stage !== 'signed'
+        && lead.stage !== 'sign_wait';
     const requeueKind = lead?.stage === 'excluded' ? 'restore' : 'requeue';
 
     const submit = async () => {
@@ -1243,6 +1279,8 @@ const DialListJournal = ({
     const checkSign = async () => {
         const leadId = openId;
         if (!leadId || checking) return;
+        // Этап до проверки — чтобы после неё заметить любую его смену.
+        const prevStage = card?.stage;
         setChecking(true);
         try {
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}/sign_check`, {
@@ -1254,7 +1292,14 @@ const DialListJournal = ({
             if (data.lead) {
                 if (openIdRef.current === leadId) setCard(data.lead);
                 setItems((cur) => cur.map((it) => (it.id === data.lead.id ? { ...it, ...data.lead, attempts: undefined, events: undefined } : it)));
-                if (data.lead.stage === 'signed') { load(0, { keepSize: true }); onChanged?.(); }
+                // Этап сменился — числа этапов и «доступно сейчас» у раздела уже не
+                // те: перечитываем их вместе со списком. Это и уход из обзвона
+                // (подписал, ждёт Яндекс), и возврат в него: не примет Яндекс
+                // документы — водитель с «На проверке у Яндекса» вернётся в очередь
+                // и из отбора по этому этапу уйдёт. «Подписали» — всегда, как раньше.
+                if (data.lead.stage !== prevStage || data.lead.stage === 'signed') {
+                    load(0, { keepSize: true }); onChanged?.();
+                }
                 const label = data.lead.sign?.label || '';
                 toast(data.lead.stage === 'signed' ? `Подписал документы — ${lower(successText(data.lead.sign))}` : `Sapar: ${lower(label)}`, 'success');
             }

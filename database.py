@@ -420,6 +420,69 @@ def resolve_sip_auto_answer_delay(personal, department) -> int:
     return int(SIP_AUTO_ANSWER_DELAY_DEFAULT)
 
 
+# Автосброс исходящего без ответа (запрос владельца 11.10.2026): если абонент не
+# взял трубку за столько гудков, телефон кладёт её сам, и звонок пишется как
+# «Не поднял трубку». Ярус один — отдел, личного значения нет. NULL в строке
+# отдела — «не задавали», и действует умолчание: сброс включён у всех сразу, так
+# решил владелец. 0 — не сбрасывать. Гудок в СНГ — секунда тона и четыре тишины,
+# отсюда пять секунд на гудок.
+SIP_RING_TIMEOUT_RINGS_DEFAULT = 5
+SIP_RING_SECONDS_PER_RING = 5
+SIP_RING_TIMEOUT_RINGS_MAX = 20
+# Обычный исходящий телефон считает от первого 180/183, и класть трубку надо в
+# тишине после N-го гудка: он отзвучал к N·5−4 с, следующий начнётся на N·5 с.
+# Берём N·5−3 — пять гудков дают 22 с, и это раньше шестого даже у гудка самого
+# телефона (он повторяется раз в 4,5 с, шестой прозвучал бы на 22,5 с). Обзвону
+# из телефона это вычитание не нужно: там отсчёт от момента, когда Binotel начал
+# набирать водителя, и время — ровно N·5.
+SIP_RING_TIMEOUT_LEAD_SEC = 3
+
+
+def parse_sip_ring_timeout_rings(value, default=None):
+    """Число гудков до автосброса из payload'а: число / None («по умолчанию»).
+
+    В отличие от задержки автоприёма, пустая строка здесь — «по умолчанию»
+    (NULL), а не «оставить как было»: так поле в карточке отдела и подписано
+    («Пусто — 5»), и иначе вернуть отдел к умолчанию было бы нечем. «Поле не
+    прислали» — это отсутствие ключа, его разбирает вызывающий. bool и мусор
+    оставляют прежнее значение: сорванная валидация на фронте не повод молча
+    выключить сброс целому отделу.
+    """
+    if value is None or is_sip_inherit(value):
+        return None
+    # bool — тоже int: ring_timeout_rings: true не должно стать «1 гудок».
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, str) and value.strip() == '':
+        return None
+    try:
+        rings = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError — от Infinity: json.loads его пропускает, а 500 из-за
+        # одного числа в форме был бы хуже, чем прежнее значение.
+        return default
+    return max(0, min(SIP_RING_TIMEOUT_RINGS_MAX, rings))
+
+
+def resolve_sip_ring_timeout_rings(department) -> int:
+    """Эффективное число гудков: значение отдела, не задано — умолчание.
+
+    Потолок держим и здесь: значение, вписанное в базу руками, не должно уехать
+    в телефон за пределами диапазона, который допускает форма.
+    """
+    if department is None:
+        return int(SIP_RING_TIMEOUT_RINGS_DEFAULT)
+    return max(0, min(SIP_RING_TIMEOUT_RINGS_MAX, int(department)))
+
+
+def sip_ring_timeout_seconds(rings) -> int:
+    """Секунды от первого 180/183 до автосброса обычного исходящего; 0 — не сбрасывать."""
+    rings = int(rings or 0)
+    if rings <= 0:
+        return 0
+    return rings * SIP_RING_SECONDS_PER_RING - SIP_RING_TIMEOUT_LEAD_SEC
+
+
 def normalize_sip_identifier(value, field="SIP-номер"):
     """Нормализует SIP-номер/код: '' если пусто, иначе валидирует набор символов."""
     if value is None:
@@ -5499,6 +5562,15 @@ class Database:
             cursor.execute("""
                 ALTER TABLE sip_department_config
                 ADD COLUMN IF NOT EXISTS auto_answer_delay SMALLINT;
+            """)
+            # Автосброс исходящего без ответа: после скольких гудков телефон кладёт
+            # трубку сам (запрос владельца 11.10.2026). NULL — отдел не задавал, и
+            # действует SIP_RING_TIMEOUT_RINGS_DEFAULT, то есть сброс ВКЛЮЧЁН; 0 — не
+            # сбрасывать. Дефолта у колонки нет, и строки отделов, в отличие от
+            # автоприёма, не проставляем: NULL само по себе и есть умолчание.
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS ring_timeout_rings SMALLINT;
             """)
             # Общий адрес кабинета Binotel. У локальной АТС кабинета нет вовсе,
             # поэтому поле живёт в той же строке отдела, но показывается только
@@ -30791,7 +30863,11 @@ class Database:
                        -- «выключено», а это разные вещи для карточки отдела.
                        c.auto_answer, c.auto_answer_delay,
                        COALESCE(c.binotel_cabinet_url, ''),
-                       COALESCE(own.cnt, 0)
+                       COALESCE(own.cnt, 0),
+                       -- Автосброс исходящего — тоже сырым: NULL = «не задано»
+                       -- (действуют 5 гудков, сброс включён), 0 = не сбрасывать.
+                       -- COALESCE схлопнул бы противоположности.
+                       c.ring_timeout_rings
                 FROM departments d
                 LEFT JOIN sip_department_config c ON c.department_id = d.id
                 LEFT JOIN users u ON u.id = c.updated_by
@@ -30838,6 +30914,8 @@ class Database:
             "auto_answer_delay": None if r[14] is None else int(r[14]),
             "binotel_cabinet_url": r[15] or "",
             "own_auto_answer_count": int(r[16] or 0),
+            # None — отдел не задавал (действует умолчание), 0 — сброс выключен.
+            "ring_timeout_rings": None if r[17] is None else int(r[17]),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
@@ -30873,8 +30951,19 @@ class Database:
         auto_answer = parse_sip_flag_tri(payload.get('auto_answer'), current['auto_answer'])
         auto_answer_delay = parse_sip_delay_tri(
             payload.get('auto_answer_delay'), current['auto_answer_delay'])
+        # Автосброс исходящего. «Не прислали» здесь — отсутствие КЛЮЧА, а не None:
+        # пустота у этого поля занята под «по умолчанию», и форма, которая поля не
+        # знает (старая вкладка сайта), иначе молча вернула бы отделу снятый ноль.
+        if 'ring_timeout_rings' in payload:
+            ring_timeout_rings = parse_sip_ring_timeout_rings(
+                payload['ring_timeout_rings'], current.get('ring_timeout_rings'))
+        else:
+            ring_timeout_rings = current.get('ring_timeout_rings')
+        # Ноль у автосброса — настройка («не сбрасывать»), а не пустое поле:
+        # отдел на локальной АТС, у которого задан только он, строку не теряет.
         filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base,
-                  cabinet_url, auto_answer is not None, auto_answer_delay is not None)
+                  cabinet_url, auto_answer is not None, auto_answer_delay is not None,
+                  ring_timeout_rings is not None)
         # Binotel описывается одним признаком провайдера, поэтому его строка
         # «непустая» даже без единого заполненного поля.
         keep_row = any(filled) or provider != SIP_PROVIDER_DEFAULT
@@ -30888,6 +30977,7 @@ class Database:
             and cabinet_url == current['binotel_cabinet_url']
             and auto_answer == current['auto_answer']
             and auto_answer_delay == current['auto_answer_delay']
+            and ring_timeout_rings == current.get('ring_timeout_rings')
         )
         if unchanged and current['configured'] == keep_row:
             return current
@@ -30898,8 +30988,8 @@ class Database:
                     INSERT INTO sip_department_config (
                         department_id, sip_server, base_password, autodial_code, autodial_server,
                         autodial_base_password, provider, binotel_cabinet_url,
-                        auto_answer, auto_answer_delay, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        auto_answer, auto_answer_delay, ring_timeout_rings, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
@@ -30911,11 +31001,12 @@ class Database:
                         binotel_cabinet_url = EXCLUDED.binotel_cabinet_url,
                         auto_answer = EXCLUDED.auto_answer,
                         auto_answer_delay = EXCLUDED.auto_answer_delay,
+                        ring_timeout_rings = EXCLUDED.ring_timeout_rings,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, (department_id, sip_server, base_password, autodial_code, autodial_server,
                       autodial_base, provider, cabinet_url, auto_answer, auto_answer_delay,
-                      user_id))
+                      ring_timeout_rings, user_id))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
@@ -30931,6 +31022,9 @@ class Database:
                 "binotel_cabinet_url": cabinet_url,
                 "auto_answer": auto_answer,
                 "auto_answer_delay": auto_answer_delay,
+                # Выключенный автосброс меняет звонки всему отделу — в истории
+                # его видно так же, как общий автоприём.
+                "ring_timeout_rings": ring_timeout_rings,
             })))
         return next(
             row for row in self.get_sip_department_configs([department_id])
@@ -31005,7 +31099,11 @@ class Database:
             -- автодозвона, ни FOP2, и карточка показывает только учётку кабинета
             -- (departmentCodeUsesOktellCabinet в src/utils/departmentViews.js).
             -- Имени отдела для этого мало: оно меняется, а код — нет.
-            COALESCE(dep.code, '') AS department_code
+            COALESCE(dep.code, '') AS department_code,
+            -- Автосброс исходящего без ответа — ярус только отдела, личного нет.
+            -- Сырым, как и ярус автоприёма: NULL = «не задано» (действуют 5
+            -- гудков), 0 = не сбрасывать, и COALESCE схлопнул бы одно с другим.
+            dc.ring_timeout_rings AS department_ring_timeout_rings
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
@@ -31079,8 +31177,11 @@ class Database:
             # а пароль — никогда, только признаком «задан».
             "oktell_cabinet_login": row[35] or "",
             "has_oktell_cabinet_password": bool(row[36]),
-            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
             "department_code": row[37] or "",
+            # Автосброс исходящего: эффективное значение считает
+            # resolve_sip_ring_timeout_rings (не задано — 5 гудков).
+            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
+            "department_ring_timeout_rings": None if row[38] is None else int(row[38]),
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -31812,6 +31913,28 @@ class Database:
             "cabinet_password": row[1] or "",
         }
 
+    def _sip_department_ring_timeout_rings(self, department_id):
+        """Ярус автосброса исходящего у отдела: число гудков или None («не задано»).
+
+        Нужен сидящему на линии другого отдела: строка из _SIP_OPERATOR_SELECT
+        несёт ярус ЕГО отдела, а звонит он на учётке линии — значит, и сброс по
+        правилу отдела линии. Сбой чтения — None, то есть умолчание: исключение
+        отсюда _dial_list_line_account молча превратил бы в регистрацию на
+        телефонии собственного отдела человека, то есть увёл бы его с линии.
+        """
+        if department_id is None:
+            return None
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    "SELECT ring_timeout_rings FROM sip_department_config WHERE department_id = %s",
+                    (int(department_id),))
+                row = cur.fetchone()
+        except Exception:
+            logging.exception("Не удалось прочитать автосброс исходящего отдела %s", department_id)
+            return None
+        return None if not row or row[0] is None else int(row[0])
+
     def get_user_sip_account(self, user_id: int, line_member: Optional[dict] = None) -> dict:
         """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон.
 
@@ -31821,9 +31944,10 @@ class Database:
 
         line_member — привязка сотрудника к линии Binotel ДРУГОГО отдела (раздел
         «Удаленный КЦ», dial_list.service.line_member). Пока она действует, телефон
-        работает на этой линии: учётка, сервер и ярус автоприёма берутся у линии, а
-        телефония собственного отдела человека (номер, автодозвон, FOP2, кабинет)
-        не применяется — и остаётся нетронутой до снятия с линии."""
+        работает на этой линии: учётка, сервер и ярусы автоприёма и автосброса
+        исходящих берутся у линии, а телефония собственного отдела человека (номер,
+        автодозвон, FOP2, кабинет) не применяется — и остаётся нетронутой до снятия
+        с линии."""
         row = self.get_sip_operator(int(user_id)) or {}
         on_line = bool(line_member) and (line_member.get("provider") or '') == 'binotel'
         if on_line:
@@ -31838,6 +31962,12 @@ class Database:
                 department_sip_server=line_member.get("sip_server") or "",
                 department_auto_answer=line_member.get("auto_answer"),
                 department_auto_answer_delay=line_member.get("auto_answer_delay"),
+                # Автосброс исходящего — тоже по отделу линии. Привязка его пока не
+                # несёт (dial_list.service._LINE_MEMBER_SQL), поэтому без ключа
+                # читаем строку отдела линии сами.
+                department_ring_timeout_rings=(
+                    line_member.get("ring_timeout_rings") if "ring_timeout_rings" in line_member
+                    else self._sip_department_ring_timeout_rings(line_member.get("department_id"))),
             )
         provider = row.get("department_provider") or SIP_PROVIDER_DEFAULT
         sip_number = (row.get("sip_number") or "").strip()
@@ -31848,6 +31978,12 @@ class Database:
             row.get("auto_answer"), row.get("department_auto_answer"))
         auto_answer_delay = resolve_sip_auto_answer_delay(
             row.get("auto_answer_delay"), row.get("department_auto_answer_delay"))
+        # Автосброс исходящего без ответа — по тому же правилу «один раз до
+        # развилки». Ярус только отдела: не задано — 5 гудков, 0 — не сбрасывать.
+        # Секунды — для обычного исходящего телефона, отсчёт от первого 180/183.
+        ring_timeout_rings = resolve_sip_ring_timeout_rings(
+            row.get("department_ring_timeout_rings"))
+        ring_timeout_sec = sip_ring_timeout_seconds(ring_timeout_rings)
 
         if provider == 'binotel':
             login = (row.get("sip_login") or "").strip()
@@ -31883,6 +32019,10 @@ class Database:
                 # выше развилки (персональное → отдела → выключено).
                 "auto_answer": auto_answer,
                 "auto_answer_delay": auto_answer_delay,
+                # Автосброс исходящего кладёт трубку сам телефон — провайдер тут
+                # тоже ни при чём, значение посчитано выше развилки.
+                "ring_timeout_rings": ring_timeout_rings,
+                "ring_timeout_sec": ring_timeout_sec,
                 # У сидящего на линии другого отдела учётка кабинета (если есть) — от
                 # кабинета ЕГО отдела: телефон менял бы статус не в той компании.
                 "binotel": None if on_line else self.get_binotel_account(user_id),
@@ -31927,6 +32067,8 @@ class Database:
             # же, посчитанное один раз до развилки.
             "auto_answer": auto_answer,
             "auto_answer_delay": auto_answer_delay,
+            "ring_timeout_rings": ring_timeout_rings,
+            "ring_timeout_sec": ring_timeout_sec,
             "binotel": None,
         }
 
