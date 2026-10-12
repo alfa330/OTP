@@ -586,5 +586,40 @@ class SchemaTests(unittest.TestCase):
         self.assertLess(max(tables), min(others))
 
 
+class DriverCardNoteTests(unittest.TestCase):
+    """Красная подпись состояния водителя в карточке «Выдачи» и «Проверки»."""
+
+    def setUp(self):
+        self.issue = _read(ROOT / 'src' / 'components' / 'water' / 'WaterIssue.jsx')
+
+    def test_blocked_card_is_named_by_its_cause_not_as_a_park_block(self):
+        """`is_blocked` в CRM — «карточка заблокирована сменой номера», а не запрет
+        работать: 12.10.2026 «Заблокирован в парке» стояло у водителя со статусом
+        `working` и 99 заказами за неделю. Само выражение подписи из WaterIssue.jsx,
+        выполненное node: проверяем поведение, а не текст."""
+        self.assertNotIn('Заблокирован в парке', self.issue)
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node недоступен')
+        start = self.issue.index('const WORK_STATUS = {')
+        consts = self.issue[start:self.issue.index(';', self.issue.index('const CARD_BLOCKED = ')) + 1]
+        expression = self.issue.split('const statusNote = ')[1].split(';')[0]
+        cases = [
+            ({'fired': False, 'is_blocked': True, 'work_status': 'working'},
+             'Сменился номер — карточка в CRM заблокирована'),
+            ({'fired': True, 'is_blocked': True, 'work_status': 'fired'}, 'Уволен из парка'),
+            ({'fired': False, 'is_blocked': False, 'work_status': 'not_working'}, 'Не работает'),
+            ({'fired': False, 'is_blocked': False, 'work_status': 'working'}, None),
+        ]
+        script = '\n'.join((
+            consts,
+            'const note = (driver) => %s;' % expression,
+            'process.stdout.write(JSON.stringify(%s.map(note)));'
+            % json.dumps([driver for driver, _ in cases]),
+        ))
+        out = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, check=True)
+        self.assertEqual(json.loads(out.stdout.decode('utf-8')), [expected for _, expected in cases])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -29,6 +29,13 @@ const WORK_STATUS = {
     fired: 'Уволен',
 };
 
+/* `is_blocked` в CRM — не запрет работать в парке: так помечена карточка, в
+   которой сменили номер телефона («карточка заблокирована сменой номера» в
+   спецификации CRM). Водитель при этом числится работающим и выполняет
+   заказы, право на воду от флага не зависит — подпись только говорит, что с
+   карточкой. */
+const CARD_BLOCKED = 'Сменился номер — карточка в CRM заблокирована';
+
 /* Заказы недели на тарифах программы из настроек — «из них Business 12,
    Premier (Ultima) 3». Тариф программы, которого нет у машины и по которому не
    было заказов, не показываем: «Premier 0» у машины без Premier — шум. Нет
@@ -47,7 +54,7 @@ const NAME = 'xl:text-[17px] 2xl:text-[22px] 2xl:tracking-tight';
 const DriverCard = ({ driver, programTariffs }) => {
     const account = driverAccountUrl({ driver_account_id: driver.account_id, driver_park_id: driver.park_id });
     const statusNote = driver.fired ? 'Уволен из парка'
-        : driver.is_blocked ? 'Заблокирован в парке'
+        : driver.is_blocked ? CARD_BLOCKED
             : WORK_STATUS[driver.work_status] ?? null;
     const orders = driver.orders || {};
     // Список CRM обрезан на 500 заказах — числа «не меньше», отсюда «+».
