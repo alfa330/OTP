@@ -96,8 +96,10 @@ class ThinScrollTests(unittest.TestCase):
         self.assertIsNotNone(params, 'IosModal: список параметров не разобран')
         self.assertRegex(params.group(1), r'\bbodyClassName\s*=\s*MODAL_BODY_CLASS\s*(,|//|/\*|$)',
                          'IosModal: умолчание bodyClassName — не MODAL_BODY_CLASS')
-        self.assertTrue('<div className={bodyClassName}>' in modal,
-                        'IosModal: тело окна не берёт класс из bodyClassName')
+        # 12.10.2026 у тела появился ref (окно прячет полосу прокрутки, пока едет его
+        # рамка) — сверяем сам класс, а не строку разметки целиком.
+        self.assertRegex(modal, r'<div (?:ref=\{bodyRef\} )?className=\{bodyClassName\}>',
+                         'IosModal: тело окна не берёт класс из bodyClassName')
 
         overrides = []
         for folder, _dirs, files in os.walk(os.path.join(ROOT, 'src')):

@@ -5,11 +5,12 @@ import { iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal } from '../
 import IosDatePicker from '../ui/DatePicker';
 import { CITY_OPTIONS } from './PaymentAssetsEditor';
 import {
-    ASSET_STATUS_META, ASSET_STATUS_OPTIONS, HINTS, LIST_PAGE_SIZE, RECORD_FORMS, fmtDate, fmtDateTime, fmtMoney, pageRange,
+    ASSET_SKELETON, ASSET_STATUS_META, ASSET_STATUS_OPTIONS, HINTS, LIST_PAGE_SIZE, RECORD_FORMS, fmtDate, fmtDateTime, fmtMoney,
+    pageRange, recordView,
 } from './paymentsMeta';
 import {
-    AmountInput, DATE_TRIGGER, ErrorBox, Field, FilePicker, FormSelect, NoticeBox, Pager, Row, SectionTitle, TonePill, UserSelect,
-    downloadAttachment, errorText, multipart,
+    AmountInput, Bone, DATE_TRIGGER, ErrorBox, Field, FilePicker, FormSelect, NoticeBox, Pager, Row, SectionTitle, TonePill,
+    UserSelect, WindowSkeleton, downloadAttachment, errorText, multipart,
 } from './paymentsUi';
 
 /*
@@ -54,10 +55,21 @@ const moveLines = (move) => {
 
 const MOVE_TITLES = { registered: 'Поставлено на учёт', moved: 'Перемещение', status: 'Смена статуса' };
 
-const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToast, onClose, onChanged, onOpenRequest }) => {
+/* Чем содержимое окна появляется: карточка после загрузки проявляется, второй
+   уровень («Переместить», «Изменить описание») приезжает справа, возврат — слева,
+   как шаги формы заявки. */
+const LEVEL_APPEAR = 'motion-safe:animate-fade-in-soft';
+const LEVEL_FORWARD = 'motion-safe:animate-push-in';
+const LEVEL_BACK = 'motion-safe:animate-pop-in';
+
+/* preview — строка реестра, по которой открыли карточку: название и инвентарный
+   номер известны до ответа сервера, шапка окна не меняется при загрузке.
+   Экспорт — для теста первого кадра окна. */
+export const AssetCard = ({ assetId, preview = null, apiBaseUrl, headers, dictionaries, users, showToast, onClose, onChanged, onOpenRequest }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [mode, setMode] = useState(null);         // 'move' | 'edit'
+    const [levelMotion, setLevelMotion] = useState(LEVEL_APPEAR);
     const [draft, setDraft] = useState({});
     const [files, setFiles] = useState([]);
     const [busy, setBusy] = useState(false);
@@ -73,9 +85,14 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
         }
     }, [apiBaseUrl, headers, assetId]);
 
-    useEffect(() => { setData(null); setMode(null); load(); }, [load]);
+    // Отказ прошлого открытия уходит тоже: иначе он мелькнул бы первым кадром следующего.
+    useEffect(() => { setData(null); setMode(null); setError(''); setLevelMotion(LEVEL_APPEAR); load(); }, [load]);
 
     const asset = data?.asset;
+    const known = asset || preview;
+    // Окно меняет рост и при загрузке, и при переходе на второй уровень — sizeKey в ui/ios.jsx.
+    const view = asset ? (mode || 'view') : recordView({ data: asset, error });
+    const leaveMode = () => { setLevelMotion(LEVEL_BACK); setMode(null); };
     const canManage = Boolean(data?.can_manage);
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
 
@@ -93,6 +110,7 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
         });
         setFiles([]);
         setError('');
+        setLevelMotion(LEVEL_FORWARD);
         setMode('move');
     };
     const startEdit = () => {
@@ -102,6 +120,7 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
             cost: asset.cost ?? 0, legal_entity_id: asset.legal_entity_id, note: asset.note || '',
         });
         setError('');
+        setLevelMotion(LEVEL_FORWARD);
         setMode('edit');
     };
 
@@ -114,7 +133,7 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
                 : await axios.patch(`${apiBaseUrl}/api/payments/assets/${assetId}`, { ...draft, received_on: draft.received_on || null }, { headers: headers() });
             setData((prev) => ({ ...prev, asset: response.data?.asset || prev.asset, moves: response.data?.moves || prev.moves }));
             showToast?.(mode === 'move' ? 'Перемещение записано' : 'Карточка сохранена', 'success');
-            setMode(null);
+            leaveMode();
             onChanged?.();
         } catch (err) {
             setError(errorText(err, 'Не удалось сохранить'));
@@ -127,7 +146,7 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
 
     const footer = mode ? (
         <>
-            <button type="button" className={iosBtnSecondary} onClick={() => setMode(null)} disabled={busy}>Отмена</button>
+            <button type="button" className={iosBtnSecondary} onClick={leaveMode} disabled={busy}>Отмена</button>
             <button type="button" className={iosBtnPrimary} onClick={submit} disabled={busy}>
                 {busy && <Loader2 size={14} className="animate-spin" />} {mode === 'move' ? 'Записать перемещение' : 'Сохранить'}
             </button>
@@ -148,18 +167,19 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
         <IosModal
             open={Boolean(assetId)}
             onClose={onClose}
-            onBack={mode ? () => setMode(null) : null}
-            title={mode === 'move' ? 'Перемещение имущества' : mode === 'edit' ? 'Описание имущества' : (asset?.name || 'Имущество')}
-            subtitle={asset ? `инв. № ${asset.inventory_number}` : ''}
+            onBack={mode ? leaveMode : null}
+            title={mode === 'move' ? 'Перемещение имущества' : mode === 'edit' ? 'Описание имущества' : (known?.name || 'Имущество')}
+            subtitle={known?.inventory_number ? `инв. № ${known.inventory_number}` : (view === 'loading' ? <Bone inline className="h-2 w-28" /> : '')}
             maxWidth="max-w-2xl"
             footer={footer}
+            sizeKey={view}
         >
             <div className="space-y-4">
                 <ErrorBox text={error} />
-                {!asset && !error && <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500"><Loader2 size={15} className="animate-spin" /> Загружаем…</div>}
+                {view === 'loading' && <WindowSkeleton label="Загружаем карточку" sections={ASSET_SKELETON} />}
 
                 {asset && !mode && (
-                    <>
+                    <div key="view" className={`space-y-4 ${levelMotion}`}>
                         <div className={`${iosCard} px-4 py-2`}>
                             <Row label="Статус">{statusPill(asset)}</Row>
                             <Row label="Категория">{asset.category_name}</Row>
@@ -205,11 +225,11 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
                                 ))}
                             </div>
                         </section>
-                    </>
+                    </div>
                 )}
 
                 {asset && mode === 'move' && (
-                    <div className="space-y-3">
+                    <div key="move" className={`space-y-3 ${levelMotion}`}>
                         <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Ответственный сотрудник" required optionalMark={false} hint="За кем имущество числится. Оно появится в его профиле.">
                                 <UserSelect users={users} value={draft.responsible_user_id} onChange={(v) => set('responsible_user_id', v)} />
@@ -240,7 +260,7 @@ const AssetCard = ({ assetId, apiBaseUrl, headers, dictionaries, users, showToas
                 )}
 
                 {asset && mode === 'edit' && (
-                    <div className="space-y-3">
+                    <div key="edit" className={`space-y-3 ${levelMotion}`}>
                         <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Наименование" required optionalMark={false}><input className={iosInput} value={draft.name} onChange={(event) => set('name', event.target.value)} maxLength={300} /></Field>
                             <Field label="Категория" required optionalMark={false}>
@@ -428,6 +448,7 @@ const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, o
 
             <AssetCard
                 assetId={openedId}
+                preview={items.find((item) => item.id === openedId) || null}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 dictionaries={dictionaries}

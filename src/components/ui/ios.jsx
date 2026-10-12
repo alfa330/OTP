@@ -2,6 +2,7 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
+import { windowResizeMotion } from '../../utils/windowResize';
 
 /* Сколько экран уезжает вправо при закрытии. Дублируется в mobile-shell.css
    (анимация otp-screen-out) — равенство сторожит тест: разойдясь, они дадут
@@ -402,8 +403,14 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
    (карточка водителя «Обзвона»). Не передано — всё как было. */
 const MODAL_BODY_CLASS = 'thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5';
 
+/* sizeKey — окно сменило содержимое разом (догрузилась запись, открылся второй
+   шаг формы) и от этого стало другого роста. Без него рамка перескакивает на
+   новую высоту за один кадр (жалоба владельца 12.10.2026: «мини карточка
+   загрузка и резко она увеличивается»); с ним — доезжает до неё. Хозяин окна
+   меняет значение ровно тогда, когда меняет содержимое: 'loading' → 'ready',
+   'view' → 'edit'. Не передано — всё как было. */
 export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS,
-    embedded = false, headerActions = null }) => {
+    embedded = false, headerActions = null, sizeKey }) => {
     /* НА ТЕЛЕФОНЕ ЭТО НЕ ОКНО, А ЭКРАН. Решение владельца 10.09.2026: «убрать
        все модалки и вместо них сделать плавное переключение 1 в 1 как в
        телеграмме — модалка на мобильном выглядит не очень». Карточка посреди
@@ -455,6 +462,62 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
     if (open) kept.current = { title, subtitle, children, footer, onBack };
     const shown = !open && kept.current ? kept.current : { title, subtitle, children, footer, onBack };
 
+    /* Смена высоты по sizeKey. Только на компьютере: на телефоне окно — экран
+       во всю высоту, расти ему некуда. Высоту «было» берём при отрисовке, пока
+       React ещё не подменил содержимое; «стало» — сразу после подмены, до
+       показа кадра, иначе окно успело бы мигнуть в новом росте. offsetHeight, а
+       не рамка на экране: появление окна идёт с масштабом, и он бы исказил замер.
+
+       ОТПРАВНАЯ ВЫСОТА — ТОЛЬКО ТА, ЧТО ПОБЫЛА НА ЭКРАНЕ. Окно часто заполняет
+       себя эффектом уже после первого кадра (форма заявки подставляет заявку),
+       и на этот кадр в нём стоит прежний шаг. Человек его не видит, а окно при
+       каждом открытии «подрастало» бы из него. Отметка «показано» встаёт через
+       два кадра после подмены; движение, которое уже идёт, показано заведомо. */
+    const panelRef = React.useRef(null);
+    const bodyRef = React.useRef(null);
+    const sizeKeySeen = React.useRef(sizeKey);
+    const sizeShown = React.useRef(false);
+    const sizeFrom = React.useRef(null);
+    const resizing = React.useRef(null);
+    if (sizeKeySeen.current !== sizeKey) {
+        sizeKeySeen.current = sizeKey;
+        sizeFrom.current = panelRef.current && (sizeShown.current || resizing.current) ? panelRef.current.offsetHeight : null;
+    }
+    useIsoLayoutEffect(() => {
+        // Замер «было» одноразовый: забываем его сразу, чтобы высота закрывшегося
+        // окна не стала отправной точкой при следующем открытии.
+        const from = sizeFrom.current;
+        sizeFrom.current = null;
+        sizeShown.current = false;
+        // Окну без sizeKey отметка «показано» не нужна: оно свою высоту не двигает.
+        if (!open || sizeKey === undefined) return undefined;
+        let second = 0;
+        const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => { sizeShown.current = true; }); });
+        const forget = () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+
+        const panel = panelRef.current;
+        if (!from || !panel || isNarrow || embedded || prefersReducedMotion() || typeof panel.animate !== 'function') return forget;
+        // Прежнее движение ещё шло — новое начинается с высоты, на которой оно застало окно.
+        if (resizing.current) resizing.current.cancel();
+        const motion = windowResizeMotion(from, panel.offsetHeight);
+        if (!motion) return forget;
+        /* Пока рамка едет, тело окна короче содержимого: без этого на время
+           движения мелькала бы полоса прокрутки, которой в итоге может и не быть. */
+        const body = bodyRef.current;
+        if (body) body.style.overflowY = 'hidden';
+        const animation = panel.animate(motion.frames, { duration: motion.duration, easing: motion.easing });
+        resizing.current = animation;
+        const settle = () => {
+            if (resizing.current !== animation) return;
+            resizing.current = null;
+            if (body) body.style.overflowY = '';
+        };
+        animation.onfinish = settle;
+        animation.oncancel = settle;
+        return forget;
+    }, [sizeKey, open]);
+    React.useEffect(() => () => { if (resizing.current) resizing.current.cancel(); }, []);
+
     if (embedded && !open) return null;
     if (!open && !leaving) return null;
     /* Движение окна — только на компьютере: на телефоне окно едет экраном
@@ -472,7 +535,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
             style={{ fontFamily: APPLE_FONT }}
             onMouseDown={(e) => { if (!embedded && !leaving && e.target === e.currentTarget) onClose?.(); }}
         >
-            <div className={embedded ? 'flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-slate-50'
+            <div ref={panelRef} className={embedded ? 'flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-slate-50'
                 : `otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl${panelMotion}`}>
                 <div className={embedded ? 'relative flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/80 px-3 py-2'
                     : 'otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5'}>
@@ -522,7 +585,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                     прокрутки внизу окна на всё время перехода.
                     thin-scroll: полоса в 3 px, как у остальных тонких скроллов
                     портала (styles.css), а не системная в ~15 px вдоль окна. */}
-                <div className={bodyClassName}>
+                <div ref={bodyRef} className={bodyClassName}>
                     {shown.children}
                 </div>
                 {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,

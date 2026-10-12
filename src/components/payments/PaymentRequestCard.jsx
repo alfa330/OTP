@@ -6,12 +6,13 @@ import IosDatePicker from '../ui/DatePicker';
 import PaymentStageForm from './PaymentStageForm';
 import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, OBJECT_TYPE_LABELS,
-    PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, approvalSummary, describeEvent, dueLabel, fileKindOptions, fmtDate,
-    fmtDateTime, fmtMoney, fmtQty, isClosed, isOverdue, netAmount, paidLabel, requestState, tonePill,
+    PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent, dueLabel,
+    fileKindOptions, fmtDate, fmtDateTime, fmtMoney, fmtQty, isClosed, isOverdue, netAmount, paidLabel, recordView,
+    requestState, tonePill,
 } from './paymentsMeta';
 import {
-    AmountInput, ApprovalHint, AttachmentList, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Lifecycle,
-    NoticeBox, RequisitesBox, Row, SectionTitle, StatePill, TonePill, UserSelect, errorText, multipart,
+    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Lifecycle,
+    NoticeBox, RequisitesBox, Row, SectionTitle, StatePill, TonePill, UserSelect, WindowSkeleton, errorText, multipart,
 } from './paymentsUi';
 
 /*
@@ -97,7 +98,14 @@ const PaymentRequestCard = ({
     }, [apiBaseUrl, headers, requestId]);
 
     useEffect(() => {
-        if (!open) { setData(null); setMode(null); return; }
+        /* Закрыли — окно пустеет целиком: ни заявки, ни отказа, ни идущей
+           загрузки. Иначе следующее открытие начиналось бы с них: ответ, опоздавший
+           к закрытому окну, показывал прежнюю заявку первым кадром следующей. */
+        if (!open) {
+            ticketRef.current += 1;
+            setData(null); setMode(null); setError(''); setLoading(false);
+            return;
+        }
         // Открыли другую заявку поверх прежней (щелчок по колоколу) — прежнюю не показываем.
         setData((prev) => (prev?.request?.id === requestId ? prev : null));
         setExtraFiles([]);
@@ -232,19 +240,26 @@ const PaymentRequestCard = ({
         permissions.can_delete && { key: 'delete', label: 'Удалить', icon: Trash2, danger: true, separatorBefore: Boolean(permissions.can_refund || permissions.can_cancel), onSelect: () => setMode('delete') },
     ] : [];
 
-    const footer = request ? (
+    /* Подвал стоит с первого кадра, одной кнопкой «Готово»: появляясь вместе с
+       заявкой, он добавлял окну высоты уже после открытия. Действия над заявкой
+       встают в тот же ряд, когда она загрузилась. */
+    const footer = (
         <>
-            <div className="mr-auto">
-                <IosMenu items={menuItems} label="Ещё действия" align="left" disabled={busy} />
-            </div>
-            {permissions.can_edit && (
+            {request && (
+                <div className="mr-auto">
+                    <IosMenu items={menuItems} label="Ещё действия" align="left" disabled={busy} />
+                </div>
+            )}
+            {request && permissions.can_edit && (
                 <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => onEdit?.(data)}>
                     <Pencil size={14} /> Доработать
                 </button>
             )}
             <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
         </>
-    ) : null;
+    );
+    const view = recordView({ data, error, loading });
+    const shownId = request?.id ?? requestId;
 
     const events = (data?.events || []).slice().reverse();
     const shownEvents = showAllEvents ? events : events.slice(0, EVENTS_SHOWN);
@@ -324,19 +339,20 @@ const PaymentRequestCard = ({
         <IosModal
             open={open}
             onClose={onClose}
-            title={request ? `Заявка №${request.id}` : 'Заявка'}
-            subtitle={request ? `${REQUEST_KIND_LABELS[request.request_kind] || 'Закуп'} · ${fmtDateTime(request.created_at)} · ${request.initiator_name || ''}` : ''}
+            /* Номер известен до ответа сервера, строка под ним — нет: её место
+               держит полоса, иначе шапка подрастала бы вместе с заявкой. */
+            title={shownId ? `Заявка №${shownId}` : 'Заявка'}
+            subtitle={request
+                ? `${REQUEST_KIND_LABELS[request.request_kind] || 'Закуп'} · ${fmtDateTime(request.created_at)} · ${request.initiator_name || ''}`
+                : (view === 'loading' ? <Bone inline className="h-2 w-56" /> : '')}
             maxWidth="max-w-3xl"
             footer={footer}
+            sizeKey={view}
         >
-            {loading && !data && (
-                <div className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-500">
-                    <Loader2 size={15} className="animate-spin" /> Загружаем заявку…
-                </div>
-            )}
-            {!loading && !data && error && <ErrorBox text={error} />}
+            {view === 'loading' && <WindowSkeleton label="Загружаем заявку" summary wide sections={REQUEST_SKELETON} />}
+            {view === 'error' && <ErrorBox text={error} />}
             {request && (
-                <div className="space-y-4">
+                <div className="space-y-4 motion-safe:animate-fade-in-soft">
                     {/* Сводка: что, сколько, на каком этапе. Цвет только у состояний со смыслом. */}
                     <div className={`${iosCard} p-4`}>
                         {/* grow basis-0, а не flex-1: по нему оболочка телефона ставит ряд столбиком. */}

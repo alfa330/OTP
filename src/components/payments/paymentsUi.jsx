@@ -5,7 +5,7 @@ import {
     UsersRound, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { iosBtnGhost, iosBtnSecondary, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
+import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import {
     ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, fileSizeLabel, fmtMoney, initialsOf,
@@ -730,6 +730,66 @@ export const SectionTitle = ({ children, right = null }) => (
     <div className="flex items-end justify-between gap-2">
         <div className={iosGroupLabel}>{children}</div>
         {right}
+    </div>
+);
+
+/* Заготовка окна, пока запись грузится. Раньше окно открывалось коротким
+   «Загружаем…» и на ответе сервера разом вырастало в несколько раз (жалоба
+   владельца 12.10.2026: «мини карточка загрузка и резко она увеличивается»).
+   Теперь оно сразу стоит в свой рост: те же карточки и строки на тех же местах,
+   что у настоящей записи, только серыми полосами — как заготовки «Задач» и
+   профиля. Строка повторяет геометрию Row, раздел — SectionTitle с карточкой,
+   сводка — шапку карточки заявки: настоящее содержимое встаёт на место
+   заготовки без сдвига. Читалке о загрузке говорит одна подпись, а не полосы. */
+/* Тон полос — как у заготовок карточек на досках (bg-slate-200/70): более
+   бледный bg-slate-100 в тёмной теме почти сливался с карточкой. */
+export const Bone = ({ className = '', inline = false }) => (
+    <span aria-hidden="true" className={`${inline ? 'inline-block align-middle' : 'block'} animate-pulse rounded-full bg-slate-200/70 motion-reduce:animate-none ${className}`} />
+);
+
+const BONE_WIDTHS = ['w-3/5', 'w-2/5', 'w-1/2', 'w-1/3', 'w-2/3', 'w-1/4'];
+const BONE_STAGES = ['w-28', 'w-24', 'w-16', 'w-20', 'w-36', 'w-20'];
+
+const SkeletonRows = ({ rows, wide }) => (
+    <div className={`${iosCard} px-4 py-2`}>
+        {Array.from({ length: rows }, (_, index) => (
+            <div key={index} className="flex gap-3 py-1.5">
+                <div className={`${wide ? 'w-[168px]' : 'w-[140px]'} flex h-5 shrink-0 items-center`}><Bone className="h-2.5 w-24" /></div>
+                <div className="flex h-5 min-w-0 flex-1 items-center"><Bone className={`h-2.5 ${BONE_WIDTHS[index % BONE_WIDTHS.length]}`} /></div>
+            </div>
+        ))}
+    </div>
+);
+
+/* sections — сколько строк в каждом разделе: число либо { rows, title: false }
+   для карточки без заголовка. summary — сводка наверху, как у заявки. */
+export const WindowSkeleton = ({ label, summary = false, sections = [], wide = false }) => (
+    <div className="space-y-4" role="status" aria-busy="true" aria-label={label}>
+        {summary && (
+            <div className={`${iosCard} p-4`}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 grow basis-0">
+                        <div className="flex h-[22px] items-center"><Bone className="h-3.5 w-3/5" /></div>
+                        <div className="mt-0.5 flex h-5 items-center"><Bone className="h-2.5 w-2/5" /></div>
+                    </div>
+                    <div className="flex h-[30px] items-center"><Bone className="h-5 w-28" /></div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    {BONE_STAGES.map((width, index) => <Bone key={index} className={`h-[22px] ${width}`} />)}
+                </div>
+                <div className="mt-2.5 flex h-[22px] items-center"><Bone className="h-[22px] w-44" /></div>
+            </div>
+        )}
+        {sections.map((section, index) => {
+            const { rows, title = true } = typeof section === 'number' ? { rows: section } : section;
+            if (!title) return <SkeletonRows key={index} rows={rows} wide={wide} />;
+            return (
+                <section key={index} className="space-y-1.5">
+                    <div className="flex h-4 items-center px-1"><Bone className="h-2 w-28" /></div>
+                    <SkeletonRows rows={rows} wide={wide} />
+                </section>
+            );
+        })}
     </div>
 );
 

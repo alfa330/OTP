@@ -1237,6 +1237,30 @@ class ModalScreenTests(unittest.TestCase):
         self.assertIn("const panelMotion = isNarrow ? '' :", self.IOS)
         self.assertIn("const dimMotion = isNarrow ? '' :", self.IOS)
 
+    def test_window_height_follows_content_only_when_asked_and_only_on_desktop(self):
+        """Смена высоты окна по sizeKey (жалоба владельца 12.10.2026: «мини
+        карточка загрузка и резко она увеличивается»). Окно без sizeKey не
+        трогаем — движения в нём нет; на телефоне окно — экран во всю высоту,
+        расти ему некуда; при «Уменьшить движение» рамка встаёт сразу. Высота
+        «было» берётся при отрисовке, пока содержимое ещё прежнее: после
+        подмены мерить уже нечего. Сам расчёт движения — в utils/windowResize.js
+        под своим тестом (tests/window_resize.test.mjs)."""
+        self.assertIn('embedded = false, headerActions = null, sizeKey }) => {', self.IOS)
+        self.assertIn('if (sizeKeySeen.current !== sizeKey) {', self.IOS)
+        self.assertIn('if (!open || sizeKey === undefined) return undefined;', self.IOS)
+        self.assertIn("if (!from || !panel || isNarrow || embedded || prefersReducedMotion() "
+                      "|| typeof panel.animate !== 'function') return forget;", self.IOS)
+        self.assertIn('}, [sizeKey, open]);', self.IOS)
+        # Отправная высота — только та, что побыла на экране: форма заявки заполняет себя
+        # эффектом после первого кадра, и без этого окно «подрастало» бы при каждом открытии.
+        self.assertIn('sizeFrom.current = panelRef.current && (sizeShown.current || resizing.current) '
+                      '? panelRef.current.offsetHeight : null;', self.IOS)
+        self.assertIn('second = requestAnimationFrame(() => { sizeShown.current = true; });', self.IOS)
+        self.assertIn("import { windowResizeMotion } from '../../utils/windowResize';", self.IOS)
+        # Меряется панель окна, а полоса прокрутки на время движения прячется у его тела.
+        self.assertIn('<div ref={panelRef} className={embedded ?', self.IOS)
+        self.assertIn('<div ref={bodyRef} className={bodyClassName}>', self.IOS)
+
     def test_dim_is_off_and_panel_fills_the_screen(self):
         self.assertIn('body.mobile-shell .otp-modal-dim', SHELL_CSS)
         panel = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-panel {', 600)

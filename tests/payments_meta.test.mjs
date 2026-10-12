@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   ACCOUNTING_CATEGORY_OPTIONS,
   ALTERNATIVES_OPTIONS,
+  ASSET_SKELETON,
   ASSET_STATUS_OPTIONS,
   AUTO_CREATE_OPTIONS,
   BOARD_CHUNK_SIZES,
@@ -22,6 +23,7 @@ import {
   PAYMENT_METHOD_OPTIONS,
   REGISTRY_COLUMNS,
   REQUEST_KIND_OPTIONS,
+  REQUEST_SKELETON,
   STATE_FILTERS,
   STATE_META,
   STATE_OPTIONS,
@@ -71,6 +73,7 @@ import {
   priceTrend,
   purchaseProblems,
   quantityText,
+  recordView,
   regularProblems,
   registryTableMinWidth,
   registryWhere,
@@ -771,4 +774,39 @@ test('виды файлов по месту: первым стоит тот, ч�
       assert.ok(option && option.label, 'у каждого вида файла есть подпись');
     }
   }
+});
+
+test('окно записи: первый кадр после открытия — уже загрузка, а не пустое окно', () => {
+  // Запрос ещё не ушёл (loading = false), данных нет — окно стоит с заготовкой.
+  // Пустое окно на этот кадр и было той «мини-карточкой», которая потом вырастала.
+  assert.equal(recordView({ data: null, error: '', loading: false }), 'loading');
+  assert.equal(recordView({ data: null, error: '', loading: true }), 'loading');
+  assert.equal(recordView(), 'loading');
+});
+
+test('окно записи: отказ виден, только когда запрос закончился', () => {
+  assert.equal(recordView({ data: null, error: 'Заявка не найдена', loading: false }), 'error');
+  // Идёт новая попытка — прошлая ошибка не мелькает поверх заготовки.
+  assert.equal(recordView({ data: null, error: 'Заявка не найдена', loading: true }), 'loading');
+});
+
+test('окно записи: загруженная запись остаётся на экране при перечитывании и при отказе действия', () => {
+  const data = { request: { id: 7 } };
+  assert.equal(recordView({ data, error: '', loading: false }), 'ready');
+  assert.equal(recordView({ data, error: '', loading: true }), 'ready');
+  assert.equal(recordView({ data, error: 'Этап уже выполнил другой', loading: false }), 'ready');
+});
+
+test('заготовка заявки выше окна на ноутбуке и обычном мониторе — рамка при загрузке не меняется', () => {
+  const rowsOf = (section) => (typeof section === 'number' ? section : section.rows);
+  // Строка заготовки — 32 px, как Row; раздел добавляет заголовок и поля карточки (38 px),
+  // промежуток между разделами — 16 px; сводка заявки, шапка, подвал и поля окна — ещё около 300 px.
+  const height = (sections, extra) => sections.reduce((sum, section) => sum + rowsOf(section) * 32 + 38 + 16, extra);
+  // Окно не выше 92% экрана: при экране 1440 px по высоте это 1325 px.
+  assert.ok(height(REQUEST_SKELETON, 300) >= 1325, `заготовка заявки — около ${height(REQUEST_SKELETON, 300)} px`);
+  assert.ok(REQUEST_SKELETON.every((section) => rowsOf(section) > 0));
+  // Карточка имущества: описание без заголовка — одиннадцать обязательных полей п. 10.2
+  // (название стоит в шапке окна) и строка «Заявка»; ниже — история владельцев и мест.
+  assert.deepEqual(ASSET_SKELETON[0], { rows: 12, title: false });
+  assert.equal(ASSET_SKELETON.length, 2);
 });

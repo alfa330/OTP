@@ -190,7 +190,6 @@ const PaymentRequestForm = ({
        «назад» выбор типа возвращается слева. Новое окно начинает без сдвига —
        у него своё появление. */
     const [kindMotion, setKindMotion] = useState('');
-    useEffect(() => { if (open) setKindMotion(''); }, [open]);
     const errorRef = useRef(null);
     const pristineRef = useRef('');
 
@@ -204,34 +203,42 @@ const PaymentRequestForm = ({
     }, [error]);
 
     // Форма заполняется заново только при открытии и при смене заявки. `data` и `me`
-    // родитель пересоздаёт при каждом обновлении раздела (счётчики, колокол) — стой
-    // они в зависимостях, фоновое обновление стирало бы всё, что человек успел ввести.
-    const sourceRef = useRef({ data, me });
-    sourceRef.current = { data, me };
+    // родитель пересоздаёт при каждом обновлении раздела (счётчики, колокол) — следи
+    // форма за ними, фоновое обновление стирало бы всё, что человек успел ввести.
+    //
+    // Заполняется ПРИ ОТРИСОВКЕ, а не эффектом после неё: эффект отставал на кадр, и
+    // этот кадр окно стояло с тем, что осталось от прошлого раза, — после созданной
+    // заявки «Создать заявку» мелькало прежней формой во весь рост вместо двух плиток
+    // выбора. React перерисовывает компонент с новым состоянием ещё до показа кадра.
     const requestId = data?.request?.id || null;
-    useEffect(() => {
-        if (!open) return;
-        const source = sourceRef.current;
-        setError('');
-        setFiles([]);
-        setInvoiceFile(null);
-        setPreview(null);
-        setCardEditing(false);
-        setConfirmClose(false);
-        let next = emptyDraft(source.me);
-        if (source.data?.request) {
-            next = draftFromData(source.data, source.me);
-            setExtras(EXTRA_FIELDS.map((field) => field.key).filter((key) => next[key]));
-            setInvoiceOpen(Boolean(next.invoice_number || next.invoice_date
-                || (source.data.attachments || []).some((item) => item.kind === 'invoice')
-                || source.data.request.clarify_reason === 'invoice_missing'));
-        } else {
-            setExtras([]);
-            setInvoiceOpen(false);
+    const fillKey = open ? String(requestId ?? 'new') : null;
+    const [filledFor, setFilledFor] = useState(null);
+    if (fillKey !== filledFor) {
+        setFilledFor(fillKey);
+        if (fillKey !== null) {
+            setError('');
+            setFiles([]);
+            setInvoiceFile(null);
+            setPreview(null);
+            setCardEditing(false);
+            setConfirmClose(false);
+            // Новое окно начинает без сдвига содержимого — у него своё появление.
+            setKindMotion('');
+            let next = emptyDraft(me);
+            if (data?.request) {
+                next = draftFromData(data, me);
+                setExtras(EXTRA_FIELDS.map((field) => field.key).filter((key) => next[key]));
+                setInvoiceOpen(Boolean(next.invoice_number || next.invoice_date
+                    || (data.attachments || []).some((item) => item.kind === 'invoice')
+                    || data.request.clarify_reason === 'invoice_missing'));
+            } else {
+                setExtras([]);
+                setInvoiceOpen(false);
+            }
+            setDraft(next);
+            pristineRef.current = fingerprint(next);
         }
-        setDraft(next);
-        pristineRef.current = fingerprint(next);
-    }, [open, requestId]);
+    }
 
     const set = useCallback((key, value) => setDraft((prev) => ({ ...prev, [key]: value })), []);
     const kind = draft.request_kind;
@@ -523,6 +530,8 @@ const PaymentRequestForm = ({
             subtitle={editing ? request.expense_name : (kind ? '' : 'Выберите тип обращения')}
             maxWidth="max-w-3xl"
             footer={footer}
+            // Выбор типа — две плитки, форма — во весь рост окна: рамка доезжает, а не перескакивает.
+            sizeKey={kind ? 'form' : 'kind'}
         >
             <div key={kind ? 'form' : 'kind'} className={`space-y-4 ${kindMotion}`}>
                 <div ref={errorRef} className="scroll-mt-4"><ErrorBox text={error} /></div>
