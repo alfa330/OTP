@@ -399,3 +399,10 @@ test('раздел: лента подключена к useThreadEnd, загру�
     assert.equal(loadThread.split('requestAnimationFrame(').length - 1, 1);
     assert.match(loadThread, /if \(before\) \{[\s\S]*requestAnimationFrame\([\s\S]*\} else \{\n[^\n]*\n\s*setThread\(r\.data\.items \|\| \[\]\);\n\s*\}/);
 });
+
+test('шапка чата: у оператора счётчика «вх. · исх.» нет, у остальных — прежний', () => {
+    const view = readFileSync('src/components/wazzup/WazzupChatsView.jsx', 'utf8').replace(/\r\n/g, '\n');
+    assert.match(view, /\{!operator && selected\.messagesCount != null && \(\n\s*<IosBadge tone="slate">\n\s*\{selected\.inboundCount \?\? 0\} вх\. · \{selected\.outboundCount \?\? 0\} исх\.\n/);
+    // Других мест со счётчиком в разделе нет.
+    assert.equal(view.split('} вх. · {').length - 1, 1);
+});

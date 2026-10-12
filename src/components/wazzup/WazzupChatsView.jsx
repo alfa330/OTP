@@ -1984,8 +1984,9 @@ function ChatsWorkspace(props) {
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
                                         конкретной неправдой — ссылка открывает переписку
-                                        раньше, чем отвечает список. */}
-                                    {selected.messagesCount != null && (
+                                        раньше, чем отвечает список. Оператору счётчик не
+                                        нужен вовсе — решение владельца 12.10.2026. */}
+                                    {!operator && selected.messagesCount != null && (
                                         <IosBadge tone="slate">
                                             {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
                                         </IosBadge>
