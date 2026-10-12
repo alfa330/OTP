@@ -85,9 +85,28 @@ test('empty composer has disabled send and does not perform requests on render',
     const html = render();
     assert.doesNotMatch(html, /Ответ в WhatsApp/);
     assert.match(html, /rows="1"/);
-    assert.match(html, /Shift\+Enter/);
     assert.match(html, /<button[^>]+disabled=""/);
     assert.doesNotMatch(html, /readOnly=""/);
+});
+
+test('under the field there is no Enter/Shift+Enter hint: only the character counter while typing', () => {
+    // Решение владельца 12.10.2026: подсказка про Enter под полем — лишний текст.
+    const help = (html) => /<div id="wazzup-pilot-message-help"[^>]*>(.*?)<\/div>/.exec(html)[1];
+    const empty = render();
+    assert.doesNotMatch(empty, /Shift\s*\+\s*Enter|Enter —|новая строка/);
+    assert.equal(help(empty), '<span class=""></span>');
+    // Пустая строка (min-h-4) и строка со счётчиком (leading-4) одного роста: поле не дёргается при наборе.
+    assert.match(empty, /<div class="mt-1 flex min-h-4 [^"]*"><div id="wazzup-pilot-message-help" class="[^"]*\bleading-4\b[^"]*"/);
+    const previous = globalThis.sessionStorage;
+    globalThis.sessionStorage = { getItem: (key) => (key === pilotDraftStorageKey(chat) ? JSON.stringify({ text: 'Привет' }) : null) };
+    try {
+        assert.equal(help(render()), '<span class="">6/4096</span>');
+        assert.equal(help(render({ maxLength: 5 })), '<span class="text-rose-600">6/5</span>');
+        assert.doesNotMatch(render(), /Shift\s*\+\s*Enter|Enter —|новая строка/);
+    } finally {
+        if (previous === undefined) delete globalThis.sessionStorage;
+        else globalThis.sessionStorage = previous;
+    }
 });
 
 test('WABA composer shows the template hint only when the known last incoming message is at least 24 hours old', () => {

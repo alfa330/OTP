@@ -400,8 +400,9 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                 </div>
             )}
             <div className="mt-1 flex min-h-4 items-center justify-between gap-2">
-                <div id="wazzup-pilot-message-help" className="text-[11px] text-slate-400" aria-live="polite">
-                    <span className={tooLong ? 'text-rose-600' : ''}>{length > 0 && `${length}/${maxLength} · `}Enter — отправить · Shift+Enter — новая строка</span>
+                {/* leading-4 = высота пустой строки (min-h-4): блок не меняет рост, когда появляется счётчик. */}
+                <div id="wazzup-pilot-message-help" className="text-[11px] leading-4 text-slate-400" aria-live="polite">
+                    <span className={tooLong ? 'text-rose-600' : ''}>{length > 0 && `${length}/${maxLength}`}</span>
                 </div>
                 {undoText !== null && !hasFile && <button type="button" aria-label="Вернуть исходный текст" title="Вернуть исходный текст"
                     onClick={() => updateText(undoText)} className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-100"><Undo2 size={14} /></button>}
