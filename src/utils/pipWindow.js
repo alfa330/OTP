@@ -31,12 +31,80 @@ export const pipWindowTaken = () => (
  * голый HTML. href клонированной ссылки подставляем уже разрешённым — см.
  * причину в шапке файла.
  */
+const documentStyleNodes = () => Array.from(document.querySelectorAll('link[rel="stylesheet"], style'));
+
+const cloneStyleNode = (node) => {
+    const clone = node.cloneNode(true);
+    if (clone.tagName === 'LINK' && node.href) clone.href = node.href;
+    return clone;
+};
+
 export const cloneDocumentStyles = (targetWindow) => {
-    Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).forEach((node) => {
-        const clone = node.cloneNode(true);
-        if (clone.tagName === 'LINK' && node.href) clone.href = node.href;
-        targetWindow.document.head.appendChild(clone);
+    documentStyleNodes().forEach((node) => {
+        targetWindow.document.head.appendChild(cloneStyleNode(node));
     });
+};
+
+/*
+ * То же, но окно следит за стилями основного документа, пока открыто.
+ *
+ * Разового снимка хватает окну, чьи стили к открытию уже загружены. Просмотр
+ * вложений «Чатов ОП» догружает их ПОСЛЕ открытия окна: таблица текстового слоя
+ * PDF приходит вместе с первым PDF, а на dev-сервере Vite переписывает <style>
+ * на лету. Со снимком такой PDF открылся бы в окне без своих стилей.
+ *
+ * Возвращает функцию остановки: она снимает наблюдение и убирает из окна ровно
+ * то, что сюда положила, — чужие узлы <head> окна остаются на месте.
+ */
+export const mirrorDocumentStyles = (targetWindow) => {
+    const head = targetWindow.document.head;
+    const clones = new Map();
+    documentStyleNodes().forEach((source) => {
+        const clone = cloneStyleNode(source);
+        head.appendChild(clone);
+        clones.set(source, clone);
+    });
+    // Свои клоны держим перед меткой: по ней видно, куда вставлять новые.
+    const boundary = targetWindow.document.createComment('pip-document-styles');
+    head.appendChild(boundary);
+    let stopped = false;
+
+    const sync = () => {
+        if (stopped || targetWindow.closed) return;
+        const sources = documentStyleNodes();
+        const alive = new Set(sources);
+        clones.forEach((clone, source) => {
+            if (alive.has(source)) return;
+            clone.remove();
+            clones.delete(source);
+        });
+        sources.forEach((source) => {
+            const clone = cloneStyleNode(source);
+            const previous = clones.get(source);
+            if (previous?.isEqualNode(clone)) return;
+            previous?.remove();
+            clones.set(source, clone);
+        });
+        // Порядок — как в основном документе. Неизменённую ссылку с места не
+        // снимаем: переставленный <link> браузер загружает заново.
+        let next = boundary;
+        sources.slice().reverse().forEach((source) => {
+            const clone = clones.get(source);
+            if (clone.nextSibling !== next) head.insertBefore(clone, next);
+            next = clone;
+        });
+    };
+    const observer = typeof MutationObserver !== 'undefined' ? new MutationObserver(sync) : null;
+    observer?.observe(document.head, {
+        childList: true, subtree: true, characterData: true, attributes: true,
+    });
+    return () => {
+        stopped = true;
+        observer?.disconnect();
+        clones.forEach((clone) => clone.remove());
+        clones.clear();
+        boundary.remove();
+    };
 };
 
 /*

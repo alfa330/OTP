@@ -12,27 +12,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cloneDocumentStyles, mirrorDocumentChrome } from '../src/utils/pipWindow.js';
+import { cloneDocumentStyles, mirrorDocumentChrome, mirrorDocumentStyles } from '../src/utils/pipWindow.js';
 
 /** Узел <link> так, как его отдаёт браузер: атрибут относительный, свойство — нет. */
 const linkNode = (attrHref, absoluteHref) => {
     const node = {
         tagName: 'LINK',
+        rel: 'stylesheet',
         href: absoluteHref,
         attrHref,
-        cloneNode() { return { tagName: 'LINK', href: this.attrHref }; },
+        cloneNode() { return { tagName: 'LINK', rel: 'stylesheet', href: this.attrHref }; },
     };
     return node;
 };
 
+// Неглубокий клон в браузере — <style> без текста: стили уехали бы в окно пустыми.
 const styleNode = (text) => ({
     tagName: 'STYLE',
     textContent: text,
-    cloneNode() { return { tagName: 'STYLE', textContent: text }; },
+    cloneNode(deep) { return { tagName: 'STYLE', textContent: deep ? text : '' }; },
 });
 
+/** Селектор разбираем сами и только в двух формах, которыми в окно берут стили. */
+const matches = (node, selector) => selector.split(',').map((part) => part.trim()).some((part) => (
+    (part === 'style' && node.tagName === 'STYLE')
+    || (part === 'link[rel="stylesheet"]' && node.tagName === 'LINK' && node.rel === 'stylesheet')
+));
+
 const fakeSource = (nodes, { theme = null, bodyClass = '' } = {}) => ({
-    querySelectorAll: () => nodes,
+    querySelectorAll: (selector) => nodes.filter((node) => matches(node, selector)),
     documentElement: { getAttribute: (name) => (name === 'data-otp-theme' ? theme : null) },
     body: { className: bodyClass },
 });
@@ -85,6 +93,96 @@ test('встроенные стили переносятся вместе со �
 
     assert.deepEqual(target.head.map((n) => n.tagName), ['STYLE', 'LINK']);
     assert.equal(target.head[0].textContent, '.a{color:red}');
+});
+
+/** Узел, который можно вставить в середину <head> и снять: этого требует слежение. */
+const liveNode = (tagName, { attrHref = '', href = '', textContent = '' } = {}) => ({
+    tagName,
+    rel: tagName === 'LINK' ? 'stylesheet' : undefined,
+    href,
+    attrHref,
+    textContent,
+    parentNode: null,
+    get nextSibling() {
+        const siblings = this.parentNode?.childNodes || [];
+        return siblings[siblings.indexOf(this) + 1] ?? null;
+    },
+    remove() {
+        if (!this.parentNode) return;
+        this.parentNode.childNodes.splice(this.parentNode.childNodes.indexOf(this), 1);
+        this.parentNode = null;
+    },
+    // Как и у linkNode выше: клон получает атрибут, то есть относительный адрес.
+    cloneNode(deep) { return liveNode(tagName, { attrHref, href: attrHref, textContent: deep ? this.textContent : '' }); },
+    isEqualNode(other) {
+        return this.tagName === other.tagName && this.href === other.href
+            && this.textContent === other.textContent;
+    },
+});
+
+const liveHead = () => {
+    const head = {
+        childNodes: [],
+        // Каждая постановка узла: по ней видно, не трогали ли то, что не менялось.
+        placed: [],
+        appendChild(node) { node.remove(); node.parentNode = head; head.childNodes.push(node); head.placed.push(node); },
+        insertBefore(node, next) {
+            node.remove();
+            node.parentNode = head;
+            head.childNodes.splice(head.childNodes.indexOf(next), 0, node);
+            head.placed.push(node);
+        },
+    };
+    return head;
+};
+
+test('ссылка, догруженная после открытия окна, тоже едет с разрешённым адресом', () => {
+    const styles = [liveNode('LINK', { attrHref: '/assets/main-abc.css', href: 'https://portal.example/assets/main-abc.css' })];
+    const head = liveHead();
+    const targetWindow = {
+        closed: false,
+        document: { head, createComment: (text) => liveNode(null, { textContent: text }) },
+    };
+    const observers = [];
+    const previousObserver = globalThis.MutationObserver;
+    globalThis.MutationObserver = class {
+        constructor(callback) { this.callback = callback; observers.push(this); }
+        observe(node, options) { this.node = node; this.options = options; }
+        disconnect() { this.disconnected = true; }
+    };
+    const source = { head: {}, querySelectorAll: (selector) => styles.filter((node) => matches(node, selector)) };
+    try {
+        withDocument(source, () => {
+            const stop = mirrorDocumentStyles(targetWindow);
+            const [opened] = head.childNodes;
+            assert.equal(opened.href, 'https://portal.example/assets/main-abc.css');
+            // Следим за <head> портала целиком: Vite переписывает текст <style> на месте,
+            // и без subtree с characterData окно такой правки не увидит.
+            assert.equal(observers[0].node, source.head);
+            assert.deepEqual(observers[0].options, {
+                childList: true, subtree: true, characterData: true, attributes: true,
+            });
+
+            // Таблица стилей PDF приходит с первым PDF — окно к этому времени открыто.
+            styles.push(liveNode('LINK', { attrHref: '/assets/pdf-lazy.css', href: 'https://portal.example/assets/pdf-lazy.css' }));
+            observers[0].callback();
+
+            assert.deepEqual(head.childNodes.filter((node) => node.tagName).map((node) => node.href), [
+                'https://portal.example/assets/main-abc.css',
+                'https://portal.example/assets/pdf-lazy.css',
+            ]);
+            // Переставленный <link> браузер загружает заново — окно мигнуло бы без стилей.
+            assert.equal(head.placed.filter((node) => node === opened).length, 1,
+                'ссылку, которая не менялась, с места не снимают');
+
+            stop();
+            assert.deepEqual(head.childNodes, [], 'после остановки в окне не остаётся ни клонов, ни метки');
+            assert.equal(observers[0].disconnected, true);
+        });
+    } finally {
+        if (previousObserver === undefined) delete globalThis.MutationObserver;
+        else globalThis.MutationObserver = previousObserver;
+    }
 });
 
 test('тёмный режим уезжает в окно: он включается атрибутом, а не темой системы', () => {

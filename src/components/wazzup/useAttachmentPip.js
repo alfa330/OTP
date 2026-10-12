@@ -1,61 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
+    canOpenPipWindow, mirrorDocumentChrome, mirrorDocumentStyles, pipWindowTaken,
 } from '../../utils/pipWindow';
 
 const closeWindow = (target) => {
     try { target?.close(); } catch { /* The browser may already have closed it. */ }
-};
-
-const mirrorStyles = (target) => {
-    const sourceStyles = () => Array.from(document.querySelectorAll('link[rel="stylesheet"], style'));
-    const head = target.document.head;
-    const previousNodes = new Set(head.childNodes);
-    const sources = sourceStyles();
-    cloneDocumentStyles(target);
-    const clones = Array.from(head.childNodes).filter((node) => !previousNodes.has(node));
-    const entries = new Map(sources.map((source, index) => [source, clones[index]]));
-    const boundary = target.document.createComment('attachment-pip-styles');
-    head.appendChild(boundary);
-    let disposed = false;
-
-    const sync = () => {
-        if (disposed || target.closed) return;
-        const current = sourceStyles();
-        const available = new Set(current);
-        entries.forEach((clone, source) => {
-            if (!available.has(source)) {
-                clone.remove();
-                entries.delete(source);
-            }
-        });
-        current.forEach((source) => {
-            const clone = source.cloneNode(true);
-            if (clone.tagName === 'LINK' && source.href) clone.href = source.href;
-            const previous = entries.get(source);
-            if (previous?.isEqualNode(clone)) return;
-            previous?.remove();
-            entries.set(source, clone);
-        });
-        // Preserve source order without detaching unchanged stylesheet links.
-        let next = boundary;
-        current.slice().reverse().forEach((source) => {
-            const clone = entries.get(source);
-            if (clone.nextSibling !== next) head.insertBefore(clone, next);
-            next = clone;
-        });
-    };
-    const observer = typeof MutationObserver !== 'undefined' ? new MutationObserver(sync) : null;
-    observer?.observe(document.head, {
-        childList: true, subtree: true, characterData: true, attributes: true,
-    });
-    return () => {
-        disposed = true;
-        observer?.disconnect();
-        entries.forEach((clone) => clone.remove());
-        entries.clear();
-        boundary.remove();
-    };
 };
 
 /** Owns only the PiP window. The viewer keeps its portal host and React state. */
@@ -132,7 +81,7 @@ export default function useAttachmentPip({ onReturn } = {}) {
                 return null;
             }
             target.document.title = 'Вложения — Чаты ОП';
-            session = { window: target, themeObserver: null, stopStyles: mirrorStyles(target), onPageHide: null };
+            session = { window: target, themeObserver: null, stopStyles: mirrorDocumentStyles(target), onPageHide: null };
             mirrorDocumentChrome(target);
             Object.assign(target.document.body.style, { margin: '0', height: '100vh', overflow: 'hidden' });
 
