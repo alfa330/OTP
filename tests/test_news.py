@@ -1244,7 +1244,7 @@ class NewsPassFrontendTests(unittest.TestCase):
         """Окно смонтировано в корне портала — сценарии едут только к тем, кому
         тренажёр прикреплён."""
         passes = _jsx_code_only(_read(self.PASSES))
-        self.assertIn("lazy(() => import('../wiki/trainers/TrainerPlayer'))", passes)
+        self.assertIn("lazyWithRetry(() => import('../wiki/trainers/TrainerPlayer'))", passes)
         self.assertIn("import('../wiki/trainers/registry')", passes)
         self.assertNotIn("from '../wiki/trainers/registry'", passes)
         self.assertNotIn('trainers/', _jsx_code_only(_read(self.MODAL)))

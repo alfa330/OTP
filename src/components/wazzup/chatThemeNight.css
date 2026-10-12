@@ -78,7 +78,6 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-amber-200 { --tw-ring-color: #826027 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-amber-300 { --tw-ring-color: #9b6e21 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-100 { --tw-ring-color: #324b74 !important; }
-:is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-200\/60 { --tw-ring-color: rgba(51, 84, 138, 0.6) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-300 { --tw-ring-color: #355ea2 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-100 { --tw-ring-color: #255b51 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-200 { --tw-ring-color: #216b59 !important; }

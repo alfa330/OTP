@@ -53,7 +53,11 @@ const deferred = () => {
     const promise = new Promise((a, b) => { resolve = a; reject = b; });
     return { promise, resolve, reject };
 };
-const flush = () => new Promise((resolve) => setImmediate(resolve));
+// Reading the copied Response takes one event-loop turn in Node 22 and two in Node 24.
+// Spare turns keep these tests independent of the runtime's stream internals.
+const flush = async () => {
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+};
 const audioResponse = () => new Response(new Blob(['synthetic ogg'], { type: 'audio/ogg' }));
 
 function copyFixture(t) {

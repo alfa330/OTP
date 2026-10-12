@@ -89,8 +89,13 @@ class ThinScrollTests(unittest.TestCase):
                         default.group(1))
         modal = ios[ios.index('export const IosModal'):]
         modal = modal[:modal.index('\n};\n')]
-        self.assertTrue("bodyClassName = MODAL_BODY_CLASS }" in modal,
-                        'IosModal: умолчание bodyClassName — не MODAL_BODY_CLASS')
+        # Умолчание ищем среди параметров, где бы оно ни стояло: 09.10.2026 за
+        # ним дописали embedded и headerActions, и сверка «последним в списке»
+        # покраснела на окне, тело которого не менялось.
+        params = re.match(r'export const IosModal = \(\{(.*?)\}\) => \{', modal, re.S)
+        self.assertIsNotNone(params, 'IosModal: список параметров не разобран')
+        self.assertRegex(params.group(1), r'\bbodyClassName\s*=\s*MODAL_BODY_CLASS\s*(,|//|/\*|$)',
+                         'IosModal: умолчание bodyClassName — не MODAL_BODY_CLASS')
         self.assertTrue('<div className={bodyClassName}>' in modal,
                         'IosModal: тело окна не берёт класс из bodyClassName')
 
