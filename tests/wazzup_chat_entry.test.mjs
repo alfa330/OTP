@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import React from 'react';
@@ -184,4 +184,218 @@ test('на сенсорном экране поле сообщения при в
         assert.equal(h.fields.length, 2);
         assert.deepEqual(h.fields.map((field) => field.focused), [[], []]);
     } finally { h.close(); }
+});
+
+// Лента при входе в чат (useThreadEnd.js): настоящий хук; лента и ResizeObserver — подделки,
+// которые ведут себя как браузер: прокрутка зажата в [0, scrollHeight − clientHeight],
+// события scroll и наблюдения размеров тест присылает сам — тогда, когда их прислал бы браузер.
+const threadEndOutput = join(cache, 'wazzup-thread-end.mjs');
+await build({ entryPoints: ['src/components/wazzup/useThreadEnd.js'], outfile: threadEndOutput,
+    bundle: true, format: 'esm', platform: 'node', plugins: [{ name: 'thread-end-react', setup(builder) {
+        builder.onResolve({ filter: /^react$/ }, () => ({ path: 'react', namespace: 'thread-end' }));
+        builder.onLoad({ filter: /.*/, namespace: 'thread-end' }, () => ({ loader: 'js', contents: `
+            const h=()=>globalThis.__threadEnd;
+            export const useRef=(...v)=>h().useRef(...v);
+            export const useLayoutEffect=(...v)=>h().useLayoutEffect(...v);` }));
+    } }] });
+const { default: useThreadEnd } = await import(pathToFileURL(threadEndOutput));
+
+function threadBox({ content = 600, client = 600, padding = 24 } = {}) {
+    const box = {
+        content: { part: 'сообщения' }, contentHeight: content, clientHeight: client, padding, top: 0,
+        listeners: new Set(),
+        get scrollHeight() { return this.contentHeight + this.padding; },
+        get scrollTop() { return this.top; },
+        set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
+        get firstElementChild() { return this.content; },
+        addEventListener(name, listener, options) {
+            assert.equal(name, 'scroll'); assert.equal(options?.passive, true); this.listeners.add(listener);
+        },
+        removeEventListener(name, listener) { if (name === 'scroll') this.listeners.delete(listener); },
+        // Высота поменялась: браузер зажимает прокрутку, но сам её не двигает.
+        resize({ content = this.contentHeight, client = this.clientHeight } = {}) {
+            this.contentHeight = content; this.clientHeight = client; this.scrollTop = this.top;
+        },
+        scroll() { this.listeners.forEach((listener) => listener()); },
+        gap() { return this.scrollHeight - this.top - this.clientHeight; },
+    };
+    return box;
+}
+
+function threadEnd({ resizeObserver = true } = {}) {
+    const observers = [];
+    class FakeResizeObserver {
+        constructor(callback) { this.callback = callback; this.targets = new Set(); observers.push(this); }
+        observe(target) { this.targets.add(target); }
+        disconnect() { this.targets.clear(); }
+    }
+    const previous = globalThis.ResizeObserver;
+    if (resizeObserver) globalThis.ResizeObserver = FakeResizeObserver; else delete globalThis.ResizeObserver;
+    const boxRef = { current: null };
+    const slots = [];
+    let cursor = 0, effects = [];
+    const h = {
+        boxRef,
+        useRef(initial) { const i = cursor++; return slots[i] ??= { current: initial }; },
+        useLayoutEffect(effect, deps) {
+            const i = cursor++, old = slots[i];
+            if (old && deps.every((value, k) => Object.is(value, old.deps[k]))) return;
+            slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); });
+        },
+        render(props, box = boxRef.current) {
+            boxRef.current = box;
+            globalThis.__threadEnd = h; cursor = 0;
+            useThreadEnd(boxRef, props);
+            const pending = effects; effects = []; pending.forEach((effect) => effect());
+        },
+        // Наблюдение размера: только тем наблюдателям, что следят за этим узлом.
+        observed(target) { observers.forEach((observer) => { if (observer.targets.has(target)) observer.callback([{ target }]); }); },
+        watching: () => observers.filter((observer) => observer.targets.size).map((observer) => [...observer.targets]),
+        close() {
+            slots.forEach((slot) => slot?.cleanup?.()); delete globalThis.__threadEnd;
+            if (previous === undefined) delete globalThis.ResizeObserver; else globalThis.ResizeObserver = previous;
+        },
+    };
+    return h;
+}
+
+// Открыть чат: лента грузится (спиннер), потом React вставляет сообщения.
+const openThread = (h, box, chatKey, content) => {
+    h.render({ chatKey, loaded: false }, box);
+    box.resize({ content });
+    h.render({ chatKey, loaded: true }, box);
+};
+
+test('вход в чат: лента в конце сразу, как React вставил сообщения, — без кадра', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox();
+        h.render({ chatKey: 'A', loaded: false }, box);
+        assert.equal(box.top, 0);
+        box.resize({ content: 5000 });
+        h.render({ chatKey: 'A', loaded: true });
+        assert.equal(box.gap(), 0);
+        assert.equal(box.top, 5024 - 600);
+        // Ответ без перезагрузки ленты (сверка, правки) — сам по себе прокрутку не ставит.
+        box.scrollTop = 1000;
+        h.render({ chatKey: 'A', loaded: true });
+        assert.equal(box.top, 1000);
+    } finally { h.close(); }
+});
+
+test('пока человек внизу, поздние заметка, кнопка и поле ввода не уводят его от последних сообщений', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox();
+        openThread(h, box, 'A', 5000);
+        // Заметка пришла позже ленты — выросла сама лента.
+        box.resize({ content: 5120 }); h.observed(box.content);
+        assert.equal(box.gap(), 0);
+        // Поле ввода появилось позже — окно ленты стало ниже.
+        box.resize({ client: 520 }); h.observed(box);
+        assert.equal(box.gap(), 0);
+        // «Ответ не нужен»: событие scroll пришло раньше наблюдения размера — догоняем сразу.
+        box.resize({ content: 5160 }); box.scroll();
+        assert.equal(box.gap(), 0);
+        // Кнопку убрали — браузер зажал прокрутку; человек всё ещё внизу, и от нового низа
+        // считается следующий рост (событие scroll снова раньше наблюдения).
+        box.resize({ content: 5120 }); box.scroll();
+        box.resize({ content: 5300 }); box.scroll();
+        assert.equal(box.gap(), 0);
+        box.resize({ content: 5420 }); h.observed(box.content);
+        assert.equal(box.gap(), 0);
+    } finally { h.close(); }
+});
+
+test('прокрутка вверх снимает прилипание к низу, возврат вниз — возвращает', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox();
+        openThread(h, box, 'A', 5000);
+        // Сдвиг в пару пикселей — всё ещё внизу.
+        box.scrollTop = box.top - 2; box.scroll();
+        box.resize({ content: 5060 }); h.observed(box.content);
+        assert.equal(box.gap(), 0);
+        // Ушёл читать выше: новая высота его не двигает.
+        box.scrollTop = box.top - 30; box.scroll();
+        const reading = box.top;
+        box.resize({ content: 5200 }); h.observed(box.content);
+        box.resize({ client: 520 }); h.observed(box);
+        assert.equal(box.top, reading);
+        box.resize({ content: 5260 }); box.scroll();
+        assert.equal(box.top, reading);
+        // Вернулся вниз сам — снова держимся у последних.
+        box.scrollTop = box.scrollHeight; box.scroll();
+        box.resize({ content: 5400 }); h.observed(box.content);
+        assert.equal(box.gap(), 0);
+    } finally { h.close(); }
+});
+
+test('дробная прокрутка при масштабе экрана не снимает прилипание', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox({ padding: 24.67 });
+        openThread(h, box, 'A', 5000);
+        assert.equal(box.top, 4424.67);
+        // Браузер округлил прокрутку до пикселя экрана, и тут же лента подросла снизу.
+        box.top = 4424.5; box.resize({ content: 5020 }); box.scroll();
+        assert.equal(box.gap(), 0);
+    } finally { h.close(); }
+});
+
+test('новый чат и «Обновить» — снова с последних сообщений; подписки — на одну ленту', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox();
+        openThread(h, box, 'A', 5000);
+        box.scrollTop = 200; box.scroll();
+        openThread(h, box, 'B', 3000);
+        assert.equal(box.gap(), 0);
+        assert.equal(box.listeners.size, 1);
+        assert.deepEqual(h.watching(), [[box, box.content]]);
+        box.scrollTop = 100; box.scroll();
+        openThread(h, box, 'B', 3200);
+        assert.equal(box.gap(), 0);
+        // Смена ключа без перезагрузки ленты прокрутку не ставит — даже вернувшись к прежнему чату.
+        box.scrollTop = 100; box.scroll();
+        h.render({ chatKey: 'C', loaded: true });
+        h.render({ chatKey: 'B', loaded: true });
+        assert.equal(box.top, 100);
+    } finally { h.close(); }
+});
+
+test('чат закрыт — подписки сняты; новая лента — новые подписки; без ResizeObserver не падает', () => {
+    const h = threadEnd();
+    try {
+        const box = threadBox();
+        openThread(h, box, 'A', 5000);
+        h.render({ chatKey: '', loaded: false }, null);
+        assert.equal(box.listeners.size, 0);
+        assert.deepEqual(h.watching(), []);
+        h.render({ chatKey: '', loaded: true }, null);
+        const next = threadBox();
+        openThread(h, next, 'B', 4000);
+        assert.equal(next.gap(), 0);
+        assert.equal(next.listeners.size, 1);
+        assert.deepEqual(h.watching(), [[next, next.content]]);
+    } finally { h.close(); }
+    const bare = threadEnd({ resizeObserver: false });
+    try {
+        const box = threadBox();
+        openThread(bare, box, 'A', 5000);
+        assert.equal(box.gap(), 0);
+        box.resize({ content: 5100 }); box.scroll();
+        assert.equal(box.gap(), 0);
+    } finally { bare.close(); }
+});
+
+test('раздел: лента подключена к useThreadEnd, загрузка переписки не крутит её по кадру', () => {
+    const view = readFileSync('src/components/wazzup/WazzupChatsView.jsx', 'utf8').replace(/\r\n/g, '\n');
+    assert.match(view, /\n {4}useThreadEnd\(threadBox, \{ chatKey: selectedKey, loaded: thread !== null \}\);\n/);
+    assert.match(view, /<div ref=\{threadBox\} className="[^"]*overflow-y-auto[^"]*">\n\s*<div className="mx-auto w-full/);
+    const start = view.indexOf('    const loadThread = ');
+    const loadThread = view.slice(start, view.indexOf('    const refreshPilotThread = ', start));
+    // Кадр остался только у «Более ранних»: там позиция считается от прежней высоты.
+    assert.equal(loadThread.split('requestAnimationFrame(').length - 1, 1);
+    assert.match(loadThread, /if \(before\) \{[\s\S]*requestAnimationFrame\([\s\S]*\} else \{\n[^\n]*\n\s*setThread\(r\.data\.items \|\| \[\]\);\n\s*\}/);
 });

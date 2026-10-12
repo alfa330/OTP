@@ -40,6 +40,7 @@ import ChatMessageVideo from './ChatMessageVideo';
 import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import useInternalNotes from './useInternalNotes';
+import useThreadEnd from './useThreadEnd';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
@@ -1245,10 +1246,8 @@ function ChatsWorkspace(props) {
                     if (box) box.scrollTop = prevTop + box.scrollHeight - prevHeight;
                 });
             } else {
+                // В конец ленты её ставит useThreadEnd — после отрисовки, а не по кадру.
                 setThread(r.data.items || []);
-                requestAnimationFrame(() => {
-                    if (threadBox.current) threadBox.current.scrollTop = threadBox.current.scrollHeight;
-                });
             }
         }).catch((e) => {
             if (axios.isCancel?.(e) || e.name === 'CanceledError') return;
@@ -1409,6 +1408,8 @@ function ChatsWorkspace(props) {
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [localSignature]);
+    // Открытый чат — с последних сообщений, и лента держится на них, пока человек внизу.
+    useThreadEnd(threadBox, { chatKey: selectedKey, loaded: thread !== null });
     const attachmentAllowed = Boolean(attachmentSelection
         && attachmentSelection.account === account && attachmentSelection.ownerId === user?.id
         && attachmentSelection.apiBaseUrl === apiBaseUrl
