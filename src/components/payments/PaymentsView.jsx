@@ -18,8 +18,9 @@ import {
     tonePill, toneRow, toneText,
 } from './paymentsMeta';
 import {
-    ColumnsMenu, DueChip, NoticeBox, Pager, SECTION_COLUMN, StatePill, TypePill, errorText, requestCardFrame,
+    Bone, ColumnsMenu, DueChip, NoticeBox, Pager, SECTION_COLUMN, StatePill, TypePill, errorText, requestCardFrame,
 } from './paymentsUi';
+import { recall, recallShell, remember, rememberPing } from './paymentsEntry';
 
 /*
  * Раздел «Оплата счетов» — модуль «Закуп и оплата» (ТЗ #381).
@@ -36,7 +37,9 @@ import {
  *   «Справочники» (в них и регулярные платежи), «Участники» — настройка процесса (п. 13).
  *
  * Набор вкладок приходит с сервера (`capabilities`): раздел рисует то, что
- * человеку положено, а не то, что следует из его должности.
+ * человеку положено, а не то, что следует из его должности. Чтобы раздел при
+ * входе не перестраивался на глазах (две вкладки → восемь), он помнит прошлый
+ * ответ и первый кадр рисует им — см. paymentsEntry.js.
  *
  * Диплинк: ?view=payments&request=<id> открывает заявку сразу — на него ведут
  * уведомления в Telegram; из колокола заявку открывает `focusRequest`.
@@ -68,17 +71,30 @@ const dropRequestFromLocation = () => {
 
 const optionLabel = (options, value) => options.find((option) => option.value === value)?.label || '';
 
-const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest = null }) => {
+const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest = null, userId = null }) => {
     const headers = useCallback(() => (withAccessTokenHeader ? withAccessTokenHeader() : {}), [withAccessTokenHeader]);
 
-    const [ping, setPing] = useState(null);
+    /* Что раздел помнит с прошлого входа (paymentsEntry.js). `ping` — полный ответ сервера:
+       свежий или из памяти страницы; `entry.shell` — его оболочка из хранилища браузера, она
+       есть и сразу после перезагрузки. Первый кадр рисуется ими, запросы обновляют фоном. */
+    const [entry] = useState(() => ({
+        ping: recall(userId, 'ping'),
+        shell: recallShell(userId),
+        desk: recall(userId, 'desk'),
+        dictionaries: recall(userId, 'dictionaries'),
+        users: recall(userId, 'users'),
+    }));
+    const [ping, setPing] = useState(entry.ping);
     const [pingError, setPingError] = useState('');
-    const [dictionaries, setDictionaries] = useState(null);
-    const [users, setUsers] = useState([]);
+    const [dictionaries, setDictionaries] = useState(entry.dictionaries);
+    const [users, setUsers] = useState(entry.users || []);
     const [tab, setTab] = useState('desk');
     // Растёт после любого действия над заявкой: доски и рабочий стол перечитываются.
     const [refreshKey, setRefreshKey] = useState(0);
-    const [deskCount, setDeskCount] = useState(null);
+    const [deskCount, setDeskCount] = useState(() => {
+        const count = entry.desk?.total ?? (entry.ping || entry.shell)?.counters?.desk;
+        return count === undefined || count === null ? null : Number(count) || 0;
+    });
 
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
@@ -93,6 +109,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     const [filters, setFilters] = useState(EMPTY_FILTERS);
 
     const [formOpen, setFormOpen] = useState(false);
+    const [createWanted, setCreateWanted] = useState(false);
     const [editing, setEditing] = useState(null);
     const [openedId, setOpenedId] = useState(() => requestIdFromLocation());
 
@@ -103,29 +120,37 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         try {
             const response = await axios.get(`${apiBaseUrl}/api/payments/ping`, { headers: headers() });
             setPing(response.data);
+            rememberPing(userId, response.data);
             setDeskCount(Number(response.data?.counters?.desk) || 0);
             setPingError('');
         } catch (error) {
             setPingError(errorText(error, 'Раздел недоступен'));
+            setCreateWanted(false);
         }
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, userId]);
 
     const loadDictionaries = useCallback(async () => {
         try {
             const response = await axios.get(`${apiBaseUrl}/api/payments/dictionaries`, { headers: headers() });
             setDictionaries(response.data);
+            remember(userId, 'dictionaries', response.data);
         } catch { /* форма покажет пустые списки */ }
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, userId]);
 
     useEffect(() => { loadPing(); loadDictionaries(); }, [loadPing, loadDictionaries]);
 
     useEffect(() => {
         let cancelled = false;
         axios.get(`${apiBaseUrl}/api/payments/users`, { headers: headers() })
-            .then((response) => { if (!cancelled) setUsers(response.data?.users || []); })
+            .then((response) => {
+                if (cancelled) return;
+                const list = response.data?.users || [];
+                setUsers(list);
+                remember(userId, 'users', list);
+            })
             .catch(() => {});
         return () => { cancelled = true; };
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, userId]);
 
     // Щелчок по уведомлению в колоколе: раздел уже открыт, нужна сама заявка.
     useEffect(() => {
@@ -137,13 +162,18 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         return () => clearTimeout(timer);
     }, [search]);
 
-    const capabilities = ping?.capabilities || {};
-    const meta = ping?.meta || null;
-    const settings = ping?.settings || dictionaries?.settings || {};
+    // Оболочка раздела — вкладки, кнопка, предупреждения — рисуется по тому, что известно:
+    // свежему ответу, памяти страницы или записи в хранилище. Ничего нет — заготовкой; сервер
+    // не ответил вовсе — как раньше, тем, что есть у всех («Мои задачи» и «Заявки»).
+    const known = ping || entry.shell;
+    const shellKnown = Boolean(known) || Boolean(pingError);
+    const capabilities = known?.capabilities || {};
+    const meta = known?.meta || null;
+    const settings = known?.settings || dictionaries?.settings || {};
     // За сколько дней до срока метка на карточке желтеет — та же настройка, что у напоминаний.
     const soonDays = Number(settings.due_soon_days) || undefined;
     const isAdmin = Boolean(capabilities.is_admin);
-    const rolesMissing = ping?.roles_missing || [];
+    const rolesMissing = known?.roles_missing || [];
     const rolesReady = !rolesMissing.length;
 
     const tabs = useMemo(() => {
@@ -402,7 +432,20 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     };
 
     const filtersActive = activeFilterCount(filters);
-    const openCreate = () => { setEditing(null); setFormOpen(true); };
+    /* Кнопка «Создать заявку» видна сразу, по запомненным правам, а форме нужен полный ответ
+       сервера: из него она берёт самого человека и его подразделение. Нажали раньше, чем он
+       пришёл (первые доли секунды после перезагрузки), — форма откроется, как только придёт. */
+    const openCreate = () => {
+        if (!ping) { setCreateWanted(true); return; }
+        setEditing(null);
+        setFormOpen(true);
+    };
+    useEffect(() => {
+        if (!createWanted || !ping) return;
+        setCreateWanted(false);
+        setEditing(null);
+        setFormOpen(true);
+    }, [createWanted, ping]);
     const narrowed = Boolean(query || filtersActive || state !== 'all');
 
     return (
@@ -410,12 +453,24 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         // и фоновый логотип портала просвечивал бы серыми фигурами между карточками.
         // Корень — колонка раздела, одна на шапку, списки и доску: края у всех общие.
         <div className={`${SECTION_COLUMN} min-h-screen bg-gray-50 pb-12 pt-3 md:min-h-0`} style={{ fontFamily: APPLE_FONT }}>
-            <header className="flex flex-wrap items-center justify-between gap-3">
+            {/* Рост шапки — по кнопке, есть она или нет: иначе всё под шапкой сдвигалось на 7 px,
+                когда кнопка появлялась. Пока о правах ничего не известно, на её месте заготовка —
+                с теми же полями и тем же (невидимым) текстом, то есть точно того же размера. */}
+            <header className="flex flex-wrap items-center justify-between gap-3 sm:min-h-[40px]">
                 <h1 className="min-w-0 text-[22px] font-semibold tracking-tight text-slate-900">Оплата счетов</h1>
                 {capabilities.can_create && (
                     <button type="button" className={`${iosBtnPrimary} w-full whitespace-nowrap sm:w-auto`} onClick={openCreate} disabled={!rolesReady}>
                         <Plus size={15} /> Создать заявку
                     </button>
+                )}
+                {!shellKnown && (
+                    <span
+                        aria-hidden="true"
+                        data-create-skeleton
+                        className="inline-flex w-full animate-pulse items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-slate-200/70 px-4 py-2.5 text-[13.5px] font-semibold motion-reduce:animate-none sm:w-auto"
+                    >
+                        <span className="invisible inline-flex items-center gap-2"><Plus size={15} /> Создать заявку</span>
+                    </span>
                 )}
             </header>
 
@@ -425,22 +480,36 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 1179 px вкладки плотнее — поля 8 px и текст 12,5 px, — и лента помещается с 1010 px.
                 Правило стоит на самих кнопках (`[&>button]`), а не утилитой рядом: размер кнопки
                 задаёт IosSegmented, и одиночная утилита его не перебивает. */}
-            <div ref={tabsRef} className="-mx-3 mt-4 overflow-x-auto px-3 [scrollbar-width:none] sm:mx-0 sm:px-0">
-                <IosSegmented
-                    value={activeTab}
-                    options={tabs}
-                    onChange={setTab}
-                    size="lg"
-                    ariaLabel="Раздел"
-                    className="min-w-max min-[769px]:max-[1179px]:[&>button]:px-2 min-[769px]:max-[1179px]:[&>button]:text-[12.5px]"
-                />
-            </div>
+            {shellKnown ? (
+                /* Лента стоит в краях раздела и на телефоне. Раньше у обёртки были `-mx-3 px-3` —
+                   выпустить ленту до краёв экрана; но в телефонной оболочке отрицательные поля
+                   гасятся (mobile-shell.css), а внутренние оставались, и лента стояла на 12 px
+                   правее кнопки и карточек. */
+                <div ref={tabsRef} className="mt-4 overflow-x-auto [scrollbar-width:none]">
+                    <IosSegmented
+                        value={activeTab}
+                        options={tabs}
+                        onChange={setTab}
+                        size="lg"
+                        ariaLabel="Раздел"
+                        className="min-w-max min-[769px]:max-[1179px]:[&>button]:px-2 min-[769px]:max-[1179px]:[&>button]:text-[12.5px]"
+                    />
+                </div>
+            ) : (
+                /* Какие вкладки положены человеку, ещё не известно (первый вход на этом
+                   устройстве). Двух вкладок «по умолчанию» не рисуем — через мгновение их стало
+                   бы восемь; стоит пустая лента того же роста, вкладки встанут в неё. Рост даёт
+                   невидимая вкладка с теми же классами, что у настоящих. */
+                <div className="mt-4 flex rounded-[12px] bg-slate-100 p-[4px]" data-tabs-skeleton aria-hidden="true">
+                    <span className="invisible px-3.5 py-2 text-[13.5px] font-semibold min-[769px]:max-[1179px]:text-[12.5px]">Мои задачи</span>
+                </div>
+            )}
 
             {pingError && <div className="mt-4"><NoticeBox text={pingError} /></div>}
-            {ping && ping.schema_ready === false && (
+            {known && known.schema_ready === false && (
                 <div className="mt-4"><NoticeBox text="Раздел разворачивается — таблицы появятся после перезапуска сервера." /></div>
             )}
-            {ping && !rolesReady && (
+            {known && !rolesReady && (
                 <div className="mt-4">
                     <NoticeBox text={`Заявки пока не завести: не назначены участники — ${rolesMissing.join(', ')}.`}>
                         {isAdmin && (
@@ -452,20 +521,29 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     </NoticeBox>
                 </div>
             )}
-            {ping && ping.storage_ready === false && (
+            {known && known.storage_ready === false && (
                 <div className="mt-3"><NoticeBox tone="slate" text="Хранилище файлов не настроено: счета, чеки и акты прикрепить не получится, пока не задан бакет." /></div>
             )}
-            {ping && isAdmin && ping.legacy_pending > 0 && (
-                <div className="mt-3"><NoticeBox text={`Заявок прежней версии процесса не переведено на этапы: ${ping.legacy_pending}. Работать с ними нельзя, пока перенос не пройдёт, — причина записана в журнале сервера.`} /></div>
+            {known && isAdmin && known.legacy_pending > 0 && (
+                <div className="mt-3"><NoticeBox text={`Заявок прежней версии процесса не переведено на этапы: ${known.legacy_pending}. Работать с ними нельзя, пока перенос не пройдёт, — причина записана в журнале сервера.`} /></div>
             )}
-            {ping && isAdmin && ping.card_key_ready === false && (
+            {known && isAdmin && known.card_key_ready === false && (
                 <div className="mt-3"><NoticeBox tone="slate" text="Не задан ключ шифрования номеров карт: заявки на пополнение карты сохранить не получится." /></div>
             )}
 
             {/* Вкладка не подменяется рывком: содержимое мягко проявляется (fade-in-soft). */}
             {activeTab === 'desk' && (
                 <div className="mt-4 motion-safe:animate-fade-in-soft">
-                    <PaymentsDesk apiBaseUrl={apiBaseUrl} headers={headers} refreshKey={refreshKey} soonDays={soonDays} onOpen={setOpenedId} onCount={setDeskCount} />
+                    <PaymentsDesk
+                        apiBaseUrl={apiBaseUrl}
+                        headers={headers}
+                        refreshKey={refreshKey}
+                        soonDays={soonDays}
+                        onOpen={setOpenedId}
+                        onCount={setDeskCount}
+                        memoryKey={userId}
+                        expected={deskCount}
+                    />
                 </div>
             )}
 
@@ -649,15 +727,24 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
 
             {activeTab === 'roles' && (
                 <div className="mt-4 motion-safe:animate-fade-in-soft">
-                    <PaymentsRoles
-                        apiBaseUrl={apiBaseUrl}
-                        headers={headers}
-                        roles={ping?.roles || {}}
-                        users={users}
-                        onChanged={(roles) => { setPing((prev) => (prev ? { ...prev, roles } : prev)); loadPing(); }}
-                        showToast={showToast}
-                        canEdit={isAdmin}
-                    />
+                    {ping ? (
+                        <PaymentsRoles
+                            apiBaseUrl={apiBaseUrl}
+                            headers={headers}
+                            roles={ping.roles || {}}
+                            users={users}
+                            onChanged={(roles) => { setPing((prev) => (prev ? { ...prev, roles } : prev)); loadPing(); }}
+                            showToast={showToast}
+                            canEdit={isAdmin}
+                        />
+                    ) : (
+                        /* Кто в какой роли, приходит только с полным ответом сервера (в запомненной
+                           оболочке раздела имён нет). Без него роли выглядели бы пустыми — «Пока
+                           никого. Без участника этой роли заявки не заводятся». */
+                        <div className="grid gap-4 lg:grid-cols-2" role="status" aria-busy="true" aria-label="Загружаем участников">
+                            {[0, 1, 2, 3].map((index) => <Bone key={index} className="h-[132px] !rounded-2xl" />)}
+                        </div>
+                    )}
                 </div>
             )}
 

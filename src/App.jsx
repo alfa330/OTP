@@ -57961,12 +57961,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </Suspense>
                         )))}
                         {( view === "payments" && canAccessPaymentsSection && (
-                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                            /* Надпись о загрузке проявляется только через треть секунды: код раздела
+                               обычно уже в кеше и приходит за кадр-другой, и надпись, мелькнувшая на
+                               этот кадр, читалась как рывок при входе. */
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500 motion-safe:animate-fade-in-soft motion-safe:![animation-delay:300ms]">Загрузка раздела...</div>}>
                                 <PaymentsView
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     focusRequest={paymentsFocusRequest}
+                                    userId={user?.id}
                                 />
                             </Suspense>
                         ))}

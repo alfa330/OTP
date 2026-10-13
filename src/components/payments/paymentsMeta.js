@@ -733,6 +733,18 @@ export const normalizeBoardChunk = (value) => {
 export const COLUMN_SHEET_PAGE = 40;
 export const DESK_PAGE_SIZE = 20;
 export const LIST_PAGE_SIZE = 50;
+
+/* Заготовка «Моих задач», пока список не пришёл и помнить нечего (вход в раздел не должен
+   перестраиваться на глазах — см. paymentsEntry.js). Строк — сколько задач обещает счётчик
+   вкладки, но не длиннее экрана. Ноль — заготовки нет: сразу пустой стол. Счётчик неизвестен
+   (первый вход на этом устройстве) — три строки. */
+export const DESK_SKELETON_MAX = 6;
+export const deskSkeletonRows = (expected) => {
+    if (expected === null || expected === undefined || expected === '') return 3;
+    const count = Math.trunc(Number(expected));
+    if (!Number.isFinite(count) || count < 0) return 3;
+    return Math.min(DESK_SKELETON_MAX, count);
+};
 export const DICTIONARY_PAGE_SIZE = 20;
 
 export const REQUEST_FORMS = ['заявка', 'заявки', 'заявок'];

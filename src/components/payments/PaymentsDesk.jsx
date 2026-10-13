@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, Loader2, MessageCircleQuestion,
+    BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, MessageCircleQuestion,
     PackageCheck, Paperclip, PencilLine, ReceiptText, Send,
 } from 'lucide-react';
 import { iosCard } from '../ui/ios';
-import { DESK_PAGE_SIZE, TASK_FORMS, deskTaskAbout, deskTaskReturned, dueChip, fmtMoney, pageRange } from './paymentsMeta';
-import { DueChip, NoticeBox, Pager, errorText } from './paymentsUi';
+import {
+    DESK_PAGE_SIZE, TASK_FORMS, deskSkeletonRows, deskTaskAbout, deskTaskReturned, dueChip, fmtMoney, pageRange,
+} from './paymentsMeta';
+import { Bone, DueChip, NoticeBox, Pager, errorText } from './paymentsUi';
+import { recall, remember } from './paymentsEntry';
 
 /*
  * «Мои задачи» — персональный рабочий стол (ТЗ «Закуп и оплата», п. 16).
@@ -19,6 +22,11 @@ import { DueChip, NoticeBox, Pager, errorText } from './paymentsUi';
  * Строка отвечает на два вопроса: что сделать и по какой заявке. Щелчок
  * открывает заявку, где действие и выполняется. Длинный стол — страницами по
  * двадцать, как списки раздела «Задачи».
+ *
+ * Стол — первое, что видно при входе в раздел, поэтому он не «загружается» на
+ * глазах: первая страница помнится с прошлого входа (paymentsEntry.js) и рисуется
+ * сразу, а пока помнить нечего — стоит заготовка списка на столько строк, сколько
+ * задач обещает счётчик вкладки.
  */
 
 /* Значок — по тому, ЧТО предстоит сделать: задачи на столе разнородные
@@ -85,9 +93,36 @@ const DeskRow = ({ task, first, soonDays, onOpen }) => {
     );
 };
 
-const PaymentsDesk = ({ apiBaseUrl, headers, refreshKey, soonDays, onOpen, onCount }) => {
-    const [tasks, setTasks] = useState([]);
-    const [total, setTotal] = useState(0);
+/* Заготовка списка: строка повторяет геометрию DeskRow (значок, три строки текста, сумма
+   справа), поэтому задачи встают на её место без сдвига. */
+const DeskSkeleton = ({ rows }) => (
+    <div className={`${iosCard} overflow-hidden`} role="status" aria-busy="true" aria-label="Загружаем задачи" data-desk-skeleton>
+        {Array.from({ length: rows }, (_, index) => (
+            <div key={index} className="flex items-stretch gap-3 pl-4">
+                <span className="py-3"><Bone className="h-8 w-8 !rounded-[10px]" /></span>
+                <span className={`flex min-w-0 grow basis-0 items-center gap-3 py-3 pr-3 ${index ? 'border-t border-slate-100' : ''}`}>
+                    <span className="flex h-[63px] min-w-0 grow basis-0 flex-col justify-between py-[3px]">
+                        <Bone className="h-3 w-40 max-w-full" />
+                        <Bone className={`h-3 max-w-full ${index % 2 ? 'w-56' : 'w-72'}`} />
+                        <Bone className="h-3 w-24" />
+                    </span>
+                    <Bone className="hidden h-3.5 w-20 shrink-0 sm:block" />
+                </span>
+            </div>
+        ))}
+    </div>
+);
+
+const PaymentsDesk = ({ apiBaseUrl, headers, refreshKey, soonDays, onOpen, onCount, memoryKey = null, expected = null }) => {
+    // Первая страница с прошлого входа в раздел: стол рисуется ею сразу и обновляется фоном.
+    const [remembered] = useState(() => recall(memoryKey, 'desk'));
+    const [tasks, setTasks] = useState(remembered?.tasks || []);
+    const [total, setTotal] = useState(remembered?.total || 0);
+    /* Сколько строк в заготовке первой загрузки — решается один раз, при входе: счётчик вкладки
+       может прийти посреди неё (первый вход на устройстве), и заготовка, выросшая с трёх строк
+       до шести за мгновение до списка, была бы лишним движением. */
+    const [firstRows] = useState(() => deskSkeletonRows(expected));
+    const answered = useRef(false);
     const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -106,17 +141,21 @@ const PaymentsDesk = ({ apiBaseUrl, headers, refreshKey, soonDays, onOpen, onCou
             const params = new URLSearchParams({ limit: String(DESK_PAGE_SIZE), offset: String((pageNumber - 1) * DESK_PAGE_SIZE) });
             const response = await axios.get(`${apiBaseUrl}/api/payments/desk?${params}`, { headers: headers() });
             if (ticket.current !== mine) return;
-            setTasks(response.data?.tasks || []);
+            const list = response.data?.tasks || [];
             const count = Number(response.data?.total) || 0;
+            answered.current = true;
+            setTasks(list);
             setTotal(count);
+            if (pageNumber === 1) remember(memoryKey, 'desk', { tasks: list, total: count });
             countRef.current?.(count);
         } catch (err) {
             if (ticket.current !== mine) return;
+            answered.current = true;
             setError(errorText(err, 'Не удалось загрузить задачи'));
         } finally {
             if (ticket.current === mine) setLoading(false);
         }
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, memoryKey]);
 
     // После действия над заявкой (refreshKey) перечитывается та же страница.
     useEffect(() => { load(page); }, [load, page, refreshKey]);
@@ -134,9 +173,11 @@ const PaymentsDesk = ({ apiBaseUrl, headers, refreshKey, soonDays, onOpen, onCou
     };
 
     if (error) return <NoticeBox text={error} />;
-    if (loading && !tasks.length) {
-        return <div className="flex items-center justify-center gap-2 py-12 text-[13px] text-slate-500"><Loader2 size={15} className="animate-spin" /> Загружаем задачи…</div>;
-    }
+    /* Список ещё не пришёл, и помнить нечего — стоит его заготовка. Счётчик вкладки говорит
+       «ноль» — сразу пустой стол: ответ почти наверняка это подтвердит, а заготовка, сменяющаяся
+       надписью «задач нет», была бы лишним движением. */
+    const skeletonRows = loading && !tasks.length ? (answered.current ? deskSkeletonRows(expected) : firstRows) : 0;
+    if (skeletonRows) return <DeskSkeleton rows={skeletonRows} />;
     if (!tasks.length) {
         return (
             <div className={`${iosCard} flex flex-col items-center gap-2 px-4 py-14 text-center`}>

@@ -710,7 +710,9 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
 
             {isMobile && (
                 <div className="mt-2">
-                    <div ref={stripRef} className="-mx-3 overflow-x-auto px-3 [scrollbar-width:none]">
+                    {/* Без `-mx-3 px-3`: в телефонной оболочке отрицательные поля гасятся, и полоса
+                        стояла на 12 px правее карточек под ней. */}
+                    <div ref={stripRef} className="overflow-x-auto [scrollbar-width:none]">
                         <IosSegmented
                             value={activeMobile?.key}
                             options={columns.map((column) => ({ value: column.key, label: column.label, count: column.count }))}
