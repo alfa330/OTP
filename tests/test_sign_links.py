@@ -860,6 +860,22 @@ class SchemaTests(unittest.TestCase):
         for forbidden in ('link_url', 'link TEXT', 'link VARCHAR', 'sign_link TEXT'):
             self.assertNotIn(forbidden, ddl)
 
+    def test_the_external_service_is_counted_per_key_per_day(self):
+        """Счёт внешнего сервиса — строка на ключ в сутки, а не строка на ИИН:
+        по нему держится дневной предел, и «документов нет» лежит только в нём."""
+        usage = [text for text in schema._STATEMENTS if 'sign_link_api_usage' in text]
+        self.assertEqual(len(usage), 1)
+        ddl = ' '.join(usage[0].split())
+        self.assertIn('CREATE TABLE IF NOT EXISTS sign_link_api_usage', ddl)
+        self.assertIn('PRIMARY KEY (day, key_mark)', ddl)
+        for column in ('requests', 'iins', 'links', 'not_found', 'invalid', 'errors'):
+            self.assertIn('%s INTEGER NOT NULL DEFAULT 0' % column, ddl, column)
+        # Ни ИИН, ни ссылки, ни самого ключа в счёте нет — только числа и отпечаток.
+        for forbidden in (' iin ', 'link_url', 'api_key', 'secret'):
+            self.assertNotIn(forbidden, ddl)
+        # Сутки счёта — те же, что у журнала: по Алматы.
+        self.assertIn("AT TIME ZONE 'Asia/Almaty'", ddl)
+
     def test_a_deleted_account_keeps_its_journal_rows(self):
         ddl = '\n'.join(schema._STATEMENTS)
         self.assertIn('REFERENCES users(id) ON DELETE SET NULL', ddl)

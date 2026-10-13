@@ -9,9 +9,9 @@
 
 * **Генератор — чужая гостевая форма за WAF**, на том же хосте, что и API Sapar,
   которым живут «Обзвон» и «Обращения». Заблокируют нас там за напор — пострадают
-  и они. Поэтому одновременных запросов к форме не больше LANES на ВЕСЬ процесс,
-  сколько бы пачек ни шло разом. Места свои, а не из общего пула бота: там их
-  четыре на всё приложение.
+  и они. Поэтому одновременных запросов к форме — считанные места на ВЕСЬ
+  процесс (configured_lanes), сколько бы пачек ни шло разом. Места свои, а не из
+  общего пула бота: там их четыре на всё приложение.
 
 * **Ответа ждёт чужая программа со своим таймаутом.** У пачки есть срок
   (BUDGET_SEC). Не успели — оставшиеся ИИН уходят с пометкой «повторить», а не
@@ -27,17 +27,28 @@
 
 import collections
 import logging
+import os
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import sapar_link
 
+# Четыре места — столько же одновременных запросов к этому хосту портал уже
+# делает сам (dial_list: SIGN_PRECHECK_WORKERS). Замер на живом генераторе
+# 13.10.2026 (с рабочей машины, не с сервера): четыре места — 6–7 ИИН в секунду,
+# восемь — 9, то есть вдвое больше нагрузки на чужой сервер ради полутора раз
+# скорости. Поэтому больше — только осознанно, переменной окружения, без
+# выкладки кода.
 LANES = 4
+MAX_LANES = 16
+LANES_ENV = 'SIGN_LINKS_API_LANES'
 # Сколько ждать каждый из двух запросов к форме. У оператора — 20 секунд
 # (sapar_link.TIMEOUT), но он ждёт один ИИН, а не пачку.
 CALL_TIMEOUT = 10
-BUDGET_SEC = 30
+# Срок пачки. 500 ИИН в четыре места — около 80 секунд (замер выше), запас почти
+# вдвое. Прокси Render держит запрос куда дольше, упираться будет клиент.
+BUDGET_SEC = 150
 MAX_UNAVAILABLE_IN_ROW = 3
 
 # Почему ИИН остался без ответа генератора.
@@ -53,12 +64,22 @@ _executor = None
 _executor_lock = threading.Lock()
 
 
+def configured_lanes(environ=None):
+    """Сколько мест у процесса: LANES либо SIGN_LINKS_API_LANES, от 1 до MAX_LANES."""
+    raw = ((os.environ if environ is None else environ).get(LANES_ENV) or '').strip()
+    try:
+        value = int(raw or LANES)
+    except ValueError:
+        value = LANES
+    return max(1, min(MAX_LANES, value))
+
+
 def shared_executor():
     """Места процесса под запросы к генератору. Создаются при первой пачке."""
     global _executor
     with _executor_lock:
         if _executor is None:
-            _executor = ThreadPoolExecutor(max_workers=LANES,
+            _executor = ThreadPoolExecutor(max_workers=configured_lanes(),
                                            thread_name_prefix='sign-links-api')
         return _executor
 
@@ -96,7 +117,7 @@ def run(iins, generate, *, executor=None, lanes=None, budget_sec=None,
     берутся из констант модуля в момент вызова.
     """
     executor = executor or shared_executor()
-    lanes = max(1, int(LANES if lanes is None else lanes))
+    lanes = max(1, int(configured_lanes() if lanes is None else lanes))
     budget_sec = BUDGET_SEC if budget_sec is None else budget_sec
     if max_unavailable_in_row is None:
         max_unavailable_in_row = MAX_UNAVAILABLE_IN_ROW

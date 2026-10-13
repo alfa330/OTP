@@ -25,12 +25,15 @@ def today_start_almaty():
     return now_almaty().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-# Запрос внешнего сервиса (external.py) — строка того же журнала: вопрос «кто
-# запрашивал ссылку по этому ИИН» обязан находить и его. Сотрудника у такой
-# строки нет (user_id NULL), вместо роли стоит API_ROLE, вместо имени —
-# «Внешний сервис» с отпечатком ключа. Отдела тоже нет, поэтому главе отдела
-# такие строки не видны (граница scope в _JOURNAL_WHERE) — только глобальному
-# админу. Двойник кода роли — API_ROLE в signLinkMeta.js.
+# Запрос внешнего сервиса (external.py) — строка того же журнала: вопрос «кому
+# выдана ссылка по этому ИИН» обязан находить и его. Сотрудника у такой строки
+# нет (user_id NULL), вместо роли стоит API_ROLE, вместо имени — «Внешний
+# сервис» с отпечатком ключа. Отдела тоже нет, поэтому главе отдела такие строки
+# не видны (граница scope в _JOURNAL_WHERE) — только глобальному админу.
+# Двойник кода роли — API_ROLE в signLinkMeta.js.
+#
+# Строкой от сервиса пишется не всё: выданная ссылка, отказ и опечатка. Ответ
+# «документов нет» идёт только в счёт суток (sign_link_api_usage) — см. schema.
 API_ROLE = 'api'
 API_CLIENT_NAME = 'Внешний сервис (ключ %s)'
 
@@ -134,9 +137,9 @@ def log_request(cursor, ctx, *, iin, outcome, vendor_message=None, link_issued=F
     return {'id': row[0], 'created_at': row[1].isoformat() if row and row[1] else None}
 
 
-# Пачка внешнего входа — одним INSERT: полсотни строк по одной были бы
-# полусотней обращений к базе. Массивы, а не execute_values: тот шлёт страницы
-# по сто строк отдельными запросами и врёт про rowcount.
+# Пачка внешнего входа — одним INSERT: сотня строк по одной была бы сотней
+# обращений к базе. Массивы, а не execute_values: тот шлёт страницы по сто
+# строк отдельными запросами и врёт про rowcount.
 _API_INSERT_SQL = """
     INSERT INTO sign_link_requests
         (user_id, user_name, user_role, department_id, department_code,
@@ -204,27 +207,53 @@ def used_today(cursor, user_id):
     return int(row[0] or 0) if row else 0
 
 
-# У внешнего входа предел один на всех держателей ключей и считает КАЖДУЮ
-# строку, а не только походы к генератору: он бережёт и генератор, и журнал —
-# без этого утёкший ключ завалил бы таблицу опечатками. Идёт по индексу
-# (user_id, created_at): у строк внешнего входа user_id пуст.
+# У внешнего входа предел один на всех держателей ключей и считает КАЖДЫЙ
+# принятый ИИН, а не только походы к генератору: и «документов нет», и опечатку —
+# иначе утёкший ключ гонял бы генератор и журнал, не тратя предела. Счёт лежит
+# в sign_link_api_usage, строкой на ключ в сутки: прочитать предел — одна-две
+# строки, а не подсчёт по журналу на каждый запрос.
 _API_USED_TODAY_SQL = """
-    SELECT count(*)
-      FROM sign_link_requests r
-     WHERE r.user_id IS NULL
-       AND r.user_role = %(api_role)s
-       AND r.created_at >= %(day_start)s
+    SELECT COALESCE(sum(u.iins), 0)
+      FROM sign_link_api_usage u
+     WHERE u.day = %(day)s
+"""
+
+_API_USAGE_ADD_SQL = """
+    INSERT INTO sign_link_api_usage AS u
+        (day, key_mark, requests, iins, links, not_found, invalid, errors)
+    VALUES (%(day)s, %(key_mark)s, 1, %(iins)s, %(links)s, %(not_found)s,
+            %(invalid)s, %(errors)s)
+    ON CONFLICT (day, key_mark) DO UPDATE
+       SET requests = u.requests + 1,
+           iins = u.iins + EXCLUDED.iins,
+           links = u.links + EXCLUDED.links,
+           not_found = u.not_found + EXCLUDED.not_found,
+           invalid = u.invalid + EXCLUDED.invalid,
+           errors = u.errors + EXCLUDED.errors,
+           updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
 """
 
 
 def api_used_today(cursor):
-    """Сколько ИИН внешний вход принял сегодня (сутки — по Алматы)."""
-    cursor.execute(_API_USED_TODAY_SQL, {
-        'api_role': API_ROLE,
-        'day_start': today_start_almaty(),
-    })
+    """Сколько ИИН внешний вход принял сегодня, по всем ключам (сутки — по Алматы)."""
+    cursor.execute(_API_USED_TODAY_SQL, {'day': now_almaty().date()})
     row = cursor.fetchone()
     return int(row[0] or 0) if row else 0
+
+
+def add_api_usage(cursor, *, key_mark, links=0, not_found=0, invalid=0, errors=0):
+    """Записать пачку в счёт суток. Возвращает число принятых ИИН.
+
+    Принятый ИИН — тот, по которому что-то сделано: спросили генератор (ссылка,
+    «документов нет», отказ, сбой) либо отвергли как опечатку. ИИН, до которого
+    очередь не дошла, в счёт не идёт: его пришлют снова.
+    """
+    counts = {'links': int(links), 'not_found': int(not_found), 'invalid': int(invalid),
+              'errors': int(errors)}
+    accepted = sum(counts.values())
+    cursor.execute(_API_USAGE_ADD_SQL, dict(counts, day=now_almaty().date(),
+                                            key_mark=str(key_mark)[:16], iins=accepted))
+    return accepted
 
 
 # ─────────────────────────────────────────────────────────────────────────────

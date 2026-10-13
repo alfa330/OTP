@@ -25,17 +25,21 @@
 
 Чем ограничено (значения — в окружении сервера, см. README):
     * ИИН в одном запросе — MAX_IINS;
-    * ИИН в сутки на все ключи — DAILY_LIMIT, счёт по журналу;
+    * ИИН в сутки на все ключи — DAILY_LIMIT, счёт в sign_link_api_usage;
     * одновременных запросов — MAX_IN_FLIGHT; лишний получает 429, а не
-      занимает нить waitress на полминуты;
-    * одновременных походов к генератору — batch.LANES на весь процесс.
+      занимает нить waitress на всё время пачки;
+    * одновременных походов к генератору — batch.configured_lanes на весь
+      процесс. Это и есть настоящий потолок скорости: 6–7 ИИН в секунду.
 Пределы стоят не от подбора ключа (его не подобрать), а на случай, если ключ
 утечёт или сервис на той стороне зациклится: генератор — чужая форма на общем
 с API Sapar хосте, и блокировка там ударит по «Обзвону» и «Обращениям».
 
-Каждый спрошенный ИИН — строка журнала раздела (кто: «Внешний сервис» с
-отпечатком ключа). Журнал не записался — ссылки не отдаём: выдача без следа
-хуже отказа. Сама ссылка, как и у сотрудников, в базе не хранится.
+Что остаётся в базе. Выданная ссылка, отказ генератора и опечатка — строкой
+журнала раздела (кто: «Внешний сервис» с отпечатком ключа). Ответ «документов
+нет» — только в счёт суток: сервис шлёт ИИН десятками тысяч, почти на все ответ
+именно такой, и сто тысяч строк в день, по которым ничего не выдано, утопили
+бы журнал. Запись не удалась — ссылки не отдаём: выдача без следа хуже отказа.
+Сама ссылка, как и у сотрудников, в базе не хранится.
 """
 
 import json
@@ -46,17 +50,21 @@ import time
 
 from flask import Blueprint, jsonify, request
 
-from . import api_key, batch, iin as iin_rules, queries, sapar_link
+from . import api_key, batch, iin as iin_rules, queries, sapar_link, schema
 
-MAX_IINS = 50
-MAX_IINS_CEILING = 200
-DAILY_LIMIT = 10000
-DAILY_LIMIT_CEILING = 500000
-MAX_IN_FLIGHT = 3
+# Пределы подняты 13.10.2026 по слову владельца («нормально так увеличим») —
+# вдесятеро. Потолок MAX_IINS стоит там, где пачка ещё укладывается в срок
+# (batch.BUDGET_SEC) на четырёх местах: больше прислать можно было бы, но хвост
+# возвращался бы с пометкой «не успели».
+MAX_IINS = 500
+MAX_IINS_CEILING = 1000
+DAILY_LIMIT = 100000
+DAILY_LIMIT_CEILING = 1000000
+MAX_IN_FLIGHT = 5
 RETRY_AFTER_SEC = 2
-# Полсотни ИИН — это килобайт. 64 КБ хватает на потолок с запасом на пробелы и
-# дефисы, а читать больше до разбора незачем.
-MAX_BODY_BYTES = 64 * 1024
+# Тысяча ИИН — это 20 КБ даже с пробелами и отступами. Четверти мегабайта
+# хватает с большим запасом, а читать больше до разбора незачем.
+MAX_BODY_BYTES = 256 * 1024
 # Сколько знаков присланного значения возвращаем и пишем в журнал: у опечатки
 # длина любая, а колонка журнала — 32.
 ECHO_LENGTH = 32
@@ -80,11 +88,15 @@ def _env_int(name, default, minimum, maximum):
     return max(minimum, min(maximum, value))
 
 
+def _is_number(item):
+    return isinstance(item, int) and not isinstance(item, bool)
+
+
 def _text(item):
     """Элемент списка как строка. ИИН — строка; число тоже примем, остальное пусто."""
     if isinstance(item, str):
         return item
-    if isinstance(item, int) and not isinstance(item, bool):
+    if _is_number(item):
         return str(item)
     return ''
 
@@ -101,7 +113,13 @@ def _printable(text):
 
 def _entry(item):
     text = _storable(_text(item))
-    value, defect = iin_rules.validate(text)
+    # Число ведущих нулей не хранит, а ИИН родившихся в 2000-х с них начинается:
+    # 050101… приходит числом как 50101…. Число дополняем до двенадцати знаков —
+    # это не догадка, значение то же. Строке нуль НЕ дописываем: там недостающая
+    # цифра может быть и опечаткой, а угадывать чужой ИИН нельзя — по нему
+    # выдаётся ссылка на документы.
+    candidate = text.zfill(iin_rules.IIN_LENGTH) if _is_number(item) and item >= 0 else text
+    value, defect = iin_rules.validate(candidate)
     return {
         'shown': text.strip()[:ECHO_LENGTH],
         'iin': value,
@@ -172,6 +190,15 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
     daily_limit = daily_limit or _env_int('SIGN_LINKS_API_DAILY_LIMIT', DAILY_LIMIT, 1,
                                           DAILY_LIMIT_CEILING)
     slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
+    ready = {'usage': False}
+
+    def _usage_ready():
+        """Таблица счёта суток на месте. Помним только «да»: «нет» лечится
+        перезапуском со схемой, и узнать о нём надо первым же запросом после."""
+        if not ready['usage']:
+            with db._get_cursor() as cursor:
+                ready['usage'] = schema.api_usage_is_ready(cursor)
+        return ready['usage']
 
     def _ip():
         try:
@@ -263,6 +290,12 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
         planned = len(valid) + len(typos)
         used = 0
         if planned:
+            if not _usage_ready():
+                # Без счёта суток предел не проверить — а без предела не выдаём.
+                logging.error('sign_links: нет таблицы sign_link_api_usage — внешний вход '
+                              'закрыт; схема раздела не встала, смотрите логи старта')
+                return _refuse(503, 'SIGN_LINKS_API_NOT_READY',
+                               'Сервис ещё разворачивается — повторите запрос позже')
             with db._get_cursor() as cursor:
                 used = queries.api_used_today(cursor)
             if used + planned > daily_limit:
@@ -273,16 +306,22 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
                                'Дневной предел: в запросе ИИН больше, чем осталось на сегодня',
                                limits=_limits(used))
 
-        # Курсор на время похода к генератору НЕ держим: пачка идёт секунды, а
-        # слот пула на это время нужен остальному порталу.
+        # Курсор на время похода к генератору НЕ держим: пачка идёт до пары
+        # минут, а слот пула на это время нужен остальному порталу.
         outcomes, stopped = batch.run(valid, generate, executor=executor) if valid else ({}, '')
 
         rows = []
+        counts = {'links': 0, 'not_found': 0, 'errors': 0}
         for value in valid:
             result = outcomes[value]
             if not result.get('asked'):
-                continue  # генератор не спрашивали — в журнал писать нечего
+                continue  # генератор не спрашивали — ни в журнал, ни в счёт
             outcome, link = _settle(result)
+            if outcome == sapar_link.NO_DOCUMENTS:
+                # Ничего не выдано, а таких ответов большинство: только в счёт суток.
+                counts['not_found'] += 1
+                continue
+            counts['links' if link else 'errors'] += 1
             rows.append({
                 'iin': value, 'outcome': outcome,
                 'vendor_message': result.get('message'),
@@ -293,10 +332,15 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
             })
         rows.extend({'iin': logged, 'outcome': 'invalid', 'error_text': defect}
                     for logged, defect in typos)
-        if rows:
+        accepted = 0
+        if rows or counts['not_found']:
+            # Журнал и счёт — одной транзакцией: либо записано всё, либо ничего
+            # не выдано.
             with db._get_cursor() as cursor:
                 queries.log_api_requests(cursor, key_mark=mark, rows=rows,
                                          ip_address=_ip(), user_agent=_ua())
+                accepted = queries.add_api_usage(cursor, key_mark=mark, invalid=len(typos),
+                                                 **counts)
 
         results = [_answer(entry, outcomes) for entry in entries]
         summary = {status: 0 for status in STATUSES}
@@ -311,7 +355,7 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
         return jsonify({
             "results": results,
             "summary": dict(summary, total=len(results)),
-            "limits": _limits(used + len(rows)),
+            "limits": _limits(used + accepted),
         }), 200
 
     return bp

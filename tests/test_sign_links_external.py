@@ -13,9 +13,10 @@
 * **«Не спросили» ≠ «не найдено».** Генератор лёг, не успели, ответил
   незнакомыми словами — это error, а не not_found.
 * **Пределы.** ИИН в запросе, ИИН в сутки, одновременные запросы, одновременные
-  походы к генератору.
-* **Журнал.** Каждый спрошенный ИИН — строка; ссылки и ключа в ней нет; журнал не
-  записался — ссылки не отдаются.
+  походы к генератору — и что поднятый предел запроса укладывается в срок пачки.
+* **Журнал и счёт.** Выданная ссылка, отказ и опечатка — строкой журнала;
+  «документов нет» — только в счёт суток; ссылки и ключа в базе нет; запись не
+  удалась — ссылки не отдаются.
 
 Сети и базы здесь нет: генератор подменяется, курсор — двойник. Настоящий SQL
 исполняется в tests/test_sign_links_external_postgres.py.
@@ -56,12 +57,12 @@ KEY = 'FAKE-key-for-tests-0123456789-abcdefghij'
 OTHER_KEY = 'FAKE-second-key-for-tests-9876543210-zyx'
 
 
-def synthetic_iins(count):
-    """Верные по алгоритму ИИН на 01.01.1990 — живых людей за ними нет."""
+def synthetic_iins(count, prefix='9001013'):
+    """Верные по алгоритму ИИН (по умолчанию на 01.01.1990) — собраны, не взяты у людей."""
     found = []
     serial = 0
     while len(found) < count:
-        head = '9001013%04d' % serial
+        head = '%s%04d' % (prefix, serial)
         serial += 1
         control = iin._checksum(head)
         if control is not None:
@@ -293,8 +294,18 @@ class BatchTests(unittest.TestCase):
     def test_the_shared_lanes_are_one_small_pool_for_the_whole_process(self):
         pool = batch.shared_executor()
         self.assertIs(pool, batch.shared_executor())
-        self.assertEqual(pool._max_workers, batch.LANES)
-        self.assertLessEqual(batch.LANES, 4)
+        self.assertEqual(pool._max_workers, batch.configured_lanes())
+
+    def test_more_lanes_only_by_a_deliberate_setting_and_within_bounds(self):
+        """Четыре места — столько же портал уже держит к этому хосту сам. Больше —
+        только переменной окружения: это нагрузка на чужой сервер."""
+        self.assertEqual(batch.LANES, 4)
+        self.assertEqual(batch.configured_lanes({}), 4)
+        self.assertEqual(batch.configured_lanes({batch.LANES_ENV: '8'}), 8)
+        self.assertEqual(batch.configured_lanes({batch.LANES_ENV: ' 6 '}), 6)
+        for raw, expected in (('0', 1), ('-3', 1), ('999', batch.MAX_LANES), ('много', 4),
+                              ('', 4), ('2.5', 4)):
+            self.assertEqual(batch.configured_lanes({batch.LANES_ENV: raw}), expected, raw)
 
 
 class GeneratorTimeoutTests(unittest.TestCase):
@@ -346,20 +357,32 @@ class GeneratorTimeoutTests(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Cursor:
-    """Курсор-двойник: помнит SQL и параметры, на счёт за сегодня отвечает `used`."""
+    """Курсор-двойник: помнит SQL и параметры, на счёт за сегодня отвечает `used`.
 
-    def __init__(self, used=0, fail_insert=False):
+    fail_insert — на какой записи падать: 'journal', 'usage' или True (на любой).
+    usage_ready — есть ли таблица счёта суток.
+    """
+
+    def __init__(self, used=0, fail_insert=False, usage_ready=True):
         self.calls = []
         self.used = used
         self.fail_insert = fail_insert
+        self.usage_ready = usage_ready
         self._last = None
 
     def execute(self, sql, params=None):
         text = ' '.join(str(sql).split())
         self.calls.append((text, params))
-        if text.startswith('INSERT') and self.fail_insert:
+        if text.startswith('INSERT INTO sign_link_requests') and self.fail_insert in (True, 'journal'):
             raise RuntimeError('база недоступна')
-        self._last = (self.used,) if 'count(*)' in text else None
+        if text.startswith('INSERT INTO sign_link_api_usage') and self.fail_insert in (True, 'usage'):
+            raise RuntimeError('база недоступна')
+        if 'to_regclass' in text:
+            self._last = (self.usage_ready,)
+        elif text.startswith('SELECT COALESCE(sum(u.iins)'):
+            self._last = (self.used,)
+        else:
+            self._last = None
 
     def fetchone(self):
         return self._last
@@ -368,11 +391,16 @@ class _Cursor:
         return [params for text, params in self.calls
                 if text.startswith('INSERT INTO sign_link_requests')]
 
+    def usage(self):
+        """Что ушло в счёт суток — по записи на запрос."""
+        return [params for text, params in self.calls
+                if text.startswith('INSERT INTO sign_link_api_usage')]
+
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
 class Harness(unittest.TestCase):
     def build(self, *, plan=None, used=0, fail_insert=False, environ=None,
-              max_iins=None, daily_limit=None, generate='fake'):
+              max_iins=None, daily_limit=None, generate='fake', usage_ready=True, workers=4):
         """Клиент ручки. plan — {ИИН: исход | функция}; чего в нём нет — ссылка."""
         self.plan = plan or {}
         self.asked = []
@@ -386,15 +414,20 @@ class Harness(unittest.TestCase):
                 return answer(value)
             return dict(answer) if answer else link_for(value)
 
-        self.cursor = _Cursor(used=used, fail_insert=fail_insert)
+        self.cursor = _Cursor(used=used, fail_insert=fail_insert, usage_ready=usage_ready)
+        # По списку на каждое открытие курсора (транзакцию): в какие таблицы писали.
+        self.transactions = []
         db = MagicMock()
 
         @contextmanager
         def _get_cursor():
+            start = len(self.cursor.calls)
             yield self.cursor
+            self.transactions.append([text.split(' ')[2] for text, _params
+                                      in self.cursor.calls[start:] if text.startswith('INSERT')])
 
         db._get_cursor = _get_cursor
-        executor = ThreadPoolExecutor(max_workers=4)
+        executor = ThreadPoolExecutor(max_workers=workers)
         self.addCleanup(executor.shutdown, wait=True)
         self.app = Flask(__name__)
         self.app.register_blueprint(build_sign_links_external_blueprint(
@@ -566,6 +599,25 @@ class AnswerTests(Harness):
                          [('invalid', 'digits')] * 2)
         self.assertEqual(self.asked, [])
 
+    def test_a_number_gets_its_leading_zeros_back_a_string_does_not(self):
+        """ИИН родившихся в 2000-х начинается с нуля, а число нулей не хранит:
+        050101… приезжает как 50101…. Числу нули возвращаем — значение то же.
+        Строке из одиннадцати цифр — нет: там может не хватать любой цифры, а
+        угадывать чужой ИИН нельзя, по нему выдаётся ссылка на документы."""
+        born_2005 = synthetic_iins(1, prefix='0501015')[0]
+        born_2000 = synthetic_iins(1, prefix='0001055')[0]
+        self.assertEqual((len(str(int(born_2005))), len(str(int(born_2000)))), (11, 9))
+        client = self.build()
+        results = self.post(client, [int(born_2005), int(born_2000), born_2005,
+                                     born_2005[1:], -int(born_2005)]).get_json()['results']
+        self.assertEqual([(item['iin'], item['status']) for item in results], [
+            (str(int(born_2005)), 'link'), (str(int(born_2000)), 'link'), (born_2005, 'link'),
+            (born_2005[1:], 'invalid'), ('-' + str(int(born_2005)), 'invalid')])
+        self.assertEqual(results[3]['reason'], 'length')
+        # К генератору и в журнал уходит полный ИИН, двенадцать цифр.
+        self.assertEqual(sorted(self.asked), sorted([born_2005, born_2000]))
+        self.assertEqual(self.cursor.inserted()[0]['iin'][:2], [born_2005, born_2000])
+
     def test_separators_and_numbers_are_accepted_and_echoed_as_sent(self):
         spaced = '%s %s %s' % (A[:6], A[6:9], A[9:])
         client = self.build()
@@ -704,12 +756,25 @@ class RequestShapeTests(Harness):
         response = client.post(URL, data=json.dumps({'iins': [A]}), **chunked)
         self.assertEqual(response.status_code, 200)
 
-    def test_the_defaults_fit_one_answer_into_the_budget(self):
-        """Полсотни ИИН в четыре места — заметно быстрее срока пачки, а самый
-        длинный запрос к генератору короче его."""
+    def test_the_limits_fit_one_answer_into_the_budget(self):
+        """Пределы подняты вдесятеро (владелец, 13.10.2026) — но пачка обязана
+        успевать в срок. Замер на живом генераторе: одно место отдаёт полтора ИИН
+        в секунду; здесь берём с запасом — один. Поднял предел запроса, не подняв
+        срок или мест, — хвост пачки начнёт возвращаться с пометкой «не успели»."""
+        lanes = batch.configured_lanes({})
+        self.assertLessEqual(external.MAX_IINS, batch.BUDGET_SEC * lanes)
         self.assertLessEqual(external.MAX_IINS, external.MAX_IINS_CEILING)
         self.assertLess(batch.CALL_TIMEOUT, batch.BUDGET_SEC)
         self.assertGreaterEqual(external.MAX_BODY_BYTES, external.MAX_IINS_CEILING * 64)
+        self.assertEqual((external.MAX_IINS, external.DAILY_LIMIT, external.MAX_IN_FLIGHT),
+                         (500, 100000, 5))
+
+    def test_the_readme_names_the_same_limits_as_the_code(self):
+        readme = README.read_text(encoding='utf-8')
+        for line in ('SIGN_LINKS_API_MAX_IINS=%d' % external.MAX_IINS,
+                     'SIGN_LINKS_API_DAILY_LIMIT=%d' % external.DAILY_LIMIT,
+                     'SIGN_LINKS_API_LANES=%d' % batch.LANES):
+            self.assertIn(line, readme, line)
 
 
 class LimitTests(Harness):
@@ -727,14 +792,43 @@ class LimitTests(Harness):
         self.assertEqual(payload['results'][0]['status'], 'link')
         self.assertEqual(payload['limits'], {'per_day': 10, 'used_today': 10, 'left_today': 0})
 
-    def test_the_limit_counts_what_is_logged_typos_included(self):
-        """Иначе утёкший ключ завалил бы журнал мусором, не тратя предел."""
+    def test_the_limit_counts_every_accepted_iin_not_found_and_typos_included(self):
+        """Иначе утёкший ключ гонял бы генератор и журнал, не тратя предела."""
         client = self.build(used=9, daily_limit=10)
         self.assertEqual(self.post(client, [A, '12345']).status_code, 429)
-        sql, params = self.cursor.calls[0]
-        self.assertIn('r.user_id IS NULL', sql)
-        self.assertNotIn('outcome', sql)
-        self.assertEqual(params['api_role'], queries.API_ROLE)
+        # Предел читается из счёта суток — одной суммой, а не подсчётом по журналу.
+        sql = [text for text, _params in self.cursor.calls]
+        self.assertEqual(len(sql), 2)
+        self.assertIn("to_regclass('sign_link_api_usage')", sql[0])
+        self.assertEqual(sql[1], 'SELECT COALESCE(sum(u.iins), 0) FROM sign_link_api_usage u '
+                                 'WHERE u.day = %(day)s')
+
+        client = self.build(used=7, daily_limit=10, plan={A: NO_DOCS})
+        payload = self.post(client, [A, B, '12345']).get_json()
+        self.assertEqual([item['status'] for item in payload['results']],
+                         ['not_found', 'link', 'invalid'])
+        self.assertEqual(payload['limits'], {'per_day': 10, 'used_today': 10, 'left_today': 0})
+
+    def test_the_schema_check_is_made_once_not_on_every_request(self):
+        client = self.build()
+        for value in (A, B, C):
+            self.assertEqual(self.post(client, [value]).status_code, 200)
+        checks = [text for text, _params in self.cursor.calls if 'to_regclass' in text]
+        self.assertEqual(len(checks), 1)
+
+    def test_without_the_usage_table_nothing_is_issued(self):
+        """Схема раздела не встала — предел не посчитать, а без предела не выдаём."""
+        client = self.build(usage_ready=False)
+        with self.assertLogs(level='ERROR') as logs:
+            response = self.post(client, [A])
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()['code'], 'SIGN_LINKS_API_NOT_READY')
+        self.assertIn('sign_link_api_usage', logs.output[0])
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.cursor.inserted() + self.cursor.usage(), [])
+        # «Нет» не запоминается: после перезапуска со схемой вход оживает сам.
+        self.cursor.usage_ready = True
+        self.assertEqual(self.post(client, [A]).status_code, 200)
 
     def test_a_list_of_blanks_touches_neither_the_base_nor_the_limit(self):
         client = self.build(used=10, daily_limit=10)
@@ -742,7 +836,7 @@ class LimitTests(Harness):
         self.assertEqual(response.status_code, 200)
         self.assert_untouched()
 
-    def test_the_fourth_simultaneous_request_is_refused_not_queued(self):
+    def test_a_request_beyond_the_places_is_refused_not_queued(self):
         gate = threading.Event()
         entered = threading.Semaphore(0)
 
@@ -751,7 +845,12 @@ class LimitTests(Harness):
             gate.wait(5)
             return link_for(value)
 
-        client = self.build(plan={A: slow, B: slow, C: slow})
+        places = external.MAX_IN_FLIGHT
+        busy = synthetic_iins(places + 1)
+        extra = busy.pop()
+        # Мест у генератора в этом тесте столько же, сколько запросов: проверяем
+        # предел запросов, а не очередь к генератору.
+        client = self.build(plan={value: slow for value in busy}, workers=places)
         statuses = []
 
         def call(value):
@@ -759,25 +858,24 @@ class LimitTests(Harness):
                 URL, json={'iins': [value]}, headers={api_key.HEADER: KEY})
             statuses.append(response.status_code)
 
-        threads = [threading.Thread(target=call, args=(value,)) for value in (A, B, C)]
+        threads = [threading.Thread(target=call, args=(value,)) for value in busy]
         for thread in threads:
             thread.start()
         try:
             for _ in threads:
                 self.assertTrue(entered.acquire(timeout=5))
-            response = self.post(client, [D])
+            response = self.post(client, [extra])
             self.assertEqual(response.status_code, 429)
             self.assertEqual(response.get_json()['code'], 'SIGN_LINKS_API_BUSY')
             self.assertEqual(response.headers['Retry-After'], str(external.RETRY_AFTER_SEC))
-            self.assertNotIn(D, self.asked)
+            self.assertNotIn(extra, self.asked)
         finally:
             gate.set()
             for thread in threads:
                 thread.join(5)
-        self.assertEqual(statuses, [200, 200, 200])
-        self.assertEqual(external.MAX_IN_FLIGHT, 3)
+        self.assertEqual(statuses, [200] * places)
         # Место освободилось — следующий запрос проходит.
-        self.assertEqual(self.post(client, [D]).status_code, 200)
+        self.assertEqual(self.post(client, [extra]).status_code, 200)
 
     def test_a_refused_request_gives_its_place_back(self):
         """Отказ по дневному пределу не должен съедать место навсегда."""
@@ -789,21 +887,22 @@ class LimitTests(Harness):
 
 
 class JournalTests(Harness):
-    def test_every_asked_iin_is_one_row_without_the_link_and_without_the_key(self):
-        client = self.build(plan={B: NO_DOCS, C: DOWN})
-        response = client.post(URL, json={'iins': [A, B, C, '12345']},
+    def test_what_was_issued_or_failed_is_a_row_without_the_link_and_without_the_key(self):
+        client = self.build(plan={B: NO_DOCS, C: DOWN, D: REJECTED})
+        response = client.post(URL, json={'iins': [A, B, C, D, '12345']},
                                headers={api_key.HEADER: KEY, 'User-Agent': 'partner-bot/2.1'})
         self.assertEqual(response.status_code, 200)
         rows = self.cursor.inserted()
         self.assertEqual(len(rows), 1)  # одна пачка — один INSERT
         row = rows[0]
-        self.assertEqual(row['iin'], [A, B, C, '12345'])
-        self.assertEqual(row['outcome'], ['link', 'no_documents', 'unavailable', 'invalid'])
+        # «Документов нет» (B) строкой не пишется — см. следующий тест.
+        self.assertEqual(row['iin'], [A, C, D, '12345'])
+        self.assertEqual(row['outcome'], ['link', 'unavailable', 'rejected', 'invalid'])
         self.assertEqual(row['link_issued'], [True, False, False, False])
         self.assertEqual(row['link_host'], ['sign.example.kz', None, None, None])
-        self.assertEqual(row['latency_ms'], [700, 300, 10000, None])
+        self.assertEqual(row['latency_ms'], [700, 10000, 400, None])
         self.assertEqual(row['error_text'][3], 'length')
-        self.assertIn('Нет документов', row['vendor_message'][1])
+        self.assertEqual(row['vendor_message'][2], 'Ошибка формирования ссылки')
         # Кто: не сотрудник, а внешний сервис с отпечатком ключа.
         self.assertEqual(row['user_role'], queries.API_ROLE)
         self.assertEqual(row['user_name'],
@@ -813,7 +912,44 @@ class JournalTests(Harness):
         # Ни ссылки, ни ключа в журнал не уходит.
         self.assertNotIn('sign.example.kz/s/', repr(row))
         self.assertNotIn(KEY, repr(row))
-        self.assertEqual(response.get_json()['limits']['used_today'], 4)
+        self.assertEqual(response.get_json()['limits']['used_today'], 5)
+
+    def test_not_found_is_counted_for_the_day_but_not_written_row_by_row(self):
+        """Сервис шлёт ИИН десятками тысяч, и почти на все ответ «документов нет»:
+        сто тысяч таких строк в день утопили бы журнал, хотя ничего не выдано."""
+        iins = synthetic_iins(8)
+        client = self.build(plan={value: NO_DOCS for value in iins[:6]})
+        payload = self.post(client, iins + ['12345']).get_json()
+        self.assertEqual(payload['summary'],
+                         {'total': 9, 'link': 2, 'not_found': 6, 'invalid': 1, 'error': 0})
+        self.assertEqual(self.cursor.inserted()[0]['iin'], iins[6:] + ['12345'])
+        usage = self.cursor.usage()
+        self.assertEqual(len(usage), 1)
+        self.assertEqual({key: usage[0][key] for key in ('iins', 'links', 'not_found', 'invalid',
+                                                         'errors')},
+                         {'iins': 9, 'links': 2, 'not_found': 6, 'invalid': 1, 'errors': 0})
+        self.assertEqual(usage[0]['key_mark'], api_key.fingerprint(KEY))
+        self.assertNotIn(KEY, repr(usage))
+        # В предел идёт всё принятое, а не только то, что легло в журнал.
+        self.assertEqual(payload['limits']['used_today'], 9)
+
+    def test_a_batch_of_nothing_but_not_found_still_reaches_the_count(self):
+        client = self.build(plan={A: NO_DOCS, B: NO_DOCS})
+        payload = self.post(client, [A, B]).get_json()
+        self.assertEqual(self.cursor.inserted(), [])
+        self.assertEqual(self.cursor.usage()[0]['not_found'], 2)
+        self.assertEqual(payload['limits']['used_today'], 2)
+
+    def test_what_was_not_asked_is_neither_written_nor_counted(self):
+        """До этих ИИН очередь не дошла — их пришлют снова, и предел они не тратят."""
+        iins = synthetic_iins(30)
+        client = self.build(plan={value: DOWN for value in iins})
+        payload = self.post(client, iins).get_json()
+        asked = len(self.asked)
+        self.assertLess(asked, 12)
+        self.assertEqual(self.cursor.usage()[0]['iins'], asked)
+        self.assertEqual(self.cursor.usage()[0]['errors'], asked)
+        self.assertEqual(payload['limits']['used_today'], asked)
 
     def test_the_row_is_written_for_nobody_and_no_department(self):
         """Отдела нет — глава отдела такие строки не видит, только глобальный админ."""
@@ -824,14 +960,23 @@ class JournalTests(Harness):
             self.assertNotIn(forbidden, sql)
 
     def test_without_the_journal_no_link_leaves(self):
-        client = self.build(fail_insert=True)
-        with self.assertLogs(level='ERROR'):
-            response = self.post(client, [A])
-        self.assertEqual(response.status_code, 500)
-        text = response.get_data(as_text=True)
-        self.assertEqual(response.get_json()['code'], 'SIGN_LINKS_API_FAILED')
-        self.assertNotIn('sign.example.kz', text)
-        self.assertNotIn('база недоступна', text)
+        for broken in ('journal', 'usage'):
+            client = self.build(fail_insert=broken)
+            with self.assertLogs(level='ERROR'):
+                response = self.post(client, [A])
+            self.assertEqual(response.status_code, 500, broken)
+            text = response.get_data(as_text=True)
+            self.assertEqual(response.get_json()['code'], 'SIGN_LINKS_API_FAILED')
+            self.assertNotIn('sign.example.kz', text)
+            self.assertNotIn('база недоступна', text)
+
+    def test_the_journal_and_the_count_are_written_in_one_transaction(self):
+        """Счёт без журнала или журнал без счёта — ни то ни другое: обе записи
+        идут одним открытием курсора, то есть одной транзакцией."""
+        client = self.build(plan={B: NO_DOCS})
+        self.post(client, [A, B])
+        self.assertEqual([writes for writes in self.transactions if writes],
+                         [['sign_link_requests', 'sign_link_api_usage']])
 
     def test_the_log_line_counts_but_names_neither_iin_nor_link(self):
         client = self.build(plan={B: NO_DOCS})

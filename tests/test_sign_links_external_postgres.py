@@ -167,21 +167,27 @@ def test_a_batch_becomes_rows_of_the_external_service(db, client):
                                 latency_ms, user_id, user_name, user_role, department_id,
                                 department_code, ip_address, user_agent, created_at IS NOT NULL
                            FROM sign_link_requests ORDER BY id''')
-    # Повтор ИИН — одна строка; порядок — как прислали, опечатки в конце.
+    # Строкой — выданная ссылка, сбой и опечатка; «документов нет» (B) — только
+    # в счёт суток. Повтор ИИН — одна строка; опечатки в конце.
     assert [row[:3] for row in logged] == [
-        (A, 'link', True), (B, 'no_documents', False), (C, 'unavailable', False),
-        ('12345', 'invalid', False)]
-    assert [row[3] for row in logged] == ['sign.example.kz', None, None, None]
-    assert logged[1][4] == NO_DOCS['message']
-    assert [row[5] for row in logged] == [None, None, DOWN['error'], 'length']
-    assert [row[6] for row in logged] == [700, 300, 10000, None]
+        (A, 'link', True), (C, 'unavailable', False), ('12345', 'invalid', False)]
+    assert [row[3] for row in logged] == ['sign.example.kz', None, None]
+    assert [row[5] for row in logged] == [None, DOWN['error'], 'length']
+    assert [row[6] for row in logged] == [700, 10000, None]
     for row in logged:
         # Кто: не сотрудник и не отдел, а внешний сервис с отпечатком ключа.
         assert row[7:] == (None, 'Внешний сервис (ключ %s)' % MARK, 'api', None, None,
                            '203.0.113.7', 'partner-bot/2.1', True)
 
-    # Ни ссылки, ни ключа в базе нет — ни в одной колонке.
-    dump = repr(rows(db, 'SELECT r::text FROM sign_link_requests r'))
+    # Счёт суток: одна строка на ключ, в ней всё принятое — и «документов нет».
+    assert rows(db, '''SELECT day = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')::date, key_mark,
+                              requests, iins, links, not_found, invalid, errors
+                         FROM sign_link_api_usage''') == [(True, MARK, 1, 4, 1, 1, 1, 1)]
+    assert response.get_json()['limits']['used_today'] == 4
+
+    # Ни ссылки, ни ключа в базе нет — ни в одной колонке обеих таблиц.
+    dump = repr(rows(db, 'SELECT r::text FROM sign_link_requests r')
+                + rows(db, 'SELECT u::text FROM sign_link_api_usage u'))
     assert 'sign.example.kz/s/' not in dump
     assert KEY not in dump
 
@@ -208,33 +214,81 @@ def test_garbage_from_foreign_json_does_not_sink_the_batch(db, client):
         (A, 'link', None), ('1234', 'invalid', 'length'), ('abcd', 'invalid', 'digits')]
 
 
-def test_the_daily_limit_counts_todays_rows_of_the_service_only(db, client):
-    build, _plan = client
+def test_the_daily_limit_counts_what_the_service_sent_today(db, client):
+    build, plan = client
+    plan[B] = NO_DOCS
     http = build(daily_limit=5)
     staff_request(db, A)
     staff_request(db, B)
     assert post(http, [A, B, '12345']).get_json()['limits'] == {
         'per_day': 5, 'used_today': 3, 'left_today': 2}
     with db._get_cursor() as cur:
-        # Запросы сотрудников в предел сервиса не идут, опечатка сервиса — идёт.
+        # Запросы сотрудников в предел сервиса не идут; его «документов нет» и
+        # опечатка — идут, хотя первое в журнал строкой не легло.
         assert queries.api_used_today(cur) == 3
         assert queries.used_today(cur, OPERATOR['user_id']) == 2
+    assert rows(db, "SELECT count(*) FROM sign_link_requests WHERE user_role = 'api'") == [(2,)]
 
     # Трое не помещаются — отказ целиком, в базе ничего не прибавилось.
     refused = post(http, [C, D, E])
     assert refused.status_code == 429
     assert refused.get_json()['limits'] == {'per_day': 5, 'used_today': 3, 'left_today': 2}
-    assert rows(db, "SELECT count(*) FROM sign_link_requests WHERE user_role = 'api'") == [(3,)]
+    assert rows(db, "SELECT count(*) FROM sign_link_requests WHERE user_role = 'api'") == [(2,)]
+    assert rows(db, 'SELECT requests, iins FROM sign_link_api_usage') == [(1, 3)]
     assert post(http, [C, D]).status_code == 200
     assert post(http, [E]).status_code == 429
+    assert rows(db, 'SELECT requests, iins, links, not_found, invalid FROM sign_link_api_usage'
+                ) == [(2, 5, 3, 1, 1)]
 
-    # Вчерашнее в сегодняшний предел не идёт.
+    # Вчерашнее в сегодняшний предел не идёт: счёт — на сутки.
     with db._get_cursor() as cur:
-        cur.execute("UPDATE sign_link_requests SET created_at = created_at - interval '2 days' "
-                    "WHERE user_role = 'api'")
+        cur.execute('UPDATE sign_link_api_usage SET day = day - 2')
     assert post(http, [E]).status_code == 200
     with db._get_cursor() as cur:
         assert queries.api_used_today(cur) == 1
+    assert rows(db, 'SELECT count(*) FROM sign_link_api_usage') == [(2,)]
+
+
+def test_the_count_is_one_row_per_key_and_survives_requests_at_once(db, client):
+    """Пять запросов разом пишут в одну строку счёта: ни один не должен пропасть —
+    и первый, создающий строку, и те, что приходят в ту же миллисекунду."""
+    import threading
+
+    build, plan = client
+    plan[B] = NO_DOCS
+    http_clients = [build() for _ in range(5)]
+    statuses = []
+
+    def call(http):
+        statuses.append(post(http, [A, B, C]).status_code)
+
+    threads = [threading.Thread(target=call, args=(http,)) for http in http_clients]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    assert statuses == [200] * 5
+    assert rows(db, 'SELECT key_mark, requests, iins, links, not_found FROM sign_link_api_usage'
+                ) == [(MARK, 5, 15, 10, 5)]
+    with db._get_cursor() as cur:
+        assert queries.api_used_today(cur) == 15
+        # Второй ключ — своя строка; предел считает обе.
+        queries.add_api_usage(cur, key_mark='0a1b2c3d', links=2, errors=1)
+        assert queries.api_used_today(cur) == 18
+    assert rows(db, 'SELECT count(*) FROM sign_link_api_usage') == [(2,)]
+
+
+def test_without_the_usage_table_the_door_answers_not_ready(db, client):
+    """Схема не встала — предел не посчитать, а без предела ничего не выдаётся."""
+    build, _plan = client
+    with db._get_cursor() as cur:
+        assert schema.api_usage_is_ready(cur) is True
+        cur.execute('DROP TABLE sign_link_api_usage')
+        assert schema.api_usage_is_ready(cur) is False
+    response = post(build(), [A])
+    assert response.status_code == 503
+    assert response.get_json()['code'] == 'SIGN_LINKS_API_NOT_READY'
+    assert rows(db, 'SELECT count(*) FROM sign_link_requests') == [(0,)]
 
 
 def test_the_journal_separates_the_service_from_the_staff(db, client):
@@ -251,16 +305,16 @@ def test_the_journal_separates_the_service_from_the_staff(db, client):
             page = queries.journal_page(cur, dict({'scope': None}, **filters))
         return sorted((item['iin'], item['user_role']) for item in page['items']), page['summary']
 
+    # «Документов нет» от сервиса (B) в журнал строкой не ложится — только в счёт.
     everything, summary = journal()
-    assert everything == sorted([(A, 'operator'), (F, 'operator'), (A, 'api'), (B, 'api'),
-                                 (C, 'api')])
-    assert (summary['requests'], summary['links'], summary['no_documents']) == (5, 3, 2)
+    assert everything == sorted([(A, 'operator'), (F, 'operator'), (A, 'api'), (C, 'api')])
+    assert (summary['requests'], summary['links'], summary['no_documents']) == (4, 3, 1)
     # Людей — один: у строк сервиса сотрудника нет.
     assert summary['people'] == 1
 
     only_api, summary = journal(source='api')
-    assert only_api == sorted([(A, 'api'), (B, 'api'), (C, 'api')])
-    assert (summary['requests'], summary['links']) == (3, 2)
+    assert only_api == sorted([(A, 'api'), (C, 'api')])
+    assert (summary['requests'], summary['links']) == (2, 2)
 
     only_staff, summary = journal(source='staff')
     assert only_staff == sorted([(A, 'operator'), (F, 'operator')])
@@ -293,24 +347,17 @@ def test_a_deleted_account_is_not_mistaken_for_the_service(db, client):
     assert [item['iin'] for item in page['items']] == [A]
 
 
-def test_the_limit_query_walks_an_index_not_the_whole_journal(db):
-    """Предел считается на каждый запрос сервиса: за месяцы журнал вырастет, а
-    читать надо только сегодняшнее."""
-    with db._get_cursor() as cur:
-        cur.execute('''INSERT INTO sign_link_requests (user_id, user_role, iin, outcome, created_at)
-                       SELECT NULL, 'api', g::text, 'no_documents',
-                              now() - interval '2 days' - (g || ' minutes')::interval
-                         FROM generate_series(1, 30000) g''')
-        cur.execute('''INSERT INTO sign_link_requests (user_id, user_role, iin, outcome, created_at)
-                       SELECT 10, 'operator', g::text, 'link',
-                              now() - (g || ' minutes')::interval
-                         FROM generate_series(1, 5000) g''')
-        cur.execute('''INSERT INTO sign_link_requests (user_id, user_role, iin, outcome)
-                       SELECT NULL, 'api', g::text, 'no_documents' FROM generate_series(1, 300) g''')
-        cur.execute('ANALYZE sign_link_requests')
-        cur.execute('EXPLAIN ' + queries._API_USED_TODAY_SQL,
-                    {'api_role': queries.API_ROLE, 'day_start': queries.today_start_almaty()})
-        plan = '\n'.join(row[0] for row in cur.fetchall())
-        assert queries.api_used_today(cur) == 300
-    assert 'Seq Scan' not in plan, plan
-    assert 'idx_sign_link_requests_' in plan, plan
+def test_a_big_day_leaves_the_journal_small(db, client):
+    """Ради чего счёт суток заведён: пятьсот ИИН, из которых документы есть у
+    десятка, — это десять строк журнала, а не пятьсот."""
+    build, plan = client
+    iins = synthetic_iins(500)
+    plan.update({value: NO_DOCS for value in iins[10:]})
+    payload = post(build(), iins).get_json()
+    assert payload['summary'] == {'total': 500, 'link': 10, 'not_found': 490, 'invalid': 0,
+                                  'error': 0}
+    assert rows(db, 'SELECT count(*), count(*) FILTER (WHERE link_issued) '
+                    'FROM sign_link_requests') == [(10, 10)]
+    assert rows(db, 'SELECT requests, iins, links, not_found FROM sign_link_api_usage'
+                ) == [(1, 500, 10, 490)]
+    assert payload['limits']['used_today'] == 500

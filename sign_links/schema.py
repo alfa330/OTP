@@ -1,4 +1,5 @@
-"""Схема раздела «Ссылка на подписание». Таблица sign_link_requests.
+"""Схема раздела «Ссылка на подписание». Таблицы sign_link_requests и
+sign_link_api_usage.
 
 Идемпотентно: CREATE TABLE / INDEX IF NOT EXISTS. Разворачивается один раз при
 старте из Database._init_db через init_sign_links_schema(cursor).
@@ -30,6 +31,14 @@
 * **Индексы под четыре разреза журнала**: по времени (страница), по человеку
   (фильтр «сотрудник» и дневной предел), по ИИН («кто запрашивал этого
   водителя») и по отделу (журнал главы ограничен его отделом).
+
+* **Внешний сервис считается отдельно — строкой на ключ в сутки**
+  (sign_link_api_usage). Сервис присылает ИИН десятками тысяч, и почти на все
+  ответ один: «документов нет». Писать это в журнал построчно — сто тысяч строк
+  в день, от которых журнал у админа перестаёт открываться; ничего при этом не
+  выдано. Поэтому в журнал от сервиса идут выданные ссылки, отказы и опечатки,
+  а «документов нет» — только в счётчик. По счётчику же держится дневной предел:
+  одна строка вместо подсчёта по журналу на каждый запрос.
 """
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
@@ -72,6 +81,25 @@ _STATEMENTS = [
     )
     """,
 
+    """
+    CREATE TABLE IF NOT EXISTS sign_link_api_usage (
+        -- Сутки по Алматы и отпечаток ключа: строка на ключ в день.
+        day         DATE NOT NULL,
+        key_mark    VARCHAR(16) NOT NULL,
+
+        requests    INTEGER NOT NULL DEFAULT 0,
+        -- Сколько ИИН принято в счёт дневного предела; ниже — чем они кончились.
+        iins        INTEGER NOT NULL DEFAULT 0,
+        links       INTEGER NOT NULL DEFAULT 0,
+        not_found   INTEGER NOT NULL DEFAULT 0,
+        invalid     INTEGER NOT NULL DEFAULT 0,
+        errors      INTEGER NOT NULL DEFAULT 0,
+
+        updated_at  TIMESTAMP NOT NULL DEFAULT """ + _NOW + """,
+        PRIMARY KEY (day, key_mark)
+    )
+    """,
+
     "CREATE INDEX IF NOT EXISTS idx_sign_link_requests_created "
     "ON sign_link_requests (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_sign_link_requests_user "
@@ -100,5 +128,16 @@ def init_sign_links_schema(cursor):
 def schema_is_ready(cursor):
     """Развёрнута ли схема. Отличает «раздел ещё не поднялся» от «журнал пуст»."""
     cursor.execute("SELECT to_regclass('public.sign_link_requests') IS NOT NULL")
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def api_usage_is_ready(cursor):
+    """Есть ли таблица счёта внешнего сервиса: без неё дневной предел не посчитать.
+
+    Только чтение каталога — на пути запроса схему не создаём: она ставится при
+    старте, и если не встала, вход отвечает «не готов», а не выдаёт без счёта.
+    """
+    cursor.execute("SELECT to_regclass('sign_link_api_usage') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
