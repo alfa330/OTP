@@ -2006,9 +2006,14 @@ class UploadTests(_Base):
         self.assertEqual(self.store.uploads[1]['file_name'], NAME)
 
     def test_same_week_again_needs_confirmation_and_writes_nothing(self):
-        self.upload()
+        # «Тот же файл» — это те же байты, отправленные дважды. Собирать книгу
+        # заново нельзя: openpyxl пишет в неё время создания до секунды, и две
+        # сборки, попавшие в разные секунды, дают разные отпечатки — тест падал
+        # на 1–2 % прогонов (замер 13.10.2026: 49 из 3000), в том числе в CI.
+        content = standard_book()
+        self.upload(content)
         before = list(self.store.writes)
-        response = self.upload()
+        response = self.upload(content)
         self.assertEqual((response.status_code, response.get_json()['code']), (409, 'BAIGA_WEEK_EXISTS'))
         self.assertTrue(response.get_json()['existing']['same_file'])
         self.assertEqual([write for write in self.store.writes if write not in before and write[0] != 'lock'], [])
