@@ -5,14 +5,15 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu
 import IosDatePicker from '../ui/DatePicker';
 import PaymentStageForm from './PaymentStageForm';
 import {
-    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, OBJECT_TYPE_LABELS,
-    PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent, dueLabel,
-    fileKindOptions, fmtDate, fmtDateTime, fmtMoney, fmtQty, isClosed, isOverdue, netAmount, paidLabel, recordView,
-    requestState, tonePill,
+    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META,
+    OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
+    dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
+    isOverdue, netAmount, paidLabel, recordView, requestState, routeSummary, tonePill,
 } from './paymentsMeta';
 import {
-    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Lifecycle,
-    NoticeBox, RequisitesBox, Row, SectionTitle, StatePill, TonePill, UserSelect, WindowSkeleton, errorText, multipart,
+    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Fold,
+    FoldGroup, Lifecycle, NoticeBox, RequisitesBox, Row, SectionTitle, StatePill, TonePill, UserSelect, WindowSkeleton,
+    errorText, multipart,
 } from './paymentsUi';
 
 /*
@@ -26,7 +27,9 @@ import {
  * вовсе: кнопка, которая всегда отвечает отказом, хуже её отсутствия.
  *
  * Ниже — сама заявка по разделам: что закупаем, поставщики, оплата,
- * согласование, получение и документы, ход по этапам, файлы, история.
+ * согласование, получение и документы. Ход по этапам, файлы и история —
+ * «по запросу»: три свёрнутые строки одной карточкой внизу окна (просьба
+ * владельца 13.10.2026 — с ними окно было в два с половиной экрана).
  * Файлы живут в одном месте — «Документы», с подписью этапа.
  *
  * Редкие действия (возврат средств, отмена, удаление) — в меню «…» подвала:
@@ -69,6 +72,8 @@ const PaymentRequestCard = ({
     const [reassignTo, setReassignTo] = useState(null);
     const [refund, setRefund] = useState({ refund_on: '', refund_amount: 0 });
     const [showAllEvents, setShowAllEvents] = useState(false);
+    // Какие разделы «по запросу» человек раскрыл или свернул сам: { route, files, history }.
+    const [folds, setFolds] = useState({});
     const modePanelRef = useRef(null);
     const errorRef = useRef(null);
 
@@ -111,6 +116,8 @@ const PaymentRequestCard = ({
         setExtraFiles([]);
         setMode(null);
         setShowAllEvents(false);
+        // Каждая заявка открывается коротко: раскрытое в прошлой — её дело.
+        setFolds({});
         load();
     }, [open, load, requestId]);
 
@@ -261,6 +268,15 @@ const PaymentRequestCard = ({
     const view = recordView({ data, error, loading });
     const shownId = request?.id ?? requestId;
 
+    /* Инициатора просят приложить закрывающие документы — «Документы» раскрыты
+       сами: плашка над разделами отправляет его именно туда. */
+    const docsWanted = Boolean(active && !permissions.can_act && request?.initiator_id === me?.id
+        && current?.kind === 'closing_docs' && request?.closing_docs_status === 'none');
+    const foldOpen = (key) => folds[key] ?? (key === 'files' && docsWanted);
+    const toggleFold = (key) => setFolds((prev) => ({ ...prev, [key]: !(prev[key] ?? (key === 'files' && docsWanted)) }));
+    // Раскрытый раздел меняет рост окна — рамка доезжает, а не перескакивает (sizeKey в ui/ios.jsx).
+    const openFolds = CARD_FOLDS.filter((fold) => foldOpen(fold.key)).map((fold) => fold.key).join(',');
+
     const events = (data?.events || []).slice().reverse();
     const shownEvents = showAllEvents ? events : events.slice(0, EVENTS_SHOWN);
     const approval = approvalSummary(request?.route_basis);
@@ -347,9 +363,9 @@ const PaymentRequestCard = ({
                 : (view === 'loading' ? <Bone inline className="h-2 w-56" /> : '')}
             maxWidth="max-w-3xl"
             footer={footer}
-            sizeKey={view}
+            sizeKey={openFolds ? `${view}:${openFolds}` : view}
         >
-            {view === 'loading' && <WindowSkeleton label="Загружаем заявку" summary wide sections={REQUEST_SKELETON} />}
+            {view === 'loading' && <WindowSkeleton label="Загружаем заявку" summary wide sections={REQUEST_SKELETON} folds={CARD_FOLDS.length} />}
             {view === 'error' && <ErrorBox text={error} />}
             {request && (
                 <div className="space-y-4 motion-safe:animate-fade-in-soft">
@@ -635,54 +651,53 @@ const PaymentRequestCard = ({
                         </section>
                     )}
 
-                    <section className="space-y-1.5">
-                        <SectionTitle>Ход заявки</SectionTitle>
-                        <div className={`${iosCard} p-3.5`}>
-                            <ol>{subtasks.filter((item) => item.kind !== 'initiation').map((item, index, list) => renderSubtask(item, index === list.length - 1))}</ol>
-                        </div>
-                    </section>
+                    {/* Ход по этапам, документы и история — по запросу: три строки одной
+                        карточкой, каждая раскрывается на месте. Свёрнутой видна суть: у кого
+                        заявка, сколько файлов, когда последнее событие. */}
+                    <FoldGroup>
+                        <Fold id="route" title="Ход заявки" summary={routeSummary(request, subtasks)} open={foldOpen('route')} onToggle={() => toggleFold('route')}>
+                            <div className="p-3.5">
+                                <ol>{subtasks.filter((item) => item.kind !== 'initiation').map((item, index, list) => renderSubtask(item, index === list.length - 1))}</ol>
+                            </div>
+                        </Fold>
 
-                    {((data.attachments || []).length > 0 || permissions.can_attach) && (
-                        <section className="space-y-1.5">
-                            <SectionTitle>Документы</SectionTitle>
-                            <div className={`${iosCard} p-2`}>
-                                <AttachmentList attachments={data.attachments} apiBaseUrl={apiBaseUrl} headers={headers} canRemove={canRemoveAttachment} onRemove={removeAttachment} showToast={showToast} showStep />
-                                {permissions.can_attach && (
-                                    <div className="px-2 pt-1">
-                                        <FilePicker files={extraFiles} onChange={setExtraFiles} kinds={fileKindOptions(closingStarted ? 'closing_docs' : 'request')} label="Добавить документ" />
-                                        {extraFiles.length > 0 && (
-                                            <button type="button" className={`${iosBtnPrimary} mb-1 mt-2`} disabled={busy} onClick={() => attach(extraFiles)}>
-                                                {busy && <Loader2 size={14} className="animate-spin" />} Загрузить
-                                            </button>
-                                        )}
+                        {((data.attachments || []).length > 0 || permissions.can_attach) && (
+                            <Fold id="files" title="Документы" summary={filesSummary(data.attachments)} open={foldOpen('files')} onToggle={() => toggleFold('files')}>
+                                <div className="p-2">
+                                    <AttachmentList attachments={data.attachments} apiBaseUrl={apiBaseUrl} headers={headers} canRemove={canRemoveAttachment} onRemove={removeAttachment} showToast={showToast} showStep />
+                                    {permissions.can_attach && (
+                                        <div className="px-2 pt-1">
+                                            <FilePicker files={extraFiles} onChange={setExtraFiles} kinds={fileKindOptions(closingStarted ? 'closing_docs' : 'request')} label="Добавить документ" />
+                                            {extraFiles.length > 0 && (
+                                                <button type="button" className={`${iosBtnPrimary} mb-1 mt-2`} disabled={busy} onClick={() => attach(extraFiles)}>
+                                                    {busy && <Loader2 size={14} className="animate-spin" />} Загрузить
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </Fold>
+                        )}
+
+                        <Fold id="history" title="История" summary={historySummary(data.events)} open={foldOpen('history')} onToggle={() => toggleFold('history')}>
+                            <div className="px-4 py-2">
+                                {shownEvents.map((event) => (
+                                    <div key={event.id} className="flex gap-3 py-1.5 text-[12.5px]">
+                                        <div className="w-[118px] shrink-0 tabular-nums text-slate-500">{fmtDateTime(event.created_at)}</div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-slate-800">{describeEvent(event, titleOf)}{event.actor_name ? <span className="text-slate-500"> · {event.actor_name}</span> : null}</div>
+                                            {event.comment && <div className="mt-0.5 whitespace-pre-line text-slate-600">{event.comment}</div>}
+                                        </div>
                                     </div>
+                                ))}
+                                {events.length > EVENTS_SHOWN && (
+                                    <button type="button" className="py-1.5 text-[12px] font-medium text-blue-600 hover:underline" onClick={() => setShowAllEvents((prev) => !prev)}>
+                                        {showAllEvents ? 'Свернуть' : `Вся история · ${events.length}`}
+                                    </button>
                                 )}
                             </div>
-                        </section>
-                    )}
-
-                    <section className="space-y-1.5">
-                        <SectionTitle
-                            right={events.length > EVENTS_SHOWN ? (
-                                <button type="button" className="px-1 text-[12px] font-medium text-blue-600 hover:underline" onClick={() => setShowAllEvents((prev) => !prev)}>
-                                    {showAllEvents ? 'Свернуть' : `Вся история · ${events.length}`}
-                                </button>
-                            ) : null}
-                        >
-                            История
-                        </SectionTitle>
-                        <div className={`${iosCard} px-4 py-2`}>
-                            {shownEvents.map((event) => (
-                                <div key={event.id} className="flex gap-3 py-1.5 text-[12.5px]">
-                                    <div className="w-[118px] shrink-0 tabular-nums text-slate-500">{fmtDateTime(event.created_at)}</div>
-                                    <div className="min-w-0 flex-1">
-                                        <div className="text-slate-800">{describeEvent(event, titleOf)}{event.actor_name ? <span className="text-slate-500"> · {event.actor_name}</span> : null}</div>
-                                        {event.comment && <div className="mt-0.5 whitespace-pre-line text-slate-600">{event.comment}</div>}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </section>
+                        </Fold>
+                    </FoldGroup>
                 </div>
             )}
         </IosModal>

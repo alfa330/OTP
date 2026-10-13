@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Check, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw, ShoppingCart, Trash2,
-    UsersRound, X,
+    Check, ChevronDown, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw,
+    ShoppingCart, Trash2, UsersRound, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
@@ -17,6 +17,11 @@ import {
  * справочников. Всё построено на примитивах ui/ios — своего визуального языка
  * раздел не заводит.
  */
+
+/* Колонка раздела: шапка, вкладки, списки. Доска из неё выходит на всю ширину
+   экрана (PaymentsBoard.jsx), поэтому колонку держит не корень раздела, а
+   каждый его блок сам. */
+export const SECTION_COLUMN = 'mx-auto max-w-[1400px] px-3 sm:px-5';
 
 /* Кнопка-поле выбора даты в формах раздела: тот же вид, что у полей ввода. */
 export const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
@@ -762,8 +767,9 @@ const SkeletonRows = ({ rows, wide }) => (
 );
 
 /* sections — сколько строк в каждом разделе: число либо { rows, title: false }
-   для карточки без заголовка. summary — сводка наверху, как у заявки. */
-export const WindowSkeleton = ({ label, summary = false, sections = [], wide = false }) => (
+   для карточки без заголовка. summary — сводка наверху, как у заявки. folds —
+   сколько свёрнутых разделов стоит внизу одной карточкой (FoldGroup). */
+export const WindowSkeleton = ({ label, summary = false, sections = [], wide = false, folds = 0 }) => (
     <div className="space-y-4" role="status" aria-busy="true" aria-label={label}>
         {summary && (
             <div className={`${iosCard} p-4`}>
@@ -790,8 +796,56 @@ export const WindowSkeleton = ({ label, summary = false, sections = [], wide = f
                 </section>
             );
         })}
+        {folds > 0 && (
+            <div className={`${iosCard} divide-y divide-slate-100`}>
+                {Array.from({ length: folds }, (_, index) => (
+                    <div key={index} className="flex items-center gap-3 px-4 py-3">
+                        <div className="flex h-5 shrink-0 items-center"><Bone className="h-2.5 w-24" /></div>
+                        <div className="flex h-5 min-w-0 grow basis-0 items-center justify-end"><Bone className={`h-2.5 ${BONE_WIDTHS[(index + 2) % BONE_WIDTHS.length]}`} /></div>
+                    </div>
+                ))}
+            </div>
+        )}
     </div>
 );
+
+/* Разделы окна «по запросу» (CARD_FOLDS в paymentsMeta.js): ход по этапам,
+   документы, история. Одна карточка, строка на раздел — как группа в
+   «Настройках» iOS и как сделка в карточке разговора «ИИ-оценки»
+   (call_qa/DealBadge.jsx): название, суть одной строкой, шеврон. Раздел
+   раскрывается на месте, под своей строкой; свёрнутому суть видна и так. */
+export const FoldGroup = ({ children }) => (
+    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>{children}</div>
+);
+
+export const Fold = ({ id, title, summary, open, onToggle, children }) => {
+    const bodyId = useId();
+    const ref = useRef(null);
+    const wasOpen = useRef(open);
+    /* Раздел у нижнего края окна раскрывался бы за край — подкручиваем к нему. */
+    useEffect(() => {
+        if (open && !wasOpen.current) ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        wasOpen.current = open;
+    }, [open]);
+    return (
+        <section ref={ref} data-fold={id} className="scroll-mb-3 scroll-mt-3">
+            <h3 className="m-0">
+                <button
+                    type="button"
+                    onClick={onToggle}
+                    aria-expanded={open}
+                    aria-controls={bodyId}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400"
+                >
+                    <span className="shrink-0 text-[13.5px] font-medium text-slate-900">{title}</span>
+                    <span className="min-w-0 grow basis-0 truncate text-right text-[12.5px] text-slate-500">{open ? '' : summary}</span>
+                    <ChevronDown size={15} aria-hidden="true" className={`shrink-0 text-slate-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                </button>
+            </h3>
+            {open && <div id={bodyId} className="border-t border-slate-100 motion-safe:animate-reveal">{children}</div>}
+        </section>
+    );
+};
 
 export const ErrorBox = ({ text }) => (text ? (
     <div className="rounded-2xl bg-rose-50 px-4 py-3 text-[13px] leading-relaxed text-rose-700 ring-1 ring-rose-200">{text}</div>

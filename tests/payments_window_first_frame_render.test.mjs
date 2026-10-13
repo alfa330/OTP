@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { ASSET_SKELETON, REQUEST_SKELETON } from '../src/components/payments/paymentsMeta.js';
+import { ASSET_SKELETON, CARD_FOLDS, REQUEST_SKELETON } from '../src/components/payments/paymentsMeta.js';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -87,9 +87,10 @@ test('окно заявки с первого кадра стоит в свой 
     // Заготовка названа читалке один раз и занимает место содержимого.
     assert.equal(count(html, /aria-busy="true"/g), 1);
     assert.match(html, /role="status"[^>]*aria-label="Загружаем заявку"|aria-label="Загружаем заявку"[^>]*role="status"/);
-    // Сводка и по карточке на каждый раздел; в каждой строке — подпись и значение.
-    assert.equal(count(html, CARD), 1 + REQUEST_SKELETON.length);
-    assert.ok(count(html, BONE) >= rowsOf(REQUEST_SKELETON) * 2);
+    // Сводка, по карточке на каждый раздел и карточка свёрнутых разделов (ход, документы,
+    // история); в каждой строке — подпись и значение.
+    assert.equal(count(html, CARD), 1 + REQUEST_SKELETON.length + 1);
+    assert.ok(count(html, BONE) >= (rowsOf(REQUEST_SKELETON) + CARD_FOLDS.length) * 2);
     // Подвал стоит сразу: раньше он появлялся вместе с заявкой и добавлял окну высоты.
     assert.match(html, /Готово/);
     // Прежней короткой строки с крутилкой больше нет.

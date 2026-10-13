@@ -763,12 +763,129 @@ export const recordView = ({ data, error, loading = false } = {}) => (
     data ? 'ready' : (error && !loading ? 'error' : 'loading'));
 
 /* Сколько строк в разделах заготовки. У заявки — по её обычным разделам (задача,
-   «Заявка», «Поставщики», «Оплата и согласование», «Ход заявки», «История»):
-   вместе со сводкой заготовка выше окна на любом ноутбуке и обычном мониторе,
-   как и настоящая заявка, — поэтому рамка окна при загрузке не меняется вовсе.
-   У имущества — карточка описания без заголовка и «История владельцев и мест». */
-export const REQUEST_SKELETON = [2, 7, 3, 7, 5, 4];
+   «Заявка», «Поставщики», «Оплата и согласование»), ниже — карточка свёрнутых
+   разделов (CARD_FOLDS): вместе со сводкой заготовка выше окна на любом ноутбуке
+   и обычном мониторе, как и настоящая заявка, — поэтому рамка окна при загрузке
+   не меняется вовсе. У имущества — карточка описания без заголовка и «История
+   владельцев и мест». */
+export const REQUEST_SKELETON = [2, 7, 3, 7];
 export const ASSET_SKELETON = [{ rows: 12, title: false }, 2];
+
+/* ── Разделы окна заявки «по запросу» ─────────────────────────────────────────
+   Ход по этапам, документы и история нужны не каждому и не каждый раз, а окно
+   заявки с ними было в два с половиной экрана (просьба владельца 13.10.2026:
+   «история, ход заявки и т.д. уходили под таб, то есть раскрытые»). Теперь это
+   три строки в одной карточке внизу окна: название, суть одной строкой, шеврон;
+   раздел раскрывается на месте. Суть свёрнутого раздела — здесь, чтобы её
+   формулировку держал тест. */
+export const CARD_FOLDS = [
+    { key: 'route', title: 'Ход заявки' },
+    { key: 'files', title: 'Документы' },
+    { key: 'history', title: 'История' },
+];
+export const FILE_FORMS = ['файл', 'файла', 'файлов'];
+export const EVENT_FORMS = ['событие', 'события', 'событий'];
+
+/** У кого заявка сейчас — одной строкой для свёрнутого «Хода заявки». */
+export const routeSummary = (request, subtasks = []) => {
+    const status = request?.status || 'active';
+    if (status === 'done') return 'Все этапы пройдены';
+    if (status === 'rejected') return 'Отклонена';
+    if (status === 'cancelled') return 'Отменена';
+    const stages = (subtasks || []).filter((item) => item.kind !== 'initiation' && item.state !== 'skipped');
+    const current = (subtasks || []).find((item) => item.state === 'open');
+    if (!current) return stages.length ? plural(stages.length, ['этап', 'этапа', 'этапов']) : '';
+    const who = current.assignee_name || current.role_label || '';
+    return [current.title, who].filter(Boolean).join(' · ');
+};
+
+export const filesSummary = (attachments = []) => (
+    (attachments || []).length ? plural(attachments.length, FILE_FORMS) : 'нет файлов');
+
+/** `events` — в порядке записи, последнее — в конце (как отдаёт сервер). */
+export const historySummary = (events = []) => {
+    const list = events || [];
+    if (!list.length) return 'пока пусто';
+    const last = list[list.length - 1];
+    const when = last?.created_at ? fmtDateTime(last.created_at) : '';
+    return [plural(list.length, EVENT_FORMS), when && `последнее ${when}`].filter(Boolean).join(' · ');
+};
+
+/* ── Доска на экранах разной ширины ───────────────────────────────────────────
+   Просьба владельца 13.10.2026: на досках с большим числом колонок остальные
+   «не заметны при первом взгляде»; на большом мониторе колонки должны стоять
+   все сразу, если помещаются, а если нет — должно быть видно, что есть ещё.
+
+   Колонки делят ширину поля поровну, пока каждой достаётся не меньше
+   BOARD_COLUMN_MIN: тогда доска видна целиком и не листается. Шире
+   BOARD_COLUMN_MAX колонка не растёт — дальше в карточке копилась бы пустота.
+   Когда все не помещаются, ширина подбирается так, чтобы следующая колонка
+   выглядывала из-за края на треть: обрезанная колонка сама говорит, что доска
+   продолжается (а не стоит впритык к краю, будто последняя). */
+export const BOARD_COLUMN_GAP = 10;
+export const BOARD_COLUMN_MIN = 232;
+export const BOARD_COLUMN_MAX = 320;
+export const BOARD_COLUMN_PEEK = 0.35;
+
+/** Раскладка доски по ширине поля: { fits, width, visible }.
+ *  fits — все колонки на экране; width — ширина одной; visible — сколько колонок
+ *  видно целиком. */
+export const boardLayout = (areaWidth, count) => {
+    const area = Math.floor(Number(areaWidth) || 0);
+    const total = Math.max(0, Math.trunc(Number(count) || 0));
+    if (!total || area <= 0) return { fits: true, width: BOARD_COLUMN_MIN, visible: total };
+    const equal = Math.floor((area - (total - 1) * BOARD_COLUMN_GAP) / total);
+    if (equal >= BOARD_COLUMN_MIN) return { fits: true, width: Math.min(BOARD_COLUMN_MAX, equal), visible: total };
+    // Сколько колонок встаёт целиком, если оставить место выглядывающей следующей.
+    for (let full = Math.floor((area + BOARD_COLUMN_GAP) / (BOARD_COLUMN_MIN + BOARD_COLUMN_GAP)); full >= 1; full -= 1) {
+        const width = Math.floor((area - full * BOARD_COLUMN_GAP) / (full + BOARD_COLUMN_PEEK));
+        if (width >= BOARD_COLUMN_MIN) return { fits: false, width: Math.min(BOARD_COLUMN_MAX, width), visible: full };
+    }
+    return { fits: false, width: BOARD_COLUMN_MIN, visible: 1 };
+};
+
+/** Какие колонки не видны целиком при прокрутке на `scrollLeft`: { left: [...], right: [...] } —
+ *  сами колонки, по порядку. Колонка, выглядывающая из-за края, тоже «ещё не видна». */
+export const boardHidden = (columns, layout, scrollLeft, areaWidth) => {
+    const step = layout.width + BOARD_COLUMN_GAP;
+    const from = Math.max(0, Number(scrollLeft) || 0);
+    const to = from + Math.max(0, Number(areaWidth) || 0);
+    const left = [];
+    const right = [];
+    (columns || []).forEach((column, index) => {
+        const start = index * step;
+        // Пара пикселей — дробная прокрутка и округление ширины, а не скрытая колонка.
+        if (start < from - 2) left.push(column);
+        else if (start + layout.width > to + 2) right.push(column);
+    });
+    return { left, right };
+};
+
+/** На сколько прокрутить доску кнопкой «ещё»: на видимые колонки без одной — последняя
+ *  виденная остаётся на экране, взгляд не теряет место. */
+export const boardPageStep = (layout) => (
+    Math.max(1, (layout.visible || 1) - 1) * (layout.width + BOARD_COLUMN_GAP));
+
+/** Ползунок тонкой полосы под доской: { left, width } в пикселях дорожки либо null,
+ *  когда листать нечего. */
+export const BOARD_THUMB_MIN = 48;
+export const boardThumb = (scrollLeft, contentWidth, viewWidth, trackWidth) => {
+    const content = Number(contentWidth) || 0;
+    const view = Number(viewWidth) || 0;
+    const track = Number(trackWidth) || 0;
+    if (content <= view + 1 || track <= 0) return null;
+    const width = Math.min(track, Math.max(BOARD_THUMB_MIN, Math.round((view / content) * track)));
+    const progress = Math.min(1, Math.max(0, (Number(scrollLeft) || 0) / (content - view)));
+    return { left: Math.round(progress * (track - width)), width };
+};
+
+/** Обратно: куда прокрутить доску, если ползунок поставили на `thumbLeft`. */
+export const boardScrollFor = (thumbLeft, thumbWidth, contentWidth, viewWidth, trackWidth) => {
+    const room = (Number(trackWidth) || 0) - (Number(thumbWidth) || 0);
+    if (room <= 0) return 0;
+    const progress = Math.min(1, Math.max(0, (Number(thumbLeft) || 0) / room));
+    return Math.round(progress * Math.max(0, (Number(contentWidth) || 0) - (Number(viewWidth) || 0)));
+};
 
 /* ── Тип заявки на карточке ───────────────────────────────────────────────────
    Карточки разводятся цветом по типу: новый закуп по счёту, закуп на карту,

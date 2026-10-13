@@ -1,18 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Loader2 } from 'lucide-react';
-import { IosSegmented } from '../ui/ios';
+import { AlertTriangle, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { IosSegmented, prefersReducedMotion } from '../ui/ios';
 import FullscreenSheet from '../common/FullscreenSheet';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { groupTasksByDay } from '../tasks/boardGrouping';
 import PaymentsFilters from './PaymentsFilters';
 import {
-    BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META, EMPTY_FILTERS,
-    REQUEST_FORMS, activeFilterCount, canDropTo, cardFaces, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk,
-    plural, requestType,
+    BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, BOARD_COLUMN_GAP, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META,
+    EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardHidden, boardLayout, boardPageStep, boardScrollFor, boardThumb,
+    canDropTo, cardFaces, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
-    CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
+    CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, SECTION_COLUMN, TypePill, errorText, requestCardFrame,
 } from './paymentsUi';
 
 /*
@@ -27,6 +27,15 @@ import {
  * колонки одной ширины, у пустой — подпись, что в неё попадает; в колонке одна
  * порция карточек (по 20, 40 или 60 — выбор запоминается), остальное — в окне
  * колонки, которое догружается при прокрутке.
+ *
+ * Колонок здесь до восьми, и на доске они должны быть видны с первого взгляда
+ * (просьба владельца 13.10.2026). Поэтому доска занимает всю ширину экрана, а
+ * не колонку раздела, и делит её между колонками поровну: на большом мониторе
+ * они стоят все сразу. Где все не помещаются — следующая колонка выглядывает
+ * из-за края, у края стоит метка «ещё N», а под доской — тонкая полоса
+ * прокрутки, прижатая к низу экрана (штатная лежала на два экрана ниже, под
+ * последней карточкой, и о скрытых колонках ничто не говорило). Раскладка —
+ * boardLayout в paymentsMeta.js.
  *
  * Перетаскивание работает между РАБОЧИМИ колонками («Новые счета» → «Проверка» →
  * «Готово к оплате» → «На оплате»): это смена статуса без условий. В
@@ -47,6 +56,22 @@ const SEARCH_DEBOUNCE_MS = 300;
 const SHEET_Z = 85;
 const SHEET_MOBILE_Z = 120;
 const SHEET_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
+
+/* Карточку тянут к краю поля — доска подаётся навстречу: рабочая колонка, в
+   которую её несут, может стоять за краем. */
+const DRAG_EDGE = 80;
+const DRAG_SPEED = 18;
+// Сколько пикселей у края гаснет, когда за ним есть колонки.
+const EDGE_FADE = 44;
+
+/* Гаснущий край доски — маской, а не градиентом поверх: маске всё равно, какого
+   цвета страница, светлая тема или тёмная. */
+const edgeFade = (left, right) => {
+    if (!left && !right) return undefined;
+    const image = `linear-gradient(to right, ${left ? 'transparent' : '#000'} 0, #000 ${left ? EDGE_FADE : 0}px, `
+        + `#000 calc(100% - ${right ? EDGE_FADE : 0}px), ${right ? 'transparent' : '#000'} 100%)`;
+    return { maskImage: image, WebkitMaskImage: image };
+};
 
 const readChunk = () => {
     try {
@@ -135,13 +160,14 @@ const BoardCard = ({ card, board, draggable = false, dragging = false, soonDays,
             {clarify && <p className="mt-1.5 text-[11.5px] leading-snug text-amber-700 line-clamp-2" title={clarify}>{clarify}</p>}
 
             {/* Низом карточки: в сетке окна колонки соседние карточки одной высоты, и
-                сумма у всех стоит на одной линии. */}
-            <div className="mt-auto flex items-center gap-1.5 pt-2">
+                сумма у всех стоит на одной линии. Колонка доски бывает уже обычной
+                (доска делит между колонками ширину экрана) — тогда семизначная сумма
+                не встаёт рядом с кружками и сроком и уходит строкой ниже, а не
+                наезжает на срок. */}
+            <div className="mt-auto flex flex-wrap items-center gap-x-1.5 gap-y-1 pt-2">
                 <CardFaces faces={cardFaces(card)} />
-                <span className="flex min-w-0 grow basis-0 items-center gap-1">
-                    <DueChip request={card} soonDays={soonDays} />
-                </span>
-                <span className="shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{fmtMoney(card.amount)}</span>
+                <DueChip request={card} soonDays={soonDays} />
+                <span className="ml-auto shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{fmtMoney(card.amount)}</span>
             </div>
         </article>
     );
@@ -267,6 +293,199 @@ const ColumnSheet = ({ open, board, column, query, apiBaseUrl, headers, soonDays
     );
 };
 
+/* Метка у края доски: за ним есть колонки. Нажатие листает доску в ту сторону;
+   какие именно колонки там и сколько в них заявок — в подсказке. Прижата к верху
+   экрана: пока доску листают вниз, она остаётся на виду. */
+const BoardMore = ({ side, columns, onClick }) => {
+    if (!columns.length) return null;
+    const right = side === 'right';
+    const names = columns.map((column) => (column.count ? `${column.label} · ${column.count}` : column.label)).join(', ');
+    return (
+        <div className={`pointer-events-none absolute inset-y-0 z-10 ${right ? 'right-3 sm:right-5' : 'left-3 sm:left-5'}`}>
+            <button
+                type="button"
+                data-board-more={side}
+                onClick={onClick}
+                title={`${right ? 'Дальше' : 'Раньше'}: ${names}`}
+                aria-label={`${right ? 'Следующие колонки' : 'Предыдущие колонки'}: ${names}`}
+                className="pointer-events-auto sticky top-2 mt-1 inline-flex items-center gap-0.5 rounded-full bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-700 shadow-[0_2px_10px_rgba(15,23,42,0.14)] ring-1 ring-slate-200 transition hover:bg-slate-50 active:scale-[0.97]"
+            >
+                {!right && <ChevronLeft size={14} aria-hidden="true" />}
+                <span className="tabular-nums">{right ? `ещё ${columns.length}` : columns.length}</span>
+                {right && <ChevronRight size={14} aria-hidden="true" />}
+            </button>
+        </div>
+    );
+};
+
+/* Тонкая полоса прокрутки доски. Своя, а не штатная: штатная стоит под последней
+   карточкой самой длинной колонки — на два экрана ниже, — и на macOS не видна,
+   пока не начнёшь листать. Эта прижата к низу экрана всё время, пока доска на
+   нём, и показывает, какая часть колонок сейчас видна. Ползунок тянется, нажатие
+   мимо него ставит его под указатель. */
+const BoardRail = ({ scrollerRef, scrollerId, left, content, view }) => {
+    const trackRef = useRef(null);
+    const grab = useRef(null);
+    const [track, setTrack] = useState(0);
+    const [inset, setInset] = useState(0);
+
+    useLayoutEffect(() => {
+        const node = trackRef.current;
+        if (!node) return undefined;
+        /* Страницу раздела прокручивает область портала с полями; прижатое к низу
+           встаёт у края её содержимого, то есть выше низа экрана на нижнее поле, и
+           под полосой остаётся ряд карточек. Сдвигаем полосу на это поле вниз. */
+        let scroller = node.parentElement;
+        while (scroller && scroller !== document.body && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
+            scroller = scroller.parentElement;
+        }
+        if (scroller && scroller !== document.body) setInset(parseFloat(getComputedStyle(scroller).paddingBottom) || 0);
+        const read = () => setTrack(Math.floor(node.getBoundingClientRect().width));
+        read();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        const observer = new ResizeObserver(read);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+
+    const thumb = boardThumb(left, content, view, track);
+    const seek = (thumbLeft) => {
+        const node = scrollerRef.current;
+        if (node && thumb) node.scrollLeft = boardScrollFor(thumbLeft, thumb.width, content, view, track);
+    };
+    const pointerX = (event) => event.clientX - trackRef.current.getBoundingClientRect().left;
+
+    const onPointerDown = (event) => {
+        if (!thumb || event.button > 0) return;
+        const x = pointerX(event);
+        const onThumb = x >= thumb.left && x <= thumb.left + thumb.width;
+        grab.current = onThumb ? x - thumb.left : thumb.width / 2;
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* указатель уже отпущен */ }
+        if (!onThumb) seek(x - grab.current);
+        event.preventDefault();
+    };
+    const onPointerMove = (event) => { if (grab.current !== null) seek(pointerX(event) - grab.current); };
+    const onPointerUp = (event) => {
+        grab.current = null;
+        try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* захвата не было */ }
+    };
+
+    const progress = content > view ? Math.round((left / (content - view)) * 100) : 0;
+    return (
+        /* Полоса лежит в своей «канавке» цвета страницы на всю ширину поля: карточки
+           уходят под неё, а не оказываются перечёркнутыми линией. Нажимается вся
+           канавка — в шесть пикселей самой полосы мышью не попасть. */
+        <div
+            data-board-scrollbar
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            className="group sticky z-10 -mx-3 mt-1 cursor-pointer touch-none bg-gray-50/80 px-3 py-2 shadow-[0_-1px_0_rgba(100,116,139,0.14)] backdrop-blur sm:-mx-5 sm:px-5"
+            style={{ bottom: -inset }}
+        >
+            <div
+                ref={trackRef}
+                role="scrollbar"
+                aria-controls={scrollerId}
+                aria-orientation="horizontal"
+                aria-label="Прокрутка доски по колонкам"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.min(100, Math.max(0, progress))}
+                className="relative h-1.5 rounded-full bg-slate-200/70"
+            >
+                {thumb && (
+                    <span
+                        data-board-thumb
+                        className="absolute inset-y-0 rounded-full bg-[rgba(100,116,139,0.5)] transition-colors group-hover:bg-[rgba(71,85,105,0.75)]"
+                        style={{ left: thumb.left, width: thumb.width }}
+                    />
+                )}
+            </div>
+        </div>
+    );
+};
+
+/* Поле доски на компьютере: все колонки в ширину экрана, если помещаются, иначе —
+   лента с меткой у края и тонкой полосой внизу. `renderColumn(column, false, width)`
+   рисует колонку заданной ширины. */
+const BoardLanes = ({ columns, dragging, renderColumn }) => {
+    const rulerRef = useRef(null);
+    const scrollerRef = useRef(null);
+    const scrollerId = useId();
+    const [area, setArea] = useState(0);
+    const [left, setLeft] = useState(0);
+
+    // Ширину поля даёт пустая линейка внутри его полей: её не меняют ни колонки, ни прокрутка.
+    useLayoutEffect(() => {
+        const node = rulerRef.current;
+        if (!node) return undefined;
+        const read = () => setArea(Math.floor(node.getBoundingClientRect().width));
+        read();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        const observer = new ResizeObserver(read);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+
+    const layout = useMemo(() => boardLayout(area, columns.length), [area, columns.length]);
+    const content = columns.length * layout.width + Math.max(0, columns.length - 1) * BOARD_COLUMN_GAP;
+    const hidden = useMemo(() => boardHidden(columns, layout, left, area), [columns, layout, left, area]);
+    /* Прокрутка доски перерисовывает только метки и ползунок: сами колонки с карточками
+       (их бывает полтораста) собираются заново, лишь когда меняется доска или ширина. */
+    const lanes = useMemo(
+        () => (area > 0 ? columns.map((column) => renderColumn(column, false, layout.width)) : null),
+        [area, columns, renderColumn, layout.width],
+    );
+
+    // Поле стало шире или колонок меньше — прежняя прокрутка могла остаться за краем.
+    useEffect(() => {
+        const node = scrollerRef.current;
+        if (node) setLeft(node.scrollLeft);
+    }, [content, area]);
+
+    const page = (direction) => {
+        scrollerRef.current?.scrollBy({ left: direction * boardPageStep(layout), behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+    };
+
+    const onDragOver = (event) => {
+        const node = scrollerRef.current;
+        if (!dragging || layout.fits || !node) return;
+        const box = node.getBoundingClientRect();
+        if (event.clientX > box.right - DRAG_EDGE) node.scrollLeft += DRAG_SPEED;
+        else if (event.clientX < box.left + DRAG_EDGE) node.scrollLeft -= DRAG_SPEED;
+    };
+
+    return (
+        <div className="relative mt-2 px-3 sm:px-5" data-board-area data-board-fits={layout.fits ? 'yes' : 'no'} onDragOver={onDragOver}>
+            <div ref={rulerRef} aria-hidden="true" />
+            {/* Штатной полосы нет — её работу делает BoardRail ниже; колесо с Shift и
+                тачпад листают доску по-прежнему. */}
+            <div
+                ref={scrollerRef}
+                id={scrollerId}
+                onScroll={(event) => setLeft(event.currentTarget.scrollLeft)}
+                className="-mx-1 overflow-x-auto px-1 pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                style={layout.fits ? undefined : edgeFade(hidden.left.length > 0, hidden.right.length > 0)}
+            >
+                {/* По верху, а не во всю высоту: пустая колонка — короткий лоток с подписью,
+                    а не серый столб длиной с соседнюю. */}
+                <div className={`flex items-start gap-2.5 ${layout.fits ? 'justify-center' : 'w-max'}`}>
+                    {lanes}
+                </div>
+            </div>
+            {!layout.fits && (
+                <>
+                    <BoardMore side="left" columns={hidden.left} onClick={() => page(-1)} />
+                    <BoardMore side="right" columns={hidden.right} onClick={() => page(1)} />
+                    <BoardRail scrollerRef={scrollerRef} scrollerId={scrollerId} left={left} content={content} view={area} />
+                </>
+            )}
+        </div>
+    );
+};
+
 const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, soonDays, refreshKey, requestOpen = false, onOpen, onChanged, showToast }) => {
     const board = useMemo(() => (meta?.boards || []).find((item) => item.code === code) || null, [meta, code]);
     const isMobile = useIsMobileShell();
@@ -383,7 +602,7 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
 
     if (!board) return null;
 
-    const renderColumn = (column, single = false) => {
+    const renderColumn = (column, single = false, width = undefined) => {
         const allowed = !dragged || canDropTo(board, dragged, column.key) || dragged.column === column.key;
         const isHover = hover === column.key && dragged && dragged.column !== column.key;
         const hidden = Math.max(0, column.count - column.cards.length);
@@ -402,7 +621,8 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
                 onDrop={(event) => { event.preventDefault(); drop(column.key); }}
                 /* Одна колонка на телефоне — без подложки: рамка вокруг единственной
                    колонки во всю ширину экрана ничего не отделяет. */
-                className={single ? 'flex w-full flex-col' : `flex w-[268px] shrink-0 flex-col rounded-2xl p-2 transition-colors ${tray}`}
+                className={single ? 'flex w-full flex-col' : `flex shrink-0 flex-col rounded-2xl p-2 transition-colors ${tray}`}
+                style={single ? undefined : { width }}
             >
                 {/* Имя и счёт колонки на телефоне уже стоят в переключателе над ней. */}
                 {!single && (
@@ -446,47 +666,45 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
 
     return (
         <div>
-            <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users} board>
-                {/* Рост — как у строки поиска и «Фильтров» рядом (FormSelect), а не 35 px списка из панели фильтров. */}
-                <FormSelect className="w-[112px] shrink-0" ariaLabel="Карточек в колонке" value={chunk} options={chunkOptions} onChange={changeChunk} />
-            </PaymentsFilters>
+            {/* Поиск, фильтры и строка состояния — в колонке раздела, под шапкой; само поле
+                доски ниже выходит из неё на всю ширину экрана. */}
+            <div className={SECTION_COLUMN}>
+                <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users} board>
+                    {/* Рост — как у строки поиска и «Фильтров» рядом (FormSelect), а не 35 px списка из панели фильтров. */}
+                    <FormSelect className="w-[112px] shrink-0" ariaLabel="Карточек в колонке" value={chunk} options={chunkOptions} onChange={changeChunk} />
+                </PaymentsFilters>
 
-            {error && <div className="mt-3"><NoticeBox text={error} /></div>}
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
-                <span className="flex items-center gap-2">
-                    {loading && <><Loader2 size={13} className="animate-spin" /> Загружаем доску…</>}
-                    {/* Пусто по отбору и пусто вообще — разные вещи; при сбое загрузки не говорим «задач нет». */}
-                    {!loading && !error && (total
-                        ? `${board.title} · ${scope === 'own' ? 'ваши согласования' : 'задачи подразделения'}`
-                        : (query || activeFilterCount(filters)
-                            ? 'Ничего не нашлось — измените запрос или фильтры'
-                            : 'На доске пусто — задач для вас сейчас нет'))}
-                </span>
-                {dragHint && <span className="text-[11.5px] text-slate-400">Перетащите карточку между рабочими колонками, чтобы сменить статус</span>}
+                {error && <div className="mt-3"><NoticeBox text={error} /></div>}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
+                    <span className="flex items-center gap-2">
+                        {loading && <><Loader2 size={13} className="animate-spin" /> Загружаем доску…</>}
+                        {/* Пусто по отбору и пусто вообще — разные вещи; при сбое загрузки не говорим «задач нет». */}
+                        {!loading && !error && (total
+                            ? `${board.title} · ${scope === 'own' ? 'ваши согласования' : 'задачи подразделения'}`
+                            : (query || activeFilterCount(filters)
+                                ? 'Ничего не нашлось — измените запрос или фильтры'
+                                : 'На доске пусто — задач для вас сейчас нет'))}
+                    </span>
+                    {dragHint && <span className="text-[11.5px] text-slate-400">Перетащите карточку между рабочими колонками, чтобы сменить статус</span>}
+                </div>
+
+                {isMobile && (
+                    <div className="mt-2">
+                        <div ref={stripRef} className="-mx-3 overflow-x-auto px-3 [scrollbar-width:none]">
+                            <IosSegmented
+                                value={activeMobile?.key}
+                                options={columns.map((column) => ({ value: column.key, label: column.label, count: column.count }))}
+                                onChange={setMobileColumn}
+                                ariaLabel="Колонка доски"
+                                className="min-w-max"
+                            />
+                        </div>
+                        <div key={activeMobile?.key} className="mt-2 motion-safe:animate-fade-in-soft">{activeMobile && renderColumn(activeMobile, true)}</div>
+                    </div>
+                )}
             </div>
 
-            {isMobile ? (
-                <div className="mt-2">
-                    <div ref={stripRef} className="-mx-3 overflow-x-auto px-3 [scrollbar-width:none]">
-                        <IosSegmented
-                            value={activeMobile?.key}
-                            options={columns.map((column) => ({ value: column.key, label: column.label, count: column.count }))}
-                            onChange={setMobileColumn}
-                            ariaLabel="Колонка доски"
-                            className="min-w-max"
-                        />
-                    </div>
-                    <div key={activeMobile?.key} className="mt-2 motion-safe:animate-fade-in-soft">{activeMobile && renderColumn(activeMobile, true)}</div>
-                </div>
-            ) : (
-                <div className="-mx-1 mt-2 overflow-x-auto px-1 pb-2">
-                    {/* По верху, а не во всю высоту: пустая колонка — короткий лоток с подписью,
-                        а не серый столб длиной с соседнюю. */}
-                    <div className="flex min-w-max items-start gap-2.5">
-                        {columns.map((column) => renderColumn(column))}
-                    </div>
-                </div>
-            )}
+            {!isMobile && <BoardLanes columns={columns} dragging={Boolean(dragged)} renderColumn={renderColumn} />}
 
             {sheetColumn && (
                 <ColumnSheet

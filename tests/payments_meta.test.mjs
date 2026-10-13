@@ -8,6 +8,12 @@ import {
   ASSET_STATUS_OPTIONS,
   AUTO_CREATE_OPTIONS,
   BOARD_CHUNK_SIZES,
+  BOARD_COLUMN_GAP,
+  BOARD_COLUMN_MAX,
+  BOARD_COLUMN_MIN,
+  BOARD_COLUMN_PEEK,
+  BOARD_THUMB_MIN,
+  CARD_FOLDS,
   DEFAULT_BOARD_CHUNK,
   CARD_RECIPIENT_OPTIONS,
   DEFAULT_UNIT,
@@ -32,6 +38,11 @@ import {
   VAT_OPTIONS,
   activeFilterCount,
   approvalSummary,
+  boardHidden,
+  boardLayout,
+  boardPageStep,
+  boardScrollFor,
+  boardThumb,
   canDropTo,
   cardDigits,
   cardFaces,
@@ -48,10 +59,12 @@ import {
   expenseSubline,
   exportFileName,
   fileKindOptions,
+  filesSummary,
   filtersToParams,
   fmtDate,
   fmtDateTime,
   fmtMoney,
+  historySummary,
   initialsOf,
   invoiceProblems,
   isBlankItem,
@@ -76,6 +89,7 @@ import {
   recordView,
   regularProblems,
   registryTableMinWidth,
+  routeSummary,
   registryWhere,
   REQUEST_TYPES,
   requestState,
@@ -797,16 +811,163 @@ test('окно записи: загруженная запись остаётс�
   assert.equal(recordView({ data, error: 'Этап уже выполнил другой', loading: false }), 'ready');
 });
 
-test('заготовка заявки выше окна на ноутбуке и обычном мониторе — рамка при загрузке не меняется', () => {
+test('заготовка заявки не ниже окна на обычном мониторе и ростом с настоящую заявку', () => {
   const rowsOf = (section) => (typeof section === 'number' ? section : section.rows);
-  // Строка заготовки — 32 px, как Row; раздел добавляет заголовок и поля карточки (38 px),
-  // промежуток между разделами — 16 px; сводка заявки, шапка, подвал и поля окна — ещё около 300 px.
-  const height = (sections, extra) => sections.reduce((sum, section) => sum + rowsOf(section) * 32 + 38 + 16, extra);
-  // Окно не выше 92% экрана: при экране 1440 px по высоте это 1325 px.
-  assert.ok(height(REQUEST_SKELETON, 300) >= 1325, `заготовка заявки — около ${height(REQUEST_SKELETON, 300)} px`);
+  // Строка заготовки — 32 px, как Row; раздел добавляет заголовок и поля карточки (38 px) и
+  // промежуток (16 px); строка свёрнутого раздела — 44 px; сводка заявки, шапка, подвал и поля
+  // окна — ещё около 300 px.
+  const height = REQUEST_SKELETON.reduce((sum, section) => sum + rowsOf(section) * 32 + 38 + 16, 300)
+    + CARD_FOLDS.length * 44 + 16;
+  // Окно не выше 92% экрана: при экране 1080 px по высоте это 994 px — заготовка окно заполняет,
+  // и рамка при загрузке не меняется вовсе.
+  assert.ok(height >= 994, `заготовка заявки — около ${height} px`);
+  // Заявка без формы этапа со свёрнутыми разделами — около 1250 px (замер на стенде, №515):
+  // на высоком экране заготовка не должна быть заметно выше или ниже неё.
+  assert.ok(Math.abs(height - 1250) <= 120, `заготовка заявки — около ${height} px при заявке около 1250 px`);
   assert.ok(REQUEST_SKELETON.every((section) => rowsOf(section) > 0));
   // Карточка имущества: описание без заголовка — одиннадцать обязательных полей п. 10.2
   // (название стоит в шапке окна) и строка «Заявка»; ниже — история владельцев и мест.
   assert.deepEqual(ASSET_SKELETON[0], { rows: 12, title: false });
   assert.equal(ASSET_SKELETON.length, 2);
+});
+
+test('разделы «по запросу»: ход заявки, документы, история — в этом порядке', () => {
+  assert.deepEqual(CARD_FOLDS.map((fold) => fold.key), ['route', 'files', 'history']);
+  assert.deepEqual(CARD_FOLDS.map((fold) => fold.title), ['Ход заявки', 'Документы', 'История']);
+});
+
+test('свёрнутый «Ход заявки» говорит, у кого заявка сейчас', () => {
+  const subtasks = [
+    { kind: 'initiation', state: 'done', title: 'Заявка у инициатора' },
+    { kind: 'approval', state: 'done', title: 'Утверждение', assignee_name: 'Карабек Ержан' },
+    { kind: 'invoice_payment', state: 'open', title: 'Оплата счёта', role_label: 'Бухгалтерия' },
+    { kind: 'receiving', state: 'pending', title: 'Получение товара/услуги', assignee_name: 'Иванова Айгерим' },
+  ];
+  assert.equal(routeSummary({ status: 'active' }, subtasks), 'Оплата счёта · Бухгалтерия');
+  // Человек важнее роли: этап согласования — у конкретного утверждающего.
+  assert.equal(routeSummary({ status: 'active' }, [{ kind: 'approval', state: 'open', title: 'Утверждение', assignee_name: 'Карабек Ержан', role_label: 'Утвердитель' }]),
+    'Утверждение · Карабек Ержан');
+  assert.equal(routeSummary({ status: 'done' }, subtasks), 'Все этапы пройдены');
+  assert.equal(routeSummary({ status: 'rejected' }, subtasks), 'Отклонена');
+  assert.equal(routeSummary({ status: 'cancelled' }, subtasks), 'Отменена');
+  // Открытого этапа нет (заявка между этапами) — хотя бы сколько их всего, без инициации и пропущенных.
+  assert.equal(routeSummary({ status: 'active' }, [
+    { kind: 'initiation', state: 'done' }, { kind: 'manager_approval', state: 'skipped' },
+    { kind: 'approval', state: 'pending' }, { kind: 'invoice_payment', state: 'pending' },
+  ]), '2 этапа');
+  assert.equal(routeSummary(null, []), '');
+});
+
+test('свёрнутые «Документы» и «История» называют, сколько внутри', () => {
+  assert.equal(filesSummary([]), 'нет файлов');
+  assert.equal(filesSummary(undefined), 'нет файлов');
+  assert.equal(filesSummary([{}]), '1 файл');
+  assert.equal(filesSummary([{}, {}, {}]), '3 файла');
+  assert.equal(filesSummary(new Array(11).fill({})), '11 файлов');
+  assert.equal(historySummary([]), 'пока пусто');
+  // Сервер отдаёт события по порядку записи — последнее в конце.
+  const events = [{ created_at: '2026-10-09T12:24:00+05:00' }, { created_at: '2026-10-12T14:37:00+05:00' }];
+  assert.equal(historySummary(events), `2 события · последнее ${fmtDateTime(events[1].created_at)}`);
+  assert.match(historySummary(new Array(17).fill({ created_at: '2026-10-12T14:37:00+05:00' })), /^17 событий · последнее /);
+});
+
+test('доска: колонки делят ширину экрана поровну, пока каждой хватает места', () => {
+  // Монитор 2560 px (поле доски на стенде — 2376 px), восемь колонок бухгалтерии: все на
+  // экране, без прокрутки.
+  const wide = boardLayout(2376, 8);
+  assert.deepEqual(wide, { fits: true, width: 288, visible: 8 });
+  assert.ok(wide.width * 8 + BOARD_COLUMN_GAP * 7 <= 2376);
+  // Ровно впритык: колонка наименьшей ширины ещё считается «помещается».
+  const exact = BOARD_COLUMN_MIN * 5 + BOARD_COLUMN_GAP * 4;
+  assert.deepEqual(boardLayout(exact, 5), { fits: true, width: BOARD_COLUMN_MIN, visible: 5 });
+  assert.equal(boardLayout(exact - 1, 5).fits, false);
+  // Шире предела колонка не растёт — доска остаётся уже экрана, а не раздувает карточки.
+  assert.deepEqual(boardLayout(2376, 5), { fits: true, width: BOARD_COLUMN_MAX, visible: 5 });
+});
+
+test('доска: когда все не помещаются, следующая колонка выглядывает из-за края', () => {
+  for (const [area, count] of [[1182, 8], [1316, 8], [1316, 7], [1736, 8], [1580, 8], [1182, 5], [900, 8], [700, 7]]) {
+    const layout = boardLayout(area, count);
+    assert.equal(layout.fits, false, `${area}/${count}`);
+    assert.ok(layout.width >= BOARD_COLUMN_MIN && layout.width <= BOARD_COLUMN_MAX, `${area}/${count}: ширина ${layout.width}`);
+    assert.ok(layout.visible >= 1 && layout.visible < count, `${area}/${count}: видно ${layout.visible}`);
+    // Целые колонки стоят на экране полностью…
+    const full = layout.visible * layout.width + layout.visible * BOARD_COLUMN_GAP;
+    assert.ok(full <= area, `${area}/${count}: целые колонки ${full} шире поля`);
+    // …а от следующей видна заметная часть: не узкая полоска и не почти вся колонка.
+    const peek = (area - full) / layout.width;
+    assert.ok(peek >= BOARD_COLUMN_PEEK - 0.02 && peek < 0.75, `${area}/${count}: выглядывает ${Math.round(peek * 100)}%`);
+  }
+  // Замеры стенда: экран 1920 px (поле 1736) — шесть колонок бухгалтерии из восьми,
+  // 1500 px (поле 1316) — пять, 1366 px (поле 1182) — четыре.
+  assert.equal(boardLayout(1736, 8).visible, 6);
+  assert.equal(boardLayout(1316, 8).visible, 5);
+  assert.equal(boardLayout(1182, 8).visible, 4);
+  // А семь колонок финансового отдела и пять согласования на 1920 px стоят целиком.
+  assert.equal(boardLayout(1736, 7).fits, true);
+  assert.equal(boardLayout(1736, 5).fits, true);
+});
+
+test('доска: пустая и ещё не измеренная', () => {
+  assert.deepEqual(boardLayout(1500, 0), { fits: true, width: BOARD_COLUMN_MIN, visible: 0 });
+  assert.equal(boardLayout(0, 8).fits, true);
+  assert.equal(boardLayout(undefined, 8).fits, true);
+  // Очень узкое поле — одна колонка, но не уже наименьшей.
+  assert.deepEqual(boardLayout(200, 3), { fits: false, width: BOARD_COLUMN_MIN, visible: 1 });
+});
+
+test('доска: метка у края называет колонки, которых не видно целиком', () => {
+  const columns = ['new', 'checking', 'clarification', 'ready', 'paying', 'paid', 'awaiting_docs', 'closed'].map((key) => ({ key }));
+  const layout = boardLayout(1736, columns.length);                 // шесть целых и выглядывающая седьмая
+  const keys = (list) => list.map((column) => column.key);
+  let hidden = boardHidden(columns, layout, 0, 1736);
+  assert.deepEqual(keys(hidden.left), []);
+  assert.deepEqual(keys(hidden.right), ['awaiting_docs', 'closed']);
+  // Долистали до конца: справа пусто, слева — ушедшие за край.
+  const content = columns.length * layout.width + (columns.length - 1) * BOARD_COLUMN_GAP;
+  hidden = boardHidden(columns, layout, content - 1736, 1736);
+  assert.deepEqual(keys(hidden.right), []);
+  assert.deepEqual(keys(hidden.left), ['new', 'checking']);
+  // Дробная прокрутка на пиксель колонку «скрытой» не делает.
+  hidden = boardHidden(columns, layout, 1, 1736);
+  assert.deepEqual(keys(hidden.left), []);
+  // Всё помещается — меток нет.
+  const fit = boardLayout(2376, columns.length);
+  assert.deepEqual(boardHidden(columns, fit, 0, 2376), { left: [], right: [] });
+});
+
+test('доска: кнопка «ещё» листает на видимые колонки без одной', () => {
+  const layout = boardLayout(1736, 8);
+  assert.equal(boardPageStep(layout), (layout.visible - 1) * (layout.width + BOARD_COLUMN_GAP));
+  // Одна видимая колонка — листаем по одной, а не стоим на месте.
+  assert.equal(boardPageStep({ visible: 1, width: 232 }), 232 + BOARD_COLUMN_GAP);
+});
+
+test('доска: ползунок тонкой полосы показывает видимую долю колонок', () => {
+  // Видно 1744 из 2182 — ползунок занимает ту же долю дорожки.
+  let thumb = boardThumb(0, 2182, 1744, 1736);
+  assert.equal(thumb.left, 0);
+  assert.equal(thumb.width, Math.round((1744 / 2182) * 1736));
+  // В конце прокрутки ползунок упирается в правый край дорожки.
+  thumb = boardThumb(2182 - 1744, 2182, 1744, 1736);
+  assert.equal(thumb.left + thumb.width, 1736);
+  // Листать нечего — ползунка нет.
+  assert.equal(boardThumb(0, 1744, 1744, 1736), null);
+  assert.equal(boardThumb(0, 2182, 1744, 0), null);
+  // Очень длинная доска — ползунок не тоньше, чем можно ухватить.
+  assert.equal(boardThumb(0, 100000, 1000, 1000).width, BOARD_THUMB_MIN);
+});
+
+test('доска: ползунок и прокрутка переводятся друг в друга без потерь на краях', () => {
+  const content = 2182, view = 1744, track = 1736;
+  const thumb = boardThumb(0, content, view, track);
+  assert.equal(boardScrollFor(0, thumb.width, content, view, track), 0);
+  assert.equal(boardScrollFor(track - thumb.width, thumb.width, content, view, track), content - view);
+  // За края дорожки ползунок не уезжает.
+  assert.equal(boardScrollFor(-50, thumb.width, content, view, track), 0);
+  assert.equal(boardScrollFor(track * 2, thumb.width, content, view, track), content - view);
+  // Середина дорожки — середина прокрутки.
+  const middle = boardScrollFor((track - thumb.width) / 2, thumb.width, content, view, track);
+  assert.ok(Math.abs(middle - (content - view) / 2) <= 1);
+  assert.equal(boardScrollFor(10, track, content, view, track), 0);
 });
