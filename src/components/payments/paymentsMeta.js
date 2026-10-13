@@ -490,6 +490,9 @@ export const toneText = (tone) => TONE_TEXT[tone] || TONE_TEXT.neutral;
 
 export const isClosed = (request) => ['done', 'rejected', 'cancelled'].includes(request?.status);
 export const isPaid = (request) => Boolean(request?.paid_on);
+/* Каким словом назвать день, когда ушли деньги. Перевод на карту — «пополнено», а
+   не «оплачено»: у карты сотрудника оплату подтверждает только чек (п. 5.3). */
+export const paidWord = (request) => (request?.payment_method === 'card' ? 'Пополнено' : 'Оплачено');
 
 /* ── Деньги и даты ─────────────────────────────────────────────────────────── */
 
@@ -699,8 +702,7 @@ export const isOverdue = (request, today = todayISO()) => {
 export const dueChip = (request, { soonDays = 3, today = todayISO() } = {}) => {
     if (!request) return null;
     if (request.paid_on) {
-        const word = request.payment_method === 'card' ? 'Пополнено' : 'Оплачено';
-        return { tone: 'done', icon: 'check', label: fmtDateShort(request.paid_on), title: `${word} ${fmtDate(request.paid_on)}` };
+        return { tone: 'done', icon: 'check', label: fmtDateShort(request.paid_on), title: `${paidWord(request)} ${fmtDate(request.paid_on)}` };
     }
     if (!request.due_on || (request.status && request.status !== 'active')) return null;
     const days = daysUntil(request.due_on, today);
@@ -712,9 +714,9 @@ export const dueChip = (request, { soonDays = 3, today = todayISO() } = {}) => {
     return { tone: days <= soonDays ? 'soon' : 'normal', icon: 'flag', label, title: `Срок оплаты ${date} — через ${pluralDays(days)}` };
 };
 
-/* «оплачено 09.10» / «пополнено 09.10» — для строки срока в карточке заявки. */
+/* «оплачено 09.10» / «пополнено 09.10» — для строки срока в карточке заявки и в реестре. */
 export const paidLabel = (request) => (request?.paid_on
-    ? `${request.payment_method === 'card' ? 'пополнено' : 'оплачено'} ${fmtDateShort(request.paid_on)}`
+    ? `${paidWord(request).toLowerCase()} ${fmtDateShort(request.paid_on)}`
     : '');
 
 /* ── Порции и страницы — как в разделе «Задачи» ────────────────────────────────

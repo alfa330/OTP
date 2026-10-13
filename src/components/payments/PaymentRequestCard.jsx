@@ -8,7 +8,7 @@ import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META,
     OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
     dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
-    isOverdue, netAmount, paidLabel, recordView, requestState, routeSummary, tonePill,
+    isOverdue, netAmount, paidLabel, paidWord, recordView, requestState, routeSummary, tonePill,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Fold,
@@ -599,7 +599,7 @@ const PaymentRequestCard = ({
                             <Row label="Согласовано" wide>
                                 {request.approved_at ? `${request.approved_by_name || ''} · ${fmtDateTime(request.approved_at)}${request.amount_approved ? ` · ${fmtMoney(request.amount_approved)}` : ''}` : null}
                             </Row>
-                            <Row label="Оплачено" wide>
+                            <Row label={paidWord(request)} wide>
                                 {request.paid_on ? `${fmtDate(request.paid_on)} · ${fmtMoney(request.paid_amount)}${request.paid_comment ? ` · ${request.paid_comment}` : ''}` : null}
                             </Row>
                             <Row label="Возврат" wide>{request.refund_amount > 0 ? `${fmtDate(request.refund_on)} · ${fmtMoney(request.refund_amount)}` : null}</Row>
@@ -632,7 +632,8 @@ const PaymentRequestCard = ({
                         </section>
                     )}
 
-                    {/* Условия закрытия (п. 15) — пока заявка не закрыта и оплата уже прошла. */}
+                    {/* Условия закрытия (п. 15) — пока заявка не закрыта и деньги уже ушли: счёт оплачен
+                        либо карта пополнена. У карты сотрудника «Оплата проведена» отмечается позже, с чеком. */}
                     {active && request.paid_on && (
                         <section className="space-y-1.5">
                             <SectionTitle>Что осталось до закрытия</SectionTitle>
@@ -643,7 +644,8 @@ const PaymentRequestCard = ({
                                             {item.ok
                                                 ? <Check size={14} strokeWidth={3} className="shrink-0 text-emerald-600" />
                                                 : <span className="h-3.5 w-3.5 shrink-0 rounded-full ring-1 ring-slate-300" />}
-                                            {item.label}
+                                            {/* grow basis-0: на телефоне ряд переносится, и длинная подпись уезжала под кружок отдельной строкой. */}
+                                            <span className="min-w-0 grow basis-0">{item.label}</span>
                                         </li>
                                     ))}
                                 </ul>

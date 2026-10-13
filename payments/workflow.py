@@ -1333,6 +1333,25 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
 
 # ─── Условия закрытия (п. 15) ────────────────────────────────────────────────
 
+def payment_done(subtasks):
+    """Проведена ли оплата по заявке (п. 15).
+
+    Счёт оплачен бухгалтерией или деньги ушли на карту поставщика — оплата
+    проведена. Перевод на карту СОТРУДНИКА оплатой ещё не является: это деньги
+    под закуп, а оплату подтверждает чек (п. 5.3). Поэтому, пока в маршруте не
+    пройден этап «Предоставить чек/подтверждение расхода», оплата не проведена.
+    Смотрим на маршрут, а не на поля заявки: чек ждут там, где этап чека у
+    заявки есть. Пропущенный этап оплату не держит — он остаётся от прежнего
+    маршрута, когда на доработке карту сотрудника сменили на карту поставщика
+    или на счёт.
+    """
+    by_kind = {item['kind']: item for item in subtasks or []}
+    if not any((by_kind.get(kind) or {}).get('state') == 'done' for kind in PAYMENT_KINDS):
+        return False
+    receipt = by_kind.get(KIND_RECEIPT)
+    return not receipt or receipt.get('state') in ('done', 'skipped')
+
+
 def closing_conditions(request, subtasks, *, assets=(), has_handover_act=False):
     """Условия закрытия заявки по типу объекта: [{'label', 'ok'}] — дословно п. 15.
 
@@ -1349,7 +1368,7 @@ def closing_conditions(request, subtasks, *, assets=(), has_handover_act=False):
     approved = done(KIND_APPROVAL) and (by_kind.get(KIND_APPROVAL) or {}).get('outcome') != 'rejected'
     conditions = [
         {'label': 'Закуп согласован', 'ok': approved},
-        {'label': 'Оплата проведена', 'ok': done(KIND_INVOICE) or done(KIND_CARD)},
+        {'label': 'Оплата проведена', 'ok': payment_done(subtasks)},
         {'label': 'Товар получен' if goods else 'Услуга получена', 'ok': done(KIND_RECEIVING)},
     ]
     if needs_asset_registration(request):

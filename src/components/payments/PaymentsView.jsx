@@ -14,8 +14,8 @@ import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
     REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, defaultRegistryColumns, dueLabel, expenseSubline,
     exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, netAmount, normalizeRegistryColumns, pageRange,
-    registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine, tonePill,
-    toneRow, toneText,
+    paidLabel, registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
+    tonePill, toneRow, toneText,
 } from './paymentsMeta';
 import {
     ColumnsMenu, DueChip, NoticeBox, Pager, SECTION_COLUMN, StatePill, TypePill, errorText, requestCardFrame,
@@ -362,7 +362,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     );
                 }
                 return request.paid_on && !columnKeys.includes('paid')
-                    ? <div className={`whitespace-nowrap text-[12.5px] tabular-nums ${text.body}`}>оплачено {fmtDateShort(request.paid_on)}</div>
+                    ? <div className={`whitespace-nowrap text-[12.5px] tabular-nums ${text.body}`}>{paidLabel(request)}</div>
                     : muted('—');
             case 'paid': return request.paid_on ? <div className={`tabular-nums ${text.main}`}>{fmtDate(request.paid_on)}</div> : muted('—');
             case 'invoice':

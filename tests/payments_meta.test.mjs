@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   ACCOUNTING_CATEGORY_OPTIONS,
@@ -80,6 +81,7 @@ import {
   normalizeRegistryColumns,
   pageRange,
   paidLabel,
+  paidWord,
   parseAmount,
   plural,
   pluralDays,
@@ -547,6 +549,21 @@ test('день оплаты в карточке заявки: счёт — «о�
   assert.equal(paidLabel({ paid_on: '2026-10-08T10:00:00', payment_method: 'card' }), 'пополнено 08.10');
   assert.equal(paidLabel({ due_on: '2026-10-08' }), '');
   assert.equal(paidLabel(null), '');
+});
+
+/* Жалоба 13.10.2026: карту сотрудника пополнили — и раздел сразу написал, что оплата
+   проведена, хотя чека ещё нет (п. 5.3). Перевод на карту раздел называет пополнением
+   везде, где показывает день, когда ушли деньги: в метке срока, в карточке, в реестре.
+   Карточку проверяет payments_card_paid_word_render.test.mjs — по разметке. */
+test('перевод на карту раздел называет пополнением, а не оплатой', () => {
+  assert.equal(paidWord({ payment_method: 'card' }), 'Пополнено');
+  assert.equal(paidWord({ payment_method: 'invoice' }), 'Оплачено');
+  assert.equal(paidWord({}), 'Оплачено');
+  assert.equal(paidWord(null), 'Оплачено');
+  // Ячейка срока в реестре: слово берётся из paidLabel, в разметку оно не вписано.
+  const registry = readFileSync(new URL('../src/components/payments/PaymentsView.jsx', import.meta.url), 'utf8');
+  assert.match(registry, /\{paidLabel\(request\)\}/);
+  assert.doesNotMatch(registry, /оплачено \{/);
 });
 
 test('тип заявки на карточке: закуп по счёту, закуп на карту, регулярный платёж — у каждого свой цвет', () => {

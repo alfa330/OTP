@@ -676,6 +676,63 @@ class ClosingConditionsTests(unittest.TestCase):
         subtasks = [{'kind': 'approval', 'state': 'done', 'outcome': 'rejected'}]
         self.assertFalse(wf.closing_conditions(purchase(), subtasks)[0]['ok'])
 
+    def paid(self, request, subtasks):
+        return {item['label']: item['ok'] for item in wf.closing_conditions(request, subtasks)}['Оплата проведена']
+
+    def test_money_on_an_employee_card_is_not_a_payment_until_the_receipt(self):
+        """П. 5.3: на карту сотрудника переводят деньги под закуп — оплату подтверждает чек."""
+        request = purchase(payment_method='card', card_recipient='employee', object_type='goods',
+                           accounting_category='consumable', closing_docs_status='closed')
+        for state in ('pending', 'open', 'waiting'):
+            with self.subTest(receipt=state):
+                topped_up = self.done('approval', 'card_topup') + [{'kind': 'receipt_confirm', 'state': state}]
+                self.assertFalse(self.paid(request, topped_up), 'карта пополнена, чека ещё нет')
+                self.assertIn('Оплата проведена', wf.closing_blockers(request, topped_up))
+        with_receipt = self.done('approval', 'card_topup', 'receipt_confirm')
+        self.assertTrue(self.paid(request, with_receipt))
+        self.assertEqual(wf.closing_blockers(request, with_receipt + self.done('receiving')), [])
+        # Чек без перевода оплатой не считается.
+        self.assertFalse(self.paid(request, self.done('approval', 'receipt_confirm')
+                                   + [{'kind': 'card_topup', 'state': 'open'}]))
+
+    def test_payment_without_a_receipt_stage_is_done_by_the_transfer(self):
+        """Счёт и карта поставщика (п. 5.4) — как было: этапа чека в маршруте нет, оплата проведена переводом."""
+        supplier = purchase(payment_method='card', card_recipient='supplier')
+        self.assertTrue(self.paid(supplier, self.done('approval', 'card_topup')))
+        self.assertTrue(self.paid(purchase(), self.done('approval', 'invoice_payment')))
+        self.assertFalse(self.paid(purchase(), self.done('approval')))
+        self.assertFalse(self.paid(purchase(), []))
+        # Этап чека остался от прежнего маршрута: на доработке получателя сменили на поставщика.
+        leftover = self.done('approval', 'card_topup') + [{'kind': 'receipt_confirm', 'state': 'skipped'}]
+        self.assertTrue(self.paid(supplier, leftover))
+
+    def test_skipped_payment_stage_is_not_a_payment(self):
+        """Пропущенный этап ОПЛАТЫ оплатой не считается: на доработке счёт сменили на карту —
+        этап счёта пропущен, а карту ещё не пополнили."""
+        changed = [{'kind': 'approval', 'state': 'done'}, {'kind': 'invoice_payment', 'state': 'skipped'},
+                   {'kind': 'card_topup', 'state': 'open'}]
+        self.assertFalse(wf.payment_done(changed))
+        self.assertFalse(wf.payment_done([{'kind': 'card_topup', 'state': 'skipped'},
+                                          {'kind': 'receipt_confirm', 'state': 'skipped'}]))
+        self.assertFalse(wf.payment_done(None))
+
+    def test_the_payment_condition_follows_the_route_of_the_request(self):
+        """Маршрут карты сотрудника, пройденный по шагам: галочка появляется на чеке, а не на переводе,
+        и вместе с ней закрывается этап «Оплата» в полосе этапов."""
+        request = purchase(payment_method='card', card_recipient='employee', status='active', stage='payment',
+                           submitted_at='2026-10-08T10:00:00')
+        route = wf.build_route(request, initiator=INITIATOR, manager=MANAGER)
+        seen = {}
+        for index, entry in enumerate(route):
+            subtasks = [dict(item, state='done' if position <= index else 'pending')
+                        for position, item in enumerate(route)]
+            stages = {item['code']: item['state'] for item in wf.lifecycle(request, subtasks)}
+            seen[entry['kind']] = (self.paid(request, subtasks), stages['payment'] == 'done')
+        self.assertEqual(seen['approval'], (False, False))
+        self.assertEqual(seen['card_topup'], (False, False), 'после пополнения карты оплата ещё не проведена')
+        self.assertEqual(seen['receipt_confirm'], (True, True))
+        self.assertEqual(seen['receiving'], (True, True))
+
 
 class BoardColumnTests(unittest.TestCase):
     """Доска — вид на подзадачу: колонка следует за её состоянием (п. 2)."""
