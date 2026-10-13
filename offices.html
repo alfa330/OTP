@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru" translate="no" class="notranslate">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Страница «Адреса офисов» для iCORE Phone: раздел «Офисы» вики целиком,
+      только для чтения. Телефон открывает её во вкладке режима обзвона через
+      WebView2 — без меню и прочих разделов портала. Вход страница получает от
+      телефона по мосту WebView2; открытая в обычном браузере, она работает при
+      живой сессии портала в этом же браузере. Вики у операторов закрыта
+      QR-подтверждением — экран QR страница показывает сама.
+      См. src/offices_embed/.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <!-- См. index.html: перевод страницы браузером ломает React (removeChild). -->
+    <meta name="google" content="notranslate" />
+    <title>Адреса офисов</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  </head>
+  <body class="bg-slate-50 font-sans antialiased text-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/src/offices_embed/main.jsx"></script>
+  </body>
+</html>

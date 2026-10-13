@@ -26,7 +26,9 @@ export default defineConfig({
         main: resolve(rootDir, 'index.html'),
         callEvaluation: resolve(rootDir, 'call_evaluation.html'),
         // Страница тренажёров для iCORE Phone (WebView2), см. src/trainers_embed/.
-        trainers: resolve(rootDir, 'trainers.html')
+        trainers: resolve(rootDir, 'trainers.html'),
+        // «Адреса офисов» для iCORE Phone (WebView2), см. src/offices_embed/.
+        offices: resolve(rootDir, 'offices.html')
       },
       output: {
         manualChunks: {

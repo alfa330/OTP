@@ -1,4 +1,4 @@
-/* Мост между страницей тренажёров и iCORE Phone.
+/* Мост между встроенными страницами (тренажёры, адреса офисов) и iCORE Phone.
  *
  * Страница живёт внутри WebView2 телефона (microsip-src/DialTrainers.cpp) и сама в
  * портал не входит: токен ей отдаёт телефон. Так у оператора одна сессия — та, что
@@ -17,6 +17,8 @@
  *                         проигрыватель: он меряет ширину один раз при монтировании
  *                       { type: 'trainer:close-request' } — закрыть тренажёр (крестик
  *                         окна телефона или входящий звонок)
+ * Странице офисов (src/offices_embed) из этого нужны auth:request/auth:token, ready и
+ * open:external; сообщения trainer:* она не шлёт и не ждёт.
  *
  * Модуль без React и без DOM-зависимостей сверх window.chrome.webview — его читают
  * тесты через node.
@@ -43,11 +45,11 @@ export const postToPhone = (message, win = globalThis.window) => {
     }
 };
 
-/** Срок access-токена (поле exp JWT) в секундах от эпохи; 0 — не разобрать.
- *  Подпись не проверяем — нам нужен только срок, чтобы попросить свежий заранее. */
-export const readJwtExpiry = (token) => {
+/** Тело JWT объектом; null — не разобрать. Подпись не проверяем: странице нужны
+ *  только срок (exp) и сессия (sid), а доступ всё равно решает сервер. */
+export const readJwtPayload = (token) => {
     const parts = String(token || '').split('.');
-    if (parts.length < 2) return 0;
+    if (parts.length < 2) return null;
     try {
         const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
         const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
@@ -55,11 +57,17 @@ export const readJwtExpiry = (token) => {
             ? atob(padded)
             : Buffer.from(padded, 'base64').toString('binary');
         const payload = JSON.parse(json);
-        const exp = Number(payload?.exp);
-        return Number.isFinite(exp) && exp > 0 ? exp : 0;
+        return payload && typeof payload === 'object' ? payload : null;
     } catch {
-        return 0;
+        return null;
     }
+};
+
+/** Срок access-токена (поле exp JWT) в секундах от эпохи; 0 — не разобрать.
+ *  Нужен только затем, чтобы попросить свежий токен заранее. */
+export const readJwtExpiry = (token) => {
+    const exp = Number(readJwtPayload(token)?.exp);
+    return Number.isFinite(exp) && exp > 0 ? exp : 0;
 };
 
 /** Токен ещё годится, если до истечения больше запаса (по умолчанию 2 минуты). */

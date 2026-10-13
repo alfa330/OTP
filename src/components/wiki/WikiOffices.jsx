@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    ChevronLeft, ChevronRight, Columns2, Loader2, MapPin, Plus, Rows3, Search,
-    Table2,
+    ChevronLeft, ChevronRight, Columns2, Loader2, MapPin, Plus, RefreshCw, Rows3,
+    Search, Table2, WifiOff,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
@@ -39,6 +39,40 @@ import {
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+/* Почему список не загрузился — словами для человека, на карточку ошибки. Текст
+   axios («Network Error», «Request failed with status code 502») английский и
+   технический; свой текст сервер вики пишет по-русски — его и показываем.
+   Коротко: что делать, говорит кнопка «Повторить» под текстом, а во вкладке
+   iCORE Phone у карточки на всё про всё около ста пикселей высоты. */
+export const loadProblem = (e) => {
+    if (!e?.response) return 'Нет связи с порталом.';
+    const message = e.response.data?.error;
+    return (typeof message === 'string' && message.trim()) || 'Портал не ответил.';
+};
+
+/**
+ * Что стоит на месте списка: 'loading' | 'failed' | 'empty' | 'list'.
+ *
+ *   failed — загрузка не удалась, и показать нечего. Раньше такого состояния не
+ *            было: сбой оставлял список пустым, и раздел писал «Офисов пока нет /
+ *            Справочник ещё не заполнен» — про полный справочник, до которого не
+ *            дошёл запрос. Карточка ошибки держится и пока идёт повтор: мигать
+ *            «Загружаем…» на каждую попытку незачем;
+ *   empty  — загрузилось, и офисов (или подходящих под условия) правда нет.
+ *
+ * Сбой при списке на экране сюда не попадает: прежний список остаётся ('list') с
+ * плашкой «не удалось обновить» над ним.
+ */
+export const officesScreen = ({ loading, failed, total, shown }) => {
+    if (failed && total === 0) return 'failed';
+    if (loading) return 'loading';
+    return shown > 0 ? 'list' : 'empty';
+};
+
+/** «14:05» — время, на которое загружен список (часы того, кто смотрит). */
+const clockOf = (stamp) => new Date(stamp)
+    .toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
 /* «3 офиса» рядом с городом: заголовок отвечает не только «где», но и «сколько
    искать». Число словами не заменяется — оператор ищет глазами цифру. */
@@ -181,10 +215,19 @@ const readPrefs = () => {
     }
 };
 
+/* reloadKey, onLoadResult и errorHint — для страницы, которая живёт часами без
+   перезагрузки (вкладка iCORE Phone, src/offices_embed): хозяин сам решает, когда
+   список устарел, и просит обновить его сменой reloadKey; чем кончилась загрузка,
+   он узнаёт из onLoadResult({ ok, quiet }), а errorHint дописывает к карточке
+   ошибки своё «повторим сами через …». Портал их не передаёт — и раздел грузится
+   как раньше: при открытии и при смене поиска, фильтров или даты. */
 export default function WikiOffices({ base, headers, showToast, spaceId = null,
-                                      focusRequest = null, onFocusConsumed = null }) {
+                                      focusRequest = null, onFocusConsumed = null,
+                                      readOnly = false,
+                                      reloadKey = 0, onLoadResult = null, errorHint = '' }) {
     const toast = useStableCallback(showToast);
     const consumeFocus = useStableCallback(onFocusConsumed);
+    const reportLoad = useStableCallback(onLoadResult);
     const prefs = useMemo(readPrefs, []);
     /* НА ТЕЛЕФОНЕ ТАБЛИЦЫ НЕТ, и это не упрощение вёрстки. Таблица ТЗ — шесть
        колонок и 860 px минимальной ширины; на экране 390 px из неё видно первую
@@ -209,13 +252,37 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
     const [offices, setOffices] = useState([]);
     const [cities, setCities] = useState([]);
     const [parks, setParks] = useState([]);
-    const [canManage, setCanManage] = useState(false);
+    const [serverCanManage, setServerCanManage] = useState(false);
+    /* Правка — по слову сервера (can_manage) и только там, где она вообще уместна.
+       readOnly ставит страница iCORE Phone (src/offices_embed): вкладка телефона —
+       рабочее место на линии, и даже человеку с правом записи (супервайзер,
+       посаженный на линию) кнопки «Офис», «Изменить» и «В архив» там не нужны.
+       Считается при отрисовке, а не в загрузке: так readOnly не попадает в
+       зависимости загрузчика и не перезапрашивает список. */
+    const canManage = !readOnly && serverCanManage;
     const [loading, setLoading] = useState(true);
+    /* Последняя загрузка не удалась: { message } — текст для человека. Раньше сбой
+       оставлял список пустым, и раздел писал «Офисов пока нет / Справочник ещё не
+       заполнен» — хотя справочник полон, а не ответила сеть; повторить было нечем. */
+    const [loadError, setLoadError] = useState(null);
+    // Когда загружен список, что на экране, — для «не удалось обновить, он на 14:05».
+    const [loadedAt, setLoadedAt] = useState(0);
     const [busy, setBusy] = useState(false);
     const [query, setQuery] = useState('');
     const [filters, setFilters] = useState({ ...DEFAULT_FILTERS, sort: prefs.sort });
     const [view, setView] = useState(prefs.view);
     const [dayISO, setDayISO] = useState(officeTodayISO);
+    /* Дату выбрал человек (стрелками, в календаре) — или на экране просто
+       «сегодня». Различие нужно фоновому обновлению (reloadKey ниже): с новыми
+       сутками оно переводит раздел на новый «сегодня», а дату, выбранную руками,
+       не трогает — человек смотрит именно её. */
+    const dayPinned = useRef(false);
+    const pickDay = useCallback((iso) => {
+        const current = officeTodayISO();
+        const next = iso || current;
+        dayPinned.current = next !== current;
+        setDayISO(next);
+    }, []);
     const [dayTarget, setDayTarget] = useState(null);
     const [infoTarget, setInfoTarget] = useState(null);
     const [stateFilter, setStateFilter] = useState('');
@@ -244,7 +311,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
         if (!focusRequest) return;
         setQuery('');
         setStateFilter('');
-        setDayISO(officeTodayISO());
+        pickDay(officeTodayISO());
         setFilters((current) => ({ ...DEFAULT_FILTERS, sort: current.sort,
                                    city: focusRequest.city || '' }));
         loadSeq.current += 1;
@@ -279,9 +346,17 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
         return () => clearInterval(timer);
     }, []);
 
+    /* Следующая загрузка — тихая: её попросил хозяин страницы (reloadKey), а не
+       человек. Список остаётся на экране, пока идёт запрос, и подменяется готовым
+       ответом: «Загружаем…» на каждое фоновое обновление сворачивало бы список в
+       плашку и сбрасывало прокрутку прямо под рукой оператора. */
+    const quietNext = useRef(false);
+
     const load = useCallback(() => {
         const seq = ++loadSeq.current;
-        setLoading(true);
+        const quiet = quietNext.current;
+        quietNext.current = false;
+        if (!quiet) setLoading(true);
         const params = { date: dayISO };
         if (query.trim()) params.q = query.trim();
         if (filters.city) params.city = filters.city;
@@ -297,23 +372,57 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 if (seq !== loadSeq.current) return;
                 setOffices(officeResponse.data?.items || []);
                 setCities(officeResponse.data?.cities || []);
-                setCanManage(!!officeResponse.data?.can_manage);
+                setServerCanManage(!!officeResponse.data?.can_manage);
                 setParks((parkResponse.data?.items || []).filter((p) => p.status === 'active'));
+                setLoadError(null);
+                setLoadedAt(Date.now());
+                reportLoad({ ok: true, quiet });
             })
             .catch((e) => {
-                if (seq === loadSeq.current) toast(errText(e, 'Не удалось загрузить офисы'), 'error');
+                if (seq !== loadSeq.current) return;
+                // Список не трогаем: прежний (если был) остаётся на экране с
+                // плашкой «не удалось обновить», а пустой уступает место карточке
+                // ошибки — см. разметку ниже.
+                setLoadError({ message: loadProblem(e) });
+                // Фоновое обновление тостом не шумит: о нём говорит плашка над
+                // списком, а тост раз в несколько минут при лежащей сети — лента
+                // ошибок поверх работы.
+                // inline — пометка странице со своими тостами (вкладка iCORE
+                // Phone): эту ошибку раздел уже показал на месте, карточкой или
+                // плашкой, и в окне высотой 285 px тост поверх них только закрыл
+                // бы кнопку «Повторить». Тост портала третий аргумент не читает.
+                if (!quiet) toast(errText(e, 'Не удалось загрузить офисы'), 'error', { inline: true });
+                reportLoad({ ok: false, quiet });
             })
             .finally(() => {
                 if (seq !== loadSeq.current) return;
                 setLoading(false);
                 setLoadedTick((n) => n + 1);
             });
-    }, [base, req, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast]);
+    }, [base, req, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast, reportLoad]);
+
+    /* Просьба хозяина обновить список (reloadKey). Заодно — переход на новые
+       сутки: страница, открытая с вечера, наутро показывала бы вчерашний день
+       под видом сегодняшнего. Смена даты пересоздаёт load, и загрузка идёт сама;
+       дата та же — толкаем загрузку счётчиком. В портале reloadKey не меняется, и
+       эффект не делает ничего. */
+    const reloadSeen = useRef(reloadKey);
+    const [reloadTick, setReloadTick] = useState(0);
+    useEffect(() => {
+        if (reloadSeen.current === reloadKey) return;
+        reloadSeen.current = reloadKey;
+        quietNext.current = true;
+        const current = officeTodayISO();
+        if (!dayPinned.current && dayISO !== current) setDayISO(current);
+        else setReloadTick((n) => n + 1);
+        // dayISO читаем на момент просьбы: смена даты сама по себе не просьба.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [reloadKey]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);
         return () => clearTimeout(timer);
-    }, [load, query, focusTick]);
+    }, [load, query, focusTick, reloadTick]);
 
     const save = () => {
         const payload = {
@@ -516,6 +625,19 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
         />
     );
 
+    // Что стоит на месте списка — одно из четырёх, см. officesScreen.
+    const screen = officesScreen({
+        loading, failed: !!loadError, total: offices.length, shown: visible.length,
+    });
+
+    /* Открытая карточка офиса читает запись из СВЕЖЕГО списка: фоновое обновление
+       подменяет список под открытым окном, и окно со снимком на момент нажатия
+       показывало бы «открыт» рядом с уже обновлённой строкой «закрыт». Записи в
+       новом списке нет (ушла под фильтр, в архив) — остаётся та, что открыли. */
+    const infoOffice = infoTarget
+        ? offices.find((item) => item.id === infoTarget.id) || infoTarget
+        : null;
+
     return (
         <div className="space-y-4">
             {/* Заголовок раздела из ТЗ. Он тут не украшение: вкладка называется
@@ -540,7 +662,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 <div className="wiki-m-office-day flex shrink-0 items-center gap-1">
                     <button
                         type="button"
-                        onClick={() => setDayISO(shiftDay(dayISO, -1))}
+                        onClick={() => pickDay(shiftDay(dayISO, -1))}
                         className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
                         aria-label="Предыдущий день"
                     >
@@ -549,13 +671,13 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                     <IosDatePicker
                         value={dayISO}
                         max={today}
-                        onChange={(iso) => setDayISO(iso || today)}
+                        onChange={(iso) => pickDay(iso || today)}
                         ariaLabel="Дата, на которую показан статус"
                         triggerClassName={dateTrigger}
                     />
                     <button
                         type="button"
-                        onClick={() => setDayISO(shiftDay(dayISO, 1))}
+                        onClick={() => pickDay(shiftDay(dayISO, 1))}
                         disabled={isToday}
                         className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent"
                         aria-label="Следующий день"
@@ -565,7 +687,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                     {!isToday && (
                         <button
                             type="button"
-                            onClick={() => setDayISO(today)}
+                            onClick={() => pickDay(today)}
                             className="rounded-xl bg-slate-100 px-2.5 py-2 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200"
                         >
                             Сегодня
@@ -630,6 +752,26 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 )}
             </div>
 
+            {/* Обновить не вышло, а прежний список есть — он остаётся, но уже не
+                выдаёт себя за свежий: статус «открыт» из утренней загрузки к
+                вечеру мог стать неправдой, и оператор должен видеть, на какое
+                время эти данные. */}
+            {!loading && loadError && offices.length > 0 && (
+                <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] leading-snug text-amber-800">
+                    <WifiOff size={14} className="shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                        Не удалось обновить список{loadedAt ? ` — данные на ${clockOf(loadedAt)}` : ''}.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => load()}
+                        className="inline-flex shrink-0 items-center gap-1 font-semibold text-amber-900 hover:underline"
+                    >
+                        <RefreshCw size={13} aria-hidden="true" /> Повторить
+                    </button>
+                </div>
+            )}
+
             {/* Легенда и счётчики — одной полосой, и она же фильтр. Цветовую
                 кодировку новый оператор читает без обучения (п. 4.4 ТЗ), а
                 «где закрыто» находится одним нажатием вместо перебора списка.
@@ -669,14 +811,48 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 </div>
             )}
 
-            {loading && (
+            {screen === 'loading' && (
                 <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-slate-400`}>
                     <Loader2 size={16} className="animate-spin" />
                     <span className="text-[13px]">Загружаем…</span>
                 </div>
             )}
 
-            {!loading && visible.length === 0 && (
+            {/* Не загрузилось, и показать нечего. Отдельно от «Офисов пока нет»:
+                та плашка говорит о справочнике («ещё не заполнен»), а здесь не
+                ответила сеть или портал — и нужна кнопка повтора, а не совет
+                ждать, пока справочник заполнят. Пока идёт повтор, карточка
+                остаётся на месте (кнопка крутится), а не мигает «Загружаем…».
+                office-load-failed — метка для страницы iCORE Phone: во вкладке
+                высотой 285 px карточка в столбик уходила под нижний край вместе
+                с кнопкой, и там она собрана плотнее (offices-embed.css): причина
+                встаёт в строку с кнопкой — затем причина и подсказка и лежат
+                одним блоком. */}
+            {screen === 'failed' && (
+                <div className={`${iosCard} office-load-failed flex flex-col items-center gap-2 px-6 py-8 text-center`}>
+                    <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                        <WifiOff size={22} aria-hidden="true" />
+                    </div>
+                    <div className="text-[15px] font-semibold text-slate-900">Не удалось загрузить офисы</div>
+                    <div className="min-w-0">
+                        <p className="text-[13px] leading-relaxed text-slate-500">{loadError.message}</p>
+                        {errorHint && <p className="mt-0.5 text-[12px] text-slate-400">{errorHint}</p>}
+                    </div>
+                    <button
+                        type="button"
+                        className={`${iosBtnSecondary} mt-1.5`}
+                        disabled={loading}
+                        onClick={() => load()}
+                    >
+                        {loading
+                            ? <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                            : <RefreshCw size={14} aria-hidden="true" />}
+                        Повторить
+                    </button>
+                </div>
+            )}
+
+            {screen === 'empty' && (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                         <MapPin size={22} />
@@ -695,7 +871,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 </div>
             )}
 
-            {!loading && visible.length > 0 && shownView === 'table' && (
+            {screen === 'list' && shownView === 'table' && (
                 <OfficeTable
                     offices={visible}
                     groups={groups}
@@ -712,7 +888,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 />
             )}
 
-            {!loading && visible.length > 0 && shownView !== 'table' && (
+            {screen === 'list' && shownView !== 'table' && (
                 groups
                     /* Между городами воздуха больше, чем между карточками внутри
                        города: одинаковый отступ и делал список сплошным, а
@@ -752,69 +928,79 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                     : <div className={grid}>{visible.map((office) => renderCard(office, true))}</div>
             )}
 
-            <IosModal
-                open={!!draft}
-                onClose={() => setDraft(null)}
-                title={draft?.id ? 'Изменить офис' : 'Новый офис'}
-                maxWidth="max-w-2xl"
-                footer={(
-                    <>
-                        <button type="button" className={iosBtnSecondary} onClick={() => setDraft(null)}>
-                            Отмена
-                        </button>
-                        <button
-                            type="button"
-                            className={iosBtnPrimary}
-                            disabled={busy || !draft?.name?.trim()}
-                            onClick={save}
-                        >
-                            {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
-                        </button>
-                    </>
-                )}
-            >
-                {draft && (
-                    <OfficeEditor
-                        draft={draft}
-                        setDraft={setDraft}
+            {/* Окна — в обёртке без собственного блока (display: contents), а не
+                прямыми детьми раздела. space-y-4 вешает margin-top на каждого
+                ребёнка, кроме первого, и fixed-корень окна съезжал на 16 px вниз:
+                над окном оставалась незатемнённая полоса страницы, а само окно
+                теряло эти 16 px высоты (во вкладке iCORE Phone их всего 285).
+                Правило space-y смотрит только на прямых детей — до окна внутри
+                обёртки оно не достаёт, а у самой обёртки отступу не на чем
+                держаться. */}
+            <div className="contents">
+                <IosModal
+                    open={!!draft}
+                    onClose={() => setDraft(null)}
+                    title={draft?.id ? 'Изменить офис' : 'Новый офис'}
+                    maxWidth="max-w-2xl"
+                    footer={(
+                        <>
+                            <button type="button" className={iosBtnSecondary} onClick={() => setDraft(null)}>
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                className={iosBtnPrimary}
+                                disabled={busy || !draft?.name?.trim()}
+                                onClick={save}
+                            >
+                                {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
+                            </button>
+                        </>
+                    )}
+                >
+                    {draft && (
+                        <OfficeEditor
+                            draft={draft}
+                            setDraft={setDraft}
+                            base={base}
+                            headers={headers}
+                            showToast={toast}
+                        />
+                    )}
+                </IosModal>
+
+                {/* Модалок две, и вложенными они не бывают: любое действие из
+                    подробностей сначала закрывает их. Иначе после «в архив» на
+                    экране осталась бы карточка офиса, которого в выборке уже нет —
+                    список-то перезагружается. */}
+                {infoOffice && (
+                    <OfficeInfoModal
+                        office={infoOffice}
                         base={base}
-                        headers={headers}
-                        showToast={toast}
+                        dayISO={dayISO}
+                        isToday={isToday}
+                        tick={tick}
+                        canManage={canManage}
+                        onClose={() => setInfoTarget(null)}
+                        onCopyAddress={copyAddress}
+                        onEdit={(item) => { setInfoTarget(null); setDraft(draftFrom(item)); }}
+                        onMarkDay={(item) => { setInfoTarget(null); setDayTarget(item); }}
+                        onArchive={(item) => { setInfoTarget(null); archive(item); }}
+                        onRestore={(item) => { setInfoTarget(null); restore(item); }}
                     />
                 )}
-            </IosModal>
 
-            {/* Модалок две, и вложенными они не бывают: любое действие из
-                подробностей сначала закрывает их. Иначе после «в архив» на
-                экране осталась бы карточка офиса, которого в выборке уже нет —
-                список-то перезагружается. */}
-            {infoTarget && (
-                <OfficeInfoModal
-                    office={infoTarget}
-                    base={base}
-                    dayISO={dayISO}
-                    isToday={isToday}
-                    tick={tick}
-                    canManage={canManage}
-                    onClose={() => setInfoTarget(null)}
-                    onCopyAddress={copyAddress}
-                    onEdit={(item) => { setInfoTarget(null); setDraft(draftFrom(item)); }}
-                    onMarkDay={(item) => { setInfoTarget(null); setDayTarget(item); }}
-                    onArchive={(item) => { setInfoTarget(null); archive(item); }}
-                    onRestore={(item) => { setInfoTarget(null); restore(item); }}
-                />
-            )}
-
-            {dayTarget && (
-                <OfficeDayModal
-                    office={dayTarget}
-                    dayISO={dayISO}
-                    busy={busy}
-                    onSubmit={markDay}
-                    onClear={clearDay}
-                    onClose={() => setDayTarget(null)}
-                />
-            )}
+                {dayTarget && (
+                    <OfficeDayModal
+                        office={dayTarget}
+                        dayISO={dayISO}
+                        busy={busy}
+                        onSubmit={markDay}
+                        onClear={clearDay}
+                        onClose={() => setDayTarget(null)}
+                    />
+                )}
+            </div>
         </div>
     );
 }

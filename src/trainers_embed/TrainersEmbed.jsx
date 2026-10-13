@@ -10,21 +10,33 @@
  * В обычном браузере страница берёт access-токен портала из localStorage (тот же
  * origin) — так её можно посмотреть и без телефона. Без токена тренажёры всё равно
  * работают, только попытки не записываются — учёт никогда не мешает уроку.
+ * Хук токена общий со страницей офисов — src/embed/useHostToken.js.
+ *
+ * Запись. Токен ещё не значит «попытки пишутся»: у операторов вики, а с ней и
+ * /trainers/runs, закрыта QR-подтверждением сессии, и без него сервер молча
+ * отказывает. Значок спрашивает сервер (useRecordingAccess) и честно говорит «без
+ * записи», а включить запись можно тут же, тем же QR, что открывает «Офисы». Если
+ * спросить не вышло (сеть, портал), значок говорит «не проверено» и спрашивает
+ * снова сам — молчаливого «с записью» по умолчанию нет.
  *
  * Ширина. Окно телефона узкое (обычно 400–500 px), поэтому карточки в одну колонку,
  * а проигрыватель сам переключается в узкую раскладку (TrainerPlayer: narrow).
  */
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import axios from 'axios';
 import lazyWithRetry from '../utils/lazyWithRetry';
 import {
-    ChevronDown, ChevronUp, Layers, Loader2, Monitor, PlayCircle, ShieldCheck, ShieldOff, Smartphone,
+    ChevronDown, ChevronUp, Layers, Loader2, Monitor, PlayCircle, QrCode, RefreshCw, ShieldCheck, ShieldOff,
+    ShieldQuestion, Smartphone,
 } from 'lucide-react';
 
 import { iosCard, iosBtnPrimary, IosBadge } from '../components/ui/ios';
 import { TRAINERS, trainerCard } from '../components/wiki/trainers/registry';
+import useHostToken from '../embed/useHostToken';
+import QrUnlockPanel from '../embed/QrUnlockPanel';
+import { accessStateFromError, retryDelayMs, sessionKeyOf } from '../embed/embedAccess';
 import {
-    authHeadersFor, hasPhoneHost, isTokenFresh, parseHostMessage, parseTokenMessage, postToPhone,
-    requestPhoneToken, waitForViewport,
+    authHeadersFor, parseHostMessage, postToPhone, waitForViewport,
 } from './phoneBridge';
 import { phoneTrainers } from './trainerList';
 
@@ -36,10 +48,6 @@ const TrainerModal = lazyWithRetry(() => import('../components/wiki/trainers/Tra
 
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const WIKI_BASE = `${API_BASE_URL}/api/wiki`;
-const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
-// Как часто проверять срок токена. Access живёт 30 минут; проверка раз в полминуты
-// успевает попросить свежий за две минуты до истечения (isTokenFresh).
-const TOKEN_CHECK_MS = 30000;
 // Сколько ждать от телефона "trainer:host" после "trainer:open": не ответил — значит,
 // окно он не открыл, и тренажёр монтируем во вкладке как есть.
 const HOST_REPLY_MS = 1500;
@@ -53,70 +61,140 @@ const plural = (n, one, few, many) => {
     return many;
 };
 
-const readPortalToken = () => {
-    try {
-        return String(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) || '').trim();
-    } catch {
-        return '';
-    }
+/* Пишутся ли попытки НА САМОМ ДЕЛЕ.
+ *
+ * Прежде значок горел «с записью», как только был токен. Но у операторов вики, а
+ * с ней и POST /trainers/runs, закрыта QR-гейтом (wiki/routes.py): без
+ * подтверждённой сессии сервер отвечает 403 SENSITIVE_ACCESS_REQUIRED, а
+ * useTrainerRun такие отказы глотает молча (учёт не мешает уроку). Значок обещал
+ * запись, строк в статистике не было.
+ *
+ * Спрашиваем ту же дверь, через которую идёт запись: GET /api/wiki/me проходит
+ * wiki_route (отдел, QR-гейт) и больше ничего не проверяет — как и сама запись.
+ * /api/sensitive-access/status тут не годится: «нужен QR» он ответил бы и стажёру,
+ * которому вики и запись открыты без подтверждения.
+ *
+ * status: checking | on | qr | blocked | expired | unknown | off.
+ *
+ * unknown — проверка не дошла: сеть, таймаут, 5xx. Прежде такой сбой считался «on»
+ * («пугать "без записи" из-за минутного обрыва незачем»), но проверка после него
+ * не повторялась вовсе: одна неудача на старте — выкладка API, мигнувший Wi-Fi — и
+ * «с записью» горело всю смену, до перевхода в телефон. Ровно у тех, кому нужен QR
+ * и чьи попытки сервер отклоняет: значок обещал запись, плашка с «Включить запись»
+ * была скрыта, в статистике — ни строки. Теперь это честное «не проверено»:
+ * значок нейтральный, а проверка повторяется сама с растущей паузой и при
+ * возврате во вкладку.
+ */
+const VERDICT_STATUS = { locked: 'qr', denied: 'blocked', 'no-session': 'expired' };
+
+/** Отказ проверки записи → { status, message }. Всё, что не отказ по существу
+ *  (сеть, 5xx, невнятный ответ), — «не проверено», а не «записывается». */
+export const recordingStatusOf = (err) => {
+    const verdict = accessStateFromError(err);
+    return { status: VERDICT_STATUS[verdict.state] || 'unknown', message: verdict.message };
 };
 
-/* Токен для учёта попыток: от телефона (внутри WebView2) или из портала (в браузере). */
-function useHostToken() {
-    const inPhone = useMemo(() => hasPhoneHost(), []);
-    const [auth, setAuth] = useState({ token: '', error: '', asked: false });
-    const authRef = useRef(auth);
-    authRef.current = auth;
-    const busyRef = useRef(false);
+// Сколько ждать ответа на проверку записи. Без срока повисшее соединение держало
+// бы «проверяем…» без конца, и повторов не было бы вовсе; полминуты хватает и на
+// холодный старт API.
+const RECORD_CHECK_TIMEOUT_MS = 30000;
+// Как часто переспрашивать у телефона токен, когда сервер сказал «сессии нет».
+const SESSION_RETRY_MS = 30000;
 
-    const refresh = useCallback(async () => {
-        if (busyRef.current) return;
-        busyRef.current = true;
-        try {
-            if (inPhone) {
-                const reply = await requestPhoneToken();
-                if (reply) {
-                    setAuth({ token: reply.token, error: reply.token ? '' : (reply.error || 'Телефон не отдал токен'), asked: true });
-                } else {
-                    setAuth((prev) => ({ ...prev, asked: true, error: prev.token ? '' : 'Телефон не ответил' }));
-                }
-            } else {
-                const token = readPortalToken();
-                setAuth({ token: isTokenFresh(token, 0) ? token : '', error: '', asked: true });
-            }
-        } finally {
-            busyRef.current = false;
-        }
-    }, [inPhone]);
+function useRecordingAccess(token, refreshToken) {
+    const sessionKey = useMemo(() => sessionKeyOf(token), [token]);
+    const tokenRef = useRef(token);
+    tokenRef.current = token;
+    // misses — сколько проверок подряд не дошло: от него пауза перед следующей.
+    const [probe, setProbe] = useState({ key: '', status: 'checking', message: '', misses: 0 });
+    const [nonce, setNonce] = useState(0);
+    const recheck = useCallback(() => setNonce((n) => n + 1), []);
 
+    // Проверка — на каждую новую СЕССИЮ (sid), а не на каждый токен: подтверждение
+    // живёт на сессии, а токен обновляется раз в полчаса.
     useEffect(() => {
-        refresh();
-        const timer = setInterval(() => {
-            if (!isTokenFresh(authRef.current.token)) refresh();
-        }, TOKEN_CHECK_MS);
+        if (!sessionKey) return undefined;
+        let cancelled = false;
+        axios.get(`${WIKI_BASE}/me`, { headers: authHeadersFor(tokenRef.current), timeout: RECORD_CHECK_TIMEOUT_MS })
+            .then(() => {
+                if (!cancelled) setProbe({ key: sessionKey, status: 'on', message: '', misses: 0 });
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                const { status, message } = recordingStatusOf(err);
+                setProbe((prev) => ({
+                    key: sessionKey,
+                    status,
+                    message,
+                    misses: status === 'unknown' ? (prev.key === sessionKey ? prev.misses : 0) + 1 : 0,
+                }));
+            });
+        return () => { cancelled = true; };
+    }, [sessionKey, nonce]);
+
+    const fresh = probe.key === sessionKey;
+    const status = !sessionKey ? 'off' : fresh ? probe.status : 'checking';
+    const misses = fresh ? probe.misses : 0;
+
+    // Не проверено — спрашиваем снова сами: через 3, 6, 12, 24, потом каждые 30 с.
+    // Спрятанная вкладка запросов не шлёт — её перепроверит возврат (эффект ниже).
+    useEffect(() => {
+        if (status !== 'unknown') return undefined;
+        const timer = setTimeout(() => {
+            if (document.visibilityState !== 'hidden') recheck();
+        }, retryDelayMs(misses - 1));
+        return () => clearTimeout(timer);
+    }, [status, misses, recheck]);
+
+    // Вернулись во вкладку без записи — может, QR уже подтвердили во вкладке «Офисы»,
+    // а «не проверено» самое время проверить. Для «on» повод не нужен.
+    useEffect(() => {
+        if (status === 'on' || status === 'checking' || status === 'off') return undefined;
         const onVisible = () => {
-            if (document.visibilityState === 'visible' && !isTokenFresh(authRef.current.token)) refresh();
+            if (document.visibilityState === 'visible') recheck();
         };
         document.addEventListener('visibilitychange', onVisible);
-        // Телефон может прислать токен и сам (перелогин оператора) — подхватываем.
-        let bridge = null;
-        const onMessage = (event) => {
-            const parsed = parseTokenMessage(event?.data);
-            if (parsed && parsed.token) setAuth({ token: parsed.token, error: '', asked: true });
-        };
-        if (inPhone) {
-            bridge = window.chrome.webview;
-            bridge.addEventListener('message', onMessage);
-        }
-        return () => {
-            clearInterval(timer);
-            document.removeEventListener('visibilitychange', onVisible);
-            if (bridge) bridge.removeEventListener('message', onMessage);
-        };
-    }, [inPhone, refresh]);
+        return () => document.removeEventListener('visibilitychange', onVisible);
+    }, [status, recheck]);
 
-    return { inPhone, token: auth.token, error: auth.error, asked: auth.asked };
+    /* Сервер сказал «сессии нет» (401). Токен той же сессии может прийти новым —
+       часы компьютера отстали, и прежний истёк раньше, чем казалось, — а эффект
+       проверки ждёт смены sid и сам не пойдёт: «без записи» висело бы до перевхода.
+       Поэтому раз в полминуты переспрашиваем токен у телефона, и любой новый
+       токен — повод проверить заново. Новую сессию (другой sid) проверит эффект
+       выше: статус у неё уже «checking», и второй запрос отсюда не уйдёт. */
+    useEffect(() => {
+        if (status !== 'expired' || !refreshToken) return undefined;
+        const timer = setInterval(() => { refreshToken(); }, SESSION_RETRY_MS);
+        return () => clearInterval(timer);
+    }, [status, refreshToken]);
+    const seenToken = useRef(token);
+    useEffect(() => {
+        const previous = seenToken.current;
+        seenToken.current = token;
+        if (token && previous && token !== previous && status === 'expired') recheck();
+    }, [token, status, recheck]);
+
+    return { status, message: fresh ? probe.message : '', recheck };
 }
+
+/** Подпись к значку записи (и текст плашки под шапкой). */
+export const recordingHint = ({ asked, status, message = '', error = '', inPhone = false }) => {
+    if (!asked) return 'Подключаемся…';
+    switch (status) {
+        case 'checking': return 'Проверяем запись…';
+        case 'on': return 'Попытки записываются';
+        case 'unknown': return 'Запись не проверена — нет связи с порталом';
+        case 'qr': return 'Без записи — нужно подтверждение по QR';
+        case 'blocked': return message || 'Без записи — вики недоступна';
+        case 'expired':
+            return inPhone
+                ? 'Сессия закончилась — войдите в iCORE Phone заново'
+                : 'Сессия портала закончилась — войдите заново';
+        default:
+            return error || (inPhone ? 'Без записи попыток' : 'Войдите в портал, чтобы попытки записывались');
+    }
+};
 
 const StageIcon = ({ stage }) => (
     stage === 'desktop'
@@ -184,7 +262,17 @@ function TrainerCardView({ scenario, onOpen }) {
 }
 
 export default function TrainersEmbed() {
-    const { inPhone, token, error, asked } = useHostToken();
+    const { inPhone, token, error, asked, refresh } = useHostToken();
+    const { status: recordStatus, message: recordMessage, recheck: recheckRecording } = useRecordingAccess(token, refresh);
+    // Окно QR «Включить запись» — только по нажатию: тренажёры работают и без записи.
+    const [showQr, setShowQr] = useState(false);
+    /* Открыли «Включить запись» — подводим панель к верху вкладки. Она стоит под
+       шапкой страницы, и во вкладке высотой 285 px кнопка «Скопировать код»
+       оказывалась под нижним краем — а удалённому оператору нужна именно она. */
+    const qrBoxRef = useRef(null);
+    useEffect(() => {
+        if (showQr) qrBoxRef.current?.scrollIntoView?.({ block: 'start' });
+    }, [showQr]);
     const [open, setOpen] = useState(null);
     /* Тренажёр, который ждёт, пока телефон вынесет страницу в большое окно.
        В ref, а не в state: ответ телефона приходит в слушатель, который вешается один раз. */
@@ -261,12 +349,17 @@ export default function TrainersEmbed() {
         postToPhone({ type: 'trainer:close' });
     }, []);
 
-    const recording = !!token;
-    const authHint = !asked
-        ? 'Подключаемся…'
-        : recording
-            ? 'Попытки записываются'
-            : (error || (inPhone ? 'Без записи попыток' : 'Войдите в портал, чтобы попытки записывались'));
+    const onQrGranted = useCallback(() => {
+        setShowQr(false);
+        recheckRecording();
+    }, [recheckRecording]);
+
+    const checking = !asked || recordStatus === 'checking';
+    const recording = recordStatus === 'on';
+    // «Не проверено» — не «без записи»: проверка не дошла, и что ответит сервер,
+    // пока неизвестно. Значок и плашка нейтральные, перепроверка идёт сама.
+    const unverified = !checking && recordStatus === 'unknown';
+    const authHint = recordingHint({ asked, status: recordStatus, message: recordMessage, error, inPhone });
 
     return (
         <div className="mx-auto min-h-screen w-full max-w-2xl px-3 pb-8 pt-3 sm:px-4">
@@ -282,14 +375,72 @@ export default function TrainersEmbed() {
                     className={`mt-1 inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium
                                 ${recording ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}
                 >
-                    {!asked
+                    {checking
                         ? <Loader2 size={12} className="animate-spin" />
-                        : recording ? <ShieldCheck size={12} /> : <ShieldOff size={12} />}
-                    <span className="hidden sm:inline">{recording ? 'с записью' : 'без записи'}</span>
+                        : recording ? <ShieldCheck size={12} />
+                            : unverified ? <ShieldQuestion size={12} /> : <ShieldOff size={12} />}
+                    {/* Пока ответа нет, подпись не утверждает ни «с записью», ни «без». */}
+                    <span className="hidden sm:inline">
+                        {checking ? 'проверяем…' : recording ? 'с записью' : unverified ? 'не проверено' : 'без записи'}
+                    </span>
                 </span>
             </header>
 
-            {asked && !recording && (
+            {/* Нужен QR — запись включается тут же, тем же кодом, что открывает «Офисы»:
+                подтверждение одно на сессию телефона. */}
+            {!checking && recordStatus === 'qr' && (showQr ? (
+                <div ref={qrBoxRef} className="mb-3 scroll-mt-3 space-y-2">
+                    <QrUnlockPanel
+                        apiBase={API_BASE_URL}
+                        headers={headers}
+                        onGranted={onQrGranted}
+                        title="Запись включится после подтверждения"
+                        inPhone={inPhone}
+                    />
+                    <button
+                        type="button"
+                        onClick={() => setShowQr(false)}
+                        className="w-full rounded-xl px-3 py-2 text-[12.5px] font-medium text-slate-500 hover:bg-slate-100"
+                    >
+                        Не сейчас
+                    </button>
+                </div>
+            ) : (
+                <div className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-800">
+                    <p>
+                        Попытки не записываются — нужно подтверждение по QR. Тренажёры при этом
+                        работают полностью.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={() => setShowQr(true)}
+                        className="mt-1.5 inline-flex items-center gap-1.5 font-semibold text-amber-900 hover:underline"
+                    >
+                        <QrCode size={13} aria-hidden="true" /> Включить запись
+                    </button>
+                </div>
+            ))}
+
+            {/* Проверка записи не дошла (сеть, портал). Плашка серая, а не жёлтая «без
+                записи»: что ответит сервер, неизвестно, и пугать зря незачем. Но и
+                молчать нельзя — если сессии нужен QR, попытки сейчас не пишутся. */}
+            {unverified && (
+                <div className="mb-3 flex items-start gap-2 rounded-xl bg-slate-100 px-3 py-2 text-[12px] leading-relaxed text-slate-600">
+                    <p className="min-w-0 flex-1">
+                        Не удалось проверить, записываются ли попытки: нет связи с порталом.
+                        Проверим снова сами — тренажёры работают и так.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={recheckRecording}
+                        className="inline-flex shrink-0 items-center gap-1 font-semibold text-slate-700 hover:underline"
+                    >
+                        <RefreshCw size={13} aria-hidden="true" /> Проверить
+                    </button>
+                </div>
+            )}
+
+            {!checking && !recording && !unverified && recordStatus !== 'qr' && (
                 <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-800">
                     {authHint}. Тренажёры при этом работают полностью — не записывается только прохождение.
                 </p>

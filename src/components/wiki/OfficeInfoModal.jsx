@@ -13,6 +13,7 @@ import {
     DAY_SOURCE_LABELS, formatDay, formatStampTime, officeDayStatus,
 } from './officeDayStatus';
 import { breakLines, dayHoursOn, scheduleLines } from './officeSchedule';
+import { phoneSegments } from './officePhones';
 
 /* Всё про один офис — по нажатию на его адрес.
  *
@@ -52,6 +53,14 @@ export default function OfficeInfoModal({
 
     const notes = (office.address_note || '').split('\n').map((s) => s.trim()).filter(Boolean);
     const parkPhones = (office.parks || []).filter((link) => link.phones?.length);
+    const phoneParts = useMemo(() => phoneSegments(office.phone), [office.phone]);
+
+    /* Подвал — только когда в нём что-то есть. Фрагмент truthy, даже если обе его
+       ветки отказали (телефон без права правки: ни действий, ни «Закрыть»), и
+       IosModal рисовал по нему пустую полосу с рамкой — 25 px высоты ни на что;
+       во вкладке iCORE Phone (285 px, справочник только для чтения) это каждое
+       открытие карточки. */
+    const hasFooter = canManage || !isPhone;
 
     return (
         <IosModal
@@ -61,7 +70,7 @@ export default function OfficeInfoModal({
             subtitle={[office.city, absent ? 'офиса в городе нет' : office.address]
                 .filter(Boolean).join(' · ')}
             maxWidth="max-w-lg"
-            footer={(
+            footer={hasFooter ? (
                 <>
                     {canManage && (
                         <div className="wiki-m-office-actions mr-auto flex items-center gap-1">
@@ -94,7 +103,7 @@ export default function OfficeInfoModal({
                         </button>
                     )}
                 </>
-            )}
+            ) : null}
         >
             <div className="space-y-3.5">
                 {/* Статус первым: за ним и открывают карточку. Выбор бейджа —
@@ -201,13 +210,29 @@ export default function OfficeInfoModal({
 
                 {!absent && (office.phone || parkPhones.length > 0) && (
                     <Panel title="Телефоны">
+                        {/* Каждый номер — своей ссылкой (officePhones.js). Одна
+                            ссылка на всё поле склеивала «+7 707 705 08 80,
+                            +7 727 333 22 11» в tel:+77077050880+77273332211:
+                            набирался номер, которого нет. Текст на экране —
+                            ровно тот, что в справочнике; то, что номером не
+                            читается, остаётся текстом без ссылки.
+                            inline-block: в узком окне строка переносится между
+                            номерами, а не посреди номера («+7 / 727 333 22 11»). */}
                         {office.phone && (
-                            <a
-                                href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
-                                className="flex items-center gap-2 text-[13.5px] font-medium tabular-nums text-slate-800 hover:text-blue-600"
-                            >
-                                <Phone size={14} className="text-slate-400" /> {office.phone}
-                            </a>
+                            <p className="flex items-start gap-2 text-[13.5px] font-medium tabular-nums text-slate-800">
+                                <Phone size={14} className="mt-[3px] shrink-0 text-slate-400" />
+                                <span className="min-w-0 break-words">
+                                    {phoneParts.map((part, index) => (part.number ? (
+                                        // eslint-disable-next-line react/no-array-index-key
+                                        <a key={index} href={`tel:${part.number}`} className="inline-block hover:text-blue-600">
+                                            {part.text}
+                                        </a>
+                                    ) : (
+                                        // eslint-disable-next-line react/no-array-index-key
+                                        <React.Fragment key={index}>{part.text}</React.Fragment>
+                                    )))}
+                                </span>
+                            </p>
                         )}
                         {/* Номер у парка в этом офисе свой: у одного адреса их
                             столько же, сколько парков за ним сидит. */}

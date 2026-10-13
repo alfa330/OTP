@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, RotateCcw, SlidersHorizontal } from 'lucide-react';
-import { APPLE_FONT, IosToggle, iosGroupLabel } from '../ui/ios';
+import { APPLE_FONT, IosToggle, iosGroupLabel, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
 
@@ -39,6 +39,63 @@ export const activeFilterCount = (value) => (
 
 const PANEL_WIDTH = 268;
 
+/* Сколько места у кнопки (над ней или под ней) нужно панели, чтобы раскрыться
+   рядом. Меньше — панель встаёт ЛИСТОМ во всё окно, см. filterPanelBox.
+
+   Раньше это число было нижней границей высоты: maxHeight = max(200, место).
+   Там, где места меньше (вкладка iCORE Phone высотой 285 px, телефон боком), панель
+   всё равно брала свои 200 px и уходила за край окна. Позиция у неё fixed, а
+   прокрутка страницы её закрывает — срезанную часть было не достать вовсе: при
+   393 × 285 выбор «Таксопарк» лежал на 321–356 px, а при 243 px панель открывалась
+   вверх и начиналась на −12 px. */
+const SHEET_BELOW = 200;
+
+/**
+ * Где встать панели: { sheet, width, left, top, bottom, maxHeight } — всё, что
+ * уходит в её инлайн-стиль. Чистый расчёт, без DOM: его читают тесты.
+ *
+ *   rect       — кнопка «Фильтр» в координатах окна (top, bottom, right);
+ *   viewWidth, viewHeight — окно (innerWidth/innerHeight);
+ *   pageWidth  — ширина страницы без полосы прокрутки (clientWidth);
+ *   floor      — ниже панели нельзя: верх бара разделов на телефоне, иначе
+ *                высота окна;
+ *   isPhone    — мобильная раскладка (панель во всю ширину).
+ */
+export const filterPanelBox = ({
+    rect, viewWidth, viewHeight, pageWidth, floor, isPhone,
+}) => {
+    const spaceBelow = floor - rect.bottom;
+    const openUp = spaceBelow < 260 && rect.top > spaceBelow;
+    /* Ширина — от страницы без полосы прокрутки и без нижней границы. Прежние
+       max(240, innerWidth − 32) при окне 243 px давали панель шириной 240 с
+       левым краем на 16 — правый край уходил за окно; а innerWidth считает и
+       полосу прокрутки, которая в окне компьютера настоящая (15 px). */
+    const width = isPhone ? Math.max(0, pageWidth - 32) : PANEL_WIDTH;
+    const left = isPhone
+        ? 16
+        : Math.min(viewWidth - width - 8, Math.max(8, Math.round(rect.right - width)));
+    // Место под панель у кнопки: 6 px зазора от неё и 10 px до края окна.
+    const room = (openUp ? rect.top : spaceBelow) - 16;
+    if (room < SHEET_BELOW) {
+        // Лист: от верха окна и на всю его высоту (на телефоне — до бара
+        // разделов), условия прокручиваются внутри.
+        return {
+            sheet: true, width, left, top: 8, bottom: undefined,
+            maxHeight: Math.max(0, floor - 16),
+        };
+    }
+    return {
+        sheet: false,
+        width,
+        left,
+        top: openUp ? undefined : Math.round(rect.bottom + 6),
+        bottom: openUp ? Math.round(viewHeight - rect.top + 6) : undefined,
+        // Высоту не считаем заранее (состав панели меняется) — ограничиваем
+        // доступным местом и разрешаем прокрутку внутри.
+        maxHeight: Math.min(room, viewHeight - 16),
+    };
+};
+
 /* Поповер внутри поповера: список CustomSelect уходит в портал body, то есть
    лежит ВНЕ панели фильтров. Без этой проверки первый же mousedown по строке
    списка считался бы «щелчком мимо», панель фильтров схлопывалась бы вместе с
@@ -53,6 +110,31 @@ const Row = ({ label, children }) => (
         <span className="text-[13px] text-slate-700">{label}</span>
         {children}
     </label>
+);
+
+/* Список условия для ЛИСТА — системный <select>.
+ *
+ * У CustomSelect свой выпадающий список: портал в body с fixed-позицией и нижней
+ * границей высоты 160 px — тот же приём, что был у этой панели. В окне, где панель
+ * встаёт листом (вкладка iCORE Phone 393 × 285), ему тесно так же: у «Города»
+ * список раскрывался на −39…121 px — поле поиска над верхним краем окна, — а из
+ * конца листа на 157…317 px, и последние города было не достать. Системный список
+ * рисует сама система поверх окна, страница его не обрезает; поиска в нём нет, но
+ * он листается и ищет по набранным буквам. Панели у кнопки это не нужно: там места
+ * хватает, и остаётся CustomSelect с поиском.
+ */
+const SheetSelect = ({ value, onChange, options, ariaLabel }) => (
+    <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={ariaLabel}
+        className={`${iosInput} mt-1 py-2`}
+    >
+        {options.map((option) => (
+            // Пустое значение — законный пункт «без условия»; ключу нужна непустая строка.
+            <option key={option.value || 'any'} value={option.value}>{option.label}</option>
+        ))}
+    </select>
 );
 
 export default function OfficeFilters({ value, onChange, cities = [], parks = [], canManage }) {
@@ -80,22 +162,15 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
         const bar = isPhone
             ? document.querySelector('.mobile-tabbar[data-side="bottom"]')?.getBoundingClientRect()
             : null;
-        const floor = bar ? Math.min(window.innerHeight, bar.top) : window.innerHeight;
-        const spaceBelow = floor - rect.bottom;
-        const openUp = spaceBelow < 260 && rect.top > spaceBelow;
-        const width = isPhone ? Math.max(240, window.innerWidth - 32) : PANEL_WIDTH;
-        setCoords({
-            width,
-            left: isPhone
-                ? 16
-                : Math.min(window.innerWidth - width - 8,
-                           Math.max(8, Math.round(rect.right - width))),
-            top: openUp ? undefined : Math.round(rect.bottom + 6),
-            bottom: openUp ? Math.round(window.innerHeight - rect.top + 6) : undefined,
-            // Высоту не считаем заранее (состав панели меняется) — ограничиваем
-            // доступным местом и разрешаем прокрутку внутри.
-            maxHeight: Math.max(200, (openUp ? rect.top : spaceBelow) - 16),
-        });
+        const viewHeight = window.innerHeight;
+        setCoords(filterPanelBox({
+            rect,
+            viewWidth: window.innerWidth,
+            viewHeight,
+            pageWidth: document.documentElement.clientWidth || window.innerWidth,
+            floor: bar ? Math.min(viewHeight, bar.top) : viewHeight,
+            isPhone,
+        }));
     }, [isPhone]);
 
     useLayoutEffect(() => { if (open) recompute(); }, [open, recompute]);
@@ -222,28 +297,46 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                     <div className="space-y-2">
                         <div>
                             <div className={iosGroupLabel}>Город</div>
-                            <CustomSelect
-                                variant="ios"
-                                className="mt-1"
-                                value={value.city}
-                                onChange={(city) => patch({ city })}
-                                options={cityOptions}
-                                searchable
-                                searchPlaceholder="Город…"
-                                ariaLabel="Город"
-                            />
+                            {coords.sheet ? (
+                                <SheetSelect
+                                    value={value.city}
+                                    onChange={(city) => patch({ city })}
+                                    options={cityOptions}
+                                    ariaLabel="Город"
+                                />
+                            ) : (
+                                <CustomSelect
+                                    variant="ios"
+                                    className="mt-1"
+                                    value={value.city}
+                                    onChange={(city) => patch({ city })}
+                                    options={cityOptions}
+                                    searchable
+                                    searchPlaceholder="Город…"
+                                    ariaLabel="Город"
+                                />
+                            )}
                         </div>
 
                         <div>
                             <div className={iosGroupLabel}>Таксопарк</div>
-                            <CustomSelect
-                                variant="ios"
-                                className="mt-1"
-                                value={value.parkId}
-                                onChange={(parkId) => patch({ parkId })}
-                                options={parkOptions}
-                                ariaLabel="Таксопарк"
-                            />
+                            {coords.sheet ? (
+                                <SheetSelect
+                                    value={value.parkId}
+                                    onChange={(parkId) => patch({ parkId })}
+                                    options={parkOptions}
+                                    ariaLabel="Таксопарк"
+                                />
+                            ) : (
+                                <CustomSelect
+                                    variant="ios"
+                                    className="mt-1"
+                                    value={value.parkId}
+                                    onChange={(parkId) => patch({ parkId })}
+                                    options={parkOptions}
+                                    ariaLabel="Таксопарк"
+                                />
+                            )}
                         </div>
 
                         {/* Архивные раньше приезжали управляющему всегда и молча
@@ -266,6 +359,26 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                         >
                             <RotateCcw size={13} /> Сбросить
                         </button>
+                    )}
+
+                    {/* У листа свой выход. Он закрывает собой кнопку «Фильтр», а
+                        «нажать мимо» ему почти некуда: от окна остаются поля по
+                        8–16 px. Кнопка прилипла к низу листа — видна, как бы ни
+                        прокрутили условия. Панели у кнопки она не нужна: там
+                        закрывают той же кнопкой или щелчком мимо.
+                        -bottom-3 и -mb-3 — на нижнее поле панели (p-3): прилипает
+                        полоса к краю содержимого, и без сдвига под ней оставалась
+                        бы щель в 12 px, где проглядывают прокрученные условия. */}
+                    {coords.sheet && (
+                        <div className="sticky -bottom-3 -mx-3 -mb-3 mt-2 border-t border-slate-200/70 bg-white px-3 py-2">
+                            <button
+                                type="button"
+                                onClick={() => setOpen(false)}
+                                className="flex w-full items-center justify-center rounded-xl bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-700 active:scale-[0.98]"
+                            >
+                                Готово
+                            </button>
+                        </div>
                     )}
                 </div>,
                 document.body,

@@ -181,9 +181,29 @@ class OfficesTests(unittest.TestCase):
 
     def test_filter_panel_is_full_width_on_the_phone(self):
         """Панель фильтра ставит координаты ИНЛАЙН-стилем, и правило со стороны
-        слоя их не перебивает: ширину под телефон обязана считать сама панель."""
+        слоя их не перебивает: ширину под телефон обязана считать сама панель.
+
+        Ширина — от страницы (без полосы прокрутки) и без нижней границы:
+        прежние max(240, innerWidth − 32) в окне 243 px уводили правый край
+        панели за окно (вкладка «Офисы» в iCORE Phone)."""
         self.assertIn('useIsMobileShell', self.filters)
-        self.assertIn('isPhone ? Math.max(240, window.innerWidth - 32) : PANEL_WIDTH', self.filters)
+        self.assertIn('isPhone ? Math.max(0, pageWidth - 32) : PANEL_WIDTH', self.filters)
+        self.assertNotIn('Math.max(240,', self.filters)
+
+    def test_filter_panel_never_outgrows_the_window(self):
+        """Нижней границы высоты у панели нет: max(200, место) в окне высотой
+        285 px выталкивал её за край, а позиция fixed и закрытие по прокрутке
+        не давали добраться до срезанного. Мало места у кнопки — панель встаёт
+        листом во всё окно, и у листа есть свой выход.
+
+        Списки в листе — системные: у CustomSelect та же нижняя граница высоты
+        (160 px), и его список в таком окне уходил за край уже сам."""
+        self.assertNotIn('Math.max(200,', self.filters)
+        self.assertIn('if (room < SHEET_BELOW)', self.filters)
+        self.assertIn('maxHeight: Math.min(room, viewHeight - 16)', self.filters)
+        self.assertIn('{coords.sheet && (', self.filters)
+        self.assertEqual(self.filters.count('{coords.sheet ? ('), 2, 'город и таксопарк')
+        self.assertEqual(self.filters.count('<SheetSelect'), 2)
 
 
 if __name__ == '__main__':
