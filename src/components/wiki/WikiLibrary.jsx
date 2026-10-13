@@ -21,6 +21,9 @@ import { fetchArticleIndex } from './articleIndex';
 import { absoluteFileUrl } from './fileUrls';
 import { selectableSections } from './sectionPicker';
 import { typeBadge } from './articleTypes';
+import {
+    isRefusal, keepUnchanged, memoryKey, recall, remember,
+} from './entryMemory';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
@@ -48,6 +51,77 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
    сервере, но объявлено здесь: строка «Найдено: N» упирается ровно в это число,
    и без суффикса «+» на упоре она врала бы. */
 const SEARCH_LIMIT = 20;
+
+// Один пустой список на все рендеры: новый [] каждый раз перерисовывал бы рельс.
+const NO_PARKS = [];
+
+/* Сколько первый кадр витрины ждёт ответа о парках после ответа /ping (см.
+   railSettled). Запрос о парках уходит одновременно с /ping, так что обычно
+   ждать нечего; полсекунды — на случай, когда он отстал. Дольше держать под
+   заготовкой поиск и оглавление ради справочника под рукой нельзя. */
+const RAIL_WAIT_MS = 500;
+
+/* Логотип парка в ответе — подписанный адрес со сроком: сервер отдаёт подпись,
+   которой осталось жить не меньше получаса (wiki/file_urls.py:
+   _RESIGN_BEFORE_SECONDS). Запомненным логотипам верим чуть меньше. */
+const LOGO_FRESH_MS = 25 * 60 * 1000;
+
+/* Запомненный ответ о парках — в том виде, в каком его можно показать.
+ *
+ * Состав рельса не портится, а адреса логотипов портятся: портал держат
+ * открытым всю смену, и рельс, вставший из памяти через час, показал бы вместо
+ * логотипов битые картинки — до свежего ответа. У постаревшего ответа адреса
+ * убираем: плитка рисует буквы, как у парка без логотипа, а логотипы приедут
+ * со свежим ответом на своё место, ничего не сдвинув. «Раздетый» ответ кладём
+ * обратно в память — чтобы каждый рендер получал один и тот же объект.
+ */
+const recallParks = (key) => {
+    const answer = recall(key);
+    if (!answer || answer.plain || Date.now() - answer.at <= LOGO_FRESH_MS) return answer;
+    const plain = {
+        ...answer,
+        plain: true,
+        items: answer.items.map((park) => (park.logo_url ? { ...park, logo_url: null } : park)),
+    };
+    remember(key, plain);
+    return plain;
+};
+
+/* Заготовка витрины — первый кадр, пока неизвестны права и пространство.
+ *
+ * Те же три места, что займёт витрина: обложка, подборки под ней и оглавление
+ * справа, — тем же видом, что заглушка подборок ниже (она при появлении
+ * витрины остаётся на месте, пока едет /home). Рельса парков в заготовке нет:
+ * будет ли он, решает ответ, которого ещё нет. Настоящего текста здесь тоже
+ * нет намеренно — подпись обложки зависит от прав («Режим редактора»), а
+ * показанное раньше ответа пришлось бы на глазах менять.
+ */
+const LibrarySkeleton = () => (
+    <div
+        role="status"
+        aria-busy="true"
+        aria-label="Загружаем вики"
+        className="flex flex-col gap-3 lg:flex-row lg:items-start"
+    >
+        {/* Высоты — по настоящим блокам на компьютере: обложка 257 px,
+            заглушка подборок 220, оглавление с «Загружаем…» 146. Блок обложки
+            носит её метку: на телефоне обложки нет (wiki-mobile.css), и её
+            заготовка обязана пропасть там же и тем же правилом. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+            <div className={`${iosCard} wiki-m-hero h-[257px] overflow-hidden`}>
+                <div className="sk-shimmer h-full w-full" />
+            </div>
+            <div className={`${iosCard} h-[220px] overflow-hidden`}>
+                <div className="sk-shimmer h-full w-full" />
+            </div>
+        </div>
+        <div className="hidden lg:block lg:w-[272px] lg:shrink-0 2xl:w-[306px]">
+            <div className={`${iosCard} h-[146px] overflow-hidden`}>
+                <div className="sk-shimmer h-full w-full" />
+            </div>
+        </div>
+    </div>
+);
 
 /* Сниппет приходит с сервера уже с <mark>. Санитизация здесь не нужна и была
    бы вредна: ts_headline вставляет ровно те теги, что мы задали, а любой текст
@@ -139,10 +213,38 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       /* Справочник поиска (офисы, комиссии
                                          Яндекса): та же дверь, что у поиска в
                                          шапке. null — вкладки нет. */
-                                      onOpenOffice = null, onOpenCity = null }) {
+                                      onOpenOffice = null, onOpenCity = null,
+                                      /* Известны ли права и пространство
+                                         (ответ /ping). Пока нет — витрина
+                                         стоит заготовкой и ничего не
+                                         запрашивает; статья по ссылке при этом
+                                         открывается сразу, ей пространство не
+                                         нужно. leaving — с витрины уходят этим
+                                         же коммитом; unavailable — /ping
+                                         отказал, отказ уже показан выше. */
+                                      ready = true, leaving = false, unavailable = false,
+                                      /* Первая загрузка дерева и каталога ещё
+                                         идёт — см. WikiView. */
+                                      structurePending = false, catalogPending = false,
+                                      userId = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
+    /* Витрина «живёт» — рисует первый кадр, — когда известны права и
+       пространство и с неё не уходят этим же коммитом. */
+    const live = ready && !leaving;
+    /* ЗА ДАННЫМИ она уходит раньше — как только известно пространство. До
+       ответа /ping раздел передаёт сюда пространство, выбранное в прошлый раз
+       (или названное ссылкой): запросы витрины уходят ОДНОВРЕМЕННО с /ping, а не
+       после него, и первый вход не ждёт два круга подряд. Проверять догадку не
+       нужно — периметр считает сервер, пространство лишь сужает его; не
+       угадали (пространство убрали в архив) — ответ /ping назовёт другое, и
+       запросы уйдут заново, а ответы за прежнее отбросят метки ниже. Рисовать при этом
+       по-прежнему нечего, пока нет прав: подпись обложки и плитки зависят от
+       них. Без пространства и без ответа — ждём: запрос «по всем пространствам разом»
+       и был лишним кругом каждого входа. */
+    const canLoad = !leaving && (ready || !!spaceId);
+
     const toast = useStableCallback(showToast);
     const consumeInitialSlug = useStableCallback(onInitialSlugConsumed);
     const consumeSearchTarget = useStableCallback(onSearchTargetConsumed);
@@ -196,8 +298,16 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const indexRun = useRef(0);
     const [home, setHome] = useState(null);
     const [homeLoading, setHomeLoading] = useState(true);
-    const [parks, setParks] = useState([]);
-    const [parksCanManage, setParksCanManage] = useState(false);
+    // Та же метка, что у оглавления: поздний ответ за прежнее пространство
+    // не должен лечь поверх подборок нынешнего.
+    const homeRun = useRef(0);
+    /* За какое пространство лежат (или уже едут) подборки и оглавление. Загрузчики —
+       эффекты, они отрабатывают ПОСЛЕ рендера, в котором сменилось
+       пространство: на этот рендер в состоянии ещё лежит прежнее (или то, что
+       было догадкой и ответом /ping не подтвердилось), а «идёт загрузка»
+       ещё не поднято. Пока метка не догнала пространство, данные считаем
+       недогруженными — иначе на кадр вставали бы чужие полки и оглавление. */
+    const loadedFor = useRef(undefined);
     const [found, setFound] = useState(null);   // null = поиска не было
     // Справочник того же ответа — офисы и комиссии (wiki/directory.py).
     const [foundDirectory, setFoundDirectory] = useState([]);
@@ -434,6 +544,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        показывали свою цифру и раскрывались пустыми. Сколько страниц забрать,
        считает fetchArticleIndex по total_visible из первого же ответа. */
     const loadIndex = useCallback(() => {
+        /* Без пространства запрос вернул бы статьи ВСЕХ вики человека, а через
+           полсекунды тот же список запросился бы заново, уже для одной. Ждём —
+           флаг стоит в зависимостях, и первый же рендер с пространством
+           запустит загрузку (см. canLoad). */
+        if (!canLoad) return Promise.resolve();
         const run = indexRun.current + 1;
         indexRun.current = run;
         const mine = () => indexRun.current === run;
@@ -444,16 +559,22 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
             .then((items) => { if (mine()) setIndex(items); })
             .catch(() => { if (mine()) setIndex([]); })
             .finally(() => { if (mine()) setIndexLoading(false); });
-    }, [base, headers, spaceId]);
+    }, [base, headers, spaceId, canLoad]);
 
     const loadHome = useCallback(() => {
+        if (!canLoad) return Promise.resolve();   // см. loadIndex
+        const run = homeRun.current + 1;
+        homeRun.current = run;
+        const mine = () => homeRun.current === run;
         setHomeLoading(true);
         return axios.get(`${base}/home`, { headers, params: { space_id: spaceId } })
-            .then((r) => setHome(r.data))
-            .catch(() => setHome(null))
-            .finally(() => setHomeLoading(false));
-    }, [base, headers, spaceId]);
+            .then((r) => { if (mine()) setHome(r.data); })
+            .catch(() => { if (mine()) setHome(null); })
+            .finally(() => { if (mine()) setHomeLoading(false); });
+    }, [base, headers, spaceId, canLoad]);
 
+    // Метка — вместе с загрузчиками: они уходят за ЭТИМ пространством тем же проходом эффектов.
+    useEffect(() => { loadedFor.current = spaceId; }, [spaceId]);
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
 
@@ -479,26 +600,84 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        space_id обязателен: справочник принадлежит пространству, и без него
        рельс собрался бы из парков соседней вики. */
     const parksWanted = features?.parks !== false || features?.library_park_rail !== false;
+    /* Ответ о парках принадлежит ПРОСТРАНСТВУ, за которое его спросили, и
+       запоминается на время жизни страницы (entryMemory.js): на втором входе
+       рельс стоит с первого кадра, а не въезжает после ответа, сдвигая центр
+       витрины на свою ширину. */
+    const parksKey = spaceId ? memoryKey(base, userId, 'parks', spaceId) : '';
+    const [parksAnswer, setParksAnswer] = useState(() => recallParks(parksKey));   // {space, items, canManage, at}
+    // Витрина уже показана (первый кадр позади) — см. ниже, у railSettled.
+    const [framed, setFramed] = useState(false);
+    /* Что показать: ответ для открытого пространства, а до него — запомненный.
+       Пространство только что сменили в шапке и ответа ещё нет — остаётся
+       прежний рельс, как и раньше: пустая колонка на полсекунды сдвинула бы
+       центр влево и обратно. Только у витрины, которая уже стоит: до первого
+       кадра «прежний» ответ — это ответ за пространство из догадки, и поставить
+       его рельс в другое значило бы показать чужой. */
+    const parksFresh = parksAnswer?.space === spaceId ? parksAnswer : recallParks(parksKey);
+    const parksShown = parksWanted ? (parksFresh || (framed ? parksAnswer : null)) : null;
+    const parks = parksShown?.items || NO_PARKS;
+    const parksCanManage = !!parksShown?.canManage;
+    /* Есть ли рельс, решает ответ о парках, а от рельса зависит, где стоит
+       центр витрины. Поэтому ПЕРВЫЙ кадр ждёт этого ответа под заготовкой:
+       иначе обложка с поиском вставала бы левее и через долю секунды уезжала
+       вправо. Без пространства спрашивать некого — и ждать нечего. */
+    const railSettled = !parksWanted || !spaceId || !!parksShown;
+    /* Ждёт именно ПЕРВЫЙ кадр, и не дольше RAIL_WAIT_MS после ответа /ping.
+       Рельс — справочник под рукой, а не условие работы витрины: застрявший
+       запрос о парках не должен держать под заготовкой поиск и оглавление, а
+       смена вики в шапке не должна на время запроса убирать с экрана уже
+       стоящую витрину. Опоздавший рельс въедет, как въезжал. */
     useEffect(() => {
-        if (!parksWanted) { setParks([]); setParksCanManage(false); return; }
-        // Пока ping не назвал пространство, не спрашиваем: у того, кому выдано
-        // два, сервер честно ответит «укажите пространство», и на главной
-        // мигнула бы ошибка вместо рельса.
-        if (!spaceId) return;
+        if (!live || framed) return undefined;
+        if (railSettled) { setFramed(true); return undefined; }
+        const timer = setTimeout(() => setFramed(true), RAIL_WAIT_MS);
+        return () => clearTimeout(timer);
+    }, [live, railSettled, framed]);
+    useEffect(() => {
+        /* В пространстве без парков прежний ответ забываем: иначе, перейдя
+           отсюда в третье пространство, человек увидел бы в нём рельс первого. */
+        if (!parksWanted) { setParksAnswer(null); return undefined; }
+        // Без пространства не спрашиваем: у того, кому выдано два, сервер
+        // честно ответит «укажите пространство», и на главной мигнула бы
+        // ошибка вместо рельса. С пространством — можно и до ответа /ping
+        // (см. canLoad): ответ лежит за своим пространством и чужому не достанется.
+        if (!canLoad || !spaceId) return undefined;
+        let stale = false;
+        const settle = (items, canManage) => {
+            // Ответ за пространство, с которого уже ушли, рельсу не нужен.
+            if (stale) return;
+            const answer = { space: spaceId, items, canManage, at: Date.now() };
+            remember(parksKey, answer);
+            setParksAnswer((prev) => keepUnchanged(prev, answer));
+        };
         axios.get(`${base}/parks`, { headers, params: { space_id: spaceId } })
-            .then((r) => {
-                // Архивные парки сервер отдаёт управляющему справочником —
-                // в рельсе им не место, это витрина «куда звонить сейчас».
-                // Логотип раскрываем до абсолютного адреса: страница и API на
-                // разных доменах, и относительный /api/wiki/file/<id> браузер
-                // искал бы на Pages (fileUrls.js).
-                setParks((r.data?.items || [])
+            // Архивные парки сервер отдаёт управляющему справочником —
+            // в рельсе им не место, это витрина «куда звонить сейчас».
+            // Логотип раскрываем до абсолютного адреса: страница и API на
+            // разных доменах, и относительный /api/wiki/file/<id> браузер
+            // искал бы на Pages (fileUrls.js).
+            .then((r) => settle(
+                (r.data?.items || [])
                     .filter((p) => p.status === 'active')
-                    .map((p) => ({ ...p, logo_url: absoluteFileUrl(p.logo_url, base) })));
-                setParksCanManage(!!r.data?.can_manage);
-            })
-            .catch(() => setParks([]));
-    }, [base, headers, parksWanted, spaceId]);
+                    .map((p) => ({ ...p, logo_url: absoluteFileUrl(p.logo_url, base) })),
+                !!r.data?.can_manage,
+            ))
+            .catch((e) => {
+                /* Отказ (гостю и тому, кому справочник не выдан, сервер
+                   отвечает 404) — это ответ «рельса нет»: его запоминаем, иначе
+                   такой человек на КАЖДОМ входе ждал бы под заготовкой запроса,
+                   исход которого известен. */
+                if (isRefusal(e)) { settle(NO_PARKS, false); return; }
+                /* Сбой — не ответ. Что знали об этом пространстве, тому и верим дальше
+                   (и памяти не трогаем); не знали ничего — рельса пока нет, а
+                   первый кадр ждать больше нечего. */
+                if (stale) return;
+                setParksAnswer((prev) => (prev?.space === spaceId ? prev
+                    : recallParks(parksKey) || { space: spaceId, items: NO_PARKS, canManage: false, at: 0 }));
+            });
+        return () => { stale = true; };
+    }, [base, headers, parksWanted, spaceId, canLoad, parksKey]);
 
     /* В дереве — только разделы своего периметра и только живые. Сервер отдаёт
        и чужие (вкладке «Структура» они нужны), помечая их accessible=false, и
@@ -665,6 +844,27 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         );
     }
 
+    /* Статья, парк и редактор — выше этих строк: им пространство не нужно, и
+       статья по ссылке открывается, не дожидаясь /ping.
+       Отказ /ping показывает карточка раздела — под ней витрине сказать нечего. */
+    if (unavailable) return null;
+    /* Всё ниже — только ДО первого кадра. Витрину, которая уже стоит, ничем не
+       подменяем: «с неё уходят» длится один коммит, и мигнуть ради него
+       заготовкой или пустым местом хуже, чем дать ей достоять этот кадр. */
+    if (!framed) {
+        /* Уходят, не успев её показать, — рисовать нечего: ни её, ни её
+           заготовку. Три серых блока в форме главной, на месте которых встают
+           «Офисы», — то же «сначала одно, потом другое»; пока ответа нет,
+           место держит нейтральная заглушка раздела. */
+        if (leaving) return null;
+        // Нет прав и пространства — либо первый кадр ждёт ответа о парках.
+        if (!(ready && railSettled)) return <LibrarySkeleton />;
+    }
+
+    // Подборки и оглавление в состоянии — ещё за прежнее пространство (см. loadedFor).
+    const otherSpace = loadedFor.current !== spaceId;
+    const homePending = homeLoading || catalogPending || otherSpace;
+
     const searching = query.trim().length >= 2;
     /* Между вводом и запросом лежит дебаунс в 250 мс. Без этого условия в
        окне дебаунса found ещё null, а «идёт загрузка» уже false — и на первые
@@ -830,9 +1030,12 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
 
                 {/* Пока /home не ответил, витрину «про меня» не рисуем пустыми
                     полками: «Пусто» и «Пока ничего не читали» — это утверждения,
-                    и до ответа сервера они неправда. */}
+                    и до ответа сервера они неправда.
+                    Редактор ждёт ещё и каталога: плитки-счётчики берут числа
+                    оттуда, и, приехав вторыми, вставали над уже показанными
+                    полками и сдвигали их вниз. */}
                 {!busy && !searching && (
-                    homeLoading ? (
+                    homePending ? (
                         <div className={`${iosCard} h-[220px] overflow-hidden`}>
                             <div className="sk-shimmer h-full w-full" />
                         </div>
@@ -853,12 +1056,23 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 )}
             </div>
 
-            <WikiIndexPanel
-                tree={tree}
-                articles={index}
-                onOpen={openArticle}
-                loading={indexLoading}
-            />
+            {/* На телефоне и планшете оглавление стоит ПОД подборками. Пока они
+                грузятся, на их месте заглушка в 220 px — и оглавление вставало
+                на первом экране, чтобы с ответом улететь вниз на 600–700 px.
+                До ответа его там не показываем; на компьютере оно в своей
+                колонке и никуда не едет. `contents` — обёртка без своей рамки:
+                колонки витрины раскладываются так, будто её нет. */}
+            <div className={homePending ? 'hidden lg:contents' : 'contents'}>
+                <WikiIndexPanel
+                    tree={tree}
+                    articles={index}
+                    onOpen={openArticle}
+                    /* Оглавление — это дерево И список статей. Пришёл один
+                       список — панель показала бы все статьи одной группой «Без
+                       раздела», а с деревом тут же разложила бы их по разделам. */
+                    loading={indexLoading || structurePending || otherSpace}
+                />
+            </div>
         </div>
     );
 }

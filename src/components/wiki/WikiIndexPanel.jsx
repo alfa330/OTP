@@ -319,9 +319,13 @@ export default function WikiIndexPanel({ tree, articles: perimeter, onOpen, load
                     <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
                         <Layers size={11} /> Разделы и статьи
                     </span>
-                    <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[9.5px] font-bold text-indigo-600 tabular-nums">
-                        {articles.length}
-                    </span>
+                    {/* Число — после ответа: «0» на время загрузки было бы
+                        утверждением, которое через полсекунды сменится верным. */}
+                    {!loading && (
+                        <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[9.5px] font-bold text-indigo-600 tabular-nums">
+                            {articles.length}
+                        </span>
+                    )}
                 </div>
 
                 <div className="mx-2.5 mb-1.5 flex items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5">

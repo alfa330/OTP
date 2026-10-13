@@ -549,7 +549,11 @@ export function ResultsPane({
 
 export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier,
                                      onAskAssistant = null, spaceId = null,
-                                     onOpenOffice = null, onOpenCity = null }) {
+                                     onOpenOffice = null, onOpenCity = null,
+                                     /* Шапка раздела ещё не показана (первый
+                                        ответ /ping в пути): горячая клавиша
+                                        поиск не открывает. */
+                                     asleep = false }) {
     const [query, setQuery] = useState('');
     /* Фильтры сбрасываются вместе с запросом при закрытии поиска — так же, как
        это делает сам запрос («начинаем следующий поиск с чистого листа»).
@@ -834,6 +838,10 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
             const isHotkey = (e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 'k';
             if (isHotkey) {
                 if (e.target?.closest?.('.ProseMirror, [contenteditable="true"]')) return;
+                /* Поле ещё невидимо — фокус в него не встанет, а поиск остался
+                   бы «раскрытым» без курсора и с первым ответом растолкал бы
+                   шапку на две строки. Сочетание до этого времени не наше. */
+                if (asleep) return;
                 e.preventDefault();
                 if (window.innerWidth < MOBILE_WIDTH) {
                     setSheetOpen((prev) => !prev);
@@ -847,7 +855,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [escapeStep]);
+    }, [escapeStep, asleep]);
 
     /* Клик мимо — выпадашка закрывается. Внутри неё закрывать нечему:
        слушатель проверяет containerRef, а blur поля выпадашку не гасит.

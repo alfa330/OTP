@@ -660,6 +660,12 @@
         animation: none;
     }
 
+    /* Заготовки входа — три блока почти во весь первый экран: бесконечный
+       перелив под ними тому, кто просил движение уменьшить, ни к чему. */
+    .wiki-scope .sk-shimmer {
+        animation: none;
+    }
+
     .wiki-scope * {
         transition-duration: 0.01ms !important;
     }

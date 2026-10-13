@@ -56401,7 +56401,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 onRequestQr={requestSensitiveQrAccess}
                             />
                         ) : (
-                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка Вики…</div>}>
+                            /* Надпись проявляется только через треть секунды — тем же приёмом, что у
+                               «Оплаты счетов»: код раздела обычно уже в кеше и приходит за кадр-другой,
+                               и надпись, мелькнувшая на этот кадр перед заготовкой раздела, читалась
+                               как ещё один рывок при входе. */
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500 motion-safe:animate-fade-in-soft motion-safe:![animation-delay:300ms]">Загрузка Вики…</div>}>
                                 <WikiView
                                     user={user}
                                     showToast={showToast}

@@ -1,4 +1,6 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+    Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from 'react';
 import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
@@ -30,6 +32,10 @@ import { CLASSIFIER_TAB, classifierPrefillOf, sourceDoor } from '../assistant/so
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
+import {
+    isRefusal, keepUnchanged, memoryKey, recall, remember,
+} from './entryMemory';
+import useStableCallback from './useStableCallback';
 const WikiAssistant = lazyWithRetry(() => import('./WikiAssistant'));
 /* «Новости» — лениво по той же причине, что редактор статей: у формы объявления
    свой TipTap, а это ~128 КБ gzip, и платить за них должен тот, кто открыл
@@ -167,6 +173,36 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
     </div>
 );
 
+/** Вкладка, на которую ведёт переход из колокола; '' — просьбы нет. */
+const bellTabOf = (focus) => {
+    if (!focus?.id) return '';
+    return focus.kind === 'assistant' ? 'assistant' : 'questions';
+};
+
+/* Место ряда вкладок на время первого ответа /ping — та же подложка, пустая.
+ *
+ * Разметка НАСТОЯЩЕГО ряда: те же классы у подложки и та же кнопка внутри,
+ * только невидимая и выключенная. Рост ряда поэтому считают те же правила —
+ * и утилиты на компьютере, и телефонный слой (wiki-mobile.css отбирает ряд по
+ * классам подложки, а высоту задаёт её кнопкам): когда вкладки встанут, ниже
+ * них ничего не сдвинется. Подписей и полосок нет намеренно: каких вкладок и
+ * сколько, до ответа неизвестно, а назвать «Помощник» тому, у кого он выключен,
+ * — ровно та ошибка, вместо которой здесь стоит пустой ряд. Читалке о загрузке
+ * говорит заготовка витрины, поэтому aria-hidden.
+ */
+const TabsSkeleton = () => (
+    <div aria-hidden="true" className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
+        <button
+            type="button"
+            disabled
+            tabIndex={-1}
+            className="invisible flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-medium"
+        >
+            &#8203;
+        </button>
+    </div>
+);
+
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed,
                                    bellFocus = null, onBellFocusConsumed,
@@ -177,11 +213,32 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         [withAccessTokenHeader],
     );
     const base = `${apiBaseUrl}/api/wiki`;
+    const userId = user?.id || null;
+    const pingKey = memoryKey(base, userId, 'ping');
 
-    const [state, setState] = useState(null);
+    /* Ответ /ping. На первом входе его нет, на следующих — стоит прошлый
+       (entryMemory.js): раздел размонтируется при уходе, и без памяти каждый
+       вход начинался бы с заготовки, хотя ответ известен заранее. Свежий /ping
+       всё равно уходит ниже и поправит экран, если что-то изменилось. */
+    const [state, setState] = useState(() => recall(pingKey));
+    /* Есть ли ответ сейчас — для обработчика сбоя: он выполняется позже
+       рендера, в котором создан, и своё `state` видел бы устаревшим. */
+    const answered = useRef(!!state);
+    /* showToast у портала — новая функция на каждый его рендер: попав в
+       зависимости loadPing, она перезапрашивала бы раздел по кругу. */
+    const toast = useStableCallback(showToast);
     const [structure, setStructure] = useState(null);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
+    /* Ответил ли /ping хоть раз — согласием или отказом. До этого шапка держит
+       место под кнопки невидимым; после — больше не прячет их, даже когда
+       запрос повторяют («Попробовать снова»): кнопки, которые человек уже
+       видел, исчезать на время запроса не должны. */
+    const [settled, setSettled] = useState(false);
+    /* «Обновить» нажал сам человек. Отдельно от loading: тот поднят и при
+       тихой сверке на входе, а крутить значок на кнопке, которую никто не
+       нажимал, — движение на экране ни о чём. */
+    const [refreshing, setRefreshing] = useState(false);
     const [structureLoading, setStructureLoading] = useState(true);
     const [tab, setTab] = useState(WIKI_DEFAULT_TAB);
     /* ВКЛАДКА, НАЗВАННАЯ АДРЕСОМ (?view=wiki&tab=offices) — просьба, а не
@@ -209,6 +266,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        вопроса, оператору — разговор с ответом. Одноразовые, как assistantAsk. */
     const [questionFocus, setQuestionFocus] = useState(null);   // {id, nonce}
     const [assistantChat, setAssistantChat] = useState(null);   // {chatId, nonce}
+    /* Какие просьбы «открой вкладку» раздел уже исполнил: колокол и шарик
+       помощника. По ним видно, что с витрины сейчас уйдут (leavingLibrary). */
+    const [bellDone, setBellDone] = useState(null);
+    const [directoryDone, setDirectoryDone] = useState(null);
     const [newsCompose, setNewsCompose] = useState(null);       // {questionId, draft, nonce}
     /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
        двум причинам: счётчики на главной берут из них свои числа (иначе «29
@@ -283,6 +344,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        пишет инлайновые стили и под него не подпадает — нужен свой флаг.
        Тот же приём, что в поиске раздела (WikiSearch). */
     const reduceMotion = useReducedMotion();
+
+    /* РАЗДЕЛ «ОТКРЫЛСЯ», когда есть ответ /ping. До него неизвестны ни права, ни
+       пространство — а из них считается всё, что стоит на экране: набор
+       вкладок, кнопки шапки, чьи статьи и парки показывать. Раньше это место
+       заполнялось умолчаниями («чего нет — то включено», прав нет ни одного):
+       человек полсекунды видел семь вкладок вместо своих одиннадцати и витрину
+       без пространства, а на ответе всё перерисовывалось — вкладки менялись,
+       экран прыгал на высоту заглушки, оглавление и подборки запрашивались
+       второй раз (жалоба владельца 13.10.2026: «сначала выходят некоторые
+       разделы, пролаг и разделы, которые имеются»). Умолчание — не ответ:
+       пока ответа нет, на его месте стоит заготовка. */
+    const ready = !!state;
 
     /* Способности считаем ДО загрузчиков: loadCatalog держит isEditor в
        списке зависимостей, а const в теле компонента до своей строки лежит во
@@ -378,10 +451,37 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const loadPing = useCallback(() => {
         setLoading(true);
         return axios.get(`${base}/ping`, { headers })
-            .then((r) => { setState(r.data); setError(''); })
-            .catch((e) => { setState(null); setError(errText(e, 'Не удалось связаться с разделом')); })
-            .finally(() => setLoading(false));
-    }, [base, headers]);
+            .then((r) => {
+                remember(pingKey, r.data);
+                answered.current = true;
+                /* Прежние объекты там, где ответ не изменился: сверка на входе
+                   и «Обновить» тогда не трогают ни вкладки, ни каталог — им не
+                   с чего перерисовываться и перезапрашиваться. */
+                setState((prev) => keepUnchanged(prev, r.data));
+                setError('');
+                return true;
+            })
+            .catch((e) => {
+                /* СБОЙ при уже известном ответе (сеть моргнула, сервер
+                   перезапускается после выкладки) раздел не трогает: права от
+                   этого не изменились. Раньше любой неудачный /ping стирал
+                   ответ — и человека, правившего «Структуру» или читавшего
+                   «Журнал», выбрасывало на главную с вкладками «по умолчанию».
+                   Об ошибке говорит тост, а не карточка «Раздел недоступен»:
+                   раздел доступен, не дошло одно обновление. */
+                if (answered.current && !isRefusal(e)) {
+                    toast('Не удалось обновить вики: сервер не ответил. На экране прежние данные.', 'error');
+                    return false;
+                }
+                // Отказ — и прошлому ответу верить нельзя: доступ могли снять.
+                remember(pingKey, null);
+                answered.current = false;
+                setState(null);
+                setError(errText(e, 'Не удалось связаться с разделом'));
+                return false;
+            })
+            .finally(() => { setLoading(false); setSettled(true); });
+    }, [base, headers, pingKey, toast]);
 
     const loadStructure = useCallback(() => {
         setStructureLoading(true);
@@ -394,7 +494,16 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     /* Каталог грузим только редактору: и вкладка, и счётчики на главной
        принадлежат ему одному, а сервер читателю всё равно ответит 403. */
     const loadCatalog = useCallback(() => {
-        if (!isEditor) { setCatalog(null); setCatalogLoading(false); return Promise.resolve(); }
+        if (!isEditor) {
+            setCatalog(null);
+            /* «Каталог не нужен» — вывод из ответа /ping, а не из его отсутствия.
+               До ответа редактором не выглядит никто, и снятый здесь флаг
+               загрузки давал редактору кадр «каталог уже не грузится, но его и
+               нет»: полки главной вставали без плиток-счётчиков, тут же
+               сменялись заглушкой и вставали снова, уже с плитками. */
+            if (ready) setCatalogLoading(false);
+            return Promise.resolve();
+        }
         setCatalogLoading(true);
         /* Просим ФАКТИЧЕСКИ показанное пространство, а не сохранённое: до
            первого ответа ping сохранённого может не быть вовсе, и каталог
@@ -404,7 +513,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             .then((r) => setCatalog(r.data))
             .catch(() => setCatalog(null))
             .finally(() => setCatalogLoading(false));
-    }, [base, headers, isEditor, activeSpace]);
+    }, [base, headers, isEditor, activeSpace, ready]);
 
     useEffect(() => { loadPing(); loadStructure(); }, [loadPing, loadStructure]);
 
@@ -429,7 +538,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     /* Вкладку показывают ДВА независимых условия: способности человека и
        тумблеры пространства. Их нельзя складывать в одно — они отвечают на
        разные вопросы («вправе ли он» и «есть ли это здесь вообще»), и,
-       слитые, однажды прочитаются как «нет права» там, где просто выключено. */
+       слитые, однажды прочитаются как «нет права» там, где просто выключено.
+
+       До ответа /ping набор ПУСТ (ready), а не «какой получится по
+       умолчанию»: оба условия приезжают этим ответом. Всё, что сверяется с
+       набором — вкладка из адреса, переход из колокола, «активной вкладки
+       больше нет», — тем самым ждёт настоящих прав, а не их отсутствия. */
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Главная', icon: Home, show: true },
         // Показан всем: периметр считает сервер, и гейт по способности здесь
@@ -487,8 +601,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
            сервере (access.may_read_audit). */
         { key: 'audit', label: 'Журнал', icon: ScrollText,
           show: features.audit && canReadAudit },
-    ].filter((t) => t.show)),
-    [canManageStructure, canManageAccess, canGrantAccess, canGrantGuest,
+    ].filter((t) => ready && t.show)),
+    [ready, canManageStructure, canManageAccess, canGrantAccess, canGrantGuest,
      canReadAudit, canPublishNews, isEditor, features]);
 
     /* Поиск предлагает спросить помощника ровно тогда, когда вкладка помощника
@@ -593,10 +707,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     // Доступная человеку половина может не совпасть с выбранной — например,
     // права сузились между заходами.
     useEffect(() => {
-        if (catalogModes.length && !catalogModes.includes(catalogMode)) {
+        /* Только при ответе /ping: после отказа прав нет ни одного, набор
+           половин сводится к тому, что знает дерево, — и человек, вернувшись
+           после «Попробовать снова», оказывался бы в «Структуре» вместо
+           каталога, из которого не уходил. */
+        if (ready && catalogModes.length && !catalogModes.includes(catalogMode)) {
             setCatalogMode(catalogModes[0]);
         }
-    }, [catalogModes, catalogMode]);
+    }, [ready, catalogModes, catalogMode]);
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {
@@ -609,8 +727,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        Просьбу гасим и в случае «вкладки нет»: ответ /ping уже получен, набор
        окончательный, а непогашенная просьба заперла бы адресную строку —
        синхронизация ниже её ждёт. Человек в этом случае остаётся на главной:
-       ссылку прислали на то, чего ему не показывают. */
-    useEffect(() => {
+       ссылку прислали на то, чего ему не показывают.
+
+       useLayoutEffect, как и у перехода из колокола ниже: смена вкладки из
+       него применяется ДО отрисовки, и кадр «открыта главная», с которого тут
+       же уходят, на экран не попадает вовсе. */
+    useLayoutEffect(() => {
         if (!requestedTab) return;
         if (tabs.some((t) => t.key === requestedTab)) {
             setTab(requestedTab);
@@ -640,26 +762,46 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        когда она уже есть в наборе: права приезжают с ping ПОЗЖЕ первого
        рендера, и раньше времени эффект выше вернул бы человека на главную.
        До этого просьба просто ждёт, а гасится — когда выполнена. */
-    useEffect(() => {
-        if (!bellFocus?.id) return;
-        const target = bellFocus.kind === 'assistant' ? 'assistant' : 'questions';
-        if (!tabs.some((t) => t.key === target)) return;
+    useLayoutEffect(() => {
+        const target = bellTabOf(bellFocus);
+        if (!target) return;
+        if (!tabs.some((t) => t.key === target)) {
+            /* Набор окончательный (свежий ответ получен), а вкладки в нём нет:
+               просьбу гасим, как и вкладку из адреса. Непогашенная, она
+               дождалась бы своего набора — и перебросила бы человека в чат
+               помощника в тот момент, когда он просто сменил пространство в шапке. */
+            if (ready && !loading) onBellFocusConsumed?.();
+            return;
+        }
+        setBellDone(bellFocus);
         setTab(target);
         if (target === 'assistant') setAssistantChat({ chatId: bellFocus.id, nonce: bellFocus.nonce });
         else setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
         onBellFocusConsumed?.();
-    }, [bellFocus, tabs, onBellFocusConsumed]);
+    }, [bellFocus, tabs, ready, loading, onBellFocusConsumed]);
 
     /* Источник-справочник из шарика помощника (App.onOpenWikiTarget): вкладка
-       «Офисы»/«Города» на записи. Ждём ответа /ping, а не появления вкладки в
-       наборе: до него effectiveFeatures(null) включает все вкладки, а
+       «Офисы»/«Города» на записи. Ждём ОТВЕТА /ping — свежего или запомненного
+       с прошлого входа, — а не появления вкладки в наборе: без ответа
        пространство ещё не выбрано — вкладка ушла бы за данными без него, и у
        кого пространств два, сервер ответил бы «укажите пространство», а
        просьба сгорела бы на пустом списке. Вкладку проверяем у пространства
        ЗАПИСИ (шарик живёт и над соседним), а недоступное пространство просьбу
-       просто гасит: открыть ту же вкладку в чужом значило бы показать не то. */
+       просто гасит: открыть ту же вкладку в чужом значило бы показать не то.
+
+       Свежего ответа при запомненном не ждём: раньше на это время человеку
+       показывали главную — полсекунды, со всеми её запросами, — и только
+       потом открывали «Офисы», за которыми он и шёл.
+
+       Обычный useEffect, в отличие от двух переходов выше: «Офисы», открытые
+       с просьбой показать запись, смонтированные синхронным рендером, уходят
+       за списком дважды (их таймер загрузки успевает сработать раньше
+       перерисовки с этой просьбой) — проверено на стенде. Кадр до перехода
+       витрина при этом не рисует вовсе (leaving). */
     useEffect(() => {
-        if (!directoryFocus?.tab || loading) return;
+        if (!directoryFocus?.tab || directoryDone === directoryFocus) return;
+        if (loading && !state) return;
+        setDirectoryDone(directoryFocus);
         // Классификатор — статья, а не вкладка: пространство ей не нужно.
         if (directoryFocus.tab === CLASSIFIER_TAB) {
             if (state) openClassifierSource(directoryFocus);
@@ -673,8 +815,26 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             : tabs.some((t) => t.key === directoryFocus.tab);
         if (state && allowed) openDirectory(directoryFocus);
         onDirectoryFocusConsumed?.();
-    }, [directoryFocus, tabs, spaces, state, loading, openDirectory, openClassifierSource,
-        onDirectoryFocusConsumed]);
+    }, [directoryFocus, directoryDone, tabs, spaces, state, loading, openDirectory,
+        openClassifierSource, onDirectoryFocusConsumed]);
+
+    /* С ВИТРИНЫ ВОТ-ВОТ УЙДУТ: вкладка из адреса, переход из колокола или
+       справочник из шарика помощника ещё не исполнены, но эффекты выше сделают
+       это этим же коммитом (или с ответом /ping). Витрина на это время не
+       готова — иначе она успевала сходить за оглавлением, подборками и
+       парками ради экрана, который сейчас сменится.
+
+       Исполненное помнит сам раздел (bellDone, directoryDone), а не «родитель
+       погасил просьбу»: просьба, которую почему-либо не сняли, не должна
+       навсегда оставить витрину заготовкой. Колокол считается, только если его
+       вкладка в наборе есть: без неё просьба ждёт, и витрина работает.
+       Классификатор из шарика — тоже уход: статья откроется на месте главной,
+       и рисовать главную на кадр перед ней незачем. */
+    const bellTab = bellTabOf(bellFocus);
+    const leavingLibrary = !!requestedTab
+        // До ответа набора ещё нет: уйдут ли — неизвестно, и за данными не спешим.
+        || (!!bellTab && bellDone !== bellFocus && (!ready || tabs.some((t) => t.key === bellTab)))
+        || (!!directoryFocus?.tab && directoryDone !== directoryFocus);
 
     /* «Опубликовать как новость» из «Вопросов» живёт, пока открыта вкладка
        «Новости»: ушли с неё иначе — просьба снимается, и следующий заход в
@@ -755,8 +915,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     }, [initialArticleSlug]);
 
     const refresh = () => {
+        setRefreshing(true);
         Promise.all([loadPing(), loadStructure(), loadCatalog()])
-            .then(() => showToast?.('Обновлено', 'success'));
+            // Об отказе /ping уже сказано — карточкой или тостом; зелёное
+            // «Обновлено» рядом с ними было бы неправдой.
+            .then(([pinged]) => { if (pinged) showToast?.('Обновлено', 'success'); })
+            .finally(() => setRefreshing(false));
     };
 
     /* Возврат из статьи на вкладку, с которой её открыли.
@@ -783,6 +947,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         setHomeTick((n) => n + 1);
         getScrollContainer(rootRef.current)?.scrollTo({ top: 0, behavior: 'smooth' });
     };
+
+    /* ЧЬЁ СОДЕРЖИМОЕ НА ЭКРАНЕ. Вкладка без ответа /ping жить не может: ей
+       нужны пространство и права. Без ответа раздел бывает в двух случаях —
+       первый вход (там открыта главная, а она ждёт под заготовкой) и отказ
+       сервера: доступ сняли, раздел не выдан отделу. При отказе содержимое
+       вкладки убираем целиком — раньше оно оставалось под карточкой «Раздел
+       недоступен», перезапрашивалось без пространства и показывало вторую
+       ошибку или разделы всех пространств разом. Сама вкладка при этом помнится:
+       «Попробовать снова» вернёт человека туда, где он был.
+       Главная в это правило не входит намеренно: в ней живут открытая статья
+       и редактор с несохранённым текстом, а пустой она становится сама. */
+    const bodyTab = ready ? tab : '';
 
     return (
         <div
@@ -847,13 +1023,26 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         />
                     )}
 
-                    <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+                    {/* Пока ответа /ping нет, группа держит своё место, но не видна:
+                        редактору в неё приедут ещё две кнопки, и поиск с
+                        «Обновить», показанные раньше них, на глазах уехали бы
+                        влево. К тому же искать до ответа пришлось бы без
+                        пространства — по всем сразу. Только до ПЕРВОГО
+                        ответа: при отказе группа видна («Обновить» там —
+                        способ выбраться) и на повторный запрос уже не гаснет. */}
+                    <div className={`flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto ${
+                        ready || settled ? '' : 'invisible'}`}
+                    >
                         {/* Поиск живёт прямо в шапке: поле растёт при фокусе, выдача
                             выпадает под ним. Так он доступен с любой вкладки раздела. */}
                         <WikiSearch
                             base={base}
                             headers={headers}
                             spaceId={activeSpace?.id || null}
+                            /* Пока группа не видна, ⌘K ничего не открывает:
+                               фокус в невидимое поле не встаёт, а поиск
+                               оставался бы «раскрытым» без курсора. */
+                            asleep={!ready && !settled}
                             /* Поиск открывается с ЛЮБОЙ вкладки, поэтому дверь
                                возврата — та вкладка, где человек сейчас стоит.
                                С главной двери нет: возвращаться и так в неё. */
@@ -874,8 +1063,23 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             onOpenCity={canOpenCities ? openDirectory : null}
                         />
 
-                        <button type="button" onClick={refresh} className={iosBtnSecondary}>
-                            <RefreshCw size={15} /> Обновить
+                        <button
+                            type="button"
+                            onClick={refresh}
+                            disabled={refreshing}
+                            aria-busy={refreshing}
+                            className={iosBtnSecondary}
+                        >
+                            {/* Значок крутится, пока идёт обновление: раньше на
+                                это время над вкладкой вставала заглушка и
+                                сдвигала всё содержимое вниз и обратно. У кого
+                                движение в системе уменьшено, знак работы —
+                                приглушённая кнопка: она же не даёт нажать
+                                второй раз, пока идёт первый. */}
+                            <RefreshCw
+                                size={15}
+                                className={refreshing ? 'animate-spin motion-reduce:animate-none' : ''}
+                            /> Обновить
                         </button>
 
                         {/* Действие вкладки со статьями — в шапке рядом с «Обновить»,
@@ -934,6 +1138,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     той вкладке, куда он, может быть, и не зайдёт. */}
                 <WikiGuestBanner grants={guestGrants} />
 
+                {!ready && loading && <TabsSkeleton />}
+
                 {tabs.length > 1 && (
                     <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
                         {tabs.map(({ key, label, icon: Icon }) => (
@@ -953,7 +1159,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </div>
                 )}
 
-                {loading && (
+                {/* Нейтральная заглушка — когда ответа /ping ещё нет, а на экране
+                    будет НЕ главная: вход по ссылке на вкладку, переход из
+                    колокола или шарика, повтор запроса после отказа. Заготовку
+                    главной (в её рост и её формы) рисует сама витрина; при
+                    «Обновить» крутится значок кнопки — раньше заглушка вставала
+                    на каждый запрос /ping и сдвигала содержимое на 140 px вниз
+                    и обратно. */}
+                {!ready && loading && (tab !== 'library' || leavingLibrary) && (
                     <div className={`${iosCard} h-[120px]`}>
                         <div className="sk-shimmer h-full w-full rounded-2xl" />
                     </div>
@@ -972,7 +1185,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </div>
                 )}
 
-                {!loading && !error && state && tab === 'overview' && (
+                {/* Без оглядки на loading: при «Обновить» ответ уже на экране, и
+                    убирать его на время запроса значило бы мигнуть пустой
+                    вкладкой — заглушки на это время больше нет. */}
+                {!error && state && tab === 'overview' && (
                     <>
                         {!state.schema_ready && (
                             <div className={`${iosCard} flex items-start gap-3 p-4`}>
@@ -1091,7 +1307,34 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         structure={scopedStructure}
                         catalog={catalog}
                         features={features}
-                        spaceId={activeSpace?.id || null}
+                        /* До ответа /ping — пространство, выбранное в прошлый раз
+                           (или названное ссылкой): с ним витрина уходит за
+                           данными одновременно с /ping, а не после него. Ответ
+                           его подтвердит или назовёт другое. */
+                        spaceId={activeSpace?.id || (ready ? null : spaceId) || null}
+                        /* Права и пространство известны (ответ /ping): до этого
+                           витрина стоит заготовкой — рисовать ей нечего. */
+                        ready={ready}
+                        /* С неё вот-вот уйдут (перезагрузка страницы на
+                           «Статьях», переход из колокола или шарика): ни
+                           показываться, ни ходить за своими данными перед
+                           самым уходом ей незачем. */
+                        leaving={leavingLibrary}
+                        /* Отказ /ping показывает карточка выше: заготовка
+                           «загружаем» под ней обещала бы то, чего не будет. */
+                        unavailable={!ready && !loading}
+                        /* Оглавление собирается из двух ответов — дерева и
+                           списка статей. Пришёл один список — все статьи
+                           встали бы в «Без раздела», а на дереве разъехались
+                           бы по разделам: та же смена «одних разделов другими».
+                           Только ПЕРВАЯ загрузка: при «Обновить» дерево уже
+                           на экране, и гасить его незачем. */
+                        structurePending={structureLoading && !structure}
+                        /* То же у счётчиков редактора: плитки вставали над уже
+                           показанными полками и сдвигали их вниз. */
+                        catalogPending={isEditor && catalogLoading && !catalog}
+                        // Учётка — ключ памяти входа (entryMemory.js).
+                        userId={userId}
                         /* В гостевом пространстве человек — читатель, какая
                            бы должность у него ни была: правил на запись ему
                            там не выписывали, и «Режим редактора» в шапке
@@ -1138,7 +1381,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 {/* Помощник грузится лениво: у него свой чат-каркас и композер,
                     а открывают вкладку далеко не всегда. Тот же приём, что у
                     редактора статей и классификатора. */}
-                {tab === 'assistant' && (
+                {bodyTab === 'assistant' && (
                     <Suspense fallback={(
                         <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
                             <Loader2 size={18} className="animate-spin" />
@@ -1174,7 +1417,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
-                {tab === 'questions' && (
+                {bodyTab === 'questions' && (
                     <Suspense fallback={(
                         <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
                             <Loader2 size={18} className="animate-spin" />
@@ -1203,7 +1446,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
-                {tab === 'catalog' && (
+                {bodyTab === 'catalog' && (
                     <div className="space-y-3">
                         {/* Оба переключателя в одной строке: половина вкладки
                             слева, корзина справа. Друг под другом два одинаковых
@@ -1343,7 +1586,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                        в «Таксопарках» предлагается «Тез КЦ». */
                                     spaceId={activeSpace?.id || null}
                                     structure={scopedStructure}
-                                    loading={structureLoading}
+                                    /* Только первая загрузка: при «Обновить» и
+                                       после каждой правки дерево уже на экране,
+                                       и гасить его на время запроса значило
+                                       сжать и вернуть весь экран. */
+                                    loading={structureLoading && !structure}
                                     canManageAccess={canManageAccess}
                                     canManageStructure={canManageStructure}
                                     /* Правка структуры меняет и каталог: раздел
@@ -1361,7 +1608,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     и телефон офиса Таксопарков не должны доезжать до Тез. Поэтому
                     spaceId — не уточнение выборки, а сам доступ, и сервер без
                     него отвечает 400 (wiki/routes_structure.request_space). */}
-                {tab === 'news' && (
+                {bodyTab === 'news' && (
                     <Suspense fallback={(
                         <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
                             <Loader2 size={18} className="animate-spin" />
@@ -1390,19 +1637,19 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
-                {tab === 'parks' && (
+                {bodyTab === 'parks' && (
                     <WikiParks base={base} headers={headers} showToast={showToast}
                                spaceId={activeSpace?.id || null} />
                 )}
 
-                {tab === 'offices' && (
+                {bodyTab === 'offices' && (
                     <WikiOffices base={base} headers={headers} showToast={showToast}
                                  spaceId={activeSpace?.id || null}
                                  focusRequest={officeFocus}
                                  onFocusConsumed={consumeOfficeFocus} />
                 )}
 
-                {tab === 'cities' && (
+                {bodyTab === 'cities' && (
                     <Suspense fallback={(
                         <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
                             <Loader2 size={18} className="animate-spin" />
@@ -1420,7 +1667,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
-                {tab === 'analytics' && (
+                {bodyTab === 'analytics' && (
                     <WikiAnalytics
                         base={base}
                         headers={headers}
@@ -1439,7 +1686,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     />
                 )}
 
-                {tab === 'audit' && (
+                {bodyTab === 'audit' && (
                     <WikiAudit
                         base={base}
                         headers={headers}
