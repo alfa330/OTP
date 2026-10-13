@@ -4,28 +4,90 @@
 Зависимости приходят аргументами фабрики, а не импортом `bot_schedule2`: тот
 сам подключает этот модуль (как op_funnel/routes.py, oktell_guard/routes.py).
 
-Ручки телефона (bearer оператора, как /api/operator/sip_settings):
+Ручки телефона (bearer оператора, как /api/operator/sip_settings). Телефон с 3.22.34 в каждом
+запросе называет версию заголовком X-ICore-Phone-Version; запрос без разборчивой версии —
+выпущенный 3.22.33 без защиты автосброса по речи: ему ring_timeout_sec всегда 0, а на событие
+ring_timeout ответ — сразу hangup: false, без базы и без Binotel (service.phone_guards_speech).
+Решает наличие заголовка, а не номер версии — любой разборчивый, хоть «3.22.33» у сборки до
+выпуска, получает настройку отдела:
     GET  /api/operator/dial_list                             текущая порция и состояние (ring_timeout_sec —
-                                                             через сколько секунд гудков телефон кладёт плечо)
+                                                             через сколько секунд гудков телефон кладёт плечо,
+                                                             active_attempt.lead_id — с кем идёт разговор;
+                                                             запросу без заголовка версии active_attempt —
+                                                             и с кончившимся плечом (ended), как раньше;
+                                                             speech_guard — не класть плечо, пока на линии
+                                                             речь; announcement_ms — сколько мс должна
+                                                             звучать речь сообщения сети, чтобы телефон его
+                                                             распознал, 0 — по речи не распознавать;
+                                                             announcement_sit — класть плечо по тону SIT;
+                                                             announcement_mode — auto|suggest|off: класть по
+                                                             распознанной речи, подсказать оператору или
+                                                             ничего; у строк пачки и у
+                                                             active_attempt — last_comment, last_comment_label,
+                                                             last_comment_outcome: последний комментарий
+                                                             этого оператора по водителю; last_attempt.
+                                                             auto_hangup — почему плечо положил сам телефон)
     GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
                                                              (outcomes[].subtypes — счётчики по типам итога,
                                                              conversion — конверсия за базу месяца)
-    GET  /api/operator/dial_list/worked                      вкладки итогов: отработанные за месяц
+    GET  /api/operator/dial_list/worked[?q=]                 вкладки итогов: отработанные за месяц
                                                              (items[].subtype_name — тип итога,
-                                                             items[].can_recall — можно «Перезвонить»)
+                                                             items[].can_call_again / call_again_block — можно
+                                                             ли «Позвонить ещё раз» и почему нет, signed —
+                                                             подписал, can_recall — «Перезвонить» телефонов до
+                                                             3.22.33 включительно; q — поиск по ФИО: count
+                                                             вкладок — найденные, в ответе q — нормализованный;
+                                                             items[].last_comment, last_comment_label,
+                                                             last_comment_outcome — как в состоянии, comment —
+                                                             как был; items[].auto_hangup — «announcement»:
+                                                             сообщение сети, подпись «Абонент недоступен»)
     GET  /api/operator/dial_list/script                      скрипт разговора отдела (текст + вопросы)
-    GET  /api/operator/dial_list/attempts/<attempt_id>/live  набираем / разговор / финал по Binotel
+    GET  /api/operator/dial_list/attempts/<attempt_id>/live  набираем / разговор / финал по Binotel — из общего
+                                                             опроса компании (один запрос call-details на всех
+                                                             не чаще раза в 3 с); ANSWER, пока плечо идёт, —
+                                                             talking, а не финал (13.10.2026)
     POST /api/operator/dial_list/next                        выдать следующую порцию (подписавших сервер
-                                                             перед выдачей отсеивает сам)
-    POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
-    POST /api/operator/dial_list/leads/<lead_id>/recall      «Перезвонить» раньше срока своему водителю с
-                                                             итогом «Перезвонить» → assignment_id + состояние
+                                                             перед выдачей отсеивает сам); строка, исход которой
+                                                             ещё едет от АТС (плечо кончилось), «Ещё» не держит
+                                                             и переезжает в новую выдачу
+    POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке (attempt.lead_id — с кем;
+                                                             attempt.last_comment, last_comment_label,
+                                                             last_comment_outcome — как в состоянии). Держит
+                                                             только звонок, плечо которого идёт; кончившееся
+                                                             (ended) — нет, но тому же водителю — после исхода.
+                                                             Отказ АТС — только кодом, без текста Binotel
+    POST /api/operator/dial_list/leads/<lead_id>/recall      «Позвонить ещё раз» своему водителю (последним ему
+                                                             звонил этот оператор) → assignment_id + состояние
+    POST /api/operator/dial_list/leads/<lead_id>/sign_check  подписал ли водитель — Sapar сейчас, и во время
+                                                             звонка: только статус и время проверки (sign),
+                                                             row_closed, text; без ИИН, номера и документов
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
                                                              {event: ringing|answered|ended|no_leg|operator_hangup|
                                                               ring_timeout, by_operator?, leg_sec?, ring_timeout?,
-                                                              ring_sec?} → в ответе outcome_required /
-                                                             cancelled — нужен ли итог после разговора; на
-                                                             ring_timeout — ещё hangup (класть ли плечо) и talking
+                                                              ring_sec?, auto_hangup?, talk_detected?,
+                                                              announcement_suspected?, announcement_by?} → в ответе
+                                                             outcome_required / cancelled — нужен ли итог после
+                                                             разговора; на ring_timeout — ещё hangup (класть ли
+                                                             плечо; данных Binotel нет или «набирает» старше 3 с —
+                                                             false), talking, final (с hangup — Binotel
+                                                             подтвердил «не дозвонились», попытка закрыта) и
+                                                             data_age_ms (возраст данных Binotel, если решали по
+                                                             ним). У ended с 3.22.34: auto_hangup —
+                                                             ring_timeout|announcement, почему плечо положил сам
+                                                             телефон (сообщение сети — всегда недозвон, итог не
+                                                             нужен); talk_detected — был ли разговор: true —
+                                                             итог нужен сразу, и после отбоя оператора, — кроме
+                                                             финального «не дозвонились» Binotel (занято, не
+                                                             ответил, отмена, канал недоступен, перегрузка);
+                                                             false — итог нужен, только если ответ водителя
+                                                             подтвердит Binotel (до исхода outcome_required:
+                                                             null); «ключа нет» — как раньше. Анализ звука не
+                                                             работал — ключ не слать. announcement_suspected —
+                                                             распознавание по речи сработало хоть раз (true/
+                                                             false), announcement_by — auto|sit|operator, кто
+                                                             решил, что это сообщение сети (с auto_hangup:
+                                                             announcement; operator — отбой по подсказке, тоже
+                                                             недозвон, не отмена): для замера, на счёт не влияют
     POST /api/operator/dial_list/attempts/<attempt_id>/outcome
                                                              {outcome_id, subtype_id?, comment} — итог разговора
                                                              (обязателен перед следующим звонком). subtype_id —
@@ -49,6 +111,9 @@
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
+    GET     /api/dial_list/departments/<id>/announcement_stats  точность распознавания сообщения сети по речи
+                                                             за ?days= (14): подозрительные плечи против
+                                                             финалов Binotel — безопасен ли режим auto
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка; у итога subtypes —
                                                              его типы (в PUT ключа нет — типы не трогаются)
     GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
@@ -60,16 +125,27 @@
                                                              date_from/date_to — дни звонков, period,
                                                              sign — состояние подписания документов,
                                                              sort, limit, offset)
-    GET     /api/dial_list/leads/<lead_id>                   карточка: попытки, действия, загрузки, документы
+    GET     /api/dial_list/leads/<lead_id>                   карточка: попытки (attempts[].auto_hangup — плечо
+                                                             положил сам телефон: ring_timeout — на гудках,
+                                                             announcement — на сообщении сети; это недозвон),
+                                                             действия, загрузки, документы
     POST    /api/dial_list/leads/<lead_id>/sign_check        проверить подписание в Sapar сейчас
     POST    /api/dial_list/leads/<lead_id>/requeue           вернуть в список  {note} (подписавшего — нельзя)
     POST    /api/dial_list/leads/<lead_id>/exclude           исключить         {note}
     PUT     /api/dial_list/leads/<lead_id>/note              заметка руководителя
     GET     /api/dial_list/attempts/<attempt_id>/recording   ссылка на запись разговора (Binotel)
+    POST    /api/dial_list/departments/<id>/repair/cut-calls починка 12.10.2026: водители, чьи разговоры
+                                                             оборвал автосброс, {since: ISO, apply: false|true,
+                                                             target: operator|pool} — список либо возврат в
+                                                             очередь того же оператора (нет его в отделе —
+                                                             в общий список); без номеров и ИИН
     GET     /api/dial_list/overview?date=YYYY-MM-DD[&department_id=]
 
-Binotel (без авторизации, токен в адресе либо IP сервера Binotel):
-    GET/POST /api/dial_list/webhook/binotel?token=…          «API Call Completed»
+Binotel (без авторизации, токен в адресе И, по умолчанию, IP сервера Binotel — адрес, который
+дописал справа в X-Forwarded-For прокси Render; отказ — WARNING в журнале сервера с адресом,
+всей цепочкой и причиной, без токена):
+    GET/POST /api/dial_list/webhook/binotel?token=…          «API Call Completed»: форма callDetails[…]
+                                                             (как шлёт Binotel) или JSON {callDetails: {…}}
 
 Номер телефона водителя ни одна ручка оператора не отдаёт — это весь смысл
 раздела; проверяется тестом.
@@ -81,7 +157,8 @@ from datetime import date, datetime
 
 from flask import Blueprint, jsonify, request
 
-from .service import SUBTYPE_NOT_SENT, DialListError, DialListService, parse_period
+from .service import (PHONE_VERSION_HEADER, SUBTYPE_NOT_SENT, DialListError, DialListService, parse_period,
+                      webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +224,12 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         return svc.can_seat_anyone(is_super, headed_department_ids(requester_id),
                                    supervisor_department_code=_supervisor_department_code(requester_id, role))
 
+    def _phone_version():
+        """Версия телефона из заголовка запроса (X-ICore-Phone-Version) — как пришла; None —
+        заголовка нет: это выпущенный 3.22.33. Разбирает и решает сервис (phone_guards_speech):
+        автосброс на гудках получает только телефон с защитой по речи."""
+        return request.headers.get(PHONE_VERSION_HEADER)
+
     def _error(exc):
         return jsonify({"error": str(exc)}), exc.status
 
@@ -172,7 +255,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_state():
         user_id, _ = _operator()
-        return jsonify({"status": "success", **svc.get_state(user_id)}), 200
+        return jsonify({"status": "success", **svc.get_state(user_id, phone_version=_phone_version())}), 200
 
     @bp.route('/api/operator/dial_list/progress', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -186,9 +269,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_worked():
-        """Вкладки итогов на телефоне: отработанные за месяц водители по итогам оператора."""
+        """Вкладки итогов на телефоне: отработанные за месяц водители по итогам оператора;
+        ?q= — поиск по ФИО во всех вкладках сразу."""
         user_id, _ = _operator()
-        return jsonify({"status": "success", **svc.operator_worked(user_id)}), 200
+        return jsonify({"status": "success", **svc.operator_worked(user_id, q=request.args.get('q', ''))}), 200
 
     @bp.route('/api/operator/dial_list/script', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -210,8 +294,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_next():
+        # Ответ — то же состояние, что у GET: версия телефона нужна и здесь (ring_timeout_sec).
         user_id, _ = _operator()
-        return jsonify({"status": "success", **svc.issue_next_portion(user_id)}), 200
+        return jsonify({"status": "success",
+                        **svc.issue_next_portion(user_id, phone_version=_phone_version())}), 200
 
     @bp.route('/api/operator/dial_list/items/<assignment_id>/call', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -224,10 +310,21 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_recall(lead_id):
-        """«Перезвонить» раньше срока: свой водитель с итогом «Перезвонить» снова в списке
-        оператора; в ответе — состояние и assignment_id строки, по которой телефон звонит."""
+        """«Позвонить ещё раз»: свой водитель (последним ему звонил этот оператор) снова в
+        списке оператора; в ответе — состояние и assignment_id строки, по которой телефон звонит."""
         user_id, _ = _operator()
-        return jsonify({"status": "success", **svc.recall_lead(user_id, lead_id)}), 200
+        return jsonify({"status": "success",
+                        **svc.recall_lead(user_id, lead_id, phone_version=_phone_version())}), 200
+
+    @bp.route('/api/operator/dial_list/leads/<lead_id>/sign_check', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_sign_check(lead_id):
+        """«Проверить на подписание» — и посреди разговора: статус подписания водителя без ИИН,
+        номера и документов; подписал — его строка у оператора снимается со списка. Ручка
+        руководителя (lead_sign_check) отдаёт карточку — телефону она не годится."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.operator_sign_check(user_id, lead_id)}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/phone_event', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -238,10 +335,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         # by_operator/leg_sec — у события ended: оператор ли положил трубку и сколько
         # секунд плечо было принято телефоном (см. service.phone_event). ring_timeout — у
         # ended: плечо положил сам телефон на гудках; ring_sec — у события ring_timeout:
-        # сколько секунд гудков телефон отсчитал.
+        # сколько секунд гудков телефон отсчитал. auto_hangup и talk_detected — у ended
+        # телефона с 3.22.34: почему плечо положил сам телефон и был ли разговор по звуку;
+        # отсутствие ключа talk_detected (None) и false сервис различает — передаём как есть.
+        # announcement_suspected и announcement_by (ревью 13.10.2026) — замер распознавания сообщения
+        # сети: тоже как пришли, разбирает сервис.
         result = svc.phone_event(user_id, attempt_id, payload.get('event'), payload.get('at'),
                                  by_operator=bool(payload.get('by_operator')), leg_sec=payload.get('leg_sec', 0),
-                                 ring_timeout=bool(payload.get('ring_timeout')), ring_sec=payload.get('ring_sec', 0))
+                                 ring_timeout=bool(payload.get('ring_timeout')), ring_sec=payload.get('ring_sec', 0),
+                                 auto_hangup=payload.get('auto_hangup'), talk_detected=payload.get('talk_detected'),
+                                 phone_version=_phone_version(),
+                                 announcement_suspected=payload.get('announcement_suspected'),
+                                 announcement_by=payload.get('announcement_by'))
         return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/outcome', methods=['POST', 'OPTIONS'])
@@ -445,6 +550,16 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         period = parse_period(request.args.get('period'))
         return jsonify({"status": "success", **svc.analytics(department_id, period=period)}), 200
 
+    @bp.route('/api/dial_list/departments/<int:department_id>/announcement_stats', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def announcement_stats(department_id):
+        """Точность распознавания сообщения сети по речи (?days=, по умолчанию 14): по этим числам
+        владелец решает, безопасен ли режим auto (service.announcement_stats). Только числа."""
+        _manager(department_id)
+        return jsonify({"status": "success",
+                        **svc.announcement_stats(department_id, days=request.args.get('days'))}), 200
+
     # ── итоги звонка ────────────────────────────────────────────────────────
     @bp.route('/api/dial_list/departments/<int:department_id>/outcomes', methods=['GET', 'PUT', 'OPTIONS'])
     @require_api_key
@@ -579,6 +694,22 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(svc.attempt_department(attempt_id))
         return jsonify({"status": "success", **svc.attempt_recording(attempt_id)}), 200
 
+    @bp.route('/api/dial_list/departments/<int:department_id>/repair/cut-calls', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def repair_cut_calls(department_id):
+        """Починка 12.10.2026: водители, чьи разговоры оборвал автосброс, — список (apply: false)
+        или возврат в очередь того же оператора / в общий список (apply: true, target).
+        {since: ISO, apply: false|true, target: operator|pool}. Ни номеров, ни ИИН в ответе."""
+        requester_id, _scope = _manager(department_id)
+        payload = request.get_json(silent=True) or {}
+        apply = payload.get('apply', False)
+        if not isinstance(apply, bool):
+            raise DialListError("apply: true или false")
+        return jsonify({"status": "success", **svc.repair_cut_calls(
+            department_id, payload.get('since'), apply=apply, target=payload.get('target') or 'operator',
+            actor_id=requester_id)}), 200
+
     @bp.route('/api/dial_list/overview', methods=['GET', 'OPTIONS'])
     @require_api_key
     @_guard
@@ -605,17 +736,27 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     # ── Binotel ─────────────────────────────────────────────────────────────
     @bp.route('/api/dial_list/webhook/binotel', methods=['GET', 'POST'])
     def binotel_webhook():
-        remote_addr = (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
-                       or request.remote_addr or '')
+        # Адрес для списка серверов Binotel — тот, что дописал справа в X-Forwarded-For прокси Render
+        # (ревью 13.10.2026), а не первый в цепочке, как у остальных ручек проекта: первый пишет сам
+        # клиент, и с токеном из утёкшей ссылки любой назвался бы Binotel (service.webhook_remote_addr).
+        forwarded = request.headers.get('X-Forwarded-For', '')
+        remote_addr = webhook_remote_addr(forwarded, request.remote_addr)
         token = request.args.get('token', '')
         if request.method == 'GET':
             # Binotel и человек проверяют адрес открытием: отвечаем коротко и без данных.
             return "ok", 200
         try:
-            if not svc.webhook_allowed(token, remote_addr):
-                log.warning("dial_list: вебхук отклонён, адрес %s", remote_addr)
+            allowed, reason = svc.webhook_verdict(token, remote_addr)
+            if not allowed:
+                # Почему отклонён и откуда — точно, со всей цепочкой прокси: по журналу видно, с
+                # каких адресов на самом деле приходит Binotel. Токен в журнал не пишем никогда.
+                log.warning("dial_list: вебхук Binotel отклонён — %s; адрес %s (X-Forwarded-For: %r, "
+                            "соединение: %s)", reason, remote_addr or '(пусто)', forwarded[:200],
+                            request.remote_addr or '(пусто)')
                 return jsonify({"error": "Forbidden"}), 403
-            form = request.form if request.form else (request.get_json(silent=True) or {})
+            # Binotel шлёт форму (callDetails[…]); JSON — тоже понимаем (service.webhook_fields), и с
+            # чужим Content-Type: разбирать тело заставляем сами (force).
+            form = request.form if request.form else (request.get_json(silent=True, force=True) or {})
             result = svc.handle_webhook(form, remote_addr)
         except Exception:
             log.exception("dial_list: ошибка обработки вебхука")

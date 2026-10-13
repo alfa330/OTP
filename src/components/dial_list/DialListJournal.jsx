@@ -9,6 +9,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { OutcomeBadge } from './DialListOutcomesPanel';
+import { autoHangupHint } from './attemptHints';
 import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
@@ -56,7 +57,8 @@ import { operatorsForFilter } from './linePicker';
  *
  * Недозвон пишется «Не поднял трубку», и под ним видно, если трубку положил сам
  * телефон оператора (автосброс, по умолчанию — после пятого гудка): это обычная
- * засчитанная попытка, а не отмена оператором.
+ * засчитанная попытка, а не отмена оператором. С 12.10.2026 телефон кладёт трубку
+ * и на сообщении сети «абонент недоступен» — приписка об этом своя (attemptHints.js).
  */
 
 const PAGE = 50;
@@ -531,13 +533,12 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
     // не идёт в счёт ни строке, ни водителю, поэтому подпись объясняет это явно.
     const cancelledHint = result === 'cancelled'
         ? ' · оператор завершил звонок до ответа водителя, попытка не засчитана' : '';
-    // Автосброс: трубку положил сам телефон оператора, не дождавшись ответа за
-    // заданное отделом число гудков (по умолчанию пять). Это обычный недозвон,
-    // попытка засчитана — поэтому и подпись своя, не «отмена».
-    // Если водитель всё же успел ответить в последний момент, звонок — разговор,
-    // и подпись была бы неправдой.
-    const ringTimeoutHint = attempt.ring_timeout && result !== 'answered' && result !== 'cancelled'
-        ? ' · сброшен автоматически: водитель не взял трубку' : '';
+    // Автосброс: трубку положил сам телефон оператора — не дождавшись ответа за
+    // заданное отделом число гудков (по умолчанию пять) либо услышав сообщение сети
+    // «абонент недоступен». Это обычный недозвон, попытка засчитана — поэтому и
+    // подпись своя, не «отмена». Если водитель всё же успел ответить в последний
+    // момент, звонок — разговор, и подпись была бы неправдой (attemptHints.js).
+    const autoHint = autoHangupHint(attempt);
     const rec = recording || {};
     return (
         <li className="relative flex gap-3 py-3">
@@ -568,7 +569,7 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
                     {attempt.operator?.name || 'Оператор'}
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
                     {cancelledHint}
-                    {ringTimeoutHint}
+                    {autoHint}
                 </div>
                 {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
                 {attempt.comment && <Bubble>{attempt.comment}</Bubble>}

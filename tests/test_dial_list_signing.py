@@ -284,6 +284,32 @@ class SuccessAttributionTests(unittest.TestCase):
         self.assertIn('t.state IN %(in_flight)s', sql)
         self.assertIn('t.requested_at > %(stale_before)s', sql)
 
+    def test_network_announcement_is_never_a_talk_or_a_success(self):
+        # Владелец, 12.10.2026: сообщение сети «абонент недоступен», плечо на котором положил
+        # сам телефон (auto_hangup 'announcement'), — недозвон, что бы ни ответил Binotel.
+        # Автоответчик отвечает ANSWER с длительностью: без условия такой звонок от 10 секунд
+        # попал бы в «поговорили» и мог бы дать оператору успешку.
+        best = sign_check.SignChecker._RESOLVE_SQL.split('best AS', 1)[1].split('UPDATE dial_list_leads', 1)[0]
+        flat = ' '.join(best.split())
+        self.assertIn("UPPER(t.disposition) IN %(answered)s AND t.auto_hangup <> 'announcement' "
+                      "AND t.billsec >= %(min_sec)s AND t.requested_at <= c.signed_at", flat)
+        att = ' '.join(dial_analytics._LEADS_CTE.split('att AS', 1)[1].split())
+        # «Ответили» — то же правило, что у строки выдачи и лида (service.ATTEMPT_TALK_SQL).
+        self.assertIn("(t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s AND "
+                      + dial_service.ATTEMPT_TALK_SQL + ") AS answered", att)
+        # «Поговорили» и секунды разговора — без сообщений сети.
+        self.assertIn("(t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s "
+                      "AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s) AS talked", att)
+        self.assertIn("CASE WHEN t.state = 'finished' AND t.auto_hangup <> 'announcement' "
+                      "THEN t.billsec ELSE 0 END AS talk_sec", att)
+        # Попыткой сообщение сети остаётся — оператор звонил: счёт попыток условие не трогает.
+        self.assertIn("COUNT(*) FILTER (WHERE NOT cancelled) AS attempts", dial_analytics._TOTALS_SQL)
+        self.assertNotIn('auto_hangup', dial_analytics._TOTALS_SQL.split('per_lead AS', 1)[1])
+        # Колонки заводит схема обзвона — до индексов (их порядок сторожит test_dial_list).
+        ddl = ' '.join(dial_schema.DDL)
+        self.assertIn("ADD COLUMN IF NOT EXISTS auto_hangup VARCHAR(16) NOT NULL DEFAULT ''", ddl)
+        self.assertIn("ADD COLUMN IF NOT EXISTS talk_detected BOOLEAN", ddl)
+
     def test_signed_rows_leave_operator_lists_but_not_live_calls(self):
         src = inspect.getsource(sign_check.SignChecker.close_signed_rows)
         self.assertIn("a.state = 'issued'", src)
@@ -585,12 +611,45 @@ class SchemaAndWiringTests(unittest.TestCase):
         block = text[text.index("dial_list_sign_check_job,\n"):text.index("id='dial_list_sign_check'")]
         self.assertIn("minute='20,50'", block)
 
-    def test_new_routes_are_manager_only(self):
+    def test_sign_routes_split_manager_card_and_operator_status(self):
+        # Аналитика и «Проверить сейчас» с карточкой (маски ИИН и номера, документы) — только
+        # руководителю. С 12.10.2026 у телефона своя ручка «Проверить на подписание»
+        # (владелец: «без передачи данных на телефон»): она в зоне оператора и отдаёт один
+        # статус — ни карточки, ни документов, ни ИИН.
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         for name in ('def analytics(', 'def lead_sign_check('):
             body = src[src.index(name):src.index('@bp.route', src.index(name))]
             self.assertIn('_manager(', body)
-        self.assertNotIn('/api/operator/dial_list/sign', src)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        operator_routes = re.findall(r"@bp\.route\('([^']+)'", operator_part)
+        self.assertEqual([r for r in operator_routes if r.rsplit('/', 1)[-1].startswith('sign')],
+                         ['/api/operator/dial_list/leads/<lead_id>/sign_check'])
+        manager_part = src[src.index('# ── руководитель'):]
+        self.assertNotIn('/api/operator/', manager_part)
+        service = inspect.getsource(dial_service.DialListService.operator_sign_check)
+        self.assertNotIn('check_lead_signature(', service)
+        for forbidden in ('lead_card', '_journal_row', '_sign_block', 'mask_iin', 'mask_phone', 'sign_docs',
+                          'documents'):
+            self.assertNotIn(forbidden, service, forbidden)
+        # В ответ идут только статус, подпись и время проверки (весь ответ ручки — в
+        # OperatorSignCheckTests.test_response_carries_status_only).
+        returned = service[service.rindex('return {'):]
+        for forbidden in ('iin', 'error', 'signed_at', 'docs', 'phone'):
+            self.assertNotIn(forbidden, returned, forbidden)
+        # ИИН из базы читается только для запроса в Sapar — сам запрос его не возвращает.
+        self.assertNotIn('sign_docs', dial_service.DialListService._OPERATOR_SIGN_LEAD_SQL)
+        self.assertNotIn('phone_norm', dial_service.DialListService._OPERATOR_SIGN_LEAD_SQL)
+
+    def test_operator_labels_reuse_journal_wording(self):
+        # Причина «не подписал» на телефоне — словами SIGN_STATUS_LABELS (двойник на сайте
+        # сторожит test_frontend_twin_labels_and_filters): поменяли там — поменяется и тут.
+        for code in (signing.NOT_FORMED, signing.EXPIRED, signing.REJECTED, signing.NO_DOCS):
+            detail = signing.SIGN_STATUS_LABELS[code]
+            self.assertEqual(dial_service.operator_sign_status(code, None)[2],
+                             f"Не подписал · {detail[0].lower()}{detail[1:]}")
+        waiting = signing.SIGN_STATUS_LABELS[signing.PROCESSING]
+        self.assertEqual(dial_service.operator_sign_status(signing.PROCESSING, None)[2],
+                         f"Подписал · {waiting[0].lower()}{waiting[1:]}")
 
     def test_analytics_has_no_phones_or_iin(self):
         src = inspect.getsource(dial_analytics)

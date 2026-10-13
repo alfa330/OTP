@@ -375,6 +375,10 @@ class SignChecker:
                 """, errors, template="(%s::uuid, %s, %s::boolean, %s::timestamptz)", page_size=WRITE_CHUNK)
 
     # ------------------------------------------------------------ успешки
+    # Сообщение сети «абонент недоступен», плечо на котором положил сам телефон
+    # (dial_list_attempts.auto_hangup 'announcement'), — не разговор даже при ANSWER от
+    # Binotel с длительностью (автоответчик): успешку за него не даём (владелец,
+    # 12.10.2026; то же условие — service.ATTEMPT_TALK_SQL и analytics._LEADS_CTE).
     _RESOLVE_SQL = """
         WITH cand AS (
             SELECT l.id, l.signed_at
@@ -397,6 +401,7 @@ class SignChecker:
             JOIN dial_list_attempts t ON t.assignment_id = a.id
             WHERE t.state = 'finished' AND NOT t.cancelled
               AND UPPER(t.disposition) IN %(answered)s
+              AND t.auto_hangup <> 'announcement'
               AND t.billsec >= %(min_sec)s
               AND t.requested_at <= c.signed_at
             ORDER BY c.id, t.requested_at DESC

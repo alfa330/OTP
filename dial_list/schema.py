@@ -256,6 +256,26 @@ DDL = [
     # водитель за пять гудков не взял трубку. Это недозвон, а не отбой оператора:
     # попытка в счёт, итог по ней не нужен (если водитель так и не ответил).
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS ring_timeout_at TIMESTAMP WITH TIME ZONE",
+    # Что телефон услышал на плече (владелец, 12.10.2026; телефон с 3.22.34):
+    #   auto_hangup    почему плечо положил сам телефон: 'ring_timeout' — гудки кончились,
+    #                  'announcement' — сообщение сети «абонент недоступен» (это всегда
+    #                  недозвон, что бы ни ответил Binotel); '' — телефон плечо не клал
+    #                  (и все попытки до 3.22.34: у них причину знает только ring_timeout_at)
+    #   talk_detected  был ли разговор: FALSE — телефон его не услышал, итог нужен, только
+    #                  если Binotel подтвердит ответ водителя; TRUE — был (по Binotel или по
+    #                  звуку), итог нужен сразу, и отбой оператора тогда не отмена; NULL —
+    #                  телефон не сообщил (до 3.22.34) — тогда всё решается, как раньше
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS auto_hangup VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS talk_detected BOOLEAN",
+    # Замер точности распознавания сообщения сети (ревью 13.10.2026: по речи его не отличить от
+    # мелодии вместо гудков, режим announcement_mode выбирает владелец по этим числам):
+    #   announcement_suspected  распознавание по речи сработало на плече хоть раз (в любом режиме);
+    #                           NULL — телефон не сообщил (до этой сборки)
+    #   announcement_by         кто решил, что это сообщение сети, у auto_hangup 'announcement':
+    #                           'auto' / 'sit' — телефон (по речи / по тону SIT), 'operator' —
+    #                           оператор по подсказке; NULL — не сообщил. На счёт попытки не влияют.
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS announcement_suspected BOOLEAN",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS announcement_by VARCHAR(16)",
     # Типы итога (запрос владельца 29.09.2026): у итога может быть свой список
     # вложенных типов («Отказ» → «Дорого», «Уже работает в другом парке»), чтобы
     # типизировать сами итоги. Отдельная таблица, а не parent_id в
@@ -392,6 +412,13 @@ DDL = [
     CREATE UNIQUE INDEX IF NOT EXISTS uq_dial_list_line_members_line
         ON dial_list_line_members(department_id, internal_number) WHERE released_at IS NULL
     """,
+    # Живые попытки (13.10.2026): один опрос call-details на компанию (live_calls) каждые
+    # несколько секунд ищет их по состоянию и возрасту, а «следующий звонок оператора»
+    # (superseded_at) и добор исходов — по оператору и времени звонка.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_live ON dial_list_attempts(requested_at)"
+    " WHERE state IN ('requested', 'leg_ringing', 'leg_answered', 'ended')",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_operator_requested"
+    " ON dial_list_attempts(operator_id, requested_at)",
 ]
 
 

@@ -23,6 +23,12 @@ from . import signing
 ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 
 # Лиды месяца и их попытки — общая часть всех трёх запросов.
+# Ответ Binotel — ещё не разговор (владелец, 12.10.2026; то же условие —
+# service.ATTEMPT_TALK_SQL, правятся вместе): сообщение сети «абонент недоступен»,
+# плечо на котором положил сам телефон (auto_hangup 'announcement'), — недозвон даже при
+# ANSWER с длительностью (автоответчик): ни «ответили», ни «поговорили», ни минуты. И
+# «ответили» без единой секунды, когда телефон разговора не услышал (talk_detected FALSE),
+# — тоже. У попыток телефонов до 3.22.34 оба условия верны всегда.
 _LEADS_CTE = """
     leads AS (
         SELECT l.id, l.iin, l.status, l.sign_status, l.signed_at, l.success_attempt_id,
@@ -34,10 +40,14 @@ _LEADS_CTE = """
     ),
     att AS (
         SELECT a.lead_id, t.operator_id, t.requested_at, t.cancelled,
-               (t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s) AS answered,
                (t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+                AND t.auto_hangup <> 'announcement'
+                AND (t.talk_detected IS NOT FALSE OR t.billsec >= 1)) AS answered,
+               (t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+                AND t.auto_hangup <> 'announcement'
                 AND t.billsec >= %(min_sec)s) AS talked,
-               CASE WHEN t.state = 'finished' THEN t.billsec ELSE 0 END AS talk_sec
+               CASE WHEN t.state = 'finished' AND t.auto_hangup <> 'announcement'
+                    THEN t.billsec ELSE 0 END AS talk_sec
         FROM leads l
         JOIN dial_list_assignments a ON a.lead_id = l.id
         JOIN dial_list_attempts t ON t.assignment_id = a.id
