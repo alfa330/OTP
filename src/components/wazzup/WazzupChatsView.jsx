@@ -323,11 +323,19 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     {msg.local.error || (stuck === 'failed' ? 'Не отправлено' : 'Отправка не подтверждена')}
                 </span>
                 <button type="button" onClick={() => onRetry?.(msg.clientMessageId)}
+                    disabled={msg.local.checkInFlight}
                     title={stuck === 'failed' ? 'Отправить это сообщение ещё раз'
-                        : 'Спросить сервер об этой же отправке — второй раз сообщение не уйдёт'}
-                    className="font-semibold text-blue-600 hover:underline">
-                    {stuck === 'failed' ? 'Повторить' : 'Проверить'}
+                        : 'Проверить полученные подтверждения и переписку — без повторной отправки'}
+                    className="font-semibold text-blue-600 hover:underline disabled:opacity-60">
+                    {msg.local.checkInFlight ? 'Проверяем…' : stuck === 'failed' ? 'Повторить' : 'Проверить'}
                 </button>
+                {msg.local.candidates?.map((candidate) => <button key={candidate.messageId} type="button"
+                    onClick={() => onQuote?.(candidate.messageId)}
+                    className="font-semibold text-blue-600 hover:underline">
+                    Посмотреть совпадение {fmtTime(candidate.dt)}
+                    {' · '}{({ pending: 'принято Wazzup', sent: 'отправлено', delivered: 'доставлено',
+                        read: 'прочитано', error: 'ошибка доставки' })[candidate.status] || 'статус неизвестен'}
+                </button>)}
                 {msg.local.editable
                     ? <button type="button" onClick={() => onEdit?.(msg.clientMessageId)}
                         title="Вернуть текст в поле ввода, чтобы исправить его"
@@ -1359,6 +1367,11 @@ function ChatsWorkspace(props) {
     const live = pilot.connection === 'live';
     const refreshers = useRef({});
     refreshers.current = { thread: refreshPilotThread, list: () => loadChats({ silent: true }) };
+    const retryOutboxMessage = useCallback(async (id) => {
+        await retryMessage(id);
+        // The checked message/candidate may have arrived while SSE was offline.
+        await refreshers.current.thread().catch(() => {});
+    }, []);
     useEffect(() => {
         if (!acceptedIds) return undefined;
         // Каждое новое принятое сообщение заводит свою проверку: сверка, ушедшая
@@ -2047,7 +2060,7 @@ function ChatsWorkspace(props) {
                                         <MessageBubble msg={m} quote={threadQuotes.get(m.messageId)}
                                             showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
                                             onReply={pilotCanSend && !m.local ? chooseReply : undefined} onQuote={jumpToQuote}
-                                            onRetry={retryMessage} onDiscard={discardMessage} onEdit={editFailed}
+                                            onRetry={retryOutboxMessage} onDiscard={discardMessage} onEdit={editFailed}
                                             onAttachment={m.local ? undefined : pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
                                                 ? openAttachment : attachmentPreviewKind(m) === 'video' ? (message) => openAttachment(message, true) : undefined} />
                                         {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&

@@ -13,8 +13,9 @@ import { classifyPilotSendFailure, newClientMessageId, pilotChatKey } from './ch
  * Повтор безопасен по построению. У каждого сообщения свой clientMessageId;
  * сервер записывает его в wazzup_pilot_outbox ДО обращения к Wazzup и на
  * повторный запрос с тем же id Wazzup уже не зовёт (wazzup/pilot.py, replay).
- * Поэтому потерянный ответ, перезагрузка вкладки и «Проверить» повторяют ТОТ
- * ЖЕ id, а новый id получает только «Повторить» после явного отказа Wazzup.
+ * Потерянный ответ и перезагрузка свежей отправки повторяют тот же id.
+ * «Проверить» обращается только к /send/check: даже если первой попытки на
+ * сервере нет, проверка никогда не превращается в новую отправку.
  *
  * Модуль без React-состояния намеренно: очередь переживает смену чата и
  * размонтирование раздела, а подписка идёт через useSyncExternalStore. */
@@ -66,7 +67,8 @@ function load(now = Date.now()) {
 
 function save() {
     try {
-        const keep = items.filter((item) => item.state !== 'sent');
+        const keep = items.filter((item) => item.state !== 'sent')
+            .map(({ checkInFlight, ...item }) => item);
         if (keep.length) globalThis.sessionStorage?.setItem(STORAGE_KEY, JSON.stringify(keep));
         else globalThis.sessionStorage?.removeItem(STORAGE_KEY);
     } catch { /* Без хранилища (приватный режим) очередь живёт в памяти вкладки. */ }
@@ -214,15 +216,38 @@ async function deliver(item) {
     }
 }
 
-/* «Проверить» у неясной отправки — тот же id: сервер ответит из outbox и
-   второй раз в Wazzup не пойдёт. «Повторить» после отказа Wazzup — новое
-   сообщение с новым id на месте прежнего пузыря. */
+async function checkMessage(item) {
+    const id = item.clientMessageId;
+    if (item.checkInFlight) return;
+    update(id, { checkInFlight: true, candidates: [] });
+    try {
+        const { data } = await axios.post(`${api.apiBaseUrl}/api/wazzup/pilot/send/check`, {
+            account: 'op', channelId: item.channelId, chatId: item.chatId, clientMessageId: id,
+        }, { headers: api.headers(), timeout: 15000 });
+        if (!owned(find(id)) || find(id).state !== 'unknown') return;
+        if (data?.state === 'sent' && data.messageId) {
+            update(id, { state: 'sent', messageId: String(data.messageId),
+                deliveryStatus: data.deliveryStatus, acceptedAt: Date.now(), error: '', checkInFlight: false });
+        } else {
+            update(id, { state: data?.state === 'failed' ? 'failed' : 'unknown',
+                checkInFlight: false, checkedAt: data?.checkedAt,
+                candidates: Array.isArray(data?.candidates) ? data.candidates : [],
+                error: data?.error || 'Подтверждение пока не получено. Проверьте чат в Wazzup.' });
+        }
+    } catch {
+        if (owned(find(id)) && find(id).state === 'unknown') {
+            update(id, { checkInFlight: false, candidates: [],
+                error: 'Не удалось проверить статус. Сообщение повторно не отправлялось. Попробуйте проверить позже.' });
+        }
+    }
+}
+
+/* Проверка читает результат; повтор после явного отказа создаёт новую отправку. */
 export function retryMessage(id) {
     const item = find(id);
     if (!owned(item)) return;
     if (item.state === 'unknown') {
-        update(id, { state: 'queued', error: '' });
-        pump(chatKeyOf(item));
+        return checkMessage(item);
     } else if (item.state === 'failed') {
         // В конец очереди — там же, где его нарисует лента: порядок отправки и
         // порядок на экране совпадают.

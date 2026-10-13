@@ -55,10 +55,13 @@ export const outboxMessages = (thread, outbox) => {
             messageId: `local:${item.clientMessageId}`, clientMessageId: item.clientMessageId,
             dt: item.createdAt, isEcho: true, type: item.attachment ? attachmentType(item.attachment.mime) : 'text',
             text: item.displayText || '', authorName: item.authorName || null, authorId: null,
-            status: OUTBOX_STATUS[item.state] || 'queued',
+            status: item.state === 'sent' && item.deliveryStatus
+                ? item.deliveryStatus : OUTBOX_STATUS[item.state] || 'queued',
             replyToMessageId: item.replyToMessageId || null,
             replyText: item.reply?.text || null, replyAuthorName: item.reply?.authorName || null,
             local: { state: item.state, error: item.error || '', pinned: !['failed', 'unknown'].includes(item.state),
+                checkInFlight: Boolean(item.checkInFlight), checkedAt: item.checkedAt,
+                candidates: item.candidates || [],
                 editable: item.state === 'failed' && !item.attachmentId && item.text === item.displayText },
         }));
 };

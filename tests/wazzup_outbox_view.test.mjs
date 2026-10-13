@@ -28,7 +28,7 @@ await build({
     stdin: { contents: `
         import { outboxMessages, pilotChatKey } from './chatPilot';
         import { chatKeyOf, configureSendQueue, enqueueMessage, outboxProblems, outboxSnapshot, resetSendQueueForTests,
-            settleOutbox, takeBackMessage, useChatOutbox, useOutbox } from './sendQueue';
+            retryMessage, settleOutbox, takeBackMessage, useChatOutbox, useOutbox } from './sendQueue';
         import { localDayKey } from './messageTime';
         import { messageQuote } from './threadPresentation';
         import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -42,7 +42,8 @@ await build({
             pilotView.current = { key: selectedKey, thread, mainTab };
             ${threadBlock}
             ${effectsBlock}
-            return { localMessages, threadWithDays, threadQuotes, problemChats, sendProblems, editFailed, draftRestore };
+            return { localMessages, threadWithDays, threadQuotes, problemChats, sendProblems, editFailed,
+                draftRestore, retryOutboxMessage };
         }
     `, resolveDir: join(process.cwd(), 'src/components/wazzup'), loader: 'jsx' },
     outfile: output, bundle: true, platform: 'node', format: 'esm',
@@ -105,12 +106,31 @@ let calls;
 const setup = () => {
     view.resetSendQueueForTests();
     calls = [];
-    globalThis.__outboxPost = (url, body) => new Promise((resolve, reject) => calls.push({ body, resolve, reject }));
+    globalThis.__outboxPost = (url, body) => new Promise((resolve, reject) => calls.push({ url, body, resolve, reject }));
     globalThis.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {}, key: () => null, length: 0 };
     view.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
 };
 const send = (chatId, text, extra = {}) => view.enqueueMessage({ clientMessageId: `id-${text}`, channelId: CH, chatId,
     text, displayText: text, authorName: 'Оператор', ...extra });
+
+test('manual check refreshes the thread after reading status, so an archive candidate can be opened', async () => {
+    setup();
+    let reads = 0;
+    const v = mount({ selectedKey: keyOf('A'), thread: [],
+        refreshPilotThread: async () => { reads += 1; } });
+    send('A', 'без ответа');
+    await flush();
+    calls[0].reject({ response: { status: 409, data: { state: 'unknown' } } });
+    await flush();
+    const checking = v.render().retryOutboxMessage('id-без ответа');
+    assert.equal(calls[1].url, '/api/wazzup/pilot/send/check');
+    assert.equal(reads, 0);
+    calls[1].resolve({ data: { state: 'unknown', candidates: [], error: 'Пока нет подтверждения' } });
+    await checking;
+    assert.equal(reads, 1);
+    assert.equal(view.outboxSnapshot()[0].state, 'unknown');
+    v.unmount();
+});
 
 test('a sent message is in the thread at once, at the end, and gives way to its archive row', async () => {
     setup();

@@ -17,6 +17,7 @@ import pytest
 
 from tests import source_cache
 from wazzup.pilot_schema import init_schema
+from wazzup.send_check import inspect_send
 
 PORT = os.environ.get('WAZZUP_PILOT_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs isolated local PG (WAZZUP_PILOT_TEST_PORT)')
@@ -108,6 +109,92 @@ def status(cursor, message_id='m1'):
     cursor.execute('SELECT status FROM wazzup_messages WHERE message_id=%s', (message_id,))
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def uncertain_send(cursor, message_id=None, state='unknown', attachment_id=None):
+    request_id = str(uuid.uuid4())
+    cursor.execute("""INSERT INTO wazzup_pilot_outbox
+        (request_id,account,channel_id,chat_id,chat_type,text,user_id,state,message_id,attachment_id,created_at)
+        VALUES (%s,'op','channel-op','70000000000','whatsapp','Private message content',42,%s,%s,%s,
+                '2026-10-06T08:00:00Z')""", (request_id, state, message_id, attachment_id))
+    return request_id
+
+
+def check_send(cursor, request_id, user_id=42, channel='channel-op', chat='70000000000'):
+    return inspect_send(cursor, request_id, user_id, channel, chat)
+
+
+def test_send_check_missing_attempt_or_wrong_owner_never_creates_or_reveals_a_send(pg):
+    _, cursor, _, _ = pg
+    request_id = uncertain_send(cursor)
+    for args in ((str(uuid.uuid4()),), (request_id, 43), (request_id, 42, 'other'),
+                 (request_id, 42, 'channel-op', 'another')):
+        result = check_send(cursor, *args)
+        assert result['code'] == 'SEND_NOT_FOUND'
+        assert result['state'] == 'unknown'
+        assert result['candidates'] == []
+    cursor.execute('SELECT count(*) FROM wazzup_pilot_outbox')
+    assert cursor.fetchone()[0] == 1
+
+
+def test_send_check_same_text_is_only_a_candidate_never_confirmation(pg):
+    _, cursor, database, _ = pg
+    request_id = uncertain_send(cursor)
+    db = database()
+    db.store_wazzup_messages([message(status='read'), message('second', status='delivered')])
+    result = check_send(cursor, request_id)
+    assert result['state'] == 'unknown'
+    assert {m['messageId'] for m in result['candidates']} == {'m1', 'second'}
+    assert 'другой' in result['error']
+    cursor.execute('SELECT state,message_id FROM wazzup_pilot_outbox WHERE request_id=%s', (request_id,))
+    assert cursor.fetchone() == ('unknown', None)
+
+
+@pytest.mark.parametrize('changes', [
+    {'channelId': 'another'}, {'chatId': '70000000001'}, {'isEcho': False},
+    {'isDeleted': True}, {'dateTime': '2026-10-06T07:59:00Z'},
+    {'dateTime': '2026-10-06T08:03:00Z'}, {'text': 'Different text'},
+])
+def test_send_check_candidates_are_scoped_to_outgoing_text_and_time(pg, changes):
+    _, cursor, database, _ = pg
+    request_id = uncertain_send(cursor)
+    item = message()
+    item.update(changes)
+    database().store_wazzup_messages([item])
+    result = check_send(cursor, request_id)
+    assert result['state'] == 'unknown'
+    assert not result['candidates']
+
+
+def test_send_check_excludes_other_accounts_and_attachment_filename_matches(pg):
+    _, cursor, database, _ = pg
+    request_id = uncertain_send(cursor)
+    database().store_wazzup_messages([message()], account='potok')
+    assert not check_send(cursor, request_id)['candidates']
+    database().store_wazzup_messages([message('op-file')])
+    file_request = uncertain_send(cursor, attachment_id=str(uuid.uuid4()))
+    assert not check_send(cursor, file_request)['candidates']
+
+
+@pytest.mark.parametrize('events,expected', [(['sent'], 'sent'), (['read', 'sent'], 'read'),
+                                           (['error'], 'error'), ([], 'pending')])
+def test_send_check_known_id_uses_exact_receipts_even_before_echo(pg, events, expected):
+    _, cursor, database, _ = pg
+    request_id = uncertain_send(cursor, message_id='exact')
+    db = database()
+    for event in events:
+        db.update_wazzup_statuses([dict(messageId='exact', status=event)])
+    result = check_send(cursor, request_id)
+    assert result['state'] == 'sent'
+    assert result['messageId'] == 'exact'
+    assert result['deliveryStatus'] == expected
+    assert not result['candidates']
+
+
+def test_send_check_definite_rejection_remains_failed(pg):
+    _, cursor, _, _ = pg
+    result = check_send(cursor, uncertain_send(cursor, state='failed'))
+    assert result['state'] == 'failed'
 
 
 def test_schema_is_idempotent_and_outbox_message_is_unique_per_account(pg):

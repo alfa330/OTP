@@ -122,13 +122,94 @@ test('rechecks are bounded: an answerless send becomes unconfirmed, and "Про�
         assert.equal(calls.length, q.RECHECK_DELAYS_MS.length + 1, 'no endless retries');
         q.retryMessage('id-Без ответа');
         await flush();
-        assert.deepEqual(calls.at(-1).body, calls[0].body);
+        assert.equal(calls.at(-1).url, '/api/wazzup/pilot/send/check');
+        const { text, ...identity } = calls[0].body;
+        assert.deepEqual(calls.at(-1).body, identity);
         calls.at(-1).resolve(accepted('found'));
         await flush();
         assert.equal(q.outboxSnapshot()[0].state, 'sent');
     } finally {
         mock.timers.reset();
     }
+});
+
+test('manual check never sends: missing confirmation and equal-text candidates remain unknown', async () => {
+    const q = await freshQueue(memoryStorage());
+    const calls = controlledPost();
+    q.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
+    q.enqueueMessage(message('Здравствуйте!'));
+    await flush();
+    calls[0].reject({ response: { status: 409, data: { state: 'unknown', error: 'Нет подтверждения' } } });
+    await flush();
+    q.retryMessage('id-Здравствуйте!');
+    q.retryMessage('id-Здравствуйте!');
+    await flush();
+    assert.equal(calls.length, 2, 'double click performs one read');
+    assert.equal(calls[1].url, '/api/wazzup/pilot/send/check');
+    assert.equal(q.outboxSnapshot()[0].checkInFlight, true);
+    const candidates = [{ messageId: 'similar', dt: '2026-10-13T09:37:00Z', status: 'read' }];
+    calls[1].resolve({ data: { state: 'unknown', candidates, error: 'Похожее сообщение', checkedAt: 'now' } });
+    await flush();
+    assert.equal(q.outboxSnapshot()[0].state, 'unknown');
+    assert.deepEqual(outboxMessages([], q.outboxSnapshot())[0].local.candidates, candidates);
+    assert.equal(q.outboxSnapshot()[0].messageId, undefined, 'a matching text is not identity proof');
+    q.retryMessage('id-Здравствуйте!');
+    await flush();
+    calls[2].resolve({ data: { state: 'unknown', code: 'SEND_NOT_FOUND', error: 'Не найдено', candidates: [] } });
+    await flush();
+    assert.equal(q.outboxSnapshot()[0].state, 'unknown');
+    assert.ok(calls.slice(1).every((call) => call.url.endsWith('/send/check')));
+});
+
+test('failed check stays unknown; reload cannot turn an in-flight check into a send', async () => {
+    const storage = memoryStorage();
+    const q = await freshQueue(storage);
+    const calls = controlledPost();
+    q.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
+    q.enqueueMessage(message('Проверка'));
+    await flush();
+    calls[0].reject({ response: { status: 409, data: { state: 'unknown' } } });
+    await flush();
+    q.retryMessage('id-Проверка');
+    await flush();
+    const reloaded = await freshQueue(storage);
+    reloaded.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
+    await flush();
+    assert.equal(calls.length, 2);
+    assert.equal(reloaded.outboxSnapshot()[0].state, 'unknown');
+    assert.equal(reloaded.outboxSnapshot()[0].checkInFlight, undefined);
+    calls[1].reject({ response: { status: 503 } });
+    await flush();
+    assert.equal(q.outboxSnapshot()[0].state, 'unknown');
+    assert.equal(q.outboxSnapshot()[0].checkInFlight, false);
+    assert.match(q.outboxSnapshot()[0].error, /Не удалось проверить/);
+    assert.equal(calls.length, 2);
+});
+
+test('exact confirmation from a check preserves delivery status and ignores late responses after discard', async () => {
+    const q = await freshQueue(memoryStorage());
+    const calls = controlledPost();
+    q.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
+    q.enqueueMessage(message('Подтверждение'));
+    await flush();
+    calls[0].reject({ response: { status: 409, data: { state: 'unknown' } } });
+    await flush();
+    q.retryMessage('id-Подтверждение');
+    await flush();
+    calls[1].resolve({ data: { state: 'sent', messageId: 'exact', deliveryStatus: 'read' } });
+    await flush();
+    assert.equal(outboxMessages([], q.outboxSnapshot())[0].status, 'read');
+    q.settleOutbox([{ messageId: 'exact' }]);
+    assert.equal(q.outboxSnapshot().length, 0);
+    q.enqueueMessage(message('Убрано'));
+    await flush();
+    calls[2].reject({ response: { status: 409, data: { state: 'unknown' } } });
+    await flush();
+    q.retryMessage('id-Убрано');
+    q.discardMessage('id-Убрано');
+    calls[3].resolve(accepted('late'));
+    await flush();
+    assert.equal(q.outboxSnapshot().length, 0);
 });
 
 test('an attempt still talking to Wazzup is polled and finally left unconfirmed, never sent under a new id', async () => {

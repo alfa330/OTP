@@ -182,6 +182,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .send_check import register_send_check_route
+    register_send_check_route(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError
     register_upload_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS,
                            channels=channels, gcs=gcs)
@@ -439,8 +441,12 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 explanation = 'Wazzup отклонил отправку (' + code[:100] + ').'
                 if '24' in code or 'WINDOW' in code.upper() or 'TEMPLATE' in code.upper():
                     explanation = 'Возможно, закрыто 24-часовое окно WABA. Выберите одобренный шаблон Wazzup через / или +.'
-        except requests.RequestException:
-            pass
+        except requests.RequestException as error:
+            code = 'SEND_TIMEOUT' if isinstance(error, requests.Timeout) else 'SEND_NETWORK_ERROR'
+            # Exception strings may contain request URLs or credentials. Keep
+            # only the type and our request UUID for incident correlation.
+            logging.warning('Wazzup pilot transport request_id=%s error_type=%s',
+                            request_id, type(error).__name__)
         if state == 'unknown':
             explanation = 'Подтверждение не получено. Сообщение могло уйти: проверьте чат перед новой отправкой.'
         _server_timing('wz-post', stage)
@@ -449,8 +455,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             cur.execute("""UPDATE wazzup_pilot_outbox SET state=%s,message_id=%s,
                 error_code=%s,error_message=%s,updated_at=now() WHERE request_id=%s""",
                 (state, message_id, code, explanation, request_id))
-        logging.info('Wazzup pilot send state=%s duration_ms=%d', state,
-                     round((time.monotonic() - started) * 1000))
+        logging.info('Wazzup pilot send state=%s duration_ms=%d request_id=%s code=%s', state,
+                     round((time.monotonic() - started) * 1000), request_id, code)
         if state != 'sent':
             return jsonify(error=explanation, code=code, state=state, retryable=False,
                            clientMessageId=request_id), 422 if state == 'failed' else 409

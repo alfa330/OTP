@@ -316,6 +316,19 @@ class PilotRoutesTests(unittest.TestCase):
         self.transport.post.assert_called_once()
         self.assertFalse(self.db.messages)
 
+    def test_transport_diagnostics_keep_identity_without_logging_credentials_or_message(self):
+        for error, expected in ((requests.ReadTimeout('secret-token-and-private-text'), 'SEND_TIMEOUT'),
+                                (requests.ConnectionError('secret-token-and-private-text'), 'SEND_NETWORK_ERROR')):
+            self.body['clientMessageId'] = str(uuid.uuid4())
+            self.transport.post.side_effect = error
+            with self.assertLogs(level='WARNING') as logs:
+                response = self.client.post('/api/wazzup/pilot/send', json=self.body)
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json['code'], expected)
+            self.assertEqual(response.json['state'], 'unknown')
+            self.assertIn(self.body['clientMessageId'], '\n'.join(logs.output))
+            self.assertNotIn('secret-token-and-private-text', '\n'.join(logs.output))
+
     def test_parallel_retry_while_vendor_is_busy_does_not_send_again(self):
         started, finish = threading.Event(), threading.Event()
         results = []

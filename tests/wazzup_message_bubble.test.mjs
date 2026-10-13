@@ -39,6 +39,24 @@ const find = (node, predicate) => {
 };
 const msg = { messageId: 'synthetic', dt: '2026-10-08T12:34:00Z', type: 'text', text: 'Тест' };
 
+test('checking disables duplicate clicks and candidates open an archive message without confirming the attempt', () => {
+    const jumps = [];
+    const pending = { ...msg, isEcho: true, clientMessageId: 'mine', status: 'unknown',
+        local: { state: 'unknown', checkInFlight: true, error: 'Не подтверждено',
+            candidates: [{ messageId: 'other', dt: msg.dt, status: 'read' }] } };
+    const tree = Bubble.type({ msg: pending, onQuote: (id) => jumps.push(id) });
+    const check = find(tree, (node) => node.type === 'button' && node.props.disabled === true);
+    assert.ok(check);
+    assert.equal(check.props.children, 'Проверяем…');
+    const candidate = find(tree, (node) => node.type === 'button'
+        && React.Children.toArray(node.props.children).includes('Посмотреть совпадение '));
+    candidate.props.onClick();
+    assert.deepEqual(jumps, ['other']);
+    const markup = renderToStaticMarkup(React.createElement(Bubble, { msg: pending }));
+    assert.match(markup, /Не подтверждено/);
+    assert.match(markup, /прочитано/);
+});
+
 test('outgoing delivery uses gray/blue double checks, accessible labels and no visible status text or dot', () => {
     for (const [status, label, color] of [['delivered', 'Доставлено', 'text-slate-500'], ['read', 'Прочитано', 'text-sky-500']]) {
         const markup = renderToStaticMarkup(React.createElement(Bubble, { msg: { ...msg, isEcho: true, status } }));
