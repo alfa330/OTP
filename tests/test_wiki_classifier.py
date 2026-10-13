@@ -270,6 +270,66 @@ class DataFileTest(unittest.TestCase):
                     decision = classifier.plan(classifier.analyze(question, self.book))
                     self.assertNotEqual((decision or {}).get('kind'), 'cars')
 
+    def decide(self, question):
+        with patch.object(currency, 'today', return_value=TODAY):
+            decision = classifier.plan(classifier.analyze(question, self.book))
+        if decision and decision['kind'] == 'cars':
+            return [item['name'] for item in decision['cars']]
+        return decision
+
+    def test_typos_on_the_real_data(self):
+        """Вопрос владельца 13.10.2026 дословно — и опечатки того же рода."""
+        for question, expected in {
+                'На какие тарифы подходит тайота камри в алматы?': ['Toyota Camry'],
+                'тоёта камри на какие тарифы': ['Toyota Camry'],
+                'тайота каролла 2016 эконом': ['Toyota Corolla'],
+                'шевралет кобальт 2022 комфорт': ['Chevrolet Cobalt'],
+                'фольсваген поло 2019 комфорт': ['Volkswagen Polo'],
+                'мерсадес е класс 2019 бизнес': ['Mercedes-Benz E-klasse'],
+                'каролла 2016 эконом': ['Toyota Corolla'],
+                'салярис 2018 комфорт': ['Hyundai Solaris'],
+                'кабальт 2023 комфорт': ['Chevrolet Cobalt'],
+                'актавия 2019 комфорт': ['Skoda Octavia'],
+                'аптима 2015 комфорт': ['Kia Optima'],
+                'тайота на какие тарифы подходит': {'kind': 'brand', 'brand': 'Toyota'}}.items():
+            with self.subTest(question=question):
+                self.assertEqual(self.decide(question), expected)
+
+    def test_exact_model_beats_a_longer_window_with_a_typo(self):
+        # «камри на» — на одну букву от Carina; точное «камри» обязано победить.
+        for question in ('тойота камри на комфорт', 'тойота камри на какие тарифы',
+                         'тойота камри на 2015'):
+            with self.subTest(question=question):
+                self.assertEqual(self.decide(question), ['Toyota Camry'])
+
+    def test_a_instead_of_o_is_not_a_rule_for_any_model(self):
+        """«а» вместо «о» без марки — только явным списком: правило для любой
+        модели читало «премию» как Premio, «акциям» — как Axiom, «салона» — как
+        Solano, а короткое «зотье» (Zotye) — как «затеи»."""
+        for question in ('какая премия в комфорте', 'премия комфорт', 'по акциям в комфорте',
+                         'чистота салона в бизнесе', 'затеи в комфорте'):
+            with self.subTest(question=question):
+                self.assertIsNone(self.decide(question))
+
+    def test_question_words_are_not_misspelt_brands(self):
+        # «городах» на две буквы от Omoda, «кандай» — от «хендай», «тела» — на
+        # букву от Tesla: служебные слова и короткие слова марками не становятся.
+        with patch.object(currency, 'today', return_value=TODAY):
+            cars = classifier.plan(classifier.analyze(
+                'в каких городах с5 2020 года подходит в комфорт', self.book))['cars']
+        self.assertIn('Citroen C5', [item['name'] for item in cars])
+        for word in ('городах', 'кандай', 'вообще', 'тела'):
+            with self.subTest(word=word):
+                self.assertEqual(classifier._typo_brand(self.book, {'word': word, 'signal': False}),
+                                 (None, None))
+
+    def test_model_names_are_never_misspelt_brands(self):
+        names = ({key for key in self.book['alias'] if re.fullmatch(r'[а-я]+', key)}
+                 | set(classifier._KNOWN_NAMES) | set(classifier._COMMON_NAMES))
+        taken = [(word,) + classifier._typo_brand(self.book, {'word': word, 'signal': False})
+                 for word in sorted(names)]
+        self.assertEqual([item for item in taken if item[1]], [])
+
     def test_answer_does_not_depend_on_hash_order(self):
         """Порядок машин — как в файле: «с5» называет четыре модели двух
         прочтений, и набор обязан быть одним и тем же от запуска к запуску."""
@@ -476,6 +536,82 @@ class RecognitionTest(unittest.TestCase):
         self.assertEqual(analyze('камри 1975 года')['years'], [])
         self.assertEqual(analyze('камри 2027 года')['years'], [2027])        # год + 1 — уже продают
         self.assertEqual(analyze('камри 2028 года')['years'], [])
+
+
+class TypoTest(unittest.TestCase):
+    """Опечатки в марке и вопрос «на какие тарифы» (жалоба владельца 13.10.2026:
+    на «тайота камри» помощник ответил статьями про аренду)."""
+
+    def test_question_from_the_screenshot(self):
+        question = 'На какие тарифы подходит тайота камри в алматы?'
+        analysis = analyze(question)
+        self.assertEqual(([hit['level'] for hit in analysis['cars']], analysis['leftover'],
+                          analysis['tariff_word'], analysis['cities']),
+                         ([classifier.SURE], [], True, ['Алматы']))
+        self.assertEqual(names(question), ['Toyota Camry'])
+        lines = text(question).splitlines()
+        self.assertIn('Toyota Camry, Алматы, тариф Комфорт: от 2014 года выпуска.', lines)
+        self.assertIn('Toyota Camry, Алматы: в тарифы Электро, Ultima (Premier) модель не внесена.',
+                      lines)
+
+    def test_a_instead_of_o_in_the_brand_is_the_brand(self):
+        for question in ('тайота камри 2015 какой тариф', 'на тайоте камри 2015 года можно в комфорт?',
+                         'камри тайота 2015 комфорт'):
+            with self.subTest(question=question):
+                self.assertEqual(names(question), ['Toyota Camry'])
+                self.assertEqual(analyze(question)['cars'][0]['level'], classifier.SURE)
+        # И без модели: «тайота» — марка, на «какие тарифы» — список её моделей.
+        self.assertEqual(names('тайота на какие тарифы подходит'), 'brand:Toyota')
+        self.assertIsNone(names('тайота'))
+        # Модель с опечаткой рядом с маркой — на букву от своей.
+        self.assertEqual(names('тайота каролла 2016 эконом'), ['Toyota Corolla'])
+
+    def test_typo_brand_counts_only_next_to_its_model(self):
+        # «тоёта» — на две буквы от «тойота»: маркой становится только рядом с её
+        # моделью, и пара не твёрже самой модели без марки.
+        analysis = analyze('тоёта камри на какие тарифы')
+        self.assertEqual([(hit['cars'][0]['name'], hit['level']) for hit in analysis['cars']],
+                         [('Toyota Camry', classifier.NAMED)])
+        self.assertEqual(analysis['leftover'], [])
+        weak = analyze('мерсадес е класс 2019 бизнес')
+        self.assertEqual([(hit['cars'][0]['name'], hit['level']) for hit in weak['cars']],
+                         [('Mercedes-Benz E-klasse', classifier.PROBABLE)])
+        self.assertEqual(names('мерсадес е класс 2019 бизнес'), ['Mercedes-Benz E-klasse'])
+        # Без модели рядом — не марка: ни списка Toyota, ни чужой машины.
+        self.assertIsNone(names('тоёта на какие тарифы подходит'))
+        # «через» на две буквы от Chery, но рядом не её модель: машина — камри.
+        self.assertEqual(names('через камри в комфорт'), ['Toyota Camry'])
+
+    def small_book(self, *cars):
+        return classifier.build_book(dict(DATA, cars=[car(brand, model, comfort=2015)
+                                                      for brand, model in cars]))
+
+    def test_no_guessing_between_two_brands(self):
+        # Две марки, равные с точностью до «а/о», и опечатка, равноудалённая от
+        # двух марок, — не угадываем.
+        twins = self.small_book(('Kotara', 'One'), ('Katara', 'Two'))
+        self.assertNotEqual(classifier._typo_brand(twins, {'word': 'катора', 'signal': False})[1],
+                            'folded')
+        tie = self.small_book(('Lifan', 'X50'), ('Lifal', 'X60'))
+        self.assertEqual(classifier._typo_brand(tie, {'word': 'лифак', 'signal': False}),
+                         (None, None))
+
+    def test_typo_in_the_model_takes_the_shortest_window(self):
+        # Точного имени нет: «кемри» — на букву от Kamri, а «кемри на» — на букву
+        # от Kamrina. Опечатка в одном слове — это одно слово.
+        book = self.small_book(('Toyota', 'Kamri'), ('Toyota', 'Kamrina'))
+        with patch.object(currency, 'today', return_value=TODAY):
+            decision = classifier.plan(classifier.analyze('тойота кемри на комфорт', book))
+        self.assertEqual([item['name'] for item in decision['cars']], ['Toyota Kamri'])
+
+    def test_tariff_word_asks_about_the_tariff(self):
+        self.assertEqual(names('камри на какие тарифы'), ['Toyota Camry'])
+        self.assertEqual(names('какие тарифы у камри 2015'), ['Toyota Camry'])
+        self.assertEqual(names('на какие тарифы подходит машина 2015 года'), 'general')
+        for question in ('на какие тарифы можно подключиться', 'какой тариф выбрать водителю',
+                         'тариф комфорт минимальная цена'):
+            with self.subTest(question=question):
+                self.assertIsNone(names(question))
 
 
 class NoiseTest(unittest.TestCase):
@@ -767,6 +903,22 @@ class FollowUpTest(unittest.TestCase):
     def test_explicit_history_does_not_use_the_flattened_query(self):
         analysis = analyze('а в астане?', self.FIRST + ' а в астане?', history=[])
         self.assertIsNone(classifier.plan(analysis))
+
+    def test_tariff_word_carries_over_to_the_next_city(self):
+        # «акцент» — слабое имя: машиной его сделало «на какие тарифы». «А в
+        # Астане?» следом — тот же вопрос, и признак переходит вместе с машиной.
+        analysis = self.conversation('а в астане?', 'акцент на какие тарифы')
+        self.assertEqual([car['name'] for car in classifier.plan(analysis)['cars']], ['Hyundai Accent'])
+
+    def test_which_tariffs_asks_about_all_tariffs(self):
+        # «А на какие тарифы?» после «комфорта» — про все тарифы, а не про прежний.
+        analysis = self.conversation('а на какие тарифы?', self.FIRST)
+        self.assertEqual(([car['name'] for car in classifier.plan(analysis)['cars']],
+                          analysis['tariffs'], analysis['cities'], analysis['years']),
+                         (['Toyota Camry'], [], ['Алматы'], [2015]))
+        body = classifier.build_ai_rows(analysis, BOOK, article=ARTICLE)[0]['text']
+        self.assertIn('тариф Бизнес', body)
+        self.assertEqual(classifier.build_ai_rows(analysis, BOOK, article=ARTICLE)[0]['evidence'], None)
 
     def test_turn_the_classifier_kept_silent_on_does_not_lend_its_car(self):
         # Про машину спросили не классификатор: шум двигателя, штрафстоянка.

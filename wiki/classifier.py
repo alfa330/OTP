@@ -198,6 +198,7 @@ def build_book(data):
     _index_models(book)
     _index_brands(book)
     _index_aliases(book)
+    _index_brand_typos(book)
     return book
 
 
@@ -245,6 +246,12 @@ _DOUBLE = re.compile(r'([a-z])\1+')
 
 def _squeeze(value):
     return _DOUBLE.sub(r'\1', value.replace('ts', 's'))
+
+
+def _fold(value):
+    """Звуковой ключ без различия «а» и «о»: безударную «о» слышат и пишут «а» —
+    «тайота», «каролла», «салярис» (вопрос оператора 13.10.2026 был про «тайоту»)."""
+    return value.replace('o', 'a')
 
 
 def _cyrillic_sound(word):
@@ -534,6 +541,10 @@ _MODEL_NAMES = (
     ('прадо|ленд крузер прадо|лэнд крузер прадо|лендкрузер прадо', 'Toyota', 'Land Cruiser Prado'),
     ('ленд крузер|лэнд крузер|лендкрузер|крузак', 'Toyota', 'Land Cruiser'),
     ('хайлендер|хайландер', 'Toyota', 'Highlander'),
+    # «А» вместо безударной «о» в ходовых моделях. Только явным списком: правило
+    # «а = о» для любой модели без марки читало «премию» как Toyota Premio, «акциям»
+    # — как Isuzu Axiom, «салона» — как Lifan Solano (сверка по словам вики 13.10.2026).
+    ('каролла|карола', 'Toyota', 'Corolla'),
     ('рав 4|рав4|раф 4|раф4', 'Toyota', 'RAV 4'),
     ('марк 2|марк два|марк ii|mark 2', 'Toyota', 'Mark II'),
     ('марк х|марк икс|mark x', 'Toyota', 'Mark X'),
@@ -544,7 +555,11 @@ _MODEL_NAMES = (
     ('секвойя', 'Toyota', 'Sequoia'),
     ('туксон|туссан|тусон|таксон', 'Hyundai', 'Tucson'),
     ('грандер|грандеур', 'Hyundai', 'Grandeur'),
-    ('спортейдж|спортаж|спортедж|спортэйдж|спортеж', 'Kia', 'Sportage'),
+    ('салярис', 'Hyundai', 'Solaris'),
+    ('кабальт', 'Chevrolet', 'Cobalt'),
+    ('актавия', 'Skoda', 'Octavia'),
+    ('аптима', 'Kia', 'Optima'),
+    ('спортейдж|спортаж|спортедж|спортэйдж|спортеж|спартейдж', 'Kia', 'Sportage'),
     ('сид|сиид|ceed', 'Kia', "Cee'd"),
     ('лачетти|ласетти', None, 'Lacetti'),
     ('трейлблейзер', 'Chevrolet', 'TrailBlazer'),
@@ -674,6 +689,33 @@ def _index_aliases(book):
             elif brand:
                 book['brand_exact'].setdefault(_key(name), brand)
     book['alias'] = alias
+
+
+def _index_brand_typos(book):
+    """Звуковые ключи марок для опечаток: «тайота», «тоета», «мерсадес».
+
+    Берутся однословные имена марок — латинские из классификатора и русские из
+    словарей выше. Марки-обычные слова (_AMBIGUOUS_BRANDS) в разбор опечаток не
+    идут — «газ», «джип», «мини» и без того спорны, — как и ключи короче пяти
+    звуков: «лада», «рено», «опель» на букву от слишком многих слов.
+    """
+    names = {}
+    for key, brand in book['brand_exact'].items():
+        if brand not in _AMBIGUOUS_BRANDS and re.fullmatch(r'[a-zа-я]{4,}', key):
+            names.setdefault(brand, set()).add(key)
+    folded, near = {}, []
+    for brand in sorted(names):
+        for key in sorted(names[brand]):
+            for value in _sounds(key):
+                # Короткий ключ свёрнутым не берём: «зотье» (Zotye) с точностью до
+                # «а/о» — это «затеи».
+                if len(value) < 5:
+                    continue
+                folded.setdefault(_fold(value), set()).add(brand)
+                if (value, brand) not in near:
+                    near.append((value, brand))
+    book['brand_folded'] = {value: sorted(found) for value, found in folded.items()}
+    book['brand_near'] = near
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,11 +1013,19 @@ def _brand_special(book, brand, words):
 
 def _model_near_brand(book, tokens, brand, start, end):
     """Модель рядом с маркой: после неё («тойота камри») или перед («камри
-    тойота»). Возвращает (машины, окно слов) или ([], None)."""
+    тойота»). Возвращает (машины, окно слов) или ([], None).
+
+    Сначала точные имена, от длинного окна к короткому: «тигго 7 про макс»
+    длиннее «тигго 7 про». Имя с опечаткой (_closest) — только когда точного нет
+    нигде, и от короткого окна к длинному: иначе «камри на» — на одну букву от
+    «Carina» — обгоняло точное «камри» (вопрос «тойота камри на какие тарифы»).
+    """
+    after = []
     for size in (4, 3, 2, 1):
         window = _free(tokens, end, size)
         if not window:
             continue
+        after.append(window)
         words = [token['word'] for token in window]
         # Сначала то, что марка читает по-своему: «мерседес глс» по буквам
         # совпадает и с GLC, а «лексус рх 350» обязан забрать и объём мотора.
@@ -984,8 +1034,6 @@ def _model_near_brand(book, tokens, brand, start, end):
             cars = _named(book, words, brand)
         if not cars:
             cars = _sounded(book, words, brand)
-        if not cars and size <= 3:
-            cars = _closest(book, words, brand)
         if cars:
             return cars, window
     for size in (3, 2, 1):
@@ -998,6 +1046,11 @@ def _model_near_brand(book, tokens, brand, start, end):
         cars = _named(book, words, brand) or _sounded(book, words, brand)
         if cars:
             return cars, window
+    for window in reversed(after):
+        if len(window) <= 3:
+            cars = _closest(book, [token['word'] for token in window], brand)
+            if cars:
+                return cars, window
     return [], None
 
 
@@ -1080,6 +1133,52 @@ def _mercedes_class(book, tokens):
     return found
 
 
+def _typo_brand(book, token):
+    """Марка по слову с опечаткой: (марка, 'folded' | 'near') или (None, None).
+
+    'folded' — «тайота»: та же «тойота», только «а» на месте безударной «о».
+    Обычных слов, совпадающих с маркой с точностью до «а/о», нет, и такое слово —
+    просто марка. 'near' — опечатка посерьёзнее, на одну-две буквы («тоёта»,
+    «мерсадес»): маркой она становится, только если рядом стоит модель этой марки
+    (_find_cars), — иначе «школа» читалась бы как Skoda, «через» как Chery, а
+    «после» как Porsche (сверка по словам вики 13.10.2026).
+    """
+    word = token['word']
+    if (token['signal'] or word in _FILLER or len(word) < 4
+            or not re.fullmatch(r'[а-я]+', word)):
+        return None, None
+    sounds = []
+    for reading in _readings([word]):
+        sounds += [value for value in _spellings(reading)[1] if value not in sounds]
+    for value in sounds:
+        found = book['brand_folded'].get(_fold(value)) or []
+        if len(found) == 1:
+            return found[0], 'folded'
+    if len(word) < 5:
+        return None, None
+    # Название модели опечаткой марки не бывает: «нексия» на две буквы от EXEED,
+    # «тигуан» — от Qiyuan, «джетта» — от Jetour.
+    for reading in _readings([word]):
+        if book['alias'].get(reading[0]) or any(book['model_sound'].get(value)
+                                                for value in _spellings(reading)[1]):
+            return None, None
+    best, brands = None, set()
+    for value in sounds:
+        for other, brand in book['brand_near']:
+            if len(other) < 5:
+                continue
+            limit = 1 if max(len(value), len(other)) <= 5 else 2
+            distance = _distance(value, other, limit)
+            if distance > limit:
+                continue
+            if best is None or distance < best:
+                best, brands = distance, {brand}
+            elif distance == best:
+                brands.add(brand)
+    # Две марки на равном расстоянии — не угадываем.
+    return (brands.pop(), 'near') if len(brands) == 1 else (None, None)
+
+
 def _find_brands(book, tokens):
     found, index = [], 0
     while index < len(tokens):
@@ -1089,7 +1188,7 @@ def _find_brands(book, tokens):
             if not window:
                 continue
             words = [token['word'] for token in window]
-            brand = None
+            brand, typo = None, None
             for reading in _readings(words):
                 exact, sound = _spellings(reading)
                 brand = next((book['brand_exact'][value] for value in sorted(exact)
@@ -1100,11 +1199,14 @@ def _find_brands(book, tokens):
                                   if value in book['brand_sound']), None)
                 if brand is not None:
                     break
+            if brand is None and size == 1:
+                brand, typo = _typo_brand(book, window[0])
             if brand is not None:
-                hit = (brand, window, index, index + size)
+                hit = (brand, window, index, index + size, typo)
                 break
         if hit:
-            found.append({'brand': hit[0], 'window': hit[1], 'start': hit[2], 'end': hit[3]})
+            found.append({'brand': hit[0], 'window': hit[1], 'start': hit[2], 'end': hit[3],
+                          'typo': hit[4]})
             index = hit[3]
         else:
             index += 1
@@ -1119,16 +1221,23 @@ def _find_cars(book, tokens):
     for hit in brands:
         cars, window = _model_near_brand(book, tokens, hit['brand'], hit['start'], hit['end'])
         if cars:
+            level = SURE
+            if hit['typo'] == 'near':
+                # Марка угадана по опечатке — пара не твёрже самой модели без марки:
+                # «тоёта камри» — как «камри», «мерсадес вито» — слабое имя.
+                _alone, alone = _unanchored(book, tokens, tokens.index(window[0]), len(window))
+                level = NAMED if alone in (SURE, NAMED) else PROBABLE
             _take(hit['window'], 'brand')
             _take(window, 'model')
-            found.append({'cars': cars, 'level': SURE})
+            found.append({'cars': cars, 'level': level})
     found += _mercedes_class(book, tokens)
     for hit in brands:
         if hit['window'][0]['kind'] is not None:
             continue
         # Имя марки, совпавшее с моделью другой марки, сначала пробуем моделью:
-        # «джетта» — Volkswagen Jetta, а не марка Jetta без модели.
-        if hit['brand'] in _AMBIGUOUS_BRANDS:
+        # «джетта» — Volkswagen Jetta, а не марка Jetta без модели. Опечатка на
+        # буквы, а не на «а/о», без модели рядом маркой не считается вовсе.
+        if hit['brand'] in _AMBIGUOUS_BRANDS or hit['typo'] == 'near':
             continue
         _take(hit['window'], 'brand')
         loose.append(hit['brand'])
@@ -1186,6 +1295,8 @@ def analyze(question, book):
         'other_tariff': bool(_OTHER_TARIFF.search(base)),
         'rent': bool(_RENT.search(base)),
         'other_topic': bool(_OTHER_TOPIC.search(base)),
+        # «На какие тарифы подходит…» — вопрос о тарифе, даже когда ни один не назван.
+        'tariff_word': bool(_TARIFF_WORD.search(base)),
     }
     for pattern in (_CLASSIFIER_WORD, _YEAR_WORD, _FIT, _CAR_NOUN, _LIST, _TARIFF_WORD,
                     _OTHER_TARIFF):
@@ -1234,9 +1345,11 @@ def analyze(question, book):
 
 
 def _strength(analysis):
-    """(сильных признаков, слабых): тариф, «с какого года» и слово «классификатор»
-    говорят сами; год, «подходит» и «машина» — только вместе или в коротком вопросе."""
-    strong = sum(bool(analysis[name]) for name in ('tariffs', 'year_word', 'classifier'))
+    """(сильных признаков, слабых): тариф (названный или словом «тариф»), «с какого
+    года» и слово «классификатор» говорят сами; год, «подходит» и «машина» — только
+    вместе или в коротком вопросе."""
+    strong = sum(bool(analysis[name])
+                 for name in ('tariffs', 'tariff_word', 'year_word', 'classifier'))
     medium = sum(bool(analysis[name]) for name in ('years', 'fit', 'car_noun'))
     return strong, medium
 
@@ -1317,7 +1430,7 @@ def plan(analysis):
     about_car = analysis['car_noun'] or not analysis['leftover']
     if analysis['list'] and (analysis['fit'] or analysis['year_word']) and not analysis['leftover']:
         return {'kind': 'general'}
-    if about_car and analysis['tariffs'] and (
+    if about_car and (analysis['tariffs'] or analysis['tariff_word']) and (
             analysis['year_word'] or (analysis['fit'] and (analysis['years'] or analysis['car_noun']))
             or (analysis['car_noun'] and analysis['years'])):
         return {'kind': 'general'}
@@ -1336,7 +1449,8 @@ def _context(question, search_query):
 def _continue(own, past):
     """Уточнение заменяет названные поля, остальные берёт из прошлого вопроса."""
     said = (own['cars'] or own['brands'] or own['cities'] or own['tariffs'] or own['years']
-            or own['other_cities'] or own['other_tariff'] or own['fit'] or own['year_word'])
+            or own['other_cities'] or own['other_tariff'] or own['fit'] or own['year_word']
+            or own['tariff_word'])
     if own['leftover'] or not said or _another_topic(own):
         return own
     if past is None or not plan(past):
@@ -1347,11 +1461,12 @@ def _continue(own, past):
             past['cars'], past['brands'], past['unknown'])
     if not own['years']:
         merged['years'] = past['years']
-    if not own['tariffs'] and not own['other_tariff']:
+    # «А на какие тарифы?» спрашивает про все тарифы, а не про прежний.
+    if not own['tariffs'] and not own['other_tariff'] and not own['tariff_word']:
         merged['tariffs'], merged['other_tariff'] = past['tariffs'], past['other_tariff']
     if not own['cities'] and not own['other_cities']:
         merged['cities'], merged['other_cities'] = past['cities'], past['other_cities']
-    for name in ('classifier', 'year_word', 'fit', 'car_noun', 'list', 'which'):
+    for name in ('classifier', 'year_word', 'fit', 'car_noun', 'list', 'which', 'tariff_word'):
         merged[name] = own[name] or past[name]
     merged['continued'] = True
     return merged
