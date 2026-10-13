@@ -63,6 +63,11 @@ RETURNING id, created_at
 # Источник «Списки Байги» (baiga/assistant.py) — того же рода: статьи нет,
 # вкладка 'baiga', неделя в ref_id, водитель в ref_key, пространства нет.
 #
+# Источник «Классификатор авто» (wiki/classifier.py) — статья ЕСТЬ (сам
+# классификатор), а запись в ней — машина: «марка|модель» в ref_key, год из
+# вопроса в ref_id, id города из файла данных в ref_city. По ним чип открывает
+# калькулятор уже на этой машине.
+#
 # Колонки вставки и чтения названы ОДИН раз, и оба запроса собираются из этих
 # списков: колонку нельзя добавить в перечень и забыть в значениях, а чтение идёт
 # по именам, а не по номерам позиций (номер ВУ, записанный в «город записи»,
@@ -292,7 +297,9 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=(), directory_access=N
         if message is None:
             continue
         kind = source['source_kind'] or 'article'
-        if kind == 'article':
+        if kind in ('article', 'classifier'):
+            # «Классификатор авто» (wiki/classifier.py) — тоже статья: его
+            # источник открыт, пока открыта она.
             available = bool(source['visible'])
             closed_title = 'Статья недоступна'
         elif kind == 'baiga':

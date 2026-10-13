@@ -30,6 +30,7 @@ from flask import jsonify, request
 
 from baiga import assistant as baiga_assistant
 
+from . import classifier as wiki_classifier
 from . import directory as wiki_directory
 from . import perimeter as wiki_perimeter
 from . import queries
@@ -114,6 +115,25 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None):
         logging.exception('Помощник: справочник не ответил')
         return []
     cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
+    return rows
+
+
+def classifier_rows(cursor, question, article_ids, search_query=None, *, history=None):
+    """Годы «Классификатора авто» к вопросу (wiki/classifier.py) — или [].
+
+    article_ids — периметр помощника: классификатор читается, только пока его
+    статья в нём лежит. Под савпоинтом, как справочник: это приставка к ответу,
+    и её сбой не должен отнимать у оператора ответ по статьям.
+    """
+    cursor.execute('SAVEPOINT wiki_ai_classifier')
+    try:
+        rows = wiki_classifier.ai_rows(cursor, question, article_ids=article_ids,
+                                       search_query=search_query, history=history)
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_classifier')
+        logging.exception('Помощник: классификатор авто не ответил')
+        return []
+    cursor.execute('RELEASE SAVEPOINT wiki_ai_classifier')
     return rows
 
 
@@ -298,17 +318,18 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
         found = ai_retrieve.search_hybrid(
             cursor, article_ids=article_ids, query=query,
             query_vector=query_vector, limit=limit, per_article=per_article)
-        # Ровно то, что получит /ask: строки «Списков Байги» и записи
-        # справочника впереди статей.
+        # Ровно то, что получит /ask: строки «Списков Байги», записи
+        # справочника и годы классификатора авто впереди статей.
         baiga = baiga_rows(cursor, ctx, query, space_id, (), sensitive_access_granted)
         directory = directory_rows(cursor, ctx, query, space_id)
-        rows = baiga + directory + found['rows']
+        cars = classifier_rows(cursor, query, article_ids)
+        rows = baiga + directory + cars + found['rows']
 
         return jsonify({
             'query': query,
             'perimeter_articles': len(article_ids),
             'branches': {**found['branches'], 'directory': len(directory),
-                         'baiga': len(baiga)},
+                         'baiga': len(baiga), 'classifier': len(cars)},
             'degraded': found['degraded'],
             'vector_error': vector_error,
             # Поля берутся только те, что реально возвращает fuse(). Раньше здесь
@@ -451,6 +472,9 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
         # живыми данными на сегодня (wiki/directory.py). Впереди статей: при
         # равной опоре источником становится справочник, а в промпте у него своя
         # подпись и правило «при расхождении верен справочник».
+        #
+        # С какого года модель берут в тариф — из «Классификатора авто»
+        # (wiki/classifier.py): годы по городам считает код, а не модель.
         lists = baiga_rows(
             cursor, ctx, question, space_id,
             # Разговор о водителе длиннее трёх реплик, которые помнит модель:
@@ -459,6 +483,7 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
             ai_store.recent_questions(cursor, chat_id, limit=baiga_assistant.PRIOR_TURNS),
             sensitive_access_granted)
         rows = (lists + directory_rows(cursor, ctx, question, space_id, search_query)
+                + classifier_rows(cursor, question, scope['article_ids'], search_query, history=history)
                 + found['rows'])
 
         asked = ai_store.append_message(cursor, chat_id, role='user', kind='question',

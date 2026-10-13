@@ -255,6 +255,26 @@ def _city_pattern(folded_name):
     return re.compile(r'(?<![%s])%s(?![%s])' % (_LETTERS, body, _LETTERS))
 
 
+def city_patterns(names):
+    """[(образец, название)] — города из names и их разговорные формы, каждый
+    со склонением. Тем же правилом город узнаёт классификатор авто
+    (wiki/classifier.py): «в Астане» обязано значить одно и то же в обоих
+    справочниках."""
+    by_folded = {}
+    for name in names:
+        folded = normalize(name)
+        if folded and folded not in by_folded:
+            by_folded[folded] = name
+    forms = [(folded, folded) for folded in by_folded]
+    forms += [(alias, target) for alias, target in CITY_ALIASES.items() if target in by_folded]
+    found = []
+    for form, target in forms:
+        pattern = _city_pattern(form)
+        if pattern is not None:
+            found.append((pattern, by_folded[target]))
+    return found
+
+
 def _variants(text):
     """Написания запроса, в которых ищем город, парк и тариф.
 

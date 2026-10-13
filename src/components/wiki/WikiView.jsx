@@ -26,7 +26,7 @@ import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
 import { directoryTab } from './searchDirectory';
-import { sourceDoor } from '../assistant/sourceTarget';
+import { CLASSIFIER_TAB, classifierPrefillOf, sourceDoor } from '../assistant/sourceTarget';
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
@@ -536,6 +536,17 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const consumeOfficeFocus = useCallback(() => setOfficeFocus(null), []);
     const consumeCityFocus = useCallback(() => setCityFocus(null), []);
 
+    /* Источник «Классификатор авто» под ответом помощника (wiki/classifier.py):
+       статья-калькулятор открывается уже на машине, годе и городе из ответа.
+       Цитату в подсветку не отдаём — текста у этой статьи нет. nonce отличает
+       повторное нажатие от уже применённой заготовки (ClassifierView). */
+    const openClassifierSource = useCallback((source, from = null) => {
+        const car = classifierPrefillOf(source);
+        const prefill = car ? { ...car, nonce: Date.now() } : null;
+        setTab('library');
+        setSearchTarget({ slug: CLASSIFIER_SLUG, prefill, from });
+    }, []);
+
     /* Половины вкладки «Статьи» гейтятся по отдельности: каталог — редактору,
        структура — тому, кто правит дерево или раздаёт доступы. Обычно человек
        имеет обе (см. матрицу в wiki/access.py), но роль вики можно собрать
@@ -649,6 +660,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        просто гасит: открыть ту же вкладку в чужом значило бы показать не то. */
     useEffect(() => {
         if (!directoryFocus?.tab || loading) return;
+        // Классификатор — статья, а не вкладка: пространство ей не нужно.
+        if (directoryFocus.tab === CLASSIFIER_TAB) {
+            if (state) openClassifierSource(directoryFocus);
+            onDirectoryFocusConsumed?.();
+            return;
+        }
         const wanted = Number(directoryFocus.space_id) || null;
         const target = wanted ? spaces.find((sp) => sp.id === wanted) : null;
         const allowed = wanted
@@ -656,7 +673,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             : tabs.some((t) => t.key === directoryFocus.tab);
         if (state && allowed) openDirectory(directoryFocus);
         onDirectoryFocusConsumed?.();
-    }, [directoryFocus, tabs, spaces, state, loading, openDirectory, onDirectoryFocusConsumed]);
+    }, [directoryFocus, tabs, spaces, state, loading, openDirectory, openClassifierSource,
+        onDirectoryFocusConsumed]);
 
     /* «Опубликовать как новость» из «Вопросов» живёт, пока открыта вкладка
        «Новости»: ушли с неё иначе — просьба снимается, и следующий заход в
@@ -1144,6 +1162,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                 if (sourceDoor(source) === 'baiga') { onOpenBaiga?.(source); return; }
                                 // Источник-справочник ведёт во вкладку, а не в статью.
                                 if (!slug && source?.tab) { openDirectory(source); return; }
+                                // «Классификатор авто» — на машине из ответа.
+                                if (source?.tab === CLASSIFIER_TAB) {
+                                    openClassifierSource(source, returnDoor('assistant'));
+                                    return;
+                                }
                                 setTab('library');
                                 setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
                             }}

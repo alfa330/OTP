@@ -14,6 +14,7 @@ import {
 import {
     canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
 } from '../../utils/pipWindow';
+import { CLASSIFIER_TAB } from './sourceTarget';
 import './assistant-orb.css';
 
 const AssistantPanel = lazyWithRetry(() => import('./AssistantPanel.jsx'));
@@ -654,6 +655,14 @@ export default function AssistantOrb({
     }, [pipWindow]);
 
     const openArticle = useCallback((slug, quote, source) => {
+        if (source?.tab === CLASSIFIER_TAB && onOpenWikiTarget) {
+            // «Классификатор авто»: той же дорогой, что справочник, — вместе с
+            // источником уезжают машина, год и город из ответа.
+            setOpen(false);
+            raisePortal();
+            onOpenWikiTarget(source);
+            return;
+        }
         if (!slug) {
             // Источник-справочник: статьи нет, есть вкладка «Офисы»/«Города».
             if (!source?.tab || !onOpenWikiTarget) return;

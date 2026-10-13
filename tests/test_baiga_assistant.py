@@ -2250,7 +2250,8 @@ class WiringTests(unittest.TestCase):
         """Куда ведёт чип, решают чистые функции (tests/assistant_source_target.test.mjs,
         tests/baiga_meta.test.mjs); здесь — что экраны зовут именно их."""
         thread = _read('src', 'components', 'assistant', 'assistantThread.jsx')
-        self.assertIn('const SOURCE_ICONS = { offices: MapPin, cities: Percent, baiga: Trophy };', thread)
+        self.assertIn('const SOURCE_ICONS = { offices: MapPin, cities: Percent, baiga: Trophy, '
+                      'classifier: Car };', thread)
         self.assertIn('disabled={sourceDisabled(source)}', thread)
         wiki = _read('src', 'components', 'wiki', 'WikiView.jsx')
         self.assertLess(wiki.index("if (sourceDoor(source) === 'baiga') { onOpenBaiga?.(source); return; }"),

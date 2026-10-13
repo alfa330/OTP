@@ -179,16 +179,48 @@ BAIGA_RULE = """11. СПИСКИ БАЙГИ. Фрагменты с подпис�
    * ФИО, номер ВУ и название зачёта переноси буква в букву, как в списке;
      слово «зачёт» не переводи."""
 
+# Правило для фрагментов «Классификатора авто» (wiki/classifier.py). Как и правило
+# Байги, приходит модели только вместе с такими фрагментами.
+#
+# Что здесь от кода, а не от вкуса. Год по городу и «подходит / не подходит» уже
+# посчитаны во фрагменте: год, который модель сложила сама (базовый плюс поправка
+# города), в тексте фрагмента не найдётся, и верный по смыслу ответ уйдёт в отказ
+# (ungrounded_numbers). «Модель в тариф не внесена» — ответ, а не отказ: отказ у
+# оператора уходит супервайзеру (wiki/questions.py), а добавить к классификатору
+# тому нечего.
+CLASSIFIER_RULE = """12. КЛАССИФИКАТОР АВТО. Фрагменты с подписью «Справочник «Классификатор авто»» —
+   данные классификатора вики: с какого года выпуска модель берут в тариф в городе.
+   * «От N» значит «N и новее». Год бери ТОЛЬКО из фрагмента и только для того
+     города, о котором спросили: не пересчитывай и не переноси год одного города
+     на другой.
+   * «Подходит» и «не подходит» во фрагменте уже посчитаны для года из вопроса —
+     повтори их, не решай заново.
+   * Город в вопросе не назван — скажи, что год зависит от города, и дай годы по
+     городам из фрагмента таблицей; один «общий» год не называй.
+   * Модель в тариф не внесена или тарифа в городе нет — так и ответь: это ответ
+     на вопрос, а не отказ. Фразу «в доступных вам статьях этого нет» здесь не
+     пиши.
+   * «Оговорка классификатора: …» относится к тарифу в той же строке — приведи её
+     вместе с годом, дословно.
+   * Машин во фрагментах несколько (одна модель у разных марок) — назови каждую
+     с маркой; годы разных машин не смешивай.
+   * Дан список моделей марки, а модель из вопроса в нём записана иначе (в
+     классификаторе названия латиницей) — найди её по написанию и ответь про неё.
+     Не нашёл — скажи, что такой модели в классификаторе нет.
+   * Марку и модель пиши так, как они записаны во фрагменте."""
+
 _FORMAT_HEADER = '\n\nФОРМАТ ОТВЕТА'
 
 
 def system_prompt(chunks):
-    """Системный промпт под эти фрагменты: общий, плюс правило раздела, если
-    его строки среди них есть."""
-    if any(chunk.get('source_kind') == 'baiga' for chunk in chunks):
-        head, tail = SYSTEM_PROMPT.split(_FORMAT_HEADER, 1)
-        return head + '\n' + BAIGA_RULE + _FORMAT_HEADER + tail
-    return SYSTEM_PROMPT
+    """Системный промпт под эти фрагменты: общий, плюс правила разделов, чьи
+    строки среди них есть."""
+    rules = [rule for kind, rule in (('baiga', BAIGA_RULE), ('classifier', CLASSIFIER_RULE))
+             if any(chunk.get('source_kind') == kind for chunk in chunks)]
+    if not rules:
+        return SYSTEM_PROMPT
+    head, tail = SYSTEM_PROMPT.split(_FORMAT_HEADER, 1)
+    return head + '\n' + '\n'.join(rules) + _FORMAT_HEADER + tail
 
 
 _KZ_LETTERS = set('әғқңөұүһі')
@@ -739,12 +771,36 @@ def _evidence(chunk):
     источником становился однофамилец, о котором в ответе ни слова, с цитатой
     «Список Байги за неделю…» (замер на обеих моделях цепочки 05.10.2026).
     Модели при этом уходит текст целиком — неделю она обязана видеть.
+
+    У карточки «Классификатора авто» (wiki/classifier.py) — оговорки и строки
+    спрошенного тарифа: строки разных тарифов почти одинаковы, и под ответом
+    «подходит в Комфорт» иначе вставала цитата «Комфорт+: … не подходит».
     """
     return chunk.get('evidence') or chunk.get('text') or ''
 
 
 # Слова, по которым ответ с «нет» узнаётся как ответ о списках, а не отказ.
 _ABOUT_LISTS = re.compile(r'списк|байг|бәйге|тізім|тизим', re.I)
+# То же для классификатора авто: «в доступных данных классификатора такой модели
+# нет» — ответ (wiki/classifier.py сообщает это фрагментом), а не отказ.
+_ABOUT_CLASSIFIER = re.compile(r'классификатор|жіктеуіш|жиктеуиш', re.I)
+
+
+def _names_car(chunk, answer):
+    """Назвал ли ответ машину этого фрагмента классификатора.
+
+    Модель из одного-трёх знаков («3», «ES», «K5») сама по себе ничего не
+    доказывает — у неё рядом обязана стоять и марка."""
+    names = [str(name).lower() for name in chunk.get('names') or () if name]
+    if len(names) < 2:
+        return False
+    text = str(answer or '').lower()
+
+    def said(name):
+        return bool(re.search(r'(?<![a-zа-я0-9])%s(?![a-zа-я0-9])' % re.escape(name), text))
+
+    brand, model = names[0], names[1]
+    return said(model) and (len(model) >= 4 or said(brand))
 
 
 def _own_words(text, lists):
@@ -808,6 +864,11 @@ def build_sources(cited, chunks, answer):
     номер недели: на замере 05.10.2026 чужая строка подшилась к ответу про
     другого водителя, потому что его неделя № 40 совпала с её 40-м местом. Общих
     слов у строк однофамильцев тоже хватает («место», «сумма», сама фамилия).
+
+    ФРАГМЕНТ «КЛАССИФИКАТОРА АВТО» — третье исключение, по той же причине: числа
+    в нём — годы, и «2024» из ответа про акцию совпало бы с годом в карточке
+    машины, которая в вопросе просто упомянута. Неназванный моделью фрагмент
+    сервер подшивает, только когда ответ сам называет эту машину.
     """
     def offered(index, chunk):
         """Вправе ли сервер подшить кусок, которого модель не назвала."""
@@ -815,6 +876,8 @@ def build_sources(cited, chunks, answer):
             return False
         if chunk.get('source_kind') == 'baiga':
             return any(len(number) >= 5 for number in _shared_numbers(chunk, answer))
+        if chunk.get('source_kind') == 'classifier':
+            return _names_car(chunk, answer)
         return True
 
     ranked = sorted(
@@ -970,6 +1033,7 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True,
               + '\n\n' + _LANGUAGE_DIRECTIVE[wanted])
     system = system_prompt(usable)
     lists = [chunk for chunk in usable if chunk.get('source_kind') == 'baiga']
+    cars = [chunk for chunk in usable if chunk.get('source_kind') == 'classifier']
     text, meta = generate_fn(system, prompt, history=history)
     # Повтор остаётся страховкой: указание модель иногда всё равно игнорирует.
     # Если и он не помог — ответ отдаём как есть, потому что неудобно читать
@@ -988,7 +1052,10 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True,
     # ответа, а не отказ: фрагмент раздела ровно это и сообщает. Без оговорки
     # фраза со словом «доступных» и без числа читалась как отказ — терялся чип
     # раздела, а вопрос уходил супервайзеру, которому ответить на него нечем.
-    refused = not body or (is_refusal(body) and not (lists and _ABOUT_LISTS.search(body)))
+    # То же с классификатором авто: «такой модели в классификаторе нет».
+    refused = not body or (is_refusal(body)
+                           and not (lists and _ABOUT_LISTS.search(body))
+                           and not (cars and _ABOUT_CLASSIFIER.search(body)))
     if refused:
         # Отказ идёт без источников: список статей под фразой «этого нет» читается
         # как противоречие и подрывает доверие к самой фразе.
@@ -1006,6 +1073,18 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True,
         return {'kind': 'answer', 'text': text,
                 'sources': build_sources(numbers, usable, text), 'notes': [],
                 'meta': dict(meta, fallback='строки раздела вместо пересказа',
+                             ungrounded=invented, raw_preview=body[:300])}
+    named = [index for index in cited
+             if 1 <= index <= len(usable) and usable[index - 1] in cars]
+    if invented and named:
+        # Модель сама сослалась на классификатор — и назвала год, которого в нём
+        # нет (пересчитала для другого города). Данные при этом верны: их собрал
+        # код. Отказ «в статьях этого нет» здесь был бы неправдой, поэтому вместо
+        # пересказа уходят сами строки классификатора — дословно.
+        text = '\n\n'.join(usable[index - 1]['text'] for index in named)
+        return {'kind': 'answer', 'text': text,
+                'sources': build_sources(named, usable, text), 'notes': [],
+                'meta': dict(meta, fallback='данные классификатора вместо пересказа',
                              ungrounded=invented, raw_preview=body[:300])}
     if invented:
         # Единственное, из-за чего ответ теперь придерживается: числа, которых нет
