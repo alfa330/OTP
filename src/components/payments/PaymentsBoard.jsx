@@ -9,7 +9,7 @@ import PaymentsFilters from './PaymentsFilters';
 import {
     BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, BOARD_COLUMN_GAP, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META,
     EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardHidden, boardLayout, boardPageStep, boardScrollFor, boardThumb,
-    canDropTo, cardFaces, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk, plural, requestType,
+    canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
     CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
@@ -62,18 +62,6 @@ const SHEET_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
    которую её несут, может стоять за краем. */
 const DRAG_EDGE = 80;
 const DRAG_SPEED = 18;
-// Сколько пикселей у края гаснет, когда за ним есть колонки.
-const EDGE_FADE = 44;
-
-/* Гаснущий край доски — маской, а не градиентом поверх: маске всё равно, какого
-   цвета страница, светлая тема или тёмная. */
-const edgeFade = (left, right) => {
-    if (!left && !right) return undefined;
-    const image = `linear-gradient(to right, ${left ? 'transparent' : '#000'} 0, #000 ${left ? EDGE_FADE : 0}px, `
-        + `#000 calc(100% - ${right ? EDGE_FADE : 0}px), ${right ? 'transparent' : '#000'} 100%)`;
-    return { maskImage: image, WebkitMaskImage: image };
-};
-
 const readChunk = () => {
     try {
         return normalizeBoardChunk(window.localStorage.getItem(BOARD_CHUNK_STORAGE_KEY));

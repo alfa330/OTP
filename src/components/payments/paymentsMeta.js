@@ -800,6 +800,31 @@ export const CARD_FOLDS = [
 export const FILE_FORMS = ['файл', 'файла', 'файлов'];
 export const EVENT_FORMS = ['событие', 'события', 'событий'];
 
+/* Статус задачи на этапе — тот же, что колонка на доске: «Новые / На рассмотрении» у
+   согласования, «Новые счета / Проверка / Готово к оплате / На оплате» у бухгалтерии.
+   Исполнитель двигает свою задачу сам — перетаскиванием на доске или переключателем в
+   окне заявки. Переключатель стоит в нижней панели окна, рядом с «Готово» (просьба
+   владельца 13.10.2026: вверху, между текстом задачи и полем комментария, он был «вообще
+   не в удобном месте»). Здесь — у каких этапов он есть и из чего состоит.
+
+   Этапы инициатора (черновик, чек, получение) сюда не входят: их статус меняет действие,
+   а не переключатель. У учёта имущества доски нет — подписи свои. */
+export const STAGE_STATUS_KINDS = ['manager_approval', 'approval', 'invoice_payment', 'card_topup', 'asset_registration'];
+const STAGE_STATUS_LABELS = { new: 'Новая', in_progress: 'В работе' };
+
+/** Статусы, между которыми исполнитель переключает задачу этапа: [{ value, label }].
+ *  Пусто — переключать нечего (этап без рабочих статусов или статус один). */
+export const stageStatusOptions = (meta, kind) => {
+    if (!STAGE_STATUS_KINDS.includes(kind)) return [];
+    const subtask = (meta?.subtasks || []).find((item) => item.kind === kind);
+    const board = (meta?.boards || []).find((item) => item.code === subtask?.board);
+    const options = (subtask?.statuses || []).map((value) => ({
+        value,
+        label: (board?.columns || []).find((column) => column.key === value)?.label || STAGE_STATUS_LABELS[value] || value,
+    }));
+    return options.length > 1 ? options : [];
+};
+
 /** У кого заявка сейчас — одной строкой для свёрнутого «Хода заявки». */
 export const routeSummary = (request, subtasks = []) => {
     const status = request?.status || 'active';
@@ -823,6 +848,20 @@ export const historySummary = (events = []) => {
     const last = list[list.length - 1];
     const when = last?.created_at ? fmtDateTime(last.created_at) : '';
     return [plural(list.length, EVENT_FORMS), when && `последнее ${when}`].filter(Boolean).join(' · ');
+};
+
+/* Гаснущий край ленты, которая листается вбок (доска, этапы в сводке заявки), — маской, а не
+   градиентом поверх: маске всё равно, какого цвета страница, светлая тема или тёмная. Гаснет
+   только тот край, за которым что-то есть: обрезанное само говорит, что лента продолжается. */
+export const EDGE_FADE = 44;
+
+/** Стиль маски для ленты: left/right — есть ли скрытое за этим краем; size — сколько пикселей гаснет.
+ *  undefined — гасить нечего. */
+export const edgeFade = (left, right, size = EDGE_FADE) => {
+    if (!left && !right) return undefined;
+    const image = `linear-gradient(to right, ${left ? 'transparent' : '#000'} 0, #000 ${left ? size : 0}px, `
+        + `#000 calc(100% - ${right ? size : 0}px), ${right ? 'transparent' : '#000'} 100%)`;
+    return { maskImage: image, WebkitMaskImage: image };
 };
 
 /* ── Доска на экранах разной ширины ───────────────────────────────────────────

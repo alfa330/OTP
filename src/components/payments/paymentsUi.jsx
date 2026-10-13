@@ -5,10 +5,12 @@ import {
     ShoppingCart, Trash2, UsersRound, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
+import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented, prefersReducedMotion } from '../ui/ios';
+import { foldFollowStep, foldMotion } from '../../utils/foldMotion';
+import { windowResizeMotion } from '../../utils/windowResize';
 import InfoHint from '../common/InfoHint';
 import {
-    ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, fileSizeLabel, fmtMoney, initialsOf,
+    ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
     pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, tonePill,
 } from './paymentsMeta';
 
@@ -261,17 +263,62 @@ export const TonePill = ({ tone = 'neutral', children, className = '' }) => {
    рисуется вовсе: серая точка «пропущено» только отвлекала бы.
    Чёрточек между этапами нет: семь названий в строку не помещаются, и после
    переноса чёрточка повисала в начале второй строки. Порядок читается и так —
-   слева направо, по цвету. */
-export const Lifecycle = ({ stages = [], stopped = false }) => {
+   слева направо, по цвету.
+
+   oneLine — этапы не переносятся, а листаются вбок, и лента сама стоит на текущем
+   этапе. Так сводка заявки рисуется на телефоне: она закреплена над страницами
+   окна, и три строки этапов отнимали бы у них треть экрана. Этап, уходящий за край
+   ленты, гаснет, а не обрывается посреди карточки (edgeFade — как край доски). */
+const LIFECYCLE_EDGE = 20;
+const NO_EDGES = { left: false, right: false };
+
+export const Lifecycle = ({ stages = [], stopped = false, oneLine = false }) => {
     const shown = stages.filter((stage) => stage.state !== 'skipped');
+    const listRef = useRef(null);
+    const [edges, setEdges] = useState(NO_EDGES);
+    const currentCode = shown.find((stage) => stage.state === 'current')?.code || '';
+    /* Оба шага — до первой отрисовки: лента открывается уже на текущем этапе и с погашенным
+       краем, а не доезжает кадром позже. */
+    useIsoLayoutEffect(() => {
+        const list = listRef.current;
+        const current = list?.querySelector('[aria-current="step"]');
+        if (!oneLine || !list || !current || list.scrollWidth <= list.clientWidth) return;
+        const listBox = list.getBoundingClientRect();
+        const box = current.getBoundingClientRect();
+        list.scrollLeft += (box.left + box.width / 2) - (listBox.left + listBox.width / 2);
+    }, [oneLine, currentCode, shown.length]);
+    // За каким краем ленты есть этапы: читается после того, как лента встала на текущий.
+    useIsoLayoutEffect(() => {
+        const list = listRef.current;
+        if (!oneLine || !list) return undefined;
+        const read = () => {
+            const left = list.scrollLeft > 1;
+            const right = list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+            setEdges((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+        };
+        read();
+        list.addEventListener('scroll', read, { passive: true });
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(read) : null;
+        observer?.observe(list);
+        return () => {
+            list.removeEventListener('scroll', read);
+            observer?.disconnect();
+        };
+    }, [oneLine, currentCode, shown.length]);
+    /* !flex-nowrap: телефонная оболочка сама переносит ряды с gap-* (mobile-shell.css) —
+       здесь лента обязана остаться одной строкой. */
     return (
-        <ol className="flex flex-wrap items-center gap-1.5">
+        <ol
+            ref={listRef}
+            className={`flex items-center gap-1.5 ${oneLine ? '!flex-nowrap overflow-x-auto [scrollbar-width:none]' : 'flex-wrap'}`}
+            style={oneLine ? edgeFade(edges.left, edges.right, LIFECYCLE_EDGE) : undefined}
+        >
             {shown.map((stage) => {
                 const done = stage.state === 'done';
                 const current = stage.state === 'current';
                 const halted = current && stopped;
                 return (
-                    <li key={stage.code} className="flex">
+                    <li key={stage.code} className="flex shrink-0" aria-current={current ? 'step' : undefined}>
                         <span
                             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[12px] ${
                                 halted ? 'bg-slate-200 text-slate-600'
@@ -826,32 +873,244 @@ export const FoldGroup = ({ children }) => (
     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>{children}</div>
 );
 
-export const Fold = ({ id, title, summary, open, onToggle, children }) => {
+export const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+// Что прокручивает раздел: тело окна (на телефоне — экран).
+const scrollHost = (node) => {
+    let host = node?.parentElement || null;
+    while (host && host !== document.body) {
+        if (/(auto|scroll)/.test(getComputedStyle(host).overflowY)) return host;
+        host = host.parentElement;
+    }
+    return null;
+};
+
+/* РАСКРЫТИЕ — ПО ВЫСОТЕ, как в списках iOS и macOS (просьба владельца 13.10.2026:
+   «открытие табов — ход заявки, документы и историю — сделать более плавным,
+   аккуратно и удобно»). Раньше содержимое возникало целиком, строки под ним
+   перескакивали вниз, рамка окна догоняла их отдельным движением, а при
+   сворачивании всё исчезало за кадр и рамка съезжалась по пустому месту.
+
+   Теперь тело раздела растёт от нуля до своего роста (и обратно), и всё, что под
+   ним, едет вместе с ним — строки, подвал, рамка окна: у окна рост «по
+   содержимому», отдельного движения рамке не нужно. Содержимое проявляется по
+   ходу раскрытия и гаснет по ходу сворачивания; суть в строке уступает ему
+   место и возвращается так же плавно; шеврон поворачивается тем же ходом.
+   Расчёт — utils/foldMotion.js.
+
+   Три вещи, без которых движение дёргается:
+   — тело остаётся в разметке, пока сворачивается (`kept`): иначе сворачивать нечего;
+   — перехваченное движение (нажали ещё раз на полпути) продолжается с того роста
+     и той прозрачности, на которых его застали, а не с края;
+   — раздел у нижнего края окна раскрывался бы за край: пока он растёт, окно едет
+     следом, кадр в кадр, — но только пока название раздела остаётся на виду, и
+     отпускает, если человек сам взялся за прокрутку.
+
+   sizeKey — содержимое раскрытого раздела сменило рост разом («Вся история»):
+   тело доезжает до нового роста тем же ходом, что рамка окна.
+
+   При «Уменьшить движение» в системе — как раньше, сразу. */
+export const Fold = ({ id, title, summary, open, onToggle, sizeKey, children }) => {
     const bodyId = useId();
-    const ref = useRef(null);
-    const wasOpen = useRef(open);
-    /* Раздел у нижнего края окна раскрывался бы за край — подкручиваем к нему. */
-    useEffect(() => {
-        if (open && !wasOpen.current) ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        wasOpen.current = open;
+    const sectionRef = useRef(null);
+    const bodyRef = useRef(null);
+    const [kept, setKept] = useState(open);
+    if (open && !kept) setKept(true);
+    const seenOpen = useRef(open);
+    const running = useRef(null);
+
+    useIsoLayoutEffect(() => {
+        if (seenOpen.current === open) return;
+        seenOpen.current = open;
+        const body = bodyRef.current;
+        const section = sectionRef.current;
+        if (!body || !section) {
+            if (!open) setKept(false);
+            return;
+        }
+        const previous = running.current;
+        const startHeight = previous || !open ? body.getBoundingClientRect().height : 0;
+        const startOpacity = previous ? Number(getComputedStyle(body).opacity) : undefined;
+        if (previous) {
+            running.current = null;
+            previous.cancel();
+        }
+        // Движение снято — у тела снова свой рост: это и есть рост раскрытого раздела.
+        const motion = prefersReducedMotion() || typeof body.animate !== 'function'
+            ? null
+            : foldMotion(startHeight, open ? body.offsetHeight : 0, startOpacity);
+        if (!motion) {
+            body.style.overflow = '';
+            if (open) section.scrollIntoView({ block: 'nearest' });
+            else setKept(false);
+            return;
+        }
+        body.style.overflow = 'hidden';
+        const animation = body.animate(motion.frames, { duration: motion.duration, easing: motion.easing, fill: open ? 'none' : 'forwards' });
+        running.current = animation;
+
+        const host = open ? scrollHost(section) : null;
+        let frame = 0;
+        let following = Boolean(host);
+        const letGo = () => { following = false; };
+        const step = () => {
+            const view = host.getBoundingClientRect();
+            const box = section.getBoundingClientRect();
+            const shift = foldFollowStep(box.top, box.bottom, view.top, view.bottom);
+            if (shift) host.scrollTop += shift;
+        };
+        const follow = () => {
+            if (running.current !== animation || !following) return;
+            step();
+            frame = requestAnimationFrame(follow);
+        };
+        if (host) {
+            host.addEventListener('wheel', letGo, { passive: true });
+            host.addEventListener('touchstart', letGo, { passive: true });
+            frame = requestAnimationFrame(follow);
+        }
+        const release = () => {
+            cancelAnimationFrame(frame);
+            if (!host) return;
+            host.removeEventListener('wheel', letGo);
+            host.removeEventListener('touchstart', letGo);
+        };
+        animation.onfinish = () => {
+            release();
+            if (running.current !== animation) return;
+            running.current = null;
+            body.style.overflow = '';
+            // Последний кадр: раздел встал в полный рост — доводим окно до него.
+            if (host && following) step();
+            if (!open) setKept(false);
+        };
+        animation.oncancel = release;
     }, [open]);
+
+    const sizeSeen = useRef(sizeKey);
+    const sizeFrom = useRef(null);
+    if (sizeSeen.current !== sizeKey) {
+        sizeSeen.current = sizeKey;
+        sizeFrom.current = open && bodyRef.current && !running.current ? bodyRef.current.offsetHeight : null;
+    }
+    useIsoLayoutEffect(() => {
+        const from = sizeFrom.current;
+        sizeFrom.current = null;
+        const body = bodyRef.current;
+        if (!from || !body || !open || running.current || prefersReducedMotion() || typeof body.animate !== 'function') return;
+        const motion = windowResizeMotion(from, body.offsetHeight);
+        if (!motion) return;
+        body.style.overflow = 'hidden';
+        const animation = body.animate(motion.frames, { duration: motion.duration, easing: motion.easing });
+        running.current = animation;
+        animation.onfinish = () => {
+            if (running.current !== animation) return;
+            running.current = null;
+            body.style.overflow = '';
+        };
+    }, [sizeKey]);
+
+    useEffect(() => () => { if (running.current) running.current.cancel(); }, []);
+
     return (
-        <section ref={ref} data-fold={id} className="scroll-mb-3 scroll-mt-3">
+        <section ref={sectionRef} data-fold={id} className="scroll-mb-3 scroll-mt-3">
             <h3 className="m-0">
                 <button
                     type="button"
                     onClick={onToggle}
                     aria-expanded={open}
                     aria-controls={bodyId}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400"
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-slate-50 active:bg-slate-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400"
                 >
                     <span className="shrink-0 text-[13.5px] font-medium text-slate-900">{title}</span>
-                    <span className="min-w-0 grow basis-0 truncate text-right text-[12.5px] text-slate-500">{open ? '' : summary}</span>
-                    <ChevronDown size={15} aria-hidden="true" className={`shrink-0 text-slate-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                    {/* Суть свёрнутого раздела. Раскрытому она не нужна — содержимое на виду, — но
+                        уходит и возвращается плавно, а не морганием; читалке раскрытого не читается. */}
+                    <span
+                        aria-hidden={open ? true : undefined}
+                        className={`min-w-0 grow basis-0 truncate text-right text-[12.5px] text-slate-500 transition-opacity duration-200 motion-reduce:transition-none ${open ? 'opacity-0' : 'opacity-100'}`}
+                    >
+                        {summary}
+                    </span>
+                    <ChevronDown
+                        size={15}
+                        aria-hidden="true"
+                        className={`shrink-0 text-slate-400 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none ${open ? 'rotate-180' : ''}`}
+                    />
                 </button>
             </h3>
-            {open && <div id={bodyId} className="border-t border-slate-100 motion-safe:animate-reveal">{children}</div>}
+            {kept && (
+                <div
+                    ref={bodyRef}
+                    id={bodyId}
+                    data-fold-body
+                    className="border-t border-slate-100"
+                    aria-hidden={open ? undefined : true}
+                    {...(open ? {} : { inert: '' })}
+                >
+                    {children}
+                </div>
+            )}
         </section>
+    );
+};
+
+/* Статус задачи этапа — переключатель в нижней панели окна заявки, рядом с «Готово»
+   (какие статусы и у каких этапов — stageStatusOptions в paymentsMeta.js). Раньше он стоял
+   вверху, внутри блока задачи, между пояснением и полем комментария; владелец 13.10.2026:
+   «вообще не в удобном месте — должны быть внизу, на месте примерно кнопки "Готово"…
+   аккуратно и удобно, в стиле ios/macos».
+
+   Ведёт себя как переключатель iOS:
+   — выбор встаёт сразу, по нажатию, белая плашка переезжает на новый сегмент (slide у
+     IosSegmented); ответа сервера не ждёт;
+   — сервер отказал — возвращается на прежний статус, а отказ показывает окно заявки;
+   — пока над заявкой идёт другое действие, не нажимается и приглушён.
+   На узком экране (там, где панель окна ставит его отдельной строкой, — до 640 px) занимает
+   строку целиком, сегменты равной ширины; не помещаются (четыре статуса бухгалтерии) — лента
+   листается и сама подводится к выбранному. Ширина — стилями, по той же границе, что и
+   раскладка панели: признак «телефон» включается и на широком экране малой высоты, и там
+   равные сегменты в узком контроле обрезали подписи. */
+export const StageStatusSwitch = ({ options, value, busy = false, onMove }) => {
+    const stripRef = useRef(null);
+    const placed = useRef(false);
+    const [wanted, setWanted] = useState(null);
+    const shown = wanted ?? value;
+    const pick = async (next) => {
+        if (busy || wanted !== null || next === value) return;
+        setWanted(next);
+        try {
+            await onMove?.(next);
+        } finally {
+            // Статус из ответа сервера уже в заявке; отказал — в ней остался прежний.
+            setWanted(null);
+        }
+    };
+    useEffect(() => {
+        const strip = stripRef.current;
+        const selected = strip?.querySelector('[aria-selected="true"]');
+        if (strip && selected && strip.scrollWidth > strip.clientWidth) {
+            const stripBox = strip.getBoundingClientRect();
+            const box = selected.getBoundingClientRect();
+            const left = strip.scrollLeft + (box.left + box.width / 2) - (stripBox.left + stripBox.width / 2);
+            strip.scrollTo({ left, behavior: placed.current && !prefersReducedMotion() ? 'smooth' : 'auto' });
+        }
+        placed.current = true;
+    }, [shown, options.length]);
+    return (
+        <div
+            ref={stripRef}
+            data-stage-status
+            className={`max-w-full overflow-x-auto transition-opacity [scrollbar-width:none] ${busy && wanted === null ? 'pointer-events-none opacity-60' : ''}`}
+        >
+            <IosSegmented
+                value={shown}
+                options={options}
+                onChange={pick}
+                ariaLabel="Статус задачи"
+                slide
+                className="min-w-max max-sm:flex max-sm:w-full max-sm:[&>button]:flex-1"
+            />
+        </div>
     );
 };
 
@@ -870,6 +1129,22 @@ export const NoticeBox = ({ text, tone = 'amber', children }) => {
             {text}
             {children}
         </div>
+    );
+};
+
+/* Заявку вернули инициатору — кто и зачем. Стоит и на странице заявки (причина видна
+   сразу, как только её открыли), и в форме задачи (под рукой, когда отвечают). */
+export const ReturnNotice = ({ request, subtask }) => {
+    const asked = request?.clarify_reason;
+    if (!asked) return null;
+    return (
+        <NoticeBox text="">
+            <span className="font-medium">
+                {asked === 'rework' ? 'Вернули на доработку' : (subtask?.clarify_label || 'Требуется уточнение')}
+                {request.clarify_by_name ? ` — ${request.clarify_by_name}` : ''}.
+            </span>
+            {request.clarify_comment ? ` ${request.clarify_comment}` : ''}
+        </NoticeBox>
     );
 };
 

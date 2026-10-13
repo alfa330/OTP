@@ -76,20 +76,40 @@ test('свёрнутый раздел: название, суть одной с�
     assert.match(html, /aria-expanded="false"/);
     assert.match(html, />История</);
     assert.match(html, /17 событий · последнее 12\.10\.2026 14:37/);
+    // Свёрнутому суть видна и читается.
+    const summary = html.slice(html.lastIndexOf('<span', html.indexOf('17 событий')), html.indexOf('17 событий'));
+    assert.match(summary, /opacity-100/);
+    assert.doesNotMatch(summary, /aria-hidden/);
+    assert.doesNotMatch(html, /data-fold-body/);
     // Свёрнутое не рисуется вовсе — не спрятано стилем: окно от него не длиннее.
     assert.doesNotMatch(html, /Заявка создана/);
     // Строка — кнопка с названием раздела: раскрывается и мышью, и с клавиатуры.
     assert.match(html, /<h3[^>]*><button type="button"/);
 });
 
-test('раскрытый раздел: содержимое на месте, суть в строке не повторяется', async () => {
+/* Суть раздела в строке: видна свёрнутому, раскрытому не показывается и читалке не читается.
+   Из разметки она не убирается — иначе пропадала бы и возвращалась морганием, а не плавно. */
+const summaryOf = (html, text) => {
+    const at = html.indexOf(text);
+    assert.ok(at > 0, `сути «${text}» нет в разметке`);
+    return html.slice(html.lastIndexOf('<span', at), at);
+};
+
+test('раскрытый раздел: содержимое на месте, суть в строке погашена', async () => {
     const { Fold, FoldGroup } = await bundle('src/components/payments/paymentsUi.jsx', 'ui');
     const html = renderToStaticMarkup(h(FoldGroup, null,
         h(Fold, { id: 'history', title: 'История', summary: '17 событий · последнее 12.10.2026 14:37', open: true, onToggle: () => {} },
             h('p', null, 'Заявка создана'))));
     assert.match(html, /aria-expanded="true"/);
     assert.match(html, /Заявка создана/);
-    assert.doesNotMatch(html, /17 событий/);
+    const summary = summaryOf(html, '17 событий');
+    assert.match(summary, /aria-hidden="true"/);
+    assert.match(summary, /opacity-0/);
+    assert.match(summary, /transition-opacity/);
+    // Раскрытое тело доступно: не скрыто от читалки и не выключено.
+    const body = html.match(/<div[^>]*data-fold-body[^>]*>/);
+    assert.ok(body, 'тела раздела нет');
+    assert.doesNotMatch(body[0], /aria-hidden|inert/);
     // Кнопка называет читалке, что именно она раскрывает.
     const controls = html.match(/aria-controls="([^"]+)"/);
     assert.ok(controls, 'у строки раздела нет aria-controls');
@@ -106,9 +126,11 @@ test('несколько разделов стоят одной карточко
     assert.equal((html.match(/rounded-2xl bg-white ring-1 ring-slate-200\/70/g) || []).length, 1);
     assert.match(html, /файлы/);
     assert.doesNotMatch(html, /этапы|события/);
-    assert.match(html, /Оплата счёта · Бухгалтерия/);
-    assert.match(html, /6 событий/);
-    assert.doesNotMatch(html, /2 файла/);
+    assert.equal((html.match(/data-fold-body/g) || []).length, 1);
+    // Суть видна у свёрнутых и погашена у раскрытого.
+    assert.match(summaryOf(html, 'Оплата счёта · Бухгалтерия'), /opacity-100/);
+    assert.match(summaryOf(html, '6 событий'), /opacity-100/);
+    assert.match(summaryOf(html, '2 файла'), /aria-hidden="true"[^>]*opacity-0|opacity-0[^>]*aria-hidden="true"/);
 });
 
 test('окно заявки: ход, документы и история стоят свёрнутыми разделами, а не секциями во весь рост', () => {
@@ -119,6 +141,14 @@ test('окно заявки: ход, документы и история сто
     }
     // Каждая заявка открывается коротко: раскрытое в прошлой — её дело.
     assert.ok(card.includes('setFolds({});'));
+    /* Раздел раскрывается сам, по высоте (Fold), и рамка окна идёт за содержимым. Отдельного
+       движения рамке на раскрытие не заводим: два движения на одно нажатие расходились бы —
+       строки перескакивали, а рамка их догоняла. */
+    assert.ok(card.includes("sizeKey={`${view}:${onTask ? 'task' : 'request'}`}"));
+    assert.ok(!card.includes('openFolds'));
+    assert.doesNotMatch(card, /sizeKey=\{[^}]*fold/i);
+    // «Вся история» растит раскрытый раздел разом — тело доезжает до нового роста.
+    assert.match(card, /<Fold id="history"[^\n]*sizeKey=\{showAllEvents\}/);
     // От инициатора ждут закрывающие документы — «Документы» раскрыты сами.
     assert.ok(card.includes("const foldOpen = (key) => folds[key] ?? (key === 'files' && docsWanted);"));
 });
@@ -185,8 +215,33 @@ test('у доски своя тонкая полоса и метки скрыт�
     // Метки у обоих краёв; гаснущий край — маской, чтобы не зависеть от цвета темы.
     assert.ok(board.includes('<BoardMore side="left" columns={hidden.left}'));
     assert.ok(board.includes('<BoardMore side="right" columns={hidden.right}'));
-    assert.ok(board.includes('return { maskImage: image, WebkitMaskImage: image };'));
+    // (сама маска — edgeFade в paymentsMeta.js, её проверяет tests/payments_card_pages.test.mjs)
+    assert.ok(board.includes('style={layout.fits ? undefined : edgeFade(hidden.left.length > 0, hidden.right.length > 0)}'));
+    assert.doesNotMatch(board, /maskImage: image/, 'своей копии маски у доски нет — она общая с лентой этапов');
     // Колонка берёт ширину из раскладки, а не из класса: иначе экран снова делился бы по 268 px.
     assert.ok(board.includes('style={single ? undefined : { width }}'));
     assert.doesNotMatch(board, /w-\[268px\]/);
+});
+
+test('раздел раскрывается и сворачивается по высоте, а не подменой содержимого', () => {
+    const ui = source('src/components/payments/paymentsUi.jsx');
+    const fold = ui.slice(ui.indexOf('export const Fold = '), ui.indexOf('export const ErrorBox = '));
+    assert.ok(fold.length > 1500, 'компонент раздела не найден');
+    // Расчёт движения — общий, в utils/foldMotion.js; рамка окна и «Вся история» — тем же ходом.
+    assert.ok(ui.includes("import { foldFollowStep, foldMotion } from '../../utils/foldMotion';"));
+    assert.ok(fold.includes('foldMotion(startHeight, open ? body.offsetHeight : 0, startOpacity)'));
+    assert.ok(fold.includes('windowResizeMotion(from, body.offsetHeight)'));
+    // Тело остаётся в разметке, пока сворачивается, и на это время выключено.
+    assert.ok(fold.includes('{kept && ('));
+    assert.ok(fold.includes("{...(open ? {} : { inert: '' })}"));
+    assert.ok(fold.includes("fill: open ? 'none' : 'forwards'"));
+    // Перехваченное движение продолжается с того роста, на котором его застали.
+    assert.ok(fold.includes('const startHeight = previous || !open ? body.getBoundingClientRect().height : 0;'));
+    // Раскрывающийся раздел держится на виду; человек взялся за прокрутку — отпускаем.
+    assert.ok(fold.includes('foldFollowStep(box.top, box.bottom, view.top, view.bottom)'));
+    assert.ok(fold.includes("host.addEventListener('wheel', letGo, { passive: true });"));
+    // «Уменьшить движение» — без движения.
+    assert.ok(fold.includes('prefersReducedMotion() || typeof body.animate !== \'function\''));
+    // Прежнее появление «разом с лёгким сдвигом» у тела убрано: два движения спорили бы.
+    assert.doesNotMatch(fold, /animate-reveal/);
 });

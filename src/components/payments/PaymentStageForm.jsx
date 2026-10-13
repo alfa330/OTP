@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Check, Loader2, Pencil } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosSegmented } from '../ui/ios';
+import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
 import PaymentAssetsEditor, { assetGaps, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
 import {
@@ -8,7 +8,7 @@ import {
     todayISO,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, DATE_TRIGGER, Field, FileChips, FilePicker, FormSelect, NoticeBox, Row, TonePill,
+    AmountInput, CardNumber, DATE_TRIGGER, Field, FileChips, FilePicker, FormSelect, NoticeBox, ReturnNotice, Row, TonePill,
 } from './paymentsUi';
 
 /*
@@ -32,9 +32,11 @@ import {
  *
  * Состояние формы живёт здесь и сбрасывается сменой этапа: карточка монтирует
  * компонент с key из номера заявки и вида подзадачи.
+ *
+ * Переключателя статуса задачи («Новые / На рассмотрении») в форме нет: он стоит в
+ * нижней панели окна заявки (PaymentRequestCard.jsx) — там он под рукой, где бы
+ * человек ни читал заявку.
  */
-
-const LOCAL_STATUS_LABELS = { new: 'Новая', in_progress: 'В работе' };
 
 const useAttachments = (data, kind) => useMemo(() => {
     const all = data?.attachments || [];
@@ -89,7 +91,7 @@ const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
 
 const PaymentStageForm = ({
     data, subtask, dictionaries, users, meta, apiBaseUrl, headers, busy, showToast, permissions,
-    onAct, onMove, onEdit, onReply, onAttach, loadCard,
+    onAct, onEdit, onReply, onAttach, loadCard,
 }) => {
     const request = data.request;
     const kind = subtask.kind;
@@ -107,9 +109,6 @@ const PaymentStageForm = ({
     const act = (action, fields = {}, withFiles = true) => onAct({
         action, fields: { comment: comment.trim(), ...fields }, files: withFiles ? files : [],
     });
-    const board = (meta?.boards || []).find((item) => item.code === (meta?.subtasks || []).find((s) => s.kind === kind)?.board);
-    const statuses = ((meta?.subtasks || []).find((item) => item.kind === kind)?.statuses || [])
-        .map((value) => ({ value, label: board?.columns.find((column) => column.key === value)?.label || LOCAL_STATUS_LABELS[value] || value }));
     const invoiceFiles = all.filter((item) => item.kind === 'invoice');
     const closingFiles = all.filter((item) => (meta?.closing_doc_kinds || ['act', 'waybill', 'receipt']).includes(item.kind));
     const counterparty = (dictionaries?.counterparties || []).find((item) => item.id === request.counterparty_id) || null;
@@ -127,12 +126,6 @@ const PaymentStageForm = ({
             {subtask.brief && <div className="text-[12.5px] text-slate-600">{subtask.brief}</div>}
         </>
     );
-
-    const statusSwitch = statuses.length > 1 ? (
-        <div className="overflow-x-auto">
-            <IosSegmented value={subtask.status} options={statuses} onChange={(value) => value !== subtask.status && onMove(value)} ariaLabel="Статус задачи" className="min-w-max" />
-        </div>
-    ) : null;
 
     const reasonPanel = mode ? (
         <ReasonPanel
@@ -157,15 +150,7 @@ const PaymentStageForm = ({
         const asked = request.clarify_reason;
         return wrap(
             <>
-                {asked && (
-                    <NoticeBox text="">
-                        <span className="font-medium">
-                            {asked === 'rework' ? 'Вернули на доработку' : (subtask.clarify_label || 'Требуется уточнение')}
-                            {request.clarify_by_name ? ` — ${request.clarify_by_name}` : ''}.
-                        </span>
-                        {request.clarify_comment ? ` ${request.clarify_comment}` : ''}
-                    </NoticeBox>
-                )}
+                <ReturnNotice request={request} subtask={subtask} />
                 {problems.length > 0 && <Missing items={problems} />}
                 {problems.length === 0 && (
                     <Comment value={comment} onChange={setComment} placeholder="Ответ тому, кто запросил (необязательно)" />
@@ -189,7 +174,6 @@ const PaymentStageForm = ({
         const offerFiles = all.filter((item) => item.kind === 'offer' || item.kind === 'supplier_registry');
         return wrap(
             <>
-                {statusSwitch}
                 {chips('Коммерческие предложения:', offerFiles)}
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий к согласованию (необязательно)" />
                 <div className="flex flex-wrap items-center gap-2">
@@ -220,7 +204,6 @@ const PaymentStageForm = ({
         if (!kinds.has('payment_order')) missing.push('приложите платёжное поручение');
         return wrap(
             <>
-                {statusSwitch}
                 {(data.duplicates || []).length > 0 && (
                     <NoticeBox text="">
                         <span className="inline-flex items-center gap-1.5 font-medium"><AlertTriangle size={14} /> Возможный дубль.</span>
@@ -292,7 +275,6 @@ const PaymentStageForm = ({
         if (!kinds.has('transfer_proof')) missing.push('приложите подтверждение перевода');
         return wrap(
             <>
-                {statusSwitch}
                 <div className="rounded-xl bg-slate-50 px-3 py-1.5">
                     <Row label="Получатель">{[CARD_RECIPIENT_LABELS[request.card_recipient], request.card_holder_name].filter(Boolean).join(' · ')}</Row>
                     <Row label="Номер карты"><CardNumber mask={request.card_mask} canReveal={permissions.can_view_card} load={loadCard} showToast={showToast} /></Row>
@@ -391,7 +373,6 @@ const PaymentStageForm = ({
         if (!kinds.has('handover_act')) missing.push('приложите акт приёма-передачи');
         return wrap(
             <>
-                {statusSwitch}
                 <PaymentAssetsEditor assets={assets} onChange={setAssets} users={users} dictionaries={dictionaries} />
                 <Field as="div" label="Акт приёма-передачи" required optionalMark={false} hint="Подписанный акт передачи имущества ответственному сотруднику.">
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('asset_registration')} label="Приложить акт" />

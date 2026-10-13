@@ -321,17 +321,59 @@ export const IosPager = ({ page, pageCount, total, from, to, onPage, unit = 'с�
 /* size: 'xs' — компактный переключатель режима в строке подписи поля (как
    маленький NSSegmentedControl в настройках macOS), 'md' — обычный, 'lg' — крупный.
    Именно 'xs', а не 'sm': 'sm' уже передают OLX, «Воронка ОП» и «Тренажёр», и
-   раньше он рисовался как 'md' — занять его значило бы уменьшить их переключатели. */
-export const IosSegmented = ({ value, options = [], onChange, size = 'md', stretch = false, className = '', ariaLabel }) => {
+   раньше он рисовался как 'md' — занять его значило бы уменьшить их переключатели.
+
+   slide — выбранный сегмент не перекрашивается на месте, а переезжает: белая
+   плашка скользит от прежнего сегмента к новому, как у UISegmentedControl.
+   Включается по месту (просьба владельца 13.10.2026 о переключателях статуса в
+   окне заявки «Оплаты счетов» — «аккуратно и удобно, в стиле ios/macos»);
+   остальные переключатели портала рисуются как раньше. Плашка — отдельный слой
+   под кнопками; где встать, она узнаёт замером выбранной кнопки. До первого
+   замера (и на сервере) выбранный сегмент красит себя сам, как без slide, —
+   поэтому первого кадра «без выбора» не бывает. */
+export const IosSegmented = ({ value, options = [], onChange, size = 'md', stretch = false, className = '', ariaLabel, slide = false }) => {
     const large = size === 'lg';
     const small = size === 'xs';
     const wide = stretch || large;
+    const listRef = React.useRef(null);
+    const [thumb, setThumb] = React.useState(null);
+    const count = options.filter(Boolean).length;
+    useIsoLayoutEffect(() => {
+        const list = listRef.current;
+        if (!slide || !list) return undefined;
+        const read = () => {
+            const active = list.querySelector('[aria-selected="true"]');
+            setThumb((prev) => {
+                if (!active) return null;
+                const next = { left: active.offsetLeft, top: active.offsetTop, width: active.offsetWidth, height: active.offsetHeight };
+                return prev && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height
+                    ? prev : next;
+            });
+        };
+        read();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        // Ширина сегментов меняется вместе с контролом: окно, шрифт, счётчик в подписи.
+        const observer = new ResizeObserver(read);
+        observer.observe(list);
+        return () => observer.disconnect();
+    }, [slide, value, count]);
+    const sliding = slide && Boolean(thumb);
+    const radius = large ? 'rounded-[9px]' : small ? 'rounded-[6px]' : 'rounded-[8px]';
     return (
         <div
+            ref={listRef}
             role="tablist"
             aria-label={ariaLabel}
-            className={`${wide ? 'flex w-full' : 'inline-flex'} ${large ? 'gap-1 rounded-[12px] p-[4px]' : small ? 'rounded-[8px] p-[2px]' : 'rounded-[10px] p-[3px]'} bg-slate-100 ${className}`}
+            className={`${wide ? 'flex w-full' : 'inline-flex'} ${slide ? 'relative ' : ''}${large ? 'gap-1 rounded-[12px] p-[4px]' : small ? 'rounded-[8px] p-[2px]' : 'rounded-[10px] p-[3px]'} bg-slate-100 ${className}`}
         >
+            {sliding && (
+                <span
+                    aria-hidden="true"
+                    data-segment-thumb
+                    className={`pointer-events-none absolute left-0 top-0 ${radius} bg-white shadow-[0_1px_3px_rgba(15,23,42,0.10)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none`}
+                    style={{ width: thumb.width, height: thumb.height, transform: `translate(${thumb.left}px, ${thumb.top}px)` }}
+                />
+            )}
             {options.filter(Boolean).map((option) => {
                 const active = option.value === value;
                 return (
@@ -351,7 +393,7 @@ export const IosSegmented = ({ value, options = [], onChange, size = 'md', stret
                                     : 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'
                         } ${
                             active
-                                ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                ? (sliding ? 'text-slate-900' : 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]')
                                 : 'text-slate-500 hover:text-slate-800'
                         }`}
                     >
