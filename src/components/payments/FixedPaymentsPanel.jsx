@@ -7,7 +7,13 @@ import {
     ACCOUNTING_CATEGORY_OPTIONS, AUTO_CREATE_OPTIONS, HINTS, OBJECT_TYPE_OPTIONS, PERIOD_META, PERIOD_OPTIONS, fmtDate,
     fmtMoney,
 } from './paymentsMeta';
-import { AmountInput, Choice, DATE_TRIGGER, ErrorBox, Field, FormSelect, NoticeBox, UserSelect, errorText } from './paymentsUi';
+import {
+    AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, Choice, DATE_TRIGGER, ErrorBox, Field, FormSelect, NoticeBox, UserSelect, cardCell,
+    errorText, useFits,
+} from './paymentsUi';
+
+// Наименьшая ширина, в которую таблица платежей встаёт целиком; уже — платежи идут карточками.
+const TABLE_MIN = 896;
 
 const TEMPLATE_ACTIVE_OPTIONS = [{ value: true, label: 'Активен' }, { value: false, label: 'Приостановлен' }];
 
@@ -229,6 +235,7 @@ const FixedPaymentsPanel = ({
         }
     };
 
+    const [paneRef, fits] = useFits(TABLE_MIN);
     const dueCount = rows.filter((row) => row.is_due).length;
     const importReady = (importRows || []).filter((row) => !row.errors?.length && !row.exists).length;
     const dueLine = (row) => (
@@ -238,7 +245,7 @@ const FixedPaymentsPanel = ({
     );
 
     return (
-        <div className="space-y-3">
+        <div ref={paneRef} className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-[13px] font-medium text-slate-700">{dueCount ? `Пора создать заявок: ${dueCount}` : ''}</div>
                 {canEdit && (
@@ -256,21 +263,96 @@ const FixedPaymentsPanel = ({
                 )}
             </div>
 
-            <div className={`${iosCard} overflow-hidden`}>
-                {loading && !rows.length && (
-                    <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500"><Loader2 size={15} className="animate-spin" /> Загружаем…</div>
-                )}
-                {!loading && !rows.length && (
-                    <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-[13.5px] text-slate-500">
-                        <CalendarClock size={22} className="text-slate-300" />
-                        Регулярных платежей пока нет.{canEdit ? ' Добавьте платёж или загрузите перечень из Excel.' : ''}
-                    </div>
-                )}
-                {rows.map((row, index) => (
-                    <div key={row.id} data-template={row.id} className={`flex items-center gap-3 px-4 py-2.5 ${index > 0 ? 'border-t border-slate-100' : ''} ${row.is_active ? '' : 'opacity-60'}`}>
+            {loading && !rows.length && (
+                <div className={`${iosCard} flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500`}><Loader2 size={15} className="animate-spin" /> Загружаем…</div>
+            )}
+            {!loading && !rows.length && (
+                <div className={`${iosCard} flex flex-col items-center gap-2 px-4 py-10 text-center text-[13.5px] text-slate-500`}>
+                    <CalendarClock size={22} className="text-slate-300" />
+                    Регулярных платежей пока нет.{canEdit ? ' Добавьте платёж или загрузите перечень из Excel.' : ''}
+                </div>
+            )}
+
+            {/* Поле достаточно широкое: каждый платёж — своя строка-карточка, сведения — по
+                колонкам с подписями (как остальные справочники). Раньше всё, кроме названия и
+                суммы, шло одной серой строкой через точки. */}
+            {fits && rows.length > 0 && (
+                <div>
+                    <table className={CARD_TABLE} data-templates>
+                        <colgroup>
+                            <col /><col style={{ width: 184 }} /><col style={{ width: 184 }} /><col style={{ width: 172 }} />
+                            <col style={{ width: 92 }} />{canEdit && <col style={{ width: 52 }} />}
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th className={`${CARD_TH} !pl-4`}>Платёж</th>
+                                <th className={CARD_TH}>Поставщик</th>
+                                <th className={CARD_TH}>Ответственный</th>
+                                <th className={`${CARD_TH} !text-right`}>Сумма и срок</th>
+                                <th className={CARD_TH}>Заявка</th>
+                                {canEdit && <th className={CARD_TH} aria-label="Действия" />}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map((row) => {
+                                const cell = `${cardCell(row.is_active ? null : 'rejected')} align-middle`;
+                                const main = row.is_active ? 'text-slate-900' : 'text-slate-500';
+                                return (
+                                    /* Строка открывает запись, как у остальных справочников; ссылка на заявку и меню — сами по себе. */
+                                    <tr key={row.id} data-template={row.id} onClick={canEdit ? () => openEditor(row) : undefined} className={`h-[56px] ${canEdit ? CARD_ROW : ''}`}>
+                                        <td className={`${cell} !pl-4`}>
+                                            <div className={`truncate font-medium ${main}`}>{row.name}</div>
+                                            <div className="truncate text-[12px] text-slate-500">
+                                                {[`${PERIOD_META[row.periodicity]?.label || row.periodicity}${row.periodicity === 'custom' && row.interval_days ? ` (${row.interval_days} дн.)` : ''}`,
+                                                    row.is_active ? null : 'приостановлен', row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ')}
+                                            </div>
+                                        </td>
+                                        <td className={cell}>
+                                            <div className={`truncate ${row.counterparty_name ? main : 'text-slate-400'}`}>{row.counterparty_name || '—'}</div>
+                                            <div className="truncate text-[12px] text-slate-500">{[row.contract_number && `договор №${row.contract_number}`, row.legal_entity_name && `от ${row.legal_entity_name}`].filter(Boolean).join(' · ')}</div>
+                                        </td>
+                                        <td className={cell}>
+                                            <div className={`truncate ${row.responsible_name ? main : 'text-slate-400'}`}>{row.responsible_name || '—'}</div>
+                                            {row.approver_name && <div className="truncate text-[12px] text-slate-500">согласует {row.approver_name}</div>}
+                                        </td>
+                                        <td className={`${cell} text-right`}>
+                                            <div className={`font-semibold tabular-nums ${main}`}>{fmtMoney(row.amount)}</div>
+                                            <div className="truncate text-[12px] tabular-nums text-slate-500">{dueLine(row)}</div>
+                                        </td>
+                                        <td className={cell}>
+                                            {row.open_request_id
+                                                ? <button type="button" className="text-[13px] tabular-nums text-blue-600 hover:underline" onClick={(event) => { event.stopPropagation(); onOpenRequest?.(row.open_request_id); }} title="Открыть заявку по этому платежу">№{row.open_request_id}</button>
+                                                : <span className="text-slate-400">—</span>}
+                                        </td>
+                                        {canEdit && (
+                                            <td className={`${cell} !px-1.5`} onClick={(event) => event.stopPropagation()}>
+                                                {generating === row.id ? <Loader2 size={15} className="mx-2 animate-spin text-slate-400" /> : (
+                                                    <IosMenu
+                                                        label="Действия с платежом"
+                                                        items={[
+                                                            { key: 'edit', label: 'Изменить', icon: Pencil, onSelect: () => openEditor(row) },
+                                                            { key: 'now', label: 'Создать заявку сейчас', icon: Play, onSelect: () => generateNow(row), hint: fmtDate(row.next_due_on) },
+                                                        ]}
+                                                    />
+                                                )}
+                                            </td>
+                                        )}
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
+            {/* Узкое поле и телефон: те же платежи карточками — сумма, срок и открытая заявка строкой под названием. */}
+            {!fits && rows.length > 0 && (
+            <div className="space-y-1.5">
+                {rows.map((row) => (
+                    <div key={row.id} data-template={row.id} className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 ${row.is_active ? 'border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)]' : 'border-slate-200 bg-slate-50'}`}>
                         <div className="min-w-0 grow basis-0">
                             <div className="flex flex-wrap items-baseline gap-x-2">
-                                <span className="truncate text-[13.5px] font-medium text-slate-900">{row.name}</span>
+                                <span className={`truncate text-[13.5px] font-medium ${row.is_active ? 'text-slate-900' : 'text-slate-500'}`}>{row.name}</span>
                                 <span className="text-[12.5px] text-slate-500">
                                     {PERIOD_META[row.periodicity]?.label || row.periodicity}{row.periodicity === 'custom' && row.interval_days ? ` (${row.interval_days} дн.)` : ''}
                                     {row.is_active ? '' : ' · приостановлен'}
@@ -281,8 +363,7 @@ const FixedPaymentsPanel = ({
                                     row.responsible_name && `отв. ${row.responsible_name}`, row.approver_name && `согласует ${row.approver_name}`,
                                     row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ') || '—'}
                             </div>
-                            {/* На телефоне правой колонки нет — сумма, срок и открытая заявка идут строкой под названием. */}
-                            <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[12px] tabular-nums text-slate-500 sm:hidden">
+                            <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[12px] tabular-nums text-slate-500">
                                 <span className="text-[13px] text-slate-900">{fmtMoney(row.amount)}</span>
                                 <span>{dueLine(row)}</span>
                                 {row.open_request_id && (
@@ -290,15 +371,6 @@ const FixedPaymentsPanel = ({
                                 )}
                             </div>
                         </div>
-                        <div className="hidden text-right sm:block">
-                            <div className="text-[13.5px] tabular-nums text-slate-900">{fmtMoney(row.amount)}</div>
-                            <div className="text-[12px] tabular-nums text-slate-500">{dueLine(row)}</div>
-                        </div>
-                        {row.open_request_id && (
-                            <button type="button" className="hidden shrink-0 text-[12.5px] text-blue-600 hover:underline sm:block" onClick={() => onOpenRequest?.(row.open_request_id)}>
-                                заявка №{row.open_request_id}
-                            </button>
-                        )}
                         {canEdit && (generating === row.id ? <Loader2 size={15} className="mx-2 shrink-0 animate-spin text-slate-400" /> : (
                             <IosMenu
                                 label="Действия с платежом"
@@ -311,6 +383,7 @@ const FixedPaymentsPanel = ({
                     </div>
                 ))}
             </div>
+            )}
 
             <IosModal
                 open={editing}

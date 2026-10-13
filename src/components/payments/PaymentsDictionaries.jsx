@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Download, FileText, Loader2, Paperclip, Plus, Search, Trash2 } from 'lucide-react';
+import {
+    Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, FileSignature, FileText, FolderKanban, Gauge, Landmark,
+    Loader2, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
+} from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -11,7 +14,8 @@ import {
     DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, cardNumberLabel, fileSizeLabel, fmtDate, fmtMoney, pageRange, parseAmount,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormSelect, Pager, TonePill, UserSelect, errorText,
+    AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormSelect, Pager,
+    TonePill, UserSelect, cardCell, errorText, useFits,
 } from './paymentsUi';
 
 /*
@@ -26,6 +30,14 @@ import {
  * Исключение — «Регулярные платежи»: у них ещё календарь и импорт из Excel,
  * поэтому их экран живёт в своём компоненте (FixedPaymentsPanel).
  *
+ * ВИД (просьба владельца 13.10.2026: «разделение должно быть более заметным и
+ * понятным на первый взгляд»). Слева справочники стоят группами под подписями, со
+ * значками — как разделы «Системных настроек» macOS: двенадцать одинаковых строк
+ * подряд читались как один список. Справа каждая запись — своя строка-карточка, а
+ * её сведения разложены по колонкам с подписями (TABLES): раньше всё, кроме
+ * названия, шло одной серой строкой через точки. Порядок и названия справочников —
+ * по-прежнему как в ТЗ; группы только подписывают то, что уже стояло рядом.
+ *
  * Кто ведёт: администратор раздела; карты — финансовый отдел (в них полные
  * номера), категории имущества — ответственный за учёт. Остальным справочник
  * открыт для чтения: запись открывается, но поля в ней закрыты.
@@ -36,18 +48,27 @@ import {
  */
 
 const SECTIONS = [
-    { value: 'counterparties', label: 'Поставщики', about: 'Кому платим. Согласующий и лимит поставщика направляют его заявки нужному утверждающему.' },
-    { value: 'contracts', label: 'Договоры', about: 'Договоры с поставщиками. Счёт свыше 300 000 ₸ проходит только по действующему договору.' },
-    { value: 'legal_entities', label: 'Реквизиты компаний', about: 'Наши компании-плательщики. Реквизиты подставляются в заявку и копируются одним щелчком.' },
-    { value: 'counterparty_accounts', label: 'Банковские реквизиты поставщиков', about: 'Банковские счета поставщиков, на которые уходит оплата.' },
-    { value: 'cards', label: 'Банковские карты сотрудников/поставщиков', need: 'can_manage_cards', about: 'Карты для пополнения. Полные номера видит только финансовый отдел.' },
-    { value: 'templates', label: 'Регулярные платежи', need: (caps) => caps.is_admin || caps.sees_all_requests, about: 'Аренда, связь, лицензии: поставщик, договор и реквизиты подставляются в заявку сами.' },
-    { value: 'limits', label: 'Лимиты согласования', about: 'Кто, до какой суммы и по каким поставщикам утверждает заявки.' },
-    { value: 'routes', label: 'Маршруты согласования', about: 'Кто утверждает, когда ни один лимит не подошёл, и нужен ли этап руководителя.' },
-    { value: 'categories', label: 'Категории закупа', about: 'По категориям группируются затраты и выбирается согласующий.' },
-    { value: 'asset_categories', label: 'Категории имущества', about: 'Виды имущества для постановки на учёт: техника, мебель, оборудование.' },
-    { value: 'projects', label: 'Проекты', about: 'Проекты, к которым относят расходы.' },
-    { value: 'settings', label: 'Настройки', need: 'is_admin', about: 'Общие правила процесса.' },
+    { value: 'counterparties', label: 'Поставщики', icon: Building2, group: 'pay', about: 'Кому платим. Согласующий и лимит поставщика направляют его заявки нужному утверждающему.' },
+    { value: 'contracts', label: 'Договоры', icon: FileSignature, group: 'pay', about: 'Договоры с поставщиками. Счёт свыше 300 000 ₸ проходит только по действующему договору.' },
+    { value: 'legal_entities', label: 'Реквизиты компаний', icon: Landmark, group: 'pay', about: 'Наши компании-плательщики. Реквизиты подставляются в заявку и копируются одним щелчком.' },
+    { value: 'counterparty_accounts', label: 'Банковские реквизиты поставщиков', icon: WalletCards, group: 'pay', about: 'Банковские счета поставщиков, на которые уходит оплата.' },
+    { value: 'cards', label: 'Банковские карты сотрудников/поставщиков', icon: CreditCard, group: 'pay', need: 'can_manage_cards', about: 'Карты для пополнения. Полные номера видит только финансовый отдел.' },
+    { value: 'templates', label: 'Регулярные платежи', icon: CalendarClock, group: 'pay', need: (caps) => caps.is_admin || caps.sees_all_requests, about: 'Аренда, связь, лицензии: поставщик, договор и реквизиты подставляются в заявку сами.' },
+    { value: 'limits', label: 'Лимиты согласования', icon: Gauge, group: 'approval', about: 'Кто, до какой суммы и по каким поставщикам утверждает заявки.' },
+    { value: 'routes', label: 'Маршруты согласования', icon: Route, group: 'approval', about: 'Кто утверждает, когда ни один лимит не подошёл, и нужен ли этап руководителя.' },
+    { value: 'categories', label: 'Категории закупа', icon: Tags, group: 'lists', about: 'По категориям группируются затраты и выбирается согласующий.' },
+    { value: 'asset_categories', label: 'Категории имущества', icon: Boxes, group: 'lists', about: 'Виды имущества для постановки на учёт: техника, мебель, оборудование.' },
+    { value: 'projects', label: 'Проекты', icon: FolderKanban, group: 'lists', about: 'Проекты, к которым относят расходы.' },
+    { value: 'settings', label: 'Настройки', icon: SlidersHorizontal, group: 'rules', need: 'is_admin', about: 'Общие правила процесса.' },
+];
+
+/* Группы левого списка — в том же порядке, в каком справочники идут в ТЗ. У последней
+   подписи нет: «Настройки» — не справочник, они просто стоят отдельно. */
+const SECTION_GROUPS = [
+    { key: 'pay', label: 'Поставщики и платежи' },
+    { key: 'approval', label: 'Согласование' },
+    { key: 'lists', label: 'Списки для заявки' },
+    { key: 'rules', label: '' },
 ];
 
 const ACTIVE_OPTIONS = [{ value: true, label: 'Активна' }, { value: false, label: 'Скрыта' }];
@@ -59,6 +80,8 @@ const DEFAULT_ACCOUNT_OPTIONS = [{ value: true, label: 'Основной' }, { v
 const WITH_ACTIVE_FLAG = ['projects', 'categories', 'asset_categories', 'legal_entities', 'counterparties', 'counterparty_accounts', 'cards'];
 const FILE_ACCEPT = '.pdf,.jpg,.jpeg,.png,.webp,.heic,.doc,.docx';
 const SEARCH_FROM = 9;
+// Наименьшая ширина первой колонки таблицы справочника — остальные заданы числом.
+const TABLE_MAIN_MIN = 232;
 
 const iso = (value) => (value ? String(value).slice(0, 10) : '');
 const orBlank = (value) => (value === null || value === undefined ? '' : value);
@@ -154,6 +177,108 @@ const rowText = (row) => [
 const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
     <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[11.5px] text-slate-600">{label}</span>
 ));
+
+/* Колонки записи на широком экране: главное — первой колонкой, остальные сведения —
+   своими, с подписями над списком. Ячейка — { main, sub, strong, muted, mono } либо готовая
+   разметка. Ширина первой колонки свободная, у таблицы есть нижний предел
+   (dictionaryTableMin) — в поле уже него записи идут карточками. Справочники из одного
+   названия (категории, проекты) колонок не имеют — у них null, они стоят списком.
+   `tools` — то, что нужно ячейкам с действиями: чтение номера карты и тост. */
+const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · ');
+export const dictionaryColumns = (name, { loadCardNumber, showToast } = {}) => {
+    switch (name) {
+        case 'counterparties':
+            return [
+                { key: 'name', label: 'Поставщик', cell: (row) => ({ main: row.name, strong: true, sub: partyLine(row) }) },
+                { key: 'category', label: 'Категория', width: 150, cell: (row) => ({ main: row.category_name }) },
+                { key: 'contracts', label: 'Договоры', width: 150, cell: (row) => (row.active_contracts ? { main: `действующих: ${row.active_contracts}` } : { main: 'нет действующего', muted: true }) },
+                {
+                    key: 'approver', label: 'Согласует', width: 208,
+                    cell: (row) => (row.approver_name
+                        ? { main: row.approver_name, sub: row.approval_limit ? `до ${fmtMoney(row.approval_limit)}` : 'на любую сумму' }
+                        : { main: 'по общим правилам', muted: true }),
+                },
+                { key: 'state', label: '', width: 80, cell: (row) => <Hidden active={row.is_active} /> },
+            ];
+        case 'contracts':
+            return [
+                { key: 'number', label: 'Договор', cell: (row) => ({ main: `№${row.number}`, strong: true, sub: [row.signed_on && `от ${fmtDate(row.signed_on)}`, row.has_file ? 'файл приложен' : 'без файла'].filter(Boolean).join(' · ') }) },
+                { key: 'party', label: 'Поставщик', width: 180, cell: (row) => ({ main: row.counterparty_name, sub: row.legal_entity_name }) },
+                { key: 'term', label: 'Срок действия', width: 144, cell: (row) => ({ main: row.ends_on ? `до ${fmtDate(row.ends_on)}` : 'бессрочный', sub: row.starts_on ? `с ${fmtDate(row.starts_on)}` : '' }) },
+                {
+                    key: 'amount', label: 'Сумма', width: 128, align: 'right',
+                    cell: (row) => (row.amount
+                        ? { main: fmtMoney(row.amount), sub: row.periodicity ? (PERIOD_META[row.periodicity]?.label || '').toLowerCase() : '' }
+                        : { main: 'не указана', muted: true }),
+                },
+                { key: 'status', label: 'Статус', width: 136, cell: (row) => CONTRACT_STATUS_META[row.status] && <TonePill tone={CONTRACT_STATUS_META[row.status].tone}>{CONTRACT_STATUS_META[row.status].label}</TonePill> },
+            ];
+        case 'legal_entities':
+            return [
+                { key: 'name', label: 'Компания', cell: (row) => ({ main: row.name, strong: true, sub: partyLine(row) }) },
+                { key: 'account', label: 'Счёт', width: 256, cell: (row) => (row.iik ? { main: row.iik, mono: true, sub: row.bank_name } : { main: 'не указан', muted: true }) },
+                { key: 'state', label: '', width: 232, align: 'right', cell: (row) => <><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></> },
+            ];
+        case 'counterparty_accounts':
+            return [
+                { key: 'party', label: 'Поставщик', cell: (row) => ({ main: row.counterparty_name, strong: true }) },
+                {
+                    key: 'account', label: 'Счёт', width: 320,
+                    cell: (row) => ({ main: row.iik, mono: true, sub: [row.bank_name, row.bik && `БИК ${row.bik}`, row.kbe && `КБЕ ${row.kbe}`].filter(Boolean).join(' · ') }),
+                },
+                { key: 'state', label: '', width: 156, align: 'right', cell: (row) => <>{row.is_default && <TonePill tone="neutral">основной</TonePill>}<Hidden active={row.is_active} label="скрыт" /></> },
+            ];
+        case 'cards':
+            return [
+                { key: 'holder', label: 'Владелец', cell: (row) => ({ main: row.holder_name || row.owner_name, strong: true, sub: row.owner_kind === 'employee' ? 'карта сотрудника' : `карта поставщика${row.owner_name ? ` ${row.owner_name}` : ''}` }) },
+                { key: 'note', label: 'Примечание', width: 208, cell: (row) => ({ main: row.note }) },
+                { key: 'number', label: 'Номер карты', width: 268, cell: (row) => <CardNumber mask={row.mask} canReveal load={() => loadCardNumber?.(row.id)} showToast={showToast} /> },
+                { key: 'state', label: '', width: 88, cell: (row) => <Hidden active={row.is_active} /> },
+            ];
+        case 'limits':
+            return [
+                { key: 'delegate', label: 'Согласующий', cell: (row) => ({ main: row.delegate_name, strong: true, sub: conditionsLine(row) || 'любые заявки' }) },
+                { key: 'limit', label: 'Лимит', width: 136, align: 'right', cell: (row) => (row.amount_limit ? { main: `до ${fmtMoney(row.amount_limit)}` } : { main: 'без лимита', muted: true }) },
+                {
+                    key: 'scope', label: 'Поставщики и проекты', width: 196,
+                    cell: (row) => ({
+                        main: row.all_counterparties ? 'все поставщики' : `поставщиков: ${(row.counterparty_ids || []).length}`,
+                        sub: row.all_projects ? 'все проекты' : `проектов: ${(row.project_ids || []).length}`,
+                    }),
+                },
+                {
+                    key: 'basis', label: 'Основание и срок', width: 188,
+                    cell: (row) => {
+                        const until = row.ends_on ? `до ${fmtDate(row.ends_on)}` : '';
+                        if (row.number) return { main: `Приказ №${row.number}`, sub: [row.issued_on && `от ${fmtDate(row.issued_on)}`, until].filter(Boolean).join(' · ') };
+                        return until ? { main: until } : { main: 'бессрочно', muted: true };
+                    },
+                },
+                { key: 'status', label: 'Статус', width: 136, cell: (row) => LIMIT_STATUS_META[row.status] && <TonePill tone={LIMIT_STATUS_META[row.status].tone}>{LIMIT_STATUS_META[row.status].label}</TonePill> },
+            ];
+        case 'routes':
+            return [
+                {
+                    key: 'name', label: 'Маршрут',
+                    cell: (row) => ({
+                        main: row.name, strong: true,
+                        sub: [conditionsLine(row) || 'любая заявка',
+                            (row.amount_from || row.amount_to) && `сумма${row.amount_from ? ` от ${fmtMoney(row.amount_from)}` : ''}${row.amount_to ? ` до ${fmtMoney(row.amount_to)}` : ''}`].filter(Boolean).join(' · '),
+                    }),
+                },
+                { key: 'manager', label: 'Этап руководителя', width: 184, cell: (row) => ({ main: nameOf(MANAGER_STEP_OPTIONS, row.manager_step || 'auto') }) },
+                { key: 'approver', label: 'Утверждает', width: 216, cell: (row) => (row.approver_name ? { main: row.approver_name } : { main: 'любой из утверждающих', muted: true }) },
+                { key: 'state', label: '', width: 104, cell: (row) => <Hidden active={row.is_active} label="отключён" /> },
+            ];
+        default:
+            return null;
+    }
+};
+
+/** Наименьшая ширина, в которую таблица справочника встаёт целиком. */
+export const dictionaryTableMin = (columns) => (columns
+    ? TABLE_MAIN_MIN + columns.reduce((sum, column) => sum + (column.width || 0), 0)
+    : 0);
 
 const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
     const [values, setValues] = useState(null);
@@ -759,42 +884,93 @@ const PaymentsDictionaries = ({
         }
     };
 
+    /* Таблица встаёт, только когда помещается в поле целиком (useFits): его ширину решают меню
+       портала и левый список, а не одно окно. Не помещается — записи идут карточками. */
+    const columns = dictionaryColumns(name, { loadCardNumber, showToast });
+    const [paneRef, fits] = useFits(dictionaryTableMin(columns));
+    const asTable = Boolean(columns && fits);
+
     if (!current) return null;
     const isNew = !editing?.id;
 
-    const row = (item, { indent = false, strong = false } = {}) => {
+    /* Скрытая (отключённая, отменённая) запись — приглушённой строкой: в новых заявках её нет. */
+    const idle = (item) => (name === 'limits' ? item.status === 'cancelled' : (name === 'contracts' ? false : item.is_active === false));
+
+    /* Запись карточкой — на телефоне и у справочников из одного названия: название, под ним
+       уточнения, справа метка состояния и то, что делают, не открывая запись. */
+    const card = (item, { children = [] } = {}) => {
         const view = rowView(item);
+        const line = (entry, { inner = false } = {}) => {
+            const info = inner ? rowView(entry) : view;
+            return (
+                <div key={entry.id} data-row={entry.id} className={`flex items-center gap-3 ${inner ? 'border-t border-slate-100 py-2 pl-7 pr-3.5' : 'px-3.5 py-2.5'}`}>
+                    <button type="button" className="min-w-0 grow basis-0 rounded-lg text-left transition hover:opacity-70" onClick={() => openEditor(entry)}>
+                        <span className={`block truncate text-[13.5px] ${inner ? 'text-slate-700' : `font-medium ${idle(entry) ? 'text-slate-500' : 'text-slate-900'}`}`}>{info.title}</span>
+                        {info.sub && <span className="block truncate text-[12px] text-slate-500">{info.sub}</span>}
+                    </button>
+                    {/* Пустая обёртка не рисуется: иначе у строки без метки оставался бы зазор под неё. */}
+                    {info.side && <span className="flex shrink-0 items-center gap-2">{info.side}</span>}
+                    <ChevronRight size={15} className="shrink-0 text-slate-300" aria-hidden="true" />
+                </div>
+            );
+        };
         return (
-            <div key={item.id} data-row={item.id} className="flex items-center gap-3 border-b border-slate-100 px-4 py-2.5 last:border-b-0">
-                <button type="button" className={`min-w-0 flex-1 rounded-lg text-left transition hover:opacity-70 ${indent ? 'pl-5' : ''}`} onClick={() => openEditor(item)}>
-                    <div className={`truncate text-[13.5px] ${strong ? 'font-medium' : ''} ${indent ? 'text-slate-700' : 'text-slate-900'}`}>{view.title}</div>
-                    {view.sub && <div className="truncate text-[12px] text-slate-500">{view.sub}</div>}
-                </button>
-                <div className="flex shrink-0 items-center gap-2">{view.side}</div>
+            <div key={item.id} data-record={item.id} className={`overflow-hidden rounded-xl border ${idle(item) ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)]'}`}>
+                {line(item)}
+                {children.map((child) => line(child, { inner: true }))}
             </div>
         );
     };
 
+    const cellView = (value) => {
+        if (value === null || value === undefined || value === false) return null;
+        if (React.isValidElement(value)) return value;
+        const { main, sub, strong, muted, mono } = value;
+        return (
+            <>
+                <div className={`truncate ${strong ? 'font-medium' : ''} ${mono ? 'tabular-nums' : ''} ${muted || !main ? 'text-slate-400' : 'text-slate-900'}`}>{main || '—'}</div>
+                {sub ? <div className="truncate text-[12px] text-slate-500">{sub}</div> : null}
+            </>
+        );
+    };
+    const groups = SECTION_GROUPS
+        .map((group) => ({ ...group, items: sections.filter((item) => item.group === group.key) }))
+        .filter((group) => group.items.length);
+
     return (
-        <div className="md:grid md:grid-cols-[224px_minmax(0,1fr)] md:items-start md:gap-4">
-            <nav aria-label="Справочники" className="hidden rounded-2xl bg-slate-100/80 p-1.5 md:block">
-                {sections.map((item) => (
-                    <button
-                        key={item.value}
-                        type="button"
-                        aria-current={item.value === name ? 'page' : undefined}
-                        onClick={() => setTab(item.value)}
-                        className={`block w-full rounded-xl px-3 py-2 text-left text-[13.5px] transition ${item.value === name ? 'bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]' : 'text-slate-600 hover:text-slate-900'}`}
-                    >
-                        {item.label}
-                    </button>
+        <div className="md:grid md:grid-cols-[236px_minmax(0,1fr)] md:items-start md:gap-5">
+            {/* Справочники — группами под подписями, со значками: что к чему относится, видно
+                не читая все двенадцать названий. */}
+            <nav aria-label="Справочники" className="hidden space-y-3 md:block">
+                {groups.map((group) => (
+                    <div key={group.key} data-nav-group={group.key}>
+                        {group.label && <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{group.label}</div>}
+                        <div className="rounded-2xl bg-slate-100/80 p-1.5">
+                            {group.items.map((item) => {
+                                const Icon = item.icon;
+                                const active = item.value === name;
+                                return (
+                                    <button
+                                        key={item.value}
+                                        type="button"
+                                        aria-current={active ? 'page' : undefined}
+                                        onClick={() => setTab(item.value)}
+                                        className={`flex w-full items-start gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition ${active ? 'bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]' : 'text-slate-600 hover:text-slate-900'}`}
+                                    >
+                                        <Icon size={16} strokeWidth={2} className={`mt-[2px] shrink-0 ${active ? 'text-blue-600' : 'text-slate-400'}`} aria-hidden="true" />
+                                        <span className="min-w-0 grow basis-0">{item.label}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
                 ))}
             </nav>
             <div className="mb-3 md:hidden">
                 <CustomSelect value={name} onChange={setTab} options={sections.map((item) => ({ value: item.value, label: item.label }))} variant="ios" ariaLabel="Справочник" />
             </div>
 
-            <div className="min-w-0 space-y-3">
+            <div ref={paneRef} className="min-w-0 space-y-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                         <h2 className="text-[16px] font-semibold text-slate-900">{current.label}</h2>
@@ -832,24 +1008,64 @@ const PaymentsDictionaries = ({
                                 <input type="search" className={`${iosInput} pl-9`} placeholder="Поиск по справочнику" aria-label="Поиск по справочнику" value={filter} onChange={(event) => setFilter(event.target.value)} />
                             </div>
                         )}
-                        <div className={`${iosCard} overflow-hidden`}>
-                            {loading && !rows.length && (
-                                <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500"><Loader2 size={15} className="animate-spin" /> Загружаем…</div>
-                            )}
-                            {!loading && !shown.length && (
-                                <div className="px-4 py-10 text-center text-[13.5px] text-slate-500">
-                                    {rows.length ? 'Ничего не нашлось' : `Пока пусто${canEdit ? ' — добавьте первую запись' : ''}`}
-                                </div>
-                            )}
-                            {grouped
-                                ? pageItems.map(({ root, children }) => (
-                                    <React.Fragment key={root.id}>
-                                        {row(root, { strong: true })}
-                                        {children.map((child) => row(child, { indent: true }))}
-                                    </React.Fragment>
-                                ))
-                                : pageItems.map((item) => row(item))}
-                        </div>
+                        {loading && !rows.length && (
+                            <div className={`${iosCard} flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500`}><Loader2 size={15} className="animate-spin" /> Загружаем…</div>
+                        )}
+                        {!loading && !shown.length && (
+                            <div className={`${iosCard} px-4 py-10 text-center text-[13.5px] text-slate-500`}>
+                                {rows.length ? 'Ничего не нашлось' : `Пока пусто${canEdit ? ' — добавьте первую запись' : ''}`}
+                            </div>
+                        )}
+
+                        {/* Поле достаточно широкое: сведения записи — по колонкам, каждая запись — своя строка-карточка. */}
+                        {asTable && pageItems.length > 0 && (
+                            <div>
+                                <table className={CARD_TABLE} data-dictionary={name}>
+                                    <colgroup>
+                                        {columns.map((column) => <col key={column.key} style={column.width ? { width: column.width } : undefined} />)}
+                                    </colgroup>
+                                    <thead>
+                                        <tr>
+                                            {columns.map((column, index) => (
+                                                <th key={column.key} className={`${CARD_TH} ${column.align === 'right' ? '!text-right' : ''} ${index === 0 ? '!pl-4' : ''}`}>{column.label}</th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pageItems.map((item) => (
+                                            <tr key={item.id} data-row={item.id} onClick={() => openEditor(item)} className={`${CARD_ROW} h-[56px]`}>
+                                                {columns.map((column, index) => (
+                                                    <td key={column.key} className={`${cardCell(idle(item) ? 'rejected' : null)} align-middle ${column.align === 'right' ? 'text-right' : ''} ${index === 0 ? '!pl-4' : ''}`}>
+                                                        {index === 0 ? (
+                                                            /* Кнопка — для клавиатуры: строку открывают и с неё; щелчок по ней доходит до строки сам. */
+                                                            <button type="button" className="block w-full min-w-0 rounded-lg text-left">{cellView(column.cell(item))}</button>
+                                                        ) : (
+                                                            /* Метки и действия ячейки («Скопировать», «Показать номер») запись не открывают. */
+                                                            <div
+                                                                className={column.key === 'state' || column.key === 'number' ? `flex items-center gap-2 ${column.align === 'right' ? 'justify-end' : ''}` : undefined}
+                                                                onClick={column.key === 'state' || column.key === 'number' ? (event) => event.stopPropagation() : undefined}
+                                                            >
+                                                                {cellView(column.cell(item))}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {/* Узкое поле, телефон и справочники из одного названия: записи карточками;
+                            подкатегории — внутри карточки своей категории. */}
+                        {!asTable && pageItems.length > 0 && (
+                            <div className="space-y-1.5" data-dictionary-list={name}>
+                                {grouped
+                                    ? pageItems.map(({ root, children }) => card(root, { children }))
+                                    : pageItems.map((item) => card(item))}
+                            </div>
+                        )}
                         <Pager page={listRange.page} pageSize={DICTIONARY_PAGE_SIZE} total={listItems.length} forms={RECORD_FORMS}
                             onPage={(next) => setListPaging({ key: listKey, page: next })} />
                     </>

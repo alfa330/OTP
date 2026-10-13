@@ -99,19 +99,22 @@ def register(api):
         args = request.args
         limit = min(max(as_int(args.get('limit'), 'limit') or 100, 1), PAGE_SIZE_MAX)
         offset = max(as_int(args.get('offset'), 'offset') or 0, 0)
+        filters = {
+            'query': (args.get('q') or '').strip() or None,
+            'city': (args.get('city') or '').strip() or None,
+            'department_id': as_int(args.get('department_id')),
+            'responsible_user_id': as_int(args.get('responsible_user_id')),
+            'status': as_choice(args.get('status'), schema.ASSET_STATUSES, 'Статус не из списка'),
+            'category_id': as_int(args.get('category_id')),
+            'legal_entity_id': as_int(args.get('legal_entity_id')),
+        }
         with db._get_cursor() as cursor:
-            total, items = assets_sql.list_assets(
-                cursor, query=(args.get('q') or '').strip() or None,
-                city=(args.get('city') or '').strip() or None,
-                department_id=as_int(args.get('department_id')),
-                responsible_user_id=as_int(args.get('responsible_user_id')),
-                status=as_choice(args.get('status'), schema.ASSET_STATUSES, 'Статус не из списка'),
-                category_id=as_int(args.get('category_id')),
-                legal_entity_id=as_int(args.get('legal_entity_id')),
-                limit=limit, offset=offset)
+            total, items = assets_sql.list_assets(cursor, limit=limit, offset=offset, **filters)
             facets = assets_sql.filter_values(cursor)
+            # Счётчики плиток статусов — по тому же отбору, но без самого статуса.
+            counters = assets_sql.status_counts(cursor, **filters)
         return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset, 'facets': facets,
-                        'can_manage': access.can_manage_assets(ctx, ctx['roles'])})
+                        'counters': counters, 'can_manage': access.can_manage_assets(ctx, ctx['roles'])})
 
     @route('/assets/<int:asset_id>')
     def asset_read(ctx, asset_id):

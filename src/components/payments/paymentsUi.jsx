@@ -9,9 +9,10 @@ import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegm
 import { foldFollowStep, foldMotion } from '../../utils/foldMotion';
 import { windowResizeMotion } from '../../utils/windowResize';
 import InfoHint from '../common/InfoHint';
+import useIsMobileShell from '../common/useIsMobileShell';
 import {
     ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
-    pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, tonePill,
+    pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, toneEdge, tonePill, toneRow,
 } from './paymentsMeta';
 
 /*
@@ -822,6 +823,146 @@ export const SectionTitle = ({ children, right = null }) => (
     <div className="flex items-end justify-between gap-2">
         <div className={iosGroupLabel}>{children}</div>
         {right}
+    </div>
+);
+
+/* ── Списки записей: «Заявки», «Имущество», «Справочники» ──────────────────────
+   Просьба владельца 13.10.2026: эти вкладки «нужно переделать, чтобы разделение было
+   более заметным и понятным на первый взгляд». Записи стояли сплошной таблицей в одной
+   белой карточке: строки разделяла едва видная линия, деление на состояния было мелкой
+   серой полосой. Образец — списки «Задач»: плитки со счётчиками, каждая запись — своя
+   строка-карточка с зазором, группы под подписью с линией. */
+
+/* Плитки-срезы: «Все / Ждут меня / В работе…» у заявок, статусы у имущества. Плитка —
+   это и число, и отбор: выбранная залита, как выбранная метка в «Задачах». Цвет у числа —
+   только у состояний со смыслом (тот же, что у строк и меток этого состояния).
+
+   На компьютере плитки делят ширину поровну и переносятся на вторую строку, если не
+   помещаются. На телефоне восемь плиток в два столбца заняли бы пол-экрана — там ряд
+   один и листается вбок: обрезанная плитка сама говорит, что есть ещё. Раскладка
+   компьютера задана стилем, а не классом `grid-cols-[…]`: такие сетки телефонная
+   оболочка схлопывает в столбик (а включается она и на широком экране малой высоты). */
+const TILE_NUMBER = { overdue: 'text-rose-600', blocked: 'text-amber-600', done: 'text-emerald-600', rejected: 'text-slate-400' };
+// Плитка не уже 148 px (иначе «Требуют уточнения» обрезается) и не шире 224: три плитки во
+// всю ширину экрана выглядели бы тремя пустыми полосами, а выбранная — чёрной плашкой.
+// Предел ширины задан всему ряду, а не колонке: с пределом у колонки сетка считает, сколько
+// плиток встанет в строку, по нему же — и восемь плиток, которым хватает места, шли в два ряда.
+const TILE_MIN = 148;
+const TILE_MAX = 224;
+const TILE_GAP = 8;
+const tilesWrap = (count) => ({
+    gridTemplateColumns: `repeat(auto-fit, minmax(${TILE_MIN}px, 1fr))`,
+    maxWidth: Math.max(1, count) * TILE_MAX + (Math.max(1, count) - 1) * TILE_GAP,
+});
+const TILES_STRIP = { gridAutoFlow: 'column', gridAutoColumns: `minmax(${TILE_MIN}px, 1fr)` };
+
+export const StatTiles = ({ items = [], value, onChange, ariaLabel }) => {
+    const phone = useIsMobileShell();
+    const stripRef = useRef(null);
+    // Выбранная плитка остаётся на виду, когда ряд листается.
+    useEffect(() => {
+        const strip = stripRef.current;
+        const active = strip?.querySelector('[aria-pressed="true"]');
+        if (!strip || !active || strip.scrollWidth <= strip.clientWidth) return;
+        const box = strip.getBoundingClientRect();
+        const tile = active.getBoundingClientRect();
+        if (tile.left < box.left || tile.right > box.right) strip.scrollLeft += (tile.left + tile.width / 2) - (box.left + box.width / 2);
+    }, [value, items.length, phone]);
+    return (
+        <div
+            ref={stripRef}
+            role="group"
+            aria-label={ariaLabel}
+            data-stat-tiles={phone ? 'strip' : 'wrap'}
+            className={`grid gap-2 ${phone ? 'overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden' : ''}`}
+            style={phone ? TILES_STRIP : tilesWrap(items.length)}
+        >
+            {items.map((item) => {
+                const active = item.key === value;
+                const pill = item.tone ? tonePill(item.tone) : null;
+                return (
+                    <button
+                        key={item.key}
+                        type="button"
+                        data-state-filter={item.key}
+                        aria-pressed={active}
+                        onClick={() => onChange?.(item.key)}
+                        className={`min-w-0 rounded-xl border px-3 py-2.5 text-left transition active:scale-[0.99] ${active
+                            ? 'border-slate-900 bg-slate-900'
+                            : 'border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] hover:bg-slate-50'}`}
+                    >
+                        {/* Не flex: ряды с gap телефонная оболочка переносит, и подпись ушла бы под точку. */}
+                        <span className={`block truncate text-[12px] font-medium ${active ? 'text-slate-300' : 'text-slate-500'}`}>
+                            {pill && <span className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle ${pill.dot}`} aria-hidden="true" />}
+                            {item.label}
+                        </span>
+                        <span className={`mt-1 block text-[22px] font-semibold leading-none tabular-nums ${active ? 'text-white' : ((item.count > 0 && TILE_NUMBER[item.tone]) || 'text-slate-900')}`}>
+                            {item.count ?? '—'}
+                        </span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
+/* Заготовка ряда плиток, пока счётчики не пришли: те же размеры, серыми полосами вместо
+   подписи и числа. Читалке о загрузке говорит одна подпись. */
+export const StatTilesSkeleton = ({ label, count = 4 }) => {
+    const phone = useIsMobileShell();
+    return (
+        <div role="status" aria-busy="true" aria-label={label} data-stat-tiles="skeleton" className={`grid gap-2 ${phone ? 'overflow-hidden' : ''}`} style={phone ? TILES_STRIP : tilesWrap(count)}>
+            {Array.from({ length: count }, (_, index) => (
+                <div key={index} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
+                    <span className="flex h-[18px] items-center"><Bone className="h-2 w-16" /></span>
+                    <span className="mt-1 flex h-[22px] items-center"><Bone className="h-3 w-9" /></span>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+/* Таблица, у которой карточкой нарисована СТРОКА: рамка у ячеек, скругление у крайних,
+   между строками зазор. Колонки при этом остаются выровненными (и настраиваемыми — у
+   реестра заявок), а подписи колонок стоят над списком, без своей полосы. Цвет рамки и
+   фона — на самих ячейках: тёмный слой перекрашивает утилиты на элементе, а не вложенные
+   селекторы. Подсветка под курсором — яркостью строки: годится и белой, и цветной. */
+export const CARD_TABLE = 'w-full table-fixed border-separate border-spacing-x-0 border-spacing-y-1.5 text-[13.5px]';
+export const CARD_TH = 'truncate px-3.5 pb-0.5 pt-1 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500';
+export const CARD_ROW = 'group cursor-pointer transition hover:brightness-[0.97]';
+const CARD_CELL = 'border-y px-3.5 py-2.5 first:rounded-l-xl first:border-l last:rounded-r-xl last:border-r';
+/** Классы ячейки строки-карточки. `tone` — состояние записи, которое красит строку целиком
+ *  (просрочена, ждёт уточнения, закрыта, отменена): фон и рамка в тон — те же, что у метки. */
+export const cardCell = (tone = null) => `${CARD_CELL} ${toneEdge(tone) || 'border-slate-200'} ${toneRow(tone) || 'bg-white'}`;
+
+/* Помещается ли в блок содержимое шириной `minWidth`: [ref блока, да / нет / null до замера].
+   Меряется сам блок, а не окно: сколько ему достанется, решают меню портала (свёрнутое или
+   раскрытое) и соседние колонки. Так таблица справочника встаёт только туда, где видна
+   целиком, — иначе записи идут карточками, а не листаются вбок. Замер — до первой
+   отрисовки: раскладка не перескакивает. */
+export const useFits = (minWidth) => {
+    const ref = useRef(null);
+    const [width, setWidth] = useState(null);
+    useIsoLayoutEffect(() => {
+        const node = ref.current;
+        if (!node) return undefined;
+        const read = () => setWidth(node.clientWidth);
+        read();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        const observer = new ResizeObserver(read);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+    return [ref, width === null ? null : width >= minWidth];
+};
+
+/* Подпись группы с линией — как разделитель дней в списках «Задач». В таблице стоит своей
+   строкой (`colSpan`), в обычном списке — блоком. */
+export const GroupDivider = ({ children, count }) => (
+    <div className="flex items-center gap-2 px-1 pb-0.5 pt-2">
+        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{children}</span>
+        {count !== undefined && count !== null && <span className="shrink-0 text-[11px] font-semibold tabular-nums text-slate-400">{count}</span>}
+        <span className="h-px min-w-4 grow basis-0 bg-slate-200" aria-hidden="true" />
     </div>
 );
 

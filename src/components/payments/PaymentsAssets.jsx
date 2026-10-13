@@ -9,8 +9,8 @@ import {
     pageRange, recordView,
 } from './paymentsMeta';
 import {
-    AmountInput, Bone, DATE_TRIGGER, ErrorBox, Field, FilePicker, FormSelect, NoticeBox, Pager, Row, SectionTitle, TonePill,
-    UserSelect, WindowSkeleton, downloadAttachment, errorText, multipart,
+    AmountInput, Bone, CARD_ROW, CARD_TABLE, CARD_TH, DATE_TRIGGER, ErrorBox, Field, FilePicker, FormSelect, NoticeBox, Pager,
+    Row, SectionTitle, StatTiles, TonePill, UserSelect, WindowSkeleton, cardCell, downloadAttachment, errorText, multipart,
 } from './paymentsUi';
 
 /*
@@ -293,6 +293,7 @@ const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, o
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [facets, setFacets] = useState({ cities: [], departments: [] });
+    const [counters, setCounters] = useState({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
@@ -339,6 +340,7 @@ const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, o
             setItems(body.items || []);
             setTotal(Number(body.total) || 0);
             setFacets(body.facets || { cities: [], departments: [] });
+            setCounters(body.counters || {});
         } catch (err) {
             if (ticket.current !== mine) return;
             setError(errorText(err, 'Не удалось загрузить реестр имущества'));
@@ -360,65 +362,87 @@ const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, o
     const departmentOptions = useMemo(() => [{ value: '', label: 'Все подразделения' }, ...(facets.departments || []).map((item) => ({ value: item.id, label: item.name }))], [facets]);
     const categoryOptions = useMemo(() => [{ value: '', label: 'Все категории' }, ...(dictionaries?.asset_categories || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
 
+    /* Плитки статусов — те же срезы, что были списком «Все статусы»: видно сразу, сколько
+       имущества в работе, на складе, в ремонте и списано. Статус без имущества не показывается,
+       пока его не выбрали. */
+    const statusTiles = useMemo(() => [
+        { key: '', label: 'Всё имущество', tone: null, count: counters.all },
+        ...ASSET_STATUS_OPTIONS
+            .filter((option) => counters[option.value] || filters.status === option.value)
+            .map((option) => ({ key: option.value, label: option.label, tone: ASSET_STATUS_META[option.value].tone, count: counters[option.value] })),
+    ], [counters, filters.status]);
+
     return (
         <div>
             {/* Списки отбора — того же роста, что строка поиска рядом (FormSelect). */}
-            <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_repeat(4,minmax(0,176px))]">
+            <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_repeat(3,minmax(0,184px))]">
                 <div className="relative">
                     <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input type="search" className={`${iosInput} pl-9`} placeholder="Название, инвентарный или серийный номер, ответственный…" aria-label="Поиск имущества" value={search} onChange={(event) => setSearch(event.target.value)} />
                 </div>
-                <FormSelect value={filters.status} onChange={(v) => set({ status: v || '' })} options={[{ value: '', label: 'Все статусы' }, ...ASSET_STATUS_OPTIONS]} ariaLabel="Статус" />
                 <FormSelect value={filters.city} onChange={(v) => set({ city: v || '' })} options={cityOptions} searchable ariaLabel="Город" />
                 <FormSelect value={filters.department_id} onChange={(v) => set({ department_id: v || null })} options={departmentOptions} searchable ariaLabel="Подразделение" />
                 <FormSelect value={filters.category_id} onChange={(v) => set({ category_id: v || null })} options={categoryOptions} ariaLabel="Категория" />
             </div>
 
+            <div className="mt-3">
+                <StatTiles ariaLabel="Статус имущества" value={filters.status} onChange={(key) => set({ status: key || '' })} items={statusTiles} />
+            </div>
+
             {error && <div className="mt-3"><NoticeBox text={error} /></div>}
 
+            {/* Каждая единица — своя строка-карточка, как записи реестра заявок. */}
             <div ref={listRef} className="scroll-mt-4" />
-            <div className={`${iosCard} mt-4 hidden overflow-x-auto md:block`}>
-                <table className="w-full min-w-[980px] table-fixed border-collapse text-[13.5px]">
-                    <colgroup>
-                        <col style={{ width: 132 }} /><col /><col style={{ width: 208 }} /><col style={{ width: 224 }} />
-                        <col style={{ width: 108 }} /><col style={{ width: 128 }} /><col style={{ width: 148 }} />
-                    </colgroup>
-                    <thead>
-                        <tr className="border-b border-slate-200/70 bg-slate-50 text-left text-[11.5px] uppercase tracking-wider text-slate-500">
-                            <th className="px-3.5 py-2.5 font-semibold">Инв. №</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Имущество</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Ответственный</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Город и место</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Получено</th>
-                            <th className="px-3.5 py-2.5 text-right font-semibold">Стоимость</th>
-                            <th className="px-3.5 py-2.5 font-semibold">Статус</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {items.map((asset, index) => (
-                            <tr key={asset.id} data-asset={asset.id} onClick={() => setOpenedId(asset.id)} className={`h-[56px] cursor-pointer transition hover:bg-slate-50 ${index > 0 ? 'border-t border-slate-900/[0.06]' : ''} ${asset.status === 'written_off' ? 'text-slate-400' : ''}`}>
-                                <td className="truncate px-3.5 py-2 tabular-nums text-slate-900">{asset.inventory_number}</td>
-                                <td className="px-3.5 py-2">
-                                    <div className="truncate text-slate-900">{asset.name}</div>
-                                    <div className="truncate text-[12px] text-slate-500">{[asset.category_name, asset.serial_number && `серийный № ${asset.serial_number}`].filter(Boolean).join(' · ')}</div>
-                                </td>
-                                <td className="px-3.5 py-2">
-                                    <div className="truncate text-slate-900">{asset.responsible_name || '—'}</div>
-                                    <div className="truncate text-[12px] text-slate-500">{asset.department_name}</div>
-                                </td>
-                                <td className="px-3.5 py-2">
-                                    <div className="truncate text-slate-900">{asset.city || '—'}</div>
-                                    <div className="truncate text-[12px] text-slate-500">{asset.location}</div>
-                                </td>
-                                <td className="px-3.5 py-2 tabular-nums text-slate-700">{asset.received_on ? fmtDate(asset.received_on) : '—'}</td>
-                                <td className="px-3.5 py-2 text-right tabular-nums text-slate-900">{asset.cost !== null && asset.cost !== undefined ? fmtMoney(asset.cost) : '—'}</td>
-                                <td className="px-3.5 py-2">{statusPill(asset)}</td>
+            <div className="mt-2 hidden overflow-x-auto md:block">
+                {items.length > 0 && (
+                    <table className={`${CARD_TABLE} min-w-[980px]`} data-assets>
+                        <colgroup>
+                            <col style={{ width: 140 }} /><col /><col style={{ width: 208 }} /><col style={{ width: 224 }} />
+                            <col style={{ width: 108 }} /><col style={{ width: 128 }} /><col style={{ width: 156 }} />
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th className={`${CARD_TH} !pl-4`}>Инв. №</th>
+                                <th className={CARD_TH}>Имущество</th>
+                                <th className={CARD_TH}>Ответственный</th>
+                                <th className={CARD_TH}>Город и место</th>
+                                <th className={CARD_TH}>Получено</th>
+                                <th className={`${CARD_TH} !text-right`}>Стоимость</th>
+                                <th className={CARD_TH}>Статус</th>
                             </tr>
-                        ))}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            {items.map((asset) => {
+                                // Списанное — приглушённой строкой: за человеком оно уже не числится.
+                                const gone = asset.status === 'written_off';
+                                const cell = `${cardCell(gone ? 'rejected' : null)} align-middle`;
+                                const main = gone ? 'text-slate-500' : 'text-slate-900';
+                                return (
+                                    <tr key={asset.id} data-asset={asset.id} onClick={() => setOpenedId(asset.id)} className={`${CARD_ROW} h-[56px]`}>
+                                        <td className={`${cell} !pl-4`}><div className={`truncate tabular-nums ${gone ? 'text-slate-400' : 'text-slate-600'}`}>{asset.inventory_number}</div></td>
+                                        <td className={cell}>
+                                            <div className={`truncate font-medium ${main}`}>{asset.name}</div>
+                                            <div className="truncate text-[12px] text-slate-500">{[asset.category_name, asset.serial_number && `серийный № ${asset.serial_number}`].filter(Boolean).join(' · ')}</div>
+                                        </td>
+                                        <td className={cell}>
+                                            <div className={`truncate ${main}`}>{asset.responsible_name || '—'}</div>
+                                            <div className="truncate text-[12px] text-slate-500">{asset.department_name}</div>
+                                        </td>
+                                        <td className={cell}>
+                                            <div className={`truncate ${main}`}>{asset.city || '—'}</div>
+                                            <div className="truncate text-[12px] text-slate-500">{asset.location}</div>
+                                        </td>
+                                        <td className={`${cell} tabular-nums text-slate-600`}>{asset.received_on ? fmtDate(asset.received_on) : '—'}</td>
+                                        <td className={`${cell} text-right font-semibold tabular-nums ${main}`}>{asset.cost !== null && asset.cost !== undefined ? fmtMoney(asset.cost) : '—'}</td>
+                                        <td className={cell}>{statusPill(asset)}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                )}
                 {!items.length && !loading && (
-                    <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
+                    <div className={`${iosCard} mt-1.5 flex flex-col items-center gap-2 px-4 py-12 text-center`}>
                         <Boxes size={22} className="text-slate-300" />
                         <p className="text-[13.5px] text-slate-500">{narrowed ? 'Ничего не нашлось — измените запрос или фильтры' : 'Имущества на учёте пока нет. Оно появляется из заявок на закуп товара с категорией «Имущество на учёт».'}</p>
                     </div>

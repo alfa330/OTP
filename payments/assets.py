@@ -41,8 +41,9 @@ def _asset_row(row):
     return item
 
 
-def list_assets(cursor, *, query=None, city=None, department_id=None, responsible_user_id=None,
-                status=None, category_id=None, legal_entity_id=None, request_id=None, limit=200, offset=0):
+def _where(*, query=None, city=None, department_id=None, responsible_user_id=None,
+           status=None, category_id=None, legal_entity_id=None, request_id=None):
+    """Условие отбора реестра имущества: (текст ` WHERE …` либо пусто, параметры)."""
     clauses, params = [], {}
     if query:
         params['like'] = like_pattern(query.strip())
@@ -66,7 +67,27 @@ def list_assets(cursor, *, query=None, city=None, department_id=None, responsibl
         if value:
             params[key] = int(value)
             clauses.append('%s = %%(%s)s' % (column, key))
-    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    return ((' WHERE ' + ' AND '.join(clauses)) if clauses else ''), params
+
+
+def status_counts(cursor, **filters):
+    """Сколько имущества в каждом статусе по ТЕКУЩЕМУ отбору без учёта самого статуса —
+    счётчики плиток над реестром: {'all': N, 'in_use': N, …}. Статус, которого нет, — ноль."""
+    filters.pop('status', None)
+    where, params = _where(**filters)
+    cursor.execute('SELECT a.status, COUNT(*) FROM payment_assets a' + where + ' GROUP BY a.status', params)
+    counts = {code: 0 for code, _label in workflow.ASSET_STATUSES}
+    total = 0
+    for status, count in cursor.fetchall():
+        total += int(count or 0)
+        if status in counts:
+            counts[status] = int(count or 0)
+    counts['all'] = total
+    return counts
+
+
+def list_assets(cursor, *, limit=200, offset=0, **filters):
+    where, params = _where(**filters)
     sql = _ASSET_SQL.replace('SELECT ', 'SELECT COUNT(*) OVER () AS total, ', 1) + where
     sql += ' ORDER BY a.id DESC'
     if limit:

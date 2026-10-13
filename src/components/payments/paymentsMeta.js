@@ -460,6 +460,14 @@ export const TONE_ROW = {
     done: 'bg-emerald-50/60',
     rejected: 'bg-slate-50',
 };
+/* Рамка строки-карточки того же состояния (фон — TONE_ROW). Закрытая заявка — самой тихой
+   зелёной рамкой: таких строк в реестре десятки подряд. */
+export const TONE_EDGE = {
+    overdue: 'border-rose-200',
+    blocked: 'border-amber-200',
+    done: 'border-emerald-100',
+    rejected: 'border-slate-200',
+};
 export const TONE_PILL = {
     overdue: { fill: 'bg-rose-100 text-rose-800', dot: 'bg-rose-500' },
     blocked: { fill: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' },
@@ -485,6 +493,14 @@ export const requestState = (request) => {
 export const stateMeta = (state) => STATE_META[state] || STATE_META.active;
 export const rowTone = (request) => stateMeta(requestState(request)).tone;
 export const toneRow = (tone) => (tone && TONE_ROW[tone]) || '';
+export const toneEdge = (tone) => (tone && TONE_EDGE[tone]) || '';
+
+/** С этой ли строки реестра начинаются завершённые заявки. Сервер отдаёт сначала заявки в
+ *  работе, потом закрытые, отклонённые и отменённые — на стыке список получает подпись.
+ *  Страница, которая целиком из завершённых (или целиком из рабочих), подписи не имеет. */
+export const closedGroupStart = (items, index) => Boolean(items?.[index])
+    && items[index].status !== 'active'
+    && items[index - 1]?.status === 'active';
 export const tonePill = (tone) => TONE_PILL[tone] || TONE_PILL.neutral;
 export const toneText = (tone) => TONE_TEXT[tone] || TONE_TEXT.neutral;
 

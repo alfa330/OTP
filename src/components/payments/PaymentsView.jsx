@@ -12,13 +12,14 @@ import PaymentsDictionaries from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
 import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
-    REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, defaultRegistryColumns, dueLabel, expenseSubline,
+    REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, dueLabel, expenseSubline,
     exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, netAmount, normalizeRegistryColumns, pageRange,
     paidLabel, registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
-    tonePill, toneRow, toneText,
+    tonePill, toneText,
 } from './paymentsMeta';
 import {
-    Bone, ColumnsMenu, DueChip, NoticeBox, Pager, SECTION_COLUMN, StatePill, TypePill, errorText, requestCardFrame,
+    Bone, CARD_ROW, CARD_TABLE, CARD_TH, ColumnsMenu, DueChip, GroupDivider, NoticeBox, Pager, SECTION_COLUMN, StatePill,
+    StatTiles, StatTilesSkeleton, TypePill, cardCell, errorText, requestCardFrame,
 } from './paymentsUi';
 import { recall, recallShell, remember, rememberPing } from './paymentsEntry';
 
@@ -81,6 +82,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         ping: recall(userId, 'ping'),
         shell: recallShell(userId),
         desk: recall(userId, 'desk'),
+        // Первая страница реестра без отбора: «Заявки» открываются тем же, чем были, и обновляются фоном.
+        registry: recall(userId, 'registry'),
         dictionaries: recall(userId, 'dictionaries'),
         users: recall(userId, 'users'),
     }));
@@ -96,9 +99,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         return count === undefined || count === null ? null : Number(count) || 0;
     });
 
-    const [items, setItems] = useState([]);
-    const [total, setTotal] = useState(0);
-    const [counters, setCounters] = useState({});
+    const [items, setItems] = useState(entry.registry?.items || []);
+    const [total, setTotal] = useState(entry.registry?.total || 0);
+    // null — счётчики ещё не приходили: плитки стоят заготовкой, а не тремя из восьми.
+    const [counters, setCounters] = useState(entry.registry?.counters || null);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
     const [downloading, setDownloading] = useState(false);
@@ -250,13 +254,19 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             setItems(data.items || []);
             setTotal(Number(data.total) || 0);
             setCounters(data.counters || {});
+            // Запоминается только первая страница без отбора — то, с чего «Заявки» открываются.
+            if (!selectionKey && pageNumber === 1) {
+                remember(userId, 'registry', { items: data.items || [], total: Number(data.total) || 0, counters: data.counters || {} });
+            }
         } catch (error) {
             if (requestRef.current !== ticket) return;
+            // Счётчики так и не пришли — плитки всё равно встают (с прочерками), иначе заготовка висела бы вечно.
+            setCounters((prev) => prev || {});
             setLoadError(errorText(error, 'Не удалось загрузить реестр'));
         } finally {
             if (requestRef.current === ticket) setLoading(false);
         }
-    }, [apiBaseUrl, headers, selectionKey]);
+    }, [apiBaseUrl, headers, selectionKey, userId]);
 
     // Реестр читается, когда открыт: на рабочем столе и досках он не нужен. После
     // действия над заявкой (refreshKey) перечитывается та же страница.
@@ -339,7 +349,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 const sub = expenseSubline(request, columnKeys);
                 return (
                     <>
-                        <div className={`truncate ${text.main}`}>{request.expense_name}</div>
+                        <div className={`truncate font-medium ${text.main}`}>{request.expense_name}</div>
                         {sub && <div className={`truncate text-[12.5px] ${text.body}`}>{sub}</div>}
                     </>
                 );
@@ -366,7 +376,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             case 'amount':
                 return (
                     <div className="whitespace-nowrap">
-                        <div className={`font-medium tabular-nums ${text.main}`}>{fmtMoney(netAmount(request))}</div>
+                        <div className={`font-semibold tabular-nums ${text.main}`}>{fmtMoney(netAmount(request))}</div>
                         {request.refund_amount > 0 && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>возврат {fmtMoney(request.refund_amount)}</div>}
                     </div>
                 );
@@ -578,66 +588,78 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         </button>
                     </PaymentsFilters>
 
-                    <div className="mt-3 flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
-                        {STATE_FILTERS.map((item) => {
-                            const count = counters[item.counter];
-                            const active = state === item.key;
-                            if (!['all', 'mine', 'open'].includes(item.key) && !count && !active) return null;
-                            return (
-                                <button
-                                    key={item.key}
-                                    type="button"
-                                    data-state-filter={item.key}
-                                    aria-pressed={active}
-                                    onClick={() => setState(item.key)}
-                                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] transition ${active ? 'bg-slate-900 font-medium text-white' : 'text-slate-700 hover:bg-white'}`}
-                                >
-                                    {item.tone && <span className={`h-2 w-2 shrink-0 rounded-full ${tonePill(item.tone).dot}`} />}
-                                    {item.label}
-                                    {count !== undefined && <span className="font-semibold tabular-nums">{count}</span>}
-                                </button>
-                            );
-                        })}
+                    {/* Срезы реестра — плитками со счётчиками (она же легенда цвета строк). Состояние
+                        без заявок не показывается, пока его не выбрали: пустая плитка — шум. */}
+                    <div className="mt-3">
+                        {counters ? (
+                            <StatTiles
+                                ariaLabel="Состояние заявок"
+                                value={state}
+                                onChange={setState}
+                                items={STATE_FILTERS
+                                    .filter((item) => ['all', 'mine', 'open'].includes(item.key) || counters[item.counter] || state === item.key)
+                                    .map((item) => ({ key: item.key, label: item.label, tone: item.tone, count: counters[item.counter] }))}
+                            />
+                        ) : (
+                            /* Какие состояния есть у заявок, станет известно с ответом сервера. До него — заготовка
+                               того же роста: плитки, выраставшие с трёх до восьми, были бы лишним движением. */
+                            <StatTilesSkeleton label="Загружаем состояния заявок" />
+                        )}
                     </div>
 
                     {loadError && <div className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-[13px] text-red-700 ring-1 ring-red-200">{loadError}</div>}
 
-                    {/* Таблица на широком экране, карточки на телефоне. */}
+                    {/* На широком экране — таблица, у которой карточкой нарисована каждая строка (как в
+                        списках «Задач»): записи отделены зазором, подписи колонок стоят над списком.
+                        У левого края строки — полоса типа заявки, того же цвета, что на карточках досок.
+                        На телефоне — карточки. */}
                     <div ref={listRef} className="scroll-mt-4" />
-                    <div className={`${iosCard} mt-4 hidden overflow-x-auto md:block`}>
-                        <table className="w-full table-fixed border-collapse text-[13.5px]" style={{ minWidth: tableMinWidth }}>
-                            <colgroup>
-                                {visibleColumns.map((column) => <col key={column.key} style={column.width ? { width: column.width } : undefined} />)}
-                            </colgroup>
-                            <thead>
-                                <tr className="border-b border-slate-200/70 bg-slate-50 text-left text-[11.5px] uppercase tracking-wider text-slate-500">
-                                    {visibleColumns.map((column) => (
-                                        <th key={column.key} className={`truncate px-3.5 py-2.5 font-semibold ${column.align === 'right' ? 'text-right' : ''}`}>{column.label}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {items.map((request, index) => {
-                                    const tone = rowTone(request);
-                                    return (
-                                        <tr
-                                            key={request.id}
-                                            data-request={request.id}
-                                            onClick={() => setOpenedId(request.id)}
-                                            className={`h-[60px] cursor-pointer transition hover:brightness-[0.97] ${index > 0 ? 'border-t border-slate-900/[0.06]' : ''} ${toneRow(tone)}`}
-                                        >
-                                            {visibleColumns.map((column) => (
-                                                <td key={column.key} className={`px-3.5 py-2.5 align-top ${column.align === 'right' ? 'text-right' : ''}`}>
-                                                    {renderCell(column.key, request, toneText(tone))}
-                                                </td>
-                                            ))}
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
+                    <div className="mt-2 hidden overflow-x-auto md:block">
+                        {items.length > 0 && (
+                            <table className={CARD_TABLE} style={{ minWidth: tableMinWidth }} data-registry>
+                                <colgroup>
+                                    {visibleColumns.map((column) => <col key={column.key} style={column.width ? { width: column.width } : undefined} />)}
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        {visibleColumns.map((column, index) => (
+                                            <th key={column.key} className={`${CARD_TH} ${column.align === 'right' ? '!text-right' : ''} ${index === 0 ? '!pl-5' : ''}`}>{column.label}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {items.map((request, index) => {
+                                        const tone = rowTone(request);
+                                        const type = requestType(request);
+                                        const closedStart = closedGroupStart(items, index);
+                                        return (
+                                            <React.Fragment key={request.id}>
+                                                {closedStart && (
+                                                    <tr data-registry-group="closed">
+                                                        <td colSpan={visibleColumns.length} className="p-0"><GroupDivider>Завершённые</GroupDivider></td>
+                                                    </tr>
+                                                )}
+                                                <tr data-request={request.id} onClick={() => setOpenedId(request.id)} className={`${CARD_ROW} h-[60px]`}>
+                                                    {visibleColumns.map((column, cell) => (
+                                                        <td
+                                                            key={column.key}
+                                                            title={cell === 0 ? `Тип заявки: ${type.label}` : undefined}
+                                                            className={`${cardCell(tone)} align-middle ${column.align === 'right' ? 'text-right' : ''} ${cell === 0
+                                                                ? `relative !pl-5 before:pointer-events-none before:absolute before:bottom-2.5 before:left-2 before:top-2.5 before:w-[3px] before:rounded-full ${type.bar}`
+                                                                : ''}`}
+                                                        >
+                                                            {renderCell(column.key, request, toneText(tone))}
+                                                        </td>
+                                                    ))}
+                                                </tr>
+                                            </React.Fragment>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        )}
                         {!items.length && !loading && (
-                            <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
+                            <div className={`${iosCard} mt-1.5 flex flex-col items-center gap-2 px-4 py-12 text-center`}>
                                 <Receipt size={22} className="text-slate-300" />
                                 <p className="text-[13.5px] text-slate-500">
                                     {narrowed ? 'Ничего не нашлось — измените запрос или фильтры' : 'Заявок пока нет'}
@@ -649,14 +671,17 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     {/* Карточка — та же, что на досках: тип заявки цветом (метка и полоса у левого
                         края), номер и срок, название, поставщик; за линией — сумма и где заявка
                         сейчас. Кружок у этапа — того же цвета, что у фильтра над списком. */}
-                    <div className="mt-4 space-y-2 md:hidden">
-                        {items.map((request) => {
+                    <div className="mt-3 space-y-2 md:hidden">
+                        {items.map((request, index) => {
                             const tone = rowTone(request);
                             const where = registryWhere(request);
                             return (
+                                <React.Fragment key={request.id}>
+                                {/* Та же подпись на стыке, что в таблице: дальше — завершённые заявки. */}
+                                {closedGroupStart(items, index) && <GroupDivider>Завершённые</GroupDivider>}
                                 <button
-                                    key={request.id}
                                     type="button"
+                                    data-request-card={request.id}
                                     onClick={() => setOpenedId(request.id)}
                                     className={`${requestCardFrame(requestType(request))} block w-full py-3 pl-4 pr-3.5 text-left transition active:scale-[0.99]`}
                                 >
@@ -678,6 +703,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                                         </span>
                                     </span>
                                 </button>
+                                </React.Fragment>
                             );
                         })}
                         {!items.length && !loading && (
