@@ -18,6 +18,14 @@
 голый адрес в тексте) и честно отвечает «незнакомый формат», если ни одного
 не нашёл, — а не выдаёт что попало за ссылку.
 
+Что нашлось 13.10.2026 прогоном на живом генераторе: вендор дописал в подвал
+страницы ссылку «Политика конфиденциальности» (`href="/privacy-policy"`; когда
+именно — неизвестно, 16.09 её не было), и на каждого водителя без документов
+разбор отвечал «ссылка выдана: /privacy-policy» — запасной поиск по всей
+странице принимал навигацию за результат. Отсюда три правила parse_response:
+ссылка — только полный адрес; слова вендора «документов нет» важнее адреса вне
+колонки ответа; всё, что было на форме ещё ДО отправки, результатом не считается.
+
 Наружу этот модуль отдаёт словарь результата и НИКОГДА не отдаёт адрес
 генератора: оператор до него добираться не должен (требование владельца), и
 даже текст ошибки чистится от адресов.
@@ -107,12 +115,15 @@ def _clean_text(fragment):
 def _is_chrome_link(url):
     """Ссылка принадлежит оформлению страницы, а не её содержимому."""
     parts = urlsplit(url)
+    # Ссылку водитель открывает у себя на телефоне, поэтому она обязана быть
+    # полным адресом. Относительный — «/privacy-policy», «#», «javascript:» —
+    # это всегда навигация самой страницы генератора: поимённого списка таких
+    # страниц не хватит, вендор добавляет их без предупреждения.
+    if parts.scheme.lower() not in ('http', 'https') or not parts.netloc:
+        return True
     if parts.netloc.lower() in _CHROME_HOSTS:
         return True
     path = (parts.path or '').lower()
-    if not parts.netloc and not path.startswith('/'):
-        # «#», «javascript:», относительные хвосты — не адрес для водителя.
-        return True
     if _CHROME_PAGE_RE.match(path):
         return True
     return any(path.startswith(prefix) for prefix in _CHROME_PATH_PREFIXES)
@@ -124,14 +135,17 @@ def _content_region(page):
     return match.group(1) if match else page
 
 
-def _candidate_links(region):
-    """Все адреса из содержательной части страницы, в порядке появления."""
+def _candidate_links(region, known=()):
+    """Все адреса из содержательной части страницы, в порядке появления.
+
+    known — адреса, которые были на форме до отправки: это оформление.
+    """
     region = _IIN_INPUT_RE.sub('', region)
     seen = []
     for pattern in (_HREF_RE, _VALUE_RE, _BARE_URL_RE):
         for match in pattern.finditer(region):
             url = html.unescape(match.group(1)).strip()
-            if not url or url in seen or _is_chrome_link(url):
+            if not url or url in seen or url in known or _is_chrome_link(url):
                 continue
             seen.append(url)
     return seen
@@ -155,30 +169,38 @@ def _vendor_message(page):
     return ''
 
 
-def parse_response(page):
+def parse_response(page, baseline=None):
     """Разбор HTML ответа формы. Чистая функция — проверяется без сети.
 
     Возвращает (исход, ссылка, сообщение вендора). Ссылка есть только у
     исхода LINK; сообщение — текст alert'а, если он был.
 
-    Ссылку ищем сначала в содержательной колонке, а не найдя — по всей
-    странице: оформление страницы (тема, скрипты, переключатели языка,
-    счётчики) отсеивает _is_chrome_link, и на живых страницах вендора без
-    результата ни одного кандидата не остаётся (проверено 16.09.2026 на
-    трёх снятых страницах). Так ссылка находится и если вендор рисует её
-    вне колонки — в модальном окне или в подвале.
+    baseline — страница формы ДО отправки (то, что отдал GET). Всё, что на
+    ней уже было, — оформление, а не ответ: ссылка на подписание появляется
+    только после отправки ИИН. Так разбор не зависит от того, что вендор
+    завтра допишет в подвал или в меню.
+
+    Порядок — от самого надёжного признака к самому слабому:
+      1. ссылка в содержательной колонке — там вендор и показывает результат;
+      2. слова вендора «документов нет» — это ответ, и адрес где-то ещё на
+         странице его не отменяет;
+      3. ссылка в любом другом месте страницы — на случай, если вендор начнёт
+         рисовать её вне колонки, в модальном окне;
+      4. прочие слова вендора — отказ; ничего из этого — незнакомый формат.
     """
     page = page or ''
     message = _vendor_message(page)
+    known = set(_candidate_links(baseline)) if baseline else ()
 
-    links = _candidate_links(_content_region(page)) or _candidate_links(page)
-
+    links = _candidate_links(_content_region(page), known)
+    if links:
+        return LINK, links[0], message or None
+    if message and any(hint in message.lower() for hint in _NO_DOCUMENTS_HINTS):
+        return NO_DOCUMENTS, None, message
+    links = _candidate_links(page, known)
     if links:
         return LINK, links[0], message or None
     if message:
-        lowered = message.lower()
-        if any(hint in lowered for hint in _NO_DOCUMENTS_HINTS):
-            return NO_DOCUMENTS, None, message
         return REJECTED, None, message
     return UNAVAILABLE, None, None
 
@@ -268,7 +290,7 @@ def generate(iin):
         logging.warning('sign_links: генератор не принял форму: %s', error)
         return _result(UNAVAILABLE, error='форма не отправилась: %s' % error, started=started)
 
-    outcome, link, message = parse_response(answer.text or '')
+    outcome, link, message = parse_response(answer.text or '', baseline=page.text or '')
     if outcome == UNAVAILABLE:
         # Формат ответа изменился — это надо увидеть в логе целиком (без ИИН и
         # токена, см. diagnostics): по одному такому логу разбор и правится.

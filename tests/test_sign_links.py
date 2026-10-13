@@ -236,13 +236,22 @@ _CHROME = ('<head><link href="/Theme/x.css"><script src="https://cdnjs.cloudflar
            '<img src="https://pip.silt.kz/img/logo.svg">')
 
 
-def page(postback=None, body='', iin=VALID, with_title_marker=True):
+# Подвал живой страницы, каким он стал к 13.10.2026: 16.09 этих ссылок не было.
+_FOOTER = ('<div class="text-left my-2 mt-1"> <div class=""> <a class="text-muted font-12" '
+           'href="#" target="_blank">Пользовательcкое соглашение</a> <br> <a class="text-muted '
+           'font-12" href="/privacy-policy" target="_blank" rel="noopener">Политика '
+           'конфиденциальности</a> </div> </div>')
+# Чего на странице пока нет, но что вендор может дописать так же молча: полный адрес.
+_ABOUT = '<footer><a href="https://silt.kz/about">О сервисе</a></footer>'
+
+
+def page(postback=None, body='', iin=VALID, with_title_marker=True, footer=''):
     """Страница генератора, как она устроена живьём: колонка с alert'ом и формой."""
     alert = ('<div class="alert alert-info" role="alert" id="postback-message">%s</div>'
              % postback) if postback else ''
     marker = '<!-- end page title -->' if with_title_marker else ''
     return (_CHROME + marker + '<div class="row"><div class="col-xl-12">' + alert + body
-            + (_FORM % iin) + '</div></div><!-- container --></body>')
+            + (_FORM % iin) + '</div></div><!-- container -->' + footer + '</body>')
 
 
 class ParseResponseTests(unittest.TestCase):
@@ -274,6 +283,63 @@ class ParseResponseTests(unittest.TestCase):
                        'https://tps-public.silt.kz/ru/link-generator'):
             self.assertTrue(sapar_link._is_chrome_link(chrome), chrome)
         self.assertFalse(sapar_link._is_chrome_link(link))
+
+    def test_no_documents_on_the_live_page_is_not_a_link_to_the_privacy_policy(self):
+        """К 13.10.2026 вендор дописал в подвал «Политику конфиденциальности», и
+        на каждого водителя без документов раздел отвечал «ссылка выдана:
+        /privacy-policy» — запасной поиск по всей странице принимал навигацию
+        за результат. Поймано прогоном на живом генераторе."""
+        words = 'Нет документов на подписание. Документы подписаны'
+        answer = page(words, footer=_FOOTER)
+        self.assertEqual(sapar_link.parse_response(answer), (sapar_link.NO_DOCUMENTS, None, words))
+        self.assertEqual(sapar_link.parse_response(answer, baseline=page(iin='', footer=_FOOTER)),
+                         (sapar_link.NO_DOCUMENTS, None, words))
+
+    def test_a_relative_address_is_never_a_link_for_a_driver(self):
+        """Ссылку открывают на телефоне водителя — она обязана быть полным адресом.
+        Перечислять навигацию вендора поимённо бесполезно: её дописывают молча."""
+        for href in ('/privacy-policy', '/ru/egovsignmenu?token=abc', 'egovsignmenu?token=abc',
+                     '#', 'javascript:void(0)', '//cdn.example.kz/x', 'mailto:help@example.kz',
+                     'tel:+77000000000'):
+            self.assertTrue(sapar_link._is_chrome_link(href), href)
+        # Пустая форма с подвалом — незнакомый формат, а не ссылка; отказ — отказ.
+        self.assertEqual(sapar_link.parse_response(page(footer=_FOOTER)),
+                         (sapar_link.UNAVAILABLE, None, None))
+        self.assertEqual(sapar_link.parse_response(page('Ошибка формирования ссылки', footer=_FOOTER)),
+                         (sapar_link.REJECTED, None, 'Ошибка формирования ссылки'))
+
+    def test_what_was_on_the_form_before_sending_is_not_the_answer(self):
+        """Полный адрес в подвале — тоже оформление: он был на странице ещё до
+        отправки ИИН. Ссылка на подписание появляется только после неё."""
+        form = page(iin='', footer=_ABOUT)
+        for answer, expected in ((page(footer=_ABOUT), sapar_link.UNAVAILABLE),
+                                 (page('Ошибка формирования ссылки', footer=_ABOUT), sapar_link.REJECTED),
+                                 (page('Нет документов на подписание', footer=_ABOUT),
+                                  sapar_link.NO_DOCUMENTS)):
+            outcome, link, _message = sapar_link.parse_response(answer, baseline=form)
+            self.assertEqual((outcome, link), (expected, None))
+
+    def test_the_form_page_never_hides_the_real_link(self):
+        link = 'https://tps-public.silt.kz/ru/egovsignmenu?token=eyJhbGciOiJI.abc-def_123'
+        footer = _ABOUT + _FOOTER
+        form = page(iin='', footer=footer)
+        self.assertEqual(sapar_link.parse_response(page(postback=link, footer=footer), baseline=form),
+                         (sapar_link.LINK, link, None))
+        # И ссылка вне колонки, в модальном окне, по-прежнему находится.
+        modal = '<div class="modal"><input readonly value="https://sign.example.kz/m/42"></div>'
+        outcome, found, _message = sapar_link.parse_response(page(footer=footer) + modal,
+                                                            baseline=form)
+        self.assertEqual((outcome, found), (sapar_link.LINK, 'https://sign.example.kz/m/42'))
+
+    def test_the_vendor_words_outweigh_an_address_outside_the_column(self):
+        """«Документов нет» — это ответ; адрес где-то ещё на странице его не отменяет."""
+        outcome, link, _message = sapar_link.parse_response(
+            page('Нет документов на подписание', footer=_ABOUT))
+        self.assertEqual((outcome, link), (sapar_link.NO_DOCUMENTS, None))
+        # А ссылка В колонке рядом с такими же словами — всё ещё ссылка.
+        outcome, link, _message = sapar_link.parse_response(
+            page('Документы подписаны частично: https://sign.example.kz/s/9'))
+        self.assertEqual((outcome, link), (sapar_link.LINK, 'https://sign.example.kz/s/9'))
 
     def test_link_in_an_anchor_is_found_and_page_chrome_is_not(self):
         outcome, link, _message = sapar_link.parse_response(page(
@@ -448,6 +514,25 @@ class GenerateFlowTests(unittest.TestCase):
         result = sapar_link.generate(VALID)
         self.assertEqual(result['outcome'], sapar_link.NO_DOCUMENTS)
         self.assertEqual(result['message'], 'Нет документов на подписание')
+
+    def test_no_documents_on_the_live_page_is_not_a_link(self):
+        """Страница с подвалом от 13.10.2026 — целиком через generate."""
+        self._install(get_text=page(iin='', footer=_FOOTER),
+                      post_text=page('Нет документов на подписание. Документы подписаны',
+                                     footer=_FOOTER))
+        result = sapar_link.generate(VALID)
+        self.assertEqual((result['outcome'], result['link']), (sapar_link.NO_DOCUMENTS, None))
+
+    def test_the_form_page_is_the_baseline_for_the_answer(self):
+        """generate сам отдаёт разбору форму до отправки: адрес, который на ней
+        уже был, ссылкой не становится даже рядом с незнакомым ответом."""
+        self._install(get_text=page(iin='', footer=_ABOUT),
+                      post_text=page('Ошибка формирования ссылки', footer=_ABOUT))
+        result = sapar_link.generate(VALID)
+        self.assertEqual((result['outcome'], result['link']), (sapar_link.REJECTED, None))
+        with self.assertLogs(level='WARNING'):
+            self._install(get_text=page(iin='', footer=_ABOUT), post_text=page(footer=_ABOUT))
+            self.assertEqual(sapar_link.generate(VALID)['outcome'], sapar_link.UNAVAILABLE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
