@@ -76,6 +76,23 @@ def list_users(cursor):
     } for row in cursor.fetchall()]
 
 
+def avatar_refs(cursor, user_ids):
+    """Где лежат фото людей: {user_id: (avatar_bucket, avatar_blob_path)} — только у тех, у
+    кого фото есть. Одна выборка на весь список; ссылку из пары строит монолит (people.py)."""
+    ids = sorted({int(user_id) for user_id in user_ids or () if user_id is not None})
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT id, avatar_bucket, avatar_blob_path
+          FROM users
+         WHERE id = ANY(%s) AND avatar_bucket IS NOT NULL AND avatar_blob_path IS NOT NULL
+        """,
+        (ids,),
+    )
+    return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
+
 def role_members(cursor):
     """{'approver': [{user_id, name, has_telegram, department_name}], 'accounting': [...], …}"""
     cursor.execute(

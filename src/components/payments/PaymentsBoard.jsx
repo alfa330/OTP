@@ -8,8 +8,9 @@ import { groupTasksByDay } from '../tasks/boardGrouping';
 import PaymentsFilters from './PaymentsFilters';
 import {
     BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, BOARD_COLUMN_GAP, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META,
-    EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardHidden, boardLayout, boardPageStep, boardScrollFor, boardThumb,
-    canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk, plural, requestType,
+    EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardColumnsWithPhotos, boardHidden, boardLayout, boardPageStep,
+    boardScrollFor, boardThumb, canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort, fmtMoney,
+    normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
     CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
@@ -190,7 +191,7 @@ const ColumnSheet = ({ open, board, column, query, apiBaseUrl, headers, soonDays
             params.set('offset', String(offset));
             const response = await axios.get(`${apiBaseUrl}/api/payments/boards/${board.code}?${params}`, { headers: headers() });
             if (ticket.current !== mine) return;
-            const got = response.data?.columns?.[0] || { cards: [], count: 0 };
+            const got = boardColumnsWithPhotos(response.data)[0] || { cards: [], count: 0 };
             setTotal(Number(got.count) || 0);
             // Колонка могла сдвинуться, пока листали, — склеиваем по номеру заявки.
             setCards((prev) => (offset === 0 ? got.cards : [...new Map([...prev, ...got.cards].map((card) => [card.id, card])).values()]));
@@ -541,7 +542,7 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
             params.set('limit', String(chunk));
             const response = await axios.get(`${apiBaseUrl}/api/payments/boards/${code}?${params}`, { headers: headers() });
             if (ticket.current !== mine) return;
-            setColumns(response.data?.columns || []);
+            setColumns(boardColumnsWithPhotos(response.data));
             setScope(response.data?.scope || 'all');
         } catch (err) {
             if (ticket.current !== mine) return;

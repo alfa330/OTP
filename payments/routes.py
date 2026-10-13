@@ -31,7 +31,7 @@ from io import BytesIO
 from flask import Blueprint, g, request, send_file
 
 from . import (access, assets as assets_sql, cards, directory, files, fixed, flow, legacy, notices, notify,
-               privacy, queries, report, routes_assets, routes_directory, schema, workflow)
+               people, privacy, queries, report, routes_assets, routes_directory, schema, workflow)
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   jsonify, payload as _payload, uploaded_files)
 
@@ -73,13 +73,16 @@ class Api:
 
 def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester,
                              send_telegram=None, web_app_base_url=None, excel_text_warning=None,
-                             gcs=None):
+                             gcs=None, avatar_url=None):
     """Собирает Blueprint раздела.
 
     send_telegram — (chat_id, text_html, reply_markup) -> response, из монолита.
     Без него уведомления в Telegram просто не уходят (тесты, локальный стенд).
     gcs — {'bucket_name': () -> str, 'client': () -> Client}; без него вложения
     отвечают 503, а остальной раздел работает.
+    avatar_url — (bucket, blob_path) -> ссылка на фото сотрудника либо None, из
+    монолита (там же кэш подписанных ссылок). Без него на карточках досок вместо
+    фото — инициалы.
     """
     gcs = gcs or {}
     bp = Blueprint('payments', __name__, url_prefix='/api/payments')
@@ -1163,6 +1166,32 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             return live[0]
         return candidates[-1] if candidates else None
 
+    def _avatar_urls(refs):
+        """{user_id: ссылка на фото} по парам (бакет, путь). Фото — украшение карточки: отказ
+        подписи не должен стоить человеку доски, поэтому он только пишется в журнал."""
+        if not avatar_url:
+            return {}
+        urls = {}
+        for user_id, (bucket, blob_path) in (refs or {}).items():
+            try:
+                link = avatar_url(bucket, blob_path)
+            except Exception:  # noqa: BLE001
+                logging.exception('Оплата счетов: не удалось подписать ссылку на фото пользователя %s', user_id)
+                link = None
+            if link:
+                urls[user_id] = link
+        return urls
+
+    def _with_faces(card, request_row, focus, photos, hide_people):
+        """Чьи фото стоят на карточке доски — тех же людей, чьи имена на ней (people.py).
+        В карточке — номера людей, сами ссылки лежат в `photos` ответа."""
+        faces = people.card_photos(request_row, focus, photos, hide_people=hide_people)
+        card['initiator_photo'] = faces['initiator']
+        if card.get('subtask'):
+            card['subtask']['assignee_photo'] = faces['assignee']
+            card['subtask']['done_by_photo'] = faces['done_by']
+        return card
+
     def _card(request_row, focus, column, ctx, members, *, duplicate=False):
         """Карточка доски. Набор полей — пп. 7 и 9 ТЗ; номер карты — только маской."""
         return {
@@ -1254,15 +1283,24 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             shown = {key: placed[key][offset:offset + limit] for key in keys if not only or key == only}
             duplicates = (queries.duplicate_request_ids(cursor, [row['id'] for items in shown.values() for row, _f in items])
                           if code == workflow.BOARD_ACCOUNTING else set())
+            # Лица на карточках: фото читаются одной выборкой на всё, что уйдёт на экран.
+            avatar_refs = queries.avatar_refs(cursor, {
+                user_id for items in shown.values() for row, focus in items
+                for user_id in people.face_ids(row, focus, hide_people=hide_people)}) if avatar_url else {}
+        # Ссылки подписываются уже без соединения с базой: подпись может ходить в сеть.
+        photos = _avatar_urls(avatar_refs)
         return jsonify({
             'board': {'code': board['code'], 'title': board['title'], 'work': list(board['work'])},
             'scope': scope,
             'limit': limit,
             'offset': offset,
+            # Фото людей — один раз на ответ: одно лицо стоит на десятках карточек.
+            'photos': {str(user_id): link for user_id, link in photos.items()},
             'columns': [{
                 'key': key, 'label': label, 'caption': workflow.column_caption(code, key),
                 'count': len(placed[key]),
-                'cards': [_card(row, focus, key, ctx, members, duplicate=row['id'] in duplicates)
+                'cards': [_with_faces(_card(row, focus, key, ctx, members, duplicate=row['id'] in duplicates),
+                                      row, focus, photos, hide_people)
                           for row, focus in shown[key]],
             } for key, label in board['columns'] if key in shown],
         })

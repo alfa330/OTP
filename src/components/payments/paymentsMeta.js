@@ -964,7 +964,12 @@ export const requestType = (request) => {
 /* ── Лица на карточке — как у «Задач»: «кто поручил → кто исполняет» ──────────
    У заявки это «инициатор → у кого этап сейчас»; в итоговых колонках — кто этап
    закрыл. Подразделение («Бухгалтерия», «Утвердитель» без имени) лицом не
-   рисуется: у него значок, а не инициалы — иначе «Б» читалась бы как человек. */
+   рисуется: у него значок, а не инициалы — иначе «Б» читалась бы как человек.
+
+   Фото — из профиля человека, как на карточках «Задач»; у кого фото нет —
+   инициалы. Ссылки в карточку раскладывает boardColumnsWithPhotos (ниже). Фото
+   привязано к тому же полю, что и имя: взяли имя из запасного поля — фото к нему
+   не приставляем. */
 export const initialsOf = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2)
     .map((part) => part[0]).join('').toUpperCase() || '?';
 
@@ -976,18 +981,47 @@ const DONE_VERB = {
     closing_docs: 'Закрыл',
 };
 
+/** Ответ доски → колонки, в карточках которых фото людей стоят готовыми ссылками.
+ *  Сервер отдаёт ссылки один раз на ответ (`photos`: номер человека → ссылка), а в карточке —
+ *  только номера: одно лицо бывает на десятках карточек, и подписанная ссылка длиной под
+ *  килобайт в каждой из них утроила бы ответ. Дальше раздел работает с карточкой как раньше. */
+export const boardColumnsWithPhotos = (payload) => {
+    const photos = payload?.photos || {};
+    const link = (key) => (key === null || key === undefined ? '' : String(photos[key] || ''));
+    return (payload?.columns || []).map((column) => ({
+        ...column,
+        cards: (column.cards || []).map((card) => ({
+            ...card,
+            initiator_avatar_url: link(card.initiator_photo),
+            subtask: card.subtask
+                ? { ...card.subtask, assignee_avatar_url: link(card.subtask.assignee_photo), done_by_avatar_url: link(card.subtask.done_by_photo) }
+                : card.subtask,
+        })),
+    }));
+};
+
+const withPhoto = (face, url) => {
+    const photo = face.role ? '' : String(url || '').trim();
+    return photo ? { ...face, avatar_url: photo } : face;
+};
+
 export const cardFaces = (card) => {
     const task = card?.subtask || {};
-    const from = card?.initiator_name ? { name: card.initiator_name, title: `Инициатор: ${card.initiator_name}`, role: false } : null;
+    const from = card?.initiator_name
+        ? withPhoto({ name: card.initiator_name, title: `Инициатор: ${card.initiator_name}`, role: false }, card.initiator_avatar_url)
+        : null;
     let to = null;
     if (task.state === 'open') {
         const name = task.assignee_name || card?.current_assignee_name || '';
         const verb = ['manager_approval', 'approval'].includes(task.kind) ? 'Согласует' : 'Исполнитель';
-        if (name) to = { name, title: `${verb}: ${name}`, role: Boolean(task.role_label) && name === task.role_label };
+        if (name) {
+            to = withPhoto({ name, title: `${verb}: ${name}`, role: Boolean(task.role_label) && name === task.role_label },
+                name === task.assignee_name ? task.assignee_avatar_url : '');
+        }
     } else if (task.state === 'done' && task.done_by_name) {
         const name = task.done_by_name;
         const verb = task.outcome === 'rejected' || card?.column === 'rejected' ? 'Отклонил' : (DONE_VERB[task.kind] || 'Выполнил');
-        to = { name, title: `${verb}: ${name}`, role: Boolean(task.role_label) && name === task.role_label };
+        to = withPhoto({ name, title: `${verb}: ${name}`, role: Boolean(task.role_label) && name === task.role_label }, task.done_by_avatar_url);
     }
     // Заявка у самого инициатора (вернули с вопросом) — второе лицо повторяло бы первое.
     if (task.state === 'waiting' && from) return { from: { ...from, title: `Ждём ответа: ${from.name}` }, to: null };

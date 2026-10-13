@@ -160,17 +160,49 @@ export const requestCardFrame = (type) => 'relative rounded-xl border border-sla
     + 'before:pointer-events-none before:absolute before:bottom-2.5 before:left-1.5 before:top-2.5 before:w-[3px] before:rounded-full '
     + type.bar;
 
-/* Кружок человека: инициалы на сером, как на карточках «Задач». Подразделение —
-   значком, а не буквой. */
-export const Face = ({ person, size = 20 }) => (
-    <span
-        title={person?.title || person?.name || ''}
-        className="inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 font-semibold text-slate-600"
-        style={{ width: size, height: size, fontSize: Math.max(9.5, Math.round(size * 0.36 * 10) / 10) }}
-    >
-        {person?.role ? <UsersRound size={Math.round(size * 0.55)} strokeWidth={2} aria-hidden="true" /> : initialsOf(person?.name)}
-    </span>
-);
+/* Кружок человека, как на карточках «Задач»: фото из профиля, а у кого его нет —
+   инициалы на сером. Подразделение — значком, а не буквой.
+
+   Фото не загрузилось (ссылка подписана на сутки и на давно открытой доске могла
+   истечь) — вместо сломанной картинки встают те же инициалы. Запоминается сама
+   негодная ссылка, а не «сломано»: придёт свежая — фото вернётся.
+   Размер у картинки свой, в пикселях, а не «100 %»: кружок — сетка, и процент от её
+   строки считается по самой картинке — высокий снимок вставал 20×33 и держался в
+   кружке только обрезкой по краю. С размером снимок любой формы заполняет кружок
+   и обрезается по нему (object-cover).
+   draggable={false}: карточку доски тащат за любое место, а картинка по умолчанию
+   тащится сама — вместо карточки в руке оказалась бы аватарка. */
+export const Face = ({ person, size = 20 }) => {
+    const url = person?.role ? '' : String(person?.avatar_url || '').trim();
+    const [brokenUrl, setBrokenUrl] = useState('');
+    const photo = Boolean(url) && url !== brokenUrl;
+    let inner = initialsOf(person?.name);
+    if (person?.role) inner = <UsersRound size={Math.round(size * 0.55)} strokeWidth={2} aria-hidden="true" />;
+    else if (photo) {
+        inner = (
+            <img
+                src={url}
+                alt=""
+                className="block object-cover"
+                style={{ width: size, height: size }}
+                loading="lazy"
+                decoding="async"
+                draggable={false}
+                onError={() => setBrokenUrl(url)}
+            />
+        );
+    }
+    return (
+        <span
+            title={person?.title || person?.name || ''}
+            data-face={photo ? 'photo' : (person?.role ? 'group' : 'initials')}
+            className="inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 font-semibold text-slate-600"
+            style={{ width: size, height: size, fontSize: Math.max(9.5, Math.round(size * 0.36 * 10) / 10) }}
+        >
+            {inner}
+        </span>
+    );
+};
 
 const FlowArrow = () => (
     <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="shrink-0 text-slate-300">

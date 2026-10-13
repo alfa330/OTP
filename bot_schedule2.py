@@ -66652,6 +66652,8 @@ try:
         web_app_base_url=TASK_WEB_APP_BASE_URL,
         excel_text_warning=_excel_suppress_number_as_text_warning,
         gcs={'bucket_name': _payments_bucket_name, 'client': get_gcs_client},
+        # Фото сотрудников на карточках досок — теми же подписанными ссылками, что у «Задач».
+        avatar_url=_build_avatar_signed_url,
     ))
     logging.info("Раздел «Оплата счетов»: Blueprint подключён на /api/payments")
 except Exception:
