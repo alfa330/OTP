@@ -1,7 +1,7 @@
 /*
- * «Оплата счетов»: доска на всю ширину экрана и разделы окна заявки «по запросу».
+ * «Оплата счетов»: доска во всю колонку раздела и разделы окна заявки «по запросу».
  *
- * Просьба владельца 13.10.2026, две части.
+ * Просьбы владельца 13.10.2026.
  * 1. На досках с большим числом колонок остальные «не заметны при первом взгляде»: на
  *    большом мониторе колонки должны стоять все сразу, если помещаются; если нет — должно
  *    быть видно, что есть ещё, и у доски должна быть своя тонкая полоса прокрутки. Причин
@@ -10,12 +10,17 @@
  *    на два экрана ниже.
  * 2. «История, ход заявки и т.д. уходили под таб, то есть раскрытые»: окно заявки было
  *    в два с половиной экрана.
+ * 3. Первая версия п. 1 вывела доску из узкой колонки шапки на весь экран — «выглядит
+ *    вообще не симметрично»: шапка, вкладки и поиск стояли посередине, а доска — от левого
+ *    края за правый. Теперь колонка раздела одна на всё и растёт вместе с экраном; метка
+ *    «ещё N» осталась. Тогда же: «более тонкий и красивый скролл».
  *
  * Расчёт раскладки доски проверяет tests/payments_meta.test.mjs (boardLayout и соседи),
  * поведение в браузере — проходы стенда. Здесь — то, что видно без браузера: как
- * рисуется свёрнутый и раскрытый раздел (серверный рендер) и что доска действительно
- * стоит вне колонки раздела (по исходнику: такую правку легко «починить обратно», не
- * заметив на своём экране в 1500 px никакой разницы).
+ * рисуется свёрнутый и раскрытый раздел (серверный рендер) и что у шапки, списков и
+ * доски действительно одни края (по исходнику: на экране в 1500 px разницы между «одной
+ * колонкой» и «у каждого блока своя» не видно, она вылезает на широком мониторе и в
+ * установленном портале, где у области портала полей нет).
  *
  * Запуск: node --test tests/payments_board_and_folds.test.mjs
  */
@@ -118,39 +123,65 @@ test('окно заявки: ход, документы и история сто
     assert.ok(card.includes("const foldOpen = (key) => folds[key] ?? (key === 'files' && docsWanted);"));
 });
 
-test('доска стоит вне колонки раздела — на всю ширину экрана', () => {
+test('шапка, вкладки, списки и доска стоят в одной колонке раздела — с общими краями', () => {
     const view = source('src/components/payments/PaymentsView.jsx');
     const board = source('src/components/payments/PaymentsBoard.jsx');
     const ui = source('src/components/payments/paymentsUi.jsx');
-    assert.ok(ui.includes("export const SECTION_COLUMN = 'mx-auto max-w-[1400px] px-3 sm:px-5';"));
-    // Корень раздела ширину не ограничивает: это делает каждый блок сам…
-    const root = view.match(/<div className="([^"]*)" style=\{\{ fontFamily: APPLE_FONT \}\}>/);
-    assert.ok(root, 'корень раздела не найден');
-    assert.doesNotMatch(root[1], /max-w-|mx-auto|\bpx-/);
-    // …все, кроме доски.
+    const column = ui.match(/export const SECTION_COLUMN = '([^']+)';/);
+    assert.ok(column, 'колонка раздела не найдена');
+    const classes = column[1].split(' ');
+    // По центру, растёт вместе с экраном, предел — восемь колонок бухгалтерии по 268 px
+    // (8 × 268 + 7 × 10 + поля 2 × 28). Поля на компьютере 28 px: в установленном портале
+    // у области портала своих полей нет, а кнопка меню выступает в неё на 16 px.
+    for (const name of ['mx-auto', 'w-full', 'max-w-[2270px]', 'px-3', 'sm:px-5', 'lg:px-7']) {
+        assert.ok(classes.includes(name), `в колонке раздела нет ${name}`);
+    }
+    assert.equal(8 * 268 + 7 * 10 + 2 * 28, 2270);
+    // Колонка — сам корень раздела: всё, что в нём, получает одни и те же края…
+    assert.ok(view.includes('<div className={`${SECTION_COLUMN} min-h-screen bg-gray-50 pb-12 pt-3 md:min-h-0`} style={{ fontFamily: APPLE_FONT }}>'));
+    assert.equal(view.split('SECTION_COLUMN').length - 1, 2, 'колонку раздела берут не только в корне');
+    // …и ни вкладка, ни доска своей ширины и своих полей не заводят.
     for (const tab of ['desk', 'requests', 'assets', 'dictionaries', 'roles']) {
         const at = view.indexOf(`{activeTab === '${tab}' && (`);
         assert.ok(at > 0, `вкладка ${tab} не найдена`);
-        assert.ok(view.slice(at, at + 160).includes('<div className={`${SECTION_COLUMN} mt-4'), `вкладка ${tab} осталась без колонки раздела`);
+        assert.ok(view.slice(at, at + 160).includes('<div className="mt-4 motion-safe:animate-fade-in-soft">'), `у вкладки ${tab} своя ширина или свои поля`);
     }
     const boardAt = view.indexOf('{boardCode && meta && (');
     assert.ok(boardAt > 0);
-    assert.ok(!view.slice(boardAt, boardAt + 160).includes('SECTION_COLUMN'), 'доску снова заперли в колонку раздела');
-    // В самой доске колонка раздела держит только панель поиска и фильтров; поле доски — после неё.
-    const columnAt = board.indexOf('<div className={SECTION_COLUMN}>');
-    const lanesAt = board.indexOf('{!isMobile && <BoardLanes ');
-    const filtersAt = board.indexOf('<PaymentsFilters ');
-    assert.ok(columnAt > 0 && filtersAt > columnAt && lanesAt > filtersAt);
-    assert.equal(board.slice(columnAt, lanesAt).split('<div className={SECTION_COLUMN}>').length, 2);
+    assert.ok(view.slice(boardAt, boardAt + 160).includes('<div key={boardCode} className="mt-4 motion-safe:animate-fade-in-soft">'), 'у доски своя ширина или свои поля');
+    // Доска из колонки не выходит: своей колонки нет, поле доски — без полей и отступов наружу.
+    assert.ok(!board.includes('SECTION_COLUMN'));
+    assert.ok(board.includes('<div className="relative mt-2" data-board-area '));
+    // Метки скрытых колонок стоят у краёв поля, то есть у краёв шапки.
+    assert.ok(board.includes("className={`pointer-events-none absolute inset-y-0 z-10 ${right ? 'right-0' : 'left-0'}`}"));
 });
 
 test('у доски своя тонкая полоса и метки скрытых колонок, штатной полосы нет', () => {
     const board = source('src/components/payments/PaymentsBoard.jsx');
-    // Штатная полоса лежала под последней карточкой — её работу делает своя, прижатая к низу экрана.
+    const view = source('src/components/payments/PaymentsView.jsx');
+    // Штатная полоса лежала под последней карточкой — её работу делает своя, прижатая к низу экрана
+    // (поле области портала снимается замером: во вкладке оно 32 px, в установленном портале — ноль).
     assert.ok(board.includes('[scrollbar-width:none] [&::-webkit-scrollbar]:hidden'));
-    assert.ok(board.includes('data-board-scrollbar'));
     assert.ok(board.includes('role="scrollbar"'));
-    assert.match(board, /className="group sticky z-10[^"]*"\s+style=\{\{ bottom: -inset \}\}/);
+    assert.match(board, /<div data-board-scrollbar className="pointer-events-none sticky z-10[^"]*" style=\{\{ bottom: -inset \}\}>/);
+    // Тонкая: три пикселя, толще — только под указателем и пока её тянут.
+    assert.ok(board.includes("${held ? 'h-1.5' : 'h-[3px]'}"));
+    assert.ok(board.includes('transition-[height] duration-150 group-hover:h-1.5 motion-reduce:transition-none'));
+    // Лежит на дорожке цвета страницы, карточки уходят под неё, угасая: тонкая линия прямо по
+    // карточкам зачёркивала в них строку. Дорожка — тем же классом, что фон раздела (тёмная тема
+    // перекрашивает их вместе), угасание — маской.
+    assert.ok(view.includes('min-h-screen bg-gray-50 pb-12'));
+    assert.ok(board.includes('<div aria-hidden="true" className="h-2.5 bg-gray-50" style={RAIL_FADE} />'));
+    assert.ok(board.includes('const RAIL_FADE = { maskImage: RAIL_FADE_IMAGE, WebkitMaskImage: RAIL_FADE_IMAGE };'));
+    // Ни разделителя, ни рамки, ни тени: первая версия лежала серой лентой под чертой.
+    const rail = board.slice(board.indexOf('<div data-board-scrollbar'), board.indexOf('/* Поле доски на компьютере'));
+    assert.ok(rail.length > 400, 'разметка полосы не найдена');
+    assert.doesNotMatch(rail, /border|ring-|shadow/);
+    // Угасающая часть дорожки нажатий не перехватывает — под ней ещё видны карточки; сплошная
+    // перехватывает целиком: иначе нажатие у низа экрана открывало бы карточку, которой не видно.
+    assert.ok(rail.includes('className="group pointer-events-auto flex h-4 cursor-pointer touch-none items-center bg-gray-50 px-1"'));
+    assert.equal(rail.split('pointer-events-auto').length - 1, 1);
+    assert.equal(rail.split('bg-gray-50').length - 1, 2);
     // Метки у обоих краёв; гаснущий край — маской, чтобы не зависеть от цвета темы.
     assert.ok(board.includes('<BoardMore side="left" columns={hidden.left}'));
     assert.ok(board.includes('<BoardMore side="right" columns={hidden.right}'));

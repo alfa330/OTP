@@ -819,14 +819,15 @@ export const historySummary = (events = []) => {
    все сразу, если помещаются, а если нет — должно быть видно, что есть ещё.
 
    Колонки делят ширину поля поровну, пока каждой достаётся не меньше
-   BOARD_COLUMN_MIN: тогда доска видна целиком и не листается. Шире
-   BOARD_COLUMN_MAX колонка не растёт — дальше в карточке копилась бы пустота.
-   Когда все не помещаются, ширина подбирается так, чтобы следующая колонка
-   выглядывала из-за края на треть: обрезанная колонка сама говорит, что доска
-   продолжается (а не стоит впритык к краю, будто последняя). */
+   BOARD_COLUMN_MIN: тогда доска видна целиком и не листается. Верхнего предела
+   у колонки нет: поле доски — колонка раздела, и доска занимает её целиком,
+   от края до края, как шапка и поиск над ней (с пределом доска на широком
+   экране стояла бы уже шапки — та самая несимметричность, на которую владелец
+   и указал). Когда все не помещаются, ширина подбирается так, чтобы следующая
+   колонка выглядывала из-за края на треть: обрезанная колонка сама говорит,
+   что доска продолжается (а не стоит впритык к краю, будто последняя). */
 export const BOARD_COLUMN_GAP = 10;
 export const BOARD_COLUMN_MIN = 232;
-export const BOARD_COLUMN_MAX = 320;
 export const BOARD_COLUMN_PEEK = 0.35;
 
 /** Раскладка доски по ширине поля: { fits, width, visible }.
@@ -837,11 +838,11 @@ export const boardLayout = (areaWidth, count) => {
     const total = Math.max(0, Math.trunc(Number(count) || 0));
     if (!total || area <= 0) return { fits: true, width: BOARD_COLUMN_MIN, visible: total };
     const equal = Math.floor((area - (total - 1) * BOARD_COLUMN_GAP) / total);
-    if (equal >= BOARD_COLUMN_MIN) return { fits: true, width: Math.min(BOARD_COLUMN_MAX, equal), visible: total };
+    if (equal >= BOARD_COLUMN_MIN) return { fits: true, width: equal, visible: total };
     // Сколько колонок встаёт целиком, если оставить место выглядывающей следующей.
     for (let full = Math.floor((area + BOARD_COLUMN_GAP) / (BOARD_COLUMN_MIN + BOARD_COLUMN_GAP)); full >= 1; full -= 1) {
         const width = Math.floor((area - full * BOARD_COLUMN_GAP) / (full + BOARD_COLUMN_PEEK));
-        if (width >= BOARD_COLUMN_MIN) return { fits: false, width: Math.min(BOARD_COLUMN_MAX, width), visible: full };
+        if (width >= BOARD_COLUMN_MIN) return { fits: false, width, visible: full };
     }
     return { fits: false, width: BOARD_COLUMN_MIN, visible: 1 };
 };

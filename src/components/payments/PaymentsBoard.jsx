@@ -12,7 +12,7 @@ import {
     canDropTo, cardFaces, filtersToParams, fmtDateShort, fmtMoney, normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
-    CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, SECTION_COLUMN, TypePill, errorText, requestCardFrame,
+    CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
 } from './paymentsUi';
 
 /*
@@ -29,13 +29,14 @@ import {
  * колонки, которое догружается при прокрутке.
  *
  * Колонок здесь до восьми, и на доске они должны быть видны с первого взгляда
- * (просьба владельца 13.10.2026). Поэтому доска занимает всю ширину экрана, а
- * не колонку раздела, и делит её между колонками поровну: на большом мониторе
- * они стоят все сразу. Где все не помещаются — следующая колонка выглядывает
- * из-за края, у края стоит метка «ещё N», а под доской — тонкая полоса
- * прокрутки, прижатая к низу экрана (штатная лежала на два экрана ниже, под
- * последней карточкой, и о скрытых колонках ничто не говорило). Раскладка —
- * boardLayout в paymentsMeta.js.
+ * (просьба владельца 13.10.2026). Доска стоит в колонке раздела — с теми же
+ * краями, что шапка и поиск над ней, — и делит её ширину между колонками
+ * поровну; сама колонка раздела растёт вместе с экраном, поэтому на большом
+ * мониторе колонки доски стоят все сразу. Где все не помещаются — следующая
+ * колонка выглядывает из-за края, у края стоит метка «ещё N», а под доской —
+ * тонкая полоса прокрутки, прижатая к низу экрана (штатная лежала на два экрана
+ * ниже, под последней карточкой, и о скрытых колонках ничто не говорило).
+ * Раскладка — boardLayout в paymentsMeta.js.
  *
  * Перетаскивание работает между РАБОЧИМИ колонками («Новые счета» → «Проверка» →
  * «Готово к оплате» → «На оплате»): это смена статуса без условий. В
@@ -301,7 +302,7 @@ const BoardMore = ({ side, columns, onClick }) => {
     const right = side === 'right';
     const names = columns.map((column) => (column.count ? `${column.label} · ${column.count}` : column.label)).join(', ');
     return (
-        <div className={`pointer-events-none absolute inset-y-0 z-10 ${right ? 'right-3 sm:right-5' : 'left-3 sm:left-5'}`}>
+        <div className={`pointer-events-none absolute inset-y-0 z-10 ${right ? 'right-0' : 'left-0'}`}>
             <button
                 type="button"
                 data-board-more={side}
@@ -321,20 +322,41 @@ const BoardMore = ({ side, columns, onClick }) => {
 /* Тонкая полоса прокрутки доски. Своя, а не штатная: штатная стоит под последней
    карточкой самой длинной колонки — на два экрана ниже, — и на macOS не видна,
    пока не начнёшь листать. Эта прижата к низу экрана всё время, пока доска на
-   нём, и показывает, какая часть колонок сейчас видна. Ползунок тянется, нажатие
-   мимо него ставит его под указатель. */
+   нём, и показывает, какая часть колонок сейчас видна.
+
+   Вид — как у тонких полос портала (.thin-scroll в styles.css): три пикселя,
+   полупрозрачный ползунок, ни рамки, ни разделителя (просьба владельца
+   13.10.2026 — «более тонкий и красивый»; первая версия лежала серой
+   шестипиксельной лентой под чертой на всю ширину). Под указателем и пока её
+   тянут полоса утолщается вдвое — в три пикселя мышью не попасть; нажимается
+   вся дорожка под ней, 16 px. Нажатие мимо ползунка ставит его под указатель.
+
+   Полоса лежит на узкой дорожке цвета страницы, и карточки уходят под неё,
+   угасая (RAIL_FADE): без дорожки тонкая линия шла прямо по карточкам и
+   зачёркивала в них строку. Дорожка — тем же классом, что фон раздела, поэтому
+   в тёмной теме она тёмная; угасание — маской, как у края доски. Под короткой
+   доской дорожки не видно вовсе: она того же цвета, что и страница. Угасающая
+   часть нажатий не перехватывает — под ней ещё видны карточки; сплошная
+   перехватывает целиком, иначе нажатие у самого низа экрана открывало бы
+   карточку, которой под дорожкой не видно. */
+const RAIL_FADE_IMAGE = 'linear-gradient(to bottom, transparent, #000)';
+const RAIL_FADE = { maskImage: RAIL_FADE_IMAGE, WebkitMaskImage: RAIL_FADE_IMAGE };
+
 const BoardRail = ({ scrollerRef, scrollerId, left, content, view }) => {
     const trackRef = useRef(null);
     const grab = useRef(null);
     const [track, setTrack] = useState(0);
     const [inset, setInset] = useState(0);
+    const [held, setHeld] = useState(false);
 
     useLayoutEffect(() => {
         const node = trackRef.current;
         if (!node) return undefined;
-        /* Страницу раздела прокручивает область портала с полями; прижатое к низу
+        /* Страницу раздела прокручивает область портала, и у неё бывают поля (во
+           вкладке браузера — 32 px, в установленном портале — ноль). Прижатое к низу
            встаёт у края её содержимого, то есть выше низа экрана на нижнее поле, и
-           под полосой остаётся ряд карточек. Сдвигаем полосу на это поле вниз. */
+           под полосой остаётся ряд карточек. Сдвигаем полосу на это поле вниз —
+           замером, а не числом. */
         let scroller = node.parentElement;
         while (scroller && scroller !== document.body && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
             scroller = scroller.parentElement;
@@ -360,6 +382,7 @@ const BoardRail = ({ scrollerRef, scrollerId, left, content, view }) => {
         const x = pointerX(event);
         const onThumb = x >= thumb.left && x <= thumb.left + thumb.width;
         grab.current = onThumb ? x - thumb.left : thumb.width / 2;
+        setHeld(true);
         try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* указатель уже отпущен */ }
         if (!onThumb) seek(x - grab.current);
         event.preventDefault();
@@ -367,48 +390,48 @@ const BoardRail = ({ scrollerRef, scrollerId, left, content, view }) => {
     const onPointerMove = (event) => { if (grab.current !== null) seek(pointerX(event) - grab.current); };
     const onPointerUp = (event) => {
         grab.current = null;
+        setHeld(false);
         try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* захвата не было */ }
     };
 
     const progress = content > view ? Math.round((left / (content - view)) * 100) : 0;
     return (
-        /* Полоса лежит в своей «канавке» цвета страницы на всю ширину поля: карточки
-           уходят под неё, а не оказываются перечёркнутыми линией. Нажимается вся
-           канавка — в шесть пикселей самой полосы мышью не попасть. */
-        <div
-            data-board-scrollbar
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
-            className="group sticky z-10 -mx-3 mt-1 cursor-pointer touch-none bg-gray-50/80 px-3 py-2 shadow-[0_-1px_0_rgba(100,116,139,0.14)] backdrop-blur sm:-mx-5 sm:px-5"
-            style={{ bottom: -inset }}
-        >
+        <div data-board-scrollbar className="pointer-events-none sticky z-10 -mx-1" style={{ bottom: -inset }}>
+            <div aria-hidden="true" className="h-2.5 bg-gray-50" style={RAIL_FADE} />
             <div
-                ref={trackRef}
-                role="scrollbar"
-                aria-controls={scrollerId}
-                aria-orientation="horizontal"
-                aria-label="Прокрутка доски по колонкам"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.min(100, Math.max(0, progress))}
-                className="relative h-1.5 rounded-full bg-slate-200/70"
+                data-board-rail
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerCancel={onPointerUp}
+                className="group pointer-events-auto flex h-4 cursor-pointer touch-none items-center bg-gray-50 px-1"
             >
-                {thumb && (
-                    <span
-                        data-board-thumb
-                        className="absolute inset-y-0 rounded-full bg-[rgba(100,116,139,0.5)] transition-colors group-hover:bg-[rgba(71,85,105,0.75)]"
-                        style={{ left: thumb.left, width: thumb.width }}
-                    />
-                )}
+                <div
+                    ref={trackRef}
+                    role="scrollbar"
+                    aria-controls={scrollerId}
+                    aria-orientation="horizontal"
+                    aria-label="Прокрутка доски по колонкам"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.min(100, Math.max(0, progress))}
+                    className={`relative w-full rounded-full bg-[rgba(100,116,139,0.14)] transition-[height] duration-150 group-hover:h-1.5 motion-reduce:transition-none ${held ? 'h-1.5' : 'h-[3px]'}`}
+                >
+                    {thumb && (
+                        <span
+                            data-board-thumb
+                            className={`absolute inset-y-0 rounded-full transition-colors motion-reduce:transition-none ${held ? 'bg-[rgba(71,85,105,0.75)]' : 'bg-[rgba(100,116,139,0.45)] group-hover:bg-[rgba(71,85,105,0.7)]'}`}
+                            style={{ left: thumb.left, width: thumb.width }}
+                        />
+                    )}
+                </div>
             </div>
         </div>
     );
 };
 
-/* Поле доски на компьютере: все колонки в ширину экрана, если помещаются, иначе —
-   лента с меткой у края и тонкой полосой внизу. `renderColumn(column, false, width)`
+/* Поле доски на компьютере: все колонки в ширину колонки раздела, если помещаются,
+   иначе — лента с меткой у края и тонкой полосой внизу. `renderColumn(column, false, width)`
    рисует колонку заданной ширины. */
 const BoardLanes = ({ columns, dragging, renderColumn }) => {
     const rulerRef = useRef(null);
@@ -458,7 +481,7 @@ const BoardLanes = ({ columns, dragging, renderColumn }) => {
     };
 
     return (
-        <div className="relative mt-2 px-3 sm:px-5" data-board-area data-board-fits={layout.fits ? 'yes' : 'no'} onDragOver={onDragOver}>
+        <div className="relative mt-2" data-board-area data-board-fits={layout.fits ? 'yes' : 'no'} onDragOver={onDragOver}>
             <div ref={rulerRef} aria-hidden="true" />
             {/* Штатной полосы нет — её работу делает BoardRail ниже; колесо с Shift и
                 тачпад листают доску по-прежнему. */}
@@ -466,12 +489,12 @@ const BoardLanes = ({ columns, dragging, renderColumn }) => {
                 ref={scrollerRef}
                 id={scrollerId}
                 onScroll={(event) => setLeft(event.currentTarget.scrollLeft)}
-                className="-mx-1 overflow-x-auto px-1 pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                className="-mx-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 style={layout.fits ? undefined : edgeFade(hidden.left.length > 0, hidden.right.length > 0)}
             >
                 {/* По верху, а не во всю высоту: пустая колонка — короткий лоток с подписью,
                     а не серый столб длиной с соседнюю. */}
-                <div className={`flex items-start gap-2.5 ${layout.fits ? 'justify-center' : 'w-max'}`}>
+                <div className={`flex items-start gap-2.5 ${layout.fits ? '' : 'w-max'}`}>
                     {lanes}
                 </div>
             </div>
@@ -666,43 +689,39 @@ const PaymentsBoard = ({ code, apiBaseUrl, headers, dictionaries, users, meta, s
 
     return (
         <div>
-            {/* Поиск, фильтры и строка состояния — в колонке раздела, под шапкой; само поле
-                доски ниже выходит из неё на всю ширину экрана. */}
-            <div className={SECTION_COLUMN}>
-                <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users} board>
-                    {/* Рост — как у строки поиска и «Фильтров» рядом (FormSelect), а не 35 px списка из панели фильтров. */}
-                    <FormSelect className="w-[112px] shrink-0" ariaLabel="Карточек в колонке" value={chunk} options={chunkOptions} onChange={changeChunk} />
-                </PaymentsFilters>
+            <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users} board>
+                {/* Рост — как у строки поиска и «Фильтров» рядом (FormSelect), а не 35 px списка из панели фильтров. */}
+                <FormSelect className="w-[112px] shrink-0" ariaLabel="Карточек в колонке" value={chunk} options={chunkOptions} onChange={changeChunk} />
+            </PaymentsFilters>
 
-                {error && <div className="mt-3"><NoticeBox text={error} /></div>}
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
-                    <span className="flex items-center gap-2">
-                        {loading && <><Loader2 size={13} className="animate-spin" /> Загружаем доску…</>}
-                        {/* Пусто по отбору и пусто вообще — разные вещи; при сбое загрузки не говорим «задач нет». */}
-                        {!loading && !error && (total
-                            ? `${board.title} · ${scope === 'own' ? 'ваши согласования' : 'задачи подразделения'}`
-                            : (query || activeFilterCount(filters)
-                                ? 'Ничего не нашлось — измените запрос или фильтры'
-                                : 'На доске пусто — задач для вас сейчас нет'))}
-                    </span>
-                    {dragHint && <span className="text-[11.5px] text-slate-400">Перетащите карточку между рабочими колонками, чтобы сменить статус</span>}
-                </div>
-
-                {isMobile && (
-                    <div className="mt-2">
-                        <div ref={stripRef} className="-mx-3 overflow-x-auto px-3 [scrollbar-width:none]">
-                            <IosSegmented
-                                value={activeMobile?.key}
-                                options={columns.map((column) => ({ value: column.key, label: column.label, count: column.count }))}
-                                onChange={setMobileColumn}
-                                ariaLabel="Колонка доски"
-                                className="min-w-max"
-                            />
-                        </div>
-                        <div key={activeMobile?.key} className="mt-2 motion-safe:animate-fade-in-soft">{activeMobile && renderColumn(activeMobile, true)}</div>
-                    </div>
-                )}
+            {error && <div className="mt-3"><NoticeBox text={error} /></div>}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
+                <span className="flex items-center gap-2">
+                    {loading && <><Loader2 size={13} className="animate-spin" /> Загружаем доску…</>}
+                    {/* Пусто по отбору и пусто вообще — разные вещи; при сбое загрузки не говорим «задач нет». */}
+                    {!loading && !error && (total
+                        ? `${board.title} · ${scope === 'own' ? 'ваши согласования' : 'задачи подразделения'}`
+                        : (query || activeFilterCount(filters)
+                            ? 'Ничего не нашлось — измените запрос или фильтры'
+                            : 'На доске пусто — задач для вас сейчас нет'))}
+                </span>
+                {dragHint && <span className="text-[11.5px] text-slate-400">Перетащите карточку между рабочими колонками, чтобы сменить статус</span>}
             </div>
+
+            {isMobile && (
+                <div className="mt-2">
+                    <div ref={stripRef} className="-mx-3 overflow-x-auto px-3 [scrollbar-width:none]">
+                        <IosSegmented
+                            value={activeMobile?.key}
+                            options={columns.map((column) => ({ value: column.key, label: column.label, count: column.count }))}
+                            onChange={setMobileColumn}
+                            ariaLabel="Колонка доски"
+                            className="min-w-max"
+                        />
+                    </div>
+                    <div key={activeMobile?.key} className="mt-2 motion-safe:animate-fade-in-soft">{activeMobile && renderColumn(activeMobile, true)}</div>
+                </div>
+            )}
 
             {!isMobile && <BoardLanes columns={columns} dragging={Boolean(dragged)} renderColumn={renderColumn} />}
 

@@ -10,7 +10,6 @@ import {
   AUTO_CREATE_OPTIONS,
   BOARD_CHUNK_SIZES,
   BOARD_COLUMN_GAP,
-  BOARD_COLUMN_MAX,
   BOARD_COLUMN_MIN,
   BOARD_COLUMN_PEEK,
   BOARD_THUMB_MIN,
@@ -888,25 +887,33 @@ test('свёрнутые «Документы» и «История» назыв
   assert.match(historySummary(new Array(17).fill({ created_at: '2026-10-12T14:37:00+05:00' })), /^17 событий · последнее /);
 });
 
-test('доска: колонки делят ширину экрана поровну, пока каждой хватает места', () => {
-  // Монитор 2560 px (поле доски на стенде — 2376 px), восемь колонок бухгалтерии: все на
-  // экране, без прокрутки.
-  const wide = boardLayout(2376, 8);
-  assert.deepEqual(wide, { fits: true, width: 288, visible: 8 });
-  assert.ok(wide.width * 8 + BOARD_COLUMN_GAP * 7 <= 2376);
+test('доска: колонки делят ширину колонки раздела поровну, пока каждой хватает места', () => {
+  // Монитор 2560 px: колонка раздела упирается в свой предел, поле доски — 2214 px. Восемь
+  // колонок бухгалтерии стоят все, по 268 px, без прокрутки.
+  const wide = boardLayout(2214, 8);
+  assert.deepEqual(wide, { fits: true, width: 268, visible: 8 });
+  assert.ok(wide.width * 8 + BOARD_COLUMN_GAP * 7 <= 2214);
   // Ровно впритык: колонка наименьшей ширины ещё считается «помещается».
   const exact = BOARD_COLUMN_MIN * 5 + BOARD_COLUMN_GAP * 4;
   assert.deepEqual(boardLayout(exact, 5), { fits: true, width: BOARD_COLUMN_MIN, visible: 5 });
   assert.equal(boardLayout(exact - 1, 5).fits, false);
-  // Шире предела колонка не растёт — доска остаётся уже экрана, а не раздувает карточки.
-  assert.deepEqual(boardLayout(2376, 5), { fits: true, width: BOARD_COLUMN_MAX, visible: 5 });
+  // Колонок мало — они всё равно занимают поле целиком: доска стоит с теми же краями, что
+  // шапка, вкладки и поиск над ней. С пределом ширины колонки доска на пять колонок была уже
+  // шапки, а без общей колонки — шире её; владелец 13.10.2026: «выглядит вообще не симметрично».
+  for (const [area, count] of [[2214, 5], [2214, 7], [1720, 5], [1720, 7], [1240, 5], [1544, 3]]) {
+    const layout = boardLayout(area, count);
+    assert.equal(layout.fits, true, `${area}/${count}`);
+    const used = layout.width * count + BOARD_COLUMN_GAP * (count - 1);
+    assert.ok(used <= area && area - used < count, `${area}/${count}: занято ${used} из ${area}`);
+  }
+  assert.deepEqual(boardLayout(2214, 5), { fits: true, width: 434, visible: 5 });
 });
 
 test('доска: когда все не помещаются, следующая колонка выглядывает из-за края', () => {
-  for (const [area, count] of [[1182, 8], [1316, 8], [1316, 7], [1736, 8], [1580, 8], [1182, 5], [900, 8], [700, 7]]) {
+  for (const [area, count] of [[1080, 8], [1166, 8], [1240, 8], [1312, 8], [1312, 7], [1480, 8], [1544, 8], [1720, 8], [1080, 5], [900, 8], [700, 7]]) {
     const layout = boardLayout(area, count);
     assert.equal(layout.fits, false, `${area}/${count}`);
-    assert.ok(layout.width >= BOARD_COLUMN_MIN && layout.width <= BOARD_COLUMN_MAX, `${area}/${count}: ширина ${layout.width}`);
+    assert.ok(layout.width >= BOARD_COLUMN_MIN, `${area}/${count}: ширина ${layout.width}`);
     assert.ok(layout.visible >= 1 && layout.visible < count, `${area}/${count}: видно ${layout.visible}`);
     // Целые колонки стоят на экране полностью…
     const full = layout.visible * layout.width + layout.visible * BOARD_COLUMN_GAP;
@@ -915,14 +922,18 @@ test('доска: когда все не помещаются, следующа�
     const peek = (area - full) / layout.width;
     assert.ok(peek >= BOARD_COLUMN_PEEK - 0.02 && peek < 0.75, `${area}/${count}: выглядывает ${Math.round(peek * 100)}%`);
   }
-  // Замеры стенда: экран 1920 px (поле 1736) — шесть колонок бухгалтерии из восьми,
-  // 1500 px (поле 1316) — пять, 1366 px (поле 1182) — четыре.
-  assert.equal(boardLayout(1736, 8).visible, 6);
-  assert.equal(boardLayout(1316, 8).visible, 5);
-  assert.equal(boardLayout(1182, 8).visible, 4);
+  // Замеры стенда. Во вкладке браузера поле доски = экран − 200 px (меню 80, поля области
+  // портала 64, поля раздела 56): 1920 px — шесть колонок бухгалтерии из восьми, 1512 px —
+  // пять, 1366 px — четыре.
+  assert.equal(boardLayout(1720, 8).visible, 6);
+  assert.equal(boardLayout(1312, 8).visible, 5);
+  assert.equal(boardLayout(1166, 8).visible, 4);
+  // Экран владельца — 1680 px в установленном портале, где у области портала полей нет
+  // (поле 1544 px): тоже шесть.
+  assert.equal(boardLayout(1544, 8).visible, 6);
   // А семь колонок финансового отдела и пять согласования на 1920 px стоят целиком.
-  assert.equal(boardLayout(1736, 7).fits, true);
-  assert.equal(boardLayout(1736, 5).fits, true);
+  assert.equal(boardLayout(1720, 7).fits, true);
+  assert.equal(boardLayout(1720, 5).fits, true);
 });
 
 test('доска: пустая и ещё не измеренная', () => {
@@ -935,26 +946,26 @@ test('доска: пустая и ещё не измеренная', () => {
 
 test('доска: метка у края называет колонки, которых не видно целиком', () => {
   const columns = ['new', 'checking', 'clarification', 'ready', 'paying', 'paid', 'awaiting_docs', 'closed'].map((key) => ({ key }));
-  const layout = boardLayout(1736, columns.length);                 // шесть целых и выглядывающая седьмая
+  const layout = boardLayout(1720, columns.length);                 // шесть целых и выглядывающая седьмая
   const keys = (list) => list.map((column) => column.key);
-  let hidden = boardHidden(columns, layout, 0, 1736);
+  let hidden = boardHidden(columns, layout, 0, 1720);
   assert.deepEqual(keys(hidden.left), []);
   assert.deepEqual(keys(hidden.right), ['awaiting_docs', 'closed']);
   // Долистали до конца: справа пусто, слева — ушедшие за край.
   const content = columns.length * layout.width + (columns.length - 1) * BOARD_COLUMN_GAP;
-  hidden = boardHidden(columns, layout, content - 1736, 1736);
+  hidden = boardHidden(columns, layout, content - 1720, 1720);
   assert.deepEqual(keys(hidden.right), []);
   assert.deepEqual(keys(hidden.left), ['new', 'checking']);
   // Дробная прокрутка на пиксель колонку «скрытой» не делает.
-  hidden = boardHidden(columns, layout, 1, 1736);
+  hidden = boardHidden(columns, layout, 1, 1720);
   assert.deepEqual(keys(hidden.left), []);
   // Всё помещается — меток нет.
-  const fit = boardLayout(2376, columns.length);
-  assert.deepEqual(boardHidden(columns, fit, 0, 2376), { left: [], right: [] });
+  const fit = boardLayout(2214, columns.length);
+  assert.deepEqual(boardHidden(columns, fit, 0, 2214), { left: [], right: [] });
 });
 
 test('доска: кнопка «ещё» листает на видимые колонки без одной', () => {
-  const layout = boardLayout(1736, 8);
+  const layout = boardLayout(1720, 8);
   assert.equal(boardPageStep(layout), (layout.visible - 1) * (layout.width + BOARD_COLUMN_GAP));
   // Одна видимая колонка — листаем по одной, а не стоим на месте.
   assert.equal(boardPageStep({ visible: 1, width: 232 }), 232 + BOARD_COLUMN_GAP);

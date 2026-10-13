@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Download, Loader2, Plus, Receipt } from 'lucide-react';
-import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, IosSegmented } from '../ui/ios';
+import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, IosSegmented, prefersReducedMotion } from '../ui/ios';
 import PaymentRequestForm from './PaymentRequestForm';
 import PaymentRequestCard from './PaymentRequestCard';
 import PaymentsBoard from './PaymentsBoard';
@@ -164,6 +164,24 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         capabilities.can_manage_assets, isAdmin, meta, deskCount]);
     const activeTab = tabs.some((item) => item.value === tab) ? tab : 'desk';
     const boardCode = activeTab.startsWith('board:') ? activeTab.slice(6) : null;
+
+    /* Лента вкладок бывает шире экрана (телефон, узкое окно компьютера), и выбранная
+       вкладка оказывалась обрезанной краем, а следующие за ней — не видны вовсе.
+       Подводим ленту к выбранной вкладке; двигаем только саму ленту. При открытии
+       раздела она встаёт сразу, дальше — доезжает. */
+    const tabsRef = useRef(null);
+    const tabsPlaced = useRef(false);
+    useEffect(() => {
+        const strip = tabsRef.current;
+        const selected = strip?.querySelector('[aria-selected="true"]');
+        if (strip && selected && strip.scrollWidth > strip.clientWidth) {
+            const stripBox = strip.getBoundingClientRect();
+            const tabBox = selected.getBoundingClientRect();
+            const left = strip.scrollLeft + (tabBox.left + tabBox.width / 2) - (stripBox.left + stripBox.width / 2);
+            strip.scrollTo({ left, behavior: tabsPlaced.current && !prefersReducedMotion() ? 'smooth' : 'auto' });
+        }
+        tabsPlaced.current = true;
+    }, [activeTab, tabs.length]);
 
     const selection = useMemo(() => {
         const params = filtersToParams(filters);
@@ -390,59 +408,67 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     return (
         // На телефоне у корня свой непрозрачный фон: область раздела там прозрачна,
         // и фоновый логотип портала просвечивал бы серыми фигурами между карточками.
-        // Корень — во всю ширину экрана: шапка, вкладки и списки стоят колонкой
-        // (SECTION_COLUMN), а доска выходит из неё — на большом мониторе её колонки
-        // должны помещаться все сразу.
-        <div className="min-h-screen bg-gray-50 pb-12 pt-3 md:min-h-0" style={{ fontFamily: APPLE_FONT }}>
-            <div className={SECTION_COLUMN}>
-                <header className="flex flex-wrap items-center justify-between gap-3">
-                    <h1 className="min-w-0 text-[22px] font-semibold tracking-tight text-slate-900">Оплата счетов</h1>
-                    {capabilities.can_create && (
-                        <button type="button" className={`${iosBtnPrimary} w-full whitespace-nowrap sm:w-auto`} onClick={openCreate} disabled={!rolesReady}>
-                            <Plus size={15} /> Создать заявку
-                        </button>
-                    )}
-                </header>
+        // Корень — колонка раздела, одна на шапку, списки и доску: края у всех общие.
+        <div className={`${SECTION_COLUMN} min-h-screen bg-gray-50 pb-12 pt-3 md:min-h-0`} style={{ fontFamily: APPLE_FONT }}>
+            <header className="flex flex-wrap items-center justify-between gap-3">
+                <h1 className="min-w-0 text-[22px] font-semibold tracking-tight text-slate-900">Оплата счетов</h1>
+                {capabilities.can_create && (
+                    <button type="button" className={`${iosBtnPrimary} w-full whitespace-nowrap sm:w-auto`} onClick={openCreate} disabled={!rolesReady}>
+                        <Plus size={15} /> Создать заявку
+                    </button>
+                )}
+            </header>
 
-                <div className="-mx-3 mt-4 overflow-x-auto px-3 [scrollbar-width:none] sm:mx-0 sm:px-0">
-                    <IosSegmented value={activeTab} options={tabs} onChange={setTab} size="lg" ariaLabel="Раздел" className="min-w-max" />
-                </div>
-
-                {pingError && <div className="mt-4"><NoticeBox text={pingError} /></div>}
-                {ping && ping.schema_ready === false && (
-                    <div className="mt-4"><NoticeBox text="Раздел разворачивается — таблицы появятся после перезапуска сервера." /></div>
-                )}
-                {ping && !rolesReady && (
-                    <div className="mt-4">
-                        <NoticeBox text={`Заявки пока не завести: не назначены участники — ${rolesMissing.join(', ')}.`}>
-                            {isAdmin && (
-                                <>
-                                    {' '}
-                                    <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => setTab('roles')}>Открыть «Участники»</button>
-                                </>
-                            )}
-                        </NoticeBox>
-                    </div>
-                )}
-                {ping && ping.storage_ready === false && (
-                    <div className="mt-3"><NoticeBox tone="slate" text="Хранилище файлов не настроено: счета, чеки и акты прикрепить не получится, пока не задан бакет." /></div>
-                )}
-                {ping && isAdmin && ping.legacy_pending > 0 && (
-                    <div className="mt-3"><NoticeBox text={`Заявок прежней версии процесса не переведено на этапы: ${ping.legacy_pending}. Работать с ними нельзя, пока перенос не пройдёт, — причина записана в журнале сервера.`} /></div>
-                )}
-                {ping && isAdmin && ping.card_key_ready === false && (
-                    <div className="mt-3"><NoticeBox tone="slate" text="Не задан ключ шифрования номеров карт: заявки на пополнение карты сохранить не получится." /></div>
-                )}
+            {/* Восемь вкладок администратора в полный размер занимают 957 px и на небольшом экране
+                компьютера (1366 px при масштабе Windows 125 % — это 1093 px, 1280 px — 1024) уходили
+                за край: последние вкладки не видно, а полоса прокрутки у ленты скрыта. От 769 до
+                1179 px вкладки плотнее — поля 8 px и текст 12,5 px, — и лента помещается с 1010 px.
+                Правило стоит на самих кнопках (`[&>button]`), а не утилитой рядом: размер кнопки
+                задаёт IosSegmented, и одиночная утилита его не перебивает. */}
+            <div ref={tabsRef} className="-mx-3 mt-4 overflow-x-auto px-3 [scrollbar-width:none] sm:mx-0 sm:px-0">
+                <IosSegmented
+                    value={activeTab}
+                    options={tabs}
+                    onChange={setTab}
+                    size="lg"
+                    ariaLabel="Раздел"
+                    className="min-w-max min-[769px]:max-[1179px]:[&>button]:px-2 min-[769px]:max-[1179px]:[&>button]:text-[12.5px]"
+                />
             </div>
+
+            {pingError && <div className="mt-4"><NoticeBox text={pingError} /></div>}
+            {ping && ping.schema_ready === false && (
+                <div className="mt-4"><NoticeBox text="Раздел разворачивается — таблицы появятся после перезапуска сервера." /></div>
+            )}
+            {ping && !rolesReady && (
+                <div className="mt-4">
+                    <NoticeBox text={`Заявки пока не завести: не назначены участники — ${rolesMissing.join(', ')}.`}>
+                        {isAdmin && (
+                            <>
+                                {' '}
+                                <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => setTab('roles')}>Открыть «Участники»</button>
+                            </>
+                        )}
+                    </NoticeBox>
+                </div>
+            )}
+            {ping && ping.storage_ready === false && (
+                <div className="mt-3"><NoticeBox tone="slate" text="Хранилище файлов не настроено: счета, чеки и акты прикрепить не получится, пока не задан бакет." /></div>
+            )}
+            {ping && isAdmin && ping.legacy_pending > 0 && (
+                <div className="mt-3"><NoticeBox text={`Заявок прежней версии процесса не переведено на этапы: ${ping.legacy_pending}. Работать с ними нельзя, пока перенос не пройдёт, — причина записана в журнале сервера.`} /></div>
+            )}
+            {ping && isAdmin && ping.card_key_ready === false && (
+                <div className="mt-3"><NoticeBox tone="slate" text="Не задан ключ шифрования номеров карт: заявки на пополнение карты сохранить не получится." /></div>
+            )}
 
             {/* Вкладка не подменяется рывком: содержимое мягко проявляется (fade-in-soft). */}
             {activeTab === 'desk' && (
-                <div className={`${SECTION_COLUMN} mt-4 motion-safe:animate-fade-in-soft`}>
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsDesk apiBaseUrl={apiBaseUrl} headers={headers} refreshKey={refreshKey} soonDays={soonDays} onOpen={setOpenedId} onCount={setDeskCount} />
                 </div>
             )}
 
-            {/* Доска — без колонки раздела: ей нужна вся ширина экрана. */}
             {boardCode && meta && (
                 <div key={boardCode} className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsBoard
@@ -463,7 +489,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             )}
 
             {activeTab === 'requests' && (
-                <div className={`${SECTION_COLUMN} mt-4 motion-safe:animate-fade-in-soft`}>
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsFilters search={search} onSearch={setSearch} filters={filters} onChange={setFilters} dictionaries={dictionaries} users={users}>
                         <div className="hidden md:block">
                             <ColumnsMenu columns={REGISTRY_COLUMNS} value={columnKeys} onChange={changeColumns} onReset={() => changeColumns(defaultRegistryColumns())} />
@@ -591,7 +617,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             )}
 
             {activeTab === 'assets' && (
-                <div className={`${SECTION_COLUMN} mt-4 motion-safe:animate-fade-in-soft`}>
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsAssets
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
@@ -604,7 +630,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             )}
 
             {activeTab === 'dictionaries' && (
-                <div className={`${SECTION_COLUMN} mt-4 motion-safe:animate-fade-in-soft`}>
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsDictionaries
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
@@ -622,7 +648,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             )}
 
             {activeTab === 'roles' && (
-                <div className={`${SECTION_COLUMN} mt-4 motion-safe:animate-fade-in-soft`}>
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsRoles
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
