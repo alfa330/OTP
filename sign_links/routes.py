@@ -260,6 +260,10 @@ def build_sign_links_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if department and scope is not None and department not in scope:
             department = '__none__'
 
+        # Источник — сотрудники или внешний сервис (вход по ключу, external.py).
+        # Незнакомое значение отбором не считается: журнал отдаётся целиком.
+        source = (request.args.get('source') or '').strip().lower()
+
         return {
             'scope': scope,
             'date_from': date_from,
@@ -270,6 +274,7 @@ def build_sign_links_blueprint(*, db, require_api_key, build_cors_preflight_resp
             'user_id': _int_or_none(request.args.get('user_id')),
             'department_code': department,
             'iin': request.args.get('iin') or None,
+            'source': source if source in queries.SOURCES else None,
         }
 
     @sign_links_route('/journal', journal=True)
@@ -283,12 +288,17 @@ def build_sign_links_blueprint(*, db, require_api_key, build_cors_preflight_resp
         with db._get_cursor() as cursor:
             result = queries.journal_page(cursor, filters)
             people = queries.journal_people(cursor, scope=filters['scope'])
+            # Запросы внешнего сервиса отдела не имеют и главе не видны: отбор
+            # «Источник» нужен только тому, кто видит журнал целиком.
+            has_api_rows = (filters['scope'] is None
+                            and queries.journal_has_api_rows(cursor))
         return jsonify({
             **result,
             'page': page,
             'page_size': size,
             'people': people,
             'scope': filters['scope'],
+            'has_api_rows': has_api_rows,
         }), 200
 
     return bp

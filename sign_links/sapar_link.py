@@ -241,8 +241,11 @@ def _result(outcome, *, link=None, message=None, error=None, started):
     }
 
 
-def generate(iin):
+def generate(iin, timeout=None):
     """Ссылка на подписание по ИИН. Никогда не бросает исключение.
+
+    timeout — сколько ждать каждый из двух запросов; по умолчанию TIMEOUT.
+    Пачке внешнего входа (batch.py) нужен срок короче, чем одному оператору.
 
     Возвращает словарь:
         outcome     — link / no_documents / rejected / unavailable
@@ -252,11 +255,14 @@ def generate(iin):
         latency_ms  — сколько ждали генератор
     """
     started = time.monotonic()
+    timeout = timeout or TIMEOUT
     url = generator_url()
+    # Сессия своя на каждый ИИН, и это намеренно: в общей сессии форма могла бы
+    # вернуть ответ на предыдущий запрос — то есть ссылку чужого водителя.
     session = requests.Session()
     session.headers.update({'User-Agent': USER_AGENT, 'Accept-Language': 'ru'})
     try:
-        page = session.get(url, timeout=TIMEOUT)
+        page = session.get(url, timeout=timeout)
         page.raise_for_status()
     except Exception as error:  # noqa: BLE001
         logging.warning('sign_links: генератор не отдал форму: %s', error)
@@ -284,7 +290,7 @@ def generate(iin):
         fields['flDriverIin-12qsa-options'] = (None, 'YodaApp.Ui.TextInputEditor')
 
     try:
-        answer = session.post(url, files=fields, timeout=TIMEOUT, allow_redirects=True)
+        answer = session.post(url, files=fields, timeout=timeout, allow_redirects=True)
         answer.raise_for_status()
     except Exception as error:  # noqa: BLE001
         logging.warning('sign_links: генератор не принял форму: %s', error)

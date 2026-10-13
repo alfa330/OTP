@@ -25,6 +25,21 @@ def today_start_almaty():
     return now_almaty().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+# Запрос внешнего сервиса (external.py) — строка того же журнала: вопрос «кто
+# запрашивал ссылку по этому ИИН» обязан находить и его. Сотрудника у такой
+# строки нет (user_id NULL), вместо роли стоит API_ROLE, вместо имени —
+# «Внешний сервис» с отпечатком ключа. Отдела тоже нет, поэтому главе отдела
+# такие строки не видны (граница scope в _JOURNAL_WHERE) — только глобальному
+# админу. Двойник кода роли — API_ROLE в signLinkMeta.js.
+API_ROLE = 'api'
+API_CLIENT_NAME = 'Внешний сервис (ключ %s)'
+
+# Отбор журнала «Источник»: кто спрашивал — сотрудники или внешний сервис.
+SOURCE_STAFF = 'staff'
+SOURCE_API = 'api'
+SOURCES = (SOURCE_STAFF, SOURCE_API)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Контекст доступа
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +134,52 @@ def log_request(cursor, ctx, *, iin, outcome, vendor_message=None, link_issued=F
     return {'id': row[0], 'created_at': row[1].isoformat() if row and row[1] else None}
 
 
+# Пачка внешнего входа — одним INSERT: полсотни строк по одной были бы
+# полусотней обращений к базе. Массивы, а не execute_values: тот шлёт страницы
+# по сто строк отдельными запросами и врёт про rowcount.
+_API_INSERT_SQL = """
+    INSERT INTO sign_link_requests
+        (user_id, user_name, user_role, department_id, department_code,
+         iin, outcome, vendor_message, link_issued, link_host, error_text,
+         latency_ms, ip_address, user_agent)
+    SELECT NULL::integer, %(user_name)s, %(user_role)s, NULL::integer, NULL,
+           t.iin, t.outcome, t.vendor_message, t.link_issued, t.link_host,
+           t.error_text, t.latency_ms, %(ip)s, %(ua)s
+      FROM unnest(%(iin)s::text[], %(outcome)s::text[], %(vendor_message)s::text[],
+                  %(link_issued)s::boolean[], %(link_host)s::text[],
+                  %(error_text)s::text[], %(latency_ms)s::integer[])
+           AS t(iin, outcome, vendor_message, link_issued, link_host, error_text,
+                latency_ms)
+"""
+
+
+def log_api_requests(cursor, *, key_mark, rows, ip_address=None, user_agent=None):
+    """Строки журнала за одну пачку внешнего входа. Возвращает их число.
+
+    rows — словари: iin и outcome обязательны; vendor_message, link_issued,
+    link_host, error_text, latency_ms — по исходу. Самой ссылки среди них нет,
+    как и у запросов сотрудников: в журнале только факт и домен.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return 0
+    cursor.execute(_API_INSERT_SQL, {
+        'user_name': API_CLIENT_NAME % key_mark,
+        'user_role': API_ROLE,
+        'ip': (ip_address or '')[:64] or None,
+        'ua': (user_agent or '')[:500] or None,
+        'iin': [str(row.get('iin') or '')[:32] for row in rows],
+        'outcome': [row['outcome'] for row in rows],
+        'vendor_message': [(row.get('vendor_message') or '')[:1000] or None for row in rows],
+        'link_issued': [bool(row.get('link_issued')) for row in rows],
+        'link_host': [(row.get('link_host') or '')[:120] or None for row in rows],
+        'error_text': [(row.get('error_text') or '')[:1000] or None for row in rows],
+        'latency_ms': [int(row['latency_ms']) if row.get('latency_ms') is not None else None
+                       for row in rows],
+    })
+    return len(rows)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Дневной предел
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,6 +204,29 @@ def used_today(cursor, user_id):
     return int(row[0] or 0) if row else 0
 
 
+# У внешнего входа предел один на всех держателей ключей и считает КАЖДУЮ
+# строку, а не только походы к генератору: он бережёт и генератор, и журнал —
+# без этого утёкший ключ завалил бы таблицу опечатками. Идёт по индексу
+# (user_id, created_at): у строк внешнего входа user_id пуст.
+_API_USED_TODAY_SQL = """
+    SELECT count(*)
+      FROM sign_link_requests r
+     WHERE r.user_id IS NULL
+       AND r.user_role = %(api_role)s
+       AND r.created_at >= %(day_start)s
+"""
+
+
+def api_used_today(cursor):
+    """Сколько ИИН внешний вход принял сегодня (сутки — по Алматы)."""
+    cursor.execute(_API_USED_TODAY_SQL, {
+        'api_role': API_ROLE,
+        'day_start': today_start_almaty(),
+    })
+    row = cursor.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Журнал
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +242,8 @@ _JOURNAL_WHERE = """
        AND (%(user_id)s IS NULL OR r.user_id = %(user_id)s)
        AND (%(department_code)s IS NULL OR r.department_code = %(department_code)s)
        AND (%(iin_prefix)s IS NULL OR r.iin LIKE %(iin_prefix)s)
+       AND (%(api_rows)s IS NULL
+            OR (r.user_role IS NOT DISTINCT FROM %(api_role)s) = %(api_rows)s)
 """
 
 _JOURNAL_PAGE_SQL = """
@@ -207,6 +293,10 @@ def _journal_params(filters):
         # Префикс, а не «содержит»: ИИН ищут с начала, а по индексу LIKE 'abc%'
         # идёт без полного скана.
         'iin_prefix': (iin + '%') if iin else None,
+        # Источник: None — все строки, True — только внешний сервис, False —
+        # только сотрудники.
+        'api_rows': {SOURCE_API: True, SOURCE_STAFF: False}.get(filters.get('source')),
+        'api_role': API_ROLE,
         'limit': int(filters.get('limit') or 50),
         'offset': int(filters.get('offset') or 0),
     }
@@ -264,3 +354,22 @@ def journal_people(cursor, scope=None):
     cursor.execute(_JOURNAL_PEOPLE_SQL, {'scope': list(scope) if scope is not None else None})
     return [{'user_id': row[0], 'name': row[1], 'requests': int(row[2] or 0)}
             for row in cursor.fetchall()]
+
+
+_JOURNAL_HAS_API_ROWS_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM sign_link_requests r
+         WHERE r.user_id IS NULL AND r.user_role = %(api_role)s
+    )
+"""
+
+
+def journal_has_api_rows(cursor):
+    """Есть ли в журнале запросы внешнего сервиса — показывать ли отбор «Источник».
+
+    По всему журналу, а не по выборке: отбор не должен пропадать оттого, что
+    им же и отсеяли такие строки.
+    """
+    cursor.execute(_JOURNAL_HAS_API_ROWS_SQL, {'api_role': API_ROLE})
+    row = cursor.fetchone()
+    return bool(row and row[0])

@@ -84,6 +84,13 @@ class IinTests(unittest.TestCase):
         self.assertEqual(iin.validate(' 900101300007 ')[0], VALID)
         self.assertEqual(iin.validate('9001O1300007')[1], 'digits')
 
+    def test_digits_of_other_scripts_are_not_digits(self):
+        """str.isdigit считает цифрами и «９», и «٠» — и ИИН с такими знаками
+        сходился по контрольной сумме. В поле раздела их не ввести, но через
+        внешний вход ИИН присылает программа."""
+        for value in ('９００１０１３００００７', '9001013٠٠٠٠7', '900101३00007'):
+            self.assertEqual(iin.validate(value), (None, 'digits'), ascii(value))
+
     def test_every_defect_has_its_own_code(self):
         self.assertEqual(iin.validate('')[1], 'empty')
         self.assertEqual(iin.validate(None)[1], 'empty')
@@ -802,6 +809,31 @@ class JournalRouteTests(RouteHarness):
         self.assertEqual(params['offset'], 25)
         # Верхняя граница — начало СЛЕДУЮЩИХ суток.
         self.assertEqual(params['date_to'].day, 17)
+
+    def test_source_filter_separates_the_external_service_from_the_staff(self):
+        """Запросы по ключу (sign_links/external.py) лежат в том же журнале;
+        отбор «Источник» предлагается, только когда они в нём есть."""
+        admin = ctx(role='super_admin', department_code=None)
+        for query, flag in (('source=api', True), ('source=staff', False),
+                            ('source=bogus', None), ('', None)):
+            client, cursor, _gate = self.build(
+                admin, answers=[[], (0, 0, 0, 0, 0, 0), [], (True,)])
+            payload = client.get('/api/sign_links/journal?' + query).get_json()
+            self.assertIs(cursor.calls[0][1]['api_rows'], flag, query)
+            self.assertIs(cursor.calls[1][1]['api_rows'], flag, query)
+            self.assertIs(payload['has_api_rows'], True, query)
+        client, _cursor, _gate = self.build(admin, answers=[[], (0, 0, 0, 0, 0, 0), [], (False,)])
+        self.assertIs(client.get('/api/sign_links/journal').get_json()['has_api_rows'], False)
+
+    def test_head_is_not_offered_the_source_filter(self):
+        """У запросов внешнего сервиса нет отдела — глава их не видит, и
+        спрашивать базу, есть ли они, незачем."""
+        head = ctx(role='admin', department_code='front_office', headed=[909],
+                   headed_codes=['front_office'])
+        client, cursor, _gate = self.build(head, answers=[[], (0, 0, 0, 0, 0, 0), [], (True,)])
+        payload = client.get('/api/sign_links/journal?source=api').get_json()
+        self.assertIs(payload['has_api_rows'], False)
+        self.assertEqual(len(cursor.calls), 3)
 
     def test_no_response_ever_carries_the_generator_address(self):
         client, _cursor, _gate = self.build(ctx(role='super_admin', department_code=None),

@@ -15,6 +15,7 @@ import {
 import { validateIin, iinErrorMessage, normalizeIin, formatIin, IIN_LENGTH } from './iin';
 import {
     OUTCOME_ORDER, outcomeLabel, outcomeTone, departmentLabel, limitWarning, hostLabel,
+    SOURCE_ORDER, SOURCE_LABELS, isApiRow, apiClient,
 } from './signLinkMeta';
 
 /* Раздел «Ссылка на подписание» (просьба владельца 16.09.2026).
@@ -42,7 +43,7 @@ import {
  *   двойник серверного правила), к вендору уходит только верный.
  */
 
-const EMPTY_JOURNAL_FILTERS = { outcome: 'all', userId: 'all', department: 'all', iin: '' };
+const EMPTY_JOURNAL_FILTERS = { outcome: 'all', userId: 'all', department: 'all', source: 'all', iin: '' };
 
 const JOURNAL_PRESETS = [
     { label: 'Сегодня', range: () => ({ from: todayISO(), to: todayISO() }) },
@@ -531,6 +532,7 @@ const JournalPanel = ({ apiBaseUrl, headers, scope, departments }) => {
         if (filters.outcome !== 'all') search.set('outcomes', filters.outcome);
         if (filters.userId !== 'all') search.set('user_id', String(filters.userId));
         if (filters.department !== 'all') search.set('department', filters.department);
+        if (filters.source !== 'all') search.set('source', filters.source);
         if (filters.iin.trim()) search.set('iin', filters.iin.trim());
         return search;
     }, [filters]);
@@ -597,6 +599,13 @@ const JournalPanel = ({ apiBaseUrl, headers, scope, departments }) => {
         ...departments.map((code) => ({ value: code, label: departmentLabel(code) })),
     ]), [departments]);
 
+    /* «Источник» появляется, только когда в журнале есть запросы внешнего
+       сервиса (вход по ключу): пока их нет, выбирать не из чего. Выбранный
+       отбор при этом не прячется — иначе его было бы нечем снять. */
+    const showSources = Boolean(data.has_api_rows) || filters.source !== 'all';
+    const sourceOptions = useMemo(
+        () => SOURCE_ORDER.map((code) => ({ value: code, label: SOURCE_LABELS[code] })), []);
+
     /* Строки, разложенные по дням. Группируем последовательно: сервер уже
        отдал их по убыванию времени, и группа меняется ровно там, где день. */
     const groups = useMemo(() => {
@@ -611,7 +620,8 @@ const JournalPanel = ({ apiBaseUrl, headers, scope, departments }) => {
     }, [data.items]);
 
     const filtered = filters.outcome !== 'all' || filters.userId !== 'all'
-        || filters.department !== 'all' || Boolean(filters.iin.trim());
+        || filters.department !== 'all' || filters.source !== 'all'
+        || Boolean(filters.iin.trim());
 
     return (
         <div className="space-y-3">
@@ -656,6 +666,16 @@ const JournalPanel = ({ apiBaseUrl, headers, scope, departments }) => {
                         ariaLabel="Отдел"
                         className="w-full sm:w-[160px]"
                         onChange={(value) => setFilters((prev) => ({ ...prev, department: value }))}
+                    />
+                )}
+                {showSources && (
+                    <CustomSelect
+                        variant="ios"
+                        value={filters.source}
+                        options={sourceOptions}
+                        ariaLabel="Источник"
+                        className="w-full sm:w-[176px]"
+                        onChange={(value) => setFilters((prev) => ({ ...prev, source: value }))}
                     />
                 )}
                 <div className="relative w-full sm:w-[186px]">
@@ -788,36 +808,46 @@ const details = (item) => {
     return item.vendor_message || '';
 };
 
-const JournalRow = ({ item, showDepartment }) => (
-    <tr className="border-b border-slate-100 last:border-0">
-        <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500">
-            {formatTime(item.created_at)}
-        </td>
-        <td className="px-4 py-2.5">
-            <div className="font-medium text-slate-800">{item.user_name || '—'}</div>
-            <div className="text-[11.5px] text-slate-400">
-                {roleLabel(item.user_role)}
-                {showDepartment && item.department_code ? ` · ${departmentLabel(item.department_code)}` : ''}
-            </div>
-        </td>
-        <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600">
-            {formatIin(item.iin)}
-        </td>
-        <td className="px-4 py-2.5">
-            {item.outcome === 'no_documents' ? (
-                <span className="text-slate-600">{outcomeLabel(item.outcome)}</span>
-            ) : (
-                <IosBadge tone={outcomeTone(item.outcome)}>{outcomeLabel(item.outcome)}</IosBadge>
-            )}
-        </td>
-        <td
-            className="max-w-[320px] px-4 py-2.5 text-[12.5px] text-slate-600"
-            title={item.error_text && item.outcome !== 'invalid' ? item.error_text : undefined}
-        >
-            {details(item)}
-        </td>
-    </tr>
-);
+/* Кто спрашивал. У сотрудника — имя, под ним роль и отдел. У внешнего сервиса
+   (вход по ключу) нет ни сотрудника, ни отдела: вместо них — сервис и
+   отпечаток ключа, которым он вошёл. */
+const whoOf = (item, showDepartment) => {
+    if (isApiRow(item)) return apiClient(item);
+    const department = showDepartment && item.department_code
+        ? ` · ${departmentLabel(item.department_code)}` : '';
+    return { name: item.user_name || '—', note: `${roleLabel(item.user_role)}${department}` };
+};
+
+const JournalRow = ({ item, showDepartment }) => {
+    const who = whoOf(item, showDepartment);
+    return (
+        <tr className="border-b border-slate-100 last:border-0">
+            <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500">
+                {formatTime(item.created_at)}
+            </td>
+            <td className="px-4 py-2.5">
+                <div className="font-medium text-slate-800">{who.name}</div>
+                <div className="text-[11.5px] text-slate-400">{who.note}</div>
+            </td>
+            <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600">
+                {formatIin(item.iin)}
+            </td>
+            <td className="px-4 py-2.5">
+                {item.outcome === 'no_documents' ? (
+                    <span className="text-slate-600">{outcomeLabel(item.outcome)}</span>
+                ) : (
+                    <IosBadge tone={outcomeTone(item.outcome)}>{outcomeLabel(item.outcome)}</IosBadge>
+                )}
+            </td>
+            <td
+                className="max-w-[320px] px-4 py-2.5 text-[12.5px] text-slate-600"
+                title={item.error_text && item.outcome !== 'invalid' ? item.error_text : undefined}
+            >
+                {details(item)}
+            </td>
+        </tr>
+    );
+};
 
 const Stat = ({ label, value }) => (
     <div className="px-4 py-3">

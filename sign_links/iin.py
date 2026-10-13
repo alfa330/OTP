@@ -100,7 +100,9 @@ def validate(raw):
     value = normalize(raw)
     if not value:
         return None, 'empty'
-    if not value.isdigit():
+    # isascii обязателен: str.isdigit считает цифрами и «９», и «٠», а ИИН
+    # пишется только цифрами 0–9. Так же судит двойник на фронте (/^\d+$/).
+    if not (value.isascii() and value.isdigit()):
         return None, 'digits'
     if len(value) != IIN_LENGTH:
         return None, 'length'

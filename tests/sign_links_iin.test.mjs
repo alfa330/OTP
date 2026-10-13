@@ -31,6 +31,9 @@ test('разделители снимаются молча, буквы — ош�
     assert.equal(validateIin('900101-300-007').iin, VALID);
     assert.equal(validateIin(' 900101300007 ').iin, VALID);
     assert.equal(validateIin('9001O1300007').error, 'digits');
+    // Цифры других письменностей — не цифры ИИН: так же судит сервер.
+    assert.equal(validateIin('９００１０１３００００７').error, 'digits');
+    assert.equal(validateIin('9001013٠٠٠٠7').error, 'digits');
     assert.equal(normalizeIin(' 12 34 '), '1234');
 });
 

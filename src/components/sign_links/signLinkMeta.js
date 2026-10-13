@@ -37,6 +37,35 @@ export const DEPARTMENT_LABELS = {
     op: 'Отдел продаж',
 };
 
+/* Запросы внешнего сервиса (вход по ключу, sign_links/external.py) лежат в том
+   же журнале. Сотрудника у такой строки нет, вместо роли стоит API_ROLE —
+   двойник sign_links/queries.API_ROLE, набор сторожит тест. */
+export const API_ROLE = 'api';
+export const isApiRow = (item) => String(item?.user_role || '') === API_ROLE;
+
+/* Кто спрашивал, если это внешний сервис. В журнале он записан одной строкой
+   «Внешний сервис (ключ 6f899aa2)» (queries.API_CLIENT_NAME) — здесь она
+   расходится на имя и отпечаток ключа, чтобы встать в две строки, как имя и
+   роль у сотрудника. Строка другого вида показывается как есть. */
+const API_CLIENT_RE = /^(.+?)\s*\((ключ [0-9a-f]+)\)$/;
+export const apiClient = (item) => {
+    const raw = String(item?.user_name || '').trim();
+    const match = API_CLIENT_RE.exec(raw);
+    return match
+        ? { name: match[1], note: match[2] }
+        : { name: raw || SOURCE_LABELS.api, note: 'вход по ключу' };
+};
+
+/* Отбор «Источник»: кто спрашивал. Ключи — значения параметра source у журнала
+   (queries.SOURCES); «все» параметром не уходит. */
+export const SOURCE_LABELS = {
+    all: 'Все источники',
+    staff: 'Сотрудники',
+    api: 'Внешний сервис',
+};
+
+export const SOURCE_ORDER = ['all', 'staff', 'api'];
+
 export const outcomeLabel = (code) => OUTCOME_LABELS[code] || code || '—';
 export const outcomeTone = (code) => OUTCOME_TONE[code] || 'slate';
 export const departmentLabel = (code) => DEPARTMENT_LABELS[String(code || '').toLowerCase()] || code || '—';
