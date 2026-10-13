@@ -1156,6 +1156,107 @@ class ConcurrencyTests(_RateCase):
             self.assertFalse(bc._rate_state(key).heavy_lock.locked())
 
 
+class OriginateRetryTests(_RateCase):
+    """Повторы click-to-call (13.10.2026). 13.10.2026 в 19:04 сервер 40 с не мог соединиться с
+    api.binotel.com, и двое операторов получили «обратитесь к руководителю». Соединение теперь — 5 с,
+    и запрос, который до Binotel не дошёл, клиент повторяет сам; быстрый отказ с кодом 105 — тоже
+    (все шесть таких отказов за три недели звонка не дали). Таймаут ответа и обрыв открытого
+    соединения не повторяются никогда: запрос мог уйти, и водителю ушёл бы второй звонок."""
+
+    ORIGINATE = "calls/internal-number-to-external-number"
+    BUSY = {"status": "error", "code": 105, "message": "Something went wrong"}
+
+    class _Raising(_Session):
+        """Ответы по очереди; исключение в очереди бросается, как его бросил бы requests."""
+
+        def post(self, url, json=None, timeout=None):
+            if self.answers and isinstance(self.answers[0], BaseException):
+                with self._lock:
+                    self.calls.append((url.split("/api/4.0/", 1)[-1][:-len(".json")], self.clock()))
+                    error = self.answers.pop(0)
+                raise error
+            return super().post(url, json=json, timeout=timeout)
+
+    def _call(self, answers, on_post=None):
+        fake = self.fake_time()
+        session = self._Raising(answers, on_post=on_post, clock=fake.monotonic)
+        client = _client("key-o", session)
+        return fake, session, client
+
+    @staticmethod
+    def _refused():
+        import urllib3
+        return requests.exceptions.ConnectionError(
+            urllib3.exceptions.MaxRetryError(None, "/x", urllib3.exceptions.NewConnectionError(None, "refused")))
+
+    def test_connect_failure_is_retried(self):
+        fake, session, client = self._call([requests.exceptions.ConnectTimeout("connect timeout=5"),
+                                            self._refused(), _ok(generalCallID="gc-7")])
+        with self.assertLogs("binotel.client", level="WARNING") as logs:
+            self.assertEqual(client.originate_internal_to_external("904", "77000000001"), "gc-7")
+        self.assertEqual(session.endpoints, [self.ORIGINATE] * 3)
+        self.assertIn(2.0, fake.sleeps)
+        self.assertIn(3.0, fake.sleeps)
+        # В журнале нет ни линии, ни номера водителя.
+        self.assertFalse(any("904" in line or "77000000001" in line for line in logs.output), logs.output)
+
+    def test_connect_failure_gives_up_after_three_tries(self):
+        errors = [requests.exceptions.ConnectTimeout("connect timeout=5") for _ in range(5)]
+        fake, session, client = self._call(errors)
+        with self.assertLogs("binotel.client", level="WARNING"), \
+                self.assertRaises(requests.exceptions.ConnectTimeout):
+            client.originate_internal_to_external("904", "77000000001")
+        self.assertEqual(len(session.calls), 1 + bc.ORIGINATE_CONNECT_RETRIES)
+        self.assertEqual(bc.HTTP_TIMEOUT, (bc.HTTP_CONNECT_TIMEOUT, bc.HTTP_READ_TIMEOUT))
+        self.assertEqual((bc.HTTP_CONNECT_TIMEOUT, bc.HTTP_READ_TIMEOUT), (5, 40))
+
+    def test_read_timeout_and_aborted_connection_are_never_retried(self):
+        import urllib3
+        aborted = requests.exceptions.ConnectionError(
+            urllib3.exceptions.ProtocolError("Connection aborted.", ConnectionResetError()))
+        for error in (requests.exceptions.ReadTimeout("read timeout=40"), aborted):
+            bc._reset_rate_state()
+            fake, session, client = self._call([error, _ok(generalCallID="gc-1")])
+            with self.assertRaises(type(error)):
+                client.originate_internal_to_external("904", "77000000001")
+            self.assertEqual(len(session.calls), 1, repr(error))
+
+    def test_fast_code_105_is_retried(self):
+        fake, session, client = self._call([self.BUSY, self.BUSY, _ok(generalCallID="gc-9")])
+        with self.assertLogs("binotel.client", level="WARNING"):
+            self.assertEqual(client.originate_internal_to_external("904", "77000000001"), "gc-9")
+        self.assertEqual(len(session.calls), 3)
+        # Третий 105 подряд — отказ: повторов не больше ORIGINATE_105_RETRIES.
+        bc._reset_rate_state()
+        fake, session, client = self._call([self.BUSY] * 5)
+        with self.assertLogs("binotel.client", level="WARNING"), self.assertRaises(RuntimeError) as ctx:
+            client.originate_internal_to_external("904", "77000000001")
+        self.assertIn("code=105", str(ctx.exception))
+        self.assertEqual(len(session.calls), 1 + bc.ORIGINATE_105_RETRIES)
+
+    def test_slow_code_105_is_not_retried(self):
+        # 12.10.2026: один 105 пришёл через 52 с — оператор и так ждал почти минуту.
+        state = {}
+
+        def slow(endpoint):
+            state["fake"].now += bc.ORIGINATE_105_FAST_SEC + 1
+
+        fake, session, client = self._call([self.BUSY, _ok(generalCallID="gc-1")], on_post=slow)
+        state["fake"] = fake
+        with self.assertRaises(RuntimeError):
+            client.originate_internal_to_external("904", "77000000001")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_other_errors_and_rate_limit_are_not_retried_here(self):
+        for answer in ({"status": "error", "code": 150, "message": "Can't call to the ext"},
+                       {"status": "error", "code": 104, "message": "x"}, _Resp("Bad Gateway", status_code=502)):
+            bc._reset_rate_state()
+            fake, session, client = self._call([answer, _ok(generalCallID="gc-1")])
+            with self.assertRaises(RuntimeError):
+                client.originate_internal_to_external("904", "77000000001")
+            self.assertEqual(len(session.calls), 1, repr(answer))
+
+
 class CompatibilityTests(_RateCase):
     """Прежние вызывающие и подделки клиента работают без правок."""
 
@@ -1242,7 +1343,8 @@ class CompatibilityTests(_RateCase):
         client.call_details("3")
         client._post("stats/call-details", {"generalCallID": "4"}, timeout=7)
         self.assertEqual(timeouts, [(3.05, 5.0), bc.HTTP_TIMEOUT, 7])
-        self.assertEqual(bc.HTTP_TIMEOUT, 40)
+        # Соединение — 5 с, ответ — 40 с (13.10.2026: сеть до Binotel пропадала, и запрос висел 40 с).
+        self.assertEqual(bc.HTTP_TIMEOUT, (5, 40))
         # Подделки с прежней сигнатурой _post без timeout вызов без timeout не ломает, а timeout
         # уходит дальше, только когда задан.
         seen = []

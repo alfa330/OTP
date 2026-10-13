@@ -28,9 +28,12 @@ from dial_list import service as dial_service  # noqa: E402
 # Ширина строки страницы журнала без сводки: колонки журнала + total + rn.
 PAGE_WIDTH = dial_service.DialListService._JOURNAL_COLUMN_COUNT + 2
 
-# Версия телефона с защитой автосброса по речи — заголовок X-ICore-Phone-Version (с 3.22.34).
-# Запрос без него сервер считает выпущенным 3.22.33 и автосброса ему не даёт.
+# Версия телефона — заголовок X-ICore-Phone-Version (с 3.22.34). Запрос без него сервер считает
+# выпущенным 3.22.33 (active_attempt — в прежнем смысле).
 GUARDED_PHONE = '3.22.34'
+# Телефон с простым таймером автосброса (13.10.2026): только ему — ring_timeout_sec и ответ по делу на
+# вопрос ring_timeout; 3.22.34 и старше — 0 и «не класть».
+TIMER_PHONE = '3.22.35'
 # Что телефон с 3.22.34 сообщает о попытке — хвост строк с попыткой у подделок курсора:
 # auto_hangup, talk_detected и billsec исхода. Здесь — «телефон ничего не сообщил» (до 3.22.34).
 PHONE_SAID_NOTHING = ('', None, 0)
@@ -400,10 +403,12 @@ class LinesTests(unittest.TestCase):
         # Binotel code=150 «Can't call to the ext»: телефон оператора не зарегистрирован —
         # попытка по лиду не считается, а оператору объясняется, что проверить.
         src = inspect.getsource(dial_service.DialListService.start_call)
-        self.assertIn('code == 150', src)
         self.assertEqual(dial_service.binotel_error_code(
             "Binotel calls/internal-number-to-external-number status='error' code=150: Can't call to the ext"), 150)
-        self.assertIn('count_for_lead=not ext_unreachable', src)
+        self.assertEqual(dial_service.call_error_kind(None,
+                         "Binotel calls/internal-number-to-external-number status='error' code=150: x"), 'line')
+        self.assertIn('count_for_lead=kind not in CALL_ERRORS_NOT_COUNTED', src)
+        self.assertIn('line', dial_service.CALL_ERRORS_NOT_COUNTED)
         self.assertIn('не на связи', src)
         fail_src = inspect.getsource(dial_service.DialListService._fail_attempt)
         self.assertIn('GREATEST(attempts - 1, 0)', fail_src)
@@ -1904,9 +1909,9 @@ class RingTimeoutTests(unittest.TestCase):
         self.assertEqual(rings(True), 5)
         self.assertEqual(dial_service.RING_SECONDS_PER_RING, 5)
 
-    def _state(self, cursor, phone_version=GUARDED_PHONE):
-        """Состояние для телефона с защитой по речи (заголовок версии): автосброс получает
-        только он. Что получает выпущенный 3.22.33 — PhoneVersionGateTests."""
+    def _state(self, cursor, phone_version=TIMER_PHONE):
+        """Состояние для телефона с простым таймером (3.22.35+): автосброс получает только он.
+        Что получают 3.22.33 и 3.22.34 — PhoneVersionGateTests."""
         db = _TxDb(cursor)
         svc = dial_service.DialListService(db=db)
         svc.operator_context = self._ctx
@@ -1914,8 +1919,10 @@ class RingTimeoutTests(unittest.TestCase):
         return svc.get_state(7, phone_version=phone_version), db
 
     def test_state_carries_ring_timeout_of_line_department(self):
-        # Отсчёт телефона — от принятия плеча (АТС начинает набирать водителя): 5 гудков — 25 с.
-        for row, expected in (((None,), 25), (None, 25), ((0,), 0), ((3,), 15), ((40,), 100)):
+        # Отсчёт телефона — от принятия плеча, а первый гудок звучит на 8–10-й секунде (сообщение АТС
+        # оператору и соединение сети): RING_LEAD_IN_SEC сверху — 5 гудков — 34 с; 0 гудков — 0.
+        self.assertEqual(dial_service.RING_LEAD_IN_SEC, 9)
+        for row, expected in (((None,), 34), (None, 34), ((0,), 0), ((3,), 24), ((40,), 109)):
             cur = _RoutedCursor([('FROM sip_department_config', {'one': row}),
                                  ('FROM dial_list_outcomes o', {'all': [self.OUTCOME]})])
             state, db = self._state(cur)
@@ -1937,7 +1944,7 @@ class RingTimeoutTests(unittest.TestCase):
                 super().execute(sql, params)
 
         state, _ = self._state(_NoColumn([('FROM dial_list_outcomes o', {'all': [self.OUTCOME]})]))
-        self.assertEqual(state["ring_timeout_sec"], 25)
+        self.assertEqual(state["ring_timeout_sec"], 34)
         self.assertEqual(state["outcomes"][0]["name"], 'Отказ')
 
     def test_schema_and_event(self):
@@ -1955,15 +1962,16 @@ class RingTimeoutTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 400)
 
     # ── событие ring_timeout: класть ли плечо ────────────────────────────────
-    # Вопрос задаёт только телефон с защитой по речи (заголовок версии, _ring): выпущенному
-    # 3.22.33 сервер отвечает «не класть» сразу, не спрашивая Binotel (PhoneVersionGateTests).
-    def _event_svc(self, row, decision, answer=None):
+    # Вопрос по делу — только от телефона с простым таймером (3.22.35+, _ring): 3.22.33 и 3.22.34
+    # сервер отвечает «не класть» сразу, не спрашивая Binotel (PhoneVersionGateTests).
+    def _event_svc(self, row, decision, answer=None, rings=(None,)):
         """row — (state, general_call_id, disposition, cancelled) попытки; decision — строка
         _outcome_decision после события (без хвоста PHONE_SAID_NOTHING — его добавляем здесь);
-        answer — ответ call-details (или исключение)."""
+        answer — ответ call-details (или исключение); rings — строка настройки отдела (гудков)."""
         cur = _RoutedCursor([
             ('general_call_id, disposition, cancelled FROM dial_list_attempts', {'one': row}),
             ('leg_answered_at, outcome_id', {'one': decision and tuple(decision) + PHONE_SAID_NOTHING}),
+            ('FROM sip_department_config', {'one': rings}),
         ])
         db = _TxDb(cur)
         svc = dial_service.DialListService(db=db)
@@ -1976,8 +1984,8 @@ class RingTimeoutTests(unittest.TestCase):
 
     @staticmethod
     def _ring(svc, attempt_id='att-1', **kwargs):
-        """Событие ring_timeout от телефона с защитой по речи."""
-        return svc.phone_event(7, attempt_id, 'ring_timeout', phone_version=GUARDED_PHONE, **kwargs)
+        """Событие ring_timeout от телефона с простым таймером (3.22.35)."""
+        return svc.phone_event(7, attempt_id, 'ring_timeout', phone_version=TIMER_PHONE, **kwargs)
 
     # Строки решения: (state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id,
     # ring_timeout_at).
@@ -2039,6 +2047,9 @@ class RingTimeoutTests(unittest.TestCase):
                                 logs.output)
             self.assertEqual(len(cur.sql_with(self.MARK)), 1 if hangup else 0, (disposition, age))
             self.assertEqual(len(finished), 1 if final else 0, (disposition, age))
+            # Решать не по чему — телефон спросит снова (простой таймер, 13.10.2026); иначе — нет.
+            self.assertEqual(res.get("retry_after_sec"), None if (hangup or talking or final)
+                             else dial_service.RING_RETRY_AFTER_SEC, (disposition, age))
 
     def test_no_data_never_hangs_up(self):
         # 13.10.2026: «нет данных» — никогда не «класть». Звонка у Binotel не видно, АТС ответила
@@ -2056,6 +2067,8 @@ class RingTimeoutTests(unittest.TestCase):
                 res = self._ring(svc)
             self.assertEqual((res["hangup"], res["talking"], res["final"]), (False, False, False), answer)
             self.assertNotIn("disposition", res)
+            # Плечо идёт — телефон спросит снова через RING_RETRY_AFTER_SEC, а не бросит автосброс.
+            self.assertEqual(res["retry_after_sec"], dial_service.RING_RETRY_AFTER_SEC, answer)
             self.assertEqual(client.calls, asked)
             self.assertEqual(cur.sql_with(self.MARK), [], answer)
             self.assertEqual(finished, [])
@@ -2176,6 +2189,19 @@ class RingTimeoutTests(unittest.TestCase):
             self._ring(svc, 'att-x')
         self.assertEqual(ctx.exception.status, 404)
         self.assertEqual(client.calls, [])
+
+    def test_department_switched_off_answers_at_once(self):
+        # Отдел выключил автосброс (0 гудков) посреди звонка: телефон прочёл срок раньше и всё же
+        # спросил — «не класть» сразу, без Binotel и без отметки. Это выключатель на случай беды.
+        svc, cur, client, finished = self._event_svc(
+            ('leg_answered', 'gc-1', '', False), ('leg_answered', '', False, None, 't', None, 't'),
+            {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'CALLING'}}, rings=(0,))
+        with self.assertLogs('dial_list.service', level='INFO') as logs:
+            res = self._ring(svc, ring_sec=34)
+        self.assertEqual(res, {"attempt_id": "att-1", "final": False, "cancelled": False,
+                               "outcome_required": None, "hangup": False, "talking": False})
+        self.assertEqual((client.calls, cur.sql_with(self.MARK), finished), ([], [], []))
+        self.assertTrue(any('автосброс выключен' in line for line in logs.output), logs.output)
 
     # ── ended с ring_timeout: телефон положил плечо сам ──────────────────────
     def _ended_svc(self, row, decision, answer=None):
@@ -2767,6 +2793,127 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         with self._now(), self.assertLogs('dial_list.service', level='ERROR'):
             svc.start_call(7, 'asg-1')
         self.assertEqual(len(client.calls), 1)
+
+
+class CallErrorKindTests(unittest.TestCase):
+    """Почему не удался звонок (13.10.2026). В 19:04 сервер 40 с не мог соединиться с Binotel: оператор
+    ждал 41 с, получил «обратитесь к руководителю», строка — «Ошибка АТС», а попытка ушла водителю в
+    счёт. Звонок, который не начинался не по вине водителя (линия оператора, связь с Binotel, код 105,
+    лимит), водителю больше не в счёт, а оператор видит, что делать."""
+
+    # Тексты api_error из базы за три недели (номера уже скрыты).
+    CASES = (
+        ("Binotel calls/internal-number-to-external-number status='error' code=150: Can't call to the ext", 'line'),
+        ("HTTPSConnectionPool(host='api.binotel.com', port=443): Read timed out. (read timeout=40)", 'network'),
+        ("HTTPSConnectionPool(host='api.binotel.com', port=443): Max retries exceeded with url: "
+         "/api/4.0/calls/internal-number-to-external-number.json (Caused by ConnectTimeoutError("
+         "<HTTPSConnection(host='api.binotel.com', port=443) at 0x…a35d0>, 'Connection to api.binotel.com timed out. "
+         "(connect timeout=40)'))", 'network'),
+        ("Binotel calls/internal-number-to-external-number status='error' code=105: Something went wrong", 'pbx_busy'),
+        ("Binotel calls/internal-number-to-external-number status='error' code=106: Requests are too frequent", 'rate'),
+        ("Binotel calls/internal-number-to-external-number status='error' code=104: Нет доступа", 'pbx'),
+        ("Binotel HTTP 502: Bad Gateway", 'pbx'),
+        ("подключение к Binotel не настроено", 'pbx'),
+        ("", 'pbx'),
+    )
+
+    def test_kind_from_stored_text(self):
+        for text, kind in self.CASES:
+            self.assertEqual(dial_service.call_error_kind(None, text), kind, text)
+        self.assertEqual(set(dial_service.CALL_ERRORS_NOT_COUNTED), {'line', 'network', 'pbx_busy', 'rate'})
+
+    def test_kind_from_exception(self):
+        import requests
+        import urllib3
+        from binotel import client as binotel_client
+        refused = requests.exceptions.ConnectionError(
+            urllib3.exceptions.MaxRetryError(None, '/x', urllib3.exceptions.NewConnectionError(None, 'refused')))
+        aborted = requests.exceptions.ConnectionError(
+            urllib3.exceptions.ProtocolError('Connection aborted.', ConnectionResetError()))
+        for exc, kind in ((requests.exceptions.ConnectTimeout('connect'), 'network'),
+                          (requests.exceptions.ReadTimeout('read'), 'network'),
+                          (refused, 'network'),
+                          (binotel_client.RateLimited('too frequent', retry_after=3), 'rate'),
+                          (RuntimeError("Binotel x status='error' code=105: Something went wrong"), 'pbx_busy'),
+                          (RuntimeError("Binotel x status='error' code=150: Can't call to the ext"), 'line'),
+                          (RuntimeError("Binotel x status='error' code=104: y"), 'pbx')):
+            self.assertEqual(dial_service.call_error_kind(exc), kind, repr(exc))
+        # Обрыв уже открытого соединения — не «не соединились»: запрос мог уйти (повторять нельзя).
+        self.assertFalse(binotel_client.connect_failed(aborted))
+        self.assertTrue(binotel_client.connect_failed(refused))
+
+    def _start(self, error):
+        helper = SignedDriversNeverIssuedTests('test_due_rule')
+        svc, cur, db, checker, client = helper._call(configured=False)
+
+        def fail(internal_number, external_number, **extra):
+            client.calls.append((internal_number, external_number))
+            raise error
+
+        client.originate_internal_to_external = fail
+        svc._line_status_hint = lambda dep, num: 'Обычно линия возвращается в сеть со следующей регистрацией.'
+        with self.assertLogs('dial_list.service', level='WARNING'), \
+                self.assertRaises(dial_service.DialListError) as ctx:
+            svc.start_call(7, 'asg-1')
+        return ctx.exception, cur
+
+    def test_start_call_kinds_texts_and_counting(self):
+        import requests
+        from binotel import client as binotel_client
+        cases = (
+            (requests.exceptions.ConnectTimeout('connect timeout=5'), 'network', 502, 'Нет связи с АТС', False),
+            (requests.exceptions.ReadTimeout('read timeout=40'), 'network', 502, 'АТС не ответила за 40 секунд',
+             False),
+            (RuntimeError("Binotel x status='error' code=105: Something went wrong"), 'pbx_busy', 502,
+             'попробуйте ещё раз через несколько секунд', False),
+            (binotel_client.RateLimited("Binotel x status='error' code=106: too frequent", retry_after=3), 'rate',
+             429, 'слишком частые запросы', False),
+            (RuntimeError("Binotel x status='error' code=150: Can't call to the ext"), 'line', 409, 'не на связи',
+             False),
+            (RuntimeError("Binotel x status='error' code=104: Нет доступа"), 'pbx', 502, 'обратитесь к руководителю',
+             True),
+        )
+        for error, kind, status, text, counted in cases:
+            exc, cur = self._start(error)
+            self.assertEqual((exc.kind, exc.status), (kind, status), repr(error))
+            self.assertIn(text, str(exc), repr(error))
+            self.assertNotIn('77010000001', str(exc))
+            # Не в счёт водителю — попытку у строки откатили; в счёт — нет.
+            rolled = cur.sql_with('SET attempts = GREATEST(attempts - 1, 0)')
+            self.assertEqual(len(rolled), 0 if counted else 1, repr(error))
+            failed = cur.sql_with("SET state = 'failed', api_error = %s")
+            self.assertEqual(len(failed), 1, repr(error))
+            self.assertNotIn('77010000001', failed[0][1][0])
+
+    def test_route_returns_error_kind(self):
+        class Svc:
+            def start_call(self, user_id, assignment_id):
+                raise dial_service.DialListError('Нет связи с АТС — попробуйте позвонить ещё раз через полминуты',
+                                                 502, kind='network')
+
+        resp = _phone_client(Svc()).post('/api/operator/dial_list/items/asg-1/call', json={})
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(resp.get_json(), {"error": 'Нет связи с АТС — попробуйте позвонить ещё раз через полминуты',
+                                           "error_kind": 'network'})
+        # Ошибка без вида — как раньше, без ключа.
+        class Plain:
+            def start_call(self, user_id, assignment_id):
+                raise dial_service.DialListError('Строка списка не найдена', 404)
+
+        resp = _phone_client(Plain()).post('/api/operator/dial_list/items/asg-1/call', json={})
+        self.assertEqual(resp.get_json(), {"error": 'Строка списка не найдена'})
+
+    def test_portion_row_tells_the_kind_only_for_a_failed_last_attempt(self):
+        base = ('asg-1', 1, 'Иванов', 'issued', '', 0, None, 'att-1', 'failed', '', None, None, None, None,
+                False, None, 'lead-1', None, '', None, None, None)
+        network = base + ("HTTPSConnectionPool(host='api.binotel.com', port=443): Read timed out. (read timeout=40)",)
+        busy = base + ("Binotel x status='error' code=105: Something went wrong",)
+        done = base[:8] + ('finished',) + base[9:] + ('',)
+        cur = _RoutedCursor([('WHERE a.portion_id = %s', {'all': [network, busy, done]})])
+        items = dial_service.DialListService(db=None)._portion_items(cur, 'portion-1')
+        self.assertEqual([i.get("last_error_kind") for i in items], ['network', 'pbx_busy', None])
+        # Сам текст отказа телефону не уходит.
+        self.assertNotIn('HTTPSConnectionPool', json.dumps(items, ensure_ascii=False, default=str))
 
 
 class RecallTests(unittest.TestCase):
@@ -3559,31 +3706,44 @@ def _phone_client(svc):
 
 
 class PhoneVersionGateTests(unittest.TestCase):
-    """Версия телефона (владелец, 12.10.2026). Выпущенный 3.22.33 на вопрос «класть ли плечо на
-    гудках» ждёт ответа сервера пять секунд, а молчание и ошибку понимает как «класть»: Binotel
-    отвечал позже — и 12.10.2026 оборвались 52 разговора. Телефон с 3.22.34 называет версию
-    заголовком X-ICore-Phone-Version и сам слышит речь на линии. Запрос без заголовка с
-    разборчивой версией — это 3.22.33: автосброса ему нет (ring_timeout_sec: 0), а на вопрос
-    ring_timeout ответ — сразу «не класть», без базы и без Binotel.
+    """Версия телефона (владелец, 12.10.2026) — заголовок X-ICore-Phone-Version с 3.22.34.
 
-    Решает НАЛИЧИЕ заголовка, а не номер (владелец, 13.10.2026): выпущенные телефоны заголовка
-    не шлют вовсе, а сборка с защитой до выпуска называет себя ещё «3.22.33»."""
+    Автосброс на гудках (простой таймер, 13.10.2026) — только телефону 3.22.35 и новее: в срок он
+    спрашивает сервер и кладёт плечо только по явному hangup: true. 3.22.33 (заголовка нет) и
+    3.22.34 на вопрос «класть ли плечо» ждут ответа пять секунд, а молчание и ошибку понимают как
+    «класть» — 12.10.2026 так оборвались 52 разговора. Им ring_timeout_sec: 0, а на вопрос
+    ring_timeout — сразу «не класть», без базы и без Binotel.
+
+    Наличие заголовка (phone_guards_speech) решает только смысл active_attempt у 3.22.33."""
 
     HEADER = 'X-ICore-Phone-Version'
     # Заголовка нет либо версию в нём не разобрать — как у выпущенного 3.22.33.
     UNGUARDED = (None, '', '   ', 'iCORE Phone', 'мусор', '3', '3.22.34-beta', 'v3.22.34', '3.22.x', '3..34',
                  '.3.22.34', '3,22,34', '1.2.3.4.5', '３.２２.３４', 32234, ['3.22.34'])
-    # Любая разборчивая версия — телефон с защитой, номер не важен: и «3.22.33» сборки до выпуска.
+    # Любая разборчивая версия — заголовок есть.
     GUARDED = ('3.22.33', '3.22.34', ' 3.22.34 ', '3.22.35', '3.22.100', '3.23.0', '3.23', '3.22', '3.100.0',
                '4.0', '4.0.0', '10.0.0', '3.22.34.1', '3.9.99', '2.99.99')
+    # С простым таймером — 3.22.35 и новее.
+    TIMER = ('3.22.35', ' 3.22.35 ', '3.22.35.0', '3.22.35.1', '3.22.36', '3.22.100', '3.23', '3.23.0',
+             '3.100.0', '4.0', '4.0.0', '10.0.0')
+    NO_TIMER = UNGUARDED + ('3.22.33', '3.22.34', ' 3.22.34 ', '3.22', '3.22.34.1', '3.22.34.99', '3.9.99',
+                            '2.99.99', '3.21.99')
 
     def test_header_name_and_no_version_threshold(self):
         self.assertEqual(dial_service.PHONE_VERSION_HEADER, self.HEADER)
-        # Порога версии нет — только наличие заголовка.
+        # У наличия заголовка порога версии нет.
         self.assertFalse(hasattr(dial_service, 'SPEECH_GUARD_PHONE_VERSION'))
         src = inspect.getsource(dial_service.phone_guards_speech)
         self.assertNotIn('>=', src)
         self.assertNotIn('(3, 22', src)
+
+    def test_ring_timer_needs_3_22_35(self):
+        self.assertEqual(dial_service.RING_TIMER_MIN_VERSION, (3, 22, 35))
+        timer = dial_service.phone_has_ring_timer
+        for header in self.TIMER:
+            self.assertIs(timer(header), True, repr(header))
+        for header in self.NO_TIMER:
+            self.assertIs(timer(header), False, repr(header))
 
     def test_version_is_parsed_strictly(self):
         parse = dial_service.parse_phone_version
@@ -3617,8 +3777,8 @@ class PhoneVersionGateTests(unittest.TestCase):
         svc.reconcile = lambda ctx: None
         return svc, cur
 
-    def test_state_gives_auto_reset_only_to_phone_with_speech_guard(self):
-        for header in self.UNGUARDED:
+    def test_state_gives_auto_reset_only_to_phone_with_ring_timer(self):
+        for header in self.NO_TIMER:
             svc, cur = self._state_svc()
             state = svc.get_state(7, phone_version=header)
             self.assertEqual(state["ring_timeout_sec"], 0, repr(header))
@@ -3627,9 +3787,9 @@ class PhoneVersionGateTests(unittest.TestCase):
             # Остальное состояние — как у всех.
             self.assertEqual((state["enabled"], state["leg_timeout_sec"], state["outcomes"][0]["name"]),
                              (True, dial_service.LEG_TIMEOUT_SEC, 'Отказ'))
-        for header in self.GUARDED:
+        for header in self.TIMER:
             svc, cur = self._state_svc()
-            self.assertEqual(svc.get_state(7, phone_version=header)["ring_timeout_sec"], 25, repr(header))
+            self.assertEqual(svc.get_state(7, phone_version=header)["ring_timeout_sec"], 34, repr(header))
             self.assertEqual(len(cur.sql_with('FROM sip_department_config')), 1, repr(header))
 
     def test_no_version_given_means_released_phone(self):
@@ -3642,11 +3802,11 @@ class PhoneVersionGateTests(unittest.TestCase):
             params = inspect.signature(getattr(dial_service.DialListService, name)).parameters
             self.assertIsNone(params['phone_version'].default, name)
 
-    def test_department_setting_still_rules_the_guarded_phone(self):
-        # Отдел выключил сброс (0 гудков) или задал свои — телефону с защитой уходит это.
-        for rings, expected in (((0,), 0), ((3,), 15), ((None,), 25), (None, 25)):
+    def test_department_setting_still_rules_the_timer_phone(self):
+        # Отдел выключил сброс (0 гудков) или задал свои — телефону с таймером уходит это (+ поправка).
+        for rings, expected in (((0,), 0), ((3,), 24), ((None,), 34), (None, 34)):
             svc, _ = self._state_svc(rings)
-            self.assertEqual(svc.get_state(7, phone_version=GUARDED_PHONE)["ring_timeout_sec"], expected, rings)
+            self.assertEqual(svc.get_state(7, phone_version=TIMER_PHONE)["ring_timeout_sec"], expected, rings)
 
     def test_next_and_recall_answers_follow_the_same_gate(self):
         # «Ещё» и «Позвонить ещё раз» отвечают состоянием — телефон читает из него
@@ -3678,13 +3838,13 @@ class PhoneVersionGateTests(unittest.TestCase):
 
         class _NoDb:
             def _get_cursor(self):
-                test.fail('ответ телефону без защиты по речи не должен ходить в базу')
+                test.fail('ответ телефону без простого таймера не должен ходить в базу')
 
         def no_context(uid):
-            test.fail('ответ телефону без защиты по речи не должен читать контекст оператора')
+            test.fail('ответ телефону без простого таймера не должен читать контекст оператора')
 
         def no_client(dep):
-            test.fail('ответ телефону без защиты по речи не должен спрашивать Binotel')
+            test.fail('ответ телефону без простого таймера не должен спрашивать Binotel')
 
         svc = dial_service.DialListService(db=_NoDb())
         svc.operator_context = no_context
@@ -3693,7 +3853,7 @@ class PhoneVersionGateTests(unittest.TestCase):
 
     def test_released_phone_question_is_answered_at_once_without_db_or_binotel(self):
         svc = self._no_db_svc()
-        for header in self.UNGUARDED:
+        for header in self.NO_TIMER:
             with self.assertLogs('dial_list.service', level='INFO') as logs:
                 res = svc.phone_event(7, 'att-1', 'ring_timeout', ring_sec=25, phone_version=header)
             # Ровно то, что читает 3.22.33: hangup — класть ли, talking — говорит ли водитель.
@@ -3725,10 +3885,9 @@ class PhoneVersionGateTests(unittest.TestCase):
         self.assertEqual((res["hangup"], res["talking"]), (False, False))
         self.assertEqual((cur.executed, client.calls, finished), ([], [], []))
 
-    def test_guarded_phone_question_still_goes_to_binotel(self):
+    def test_timer_phone_question_still_goes_to_binotel(self):
         helper = RingTimeoutTests('test_schema_and_event')
-        # «3.22.33» в заголовке — сборка с защитой до выпуска: выпущенный 3.22.33 заголовка не шлёт.
-        for header in ('3.22.33', '3.22.34', '3.23.0', '4.1'):
+        for header in ('3.22.35', '3.22.35.0', '3.23.0', '4.1'):
             svc, cur, client, finished = helper._event_svc(
                 ('leg_answered', 'gc-1', '', False), ('leg_answered', '', False, None, 't', None, 't'),
                 {'gc-1': {'general_call_id': 'gc-1', 'disposition': 'CALLING'}})
@@ -3785,30 +3944,31 @@ class PhoneVersionGateTests(unittest.TestCase):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         self.assertIn('request.headers.get(PHONE_VERSION_HEADER)', src)
         self.assertEqual(src.count('phone_version=_phone_version()'), 4)
-        for own_rule in ('phone_guards_speech(', 'parse_phone_version(', 'SPEECH_GUARD_PHONE_VERSION'):
+        for own_rule in ('phone_guards_speech(', 'parse_phone_version(', 'SPEECH_GUARD_PHONE_VERSION',
+                         'phone_has_ring_timer(', 'RING_TIMER_MIN_VERSION'):
             self.assertNotIn(own_rule, src)
 
-    def test_state_route_gates_on_the_header_presence(self):
-        # Весь путь GET /api/operator/dial_list с настоящим сервисом — пять случаев из задачи
-        # владельца: без заголовка и с мусором — 0 (выпущенный 3.22.33), с любой разборчивой
-        # версией — настройка отдела (по умолчанию пять гудков, 25 с).
-        for headers, expected in (({}, 0), ({self.HEADER: 'мусор'}, 0), ({self.HEADER: '3.22.33'}, 25),
-                                  ({self.HEADER: '3.22.34'}, 25), ({self.HEADER: '3.23.0'}, 25)):
+    def test_state_route_gates_on_the_version(self):
+        # Весь путь GET /api/operator/dial_list с настоящим сервисом: без заголовка, с мусором, 3.22.33
+        # и 3.22.34 — 0; 3.22.35 и новее — настройка отдела (по умолчанию пять гудков, 34 с).
+        for headers, expected in (({}, 0), ({self.HEADER: 'мусор'}, 0), ({self.HEADER: '3.22.33'}, 0),
+                                  ({self.HEADER: '3.22.34'}, 0), ({self.HEADER: '3.22.35'}, 34),
+                                  ({self.HEADER: '3.23.0'}, 34)):
             svc, cur = self._state_svc()
             resp = _phone_client(svc).get('/api/operator/dial_list', headers=headers)
             self.assertEqual(resp.status_code, 200, headers)
             body = resp.get_json()
             self.assertEqual((body["status"], body["ring_timeout_sec"]), ("success", expected), headers)
-            # Настройку отдела читаем только для телефона с заголовком.
+            # Настройку отдела читаем только для телефона с таймером.
             self.assertEqual(len(cur.sql_with('FROM sip_department_config')), 1 if expected else 0, headers)
 
     def test_released_phone_gets_200_through_the_real_route(self):
         # Весь путь ручки с настоящим сервисом без базы: 3.22.33 (заголовка нет или он
-        # неразборчив) получает 200 и «не класть».
+        # неразборчив) и 3.22.34 получают 200 и «не класть».
         client = _phone_client(self._no_db_svc())
         url = '/api/operator/dial_list/attempts/att-1/phone_event'
         for headers in ({}, {self.HEADER: ''}, {self.HEADER: 'iCORE Phone'}, {self.HEADER: 'v3.22.34'},
-                        {self.HEADER: 'мусор'}):
+                        {self.HEADER: 'мусор'}, {self.HEADER: '3.22.34'}):
             with self.assertLogs('dial_list.service', level='INFO'):
                 resp = client.post(url, json={"event": "ring_timeout", "ring_sec": 25}, headers=headers)
             self.assertEqual(resp.status_code, 200, headers)
@@ -3820,44 +3980,9 @@ class PhoneVersionGateTests(unittest.TestCase):
 
 
 class StateAudioSettingsTests(unittest.TestCase):
-    """Поля состояния для анализа звука на телефоне с 3.22.34 (владелец, 12.10.2026): speech_guard
-    и announcement_ms — выключатели в окружении сервера, без выпуска нового телефона."""
-
-    def _env(self, **values):
-        """Окружение с заданными переменными; None — переменной нет."""
-        patcher = unittest.mock.patch.dict(os.environ, {k: v for k, v in values.items() if v is not None})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        for key, value in values.items():
-            if value is None:
-                os.environ.pop(key, None)
-
-    def test_announcement_ms_default_env_zero_and_garbage(self):
-        name = dial_service.ANNOUNCEMENT_MS_ENV
-        self.assertEqual((name, dial_service.ANNOUNCEMENT_MS_DEFAULT, dial_service.ANNOUNCEMENT_MS_MAX),
-                         ('DIAL_LIST_ANNOUNCEMENT_MS', 3500, 60000))
-        cases = ((None, 3500), ('', 3500), ('   ', 3500), ('0', 0), ('1', 1), ('2500', 2500), (' 4000 ', 4000),
-                 ('60000', 60000), ('60001', 3500), ('-1', 3500), ('много', 3500), ('3500.5', 3500), ('3,5', 3500),
-                 ('0x10', 3500), ('1e3', 3500))
-        for raw, expected in cases:
-            with unittest.mock.patch.dict(os.environ):
-                os.environ.pop(name, None)
-                if raw is not None:
-                    os.environ[name] = raw
-                self.assertEqual(dial_service.announcement_ms(), expected, repr(raw))
-
-    def test_speech_guard_is_on_unless_switched_off(self):
-        name = dial_service.SPEECH_GUARD_ENV
-        self.assertEqual(name, 'DIAL_LIST_SPEECH_GUARD')
-        cases = ((None, True), ('', True), ('1', True), ('true', True), ('yes', True), ('on', True),
-                 ('что-то', True), ('0', False), ('false', False), ('no', False), ('off', False),
-                 (' OFF ', False), ('False', False), ('No', False))
-        for raw, expected in cases:
-            with unittest.mock.patch.dict(os.environ):
-                os.environ.pop(name, None)
-                if raw is not None:
-                    os.environ[name] = raw
-                self.assertIs(dial_service.speech_guard_enabled(), expected, repr(raw))
+    """Анализ звука на плече выключен насовсем (владелец, 13.10.2026: «нестабильная вещь —
+    отключить»): ключи его настроек в состоянии — только для телефона 3.22.34 и всегда «выключено»,
+    а переменные окружения, которыми их выключали, больше не читаются."""
 
     def _state(self, phone_version=GUARDED_PHONE):
         cur = _RoutedCursor([('FROM dial_list_outcomes o', {'all': [RingTimeoutTests.OUTCOME]})])
@@ -3866,67 +3991,27 @@ class StateAudioSettingsTests(unittest.TestCase):
         svc.reconcile = lambda ctx: None
         return svc.get_state(7, phone_version=phone_version)
 
-    def test_state_carries_both_settings(self):
-        self._env(DIAL_LIST_ANNOUNCEMENT_MS=None, DIAL_LIST_SPEECH_GUARD=None)
-        state = self._state()
-        self.assertEqual((state["speech_guard"], state["announcement_ms"]), (True, 3500))
-        self.assertIs(type(state["speech_guard"]), bool)
-        self.assertIs(type(state["announcement_ms"]), int)
-        # Ключи есть и у выпущенного телефона — он их просто не читает.
-        old = self._state(phone_version=None)
-        self.assertEqual((old["speech_guard"], old["announcement_ms"], old["ring_timeout_sec"]), (True, 3500, 0))
+    def test_state_always_says_sound_is_off(self):
+        self.assertEqual(dial_service.SOUND_OFF_STATE, {"speech_guard": False, "announcement_ms": 0,
+                                                        "announcement_sit": False, "announcement_mode": "off"})
+        env = {'DIAL_LIST_SPEECH_GUARD': '1', 'DIAL_LIST_ANNOUNCEMENT_MS': '3500',
+               'DIAL_LIST_ANNOUNCEMENT_SIT': '1', 'DIAL_LIST_ANNOUNCEMENT_MODE': 'auto'}
+        for phone in (GUARDED_PHONE, TIMER_PHONE, None):
+            with unittest.mock.patch.dict(os.environ, env):
+                state = self._state(phone)
+            got = {key: state[key] for key in dial_service.SOUND_OFF_STATE}
+            self.assertEqual(got, dial_service.SOUND_OFF_STATE, phone)
+            self.assertIs(type(state["speech_guard"]), bool)
+            self.assertIs(type(state["announcement_ms"]), int)
 
-    def test_state_follows_environment(self):
-        self._env(DIAL_LIST_ANNOUNCEMENT_MS='0', DIAL_LIST_SPEECH_GUARD='off')
-        state = self._state()
-        self.assertEqual((state["speech_guard"], state["announcement_ms"]), (False, 0))
-        # Выключатель защиты автосброс сам не выключает: гудки — настройка отдела.
-        self.assertEqual(state["ring_timeout_sec"], 25)
-        self._env(DIAL_LIST_ANNOUNCEMENT_MS='сломано', DIAL_LIST_SPEECH_GUARD='1')
-        state = self._state()
-        self.assertEqual((state["speech_guard"], state["announcement_ms"]), (True, 3500))
-
-    # ── ревью 13.10.2026: SIT — свой выключатель, распознанное по речи — режим ──
-    def test_announcement_sit_is_on_unless_switched_off(self):
-        name = dial_service.ANNOUNCEMENT_SIT_ENV
-        self.assertEqual(name, 'DIAL_LIST_ANNOUNCEMENT_SIT')
-        cases = ((None, True), ('', True), ('1', True), ('true', True), ('мусор', True), ('0', False),
-                 ('false', False), (' NO ', False), ('off', False))
-        for raw, expected in cases:
-            self._env(**{name: raw})
-            self.assertIs(dial_service.announcement_sit_enabled(), expected, repr(raw))
-
-    def test_announcement_mode_default_values_and_garbage(self):
-        name = dial_service.ANNOUNCEMENT_MODE_ENV
-        self.assertEqual((name, dial_service.ANNOUNCEMENT_MODES, dial_service.ANNOUNCEMENT_MODE_DEFAULT),
-                         ('DIAL_LIST_ANNOUNCEMENT_MODE', ('auto', 'suggest', 'off'), 'suggest'))
-        cases = ((None, 'suggest'), ('', 'suggest'), ('auto', 'auto'), (' AUTO ', 'auto'), ('Suggest', 'suggest'),
-                 ('off', 'off'), ('on', 'suggest'), ('1', 'suggest'), ('класть', 'suggest'))
-        for raw, expected in cases:
-            self._env(**{name: raw, dial_service.ANNOUNCEMENT_MS_ENV: None})
-            self.assertEqual(dial_service.announcement_mode(), expected, repr(raw))
-        # announcement_ms=0 выключает распознавание по речи целиком — режим off, что бы ни стояло.
-        self._env(**{name: 'auto', dial_service.ANNOUNCEMENT_MS_ENV: '0'})
-        self.assertEqual(dial_service.announcement_mode(), 'off')
-        self.assertEqual(dial_service.announcement_mode(ms=2000), 'auto')
-        self.assertEqual(dial_service.announcement_mode(ms=0), 'off')
-
-    def test_state_carries_sit_and_mode(self):
-        # Ключи — каждому телефону; прежний сервер их не шлёт, и телефон тогда считает sit=true и
-        # suggest — по умолчанию сервер отвечает так же.
-        self._env(DIAL_LIST_ANNOUNCEMENT_MS=None, DIAL_LIST_ANNOUNCEMENT_SIT=None, DIAL_LIST_ANNOUNCEMENT_MODE=None)
-        state = self._state()
-        self.assertEqual((state["announcement_sit"], state["announcement_mode"], state["announcement_ms"]),
-                         (True, 'suggest', 3500))
-        self.assertIs(type(state["announcement_sit"]), bool)
-        self._env(DIAL_LIST_ANNOUNCEMENT_SIT='0', DIAL_LIST_ANNOUNCEMENT_MODE='auto')
-        state = self._state(phone_version=None)
-        self.assertEqual((state["announcement_sit"], state["announcement_mode"]), (False, 'auto'))
-        # SIT от announcement_ms больше не зависит.
-        self._env(DIAL_LIST_ANNOUNCEMENT_MS='0', DIAL_LIST_ANNOUNCEMENT_SIT='1')
-        state = self._state()
-        self.assertEqual((state["announcement_ms"], state["announcement_sit"], state["announcement_mode"]),
-                         (0, True, 'off'))
+    def test_environment_switches_are_gone(self):
+        for name in ('announcement_ms', 'announcement_sit_enabled', 'announcement_mode', 'speech_guard_enabled',
+                     'ANNOUNCEMENT_MS_ENV', 'ANNOUNCEMENT_SIT_ENV', 'ANNOUNCEMENT_MODE_ENV', 'SPEECH_GUARD_ENV'):
+            self.assertFalse(hasattr(dial_service, name), name)
+        src = inspect.getsource(dial_service)
+        for env_name in ('DIAL_LIST_SPEECH_GUARD"', 'DIAL_LIST_ANNOUNCEMENT_MS"', 'DIAL_LIST_ANNOUNCEMENT_SIT"',
+                         'DIAL_LIST_ANNOUNCEMENT_MODE"'):
+            self.assertNotIn(env_name, src)
 
 
 class PhoneHeardTests(unittest.TestCase):
@@ -4710,7 +4795,7 @@ class AnnouncementTests(unittest.TestCase):
         self.assertEqual([i["last_attempt"]["auto_hangup"] for i in items], ['announcement', 'ring_timeout', ''])
         sql = cur.executed[0][0]
         self.assertIn('os.name, t.auto_hangup, ', sql)
-        self.assertIn('cancelled, operator_hangup_at, outcome_subtype_id, auto_hangup\n', sql)
+        self.assertIn('cancelled, operator_hangup_at, outcome_subtype_id, auto_hangup, api_error\n', sql)
         from datetime import datetime as dt, timezone as tz
         at = dt(2026, 10, 12, 9, tzinfo=tz.utc)
         worked = WorkedTabsTests('test_row_lands_on_exactly_one_place')
@@ -4890,8 +4975,10 @@ class LastCommentTests(unittest.TestCase):
                          ('Петров', 'lead-2', 'Дорого'))
         sql, params = cur.executed[0]
         select = ' '.join(sql[:sql.index('FROM dial_list_assignments a')].split())
+        # r[22] — текст отказа АТС последней попытки (13.10.2026): наружу — только его вид.
         self.assertTrue(select.endswith('a.lead_id, os.name, t.auto_hangup, '
-                                        + dial_service.DialListService._LAST_COMMENT_COLUMNS), select)
+                                        + dial_service.DialListService._LAST_COMMENT_COLUMNS + ', t.api_error'),
+                        select)
         self.assertEqual(params, ('portion-1',))
         self.assertNotIn('"comment"', inspect.getsource(dial_service.DialListService._portion_items))
 
@@ -5386,9 +5473,10 @@ class AnnouncementStatsTests(unittest.TestCase):
         ]
         cur = _RoutedCursor([('t.announcement_suspected IS NOT NULL', {'all': rows})])
         svc = dial_service.DialListService(db=_routed_db(cur))
-        with unittest.mock.patch.dict(os.environ, {dial_service.ANNOUNCEMENT_MODE_ENV: 'auto',
-                                                   dial_service.ANNOUNCEMENT_MS_ENV: '4000',
-                                                   dial_service.ANNOUNCEMENT_SIT_ENV: 'off'}):
+        # Прежние переменные окружения больше ни на что не влияют: разбор звука выключен (13.10.2026).
+        with unittest.mock.patch.dict(os.environ, {'DIAL_LIST_ANNOUNCEMENT_MODE': 'auto',
+                                                   'DIAL_LIST_ANNOUNCEMENT_MS': '4000',
+                                                   'DIAL_LIST_ANNOUNCEMENT_SIT': 'off'}):
             stats = svc.announcement_stats(1954)
         self.assertEqual(cur.executed[0][1], {"department_id": 1954, "days": 14, "long_sec": 10})
         self.assertEqual((stats["analysed"], stats["suspected"]), (34, 18))
@@ -5402,8 +5490,8 @@ class AnnouncementStatsTests(unittest.TestCase):
         self.assertEqual((stats["talked_after"], stats["answered_long"], stats["network_missed"]), (1, 1, 5))
         self.assertEqual(stats["dispositions"][:2], [{"disposition": 'ANSWER', "count": 3},
                                                      {"disposition": 'BUSY', "count": 3}])
-        self.assertEqual(stats["settings"], {"announcement_mode": 'auto', "announcement_sit": False,
-                                             "announcement_ms": 4000})
+        self.assertEqual(stats["settings"], {"announcement_mode": 'off', "announcement_sit": False,
+                                             "announcement_ms": 0})
         # Ничего не замерено — проценты не придумываем.
         empty = dial_service.DialListService(db=_routed_db(_RoutedCursor([]))).announcement_stats(1954, days='30')
         self.assertEqual((empty["analysed"], empty["precision"]["percent"], empty["days"]), (0, None, 30))

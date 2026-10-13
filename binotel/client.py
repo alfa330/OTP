@@ -55,6 +55,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
+import urllib3
 
 try:
     from zoneinfo import ZoneInfo
@@ -66,7 +67,29 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TZ = "Asia/Almaty"
 DEFAULT_API_URL = "https://api.binotel.com/api/4.0"
-HTTP_TIMEOUT = 40
+# Таймаут HTTP — отдельно на соединение и на ответ (13.10.2026). Ответа click-to-call ждём до
+# 40 с: Binotel отвечает, когда линия оператора ответила или отказала (отказ, код 150, приходит
+# после ~30 с звонков на линию). А соединение с api.binotel.com — доли секунды, и когда сеть до
+# Binotel пропадала, запрос висел все 40 с: 13.10.2026 в 19:04 двое операторов ждали по 41 с и
+# получили «обратитесь к руководителю». Не соединились за HTTP_CONNECT_TIMEOUT — запрос до
+# Binotel не дошёл, и click-to-call его повторяет (ORIGINATE_CONNECT_RETRIES).
+HTTP_CONNECT_TIMEOUT = 5
+HTTP_READ_TIMEOUT = 40
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+# Повторы click-to-call (13.10.2026). Повторять можно только запрос, который заведомо не дошёл
+# до Binotel или который Binotel заведомо не выполнил, — иначе водителю уйдёт второй звонок:
+#   * не соединились (таймаут соединения, отказ в соединении, имя не разрешилось) — запрос не
+#     отправлен: ещё ORIGINATE_CONNECT_RETRIES раз;
+#   * код 105 «Something went wrong», пришедший за ORIGINATE_105_FAST_SEC: все шесть таких отказов
+#     за три недели, сверенные со списком звонков Binotel, звонка не дали, а ручной повтор
+#     оператора через 4–10 с проходил: ещё ORIGINATE_105_RETRIES раз.
+# Паузы перед повторами — ORIGINATE_RETRY_PAUSES. После таймаута ответа (запрос ушёл, ответа нет)
+# и после любого другого ответа Binotel — без повтора.
+ORIGINATE_CONNECT_RETRIES = 2
+ORIGINATE_105_RETRIES = 2
+ORIGINATE_105_FAST_SEC = 10.0
+ORIGINATE_RETRY_PAUSES = (2.0, 3.0)
+_ERROR_CODE_RE = re.compile(r"\bcode=(\d{1,6})\b")
 # Binotel: list-of-calls-by-internal-number-for-period ограничен окном в 7 дней.
 MAX_WINDOW_DAYS = 7
 # list-of-calls-for-period отдаёт ВСЕ звонки компании, но окно строго в одни
@@ -183,6 +206,24 @@ class RateLimited(RuntimeError):
         super().__init__(message or "Binotel: запросы слишком часто (too frequent)")
         self.retry_after = max(0.0, float(retry_after or 0.0))
         self.endpoint = str(endpoint or "")
+
+
+def connect_failed(exc):
+    """Запрос не дошёл до Binotel: не соединились — таймаут соединения, отказ в соединении, имя
+    не разрешилось. Повторять такой запрос безопасно. Обрыв уже открытого соединения
+    («Connection aborted», RemoteDisconnected) и таймаут ответа сюда не входят: запрос мог уйти."""
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        reason = getattr(exc.args[0], "reason", None) if exc.args else None
+        return isinstance(reason, urllib3.exceptions.NewConnectionError)
+    return False
+
+
+def error_code(exc):
+    """Код отказа Binotel из текста ошибки клиента («… code=105: …») или None."""
+    m = _ERROR_CODE_RE.search(str(exc or ""))
+    return int(m.group(1)) if m else None
 
 
 def _endpoint_name(endpoint):
@@ -911,7 +952,10 @@ class BinotelApiClient:
 
         Метод синхронный: Binotel отвечает, когда линия сотрудника ответила или
         отказала, — это секунд десять. Очередь остальных запросов он при этом не
-        держит. max_wait — см. _post (в запрос к Binotel он не попадает)."""
+        держит. max_wait — см. _post (в запрос к Binotel он не попадает).
+
+        Запрос, не дошедший до Binotel (connect_failed), и быстрый отказ с кодом 105 метод
+        повторяет сам (ORIGINATE_*); исключение последней попытки уходит вызывающему как есть."""
         params = {
             "internalNumber": str(internal_number or "").strip(),
             "externalNumber": str(external_number or "").strip(),
@@ -921,7 +965,29 @@ class BinotelApiClient:
         for key, value in extra.items():
             if value is not None:
                 params[key] = value
-        payload = self._request("calls/internal-number-to-external-number", params, max_wait)
+        connect_left, busy_left, retries = ORIGINATE_CONNECT_RETRIES, ORIGINATE_105_RETRIES, 0
+        while True:
+            started = time.monotonic()
+            try:
+                payload = self._request("calls/internal-number-to-external-number", params, max_wait)
+                break
+            except RateLimited:
+                raise
+            except Exception as exc:
+                if connect_failed(exc) and connect_left > 0:
+                    connect_left -= 1
+                    why = "нет соединения с Binotel (%s)" % type(exc).__name__
+                elif (error_code(exc) == 105 and busy_left > 0
+                      and time.monotonic() - started <= ORIGINATE_105_FAST_SEC):
+                    busy_left -= 1
+                    why = "Binotel ответил кодом 105"
+                else:
+                    raise
+            pause = ORIGINATE_RETRY_PAUSES[min(retries, len(ORIGINATE_RETRY_PAUSES) - 1)]
+            retries += 1
+            # Номера в журнал не пишем: ни линии, ни водителя.
+            log.warning("Binotel click-to-call: %s — повтор %d через %.0f с", why, retries, pause)
+            time.sleep(pause)
         gid = payload.get("generalCallID") or payload.get("generalCallId")
         if gid in (None, ""):
             raise RuntimeError(f"Binotel: звонок принят, но generalCallID не вернулся: {str(payload)[:300]}")

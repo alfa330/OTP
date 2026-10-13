@@ -50,8 +50,8 @@ ended не держит ни «Позвонить», ни «Ещё» — тол�
                    нужен и не ставится, в «дозвонились», минуты разговора и успешки такая
                    попытка не идёт (attempt_result, ATTEMPT_TALK_SQL). 'announcement'
                    сильнее 'ring_timeout': поздний сигнал о гудках его не затирает.
-    talk_detected  был ли разговор (по Binotel — /live, ответ на ring_timeout — или по
-                   звуку: собеседник и оператор обменялись репликами). true — разговор
+    talk_detected  был ли разговор (по Binotel — /live, ответ на ring_timeout; у 3.22.34 ещё и
+                   по звуку, пока разбор звука работал). true — разговор
                    был: итог обязателен сразу, кто бы ни положил трубку, исхода от АТС
                    не ждём; отбой оператора тогда не отмена «до ответа» — он был после
                    разговора. Но финальное «не дозвонились» Binotel (занято, не ответил,
@@ -78,14 +78,15 @@ ended не держит ни «Позвонить», ни «Ещё» — тол�
                    'announcement'): недозвон, итога нет, не отмена.
 
 Версия телефона (владелец, 12.10.2026) — заголовок X-ICore-Phone-Version в каждом запросе
-телефона с 3.22.34. У выпущенного 3.22.33 его нет, а его автосброс рвал разговоры: ответ
-Binotel на вопрос «класть ли плечо» приходил позже пяти секунд, которые телефон ждёт.
-Поэтому запросу без заголовка с разборчивой версией (phone_guards_speech) состояние
-отдаёт ring_timeout_sec: 0, а на событие ring_timeout сервер сразу отвечает «не класть»,
-не спрашивая ни базу, ни Binotel. Решает наличие заголовка, а не номер версии: сборка с
-защитой до выпуска называет себя ещё 3.22.33. Телефону с заголовком — настройка отдела,
-как было. И active_attempt запросу без заголовка — в прежнем смысле, вместе с кончившимся
-плечом (ended): 3.22.33 после «Завершить» ждёт по нему решения сервера (_active_attempt).
+телефона с 3.22.34. Автосброс на гудках (простой таймер, 13.10.2026) получает только телефон
+3.22.35 и новее (phone_has_ring_timer): в срок он спрашивает сервер (ring_timeout) и кладёт
+плечо только по явному hangup: true. 3.22.33 и 3.22.34 ответа ждут пять секунд, а молчание
+и ошибку понимают как «класть» — так 12.10.2026 рвались разговоры: им состояние отдаёт
+ring_timeout_sec: 0, а на ring_timeout сервер сразу отвечает «не класть», не спрашивая ни
+базу, ни Binotel. Анализ звука на плече (3.22.34) выключен насовсем: ключи его настроек в
+состоянии — всегда «выключено» (SOUND_OFF_STATE). active_attempt запросу без заголовка — в
+прежнем смысле, вместе с кончившимся плечом (ended): 3.22.33 после «Завершить» ждёт по нему
+решения сервера (_active_attempt).
 
 Комментарии оператора (владелец, 12.10.2026): last_comment, last_comment_label и
 last_comment_outcome — последний непустой комментарий ЭТОГО оператора по водителю, из
@@ -124,6 +125,7 @@ import hmac
 
 import psycopg2
 import psycopg2.errors
+import requests
 from psycopg2.extras import execute_values
 
 from binotel import client as binotel
@@ -208,52 +210,61 @@ RING_TIMEOUT_RINGS_DEFAULT = 5
 RING_TIMEOUT_RINGS_MAX = 20
 RING_SECONDS_PER_RING = 5
 # Версия телефона — заголовок каждого его запроса к iCORE, с 3.22.34. Выпущенный 3.22.33
-# заголовка не шлёт, и защиты автосброса по речи у него нет: 12.10.2026 он оборвал 52
-# разговора — Binotel отвечал на вопрос «класть ли плечо» позже пяти секунд, которые
-# телефон ждёт, либо отвечал «нет данных». Поэтому автосброс получает только телефон,
-# приславший заголовок с разборчивой версией (phone_guards_speech); остальным —
-# ring_timeout_sec: 0 и «не класть» на вопрос ring_timeout. Мусор в заголовке — как его нет.
-# Решает само НАЛИЧИЕ заголовка, а не номер версии (владелец, 13.10.2026): ни один
-# выпущенный телефон заголовка не шлёт, а сборка с защитой до выпуска ещё называет себя
-# 3.22.33 — номер в ней меняет только выпуск. Сравнение номеров отняло бы у неё автосброс.
+# заголовка не шлёт: 12.10.2026 он оборвал 52 разговора — Binotel отвечал на вопрос «класть ли
+# плечо» позже пяти секунд, которые телефон ждёт, либо отвечал «нет данных». Запрос без
+# заголовка с разборчивой версией (phone_guards_speech) — это он. Мусор в заголовке — как его нет.
+# Само НАЛИЧИЕ заголовка решает только это (и active_attempt в прежнем смысле — get_state);
+# автосброс с 13.10.2026 решает номер версии — RING_TIMER_MIN_VERSION ниже.
 PHONE_VERSION_HEADER = "X-ICore-Phone-Version"
 _PHONE_VERSION_RE = re.compile(r"[0-9]{1,5}(?:\.[0-9]{1,5}){1,3}")
-# Настройки анализа звука на плече для телефона (поля состояния), все — переменные
-# окружения сервера: это выключатели без выпуска нового телефона.
-#   announcement_ms — столько миллисекунд подряд должно звучать сообщение сети («абонент
-#     недоступен»), чтобы телефон его распознал по речи; 0 — распознавание по речи выключено
-#     (и у сборок, которые announcement_mode не знают). Мусор и число вне 0..ANNOUNCEMENT_MS_MAX —
-#     по умолчанию.
-#   speech_guard — не класть плечо на гудках, пока на линии речь; 0/false/no/off — выключить.
-#     Без защиты автосброс решает один Binotel, как у 3.22.33, — выключать вместе с гудками
-#     отдела («Настройки SIP», 0 гудков).
-#   announcement_sit — тон SIT (три нарастающих тона перед сообщением сети) → телефон сразу кладёт
-#     плечо: точный признак, отдельный выключатель (ревью 13.10.2026: прежде его выключал только
-#     announcement_ms=0 вместе со всем остальным). 0/false/no/off — выключить, мусор — включено.
-#   announcement_mode — что делать, когда сообщение сети распознано ПО РЕЧИ (долгая речь собеседника
-#     при молчащем операторе), без SIT. Ревью 13.10.2026: так же звучат мелодия вместо гудков
-#     (щипковые, отрывистые ноты, песня с голосом громче музыки) — телефон рвал бы такой звонок на
-#     каждой попытке, и водителю было бы не дозвониться никогда:
-#       auto    — класть плечо сразу, как до ревью (ended с auto_hangup: announcement);
-#       suggest — не класть: карточка звонка подсказывает «Похоже на автоответчик — можно завершить»,
-#                 и отбой оператора при подсказке — тоже сообщение сети (announcement_by: operator,
-#                 недозвон), а не «отменён до ответа»; заговорили (TALKING) — подсказка уходит;
-#       off     — ничего не делать (телефон только пишет в журнал).
-#     По умолчанию suggest, пока владелец не решит по замерам (announcement_stats); мусор — suggest;
-#     announcement_ms=0 — off (один выключатель на все сборки, и на те, что режима не знают).
-ANNOUNCEMENT_MS_ENV = "DIAL_LIST_ANNOUNCEMENT_MS"
-ANNOUNCEMENT_MS_DEFAULT = 3500
-ANNOUNCEMENT_MS_MAX = 60000
-ANNOUNCEMENT_SIT_ENV = "DIAL_LIST_ANNOUNCEMENT_SIT"
-ANNOUNCEMENT_MODE_ENV = "DIAL_LIST_ANNOUNCEMENT_MODE"
-ANNOUNCEMENT_MODES = ("auto", "suggest", "off")
-ANNOUNCEMENT_MODE_DEFAULT = "suggest"
+# Простой таймер автосброса (владелец, 13.10.2026: «если водитель не поднимает трубку 25 с —
+# просто отключать»). Разбор звука на телефоне 3.22.34 ошибался: АТС Binotel в начале каждого
+# звонка ~4 с говорит оператору своё сообщение, и телефон принимал его за речь собеседника —
+# автосброс не сработал за день ни разу, а «Разговор» загорался до ответа водителя (18 звонков из
+# 260). Звук телефон с 3.22.35 не слушает вовсе: в срок он спрашивает сервер (ring_timeout) и
+# кладёт трубку, только когда свежие данные Binotel говорят «ещё набирает» или звонок кончился без
+# ответа; ошибка, молчание и «нет данных» трубку не кладут — телефон спросит снова через
+# retry_after_sec ответа.
+# Срок у телефона — от ответа плеча: RING_LEAD_IN_SEC + гудки × RING_SECONDS_PER_RING. Первые ~4 с
+# плеча — сообщение АТС, ещё ~5 с сеть соединяет водителя (журналы операторов 13.10.2026: первый
+# гудок — на 8–10-й секунде плеча); без поправки «5 гудков» обрывались бы на третьем-четвёртом.
+RING_LEAD_IN_SEC = 9
+# Через столько секунд телефону спросить снова, когда решать не по чему (данных Binotel нет).
+RING_RETRY_AFTER_SEC = 3
+# Автосброс получает только телефон с простым таймером — 3.22.35 и новее. Телефон 3.22.34 при
+# выключенном разборе звука идёт прежним путём 3.22.33: молчание сервера и ошибку он понимает как
+# «класть» — так 12.10.2026 рвались разговоры. Ему, как и телефону без заголовка, —
+# ring_timeout_sec: 0 и «не класть» на вопрос ring_timeout.
+RING_TIMER_MIN_VERSION = (3, 22, 35)
+# Анализ звука на плече выключен насовсем (владелец, 13.10.2026: «нестабильная вещь — отключить»).
+# Ключи состояния speech_guard / announcement_ms / announcement_sit / announcement_mode остаются
+# только для телефона 3.22.34, который ещё стоит у операторов, и всегда «выключено»: отводы звука в
+# микшер он тогда не ставит вовсе. Переменные окружения DIAL_LIST_SPEECH_GUARD,
+# DIAL_LIST_ANNOUNCEMENT_MS, DIAL_LIST_ANNOUNCEMENT_SIT и DIAL_LIST_ANNOUNCEMENT_MODE больше не
+# читаются. Телефон 3.22.35 этих ключей не читает.
+SOUND_OFF_STATE = {"speech_guard": False, "announcement_ms": 0, "announcement_sit": False,
+                   "announcement_mode": "off"}
 # Кто решил, что на линии сообщение сети (ключ announcement_by события ended вместе с auto_hangup
 # 'announcement'; dial_list_attempts.announcement_by): 'auto' — телефон по речи, 'sit' — телефон по
-# тону SIT, 'operator' — оператор по подсказке. Для счёта попытки разницы нет: недозвон, итога нет,
-# не отмена. Разница — для замеров точности распознавания (announcement_stats).
+# тону SIT, 'operator' — оператор по подсказке. Шлёт только 3.22.34, пока его разбор звука работал.
+# Для счёта попытки разницы нет: недозвон, итога нет, не отмена.
 ANNOUNCEMENT_BY_VALUES = ("auto", "sit", "operator")
-SPEECH_GUARD_ENV = "DIAL_LIST_SPEECH_GUARD"
+# Почему не удался звонок (POST …/call → error_kind ответа; last_error_kind строки пачки):
+#   line     — код 150: АТС не достучалась до ЛИНИИ оператора (телефон не на связи);
+#   network  — до Binotel не достучались или он не ответил за 40 с (13.10.2026 19:04): звонка не
+#              было — пять таких случаев сверены со списком звонков Binotel;
+#   pbx_busy — код 105 «Something went wrong»: повтор через секунды проходит (клиент уже повторил);
+#   rate     — код 106: слишком частые запросы;
+#   pbx      — прочие отказы АТС (104 — дозвон по API не включён, неверный ключ, неизвестное) и
+#              ненастроенное подключение: тут нужен руководитель.
+# Водителю в счёт идёт только pbx (раньше — любой отказ, кроме кода 150): в остальных звонок не
+# начинался не по его вине, и попытку у строки откатываем — max_attempts не тратится.
+CALL_ERROR_LINE = "line"
+CALL_ERROR_NETWORK = "network"
+CALL_ERROR_PBX_BUSY = "pbx_busy"
+CALL_ERROR_RATE = "rate"
+CALL_ERROR_PBX = "pbx"
+CALL_ERRORS_NOT_COUNTED = (CALL_ERROR_LINE, CALL_ERROR_NETWORK, CALL_ERROR_PBX_BUSY, CALL_ERROR_RATE)
 # Почему плечо положил сам телефон (dial_list_attempts.auto_hangup, ключ auto_hangup
 # события ended). Сообщение сети сильнее гудков: это всегда недозвон.
 AUTO_HANGUP_RING_TIMEOUT = "ring_timeout"
@@ -474,11 +485,13 @@ def full_access_supervisor(supervisor_department_code):
 
 
 class DialListError(Exception):
-    """Ошибка для человека: текст + HTTP-статус."""
+    """Ошибка для человека: текст + HTTP-статус; kind — вид для телефона (error_kind ответа,
+    у отказа звонка — CALL_ERROR_*), None — без вида."""
 
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, kind=None):
         super().__init__(message)
         self.status = int(status)
+        self.kind = kind
 
 
 def map_disposition(disposition):
@@ -601,8 +614,8 @@ def scrub_digits(text):
 def parse_phone_version(value):
     """Заголовок X-ICore-Phone-Version → версия кортежем чисел, (3, 22, 34), или None:
     заголовка нет либо в нём не «число.число[.число[.число]]». Строго: всё, в чём версию
-    не узнать наверняка, считается её отсутствием — так безопаснее (phone_guards_speech).
-    Для журнала и разбора; решение об автосбросе номер версии не сравнивает."""
+    не узнать наверняка, считается её отсутствием — так безопаснее (phone_guards_speech,
+    phone_has_ring_timer)."""
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -612,39 +625,47 @@ def parse_phone_version(value):
 
 
 def phone_guards_speech(value):
-    """Есть ли у телефона защита автосброса по речи: он прислал заголовок
-    X-ICore-Phone-Version с разборчивой версией — любой, хоть «3.22.33» у сборки до
-    выпуска. Номер не сравниваем: заголовок шлют только телефоны с защитой, ни один
-    выпущенный его не шлёт. Заголовка нет или он неразборчив — это выпущенный 3.22.33:
-    автосброса ему не даём (get_state, phone_event)."""
+    """Прислал ли телефон заголовок X-ICore-Phone-Version с разборчивой версией (3.22.34 и новее).
+    Заголовка нет или он неразборчив — это выпущенный 3.22.33: active_attempt ему — в прежнем
+    смысле, с кончившимся плечом (get_state). Имя — с тех пор, когда заголовок означал защиту
+    автосброса по речи."""
     return parse_phone_version(value) is not None
 
 
-def announcement_ms():
-    """Поле состояния announcement_ms из окружения сервера (ANNOUNCEMENT_MS_ENV)."""
-    raw = (os.getenv(ANNOUNCEMENT_MS_ENV) or "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return ANNOUNCEMENT_MS_DEFAULT
-    return value if 0 <= value <= ANNOUNCEMENT_MS_MAX else ANNOUNCEMENT_MS_DEFAULT
+def phone_has_ring_timer(value):
+    """Телефон с простым таймером автосброса — версия в заголовке не ниже RING_TIMER_MIN_VERSION
+    (3.22.35; «3.22.35.0» и «3.23» — тоже). Только ему — ring_timeout_sec и ответ по делу на
+    вопрос ring_timeout; остальным — 0 и «не класть» (get_state, phone_event)."""
+    version = parse_phone_version(value)
+    return version is not None and version >= RING_TIMER_MIN_VERSION
 
 
-def announcement_sit_enabled():
-    """Поле состояния announcement_sit из окружения сервера (ANNOUNCEMENT_SIT_ENV): класть ли плечо
-    по тону SIT. По умолчанию включено; 0/false/no/off — выключить, мусор — включено."""
-    return (os.getenv(ANNOUNCEMENT_SIT_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
+def call_error_kind(error, text=None):
+    """Почему не удался звонок — CALL_ERROR_* (line | network | pbx_busy | rate | pbx).
 
-
-def announcement_mode(ms=None):
-    """Поле состояния announcement_mode: 'auto' | 'suggest' | 'off' из окружения сервера
-    (ANNOUNCEMENT_MODE_ENV), без учёта регистра; мусор — ANNOUNCEMENT_MODE_DEFAULT. ms — уже
-    прочитанный announcement_ms (по умолчанию — из окружения): 0 — распознавание по речи
-    выключено целиком, режим тогда 'off', что бы ни стояло в переменной."""
-    if (announcement_ms() if ms is None else ms) == 0:
-        return "off"
-    raw = (os.getenv(ANNOUNCEMENT_MODE_ENV) or "").strip().lower()
-    return raw if raw in ANNOUNCEMENT_MODES else ANNOUNCEMENT_MODE_DEFAULT
+    error — исключение click-to-call (или None), text — его текст либо api_error попытки из базы:
+    по тексту вид узнаётся и у попыток, упавших до 13.10.2026."""
+    if isinstance(error, binotel.RateLimited):
+        return CALL_ERROR_RATE
+    if error is not None and binotel.connect_failed(error):
+        return CALL_ERROR_NETWORK
+    if isinstance(error, requests.exceptions.Timeout):
+        return CALL_ERROR_NETWORK
+    raw = str(text if text is not None else (error or ""))
+    lowered = raw.lower()
+    code = binotel_error_code(raw)
+    if code == 150 or "call to the ext" in lowered:
+        return CALL_ERROR_LINE
+    if code == 106 or "too frequent" in lowered:
+        return CALL_ERROR_RATE
+    if code == 105:
+        return CALL_ERROR_PBX_BUSY
+    # Текст исключений requests (база 13.10.2026: «Read timed out. (read timeout=40)», «Max retries
+    # exceeded … ConnectTimeoutError … connect timeout=40»).
+    if code is None and ("timed out" in lowered or "max retries exceeded" in lowered
+                         or "connectionpool" in lowered):
+        return CALL_ERROR_NETWORK
+    return CALL_ERROR_PBX
 
 
 def clean_announcement_by(value):
@@ -658,11 +679,6 @@ def binotel_not_answered(disposition):
     """Финальное ли «не дозвонились» от Binotel (NOT_ANSWERED_FINAL_DISPOSITIONS): занято, не
     ответил, отмена, канал недоступен, перегрузка. Промежуточные статусы и UNKNOWN — нет."""
     return str(disposition or "").strip().upper() in NOT_ANSWERED_FINAL_DISPOSITIONS
-
-
-def speech_guard_enabled():
-    """Поле состояния speech_guard из окружения сервера (SPEECH_GUARD_ENV); по умолчанию включена."""
-    return (os.getenv(SPEECH_GUARD_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def ring_timeout_rings(value):
@@ -3381,17 +3397,18 @@ class DialListService:
 
     def _portion_items(self, cur, portion_id, today=None):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
-        # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS.
+        # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS, r[22] — текст
+        # отказа АТС у последней попытки (наружу — только его вид, last_error_kind).
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
                    o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id,
-                   os.name, t.auto_hangup, """ + self._LAST_COMMENT_COLUMNS + """
+                   os.name, t.auto_hangup, """ + self._LAST_COMMENT_COLUMNS + """, t.api_error
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
                 SELECT id, state, disposition, requested_at, general_call_id, outcome_id,
-                       cancelled, operator_hangup_at, outcome_subtype_id, auto_hangup
+                       cancelled, operator_hangup_at, outcome_subtype_id, auto_hangup, api_error
                 FROM dial_list_attempts WHERE assignment_id = a.id
                 ORDER BY requested_at DESC LIMIT 1
             ) t ON TRUE
@@ -3429,6 +3446,9 @@ class DialListService:
                 },
                 # Что оператор записал по этому водителю в прошлый раз (12.10.2026).
                 **self._last_comment_fields(r[19], r[20], r[21], today),
+                # Последний звонок не удался — почему (CALL_ERROR_*): телефон пишет «Нет связи с
+                # АТС — позвоните ещё раз» вместо «Ошибка АТС». Сам текст отказа телефону не уходит.
+                **({"last_error_kind": call_error_kind(None, r[22] or "")} if r[8] == "failed" else {}),
             })
         return items
 
@@ -3470,10 +3490,10 @@ class DialListService:
                 "lead_id": _sid(r[6])}
 
     def _ring_timeout_sec(self, department_id):
-        """Сколько секунд плечо обзвона ждёт ответа водителя, прежде чем телефон его
-        положит; 0 — не класть. Отсчёт у телефона — от принятия плеча, когда Binotel
-        начинает набирать водителя, поэтому без поправки обычного исходящего на первый
-        гудок: 5 гудков — 25 с.
+        """Сколько секунд плечо обзвона ждёт ответа водителя, прежде чем телефон спросит, класть
+        ли его; 0 — не класть (у отдела 0 гудков). Отсчёт у телефона — от принятия плеча, а
+        водителя Binotel начинает набирать только после своего сообщения оператору, и первый
+        гудок звучит на 8–10-й секунде плеча: поэтому RING_LEAD_IN_SEC сверху — 5 гудков — 34 с.
 
         Отдельной короткой транзакцией: колонки ring_timeout_rings может ещё не быть (её
         заводит схема «Настроек SIP»), а упавший запрос оборвал бы транзакцию состояния.
@@ -3489,13 +3509,14 @@ class DialListService:
         except Exception as exc:
             log.debug("dial_list: гудки до сброса у отдела %s не прочитаны (%s) — по умолчанию %d",
                       department_id, exc, RING_TIMEOUT_RINGS_DEFAULT)
-        return rings * RING_SECONDS_PER_RING
+        return RING_LEAD_IN_SEC + rings * RING_SECONDS_PER_RING if rings > 0 else 0
 
     def get_state(self, user_id, phone_version=None):
         """Состояние обзвона для телефона. phone_version — заголовок X-ICore-Phone-Version
-        запроса: автосброс на гудках (ring_timeout_sec) получает только телефон с защитой
-        по речи (phone_guards_speech); остальным, и выпущенному 3.22.33, — 0, «не класть».
-        Ему же active_attempt — в прежнем смысле, с кончившимся плечом (_active_attempt)."""
+        запроса: автосброс на гудках (ring_timeout_sec) получает только телефон с простым
+        таймером (phone_has_ring_timer, 3.22.35 и новее); остальным — 0, «не класть».
+        Выпущенному 3.22.33 (заголовка нет) — ещё и active_attempt в прежнем смысле, с
+        кончившимся плечом (_active_attempt)."""
         ctx = self.operator_context(user_id)
         self.reconcile(ctx)
         settings = ctx["settings"]
@@ -3522,32 +3543,21 @@ class DialListService:
         # Строку, плечо по которой уже кончилось, а исход от АТС ещё едет (ended), обработанной
         # считаем (13.10.2026): «Ещё» она не держит — исход закроет её и в следующей выдаче.
         pending = sum(1 for i in items if i["state"] == "issued" and not self._row_settling(i))
-        # Телефону без защиты по речи (нет заголовка версии — выпущенный 3.22.33) автосброс
-        # не даём: его вопрос «класть ли плечо» ждёт ответа Binotel всего пять секунд, а
-        # молчание он понимает как «класть» — так рвались разговоры (12.10.2026). Настройку
-        # отдела для него даже не читаем.
-        ring_timeout_sec = self._ring_timeout_sec(ctx["department_id"]) if guarded else 0
-        ms = announcement_ms()
+        # Автосброс — только телефону с простым таймером (3.22.35+): 3.22.33 и 3.22.34 ждут ответа
+        # на вопрос «класть ли плечо» всего пять секунд, а молчание и ошибку понимают как «класть» —
+        # так рвались разговоры (12.10.2026). Настройку отдела для них даже не читаем.
+        ring_timeout_sec = self._ring_timeout_sec(ctx["department_id"]) if phone_has_ring_timer(phone_version) else 0
         return {
             "enabled": True,
             "operator": {"id": ctx["user_id"], "name": ctx["name"], "internal_number": ctx["internal_number"]},
             "portion_size": settings["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
             # Сброс на гудках: через столько секунд после принятия плеча, если водитель не
-            # ответил, телефон кладёт плечо сам (событие ring_timeout); 0 — не кладёт.
+            # ответил, телефон спрашивает сервер, класть ли плечо (событие ring_timeout); 0 — не
+            # спрашивает и не кладёт.
             "ring_timeout_sec": ring_timeout_sec,
-            # Анализ звука на плече (телефон с 3.22.34, остальные ключей не читают):
-            # speech_guard — не класть плечо на гудках, пока на линии речь; announcement_ms —
-            # сколько миллисекунд должна звучать речь сообщения сети, чтобы телефон его распознал,
-            # 0 — по речи не распознавать; announcement_sit — класть плечо по тону SIT сразу;
-            # announcement_mode — что делать с сообщением сети, распознанным по речи: auto — класть
-            # (ended с auto_hangup: announcement), suggest — подсказать оператору, off — ничего
-            # (см. ANNOUNCEMENT_MODE_ENV). Нет ключей (прежний сервер) — телефон считает sit=true и
-            # suggest.
-            "speech_guard": speech_guard_enabled(),
-            "announcement_ms": ms,
-            "announcement_sit": announcement_sit_enabled(),
-            "announcement_mode": announcement_mode(ms),
+            # Анализ звука на плече выключен (SOUND_OFF_STATE): ключи — для телефона 3.22.34.
+            **SOUND_OFF_STATE,
             "period": settings["period"],
             "period_label": settings["period_label"],
             "portion": None if not portion else {
@@ -4399,37 +4409,48 @@ class DialListService:
             client = self._client(ctx["department_id"])
             general_call_id = client.originate_internal_to_external(
                 ctx["internal_number"], phone_norm, **extra)
-        except DialListError:
+        except DialListError as exc:
+            # Подключение к Binotel у отдела не настроено — дело руководителя, не водителя.
             self._fail_attempt(attempt_id, assignment_id, lead_id, "подключение к Binotel не настроено",
-                               attempts_now, settings["max_attempts"])
+                               attempts_now, settings["max_attempts"], count_for_lead=False)
+            exc.kind = CALL_ERROR_PBX
             raise
         except Exception as exc:  # отказ АТС или сеть
             raw = str(exc)
-            lowered = raw.lower()
             code = binotel_error_code(raw)
-            # Код 150 «Can't call to the ext» — АТС не достучалась до ЛИНИИ оператора:
-            # телефон не зарегистрирован (неверный сервер/пароль, нет сети). Это не
-            # вина водителя — попытку по лиду не считаем и говорим оператору, что делать.
-            ext_unreachable = code == 150 or "call to the ext" in lowered
-            too_frequent = (isinstance(exc, binotel.RateLimited) or code == 106
-                            or "too frequent" in lowered or "часто" in lowered)
+            kind = call_error_kind(exc)
             # Текст Binotel бывает с номером водителя (13.10.2026): в попытку — без длинных чисел
             # (её api_error видит руководитель), полностью — только в журнал сервера, телефону —
-            # только код.
+            # только код. Звонок, который не начинался не по вине водителя (линия оператора не на
+            # связи, нет связи с Binotel, код 105, лимит запросов), водителю не в счёт.
             self._fail_attempt(attempt_id, assignment_id, lead_id, scrub_digits(raw)[:500],
                                attempts_now, settings["max_attempts"],
-                               count_for_lead=not ext_unreachable)
-            log.warning("dial_list: Binotel отказал оператору %s (строка %s): %s", ctx["user_id"], assignment_id,
-                        raw[:500])
-            if ext_unreachable:
+                               count_for_lead=kind not in CALL_ERRORS_NOT_COUNTED)
+            log.warning("dial_list: Binotel отказал оператору %s (строка %s, %s): %s", ctx["user_id"],
+                        assignment_id, kind, raw[:500])
+            if kind == CALL_ERROR_LINE:
+                # Код 150 «Can't call to the ext» — АТС не достучалась до ЛИНИИ оператора: телефон не
+                # зарегистрирован (неверный сервер/пароль, нет сети). Говорим оператору, что делать.
                 hint = self._line_status_hint(ctx["department_id"], ctx["internal_number"])
                 raise DialListError(
-                    f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. {hint}", 409)
+                    f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. {hint}", 409,
+                    kind=kind)
             coded = f" (код {code})" if code is not None else ""
-            if too_frequent:
+            if kind == CALL_ERROR_RATE:
                 raise DialListError(f"АТС не приняла звонок{coded}: слишком частые запросы — повторите "
-                                    "через несколько секунд", 429)
-            raise DialListError(f"АТС не приняла звонок{coded} — обратитесь к руководителю", 502)
+                                    "через несколько секунд", 429, kind=kind)
+            if kind == CALL_ERROR_NETWORK:
+                # 13.10.2026 19:04: сервер 40 с не мог соединиться с Binotel, оператор получил «обратитесь к
+                # руководителю», а руководитель тут ничего не сделает — через минуту всё прошло.
+                if isinstance(exc, requests.exceptions.ReadTimeout):
+                    raise DialListError("АТС не ответила за 40 секунд — попробуйте позвонить ещё раз", 502,
+                                        kind=kind)
+                raise DialListError("Нет связи с АТС — попробуйте позвонить ещё раз через полминуты", 502,
+                                    kind=kind)
+            if kind == CALL_ERROR_PBX_BUSY:
+                raise DialListError(f"АТС не приняла звонок{coded} — попробуйте ещё раз через несколько секунд",
+                                    502, kind=kind)
+            raise DialListError(f"АТС не приняла звонок{coded} — обратитесь к руководителю", 502, kind=kind)
 
         with self.db._get_cursor() as cur:
             cur.execute("""
@@ -4503,18 +4524,23 @@ class DialListService:
         с auto_hangup 'announcement'. Отбой оператора по подсказке «похоже на автоответчик»
         (announcement_by 'operator') — то же сообщение сети: недозвон, итога нет, не отмена.
 
-        phone_version — заголовок X-ICore-Phone-Version: на вопрос ring_timeout телефону
-        без защиты по речи (phone_guards_speech) ответ — сразу «не класть»
-        (_ring_timeout_unguarded)."""
+        phone_version — заголовок X-ICore-Phone-Version: на вопрос ring_timeout телефону без
+        простого таймера (phone_has_ring_timer: ниже 3.22.35) ответ — сразу «не класть»
+        (_ring_timeout_unguarded); так же — когда у отдела автосброс выключен (0 гудков): это
+        выключатель, и он действует и на звонок, начатый до него."""
         event = str(event or "").strip().lower()
         if event not in PHONE_EVENTS:
             raise DialListError(f"Неизвестное событие: {event!r}")
         attempt_id = str(attempt_id)
-        if event == "ring_timeout" and not phone_guards_speech(phone_version):
+        if event == "ring_timeout" and not phone_has_ring_timer(phone_version):
             # Раньше operator_context: этот ответ не должен зависеть ни от базы, ни от Binotel.
-            return self._ring_timeout_unguarded(user_id, attempt_id, ring_sec, phone_version)
+            return self._ring_timeout_unguarded(user_id, attempt_id, ring_sec, phone_version,
+                                                "телефон без простого таймера")
         ctx = self.operator_context(user_id)
         if event == "ring_timeout":
+            if self._ring_timeout_sec(ctx["department_id"]) <= 0:
+                return self._ring_timeout_unguarded(user_id, attempt_id, ring_sec, phone_version,
+                                                    "у отдела автосброс выключен")
             return self._ring_timeout_event(ctx, attempt_id, ring_sec)
         ended = event == "ended"
         # Плечо положил сам телефон: прежний ключ ring_timeout — это гудки; auto_hangup
@@ -4641,19 +4667,21 @@ class DialListService:
         result.update({"cancelled": cancelled, "outcome_required": required})
         return result
 
-    def _ring_timeout_unguarded(self, user_id, attempt_id, ring_sec=0, phone_version=None):
-        """Вопрос «класть ли плечо на гудках» от телефона без защиты по речи: версии в
-        запросе нет — это выпущенный 3.22.33. Ответ — сразу и всегда «не класть», без базы
-        и без Binotel. Иначе нельзя: ответа дольше пяти секунд и любой ошибки этот телефон
-        не ждёт — кладёт трубку сам; так 12.10.2026 оборвались 52 разговора (Binotel
+    def _ring_timeout_unguarded(self, user_id, attempt_id, ring_sec=0, phone_version=None, why=""):
+        """Вопрос «класть ли плечо на гудках», на который ответ — сразу и всегда «не класть», без
+        Binotel: телефон без простого таймера (3.22.33 без заголовка версии, 3.22.34) либо у отдела
+        автосброс выключен. Иначе нельзя: ответа дольше пяти секунд и любой ошибки 3.22.33 и
+        3.22.34 не ждут — кладут трубку сами; так 12.10.2026 оборвались 52 разговора (Binotel
         отвечал «слишком часто» либо позже срока). Плечо закончит АТС или оператор.
 
         Попытку ничем не помечаем и не читаем: чем кончился звонок, телефон сообщит в
         ended. В состоянии такой телефон уже получает ring_timeout_sec: 0 (get_state) и
-        вопрос не задаёт — сюда приходит лишь тот, кто читал состояние до выката."""
-        log.info("dial_list: попытка %s — гудки кончились (у телефона %d с) у телефона без защиты по речи "
-                 "(оператор %s, версия %r): плечо не кладём, Binotel не спрашиваем", attempt_id,
-                 max(0, min(_to_int(ring_sec, 0), 3600)), user_id, str(phone_version or "")[:32])
+        вопрос не задаёт — сюда приходит лишь тот, кто читал состояние до выката (или до
+        выключения автосброса у отдела)."""
+        log.info("dial_list: попытка %s — гудки кончились (у телефона %d с), %s (оператор %s, версия %r): "
+                 "плечо не кладём, Binotel не спрашиваем", attempt_id,
+                 max(0, min(_to_int(ring_sec, 0), 3600)), why or "решать не по чему", user_id,
+                 str(phone_version or "")[:32])
         return {"attempt_id": attempt_id, "final": False, "cancelled": False, "outcome_required": None,
                 "hangup": False, "talking": False}
 
@@ -4672,21 +4700,26 @@ class DialListService:
         (ring_timeout_at): она засчитается недозвоном, итог по ней не нужен. operator_hangup_at
         здесь не ставится — это не отбой оператора.
 
-        Сюда попадает только телефон с защитой по речи (phone_event): он может и не
-        послушаться ответа «класть» — на линии уже речь. Тогда его ended придёт без
-        ring_timeout, и отметку сброса, поставленную здесь, оно снимет (_clear_ring_timeout).
+        Сюда попадает только телефон с простым таймером (3.22.35+, phone_event): hangup: true он
+        выполняет сразу, без него трубку не кладёт. Ответ «класть» он может и не выполнить —
+        разговор успел подтвердиться по /live. Тогда его ended придёт без ring_timeout, и отметку
+        сброса, поставленную здесь, оно снимет (_clear_ring_timeout).
 
         Ревью 13.10.2026. «АТС ещё набирает» велит класть, только если эти данные не старше
         RING_HANGUP_MAX_AGE_SEC: старее — «нет данных» (hangup: false, без disposition) — водитель
-        мог снять трубку уже после них. И это всё равно не подтверждение «не ответил»: между
-        гудками телефон может переждать до следующего гудка (пауза или молчащий водитель — скажет
-        гудок), а Binotel подтвердил «не дозвонились», только когда в ответе hangup и final вместе
-        (финальное «не дозвонились», попытка закрыта). data_age_ms — возраст данных опроса Binotel,
-        по которым решали (от отправки запроса, так что не меньше настоящего); ключа нет — данных
-        опроса не было или они устарели, либо попытка уже закрыта и решали по базе.
+        мог снять трубку уже после них. Остаётся гонка, которую не закрыть: водитель снимает трубку
+        между снимком Binotel и отбоем телефона — это до ~3 с (возраст данных и дорога ответа).
+        data_age_ms — возраст данных опроса Binotel, по которым решали (от отправки запроса, так
+        что не меньше настоящего); ключа нет — данных опроса не было или они устарели, либо попытка
+        уже закрыта и решали по базе.
+
+        Решать не по чему, а плечо ещё идёт (данных нет или они устарели) — в ответе
+        retry_after_sec (RING_RETRY_AFTER_SEC): телефон спросит снова, а не бросит автосброс до
+        конца звонка.
 
         Ответ — как у других событий (attempt_id, state, final, [disposition], cancelled,
-        outcome_required) плюс hangup — класть ли плечо — talking и [data_age_ms]."""
+        outcome_required) плюс hangup — класть ли плечо — talking, [data_age_ms] и
+        [retry_after_sec]."""
         ring_sec = max(0, min(_to_int(ring_sec, 0), 3600))
         with self.db._get_cursor() as cur:
             cur.execute("""
@@ -4756,6 +4789,9 @@ class DialListService:
             result["disposition"] = live
         if age_ms is not None:
             result["data_age_ms"] = age_ms
+        if not (hangup or talking or final) and state in LEG_UP_STATES:
+            # Решать не по чему, а плечо идёт: телефон спросит снова, трубку пока не кладёт.
+            result["retry_after_sec"] = RING_RETRY_AFTER_SEC
         return result
 
     def _mark_ring_timeout(self, cur, attempt_id, leg_sec=0, auto_hangup=AUTO_HANGUP_RING_TIMEOUT,
@@ -5743,13 +5779,13 @@ class DialListService:
             elif group in ("network", "no_answer"):
                 precision[group] += count
         decided = sum(precision.values())
-        ms = announcement_ms()
         return {
             "department_id": department_id,
             "days": days,
             "since": _iso_utc(_utcnow() - timedelta(days=days)),
-            "settings": {"announcement_mode": announcement_mode(ms), "announcement_sit": announcement_sit_enabled(),
-                         "announcement_ms": ms},
+            # Анализ звука выключен с 13.10.2026 — замеры остаются за прошлые дни.
+            "settings": {key: SOUND_OFF_STATE[key] for key in ("announcement_mode", "announcement_sit",
+                                                               "announcement_ms")},
             "analysed": analysed,
             "suspected": suspected,
             "ended_by": ended_by,

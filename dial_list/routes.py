@@ -5,24 +5,21 @@
 сам подключает этот модуль (как op_funnel/routes.py, oktell_guard/routes.py).
 
 Ручки телефона (bearer оператора, как /api/operator/sip_settings). Телефон с 3.22.34 в каждом
-запросе называет версию заголовком X-ICore-Phone-Version; запрос без разборчивой версии —
-выпущенный 3.22.33 без защиты автосброса по речи: ему ring_timeout_sec всегда 0, а на событие
-ring_timeout ответ — сразу hangup: false, без базы и без Binotel (service.phone_guards_speech).
-Решает наличие заголовка, а не номер версии — любой разборчивый, хоть «3.22.33» у сборки до
-выпуска, получает настройку отдела:
+запросе называет версию заголовком X-ICore-Phone-Version. Автосброс на гудках (простой таймер,
+13.10.2026) — только телефону 3.22.35 и новее (service.phone_has_ring_timer); 3.22.33 (заголовка
+нет) и 3.22.34 получают ring_timeout_sec 0, а на событие ring_timeout — сразу hangup: false, без
+базы и без Binotel:
     GET  /api/operator/dial_list                             текущая порция и состояние (ring_timeout_sec —
-                                                             через сколько секунд гудков телефон кладёт плечо,
+                                                             через сколько секунд после ответа плеча телефон
+                                                             спрашивает, класть ли его (гудки отдела × 5 + 9),
                                                              active_attempt.lead_id — с кем идёт разговор;
                                                              запросу без заголовка версии active_attempt —
                                                              и с кончившимся плечом (ended), как раньше;
-                                                             speech_guard — не класть плечо, пока на линии
-                                                             речь; announcement_ms — сколько мс должна
-                                                             звучать речь сообщения сети, чтобы телефон его
-                                                             распознал, 0 — по речи не распознавать;
-                                                             announcement_sit — класть плечо по тону SIT;
-                                                             announcement_mode — auto|suggest|off: класть по
-                                                             распознанной речи, подсказать оператору или
-                                                             ничего; у строк пачки и у
+                                                             speech_guard, announcement_ms, announcement_sit,
+                                                             announcement_mode — для 3.22.34, всегда
+                                                             «выключено»: разбор звука снят 13.10.2026;
+                                                             last_error_kind строки пачки — почему не удался
+                                                             её последний звонок; у строк пачки и у
                                                              active_attempt — last_comment, last_comment_label,
                                                              last_comment_outcome: последний комментарий
                                                              этого оператора по водителю; last_attempt.
@@ -55,7 +52,10 @@ ring_timeout ответ — сразу hangup: false, без базы и без 
                                                              last_comment_outcome — как в состоянии). Держит
                                                              только звонок, плечо которого идёт; кончившееся
                                                              (ended) — нет, но тому же водителю — после исхода.
-                                                             Отказ АТС — только кодом, без текста Binotel
+                                                             Отказ АТС — только кодом, без текста Binotel; в
+                                                             ответе error_kind: line | network | pbx_busy |
+                                                             rate | pbx (13.10.2026; кроме pbx — водителю не
+                                                             в счёт)
     POST /api/operator/dial_list/leads/<lead_id>/recall      «Позвонить ещё раз» своему водителю (последним ему
                                                              звонил этот оператор) → assignment_id + состояние
     POST /api/operator/dial_list/leads/<lead_id>/sign_check  подписал ли водитель — Sapar сейчас, и во время
@@ -72,7 +72,8 @@ ring_timeout ответ — сразу hangup: false, без базы и без 
                                                              false), talking, final (с hangup — Binotel
                                                              подтвердил «не дозвонились», попытка закрыта) и
                                                              data_age_ms (возраст данных Binotel, если решали по
-                                                             ним). У ended с 3.22.34: auto_hangup —
+                                                             ним), а решать не по чему, пока плечо идёт, —
+                                                             retry_after_sec (спросить снова). У ended с 3.22.34: auto_hangup —
                                                              ring_timeout|announcement, почему плечо положил сам
                                                              телефон (сообщение сети — всегда недозвон, итог не
                                                              нужен); talk_detected — был ли разговор: true —
@@ -231,7 +232,11 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         return request.headers.get(PHONE_VERSION_HEADER)
 
     def _error(exc):
-        return jsonify({"error": str(exc)}), exc.status
+        body = {"error": str(exc)}
+        # Вид ошибки — телефону (у отказа звонка: line | network | pbx_busy | rate | pbx).
+        if getattr(exc, "kind", None):
+            body["error_kind"] = exc.kind
+        return jsonify(body), exc.status
 
     def _guard(fn):
         """Единая обработка ошибок: DialListError → её статус, остальное → 500."""

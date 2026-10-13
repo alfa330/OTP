@@ -36,6 +36,7 @@ RCC = 1954
 OPERATOR, OTHER = 520, 521
 # Сборка с защитой по речи до выпуска: заголовок есть, а номер в нём ещё старый.
 GUARDED = '3.22.33'
+TIMER = '3.22.35'
 
 BASE_DDL = '''
     CREATE TABLE departments (id integer PRIMARY KEY, name text NOT NULL, code text,
@@ -403,27 +404,32 @@ def test_announcement_after_an_early_answer_takes_the_answer_back(env):
 
 # ── сброс на гудках и версия телефона ────────────────────────────────────────
 
-def test_ring_timeout_follows_the_header_presence(env):
+def test_ring_timeout_follows_the_phone_version(env):
+    # Простой таймер (13.10.2026): автосброс — только телефону 3.22.35 и новее; 3.22.33 (без заголовка)
+    # и 3.22.34 молчание сервера понимают как «класть» — им 0.
     assert env.svc.get_state(OPERATOR)["ring_timeout_sec"] == 0
     assert env.svc.get_state(OPERATOR, phone_version='мусор')["ring_timeout_sec"] == 0
-    for version in ('3.22.33', '3.22.34', '3.23.0'):
-        assert env.svc.get_state(OPERATOR, phone_version=version)["ring_timeout_sec"] == 25, version
+    for version in ('3.22.33', '3.22.34'):
+        assert env.svc.get_state(OPERATOR, phone_version=version)["ring_timeout_sec"] == 0, version
+    for version in ('3.22.35', '3.23.0'):
+        assert env.svc.get_state(OPERATOR, phone_version=version)["ring_timeout_sec"] == 34, version
     env.q("UPDATE sip_department_config SET ring_timeout_rings = 3 WHERE department_id = 1954")
-    assert env.svc.get_state(OPERATOR, phone_version=GUARDED)["ring_timeout_sec"] == 15
+    assert env.svc.get_state(OPERATOR, phone_version=TIMER)["ring_timeout_sec"] == 24
     assert env.svc.get_state(OPERATOR)["ring_timeout_sec"] == 0
 
     lead, asg = env.lead('Иванов Иван', '77010000001')
     attempt = env.call(asg)
     env.binotel.live[attempt["general_call_id"]] = {"disposition": "CALLING", "billsec": 0}
-    # Без заголовка (выпущенный 3.22.33): «не класть», попытку не трогаем.
-    res = env.svc.phone_event(OPERATOR, attempt["attempt_id"], 'ring_timeout', ring_sec=25)
-    assert (res["hangup"], res["talking"]) == (False, False)
-    assert env.attempt_row(attempt)[5] is False
-    # С заголовком — решает Binotel: набор ещё идёт — «класть», попытка помечена сбросом.
-    res = env.svc.phone_event(OPERATOR, attempt["attempt_id"], 'ring_timeout', ring_sec=25, phone_version=GUARDED)
+    # Без заголовка (выпущенный 3.22.33) и от 3.22.34: «не класть», попытку не трогаем.
+    for version in (None, GUARDED, '3.22.34'):
+        res = env.svc.phone_event(OPERATOR, attempt["attempt_id"], 'ring_timeout', ring_sec=25, phone_version=version)
+        assert (res["hangup"], res["talking"]) == (False, False), version
+        assert env.attempt_row(attempt)[5] is False
+    # 3.22.35 — решает Binotel: набор ещё идёт — «класть», попытка помечена сбросом.
+    res = env.svc.phone_event(OPERATOR, attempt["attempt_id"], 'ring_timeout', ring_sec=34, phone_version=TIMER)
     assert (res["hangup"], res["talking"], res["disposition"]) == (True, False, 'CALLING')
     assert env.attempt_row(attempt)[3:6] == ('ring_timeout', None, True)
-    # А на линии была речь: телефон не положил, разговор состоялся, его закончил оператор.
+    # А разговор успел подтвердиться: телефон не положил, разговор состоялся, его закончил оператор.
     del env.binotel.live[attempt["general_call_id"]]
     res = env.ended(attempt, by_operator=True, leg_sec=95, talk_detected=True)
     assert res["outcome_required"] is True

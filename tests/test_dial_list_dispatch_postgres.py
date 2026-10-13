@@ -857,10 +857,9 @@ def test_announcement_stats_on_real_sql(env):
     attempt(11, None, 'BUSY')                                            # телефон не сообщал — не в счёт
     attempt(12, True, 'BUSY', phone='77010000999')                       # тестовый номер — не в счёт
     env.q("INSERT INTO test_phone_numbers (phone_key) VALUES ('7010000999')")
+    # Разбор звука выключен (13.10.2026): прежние переменные окружения ни на что не влияют.
     with pytest.MonkeyPatch.context() as mp:
-        mp.setenv(dial_service.ANNOUNCEMENT_MODE_ENV, 'suggest')
-        mp.delenv(dial_service.ANNOUNCEMENT_MS_ENV, raising=False)
-        mp.delenv(dial_service.ANNOUNCEMENT_SIT_ENV, raising=False)
+        mp.setenv('DIAL_LIST_ANNOUNCEMENT_MODE', 'suggest')
         stats = env.svc.announcement_stats(RCC)
     assert (stats["analysed"], stats["suspected"]) == (10, 8)
     assert stats["ended_by"] == {"auto": 1, "sit": 0, "operator": 1, "none": 6}
@@ -871,7 +870,7 @@ def test_announcement_stats_on_real_sql(env):
                                   "decided": 5, "percent": 40.0}
     assert (stats["talked_after"], stats["answered_long"], stats["network_missed"]) == (1, 1, 1)
     assert stats["dispositions"][0] == {"disposition": 'ANSWER', "count": 2}
-    assert stats["settings"] == {"announcement_mode": 'suggest', "announcement_sit": True, "announcement_ms": 3500}
+    assert stats["settings"] == {"announcement_mode": 'off', "announcement_sit": False, "announcement_ms": 0}
     text = json.dumps(stats, ensure_ascii=False)
     assert '7701' not in text and 'Водитель' not in text
     # Окно в днях: старые попытки не в счёте; days проверяется.
