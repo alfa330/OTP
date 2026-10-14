@@ -1845,6 +1845,21 @@ def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
     return payload
 
 
+def _run_corrections(evaluation_run_id) -> set:
+    """{(criterion_idx, вердикт)} — исправления ИИ, уже записанные разбором этого прогона."""
+    if not evaluation_run_id:
+        return set()
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT criterion_idx, correct_verdict FROM qa_adjudication_cases
+                            WHERE evaluation_run_id = %s AND case_status = 'verified'
+                              AND criterion_idx IS NOT NULL""", (str(evaluation_run_id),))
+            return {(int(row[0]), str(row[1])) for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 def _attach_ai_review(payload: dict) -> dict:
     """Разобран ли уже этот прогон ИИ человеком (confirmed / adjudicated).
 
@@ -1880,8 +1895,16 @@ def _attach_ai_review(payload: dict) -> dict:
         logging.exception("ai-qa: не удалось прочитать итог ревью прогона %s", run_id)
         return payload
     if row and row[0]:
+        # corrections — что из этого прогона уже в базе разборов: карточка не
+        # предлагает «Правило для ИИ» второй раз и не шлёт их повторно.
+        try:
+            corrections = [{"idx": idx, "verdict": verdict}
+                           for idx, verdict in sorted(_run_corrections(run_id))]
+        except Exception:
+            logging.exception("ai-qa: не удалось прочитать исправления прогона %s", run_id)
+            corrections = []
         payload["ai_review"] = {"outcome": row[0], "reviewed_at": row[1],
-                                "reviewer": row[2] or "—"}
+                                "reviewer": row[2] or "—", "corrections": corrections}
     return payload
 
 
@@ -2142,8 +2165,13 @@ def _record_review_outcome(call_id, outcome, reviewer_id=None, *, payload=None, 
 
 def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
                           payload: dict, model: str,
-                          subject_kind: str = config.SUBJECT_CALL) -> None:
-    """Atomically claim one human review for the latest run under the subject lock."""
+                          subject_kind: str = config.SUBJECT_CALL,
+                          allow_reviewed: bool = False) -> None:
+    """Atomically claim one human review for the latest run under the subject lock.
+
+    `allow_reviewed` — повторный разбор уже проверенного прогона: поверх прежнего
+    итога ложится только исправление («подтверждена» → «исправлена»); второй
+    подтверждения не бывает (его отвергает _validated_adjudication_items)."""
     reasons = _payload_reasons(payload)
     cur.execute(
         """INSERT INTO ai_evaluation_meta
@@ -2160,10 +2188,11 @@ def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
                  reviewed_by=EXCLUDED.reviewed_by,
                  reviewed_at=now()
                WHERE ai_evaluation_meta.review_outcome IS NULL
+                  OR (%s AND EXCLUDED.review_outcome = 'adjudicated')
                RETURNING id""",
         (subject_kind, int(call_id), int(payload["direction_id"]), str(model),
          Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
-         bool(reasons), Json(reasons), outcome, reviewer_id),
+         bool(reasons), Json(reasons), outcome, reviewer_id, bool(allow_reviewed)),
     )
     if not cur.fetchone():
         raise ValueError("эта evaluation_run уже проверена другим запросом")
@@ -3478,7 +3507,10 @@ def _validated_adjudication_items(call_id, direction_id, items, *,
         raise ValueError("evaluation_run не является успешной пользовательской оценкой")
     if not source.get("is_latest"):
         raise ValueError("оценка устарела: звонок уже переоценён; запустите переоценку карточки")
-    if source.get("review_outcome"):
+    # Проверенный прогон второй раз не ПОДТВЕРЖДАЮТ, а исправить ИИ можно и после
+    # проверки (решение владельца 14.10.2026: «Сформулировать с ИИ» не только в
+    # очереди ревью) — исправление уходит в базу разборов, как и при первом ревью.
+    if source.get("review_outcome") and not items:
         raise ValueError("эта evaluation_run уже проверена")
     if call_id != int(source["call_id"]):
         raise ValueError("id субъекта не совпадает с evaluation_run")
@@ -3623,6 +3655,7 @@ def _validated_adjudication_items(call_id, direction_id, items, *,
             "excerpt_start": start,
             "excerpt_end": end,
         })
+    payload["_review_outcome"] = source.get("review_outcome")
     return payload, clean_items
 
 
@@ -3735,6 +3768,20 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
     transcript = _payload_transcript_text(payload)
     transcript_hash = str(payload["_transcript_hash"])
     outcome = "adjudicated" if (items or []) else "confirmed"
+    reviewed_before = bool(payload.get("_review_outcome"))
+    if reviewed_before:
+        # Прогон уже проверен: карточка открыта из «Звонков», «Чатов» или поиска, и в
+        # её оценке человека лежат и прежние исправления. Те, что уже в базе разборов
+        # этого прогона (тот же критерий, тот же вердикт), второй раз правилами не
+        # становятся — иначе каждое сохранение плодило бы дубли.
+        known = _run_corrections(payload.get("_evaluation_run_id"))
+        validated = [item for item in validated
+                     if (item["criterion_idx"], item["correct_verdict"]) not in known]
+        if not validated:
+            return {"saved": 0, "activated": 0, "pending_index": 0, "linked": 0,
+                    "rag_mode": _rag_rollout(authoritative_direction, int(call_id),
+                                             subject_kind)["mode"],
+                    "auto_activation": True, "rules": [], "already": True}
 
     # External embedding work happens before the short DB transaction.  A
     # provider outage still creates a visible draft with index_status=error; it
@@ -3807,7 +3854,7 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                     cur, call_id=int(call_id), outcome=outcome,
                     reviewer_id=reviewer_id, payload=payload,
                     model=payload.get("_evaluation_model") or config.CLAUDE_MODEL,
-                    subject_kind=subject_kind)
+                    subject_kind=subject_kind, allow_reviewed=reviewed_before)
             # Цели привязки — под блокировку ДО строки модели эмбеддингов: правка
             # правила администратором берёт их в том же порядке (правило, потом
             # модель), и встречных ожиданий не бывает.

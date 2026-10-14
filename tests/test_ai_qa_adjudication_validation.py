@@ -100,9 +100,16 @@ class AdjudicationValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "устарела"):
             self._validate(_valid_item(), source=_source(is_latest=False))
 
-    def test_already_reviewed_run_is_rejected_before_embedding(self):
+    def test_reviewed_run_is_not_confirmed_twice_but_accepts_a_correction(self):
+        """Владелец 14.10.2026: «Сформулировать с ИИ» — не только в очереди ревью.
+        Проверенный прогон второй раз не подтверждают, а исправление принимают."""
         with self.assertRaisesRegex(ValueError, "уже проверена"):
-            self._validate(_valid_item(), source=_source(review_outcome="confirmed"))
+            self._validate(None, source=_source(review_outcome="confirmed"))
+        payload, rows = self._validate(_valid_item(), source=_source(review_outcome="confirmed"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(payload["_review_outcome"], "confirmed")
+        payload, _ = self._validate(_valid_item())
+        self.assertIsNone(payload["_review_outcome"])
 
     def test_fingerprint_is_required(self):
         with self.assertRaisesRegex(ValueError, "evaluation_fingerprint обязателен"):
@@ -254,7 +261,95 @@ class AdjudicationValidationTests(unittest.TestCase):
         sql = " ".join(cursor.execute.call_args.args[0].split())
         self.assertIn("ON CONFLICT (subject_kind,call_id,model) DO UPDATE", sql)
         self.assertIn("WHERE ai_evaluation_meta.review_outcome IS NULL", sql)
+        self.assertIn("OR (%s AND EXCLUDED.review_outcome = 'adjudicated')", sql)
         self.assertIn("RETURNING id", sql)
+        # Первое ревью — только поверх пустого итога.
+        self.assertIs(cursor.execute.call_args.args[1][-1], False)
+
+    def test_review_claim_over_a_reviewed_run_only_for_corrections(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+        api._claim_review_outcome(
+            cursor, call_id=10, outcome="adjudicated", reviewer_id=5,
+            payload={"direction_id": 72, "criteria": []}, model="qa-model", allow_reviewed=True)
+        params = cursor.execute.call_args.args[1]
+        self.assertIs(params[-1], True)
+        self.assertEqual(params[8], "adjudicated")
+
+    def _rereview(self, known, outcome="confirmed"):
+        """Повторный разбор проверенного прогона: что уходит в базу, что нет."""
+        payload = {
+            "direction_id": 72, "_scale_revision_id": 7, "_transcript_hash": TRANSCRIPT_HASH,
+            "_evaluation_run_id": RUN_ID, "_authoritative_transcript_text": TRANSCRIPT,
+            "transcript": [], "_review_outcome": outcome,
+        }
+        validated = [
+            {"criterion_id": "d72-greeting", "criterion_idx": 0, "criterion_name": "Приветствие",
+             "ai_verdict": "Incorrect", "correct_verdict": "Correct", "reason": "Представился",
+             "situation": None, "not_covered": None, "excerpt": "", "excerpt_verified": False,
+             "evidence_status": "no_evidence", "excerpt_start": None, "excerpt_end": None},
+            {"criterion_id": "d72-close", "criterion_idx": 1, "criterion_name": "Прощание",
+             "ai_verdict": "Correct", "correct_verdict": "Incorrect", "reason": "Не попрощался",
+             "situation": None, "not_covered": None, "excerpt": "", "excerpt_verified": False,
+             "evidence_status": "no_evidence", "excerpt_start": None, "excerpt_end": None},
+        ]
+        claim = MagicMock()
+        feedback = MagicMock()
+        rollout = {"mode": "active", "approval": {"valid": True, "manual": True}}
+
+        class Cursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, *_): pass
+            def fetchone(self): return None
+
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def cursor(self): return Cursor()
+            def close(self): pass
+
+        create_case = MagicMock(return_value="case-id")
+        with patch.object(api, "_validated_adjudication_items", return_value=(payload, validated)), \
+             patch.object(api, "_run_corrections", return_value=known), \
+             patch.object(api.config, "connect_rw", return_value=Connection()), \
+             patch("call_qa.rag.similar.embed_texts", side_effect=RuntimeError("offline")), \
+             patch.object(knowledge, "rule_document_text", return_value="document"), \
+             patch.object(knowledge, "create_adjudication_case", create_case), \
+             patch.object(knowledge, "create_draft_policy_rule",
+                          return_value={"rule_id": "rule-1", "rule_version_id": 9}), \
+             patch.object(knowledge, "mark_rule_index_error"), \
+             patch("call_qa.rag.similar.find_similar", return_value={"items": [], "degraded": False}), \
+             patch.object(api, "_activate_review_rules", return_value=set()), \
+             patch.object(api, "_rag_rollout", return_value=rollout), \
+             patch.object(api, "queue_reindex_adjudication"), \
+             patch.object(api, "_claim_review_outcome", claim), \
+             patch.object(api, "_record_rule_review_feedback", feedback):
+            saved = api._save_adjudications_locked(
+                10, 72, [{}, {}], evaluation_run_id=RUN_ID, scale_revision_id=7)
+        return saved, claim, create_case, feedback
+
+    def test_rereview_writes_only_new_corrections(self):
+        saved, claim, create_case, feedback = self._rereview({(0, "Correct")})
+        self.assertEqual(saved["saved"], 1)
+        self.assertEqual(create_case.call_count, 1)
+        self.assertEqual(create_case.call_args.kwargs["criterion_idx"], 1)
+        self.assertTrue(claim.call_args.kwargs["allow_reviewed"])
+        self.assertEqual(claim.call_args.kwargs["outcome"], "adjudicated")
+        self.assertEqual(feedback.call_args.kwargs["corrected_criterion_ids"], {"d72-close"})
+
+    def test_rereview_with_nothing_new_changes_nothing(self):
+        saved, claim, create_case, feedback = self._rereview({(0, "Correct"), (1, "Incorrect")})
+        self.assertTrue(saved["already"])
+        self.assertEqual(saved["saved"], 0)
+        claim.assert_not_called()
+        create_case.assert_not_called()
+        feedback.assert_not_called()
+
+    def test_correction_of_a_correction_is_new(self):
+        """Тот же критерий с ДРУГИМ вердиктом — новое исправление, а не повтор."""
+        saved, _, create_case, _ = self._rereview({(0, "N/A")})
+        self.assertEqual(create_case.call_count, 2)
 
     def test_case_dedup_identity_includes_evaluation_run(self):
         captured = {}

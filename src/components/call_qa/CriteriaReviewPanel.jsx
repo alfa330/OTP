@@ -9,7 +9,7 @@ import {
 import { iosCard, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosToggle, scoreTone } from '../ui/ios';
 import {
     allowedVerdicts, verdictFromAi, aiVerdictOf, toAiVerdict, isCorrection, aiCommentFor,
-    initialVerdicts, quoteInTranscript, scoreOf, validateReview, validateCorrections,
+    initialVerdicts, quoteInTranscript, scoreOf, validateReview, validateCorrections, isNewCorrection,
     isEmptyReview, validationLabel, filledCount, criticalDeficiencyPenalty,
     COMMENT_REQUIRED, NEGATIVE, VERDICT_LABEL, ERROR, DEFICIENCY,
 } from './humanReview';
@@ -237,7 +237,7 @@ function KnowledgeDetails({
 const CriterionReview = memo(function CriterionReview({
     c, index, value, comment, extra, onPick, onComment, onExtra, onRevert,
     locked, kbEnabled, kbLocked, highlight, journalVerdict, journalComment, transcriptText, onRefine,
-    onSimilar, ragLive,
+    onSimilar, ragLive, inKnowledge = false,
 }) {
     const [reasonOpen, setReasonOpen] = useState(false);
     const [commentOpen, setCommentOpen] = useState(false);
@@ -400,6 +400,11 @@ const CriterionReview = memo(function CriterionReview({
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5 text-[11.5px]">
                     <span className="font-medium text-blue-600">Исправлено</span>
                     <span className="text-slate-400">у ИИ: {VERDICT_LABEL[aiHuman] || VERDICT_LABEL[aiVerdict]}</span>
+                    {inKnowledge && (
+                        <span className="text-slate-400" title="Это исправление уже ушло правилом в «Базу разборов» — второй раз его не отправим">
+                            · правило уже в базе
+                        </span>
+                    )}
                     {!locked && (
                         <button type="button" onClick={() => onRevert(index)} className={linkCls}>
                             <Undo2 size={12} />Вернуть
@@ -484,9 +489,16 @@ export default function CriteriaReviewPanel({
     }, []);
 
     // Прогон ИИ ещё не разобран — сохранение заодно подтверждает или исправляет его
-    // (и убирает карточку из очереди). Разобранный второй раз не принимается.
+    // (и убирает карточку из очереди). Разобранный второй раз не подтверждают, но
+    // исправить ИИ можно и после проверки (владелец 14.10.2026: «Сформулировать с ИИ»
+    // не только в очереди): новое исправление уходит в базу разборов, а те, что уже
+    // там (ai_review.corrections), второй раз не отправляются.
     const aiReview = call?.ai_review || null;
     const aiPending = !aiReview?.outcome && hasTranscript;
+    const knownCorrections = useMemo(
+        () => new Map((aiReview?.corrections || []).map((item) => [item.idx, item.verdict])),
+        [aiReview],
+    );
     // «ИИ учтёт исправление» — по тому, как направление оценивается СЕЙЧАС
     // (rag_now с сервера): режим в прогоне застыл на момент оценки, у пакетной —
     // «batch». В shadow/off или пока правила включает администратор — не обещаем.
@@ -501,7 +513,7 @@ export default function CriteriaReviewPanel({
     const humanLocked = inJournal && !canCorrectJournal;
     const humanCanSave = !scaleChanged && !humanLocked;
     // Вердикты правятся, пока есть что сохранить: своя оценка или разбор ИИ.
-    const verdictsLocked = saving || humanLocked || (!humanCanSave && !aiPending);
+    const verdictsLocked = saving || humanLocked || (!humanCanSave && !hasTranscript);
     const toggleBlockedByOther = journalByOther && !canCorrectJournal;
     // Общий комментарий и отметки журнала принадлежат своей оценке: их правят, только
     // когда её можно сохранить (при «шкала изменилась» вердикты открыты ради разбора ИИ).
@@ -512,13 +524,18 @@ export default function CriteriaReviewPanel({
         () => criteria.map((c, i) => (isCorrection(c, state.scores[i]) ? i : -1)).filter((i) => i >= 0),
         [criteria, state.scores],
     );
+    // Исправления, которых ещё нет в базе разборов этого прогона, — их и шлём ИИ.
+    const kbIdx = useMemo(
+        () => correctionIdx.filter((i) => isNewCorrection(criteria[i], state.scores[i], knownCorrections)),
+        [correctionIdx, criteria, state.scores, knownCorrections],
+    );
     const baseline = useMemo(() => stateFrom(criteria, lastSaved), [criteria, lastSaved]);
     const humanDirty = humanSignature(state) !== humanSignature(baseline);
     const humanChanged = !lastSaved || humanDirty;
     // Несохранённое — своя оценка и, пока прогон не разобран, уточнения для базы
     // знаний. Исправления, совпадающие с сохранённой оценкой, не теряются: при
     // открытии они выводятся из неё заново, и спрашивать «потерять?» было бы ложью.
-    const dirty = humanDirty || (aiPending && kbSignature(state.kb) !== '[]');
+    const dirty = humanDirty || (hasTranscript && kbSignature(state.kb) !== '[]');
     // Где оценка расходится с ИИ или пуста при его вердикте — это возвращает «Как у ИИ».
     const blankAiIdx = criteria.map((c, i) => (state.scores[i] == null && verdictFromAi(c, c.ai) != null ? i : -1))
         .filter((i) => i >= 0);
@@ -536,13 +553,15 @@ export default function CriteriaReviewPanel({
 
     const empty = isEmptyReview(state.scores, state.comments, state.comment);
     const doHuman = humanCanSave && humanChanged && !(empty && !state.countInQuality);
-    const doAi = aiPending;
+    // Ревью ИИ уходит, пока прогон не разобран (подтверждение или исправления), а у
+    // разобранного — когда есть новые исправления.
+    const doAi = aiPending || (hasTranscript && kbIdx.length > 0);
     const quoteFound = useCallback((text) => quoteInTranscript(text, transcriptText), [transcriptText]);
     const humanCheck = doHuman
         ? validateReview(criteria, state.scores, state.comments, { completeRequired: state.countInQuality })
         : { missing: [], commentsRequired: [], ok: true };
     const aiCheck = doAi
-        ? validateCorrections(criteria, state.scores, state.comments, state.kb, quoteFound)
+        ? validateCorrections(criteria, state.scores, state.comments, state.kb, quoteFound, knownCorrections)
         : { reasonsRequired: [], quotesInvalid: [], ok: true };
     const problems = { ...humanCheck, ...aiCheck, ok: humanCheck.ok && aiCheck.ok };
     const problemIdx = useMemo(() => new Set(attempted ? [
@@ -619,7 +638,7 @@ export default function CriteriaReviewPanel({
             count_in_quality: state.countInQuality,
         } : null;
         const ai = doAi ? {
-            items: correctionIdx.map((i) => {
+            items: kbIdx.map((i) => {
                 const c = criteria[i];
                 const extra = state.kb[c.idx] || {};
                 const quote = String(extra.excerpt || '').trim();
@@ -663,7 +682,7 @@ export default function CriteriaReviewPanel({
 
     const saveLabel = saving ? 'Сохраняю…'
         : doAi
-            ? (correctionIdx.length
+            ? (kbIdx.length
                 ? (!doHuman ? 'Сохранить разбор'
                     : state.countInQuality ? 'Сохранить и учесть' : 'Сохранить оценку')
                 : (state.countInQuality && doHuman ? 'Подтвердить и учесть' : 'Подтвердить оценку ИИ'))
@@ -685,10 +704,10 @@ export default function CriteriaReviewPanel({
                 {isChat ? 'Переписки нет' : 'Транскрипта нет'} — подтвердить оценку ИИ нельзя, пока данные не загрузятся.
             </p>
         );
-    } else if (doAi && correctionIdx.length) {
+    } else if (doAi && kbIdx.length) {
         status = (
             <p className="text-[12px] text-slate-500">
-                Исправлений: <b className="text-blue-600">{correctionIdx.length}</b>
+                Исправлений: <b className="text-blue-600">{kbIdx.length}</b>
                 {ragLive ? ' — ИИ учтёт их в следующих оценках' : ' — сохранятся в «Базу разборов»'}
             </p>
         );
@@ -751,7 +770,8 @@ export default function CriteriaReviewPanel({
                     <RotateCcw size={14} className="mt-0.5 shrink-0" />
                     <span>
                         Шкала сотрудника изменилась после этой оценки ИИ — свою оценку и журнал можно
-                        заполнить после «Переоценить».{aiPending ? ' Подтвердить или исправить ИИ можно и сейчас.' : ''}
+                        заполнить после «Переоценить».{aiPending ? ' Подтвердить или исправить ИИ можно и сейчас.'
+                            : hasTranscript ? ' Исправить ИИ можно и сейчас.' : ''}
                     </span>
                 </div>
             )}
@@ -770,7 +790,11 @@ export default function CriteriaReviewPanel({
                     <CriterionReview key={c.idx ?? i} c={c} index={i}
                                      value={state.scores[i]} comment={state.comments[i]} extra={state.kb[c.idx]}
                                      onPick={pick} onComment={setComment} onExtra={setExtra} onRevert={revert}
-                                     locked={verdictsLocked} kbEnabled={doAi} kbLocked={saving}
+                                     locked={verdictsLocked}
+                                     kbEnabled={hasTranscript && isNewCorrection(c, state.scores[i], knownCorrections)}
+                                     inKnowledge={isCorrection(c, state.scores[i])
+                                         && !isNewCorrection(c, state.scores[i], knownCorrections)}
+                                     kbLocked={saving}
                                      highlight={problemIdx.has(i)}
                                      journalVerdict={journalByOther ? c.human : null}
                                      journalComment={journalByOther ? c.human_comment : null}
@@ -838,7 +862,7 @@ export default function CriteriaReviewPanel({
                         )}
                     </div>
                     <div className="ml-auto flex items-center gap-1.5">
-                        {doAi && onSkip && (
+                        {aiPending && onSkip && (
                             <button type="button" onClick={onSkip} disabled={saving} className={iosBtnGhost}>
                                 Пропустить
                             </button>

@@ -196,17 +196,28 @@ class AiReviewStateTests(unittest.TestCase):
     def test_reviewed_run_is_reported_with_who_and_when(self):
         sink = []
         conn = _Conn(("adjudicated", "23.09.2026 17:33", "Супервайзер"), sink)
-        with mock.patch.object(api.config, "connect_ro", return_value=conn):
+        with mock.patch.object(api.config, "connect_ro", return_value=conn),                 mock.patch.object(api, "_run_corrections", return_value={(1, "Correct"), (0, "Incorrect")}):
             payload = api._attach_ai_review({"_evaluation_run_id": "run-1"})
+        # corrections — что из прогона уже в базе разборов: карточка не предложит
+        # «Правило для ИИ» по ним второй раз (повторный разбор проверенной оценки).
         self.assertEqual(payload["ai_review"], {"outcome": "adjudicated",
                                                 "reviewed_at": "23.09.2026 17:33",
-                                                "reviewer": "Супервайзер"})
+                                                "reviewer": "Супервайзер",
+                                                "corrections": [{"idx": 0, "verdict": "Incorrect"},
+                                                                {"idx": 1, "verdict": "Correct"}]})
         self.assertTrue(conn.closed)
         sql, params = sink[0]
         # Связка та же, что у проверки разбора: мета прогона по его виду, id и модели.
         self.assertIn("m.model = e.model", sql)
         self.assertIn("m.subject_kind = e.subject_kind", sql)
         self.assertEqual(params, ("run-1",))
+
+    def test_corrections_failure_keeps_the_review_state(self):
+        conn = _Conn(("confirmed", "14.10.2026 09:00", "Проверяющий"), [])
+        with mock.patch.object(api.config, "connect_ro", return_value=conn),                 mock.patch.object(api, "_run_corrections", side_effect=RuntimeError("нет таблицы")),                 self.assertLogs(level="ERROR"):
+            payload = api._attach_ai_review({"_evaluation_run_id": "run-1"})
+        self.assertEqual(payload["ai_review"]["outcome"], "confirmed")
+        self.assertEqual(payload["ai_review"]["corrections"], [])
 
     def test_unreviewed_run_has_no_state(self):
         with mock.patch.object(api.config, "connect_ro", return_value=_Conn((None, None, None), [])):

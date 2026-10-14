@@ -130,11 +130,19 @@ export const quoteInTranscript = (excerpt, transcriptText) => {
  * объяснение (правило для ИИ или, если его нет, комментарий человека), а цитата,
  * если её вписали, обязана дословно найтись в транскрипте — сервер проверяет то
  * же и иначе отказал бы при сохранении. `quoteFound(text)` — предпроверка цитаты. */
-export const validateCorrections = (criteria, scores, comments, kb, quoteFound) => {
+/* Исправление, которого ещё нет в базе разборов этого прогона, — его и шлём ИИ.
+ * `known` — Map idx → вердикт ИИ-словаря, уже записанный разбором (ai_review.corrections):
+ * уже проверенную оценку можно исправить ещё раз, но прежние исправления правилами
+ * второй раз не становятся. */
+export const isNewCorrection = (criterion, verdict, known = null) => (
+    isCorrection(criterion, verdict) && known?.get?.(criterion?.idx) !== toAiVerdict(verdict)
+);
+
+export const validateCorrections = (criteria, scores, comments, kb, quoteFound, known = null) => {
     const reasonsRequired = [];
     const quotesInvalid = [];
     (criteria || []).forEach((c, i) => {
-        if (!isCorrection(c, scores?.[i])) return;
+        if (!isNewCorrection(c, scores?.[i], known)) return;
         const extra = kb?.[c.idx] || {};
         if (!String(extra.rule || '').trim() && !String(comments?.[i] || '').trim()) reasonsRequired.push(i);
         const quote = String(extra.excerpt || '').trim();

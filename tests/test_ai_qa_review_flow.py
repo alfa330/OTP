@@ -136,8 +136,10 @@ class ReviewFlowContractTests(unittest.TestCase):
 
     def test_frontend_always_posts_review_result(self):
         self.assertNotIn("items.length &&", self.view_src.replace("call && items.length", ""))
-        # Неразобранный прогон отправляется всегда — без исправлений это подтверждение.
-        self.assertIn("const doAi = aiPending;", self.panel_src)
+        # Неразобранный прогон отправляется всегда — без исправлений это подтверждение;
+        # разобранный — когда есть исправления, которых ещё нет в базе разборов
+        # (владелец 14.10.2026: «Сформулировать с ИИ» не только в очереди ревью).
+        self.assertIn("const doAi = aiPending || (hasTranscript && kbIdx.length > 0);", self.panel_src)
         self.assertIn("Оценка ИИ подтверждена", self.view_src)
         # При отказе карточка остаётся открытой: закрывает её только успешный ответ.
         self.assertIn("return { ok: false, state };", self.view_src)
