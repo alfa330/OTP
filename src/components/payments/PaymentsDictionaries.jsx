@@ -348,13 +348,20 @@ const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
 /* Экраны, у которых нет общего списка с окном записи. */
 const OWN_SCREENS = ['settings', 'templates'];
 
+/** Справочники, которые человеку показываются, — в порядке левого списка. Нужны и разделу:
+    по ним адрес знает, какой справочник открыт на деле (paymentsLink.js). */
+export const dictionarySections = (capabilities = {}) => SECTIONS.filter((item) => !item.need
+    || (typeof item.need === 'function' ? item.need(capabilities) : capabilities[item.need]));
+
 const PaymentsDictionaries = ({
     apiBaseUrl, headers, users, dictionaries, capabilities = {}, me, onDictionariesChanged, onSettingsChanged,
-    onRequestsChanged, onOpenRequest, showToast,
+    onRequestsChanged, onOpenRequest, showToast, section = '', onSectionChange = null,
 }) => {
-    const sections = useMemo(() => SECTIONS.filter((item) => !item.need
-        || (typeof item.need === 'function' ? item.need(capabilities) : capabilities[item.need])), [capabilities]);
-    const [tab, setTab] = useState('counterparties');
+    const sections = useMemo(() => dictionarySections(capabilities), [capabilities]);
+    /* Открытый справочник держит раздел: он пишет его в адрес (paymentsLink.js). Без раздела — свой. */
+    const [ownTab, setOwnTab] = useState('counterparties');
+    const tab = section || ownTab;
+    const setTab = onSectionChange || setOwnTab;
     const current = sections.find((item) => item.value === tab) || sections[0];
     const name = current?.value;
     const ownScreen = OWN_SCREENS.includes(name);

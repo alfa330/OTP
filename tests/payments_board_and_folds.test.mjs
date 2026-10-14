@@ -172,7 +172,8 @@ test('шапка, вкладки, списки и доска стоят в од�
     assert.equal(view.split('SECTION_COLUMN').length - 1, 2, 'колонку раздела берут не только в корне');
     // …и ни вкладка, ни доска своей ширины и своих полей не заводят.
     for (const tab of ['desk', 'requests', 'assets', 'dictionaries', 'roles']) {
-        const at = view.indexOf(`{activeTab === '${tab}' && (`);
+        // Без «(» в конце: у стола ещё условие — вкладка из ссылки не ждёт прав (paymentsLink.js).
+        const at = view.indexOf(`{activeTab === '${tab}' &&`);
         assert.ok(at > 0, `вкладка ${tab} не найдена`);
         assert.ok(view.slice(at, at + 160).includes('<div className="mt-4 motion-safe:animate-fade-in-soft">'), `у вкладки ${tab} своя ширина или свои поля`);
     }

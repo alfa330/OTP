@@ -8,7 +8,7 @@ import PaymentsBoard from './PaymentsBoard';
 import PaymentsDesk from './PaymentsDesk';
 import PaymentsFilters from './PaymentsFilters';
 import PaymentsAssets from './PaymentsAssets';
-import PaymentsDictionaries from './PaymentsDictionaries';
+import PaymentsDictionaries, { dictionarySections } from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
 import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
@@ -22,6 +22,7 @@ import {
     StatTiles, StatTilesSkeleton, TypePill, cardCell, errorText, requestCardFrame,
 } from './paymentsUi';
 import { recall, recallShell, remember, rememberPing } from './paymentsEntry';
+import { PAYMENTS_DEFAULT_TAB, readPaymentsLink, resolvePaymentsLink, syncPaymentsLink } from './paymentsLink';
 
 /*
  * Раздел «Оплата счетов» — модуль «Закуп и оплата» (ТЗ #381).
@@ -42,35 +43,26 @@ import { recall, recallShell, remember, rememberPing } from './paymentsEntry';
  * входе не перестраивался на глазах (две вкладки → восемь), он помнит прошлый
  * ответ и первый кадр рисует им — см. paymentsEntry.js.
  *
- * Диплинк: ?view=payments&request=<id> открывает заявку сразу — на него ведут
- * уведомления в Telegram; из колокола заявку открывает `focusRequest`.
+ * Адрес повторяет открытое: вкладку, справочник, карточку имущества и заявку
+ * (paymentsLink.js). По нему раздел открывается после перезагрузки и по присланной
+ * ссылке; ?view=payments&request=<id> — ссылка из Telegram. Из колокола заявку
+ * открывает `focusRequest`.
  */
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
 
-const requestIdFromLocation = () => {
-    try {
-        const value = new URLSearchParams(window.location.search).get('request');
-        const id = Number(value);
-        return Number.isInteger(id) && id > 0 ? id : null;
-    } catch {
-        return null;
-    }
-};
-
-/* Заявку закрыли — её номер из адреса убираем: иначе обновление страницы
-   открывало бы ту же карточку снова. */
-const dropRequestFromLocation = () => {
-    try {
-        const url = new URL(window.location.href);
-        if (!url.searchParams.has('request')) return;
-        url.searchParams.delete('request');
-        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    } catch { /* адрес не поправить — не страшно */ }
-};
+// Что открыть при входе — по адресу. Нет окна (серверный рендер тестов) — пусто.
+const linkAtEntry = () => readPaymentsLink(typeof window === 'undefined' ? '' : window.location?.search);
 
 const optionLabel = (options, value) => options.find((option) => option.value === value)?.label || '';
+
+/* Вкладка или справочник из ссылки ждут ответа сервера о правах — заготовка на их месте. */
+const LinkPending = ({ kind, className = '' }) => (
+    <div className={`${iosCard} space-y-3 px-4 py-4 ${className}`} role="status" aria-busy="true" aria-label="Открываем ссылку" data-link-pending={kind}>
+        {['w-2/3', 'w-1/2', 'w-3/5'].map((width) => <Bone key={width} className={`h-3 ${width}`} />)}
+    </div>
+);
 
 const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest = null, userId = null }) => {
     const headers = useCallback(() => (withAccessTokenHeader ? withAccessTokenHeader() : {}), [withAccessTokenHeader]);
@@ -89,9 +81,18 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     }));
     const [ping, setPing] = useState(entry.ping);
     const [pingError, setPingError] = useState('');
+    // Сервер ответил на /ping в этот вход: settled — успешно или ошибкой, ok — успешно (права известны точно).
+    const [pingSettled, setPingSettled] = useState(false);
+    const [pingOk, setPingOk] = useState(false);
+    // Метки ссылки, которую раздел не открыл из-за сбоя /ping: держатся в адресе до ответа или до щелчка.
+    const [heldLink, setHeldLink] = useState(null);
     const [dictionaries, setDictionaries] = useState(entry.dictionaries);
     const [users, setUsers] = useState(entry.users || []);
-    const [tab, setTab] = useState('desk');
+    // Что открыть — по адресу (paymentsLink.js): вкладка, справочник, карточка имущества, заявка.
+    const [link] = useState(linkAtEntry);
+    const [tab, setTab] = useState(link.tab);
+    const [dictionary, setDictionary] = useState(link.dict);
+    const [assetId, setAssetId] = useState(link.asset);
     // Растёт после любого действия над заявкой: доски и рабочий стол перечитываются.
     const [refreshKey, setRefreshKey] = useState(0);
     const [deskCount, setDeskCount] = useState(() => {
@@ -115,7 +116,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     const [formOpen, setFormOpen] = useState(false);
     const [createWanted, setCreateWanted] = useState(false);
     const [editing, setEditing] = useState(null);
-    const [openedId, setOpenedId] = useState(() => requestIdFromLocation());
+    const [openedId, setOpenedId] = useState(link.request);
 
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
@@ -127,9 +128,12 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             rememberPing(userId, response.data);
             setDeskCount(Number(response.data?.counters?.desk) || 0);
             setPingError('');
+            setPingOk(true);
         } catch (error) {
             setPingError(errorText(error, 'Раздел недоступен'));
             setCreateWanted(false);
+        } finally {
+            setPingSettled(true);
         }
     }, [apiBaseUrl, headers, userId]);
 
@@ -196,8 +200,62 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         return list;
     }, [capabilities.boards, capabilities.can_view_assets, capabilities.sees_all_requests, capabilities.can_manage_cards,
         capabilities.can_manage_assets, isAdmin, meta, deskCount]);
-    const activeTab = tabs.some((item) => item.value === tab) ? tab : 'desk';
+    /* Что показать и что писать в адрес (paymentsLink.js::resolvePaymentsLink). Вкладка или
+       справочник из ссылки, которых нет в известных правах, ждут ответа сервера: на их месте
+       заготовка, а не «Мои задачи», которые через миг сменились бы ими. */
+    const tabValues = useMemo(() => tabs.map((item) => item.value), [tabs]);
+    const dictionaryKeys = useMemo(() => dictionarySections(capabilities).map((item) => item.value), [capabilities]);
+    const {
+        activeTab, tabPending, activeDictionary, dictionaryPending, missing, marks,
+    } = resolvePaymentsLink({
+        tab, dict: dictionary, asset: assetId, request: openedId,
+        tabs: tabValues, dictionaries: dictionaryKeys, settled: pingSettled, held: heldLink,
+    });
     const boardCode = activeTab.startsWith('board:') ? activeTab.slice(6) : null;
+
+    /* Ответ пришёл, а вкладки или справочника из ссылки у человека нет — остаются «Мои задачи» и
+       первый справочник. Сервер ответил ОШИБКОЙ — это не ответ «вкладки нет»: на экране то же,
+       но метки ссылки остаются в адресе (heldLink), и обновление страницы откроет её снова. */
+    useEffect(() => {
+        if (!missing) return;
+        if (!pingOk) setHeldLink((prev) => prev || { tab, dict: dictionary, asset: assetId });
+        setTab((prev) => (tabValues.includes(prev) ? prev : PAYMENTS_DEFAULT_TAB));
+        setDictionary((prev) => (!prev || dictionaryKeys.includes(prev) ? prev : ''));
+    }, [missing, pingOk, tab, dictionary, assetId, tabValues, dictionaryKeys]);
+    // Права подтвердились — адрес снова повторяет экран.
+    useEffect(() => { if (pingOk) setHeldLink(null); }, [pingOk]);
+
+    /* Другая вкладка — справочник и карточка имущества прежней закрываются, как и до адреса:
+       их состояние жило внутри вкладки. Сравнение — с выбранной вкладкой, а не с показанной:
+       пока вкладка из ссылки ждёт прав, щелчок по «Мои задачи» обязан сработать. */
+    const changeTab = useCallback((value) => {
+        if (value === tab) return;
+        setTab(value);
+        setDictionary('');
+        setAssetId(null);
+        setHeldLink(null);
+    }, [tab]);
+    const changeDictionary = useCallback((value) => {
+        setDictionary(value);
+        setHeldLink(null);
+    }, []);
+
+    /* ОТКРЫТОЕ — В АДРЕСНОЙ СТРОКЕ: вкладка, справочник, карточка имущества и заявка. Это и есть
+       ссылка, которую копируют из строки браузера, и по ней же перезагрузка возвращает туда, где
+       человек был (paymentsLink.js).
+
+       «Назад» на телефоне: стек жестов (utils/mobileBackStack.js) возвращает в строку адрес из
+       истории, а там бывает номер заявки, закрытой крестиком, — без поправки строка показывала бы
+       заявку, окна которой на экране нет. Поэтому после каждого «назад» открытое пишется снова;
+       жест, уводящий в другой раздел, адрес меняет сам, и его мы не трогаем (onlyHere). */
+    const { tab: markTab, dict: markDict, asset: markAsset, request: markRequest } = marks;
+    useEffect(() => {
+        const current = { tab: markTab, dict: markDict, asset: markAsset, request: markRequest };
+        syncPaymentsLink(current);
+        const restore = () => syncPaymentsLink(current, { onlyHere: true });
+        window.addEventListener('popstate', restore);
+        return () => window.removeEventListener('popstate', restore);
+    }, [markTab, markDict, markAsset, markRequest]);
 
     /* Лента вкладок бывает шире экрана (телефон, узкое окно компьютера), и выбранная
        вкладка оказывалась обрезанной краем, а следующие за ней — не видны вовсе.
@@ -295,7 +353,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         loadPing();
     }, [loadPing]);
 
-    const closeCard = useCallback(() => { setOpenedId(null); dropRequestFromLocation(); }, []);
+    // Номер закрытой заявки из адреса уберёт эффект адреса выше.
+    const closeCard = useCallback(() => setOpenedId(null), []);
 
     const exportXlsx = useCallback(async () => {
         setDownloading(true);
@@ -497,9 +556,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                    правее кнопки и карточек. */
                 <div ref={tabsRef} className="mt-4 overflow-x-auto [scrollbar-width:none]">
                     <IosSegmented
-                        value={activeTab}
+                        // Вкладка из ссылки ещё ждёт прав — не выбрана ни одна, «Мои задачи» тоже.
+                        value={tabPending ? tab : activeTab}
                         options={tabs}
-                        onChange={setTab}
+                        onChange={changeTab}
                         size="lg"
                         ariaLabel="Раздел"
                         className="min-w-max min-[769px]:max-[1179px]:[&>button]:px-2 min-[769px]:max-[1179px]:[&>button]:text-[12.5px]"
@@ -525,7 +585,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         {isAdmin && (
                             <>
                                 {' '}
-                                <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => setTab('roles')}>Открыть «Участники»</button>
+                                <button type="button" className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600" onClick={() => changeTab('roles')}>Открыть «Участники»</button>
                             </>
                         )}
                     </NoticeBox>
@@ -541,8 +601,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 <div className="mt-3"><NoticeBox tone="slate" text="Не задан ключ шифрования номеров карт: заявки на пополнение карты сохранить не получится." /></div>
             )}
 
+            {tabPending && <LinkPending kind="tab" className="mt-4" />}
+
             {/* Вкладка не подменяется рывком: содержимое мягко проявляется (fade-in-soft). */}
-            {activeTab === 'desk' && (
+            {activeTab === 'desk' && !tabPending && (
                 <div className="mt-4 motion-safe:animate-fade-in-soft">
                     <PaymentsDesk
                         apiBaseUrl={apiBaseUrl}
@@ -729,12 +791,15 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         users={users}
                         showToast={showToast}
                         onOpenRequest={setOpenedId}
+                        openedAsset={assetId}
+                        onOpenAsset={setAssetId}
                     />
                 </div>
             )}
 
             {activeTab === 'dictionaries' && (
                 <div className="mt-4 motion-safe:animate-fade-in-soft">
+                    {dictionaryPending ? <LinkPending kind="dictionary" /> : (
                     <PaymentsDictionaries
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
@@ -747,7 +812,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         onRequestsChanged={() => applyChanged(null)}
                         onOpenRequest={setOpenedId}
                         showToast={showToast}
+                        section={activeDictionary}
+                        onSectionChange={changeDictionary}
                     />
+                    )}
                 </div>
             )}
 

@@ -61,9 +61,10 @@ class SectionGateTests(unittest.TestCase):
         user_id = access.SECTION_ALLOWED_USER_IDS[0]
         self.assertTrue(access.can_open_section({'user_id': str(user_id)}))
 
-    def test_pilot_perimeter_is_owner_and_coexecutor(self):
-        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2, 448))
-        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2, 448))
+    def test_pilot_perimeter_is_owner_coexecutor_and_tz_author(self):
+        # 14.10.2026 — постановщик ТЗ #381 (id 242), вход и администрирование, как у первых двух.
+        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2, 448, 242))
+        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2, 448, 242))
 
     def test_role_member_outside_the_perimeter_is_marked(self):
         """Роль в «Участниках» раздел не открывает — администратор должен это видеть."""

@@ -144,6 +144,8 @@ import {
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
+// Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
+import { stripPaymentsParams } from './components/payments/paymentsLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
 import { recoverFromStaleBundle } from './staleBundleRecovery';
@@ -378,11 +380,11 @@ const VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = new Set([183]);
 const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([476, 523]);
 // Раздел «Оплата счетов» (задача #179): бизнес-процесс согласования закупа и
 // оплаты счетов. На время выката открыт поимённо: владельцу (id 2), его прямое
-// указание, и с 02.10.2026 соисполнителю задачи (id 448). Не «всем super_admin»:
-// их пятеро, и согласование оплаты никому из них ещё не выдавали. Та же
-// константа на бэкенде — SECTION_ALLOWED_USER_IDS в payments/access.py; списки
-// сверяет тест.
-const PAYMENTS_ALLOWED_USER_IDS = new Set([2, 448]);
+// указание, с 02.10.2026 соисполнителю задачи (id 448) и с 14.10.2026 постановщику
+// ТЗ #381, директору по развитию (id 242). Не «всем super_admin»: их пятеро, и
+// согласование оплаты никому из них ещё не выдавали. Та же константа на бэкенде —
+// SECTION_ALLOWED_USER_IDS в payments/access.py; списки сверяет тест.
+const PAYMENTS_ALLOWED_USER_IDS = new Set([2, 448, 242]);
 // «Настройки SIP» — телефония: адрес сервера, пароли, автодозвон и SIP-номера
 // операторов. Раздел НЕ «для любого главы отдела»: бэк-офис (Бухгалтерия, HR)
 // и фронт-офисы звонков не принимают, и панель с паролями SIP им не нужна.
@@ -3115,6 +3117,9 @@ const buildAppViewUrl = (nextView) => {
         }
         /* Фильтры «Списков Байги» (метки bg_*, baigaMeta.js) — тоже. */
         if (nextView !== 'baiga') stripBaigaParams(url);
+        /* И метки «Оплаты счетов» (вкладка, справочник, имущество, заявка — paymentsLink.js):
+           ссылка на другой раздел не должна нести номер открытой заявки. */
+        if (nextView !== 'payments') stripPaymentsParams(url);
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3167,6 +3172,10 @@ const syncAppViewWithUrl = (nextView) => {
            него уже не видит. То же условие «не baiga»: иначе ссылка на
            выборку теряла бы фильтры сразу после входа. */
         if (nextView !== 'baiga') stripBaigaParams(url);
+        /* Метки «Оплаты счетов» раздел тоже пишет сам (paymentsLink.js). Уход из него
+           снимает их здесь, иначе номер открытой заявки остался бы в адресе чужого
+           раздела, а «назад» на телефоне вернул бы его в раздел и открыл ту заявку снова. */
+        if (nextView !== 'payments') stripPaymentsParams(url);
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {

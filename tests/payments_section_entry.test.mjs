@@ -326,6 +326,88 @@ test('предупреждения раздела стоят с первого �
     memory.forgetEntryMemory();
 });
 
+/* ── вход по ссылке (адрес раздела — paymentsLink.js) ───────────────────── */
+
+const selectedTabOf = (html) => {
+    const match = html.match(/<button[^>]*role="tab"[^>]*aria-selected="true"[^>]*>(.*?)<\/button>/);
+    return match ? match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null;
+};
+
+/* Первый кадр при заданном адресе: окно с адресной строкой и (не)пустым хранилищем.
+   Доска и справочники зовут useLayoutEffect, и серверный рендер React предупреждает, что он
+   ничего не делает, — для первого кадра это и нужно; остальные ошибки проходят как есть. */
+const frameAt = (PaymentsView, search, storage = fakeStorage()) => {
+    const hadWindow = 'window' in globalThis;
+    const before = globalThis.window;
+    const consoleError = console.error;
+    globalThis.window = { localStorage: storage, location: { search } };
+    console.error = (...args) => {
+        if (String(args[0]).startsWith('Warning: useLayoutEffect does nothing on the server')) return;
+        consoleError(...args);
+    };
+    try {
+        return firstFrame(PaymentsView, 7);
+    } finally {
+        console.error = consoleError;
+        if (hadWindow) globalThis.window = before; else delete globalThis.window;
+    }
+};
+
+test('ссылка на вкладку: первый кадр — сразу она, а не «Мои задачи»', async () => {
+    const { PaymentsView, memory } = await section();
+    memory.forgetEntryMemory();
+    memory.remember(7, 'ping', PING);
+    memory.remember(7, 'desk', DESK);
+    const requests = frameAt(PaymentsView, '?view=payments&section=requests&request=3');
+    assert.equal(selectedTabOf(requests), 'Заявки');
+    assert.ok(!requests.includes('Согласуйте закуп'), 'под вкладкой «Заявки» нарисован стол');
+    assert.ok(!requests.includes('data-link-pending'));
+    assert.equal(selectedTabOf(frameAt(PaymentsView, '?view=payments&section=accounting')), 'Бухгалтерия');
+    // Справочник из ссылки выбран в левом списке.
+    const routes = frameAt(PaymentsView, '?view=payments&section=dictionaries&dict=routes');
+    assert.equal(selectedTabOf(routes), 'Справочники');
+    const current = routes.match(/<button[^>]*aria-current="page"[^>]*>([\s\S]*?)<\/button>/);
+    assert.ok(current && current[1].includes('Маршруты согласования'), 'в левом списке выбран не тот справочник');
+    // Карточка имущества из ссылки открыта сразу.
+    const asset = frameAt(PaymentsView, '?view=payments&section=assets&asset=2');
+    assert.equal(selectedTabOf(asset), 'Имущество');
+    assert.match(asset, /aria-label="Загружаем карточку"/);
+    assert.doesNotMatch(frameAt(PaymentsView, '?view=payments&section=assets'), /aria-label="Загружаем карточку"/);
+    // Ссылка из Telegram — заявка поверх «Моих задач».
+    assert.equal(selectedTabOf(frameAt(PaymentsView, '?view=payments&request=3')), 'Мои задачи 2');
+    // Метки чужого раздела (вход из меню, в строке ещё прежний view) не читаются.
+    assert.equal(selectedTabOf(frameAt(PaymentsView, '?view=tasks&section=requests')), 'Мои задачи 2');
+    memory.forgetEntryMemory();
+});
+
+test('ссылка на вкладку, права на которую ещё не известны: заготовка, а не «Мои задачи»', async () => {
+    const { PaymentsView, memory } = await section();
+    memory.forgetEntryMemory();
+    // Первый вход на устройстве: помнить нечего.
+    const fresh = frameAt(PaymentsView, '?view=payments&section=assets&asset=2');
+    assert.match(fresh, /data-link-pending="tab"/);
+    assert.ok(!fresh.includes('data-desk-skeleton'), 'на месте вкладки из ссылки — заготовка стола');
+    // Запомненный набор вкладку не знает (права могли дать позже) — ждём ответа сервера,
+    // ни одна вкладка не выбрана, в том числе «Мои задачи».
+    memory.remember(7, 'ping', { ...PING, capabilities: { ...PING.capabilities, is_admin: false, can_view_assets: false, can_manage_assets: false } });
+    const unknown = frameAt(PaymentsView, '?view=payments&section=assets');
+    assert.equal(selectedTabOf(unknown), null);
+    assert.match(unknown, /data-link-pending="tab"/);
+    assert.ok(!tabsOf(unknown).includes('Имущество'));
+    // Вкладка «Заявки» есть у всех — её ждать нечего.
+    const requests = frameAt(PaymentsView, '?view=payments&section=requests');
+    assert.equal(selectedTabOf(requests), 'Заявки');
+    assert.ok(!requests.includes('data-link-pending'));
+    // Справочник, на который в запомненных правах прав нет («Настройки» — администратору): заготовка
+    // на его месте, а не «Поставщики», которые через миг сменились бы им.
+    memory.remember(7, 'ping', { ...PING, capabilities: { ...PING.capabilities, is_admin: false } });
+    const settings = frameAt(PaymentsView, '?view=payments&section=dictionaries&dict=settings');
+    assert.equal(selectedTabOf(settings), 'Справочники');
+    assert.match(settings, /data-link-pending="dictionary"/);
+    assert.ok(!settings.includes('aria-current="page"'), 'под заготовкой нарисован первый справочник');
+    memory.forgetEntryMemory();
+});
+
 test('раздел узнаёт, кто его смотрит, от портала; надпись о загрузке не мелькает', () => {
     const app = source('src/App.jsx');
     const at = app.indexOf('<PaymentsView');

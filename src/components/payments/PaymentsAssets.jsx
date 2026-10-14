@@ -289,7 +289,7 @@ export const AssetCard = ({ assetId, preview = null, apiBaseUrl, headers, dictio
     );
 };
 
-const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, onOpenRequest }) => {
+const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, onOpenRequest, openedAsset = null, onOpenAsset = null }) => {
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [facets, setFacets] = useState({ cities: [], departments: [] });
@@ -299,7 +299,10 @@ const PaymentsAssets = ({ apiBaseUrl, headers, dictionaries, users, showToast, o
     const [search, setSearch] = useState('');
     const [query, setQuery] = useState('');
     const [filters, setFilters] = useState(EMPTY_FILTERS);
-    const [openedId, setOpenedId] = useState(null);
+    /* Открытую карточку держит раздел: её номер стоит в адресе (paymentsLink.js). Без раздела — своя. */
+    const [ownOpened, setOwnOpened] = useState(null);
+    const openedId = onOpenAsset ? openedAsset : ownOpened;
+    const setOpenedId = onOpenAsset || setOwnOpened;
 
     useEffect(() => {
         const timer = setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
