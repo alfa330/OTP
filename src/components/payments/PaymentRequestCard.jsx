@@ -9,11 +9,11 @@ import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META,
     OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
     dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
-    isOverdue, netAmount, paidLabel, paidWord, recordView, requestState, routeSummary, stageStatusOptions, tonePill,
+    isOverdue, netAmount, paidLabel, paidWord, recordView, requestState, routeSummary, stageStatusLabel, stageStep, tonePill,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Fold,
-    FoldGroup, Lifecycle, NoticeBox, RequisitesBox, ReturnNotice, Row, SectionTitle, StageStatusSwitch, StatePill, TonePill,
+    FoldGroup, Lifecycle, NoticeBox, RequisitesBox, ReturnNotice, Row, SectionTitle, StatePill, TonePill,
     UserSelect, WindowSkeleton, errorText, multipart, useIsoLayoutEffect,
 } from './paymentsUi';
 
@@ -36,10 +36,13 @@ import {
  *    Обе страницы живут в разметке сразу: при перелистывании одна прячется, и
  *    набранное в форме не теряется. Задачу выполнили — окно возвращается к заявке.
  * 3. Нижняя панель — то, что нужно при любом положении прокрутки: «…» с редкими
- *    действиями (возврат средств, отмена, удаление), статус своей задачи («Новые /
- *    На рассмотрении» — тот же, что колонка на доске), «Доработать», «Готово» и
- *    кнопка перехода: «К задаче ›» на странице заявки, «‹ К заявке» — на странице
- *    задачи. Синяя кнопка в панели одна — та, что ведёт дальше.
+ *    действиями (возврат средств, отмена, удаление), «Доработать», «Готово» и кнопка
+ *    перехода: «К задаче ›» на странице заявки, «‹ К заявке» — на странице задачи.
+ *    Статус задачи меняют не переключателем, а кнопкой следующей ступени на странице
+ *    задачи («Взять на рассмотрение», «Взять в проверку», «Счёт проверен»…), как в
+ *    «Задачах» (просьба владельца 14.10.2026: «не нужен такой переключатель… сделай
+ *    кнопками, и чтобы было постепенно»). Синяя кнопка в панели одна — та, что ведёт
+ *    дальше.
  *
  * Файлы живут в одном месте — «Документы», с подписью этапа.
  */
@@ -337,30 +340,25 @@ const PaymentRequestCard = ({
         if (node) node.scrollTop = onTask ? 0 : requestScroll.current;
     }, [onTask]);
 
-    /* Статус своей задачи исполнитель переключает здесь же, в нижней панели: на этапах,
-       где у задачи есть рабочие статусы (stageStatusOptions). */
-    const statusOptions = useMemo(
-        () => (hasTask ? stageStatusOptions(meta, current.kind) : []),
-        [meta, current, hasTask],
-    );
+    /* Статус своей задачи исполнитель двигает кнопкой следующей ступени (STAGE_STEPS):
+       она стоит в нижней панели страницы задачи. Ступеней дальше нет — дальше ведёт
+       итоговое действие самой формы этапа. */
+    const step = hasTask ? stageStep(current.kind, current.status) : null;
+    const stepLabel = hasTask ? stageStatusLabel(meta, current.kind, current.status) : '';
 
     /* Подвал стоит с первого кадра, одной кнопкой «Готово»: появляясь вместе с
        заявкой, он добавлял окну высоты уже после открытия. Остальное встаёт в тот же
-       ряд, когда она загрузилась: слева — «…» и статус задачи, справа — «Доработать»,
-       «Готово» и переход между страницами. Как в помощниках macOS: «назад» стоит левее,
-       а синяя кнопка — одна, крайняя справа, и это та, что ведёт дальше («К задаче ›»).
-       На странице задачи дальше ведёт действие самой формы, поэтому в панели синей нет.
-       На телефоне статус — отдельной строкой над кнопками, во всю ширину. */
+       ряд, когда она загрузилась: слева — «…», справа — «Доработать», «Готово» и переход
+       между страницами. Как в помощниках macOS: «назад» стоит левее, а синяя кнопка —
+       одна, крайняя справа, и это та, что ведёт дальше: «К задаче ›» на странице заявки,
+       кнопка следующей ступени — на странице задачи. На последней ступени дальше ведёт
+       итоговое действие самой формы, и синей в панели нет. На телефоне кнопка ступени —
+       своей строкой во всю ширину над остальными. */
     const footer = (
         <>
             {request && (
-                <div className={statusOptions.length ? 'mr-auto sm:mr-0' : 'mr-auto'}>
+                <div className="mr-auto">
                     <IosMenu items={menuItems} label="Ещё действия" align="left" disabled={busy} />
-                </div>
-            )}
-            {statusOptions.length > 0 && (
-                <div className="order-first w-full min-w-0 sm:order-none sm:mr-auto sm:w-auto">
-                    <StageStatusSwitch key={`${request.id}:${current.kind}`} options={statusOptions} value={current.status} busy={busy} onMove={move} />
                 </div>
             )}
             {request && permissions.can_edit && !onTask && (
@@ -377,6 +375,17 @@ const PaymentRequestCard = ({
                 </button>
             )}
             <button type="button" className={hasTask ? iosBtnSecondary : iosBtnPrimary} onClick={onClose}>Готово</button>
+            {onTask && step && (
+                <button
+                    type="button"
+                    data-card-step={step.to}
+                    className={`${iosBtnPrimary} max-sm:order-first max-sm:w-full`}
+                    disabled={busy}
+                    onClick={() => move(step.to)}
+                >
+                    {busy && <Loader2 size={14} className="animate-spin" />} {step.label}
+                </button>
+            )}
             {hasTask && !onTask && (
                 <button type="button" data-card-turn="task" className={iosBtnPrimary} onClick={goTask}>
                     К задаче <ChevronRight size={15} className="-mr-1" />
@@ -836,7 +845,8 @@ const PaymentRequestCard = ({
                             {hasTask && (
                                 <div data-card-page="task" hidden={!onTask} className={`space-y-4 ${onTask ? pageMotion : ''}`}>
                                     <section className="space-y-1.5">
-                                        <SectionTitle>Ваша задача · {current.title}</SectionTitle>
+                                        {/* Ступень, на которой задача сейчас, — как колонка на доске. */}
+                                        <SectionTitle right={stepLabel ? <TonePill>{stepLabel}</TonePill> : null}>Ваша задача · {current.title}</SectionTitle>
                                         <PaymentStageForm
                                             key={`${request.id}:${current.kind}`}
                                             data={data}

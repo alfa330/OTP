@@ -1424,66 +1424,6 @@ export const Fold = ({ id, title, summary, open, onToggle, sizeKey, children }) 
     );
 };
 
-/* Статус задачи этапа — переключатель в нижней панели окна заявки, рядом с «Готово»
-   (какие статусы и у каких этапов — stageStatusOptions в paymentsMeta.js). Раньше он стоял
-   вверху, внутри блока задачи, между пояснением и полем комментария; владелец 13.10.2026:
-   «вообще не в удобном месте — должны быть внизу, на месте примерно кнопки "Готово"…
-   аккуратно и удобно, в стиле ios/macos».
-
-   Ведёт себя как переключатель iOS:
-   — выбор встаёт сразу, по нажатию, белая плашка переезжает на новый сегмент (slide у
-     IosSegmented); ответа сервера не ждёт;
-   — сервер отказал — возвращается на прежний статус, а отказ показывает окно заявки;
-   — пока над заявкой идёт другое действие, не нажимается и приглушён.
-   На узком экране (там, где панель окна ставит его отдельной строкой, — до 640 px) занимает
-   строку целиком, сегменты равной ширины; не помещаются (четыре статуса бухгалтерии) — лента
-   листается и сама подводится к выбранному. Ширина — стилями, по той же границе, что и
-   раскладка панели: признак «телефон» включается и на широком экране малой высоты, и там
-   равные сегменты в узком контроле обрезали подписи. */
-export const StageStatusSwitch = ({ options, value, busy = false, onMove }) => {
-    const stripRef = useRef(null);
-    const placed = useRef(false);
-    const [wanted, setWanted] = useState(null);
-    const shown = wanted ?? value;
-    const pick = async (next) => {
-        if (busy || wanted !== null || next === value) return;
-        setWanted(next);
-        try {
-            await onMove?.(next);
-        } finally {
-            // Статус из ответа сервера уже в заявке; отказал — в ней остался прежний.
-            setWanted(null);
-        }
-    };
-    useEffect(() => {
-        const strip = stripRef.current;
-        const selected = strip?.querySelector('[aria-selected="true"]');
-        if (strip && selected && strip.scrollWidth > strip.clientWidth) {
-            const stripBox = strip.getBoundingClientRect();
-            const box = selected.getBoundingClientRect();
-            const left = strip.scrollLeft + (box.left + box.width / 2) - (stripBox.left + stripBox.width / 2);
-            strip.scrollTo({ left, behavior: placed.current && !prefersReducedMotion() ? 'smooth' : 'auto' });
-        }
-        placed.current = true;
-    }, [shown, options.length]);
-    return (
-        <div
-            ref={stripRef}
-            data-stage-status
-            className={`max-w-full overflow-x-auto transition-opacity [scrollbar-width:none] ${busy && wanted === null ? 'pointer-events-none opacity-60' : ''}`}
-        >
-            <IosSegmented
-                value={shown}
-                options={options}
-                onChange={pick}
-                ariaLabel="Статус задачи"
-                slide
-                className="min-w-max max-sm:flex max-sm:w-full max-sm:[&>button]:flex-1"
-            />
-        </div>
-    );
-};
-
 export const ErrorBox = ({ text }) => (text ? (
     <div className="rounded-2xl bg-rose-50 px-4 py-3 text-[13px] leading-relaxed text-rose-700 ring-1 ring-rose-200">{text}</div>
 ) : null);

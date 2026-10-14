@@ -5,7 +5,7 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios
 import PaymentAssetsEditor, { assetIssues, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
 import {
     CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, fileKindOptions, fmtDate, fmtMoney, issueKeys, issueSentence, issuesByKey,
-    parseAmount, quantityText, todayISO,
+    parseAmount, quantityText, stageAtFinal, stageTaken, todayISO,
 } from './paymentsMeta';
 import {
     AmountInput, CardNumber, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING, IssueNav,
@@ -38,9 +38,14 @@ import {
  * Состояние формы живёт здесь и сбрасывается сменой этапа: карточка монтирует
  * компонент с key из номера заявки и вида подзадачи.
  *
- * Переключателя статуса задачи («Новые / На рассмотрении») в форме нет: он стоит в
- * нижней панели окна заявки (PaymentRequestCard.jsx) — там он под рукой, где бы
- * человек ни читал заявку.
+ * 4. СТУПЕНЬ ЗА СТУПЕНЬЮ (просьба владельца 14.10.2026: «не нужен такой
+ *    переключатель… сделай кнопками, и чтобы было постепенно», как в «Задачах»). Статус
+ *    задачи меняет кнопка следующей ступени в нижней панели окна заявки
+ *    («Взять на рассмотрение», «Взять в проверку», «Счёт проверен», «Начать оплату»…,
+ *    paymentsMeta.STAGE_STEPS). Пока ступени не пройдены, форма показывает то, что нужно
+ *    для проверки (реквизиты, сумму, файлы), а поля и итоговое действие («Согласовать»,
+ *    «Оплачено», «Пополнено», «Поставить на учёт») — на последней ступени. «Запросить
+ *    информацию» — с той ступени, на которой задачу взяли.
  */
 
 const useAttachments = (data, kind) => useMemo(() => {
@@ -196,6 +201,10 @@ const PaymentStageForm = ({
         <FileChips label={label} attachments={list} apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
     );
 
+    // Ступень задачи: на последней — поля и итоговое действие, после первой — «Запросить информацию».
+    const final = stageAtFinal(kind, subtask.status);
+    const taken = stageTaken(kind, subtask.status);
+
     const head = (
         <>
             {permissions.acting_as_admin && (
@@ -263,19 +272,24 @@ const PaymentStageForm = ({
         return wrap(
             <>
                 {chips('Коммерческие предложения:', offerFiles)}
-                <Comment value={comment} onChange={setComment} placeholder="Комментарий к согласованию (необязательно)" />
-                <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={() => act('approve', {}, false)}>
-                        {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Согласовать
-                    </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('return')}>
-                        Вернуть на доработку
-                    </button>
-                    <button type="button" className={`${iosBtnGhost} !text-rose-600 hover:!bg-rose-50`} disabled={busy} onClick={() => toggleMode('reject')}>
-                        Отклонить
-                    </button>
-                </div>
-                {reasonPanel}
+                {/* Решение — когда заявку взяли на рассмотрение (кнопка внизу окна). */}
+                {final && (
+                    <>
+                        <Comment value={comment} onChange={setComment} placeholder="Комментарий к согласованию (необязательно)" />
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={() => act('approve', {}, false)}>
+                                {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Согласовать
+                            </button>
+                            <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('return')}>
+                                Вернуть на доработку
+                            </button>
+                            <button type="button" className={`${iosBtnGhost} !text-rose-600 hover:!bg-rose-50`} disabled={busy} onClick={() => toggleMode('reject')}>
+                                Отклонить
+                            </button>
+                        </div>
+                        {reasonPanel}
+                    </>
+                )}
             </>,
         );
     }
@@ -325,26 +339,35 @@ const PaymentStageForm = ({
                     </Row>
                 </div>
                 {chips('Счёт:', invoiceFiles)}
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Дата оплаты" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
-                        <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата оплаты" />
-                    </Field>
-                    <Field label="Фактическая сумма, ₸" required optionalMark={false} hint="Сколько ушло поставщику. Подставлена сумма заявки — поправьте, если оплатили другую." anchor="paid_amount" issue={issueOf('paid_amount')}>
-                        <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Фактическая сумма" />
-                    </Field>
-                </div>
-                <Field as="div" label="Платёжное поручение" required optionalMark={false} anchor="files" issue={issueOf('files')}>
-                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('invoice_payment')} label="Приложить платёжное поручение" />
-                </Field>
-                <Comment value={comment} onChange={setComment} placeholder="Комментарий к оплате (необязательно)" />
-                <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('pay', paid))}>
-                        {busy && <Loader2 size={14} className="animate-spin" />} Оплачено
-                    </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
-                        Запросить информацию
-                    </button>
-                </div>
+                {/* Поля оплаты и «Оплачено» — на ступени «На оплате»; до неё — проверка счёта. */}
+                {final && (
+                    <>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Дата оплаты" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
+                                <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата оплаты" />
+                            </Field>
+                            <Field label="Фактическая сумма, ₸" required optionalMark={false} hint="Сколько ушло поставщику. Подставлена сумма заявки — поправьте, если оплатили другую." anchor="paid_amount" issue={issueOf('paid_amount')}>
+                                <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Фактическая сумма" />
+                            </Field>
+                        </div>
+                        <Field as="div" label="Платёжное поручение" required optionalMark={false} anchor="files" issue={issueOf('files')}>
+                            <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('invoice_payment')} label="Приложить платёжное поручение" />
+                        </Field>
+                        <Comment value={comment} onChange={setComment} placeholder="Комментарий к оплате (необязательно)" />
+                    </>
+                )}
+                {taken && (
+                    <div className="flex flex-wrap items-center gap-2">
+                        {final && (
+                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('pay', paid))}>
+                                {busy && <Loader2 size={14} className="animate-spin" />} Оплачено
+                            </button>
+                        )}
+                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
+                            Запросить информацию
+                        </button>
+                    </div>
+                )}
                 {reasonPanel}
             </>,
         );
@@ -364,26 +387,35 @@ const PaymentStageForm = ({
                     <Row label="Согласовал">{request.approved_by_name}</Row>
                     <Row label="Срок">{request.due_on ? fmtDate(request.due_on) : null}</Row>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Дата перевода" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
-                        <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата перевода" />
-                    </Field>
-                    <Field label="Сумма перевода, ₸" required optionalMark={false} anchor="paid_amount" issue={issueOf('paid_amount')}>
-                        <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Сумма перевода" />
-                    </Field>
-                </div>
-                <Field as="div" label="Подтверждение перевода" required optionalMark={false} anchor="files" issue={issueOf('files')}>
-                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('card_topup')} label="Приложить подтверждение" />
-                </Field>
-                <Comment value={comment} onChange={setComment} placeholder="Комментарий к переводу (необязательно)" />
-                <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('top_up', paid))}>
-                        {busy && <Loader2 size={14} className="animate-spin" />} Пополнено
-                    </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
-                        Запросить информацию
-                    </button>
-                </div>
+                {/* Поля перевода и «Пополнено» — на ступени «Готово к пополнению». */}
+                {final && (
+                    <>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Дата перевода" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
+                                <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата перевода" />
+                            </Field>
+                            <Field label="Сумма перевода, ₸" required optionalMark={false} anchor="paid_amount" issue={issueOf('paid_amount')}>
+                                <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Сумма перевода" />
+                            </Field>
+                        </div>
+                        <Field as="div" label="Подтверждение перевода" required optionalMark={false} anchor="files" issue={issueOf('files')}>
+                            <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('card_topup')} label="Приложить подтверждение" />
+                        </Field>
+                        <Comment value={comment} onChange={setComment} placeholder="Комментарий к переводу (необязательно)" />
+                    </>
+                )}
+                {taken && (
+                    <div className="flex flex-wrap items-center gap-2">
+                        {final && (
+                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('top_up', paid))}>
+                                {busy && <Loader2 size={14} className="animate-spin" />} Пополнено
+                            </button>
+                        )}
+                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
+                            Запросить информацию
+                        </button>
+                    </div>
+                )}
                 {reasonPanel}
             </>,
         );
@@ -435,6 +467,8 @@ const PaymentStageForm = ({
 
     // ── Ответственный за учёт имущества (п. 10.2, п. 11) ──
     if (kind === 'asset_registration') {
+        // Карточки имущества — когда задачу взяли в работу (кнопка внизу окна).
+        if (!final) return wrap(null);
         return wrap(
             <>
                 <PaymentAssetsEditor assets={assets} onChange={setAssets} users={users} dictionaries={dictionaries} issueOf={issueOf} />

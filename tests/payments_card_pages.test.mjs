@@ -11,13 +11,19 @@
  *    много информации».
  *
  * Теперь: сводка заявки закреплена наверху окна; под ней две страницы — «Заявка» и «Ваша
- * задача», — которые листаются кнопкой в нижней панели; статус задачи переключается там же,
- * в нижней панели, и выбранный сегмент переезжает, как в iOS.
+ * задача», — которые листаются кнопкой в нижней панели.
  *
- * Здесь — то, что видно без браузера: какие статусы и у каких этапов, как рисуются
- * переключатель и лента этапов, и что окно действительно собрано из этих частей (по
- * исходнику). Поведение — перелистывание, сохранность набранного в форме, мгновенный выбор
- * статуса и его откат при отказе сервера — снимают проходы стенда.
+ * 14.10.2026 владелец заменил переключатель статуса (со снимком окна): «кнопка к задаче, уже
+ * на нем нажимают на кнопки которые влияют на задачу, не нужен такой переключатель, посмотри
+ * раздел задача сделай кнопками, и чтобы было постепенно». Статус задачи теперь двигает кнопка
+ * следующей ступени в нижней панели страницы задачи («Взять на рассмотрение», «Взять в
+ * проверку», «Счёт проверен», «Начать оплату»…), как в «Задачах»; итоговое действие этапа с
+ * полями — на последней ступени.
+ *
+ * Здесь — то, что видно без браузера: какие статусы и ступени у каких этапов, что форма
+ * показывает на каждой ступени, как рисуется лента этапов, и что окно действительно собрано
+ * из этих частей (по исходнику). Поведение — перелистывание, сохранность набранного в форме,
+ * шаги по ступеням на сервере — снимают проходы стенда.
  *
  * Запуск: node --test tests/payments_card_pages.test.mjs
  */
@@ -28,7 +34,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { EDGE_FADE, STAGE_STATUS_KINDS, edgeFade, stageStatusOptions } from '../src/components/payments/paymentsMeta.js';
+import {
+    EDGE_FADE, STAGE_STATUS_KINDS, STAGE_STEPS, edgeFade, stageAtFinal, stageStatusLabel, stageStatusOptions, stageStep, stageTaken,
+} from '../src/components/payments/paymentsMeta.js';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -101,16 +109,16 @@ test('статусы задачи — те же, что колонки доск�
     assert.deepEqual(stageStatusOptions(META, 'asset_registration'), [{ value: 'new', label: 'Новая' }, { value: 'in_progress', label: 'В работе' }]);
 });
 
-test('этапам инициатора и этапам с одним статусом переключатель не положен', () => {
-    // У «Инициации» три статуса, но меняет их действие (отправить, доработать), а не переключатель.
+test('этапам инициатора и этапам с одним статусом ступеней кнопками не положено', () => {
+    // У «Инициации» три статуса, но меняет их действие (отправить, доработать), а не кнопка ступени.
     assert.deepEqual(stageStatusOptions(META, 'initiation'), []);
     for (const kind of ['receipt_confirm', 'receiving', 'closing_docs']) assert.deepEqual(stageStatusOptions(META, kind), [], kind);
     assert.deepEqual(STAGE_STATUS_KINDS, ['manager_approval', 'approval', 'invoice_payment', 'card_topup', 'asset_registration']);
-    // Справочные данные ещё не пришли или этапа в них нет — переключать нечего, но и не падаем.
+    // Справочные данные ещё не пришли или этапа в них нет — подписывать нечего, но и не падаем.
     for (const meta of [null, undefined, {}, { subtasks: [] }, { boards: [], subtasks: [{ kind: 'approval' }] }]) assert.deepEqual(stageStatusOptions(meta, 'approval'), []);
     assert.deepEqual(stageStatusOptions(META, 'no_such_stage'), []);
     assert.deepEqual(stageStatusOptions(META, undefined), []);
-    // У этапа один рабочий статус — переключать не из чего: переключателя из одной кнопки не бывает.
+    // У этапа один рабочий статус — ступеней нет.
     const single = { boards: META.boards, subtasks: [{ kind: 'approval', board: 'approval', statuses: ['new'] }] };
     assert.deepEqual(stageStatusOptions(single, 'approval'), []);
     // Доска не описывает статус — показываем его как есть, а не пустую кнопку.
@@ -118,7 +126,7 @@ test('этапам инициатора и этапам с одним стату
     assert.deepEqual(stageStatusOptions(odd, 'approval'), [{ value: 'new', label: 'Новая' }, { value: 'review', label: 'review' }]);
 });
 
-/* ── переключатель: выбранный сегмент переезжает ─────────────────────────── */
+/* ── сегменты IosSegmented (общий примитив портала) ──────────────────────── */
 
 const OPTIONS = [{ value: 'new', label: 'Новые' }, { value: 'review', label: 'На рассмотрении' }];
 const tabs = (html) => [...html.matchAll(/<button[^>]*role="tab"[^>]*aria-selected="(true|false)"[^>]*class="([^"]*)"[^>]*>(.*?)<\/button>/g)]
@@ -154,28 +162,94 @@ test('slide: контейнер держит плашку выбора, а до 
     assert.ok(ios.indexOf('data-segment-thumb') < ios.indexOf('role="tab"'));
 });
 
-test('переключатель статуса: название для читалки, выбран статус задачи, на узком экране — во всю строку', async () => {
-    const { StageStatusSwitch } = await bundle('src/components/payments/paymentsUi.jsx', 'ui');
-    const html = renderToStaticMarkup(h(StageStatusSwitch, { options: stageStatusOptions(META, 'invoice_payment'), value: 'checking', onMove: () => {} }));
-    assert.match(html, /data-stage-status/);
-    assert.match(html, /role="tablist" aria-label="Статус задачи"/);
-    const list = tabs(html);
-    assert.deepEqual(list.map((tab) => tab.text), ['Новые счета', 'Проверка', 'Готово к оплате', 'На оплате']);
-    assert.deepEqual(list.filter((tab) => tab.selected).map((tab) => tab.text), ['Проверка']);
-    // До 640 px — строка целиком и равные сегменты; шире — по ширине подписей. Стилями, по границе
-    // раскладки панели, а не по признаку «телефон»: тот включается и на широком экране малой высоты.
-    assert.match(html, /class="inline-flex relative [^"]*min-w-max max-sm:flex max-sm:w-full max-sm:\[&amp;&gt;button\]:flex-1"/);
-    // Не помещается — листается, без своей полосы.
-    assert.match(html, /<div data-stage-status="true" class="max-w-full overflow-x-auto transition-opacity \[scrollbar-width:none\] "/);
-    // Пока идёт другое действие над заявкой — приглушён и не нажимается.
-    const busy = renderToStaticMarkup(h(StageStatusSwitch, { options: OPTIONS, value: 'new', busy: true, onMove: () => {} }));
-    assert.match(busy, /pointer-events-none opacity-60/);
-    const ui = source('src/components/payments/paymentsUi.jsx');
-    const sw = ui.slice(ui.indexOf('export const StageStatusSwitch = '), ui.indexOf('export const ErrorBox = '));
-    // Выбор встаёт сразу; ответ сервера (или отказ) его снимает — в заявке уже новый статус либо прежний.
-    assert.ok(sw.includes('const shown = wanted ?? value;'));
-    assert.ok(sw.includes('if (busy || wanted !== null || next === value) return;'));
-    assert.match(sw, /setWanted\(next\);\s*try \{\s*await onMove\?\.\(next\);\s*\} finally \{[\s\S]*?setWanted\(null\);\s*\}/);
+/* ── ступени задачи кнопками (14.10.2026) ────────────────────────────────── */
+
+test('ступени задачи идут по рабочим статусам этапа в порядке колонок доски и кончаются итоговым действием', () => {
+    for (const kind of STAGE_STATUS_KINDS) {
+        const statuses = META.subtasks.find((item) => item.kind === kind).statuses;
+        // От первого статуса кнопки ведут по всем статусам по порядку — ни одного не пропуская.
+        const walked = [statuses[0]];
+        let step = stageStep(kind, statuses[0]);
+        while (step) {
+            walked.push(step.to);
+            step = stageStep(kind, step.to);
+        }
+        assert.deepEqual(walked, statuses, kind);
+        // На последнем статусе ступеней нет — дальше итоговое действие формы.
+        assert.equal(stageAtFinal(kind, statuses[statuses.length - 1]), true, kind);
+        assert.deepEqual(Object.keys(STAGE_STEPS[kind]), statuses.slice(0, -1), kind);
+    }
+    assert.deepEqual(Object.keys(STAGE_STEPS).sort(), [...STAGE_STATUS_KINDS].sort());
+    assert.deepEqual(Object.values(STAGE_STEPS).flatMap((steps) => Object.values(steps).map((item) => item.label)),
+        ['Взять на рассмотрение', 'Взять на рассмотрение', 'Взять в проверку', 'Счёт проверен', 'Начать оплату',
+            'Взять в работу', 'Готово к пополнению', 'Взять в работу']);
+});
+
+test('ступень задачи: где итог, где задачу уже взяли, как подписана текущая', () => {
+    assert.deepEqual(stageStep('invoice_payment', 'checking'), { to: 'ready', label: 'Счёт проверен' });
+    assert.equal(stageAtFinal('invoice_payment', 'checking'), false);
+    assert.equal(stageAtFinal('invoice_payment', 'paying'), true);
+    assert.equal(stageTaken('invoice_payment', 'new'), false);
+    assert.equal(stageTaken('invoice_payment', 'checking'), true);
+    assert.equal(stageTaken('approval', 'new'), false);
+    // Этапы без ступеней (чек, получение, закрывающие документы) — сразу итог и сразу «взяты».
+    for (const kind of ['receipt_confirm', 'receiving', 'closing_docs', 'initiation']) {
+        assert.equal(stageStep(kind, 'new'), null, kind);
+        assert.equal(stageAtFinal(kind, 'new'), true, kind);
+        assert.equal(stageTaken(kind, 'new'), true, kind);
+    }
+    // Незнакомый статус (старая заявка) — форма не прячется.
+    assert.equal(stageAtFinal('invoice_payment', 'legacy_odd'), true);
+    assert.equal(stageStatusLabel(META, 'invoice_payment', 'checking'), 'Проверка');
+    assert.equal(stageStatusLabel(META, 'asset_registration', 'in_progress'), 'В работе');
+    assert.equal(stageStatusLabel(META, 'receiving', 'new'), '');
+    assert.equal(stageStatusLabel(null, 'approval', 'new'), '');
+});
+
+const STAGE_PROPS = {
+    dictionaries: {}, users: [], meta: {}, permissions: {}, busy: false,
+    onAct: () => {}, onEdit: () => {}, onReply: () => {}, onAttach: () => {}, loadCard: () => {},
+};
+const stageHtml = async (kind, status, request = {}) => {
+    const { default: PaymentStageForm } = await bundle('src/components/payments/PaymentStageForm.jsx', 'stage');
+    return renderToStaticMarkup(h(PaymentStageForm, {
+        ...STAGE_PROPS,
+        data: { request: { id: 1, amount: 1000, request_kind: 'purchase', object_type: 'goods', ...request }, attachments: [], items: [] },
+        subtask: { kind, status, brief: 'Что сделать' },
+    }));
+};
+
+test('форма этапа на каждой ступени: сначала сведения для проверки, на последней — поля и итоговое действие', async () => {
+    // Согласование: «Новые» — только сведения; «На рассмотрении» — решение.
+    const fresh = await stageHtml('approval', 'new');
+    assert.doesNotMatch(fresh, /Согласовать|Вернуть на доработку|Отклонить/);
+    assert.match(fresh, /Что сделать/);
+    assert.match(await stageHtml('approval', 'review'), /Согласовать[\s\S]*Вернуть на доработку[\s\S]*Отклонить/);
+    // Бухгалтерия: «Новые счета» — реквизиты без кнопок; «Проверка» и «Готово к оплате» — можно запросить
+    // информацию; «На оплате» — поля оплаты и «Оплачено».
+    const newInvoice = await stageHtml('invoice_payment', 'new');
+    assert.match(newInvoice, /Поставщик/);
+    assert.doesNotMatch(newInvoice, /Оплачено|Запросить информацию|Платёжное поручение/);
+    for (const status of ['checking', 'ready']) {
+        const html = await stageHtml('invoice_payment', status);
+        assert.match(html, /Запросить информацию/, status);
+        assert.doesNotMatch(html, /Оплачено|Платёжное поручение|Дата оплаты/, status);
+    }
+    assert.match(await stageHtml('invoice_payment', 'paying'), /Дата оплаты[\s\S]*Платёжное поручение[\s\S]*Оплачено[\s\S]*Запросить информацию/);
+    // Финансовый отдел: «Новые» — сведения о карте; «В работе» — запрос информации; «Готово к пополнению» — перевод.
+    assert.doesNotMatch(await stageHtml('card_topup', 'new'), /Пополнено|Запросить информацию/);
+    const working = await stageHtml('card_topup', 'in_progress');
+    assert.match(working, /Запросить информацию/);
+    assert.doesNotMatch(working, /Пополнено|Подтверждение перевода/);
+    assert.match(await stageHtml('card_topup', 'ready'), /Подтверждение перевода[\s\S]*Пополнено/);
+    // Учёт имущества: «Новая» — только что сделать; «В работе» — карточки имущества и «Поставить на учёт».
+    const asset = await stageHtml('asset_registration', 'new');
+    assert.doesNotMatch(asset, /Поставить на учёт|Инвентарный номер/);
+    assert.match(await stageHtml('asset_registration', 'in_progress'), /Инвентарный номер[\s\S]*Поставить на учёт/);
+    // Этапы без ступеней — как были.
+    assert.match(await stageHtml('receipt_confirm', 'new'), /Отправить чек/);
+    // Старая заявка с незнакомым статусом — форма целиком.
+    assert.match(await stageHtml('invoice_payment', undefined), /Оплачено/);
 });
 
 test('этапы в сводке: на телефоне — одной листающейся строкой, текущий этап помечен', async () => {
@@ -245,19 +319,29 @@ test('заявку вернули — кто и зачем: одна плашк�
 
 /* ── окно: сводка, две страницы, нижняя панель ───────────────────────────── */
 
-test('переключателя статуса в форме этапа больше нет — он в нижней панели окна', () => {
+test('статус задачи — кнопкой следующей ступени на странице задачи; переключателя нет ни в форме, ни в панели', () => {
     const form = source('src/components/payments/PaymentStageForm.jsx');
     assert.doesNotMatch(form, /IosSegmented|statusSwitch|onMove|LOCAL_STATUS_LABELS/);
+    const ui = source('src/components/payments/paymentsUi.jsx');
+    assert.doesNotMatch(ui, /StageStatusSwitch|data-stage-status/);
     const card = source('src/components/payments/PaymentRequestCard.jsx');
     const footer = card.slice(card.indexOf('    const footer = ('), card.indexOf('    const view = recordView('));
     assert.ok(footer.length > 800, 'нижняя панель не найдена');
-    assert.ok(footer.includes('<StageStatusSwitch key={`${request.id}:${current.kind}`} options={statusOptions} value={current.status} busy={busy} onMove={move} />'));
-    // Только тому, чья задача, и только на этапах с рабочими статусами.
-    assert.ok(card.includes('() => (hasTask ? stageStatusOptions(meta, current.kind) : []),'));
+    assert.doesNotMatch(card, /StageStatusSwitch|statusOptions/);
+    // Кнопка ступени — только тому, чья задача, только на странице задачи и только пока ступени есть.
+    assert.ok(card.includes('const step = hasTask ? stageStep(current.kind, current.status) : null;'));
     assert.ok(card.includes('const hasTask = Boolean(current && permissions.can_act);'));
-    // На телефоне — отдельной строкой над кнопками; на компьютере — слева, сразу за меню «…».
-    assert.ok(footer.includes('<div className="order-first w-full min-w-0 sm:order-none sm:mr-auto sm:w-auto">'));
-    assert.ok(footer.includes("<div className={statusOptions.length ? 'mr-auto sm:mr-0' : 'mr-auto'}>"));
+    assert.match(footer, /\{onTask && step && \(\s*<button\s+type="button"\s+data-card-step=\{step\.to\}\s+className=\{`\$\{iosBtnPrimary\} max-sm:order-first max-sm:w-full`\}\s+disabled=\{busy\}\s+onClick=\{\(\) => move\(step\.to\)\}/);
+    // На странице задачи синяя в панели — она, крайняя справа (после «Готово»).
+    assert.ok(footer.indexOf('{onTask && step && (') > footer.indexOf('>Готово</button>'));
+    // Слева в панели — только «…».
+    assert.ok(footer.includes('<div className="mr-auto">\n                    <IosMenu items={menuItems} label="Ещё действия" align="left" disabled={busy} />'));
+    // Ступень, на которой задача сейчас, подписана у заголовка задачи — как колонка доски.
+    assert.ok(card.includes('<SectionTitle right={stepLabel ? <TonePill>{stepLabel}</TonePill> : null}>Ваша задача · {current.title}</SectionTitle>'));
+    // Форма: на последней ступени — поля и итог; запросить информацию — с той ступени, где задачу взяли.
+    assert.ok(form.includes('const final = stageAtFinal(kind, subtask.status);'));
+    assert.ok(form.includes('const taken = stageTaken(kind, subtask.status);'));
+    assert.ok(form.includes('if (!final) return wrap(null);'));
     assert.ok(!card.includes('onMove={move}\n                                            onEdit'), 'форме этапа снова передают смену статуса');
 });
 
@@ -279,7 +363,7 @@ test('сводка закреплена над страницами, стран�
     // Чужая задача — страница заявки говорит, у кого заявка; своей задачи над заявкой больше нет.
     assert.ok(card.includes('{current && !hasTask && ('));
     assert.ok(card.includes('<SectionTitle>Сейчас · {current.title}</SectionTitle>'));
-    assert.ok(card.includes('<SectionTitle>Ваша задача · {current.title}</SectionTitle>'));
+    assert.ok(card.includes('>Ваша задача · {current.title}</SectionTitle>'));
     // Отказ сервера и панели редких действий — над обеими страницами и пустыми не рисуются.
     assert.ok(card.includes('{data && error && <div ref={errorRef} className="scroll-mt-4"><ErrorBox text={error} /></div>}'));
     assert.ok(card.includes("{mode && !mode.startsWith('reassign') && ("));
@@ -293,10 +377,14 @@ test('страницы листаются кнопкой в нижней пан�
     const card = source('src/components/payments/PaymentRequestCard.jsx');
     const footer = card.slice(card.indexOf('    const footer = ('), card.indexOf('    const view = recordView('));
     // Со страницы заявки — «К задаче», синяя, крайняя справа; «Готово» при этом обычная.
-    assert.match(footer, /<button type="button" className=\{hasTask \? iosBtnSecondary : iosBtnPrimary\} onClick=\{onClose\}>Готово<\/button>\s*\{hasTask && !onTask && \(\s*<button type="button" data-card-turn="task" className=\{iosBtnPrimary\} onClick=\{goTask\}>\s*К задаче <ChevronRight/);
-    // Со страницы задачи — «К заявке», левее «Готово», обе обычные: синяя там — действие самой формы.
+    assert.match(footer, /<button type="button" className=\{hasTask \? iosBtnSecondary : iosBtnPrimary\} onClick=\{onClose\}>Готово<\/button>/);
+    assert.match(footer, /\{hasTask && !onTask && \(\s*<button type="button" data-card-turn="task" className=\{iosBtnPrimary\} onClick=\{goTask\}>\s*К задаче <ChevronRight/);
+    // Со страницы задачи — «К заявке», левее «Готово», обе обычные: синяя там — кнопка следующей
+    // ступени, а на последней ступени — действие самой формы.
     assert.match(footer, /\{onTask && \(\s*<button type="button" data-card-turn="request" className=\{iosBtnSecondary\} onClick=\{goRequest\}>\s*<ChevronLeft[^>]*\/> К заявке\s*<\/button>\s*\)\}\s*<button type="button" className=\{hasTask/);
-    assert.equal(footer.split('iosBtnPrimary').length - 1, 2);
+    // Синих три в коде, но на экране одна: «Готово» синяя, только когда задачи нет; ступень — только на
+    // странице задачи; «К задаче» — только на странице заявки.
+    assert.equal(footer.split('iosBtnPrimary').length - 1, 3);
     // «Доработать» — действие над заявкой: на странице задачи его в панели нет.
     assert.ok(footer.includes('{request && permissions.can_edit && !onTask && ('));
     // Шеврон в шапке на странице задачи ведёт к заявке, а не закрывает окно.
