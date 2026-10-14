@@ -256,9 +256,27 @@ _SUBJECT_PHONE_KEYS = (
     test_keys.sql_digits_key('ce.contact_phone'),
 )
 _SUBJECT_NOT_TEST = test_keys.sql_not_test_keys(*_SUBJECT_PHONE_KEYS)
-_SUBJECT_EXISTS = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT NULL"
-                   " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)"
-                   " AND " + _SUBJECT_NOT_TEST)
+
+
+def _not_excluded_sql(kind_expr: str = "rc.subject_kind", id_expr: str = "rc.call_id") -> str:
+    """Субъект не исключён кнопкой «Исключить оценку» (call_qa.exclusions).
+
+    Исключённый разговор уходит из раздела целиком — из очереди, списков,
+    «Обзора» и «Сводки» — тем же местом, что номера «Реестра тестовых номеров»:
+    условие стоит внутри _SUBJECT_EXISTS, и выборка, собранная на нём, не может
+    его забыть. Опора — частичный уникальный индекс uq_ai_qa_exclusions_active."""
+    return (f"NOT EXISTS (SELECT 1 FROM ai_qa_exclusions qx"
+            f" WHERE qx.subject_kind = {kind_expr} AND qx.call_id = {id_expr}"
+            f" AND qx.restored_at IS NULL)")
+
+
+_SUBJECT_NOT_EXCLUDED = _not_excluded_sql()
+# Субъект существует и не тестовый — без условия об исключении. Отдельно нужен
+# списку исключённых: он строится тем же отбором, но по исключённым.
+_SUBJECT_PRESENT = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT NULL"
+                    " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)"
+                    " AND " + _SUBJECT_NOT_TEST)
+_SUBJECT_EXISTS = _SUBJECT_PRESENT + " AND " + _SUBJECT_NOT_EXCLUDED
 _SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
                       " us.direction_id, ua.direction_id)")
 # У звонка из АТС оператор может быть не привязан к учётной записи — тогда
@@ -1018,7 +1036,7 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
                     f"""SELECT day, COUNT(*),
                                COUNT(*) FILTER (WHERE outcome IS NOT NULL),
                                COUNT(*) FILTER (WHERE outcome = 'adjudicated'),
-                               AVG(ai), AVG(human), COUNT(human)
+                               AVG(ai), AVG(human), COUNT(human), COUNT(ai)
                           FROM (SELECT {_SUBJECT_DAY} AS day, m.review_outcome AS outcome,
                                        {_SUBJECT_AI_SCORE} AS ai, {_SUBJECT_HUMAN_SCORE} AS human
                                   FROM ai_review_cache rc""" + _SUBJECT_JOIN
@@ -1030,13 +1048,17 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
                     + filter_sql + f""" AND {_SUBJECT_DAY} = ANY(%s::date[])) t
                          GROUP BY day""",
                     (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params, dated))
-                for day, evaluated, reviewed, corrected, ai_avg, human_avg, human_n in cur.fetchall():
+                for (day, evaluated, reviewed, corrected, ai_avg, human_avg, human_n,
+                     ai_n) in cur.fetchall():
                     totals[day.isoformat()] = {
                         "evaluated": int(evaluated or 0), "reviewed": int(reviewed or 0),
                         "corrected": int(corrected or 0),
                         "ai_avg": round(float(ai_avg), 1) if ai_avg is not None else None,
                         "human_avg": round(float(human_avg), 1) if human_avg is not None else None,
                         "human_n": int(human_n or 0),
+                        # Сколько оценок дня с баллом ИИ: по нему экран пересчитывает
+                        # средний, когда разговор исключают, не перечитывая очередь.
+                        "ai_n": int(ai_n or 0),
                     }
         cur.close(); conn.close()
 
@@ -1061,6 +1083,7 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
                 "reviewed": total.get("reviewed", 0),
                 "corrected": total.get("corrected", 0),
                 "ai_avg": total.get("ai_avg", round(sum(scores) / len(scores), 1) if scores else None),
+                "ai_n": total.get("ai_n", len(scores)),
                 "human_avg": total.get("human_avg"),
                 "human_n": total.get("human_n", 0),
             })
@@ -4937,6 +4960,8 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                      AND c.audio_path <> ''
                      AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
         base += " AND " + test_keys.sql_not_test('c.phone_number')
+        # Исключённый звонок («Исключить оценку») второй раз не предлагается.
+        base += " AND " + _not_excluded_sql("'call'", "c.id")
         journal_pick, journal_pick_params = _pick_filters_predicate(
             filters, operator_col="c.operator_id",
             # Тот же перевод, что в подписи и в фильтре списка: у calls время
@@ -5278,6 +5303,11 @@ def find_subjects(*, family, department=None, allowed_direction_ids=None, phone=
                 items += _find_c2d_snapshots(*args)
             elif kind:
                 items += _find_episodes(cur, kind, *args[1:])
+        # Исключённый разговор поиск находит — его ищут, чтобы вернуть, — но
+        # помечает: иначе человек оценивал бы заново то, что уже признали ненужным.
+        excluded = excluded_keys(cur, [(item.get("subject"), item.get("id")) for item in items])
+        for item in items:
+            item["excluded"] = (item.get("subject"), item.get("id")) in excluded
     finally:
         cur.close(); conn.close()
 
@@ -5340,7 +5370,10 @@ def random_chat_episode(allowed_direction_ids=None, department=None, filters=Non
                     (*params, config.CLAUDE_MODEL))
         row = cur.fetchone()
         if not row:
-            cur.execute(base + " ORDER BY random() LIMIT 1", params)
+            # Всё уже оценено — берём любую, кроме исключённых: переписку, которую
+            # признали ненужной, «Случайный чат» второй раз не предлагает.
+            cur.execute(base + " AND " + _not_excluded_sql(f"'{subject_kind}'", "t.id")
+                        + " ORDER BY random() LIMIT 1", params)
             row = cur.fetchone()
     finally:
         cur.close(); conn.close()
@@ -5930,7 +5963,7 @@ def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=N
     дня отвечает на то же, что строка очереди, только про всё оценённое: сколько
     оценено, сколько из них критических, сколько уже проверено людьми (и в скольких
     ИИ поправили), средние баллы ИИ и человека, кто работал."""
-    empty = {"days": [], "total": 0}
+    empty = {"days": [], "total": 0, "excluded": 0}
     conn = None
     try:
         conn = config.connect_ro()
@@ -5957,7 +5990,12 @@ def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=N
             + where_sql + """) t
                  GROUP BY day""",
             where_params)
-        rows = cur.fetchall(); cur.close(); conn.close()
+        rows = cur.fetchall()
+        # Сколько под тем же отбором исключено: экран пишет «· N исключено» и по
+        # нажатию открывает их список — иначе исключённую по ошибке оценку было бы
+        # не найти и не вернуть.
+        excluded = _excluded_total(cur, allowed_direction_ids, subject_kind, department, filters)
+        cur.close(); conn.close()
         out = []
         total = 0
         for (day, evaluated, reviewed, corrected, critical, ai_avg, human_avg, human_n, operators,
@@ -5974,7 +6012,7 @@ def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=N
                 "directions": [{"name": name, "n": n} for name, n in counted.most_common()],
             })
         out.sort(key=lambda d: (d["day"] != QUEUE_NO_DAY, d["day"]), reverse=True)
-        return {"days": out, "total": total}
+        return {"days": out, "total": total, "excluded": excluded}
     except Exception:
         logging.exception("ai-qa: оценённое по дням недоступно")
         raise
@@ -6063,6 +6101,147 @@ def evaluations_day(day: str, limit: int = 50, offset: int = 0, allowed_directio
 _EVAL_ROW_REASONS = ("critical", "asr", "media")
 
 
+# ── Исключённые оценки (call_qa.exclusions) ──────────────────────────────────
+#
+# Окно «Исключённые» на вкладках «Звонки» и «Чаты»: что исключили, почему и
+# кто, с возможностью вернуть. Отбор — тот же, что у самого списка (скоуп,
+# отдел, вид субъекта, фильтры панели), только наоборот по исключению: окно
+# обязано показывать ровно то, что пропало из списка под тем же отбором.
+
+_EXCLUSION_JOIN = """
+                 JOIN ai_qa_exclusions ex
+                   ON ex.subject_kind = rc.subject_kind AND ex.call_id = rc.call_id
+                  AND ex.restored_at IS NULL"""
+
+EXCLUDED_PAGE_MAX = 100
+
+
+def _excluded_where(cur, allowed_direction_ids, subject_kind, department, filters):
+    """WHERE исключённых. None — показывать нечего (скоуп или отбор невыполним)."""
+    scope_sql, scope_params = _direction_predicate(
+        cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+    if scope_sql is None:
+        return None
+    kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+    filter_sql, filter_params = _list_filters_predicate(
+        cur, filters, allowed_direction_ids, department)
+    if filter_sql is None:
+        return None
+    return (" WHERE TRUE" + _SUBJECT_PRESENT + scope_sql + kind_sql + filter_sql,
+            (*scope_params, *kind_params, *filter_params))
+
+
+def _excluded_total(cur, allowed_direction_ids, subject_kind, department, filters) -> int:
+    where = _excluded_where(cur, allowed_direction_ids, subject_kind, department, filters)
+    if where is None:
+        return 0
+    where_sql, where_params = where
+    cur.execute(f"SELECT COUNT(*) FROM {_LATEST_EVALUATIONS}" + _SUBJECT_JOIN
+                + _marketing_join(cur, filters) + _EXCLUSION_JOIN + where_sql, where_params)
+    return int(cur.fetchone()[0] or 0)
+
+
+def excluded_list(limit: int = 50, offset: int = 0, allowed_direction_ids=None, subject_kind=None,
+                  department=None, filters=None, category=None) -> dict:
+    """Исключённые оценки — свежие сверху.
+
+    `category` — id категории, 'none' (без категории) или пусто (все). Счётчики
+    категорий (`categories`) — по тому же отбору без фильтра категории: это
+    переключатели над списком, и число рядом с каждым — сколько он покажет."""
+    from . import exclusions
+    empty = {"items": [], "total": 0, "categories": [], "uncategorized": 0}
+    limit = max(1, min(int(limit), EXCLUDED_PAGE_MAX)); offset = max(0, int(offset))
+    category_sql, category_params = "", ()
+    if category not in (None, "", "all"):
+        if str(category).strip().lower() == "none":
+            category_sql = " AND ex.category_id IS NULL"
+        else:
+            try:
+                category_sql, category_params = " AND ex.category_id = %s", (int(category),)
+            except (TypeError, ValueError):
+                raise ValueError("category: ожидается id категории или none")
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        where = _excluded_where(cur, allowed_direction_ids, subject_kind, department, filters)
+        if where is None:
+            return empty
+        where_sql, where_params = where
+        base = (f" FROM {_LATEST_EVALUATIONS}" + _SUBJECT_JOIN + _marketing_join(cur, filters)
+                + _EXCLUSION_JOIN + """
+                 LEFT JOIN ai_qa_exclusion_categories cat ON cat.id = ex.category_id""")
+        cur.execute("SELECT ex.category_id, MIN(cat.title), COUNT(*)" + base + where_sql
+                    + " GROUP BY ex.category_id ORDER BY COUNT(*) DESC, MIN(cat.title)",
+                    where_params)
+        facets = cur.fetchall()
+        cur.execute(
+            f"""SELECT rc.call_id, rc.subject_kind, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME},
+                       {_SUBJECT_DAY}, {_SUBJECT_AI_SCORE},
+                       ex.id, ex.category_id, cat.title, ex.category_source, ex.reason,
+                       eu.name, TO_CHAR(ex.excluded_at AT TIME ZONE 'Asia/Almaty', 'DD.MM HH24:MI'),
+                       ex.categorize_attempts, ex.excluded_by, COUNT(*) OVER ()"""
+            + base + """
+                 LEFT JOIN users eu ON eu.id = ex.excluded_by""" + where_sql + category_sql + """
+                ORDER BY ex.excluded_at DESC, ex.id DESC
+                LIMIT %s OFFSET %s""",
+            (*where_params, *category_params, limit, offset))
+        rows = cur.fetchall()
+        items = [{
+            "id": r[0], "subject": r[1] or config.SUBJECT_CALL, "direction": r[2],
+            "operator": r[3] or "—", "datetime": r[4],
+            "day": r[5].isoformat() if r[5] else QUEUE_NO_DAY,
+            "ai_score": round(float(r[6])) if r[6] is not None else None,
+            "exclusion": {
+                "id": int(r[7]),
+                "category_id": int(r[8]) if r[8] is not None else None,
+                "category": r[9] or None, "category_source": r[10], "reason": r[11] or "",
+                "excluded_by": r[12] or None, "excluded_at": r[13],
+                "excluded_by_id": int(r[15]) if r[15] is not None else None,
+                "category_pending": r[8] is None
+                    and int(r[14] or 0) < exclusions.CATEGORIZE_MAX_ATTEMPTS,
+            },
+        } for r in rows]
+        total = int(rows[0][16]) if rows else 0
+        if not rows and offset:
+            # Страница за краем (список сдвинулся, пока его листали) — общее число
+            # всё равно нужно, иначе «Показать ещё» спряталась бы навсегда.
+            cur.execute("SELECT COUNT(*)" + base + where_sql + category_sql,
+                        (*where_params, *category_params))
+            total = int(cur.fetchone()[0] or 0)
+        cur.close()
+        return {
+            "items": items, "total": total,
+            "categories": [{"id": int(cid), "title": title, "count": int(n)}
+                           for cid, title, n in facets if cid is not None],
+            "uncategorized": sum(int(n) for cid, _title, n in facets if cid is None),
+        }
+    except Exception:
+        logging.exception("ai-qa: список исключённых недоступен")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def excluded_keys(cur, keys) -> set:
+    """Какие из пар (вид, id) сейчас исключены — для пометки в результатах поиска."""
+    pairs = [(str(kind), int(call_id)) for kind, call_id in keys
+             if kind in config.SUBJECT_KINDS and call_id is not None]
+    if not pairs:
+        return set()
+    cur.execute("""SELECT x.subject_kind, x.call_id
+                     FROM ai_qa_exclusions x
+                     JOIN unnest(%s::text[], %s::bigint[]) AS k(subject_kind, call_id)
+                       ON k.subject_kind = x.subject_kind AND k.call_id = x.call_id
+                    WHERE x.restored_at IS NULL""",
+                ([kind for kind, _ in pairs], [call_id for _, call_id in pairs]))
+    return {(row[0], int(row[1])) for row in cur.fetchall()}
+
+
 _VERDICTS = ("Correct", "Deficiency", "Incorrect", "N/A")
 
 
@@ -6141,8 +6320,9 @@ def _reviewed_metrics(cur, subject_keys=None):
                 "alarm_precision": None}
     try:
         if subject_keys is None:
-            # Без отбора — без разговоров с номерами «Реестра тестовых номеров» (отбор
-            # панели собран через _SUBJECT_EXISTS и их уже не содержит).
+            # Без отбора — без разговоров с номерами «Реестра тестовых номеров» и без
+            # исключённых оценок (отбор панели собран через _SUBJECT_EXISTS и их уже
+            # не содержит).
             cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
                              FROM ai_evaluation_meta m
                             WHERE review_outcome IS NOT NULL AND model = %s
@@ -6150,7 +6330,9 @@ def _reviewed_metrics(cur, subject_keys=None):
                                   SELECT 1 FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
                                    WHERE rc.subject_kind = COALESCE(m.subject_kind, 'call')
                                      AND rc.call_id = m.call_id
-                                     AND NOT """ + _SUBJECT_NOT_TEST + """)""",
+                                     AND NOT """ + _SUBJECT_NOT_TEST + """)
+                              AND """ + _not_excluded_sql("COALESCE(m.subject_kind, 'call')",
+                                                          "m.call_id"),
                         (config.CLAUDE_MODEL,))
         else:
             # Отбор — в самом запросе: per_criterion тяжёлый, и тащить его по
@@ -6360,7 +6542,8 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                  ) hrv ON true
                 WHERE COALESCE(c.scores, hwz.scores, himp.scores,
                                hc2d.scores, hca.scores, hrv.scores) IS NOT NULL
-                  AND """ + _SUBJECT_NOT_TEST
+                  AND """ + _SUBJECT_NOT_TEST + """
+                  AND """ + _not_excluded_sql("t.subject_kind", "t.call_id")
 
 
 def _fill_verdict_stats(cur, out, m):
@@ -6499,7 +6682,7 @@ def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
             else:
                 cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + meta_join
                             + " WHERE rc.model = %s AND m.review_outcome IS NULL AND "
-                            + _SUBJECT_NOT_TEST,
+                            + _SUBJECT_NOT_TEST + " AND " + _SUBJECT_NOT_EXCLUDED,
                             (config.CLAUDE_MODEL,))
             out["queue"] = cur.fetchone()[0]
         except Exception:

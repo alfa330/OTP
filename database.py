@@ -64991,6 +64991,9 @@ class Database:
         ('qa_retrieval_runs', 'call_id'),
         ('ai_qa_daily_samples', 'subject_id'),
         ('qa_subject_deals', 'call_id'),
+        # «Исключить оценку» (call_qa/exclusions.py): исключение держит причину и
+        # автора — эпизод с ним удалять нельзя, как и с самой оценкой.
+        ('ai_qa_exclusions', 'call_id'),
     )
 
     @classmethod

@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, PhoneIncoming, Search, CheckCircle2 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, scoreTone } from '../ui/ios';
 import QueueList from './QueueList';
+import ExcludedList from './ExcludedList';
 import { DigestLink } from './QueueDays';
 import { isChat, subjectUnit, SUBJECT_C2D_SNAPSHOT, SUBJECT_IMPORTED_CALL } from './subjects';
 import { filtersKey, filtersToParams, hasActiveFilters, pullParamsFromFilters } from './filters';
@@ -299,6 +300,17 @@ export default function EvaluationsList(props) {
     const total = (days || []).reduce((sum, d) => sum + (d.evaluated || 0), 0);
     const critical = (days || []).reduce((sum, d) => sum + (d.critical || 0), 0);
 
+    /* «Исключённые» — свой экран, как день: «‹ Все дни» возвращает к списку. */
+    if (list?.excludedOpen) {
+        return (
+            <div style={{ fontFamily: APPLE_FONT }}>
+                <ExcludedList apiBaseUrl={apiBaseUrl} headers={headers} department={department}
+                              subject={subject} filters={filters} onOpen={onOpen} onClose={list.closeExcluded}
+                              onRestored={() => list.refresh()} showToast={showToast} />
+            </div>
+        );
+    }
+
     if (openDay) {
         return (
             <div style={{ fontFamily: APPLE_FONT }}>
@@ -325,6 +337,17 @@ export default function EvaluationsList(props) {
                             {critical > 0 && <span className="font-medium text-rose-600"> · {criticalText(critical)}</span>}
                         </>
                     ) : (chats ? 'Переписки, оценённые ИИ' : 'Звонки, оценённые ИИ')}
+                    {/* Исключённые — тихой ссылкой в той же строке: из списка они
+                        пропали, но найти и вернуть их должно быть можно. */}
+                    {days && list?.excluded > 0 && (
+                        <>
+                            {' · '}
+                            <button type="button" onClick={list.openExcluded}
+                                    className="rounded-md font-medium text-slate-600 underline decoration-slate-300 underline-offset-[3px] transition hover:text-slate-900 hover:decoration-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+                                исключено {list.excluded}
+                            </button>
+                        </>
+                    )}
                 </p>
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <button type="button" onClick={() => list?.reload()} disabled={days === null}

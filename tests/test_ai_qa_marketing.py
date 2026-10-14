@@ -217,8 +217,9 @@ class WiringTests(unittest.TestCase):
         # «Чаты» по дням, 02.10.2026) — у всех трёх сделка видна в строке.
         self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=with_deals)'), 3)
         # Счётчик очереди, итоги дней очереди, фильтр подтяжки, набор субъектов,
-        # очередь «Обзора» и сводка дней оценённого.
-        self.assertEqual(src.count('_marketing_join(cur, filters)'), 6)
+        # очередь «Обзора», сводка дней оценённого и исключённые («Исключить
+        # оценку»): их число под тем же отбором и их список.
+        self.assertEqual(src.count('_marketing_join(cur, filters)'), 8)
         self.assertIn("marketing = filters.get('marketing')", src)
         self.assertIn('def marketing_options(', src)
         self.assertIn('def deal_for_subject(', src)

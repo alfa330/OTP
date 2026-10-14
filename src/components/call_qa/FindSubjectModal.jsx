@@ -3,7 +3,7 @@ import axios from 'axios';
 import TaxiPark from './TaxiPark';
 import {
     Search, Loader2, PhoneCall, PhoneIncoming, MessageSquare, Bot, User2, ChevronRight,
-    AlertCircle, Headphones, CloudDownload, ShieldAlert, BookMarked,
+    AlertCircle, Headphones, CloudDownload, ShieldAlert, BookMarked, Ban,
 } from 'lucide-react';
 import { iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosBadge, IosModal, scoreTone } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -67,6 +67,11 @@ function ResultRow({ item, onPick, busy }) {
                     )}
                     {untrusted && <IosBadge tone="red"><ShieldAlert size={11} />чужая запись</IosBadge>}
                     {item.in_journal && <IosBadge tone="slate" title="Есть оценка в «Журнале оценок»"><BookMarked size={11} />в журнале</IosBadge>}
+                    {item.excluded && (
+                        <IosBadge tone="slate" title="Оценку исключили как ненужную — в карточке видно почему, там же «Вернуть»">
+                            <Ban size={11} className="text-rose-500" />исключена
+                        </IosBadge>
+                    )}
                 </div>
                 <p className="mt-0.5 truncate text-[12px] text-slate-400">
                     {item.operator}{item.direction && item.direction !== '—' ? ` · ${item.direction}` : ''}

@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
     Sparkles, ListChecks, SlidersHorizontal, Database, ChevronLeft, Gauge,
-    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall, ScrollText,
+    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall, ScrollText, Ban,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
@@ -27,6 +27,8 @@ import { applyReviewed, dayPageRequest, itemKey, mergeDayPage, NO_DAY } from './
 import QaFilters from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
 import AudioPendingCard from './AudioPendingCard';
+import ExcludeModal from './ExcludeModal';
+import { exclusionAuthor, exclusionLabel } from './exclusionRules';
 import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
@@ -67,6 +69,14 @@ const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
 const EMPTY_QUEUE = { days: [], total: 0, truncated: false };
 const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];
 const EXPORT_TABS = ['chats', 'evals'];
+
+/* «Исключить оценку» в строке над карточкой — красным словом, как «Удалить» в
+   панели инструментов iOS: заметно, но без заливки (залитая красная кнопка —
+   это уже подтверждение в окне). Своя строка классов: у iosBtnGhost серый цвет
+   текста перебивает утилиту поверх. */
+const EXCLUDE_BTN = 'inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium '
+    + 'text-rose-600 transition-all hover:bg-rose-50 active:scale-[0.98] focus-visible:outline-none '
+    + 'focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:cursor-not-allowed disabled:opacity-50';
 
 function Segmented({ tabs = TABS, tab, setTab }) {
     const refs = useRef([]);
@@ -197,6 +207,9 @@ export default function CallQaView(props) {
     // Диалог точечного подбора «Найти звонок / переписку» — один на обе вкладки,
     // семейство берёт у открытой вкладки.
     const [findOpen, setFindOpen] = useState(false);
+    // Окно «Исключить оценку» и возврат исключённой (плашка в карточке).
+    const [excludeOpen, setExcludeOpen] = useState(false);
+    const [restoreBusy, setRestoreBusy] = useState(false);
     const callRequest = useRef({ id: 0, controller: null });
     const queueRequest = useRef({ id: 0, controller: null });
     const returnFocus = useRef(null);
@@ -285,6 +298,7 @@ export default function CallQaView(props) {
         callRequest.current = { id: callRequest.current.id + 1, controller: null };
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
         setReviewInteraction({ dirty: false, busy: false });
+        setExcludeOpen(false);
         resetQueue();
         callsList.reset(); chatsList.reset(); digest.reset();
         // Отбор принадлежит ОТДЕЛУ: сотрудники, группы и направления у отделов
@@ -576,6 +590,9 @@ export default function CallQaView(props) {
             if (list.openDay) {
                 queueReturn.current = { key: itemKey(selected),
                                         titleId: tab === 'evals' ? 'qa-evals-day-title' : 'qa-chats-day-title' };
+            } else if (list.excludedOpen) {
+                // Из карточки исключённой — обратно в «Исключённые», к той же строке.
+                queueReturn.current = { key: itemKey(selected), titleId: 'qa-excluded-title' };
             }
         }
         if (tab === 'digest' && selected && digestReturn.current) {
@@ -585,6 +602,7 @@ export default function CallQaView(props) {
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
         setCallPending(null);
         setReviewInteraction({ dirty: false, busy: false });
+        setExcludeOpen(false);
         returnFocus.current = null;
         if (queueReturn.current) return;
         window.setTimeout(() => {
@@ -817,6 +835,77 @@ export default function CallQaView(props) {
         return { ok: true, closed: true, state };
     };
 
+    /* «Исключить оценку» — разговор оценивать незачем (нецелевой, ошибся номером,
+       тест). Несохранённые исправления пропадут вместе с карточкой — спрашиваем,
+       как при «Назад». */
+    const requestExclude = () => {
+        if (!callData) return;
+        if (reviewInteraction.busy) {
+            showToast?.('Дождитесь завершения сохранения', 'error');
+            return;
+        }
+        if (reviewInteraction.dirty &&
+            !window.confirm('Исключить оценку? Несохранённые исправления будут потеряны.')) return;
+        setExcludeOpen(true);
+    };
+
+    /* Исключили — разговор уходит из раздела. Из своего дня очереди — сразу, а
+       сводка дня меняется на месте, как после проверки (ждут и оценено на один
+       меньше, его баллы выходят из средних); «Звонки» и «Чаты» перечитают день,
+       когда карточка закроется. Карточка закрывается, как после «Подтвердить»: в
+       очереди следующим встаёт соседний разговор. Кто-то успел исключить раньше —
+       карточка остаётся и показывает ЕГО причину. */
+    const handleExcluded = (exclusion, { already = false, category = null } = {}) => {
+        const call = callData;
+        setExcludeOpen(false);
+        if (!call) return;
+        const kind = call.subject_kind || 'call';
+        if (already) {
+            setCallData((current) => (current && current.id === call.id && (current.subject_kind || 'call') === kind
+                ? { ...current, exclusion } : current));
+            const author = exclusionAuthor(exclusion);
+            showToast?.(`Эту оценку уже исключили${author ? ` — ${author}` : ''}`, 'error');
+            return;
+        }
+        showToast?.(`Оценка исключена${category ? ` · ${category}` : ''}`, 'success');
+        const key = `${kind}-${call.id}`;
+        const row = Object.values(queueDayItems).flatMap((entry) => entry.items || [])
+            .find((item) => itemKey(item) === key)
+            || (openedFrom.current === 'queue' && selected && itemKey(selected) === key && selected.day
+                ? selected : null);
+        if (row) {
+            setQueueReviewed((list) => (list.some((entry) => entry.key === key) ? list
+                : [...list, { key, day: row.day || NO_DAY, reasons: row.reasons || [], excluded: true,
+                              ai: row.ai_score ?? null, humanRemoved: row.human_score ?? null }]));
+        } else if (queue !== null) {
+            if (tab === 'queue') loadQueue(); else resetQueue();
+        }
+        resetCall();
+    };
+
+    /* «Вернуть» на плашке исключённой оценки: карточка остаётся открытой и снова
+       обычная. Непроверенная возвращается и в очередь — та перечитается. */
+    const restoreExclusion = async () => {
+        const call = callData;
+        if (!call || !apiBaseUrl || restoreBusy) return;
+        const kind = call.subject_kind || 'call';
+        setRestoreBusy(true);
+        try {
+            await axios.delete(`${apiBaseUrl}/api/ai-qa/exclusion`,
+                { params: { subject_kind: kind, call_id: call.id }, headers: headers() });
+            setCallData((current) => (current && current.id === call.id && (current.subject_kind || 'call') === kind
+                ? { ...current, exclusion: null } : current));
+            showToast?.('Оценка возвращена в раздел', 'success');
+            if (queue !== null) {
+                if (tab === 'queue') loadQueue(); else resetQueue();
+            }
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось вернуть оценку', 'error');
+        } finally {
+            setRestoreBusy(false);
+        }
+    };
+
     return (
         /* relative — опора для всего absolute внутри раздела. Без неё подписи для
            экранного диктора (`sr-only` — это position:absolute) в строках длинного
@@ -914,7 +1003,9 @@ export default function CallQaView(props) {
                                         <RotateCcw size={11} />оценка устарела
                                     </IosBadge>
                                 )}
-                                <IosBadge tone={callData._cached ? 'slate' : 'green'}>
+                                {/* Технический бейдж на телефоне не показываем: строке над
+                                    карточкой там не хватает места на действия. */}
+                                <IosBadge tone={callData._cached ? 'slate' : 'green'} className="hidden sm:inline-flex">
                                     {callData._cached ? 'из кэша' : 'оценено сейчас'}
                                 </IosBadge>
                                 <button type="button" onClick={requestReevaluation} disabled={callLoading || reviewInteraction.busy}
@@ -922,9 +1013,45 @@ export default function CallQaView(props) {
                                     {callLoading ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
                                     {callLoading ? 'Переоцениваю…' : 'Переоценить'}
                                 </button>
+                                {callData.can_exclude !== false && !callData.exclusion && (
+                                    <button type="button" onClick={requestExclude} aria-label="Исключить оценку"
+                                            disabled={callLoading || reviewInteraction.busy} className={EXCLUDE_BTN}
+                                            title="Оценка не нужна — нецелевой звонок или чат: убрать её из очереди, списков и сводок">
+                                        {/* На телефоне — красная иконка, как кнопки панели
+                                            iOS: три подписанные кнопки там в строку не входят. */}
+                                        <Ban size={15} aria-hidden="true" />
+                                        <span className="hidden sm:inline">Исключить оценку</span>
+                                    </button>
+                                )}
                             </div>
                         )}
                     </div>
+                    {/* Исключённая оценка: почему и кто — и «Вернуть». Плашка над
+                        карточкой, а не внутри неё: это состояние всей оценки, а не
+                        одной из колонок. */}
+                    {callData?.exclusion && !callPending && !callLoading && (
+                        <div className="flex shrink-0 items-center gap-3 rounded-2xl bg-slate-50 px-4 py-2.5 ring-1 ring-slate-200/70"
+                             role="status">
+                            <Ban size={16} className="shrink-0 text-rose-500" aria-hidden="true" />
+                            <div className="min-w-0 flex-1">
+                                <p className="text-[13px] leading-snug text-slate-700">
+                                    <span className="font-semibold text-slate-900">Оценка исключена</span>
+                                    {exclusionLabel(callData.exclusion) && <> · {exclusionLabel(callData.exclusion)}</>}
+                                </p>
+                                {exclusionAuthor(callData.exclusion) && (
+                                    <p className="mt-0.5 text-[12px] text-slate-500">{exclusionAuthor(callData.exclusion)}</p>
+                                )}
+                            </div>
+                            {callData.can_exclude !== false && (
+                                <button type="button" onClick={restoreExclusion} disabled={restoreBusy}
+                                        className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium text-blue-600 transition-all hover:bg-blue-50 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
+                                    {restoreBusy ? <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                                        : <RotateCcw size={14} aria-hidden="true" />}
+                                    Вернуть
+                                </button>
+                            )}
+                        </div>
+                    )}
                     <div className="min-h-0 lg:flex-1">
                     {callPending ? (
                         <AudioPendingCard pending={callPending} subject={selected} polling={callLoading}
@@ -1030,6 +1157,12 @@ export default function CallQaView(props) {
                               family={tab === 'chats' ? SUBJECT_FAMILY_CHATS : SUBJECT_FAMILY_CALLS}
                               initialFilters={filters} showToast={showToast}
                               onOpen={(item) => { setFindOpen(false); openCall(item); }} />
+            {/* Отдел — разговора, а не селектора: категории причин у отделов свои,
+                а карточку могли открыть ссылкой или поиском из другого отдела. */}
+            <ExcludeModal open={excludeOpen && Boolean(callData)} call={callData}
+                          department={callData?.department || department}
+                          apiBaseUrl={apiBaseUrl} headers={headers}
+                          onClose={() => setExcludeOpen(false)} onExcluded={handleExcluded} />
             </>
             )}
         </div>

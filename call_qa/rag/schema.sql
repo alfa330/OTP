@@ -1401,3 +1401,52 @@ CREATE TABLE IF NOT EXISTS ai_qa_digest_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_qa_digest_messages_thread
     ON ai_qa_digest_messages (department_code, digest_day, user_id, id);
+
+-- ---------------------------------------------------------------------------
+-- Исключённые оценки («Исключить оценку» в карточке ИИ-оценки)
+-- ---------------------------------------------------------------------------
+-- Разговор, оценивать который незачем (нецелевой звонок, ошибся номером,
+-- тестовая переписка), убирают из раздела целиком: из очереди ревью, списков,
+-- «Обзора» и «Сводки» (call_qa.api._SUBJECT_NOT_EXCLUDED). Исключается СУБЪЕКТ,
+-- а не прогон: «Переоценить» и смена модели его не возвращают — возвращает
+-- только «Вернуть». Строки не удаляются: «Вернуть» ставит restored_*, повторное
+-- исключение — новая строка; действующее исключение у субъекта одно (частичный
+-- уникальный индекс, он же и опора проверки «исключён ли»).
+--
+-- Причина обязательна: категория из списка ИЛИ свои слова. Свои слова без
+-- категории разбирает ИИ (call_qa.exclusions.categorize_pending): относит к
+-- подходящей категории отдела или заводит новую — так список категорий растёт
+-- из того, что люди пишут, и в следующий раз причину выбирают одним нажатием.
+-- category_source: 'picked' — выбрал человек, 'ai' — отнёс ИИ.
+CREATE TABLE IF NOT EXISTS ai_qa_exclusion_categories (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    title           text NOT NULL,
+    description     text,
+    model           text,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_qa_exclusion_categories_title
+    ON ai_qa_exclusion_categories (department_code, lower(title));
+
+CREATE TABLE IF NOT EXISTS ai_qa_exclusions (
+    id                  bigserial PRIMARY KEY,
+    subject_kind        text NOT NULL
+        CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode')),
+    call_id             bigint NOT NULL,
+    department_code     text NOT NULL,
+    direction_id        integer,
+    category_id         bigint REFERENCES ai_qa_exclusion_categories(id),
+    category_source     text CHECK (category_source IN ('picked', 'ai')),
+    reason              text,
+    excluded_by         integer NOT NULL,
+    excluded_at         timestamptz NOT NULL DEFAULT now(),
+    restored_by         integer,
+    restored_at         timestamptz,
+    categorize_attempts integer NOT NULL DEFAULT 0,
+    CHECK (category_id IS NOT NULL OR reason IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_qa_exclusions_active
+    ON ai_qa_exclusions (subject_kind, call_id) WHERE restored_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_ai_qa_exclusions_department
+    ON ai_qa_exclusions (department_code, excluded_at DESC) WHERE restored_at IS NULL;

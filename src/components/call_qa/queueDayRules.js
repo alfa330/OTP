@@ -204,8 +204,24 @@ export const mergeDayPage = (items, page, offset, total) => {
  * перезагрузки очереди. Сводка дня честно меняется на месте: ждут на один меньше,
  * проверено на один больше, новый балл человека входит в средний. День, где
  * проверили всех, остаётся — с отметкой, что всё проверено, — чтобы было видно,
- * чем закончилась работа. */
+ * чем закончилась работа.
+ *
+ * Исключённый разговор («Исключить оценку», `excluded: true`) уходит из дня
+ * совсем — так же, как его не посчитает сервер: ждут на один меньше и оценено на
+ * один меньше, проверенным он не становится, а его баллы выходят из средних
+ * (`ai` — балл ИИ, `humanRemoved` — балл человека, если он был). */
 const isScore = (value) => Number.isFinite(value) && value >= 0 && value <= 100;
+
+/* Средний без нескольких значений: (среднее × n − сумма убранных) / оставшиеся.
+ * Не знаем, сколько значений было (`n` не пришёл), — средний не трогаем: лучше
+ * прежнее число до перезагрузки, чем выдуманное. */
+const withoutValues = (avg, n, removed) => {
+    if (!removed.length || avg == null || !Number.isFinite(n) || n <= 0) return { avg, n };
+    const left = Math.max(0, n - removed.length);
+    if (!left) return { avg: null, n: 0 };
+    const sum = avg * n - removed.reduce((total, value) => total + value, 0);
+    return { avg: Math.round((sum / left) * 10) / 10, n: left };
+};
 
 export const applyReviewed = (days, reviewed) => {
     const byDay = new Map();
@@ -223,22 +239,33 @@ export const applyReviewed = (days, reviewed) => {
             if (reasons[key]) reasons[key] -= 1;
             if (!reasons[key]) delete reasons[key];
         }));
+        const excluded = done.filter((entry) => entry.excluded);
+        const checked = done.filter((entry) => !entry.excluded);
+        const scoreOf = (value) => (value == null || value === '' ? null : Number(value));
+        // Баллы исключённых выходят из средних раньше, чем входят новые баллы проверенных.
+        const ai = withoutValues(day.ai_avg ?? null, Number(day.ai_n),
+            excluded.map((entry) => scoreOf(entry.ai)).filter((value) => isScore(value)));
+        const human = withoutValues(day.human_avg ?? null, Number(day.human_n || 0),
+            excluded.map((entry) => scoreOf(entry.humanRemoved)).filter((value) => isScore(value)));
         // null — балла нет (Number(null) дал бы 0 и уронил бы средний).
-        const added = done.filter((entry) => entry.human != null && entry.human !== '')
+        const added = checked.filter((entry) => entry.human != null && entry.human !== '')
             .map((entry) => Number(entry.human)).filter((value) => isScore(value));
-        const humanN = (day.human_n || 0) + added.length;
-        const humanSum = (day.human_avg != null ? day.human_avg * (day.human_n || 0) : 0)
+        const humanN = (human.n || 0) + added.length;
+        const humanSum = (human.avg != null ? human.avg * (human.n || 0) : 0)
             + added.reduce((sum, value) => sum + value, 0);
+        const evaluated = Math.max(0, (day.evaluated || 0) - excluded.length);
         return {
             ...day,
             open: Math.max(0, day.open - done.length),
             critical: reasons.critical || 0,
             reasons,
-            reviewed: Math.min(day.evaluated || 0, (day.reviewed || 0) + done.length),
-            corrected: (day.corrected || 0) + done.filter((entry) => entry.corrected).length,
+            evaluated,
+            reviewed: Math.min(evaluated, (day.reviewed || 0) + checked.length),
+            corrected: (day.corrected || 0) + checked.filter((entry) => entry.corrected).length,
+            ...(excluded.length ? { ai_avg: ai.avg, ...(day.ai_n != null ? { ai_n: ai.n } : {}) } : {}),
             human_n: humanN,
-            human_avg: humanN && (day.human_avg != null || added.length)
-                ? Math.round((humanSum / humanN) * 10) / 10 : day.human_avg ?? null,
+            human_avg: humanN && (human.avg != null || added.length)
+                ? Math.round((humanSum / humanN) * 10) / 10 : human.avg ?? null,
         };
     });
 };

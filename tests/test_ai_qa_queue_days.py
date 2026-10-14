@@ -77,8 +77,8 @@ class DaysSummaryTests(unittest.TestCase):
         return out, cursor, queue
 
     def test_day_summary_joins_open_items_with_day_totals(self):
-        rows = [(dt.date(2026, 9, 23), 5, 3, 1, 70.456, 80.0, 2),
-                (dt.date(2026, 9, 21), 1, 0, 0, 91.0, None, 0)]
+        rows = [(dt.date(2026, 9, 23), 5, 3, 1, 70.456, 80.0, 2, 5),
+                (dt.date(2026, 9, 21), 1, 0, 0, 91.0, None, 0, 1)]
         out, cursor, queue = self._run(rows)
         self.assertEqual(out["total"], 5)
         self.assertFalse(out["truncated"])
@@ -93,6 +93,9 @@ class DaysSummaryTests(unittest.TestCase):
         self.assertEqual(first["open_ai_min"], 0)
         self.assertEqual((first["evaluated"], first["reviewed"], first["corrected"]), (5, 3, 1))
         self.assertEqual((first["ai_avg"], first["human_avg"], first["human_n"]), (70.5, 80.0, 2))
+        # Сколько оценок дня с баллом ИИ — по нему экран пересчитывает средний,
+        # когда разговор исключают («Исключить оценку»), не перечитывая очередь.
+        self.assertEqual(first["ai_n"], 5)
         # Сводка берёт выборку очереди без колонок сделки и облегчённую (без
         # обоснований критериев и балла человека): они ей не нужны.
         self.assertFalse(queue.call_args.kwargs["with_deals"])

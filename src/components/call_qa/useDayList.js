@@ -22,6 +22,12 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
     const [error, setError] = useState(false);
     const [dayItems, setDayItems] = useState({});
     const [openDay, setOpenDay] = useState(null);
+    /* Исключённые («Исключить оценку»): сколько их под тем же отбором — для
+       строки «· N исключено» — и открыт ли их экран. Экран здесь, а не во
+       вкладке, по той же причине, что и день: из карточки исключённой оценки
+       человек возвращается в их список, а не к списку дней. */
+    const [excluded, setExcluded] = useState(0);
+    const [excludedOpen, setExcludedOpen] = useState(false);
     const generation = useRef(0);
     const daysRequest = useRef({ id: 0, controller: null });
     const dayRequest = useRef({});
@@ -36,6 +42,7 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
         daysRequest.current = { id: daysRequest.current.id + 1, controller: null };
         generation.current += 1;
         setDays(null); setError(false); setDayItems({}); setOpenDay(null);
+        setExcluded(0); setExcludedOpen(false);
     }, []);
 
     const loadDays = useCallback(({ keepOpen = false } = {}) => {
@@ -57,6 +64,7 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
             .then((r) => {
                 if (requestId !== daysRequest.current.id) return;
                 setDays(r.data?.days || []);
+                setExcluded(Number(r.data?.excluded) || 0);
             })
             .catch((e) => {
                 if (axios.isCancel(e) || requestId !== daysRequest.current.id) return;
@@ -111,11 +119,14 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
 
     const open = useCallback((day) => {
         if (!day) return;
+        setExcludedOpen(false);
         setOpenDay(day);
         loadDay(day, { fresh: true });
     }, [loadDay]);
 
     const close = useCallback(() => setOpenDay(null), []);
+    const openExcluded = useCallback(() => { setOpenDay(null); setExcludedOpen(true); }, []);
+    const closeExcluded = useCallback(() => setExcludedOpen(false), []);
 
     /* Первая загрузка — когда вкладку впервые показали; смена отдела, отбора
        или вида субъекта — это новый список, а не догрузка прежнего. */
@@ -126,6 +137,7 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
         if (loadedFor.current === key && days !== null) return;
         loadedFor.current = key;
         setOpenDay(null);
+        setExcludedOpen(false);
         loadDays();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enabled, department, subject, signature, loadDays]);
@@ -138,8 +150,9 @@ export default function useDayList({ apiBaseUrl, headers, department, filters, s
     }, [loadDays, loadDay, openDay]);
 
     return {
-        days, error, dayItems, openDay,
+        days, error, dayItems, openDay, excluded, excludedOpen,
         open, close, loadDay, refresh, reset, reload: () => loadDays(),
+        openExcluded, closeExcluded,
         keyOf: itemKey,
     };
 }

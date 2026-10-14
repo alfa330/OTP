@@ -6504,8 +6504,8 @@ def api_ai_qa_call(call_id):
         # ограничен (None = весь свой отдел), и call_in_scope при None пропускает
         # всё. Без этой проверки глава СЗоВ открывал бы карточку Тез КЦ, подставив
         # её id в адрес.
-        if not _ai_qa_direction_department_allowed(
-                requester_id, subject_direction_id(call_id, subject)):
+        subject_direction = subject_direction_id(call_id, subject)
+        if not _ai_qa_direction_department_allowed(requester_id, subject_direction):
             return jsonify({"error": "субъект вне вашего отдела"}), 403
         # Запись звонка из АТС могла ещё не доехать: Binotel отдаёт ссылку не
         # мгновенно, а качает её фоновый daemon-поток без ретраев. Раздел брал
@@ -6539,6 +6539,18 @@ def api_ai_qa_call(call_id):
         except Exception:
             logging.exception("ai-qa: сделка для карточки не загрузилась")
             payload["deal"] = None
+        # Отдел разговора — карточке, открытой по ссылке: раздел переключается на
+        # него, чтобы «Назад» вёл в списки того же отдела. И исключена ли оценка
+        # («Исключить оценку»): карточка показывает плашку с «Вернуть» вместо кнопки.
+        payload["department"] = (_ai_qa_direction_department_code(subject_direction) or None
+                                 if subject_direction is not None else None)
+        payload["can_exclude"] = not _is_marketing_observer(requester_id)
+        try:
+            from call_qa import exclusions as _qa_exclusions
+            payload["exclusion"] = _qa_exclusions.state_for(subject, call_id)
+        except Exception:
+            logging.exception("ai-qa: исключение для карточки не загрузилось")
+            payload["exclusion"] = None
         return jsonify({"status": "success", "call": payload}), 200
     except _qa_subjects.SubjectNotEvaluable as error:
         # Оценить нельзя по существу (в эпизоде отвечали несколько операторов и т.п.):
@@ -8136,6 +8148,155 @@ def api_ai_qa_evaluations_days():
     except Exception as error:
         logging.exception("ai-qa evaluations days failed")
         return jsonify({"error": str(error)}), 500
+
+
+# ── Исключённые оценки («Исключить оценку», call_qa.exclusions) ──────────────
+#
+# Нецелевой звонок или чат исключают из раздела целиком: из очереди, списков,
+# «Обзора» и «Сводки». Причина обязательна — категория отдела или свои слова;
+# свои слова ИИ раскладывает по категориям фоном, и в следующий раз причину
+# выбирают из списка. Права — как у разбора: скоуп СВ по направлениям и отдел
+# субъекта отдельно (у главы отдела ось направлений не ограничена).
+
+def _ai_qa_exclusion_subject(requester_id, subject_kind, call_id):
+    """Субъект для исключения/возврата: (direction_id, код отдела) или ответ-отказ."""
+    from call_qa.api import call_in_scope, subject_direction_id
+    if not call_in_scope(call_id, _ai_qa_direction_scope(requester_id), subject_kind):
+        return None, (jsonify({"error": "субъект вне ваших направлений"}), 403)
+    direction_id = subject_direction_id(call_id, subject_kind)
+    if not _ai_qa_direction_department_allowed(requester_id, direction_id):
+        return None, (jsonify({"error": "субъект вне вашего отдела"}), 403)
+    department = _ai_qa_direction_department_code(direction_id) if direction_id is not None else ''
+    if not department:
+        return None, (jsonify({"error": "не удалось определить отдел разговора"}), 400)
+    return (direction_id, department), None
+
+
+@app.route('/api/ai-qa/exclusion-categories', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_exclusion_categories():
+    """Категории причин для окна «Исключить оценку» — отдела субъекта, частые выше.
+
+    Если в отделе остались причины своими словами, которые ИИ ещё не разобрал
+    (сбой модели, выкладка посреди разбора), разбор будится отсюда: окно
+    открывают ровно тогда, когда категории нужны."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "укажите отдел"}), 400
+        subject = _ai_qa_subject_kind(request.args.get('subject'), default=None)
+        from call_qa import exclusions as _qa_exclusions
+        result = _qa_exclusions.categories(department, subject)
+        if result.get('pending') and not _is_marketing_observer(requester_id):
+            _qa_exclusions.schedule_categorize(department)
+        return jsonify({"status": "success", **result, "department": department}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa exclusion categories failed")
+        return jsonify({"error": "не удалось загрузить причины исключения"}), 500
+
+
+@app.route('/api/ai-qa/exclusion', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_exclusion():
+    """POST — исключить оценку: {subject_kind, call_id, category_id?, reason?};
+    DELETE — вернуть исключённую: ?subject_kind=&call_id= (или то же телом).
+
+    Ответ POST — состояние исключения в форме карточки (`exclusion`); 409 —
+    оценку уже исключили (в ответе — чьё исключение и почему)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa import exclusions as _qa_exclusions
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify({"error": "тело запроса должно быть JSON-объектом"}), 400
+        raw_id = body.get('call_id', request.args.get('call_id'))
+        try:
+            call_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "call_id обязателен"}), 400
+        subject_kind = _ai_qa_subject_kind(
+            body.get('subject_kind') or body.get('subject')
+            or request.args.get('subject_kind') or request.args.get('subject'),
+            default=call_qa_config.SUBJECT_CALL)
+        resolved, deny = _ai_qa_exclusion_subject(requester_id, subject_kind, call_id)
+        if deny:
+            return deny
+        direction_id, department = resolved
+        if request.method == 'DELETE':
+            restored = _qa_exclusions.restore(subject_kind=subject_kind, call_id=call_id,
+                                              user_id=requester_id)
+            if restored:
+                logging.info("ai-qa: оценка %s %s возвращена (%s)", subject_kind, call_id, requester_id)
+            return jsonify({"status": "success", "restored": restored}), 200
+        try:
+            state = _qa_exclusions.exclude(
+                subject_kind=subject_kind, call_id=call_id, department=department,
+                direction_id=direction_id, user_id=requester_id,
+                category_id=body.get('category_id'), reason=body.get('reason'))
+        except _qa_exclusions.ExclusionError as error:
+            return jsonify({"error": str(error), "code": error.code,
+                            "exclusion": getattr(error, 'state', None)}), error.status
+        logging.info("ai-qa: оценка %s %s исключена (%s, категория %s)",
+                     subject_kind, call_id, requester_id, state.get('category_id') if state else None)
+        if state and state.get('category_id') is None:
+            # Свои слова без категории — разобрать фоном: человек не ждёт модель.
+            _qa_exclusions.schedule_categorize(department)
+        return jsonify({"status": "success", "exclusion": state}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa exclusion failed")
+        return jsonify({"error": "не удалось сохранить исключение (детали в логах сервера)"}), 500
+
+
+@app.route('/api/ai-qa/exclusions', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_exclusions():
+    """Исключённые оценки — окно «Исключённые» на вкладках «Звонки» и «Чаты».
+
+    Отбор тот же, что у списка оценённого (отдел, скоуп, вид субъекта, фильтры
+    панели), плюс `category` — id категории или none. В ответе — строки, общее
+    число и счётчики категорий для переключателей над списком."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import excluded_list
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
+        page = excluded_list(limit=int(request.args.get('limit', 50)),
+                             offset=int(request.args.get('offset', 0)),
+                             allowed_direction_ids=_ai_qa_direction_scope(requester_id),
+                             subject_kind=subject, department=department, filters=filters,
+                             category=request.args.get('category'))
+        return jsonify({"status": "success", **page, "subject": subject,
+                        "department": department,
+                        "can_restore": not _is_marketing_observer(requester_id)}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa exclusions list failed")
+        return jsonify({"error": "не удалось загрузить исключённые оценки"}), 500
 
 
 # ── Сводка дня «ИИ-оценки» (call_qa.digest) ──────────────────────────────────
