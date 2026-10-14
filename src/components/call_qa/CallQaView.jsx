@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
     Sparkles, ListChecks, SlidersHorizontal, Database, ChevronLeft, Gauge,
-    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall, ScrollText, Ban,
+    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall, ScrollText, Ban, Link2,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
@@ -29,6 +29,7 @@ import FindSubjectModal from './FindSubjectModal';
 import AudioPendingCard from './AudioPendingCard';
 import ExcludeModal from './ExcludeModal';
 import { exclusionAuthor, exclusionLabel } from './exclusionRules';
+import { buildEvalLink, copyText, readEvalLink, syncEvalLink } from './evalLink';
 import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
@@ -160,6 +161,16 @@ export default function CallQaView(props) {
     const [marketingAccess, setMarketingAccess] = useState(false);
     const [departmentsErr, setDepartmentsErr] = useState(false);
     const [department, setDepartment] = useState(null);
+    const departmentRef = useRef(department);
+    departmentRef.current = department;
+    /* Ссылка на оценку (evalLink.js): цель читается один раз, при входе в раздел, и
+       открывается, когда известен отдел. Пока она не открыта, метку в адресе не
+       трогаем: первый же кадр без карточки стёр бы то, ради чего человек пришёл.
+       adoptFor — разговор, открытый ссылкой: когда придёт его карточка, раздел
+       перейдёт на его отдел (у супер-админа по умолчанию выбран другой). */
+    const linkTarget = useRef(typeof window === 'undefined' ? null : readEvalLink(window.location.search));
+    const linkPending = useRef(Boolean(linkTarget.current));
+    const adoptFor = useRef(null);
 
     const [tab, setTab] = useState('queue');
     const [sectionInteraction, setSectionInteraction] = useState({ editing: false, busy: false });
@@ -476,6 +487,10 @@ export default function CallQaView(props) {
                 }
                 setCallPending(null);
                 setCallData(r.data.call);
+                if (adoptFor.current === itemKey(c)) {
+                    adoptFor.current = null;
+                    adoptCardDepartment(r.data.call?.department);
+                }
             })
             .catch((e) => {
                 if (!axios.isCancel(e) && requestId === callRequest.current.id) {
@@ -495,6 +510,48 @@ export default function CallQaView(props) {
     };
 
     useEffect(() => () => clearPendingTimers(), []);
+
+    /* Карточка, открытая ссылкой, бывает из другого отдела, чем выбран по умолчанию:
+       раздел переходит на отдел разговора, чтобы «Назад» вёл в его списки. Карточку
+       при этом не закрываем — в отличие от смены отдела селектором; списки прежнего
+       отдела сбрасываются по тем же причинам, что и там. */
+    const adoptCardDepartment = (code) => {
+        if (!code || code === departmentRef.current) return;
+        if (!(departments || []).some((item) => item.code === code)) return;
+        resetQueue();
+        callsList.reset(); chatsList.reset(); digest.reset();
+        setFilters(EMPTY_FILTERS);
+        setDepartment(code);
+    };
+
+    // Оценка из ссылки — как только известен отдел (без него запросы раздела не уходят).
+    useEffect(() => {
+        const target = linkTarget.current;
+        if (!linkPending.current || !target || departments === null || departmentsErr || department === null) return;
+        linkPending.current = false;
+        adoptFor.current = `${target.subject}-${target.id}`;
+        openCall({ id: target.id, subject: target.subject });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [departments, departmentsErr, department]);
+
+    /* Открытая карточка — в адресе: перезагрузка вернёт её же, а адрес из строки —
+       готовая ссылка. «Назад» метку убирает. */
+    useEffect(() => {
+        if (linkPending.current) return;
+        syncEvalLink(selected ? { subject: selected.subject || 'call', id: selected.id } : null);
+    }, [selected]);
+
+    /* «Ссылка» в строке над карточкой: в буфер — ссылку только на эту оценку, без
+       меток входа и других разделов. Отправляют её в переписке, адресную строку
+       при этом никто не открывает. */
+    const copyEvalLink = async () => {
+        const link = buildEvalLink({ subject: callData?.subject_kind || selected?.subject || 'call',
+                                     id: callData?.id ?? selected?.id });
+        if (!link) { showToast?.('Не удалось собрать ссылку на оценку', 'error'); return; }
+        const copied = await copyText(link);
+        showToast?.(copied ? 'Ссылка на оценку скопирована' : 'Не удалось скопировать — ссылка есть в адресной строке',
+                    copied ? 'success' : 'error');
+    };
 
     /* Куда поставить фокус и прокрутку после смены экрана очереди — эффектом, после
        отрисовки нового экрана, а не таймером:
@@ -603,6 +660,7 @@ export default function CallQaView(props) {
         setCallPending(null);
         setReviewInteraction({ dirty: false, busy: false });
         setExcludeOpen(false);
+        adoptFor.current = null;
         returnFocus.current = null;
         if (queueReturn.current) return;
         window.setTimeout(() => {
@@ -1008,6 +1066,12 @@ export default function CallQaView(props) {
                                 <IosBadge tone={callData._cached ? 'slate' : 'green'} className="hidden sm:inline-flex">
                                     {callData._cached ? 'из кэша' : 'оценено сейчас'}
                                 </IosBadge>
+                                <button type="button" onClick={copyEvalLink} aria-label="Скопировать ссылку на оценку"
+                                        title="Скопировать ссылку на эту оценку — её можно отправить коллеге"
+                                        className={iosBtnGhost}>
+                                    <Link2 size={14} aria-hidden="true" />
+                                    <span className="hidden sm:inline">Ссылка</span>
+                                </button>
                                 <button type="button" onClick={requestReevaluation} disabled={callLoading || reviewInteraction.busy}
                                     className={`${iosBtnGhost} disabled:cursor-not-allowed disabled:opacity-50`}>
                                     {callLoading ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}

@@ -146,6 +146,8 @@ import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTarg
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 // Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
 import { stripPaymentsParams } from './components/payments/paymentsLink';
+// И метка открытой оценки «ИИ-оценки» — по той же причине.
+import { stripAiQaParams } from './components/call_qa/evalLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
 import { recoverFromStaleBundle } from './staleBundleRecovery';
@@ -3120,6 +3122,8 @@ const buildAppViewUrl = (nextView) => {
         /* И метки «Оплаты счетов» (вкладка, справочник, имущество, заявка — paymentsLink.js):
            ссылка на другой раздел не должна нести номер открытой заявки. */
         if (nextView !== 'payments') stripPaymentsParams(url);
+        /* То же с открытой оценкой «ИИ-оценки» (eval=…, evalLink.js). */
+        if (nextView !== 'ai_qa') stripAiQaParams(url);
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3176,6 +3180,11 @@ const syncAppViewWithUrl = (nextView) => {
            снимает их здесь, иначе номер открытой заявки остался бы в адресе чужого
            раздела, а «назад» на телефоне вернул бы его в раздел и открыл ту заявку снова. */
         if (nextView !== 'payments') stripPaymentsParams(url);
+        /* Метку открытой оценки ставит и снимает «ИИ-оценка» (evalLink.js); уход из
+           раздела снимает её здесь, иначе «назад» на телефоне вернул бы в раздел уже
+           закрытую карточку. Условие «не ai_qa»: иначе ссылка на оценку стиралась бы
+           сразу после входа, раньше, чем раздел её откроет. */
+        if (nextView !== 'ai_qa') stripAiQaParams(url);
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {
