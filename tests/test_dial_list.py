@@ -272,7 +272,8 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
                      '_outcome_decision', '_pending_outcome', '_mark_ring_timeout', '_clear_ring_timeout',
                      '_unanswer_attempt', 'attempt_live', 'reconcile', '_live_attempts', '_calls_fetch',
                      '_calls_seen', '_settle_live', '_row_settling', '_raise_answered', '_reanswer_attempt',
-                     'repair_cut_calls', '_repair_one', '_repair_item'):
+                     'repair_cut_calls', '_repair_one', '_repair_item', '_operator_base_counts',
+                     '_operator_salary', '_day_results', '_operator_day', 'operator_rating'):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
             self.assertNotIn('phone_norm', src, f'{name} выбирает номер — он уедет в телефон')
         for name in ('_RECALL_JOINS_SQL', '_RECALL_COLUMNS', '_POOL_CANDIDATES_SQL', '_OPERATOR_SIGN_LEAD_SQL',
@@ -294,6 +295,23 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
         for helper in (dial_service.search_key, dial_service.name_matches, dial_service.operator_sign_status):
             self.assertNotIn('phone', inspect.getsource(helper), helper.__name__)
             self.assertNotIn('iin', inspect.getsource(helper), helper.__name__)
+        # Оплата по конверсии и рейтинг дня (14.10.2026): только числа и имена операторов. Номер
+        # лида в запросе дня читает лишь условие «Реестра тестовых номеров» (у звонков и у успешек
+        # своё) — без него там нет ни номера, ни ИИН, ни ФИО водителя.
+        from test_numbers import keys as test_keys
+        day_sql = dial_service.DialListService._DAY_RESULTS_SQL
+        self.assertEqual(day_sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        bare = day_sql.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
+        for forbidden in ('phone_norm', 'iin', 'full_name'):
+            self.assertNotIn(forbidden, bare, f'_DAY_RESULTS_SQL: {forbidden}')
+        for name in ('_operator_base_counts', '_operator_salary', '_day_results', '_operator_day', 'operator_rating'):
+            self.assertNotIn('iin', inspect.getsource(getattr(dial_service.DialListService, name)), name)
+        for name in ('_day_results', '_operator_day', 'operator_rating'):
+            self.assertNotIn('full_name', inspect.getsource(getattr(dial_service.DialListService, name)), name)
+        # Правила оплаты — чистая арифметика: ни базы, ни номеров.
+        from dial_list import pay
+        for forbidden in ('phone_norm', 'iin', 'full_name', '_get_cursor', 'execute('):
+            self.assertNotIn(forbidden, inspect.getsource(pay), f'pay.py: {forbidden}')
 
     def test_start_call_returns_no_phone(self):
         src = inspect.getsource(dial_service.DialListService.start_call)
@@ -925,19 +943,28 @@ class OperatorProgressTests(unittest.TestCase):
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SQL))
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_OUTCOMES_SQL))
             self.assertNotIn(forbidden, without_registry(svc._PROGRESS_SUBTYPES_SQL))
-        # Конверсия (11.10.2026) — единственный запрос прогресса, которому нужна таблица
-        # лидов: база месяца и засчитанные оператору успешки. Поэтому сторож у неё свой:
-        # только счётчики — внешний SELECT из двух подзапросов, оба COUNT, — и ни ФИО, ни
-        # номера, ни ИИН (номер читает лишь условие реестра, у каждого подзапроса своё).
+        # Конверсия (11.10.2026) и зарплата (14.10.2026) — запросы прогресса, которым нужна
+        # таблица лидов: база месяца, засчитанные оператору успешки, итоги дня. Поэтому сторож
+        # у них свой: только счётчики — внешний SELECT из трёх подзапросов, все COUNT (третий,
+        # 14.10.2026, — обзвонённые для зарплаты), — и ни ФИО, ни номера, ни ИИН (номер читает
+        # лишь условие реестра, у каждого подзапроса своё).
         conversion = svc._PROGRESS_CONVERSION_SQL
-        self.assertEqual(conversion.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertEqual(conversion.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 3)
         bare = conversion.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
         for forbidden in ('phone_norm', 'full_name', 'iin'):
             self.assertNotIn(forbidden, bare)
-            self.assertNotIn(forbidden, inspect.getsource(svc._operator_conversion))
+            for method in (svc._operator_conversion, svc._operator_base_counts, svc._operator_salary,
+                           svc._operator_day, svc._day_results):
+                self.assertNotIn(forbidden, inspect.getsource(method), method.__name__)
         heads = [bare[m.end():].split(None, 1)[0] for m in re.finditer(r'\bSELECT\b', bare)]
-        self.assertEqual(heads, ['(SELECT', 'COUNT(DISTINCT', 'COUNT(*)'])
-        self.assertEqual(re.findall(r'\bAS (\w+)', bare), ['leads_talked', 'successes'])
+        self.assertEqual(heads, ['(SELECT', 'COUNT(DISTINCT', 'COUNT(*)', 'COUNT(DISTINCT'])
+        self.assertEqual(re.findall(r'\bAS (\w+)', bare), ['leads_talked', 'successes', 'leads_called'])
+        # «Сегодня» у зарплаты — итоги дня с отбором оператора: наружу из них уходят только два
+        # числа (диалоги и подписавшие); имя оператора — из users, водителей там нет.
+        day = svc._DAY_RESULTS_SQL.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
+        self.assertEqual(re.findall(r'\bAS (\w+)', day), ['attempts', 'dialogs', 'operator_id', 'successes'])
+        self.assertIn("LEFT JOIN users u ON u.id = COALESCE(c.operator_id, s.operator_id)", day)
+        self.assertIn('_operator_day(ctx, today)', progress)
         # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
         self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
         self.assertIn('disp IN %(answered)s', dial_service.DialListService._PROGRESS_SQL)
@@ -2422,7 +2449,8 @@ class OperatorConversionTests(unittest.TestCase):
 
     def test_progress_carries_conversion_of_active_base(self):
         from datetime import date
-        res, cur = self._progress((40, 5), period=date(2026, 9, 1))
+        # Строка счётчиков базы — leads_talked, successes, leads_called (третий — для зарплаты).
+        res, cur = self._progress((40, 5, 60), period=date(2026, 9, 1))
         self.assertEqual(res["conversion"], {"successes": 5, "leads_talked": 40, "percent": 12.5,
                                              "period": "2026-09-01", "period_label": "Сентябрь 2026"})
         # Остальные счётчики — как были: календарный месяц.
@@ -2449,8 +2477,9 @@ class OperatorConversionTests(unittest.TestCase):
                     raise RuntimeError('canceling statement due to statement timeout')
                 super().execute(sql, params)
 
-        res, _ = self._progress((40, 5), cursor_cls=_Broken)
+        res, _ = self._progress((40, 5, 60), cursor_cls=_Broken)
         self.assertNotIn("conversion", res)
+        self.assertNotIn("salary", res)                  # зарплата — из тех же счётчиков
         self.assertEqual(res["month"]["issued"], 1)
         self.assertEqual(res["month"]["talk_sec"], 30)
 
@@ -2462,18 +2491,236 @@ class OperatorConversionTests(unittest.TestCase):
                          "l.department_id = %(department_id)s AND l.period = %(period)s",
                          "t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s",
                          "t.billsec >= %(min_sec)s",
-                         "l.success_operator_id = %(operator_id)s AND l.success_attempt_id IS NOT NULL"):
+                         "l.success_operator_id = %(operator_id)s AND l.success_attempt_id IS NOT NULL",
+                         # Обзвонённые (14.10.2026) — без попыток, отменённых до ответа.
+                         "WHERE t.operator_id = %(operator_id)s AND NOT t.cancelled"):
             self.assertIn(fragment, sql)
         # Тестовые номера — то же условие, что у аналитики, у каждого подзапроса своё.
-        self.assertEqual(sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertEqual(sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 3)
         self.assertIn(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, analytics._LEADS_CTE)
         # Определение аналитики, с которым прогресс обязан совпадать: поменяли там — тест
         # напомнит поменять и здесь.
         self.assertEqual(set(analytics.ANSWERED_SQL), set(dial_service.ANSWERED_SQL))
         self.assertIn("AND t.billsec >= %(min_sec)s) AS talked", analytics._LEADS_CTE)
+        self.assertIn("COUNT(DISTINCT lead_id) FILTER (WHERE NOT cancelled) AS leads_called",
+                      analytics._OPERATORS_SQL)
         self.assertIn("COUNT(DISTINCT lead_id) FILTER (WHERE talked) AS leads_talked", analytics._OPERATORS_SQL)
         self.assertIn("FROM leads WHERE success_attempt_id IS NOT NULL GROUP BY success_operator_id",
                       analytics._OPERATORS_SQL)
+
+
+class OperatorSalaryTests(unittest.TestCase):
+    """«Оплата по конверсии» в «Моём прогрессе» (владелец, 14.10.2026): диалоги × цена диалога по
+    конверсии — за ту же базу и из того же снимка счётчиков, что и конверсия, — и свои итоги за
+    сегодня. Каждая часть — своей транзакцией: сбой одной не роняет остальное."""
+
+    PROGRESS_ROW = (1, 1, 0, 2, 0, 1, 0, 30, 0, 0)
+
+    def _progress(self, base_row=(500, 335, 1000), day_rows=((7, 'Оператор', 9, 4, 2),), broken=()):
+        class _Cursor(_RoutedCursor):
+            def execute(self, sql, params=None):
+                if any(fragment in sql for fragment in broken):
+                    raise RuntimeError('canceling statement due to statement timeout')
+                super().execute(sql, params)
+
+        cur = _Cursor([
+            ('AS issued', {'one': self.PROGRESS_ROW}),
+            ('AS leads_talked', {'one': base_row}),
+            ('AS dialogs', {'all': list(day_rows)}),
+        ])
+        db = _TxDb(cur)
+        svc = dial_service.DialListService(db=db)
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1954, "name": "Оператор",
+                                            "settings": {"_period": date(2026, 9, 1)}}
+        return svc.operator_progress(7), cur, db
+
+    def test_salary_comes_from_the_same_snapshot_as_conversion(self):
+        from dial_list import pay
+        # Плакат владельца: обзвонили 1000, диалогов 500, подписали 335 → 67 %, 90 тн, 45 000 тн.
+        res, cur, db = self._progress()
+        salary = res["salary"]
+        self.assertEqual({key: salary[key] for key in ("currency", "called", "dialogs", "no_dialog", "successes",
+                                                        "percent", "price", "amount", "level")},
+                         {"currency": "тн", "called": 1000, "dialogs": 500, "no_dialog": 500, "successes": 335,
+                          "percent": 67.0, "price": 90, "amount": 45000, "level": 4})
+        self.assertEqual(salary["next"], {"from": 70, "price": 105, "need": 15, "amount": 52500})
+        self.assertEqual(salary["tariff"], pay.tariff_rows())
+        # База — та же, что у плитки «Конверсия» (период отдела), а не календарный месяц.
+        self.assertEqual((salary["period"], salary["period_label"]), ("2026-09-01", "Сентябрь 2026"))
+        self.assertEqual(salary["today"], {"dialogs": 4, "successes": 2})
+        conversion = res["conversion"]
+        self.assertEqual((conversion["leads_talked"], conversion["successes"], conversion["percent"]),
+                         (salary["dialogs"], salary["successes"], salary["percent"]))
+        self.assertEqual(len(cur.sql_with('AS leads_talked')), 1)     # один снимок на обе
+        # «Сегодня» — отдел линии, сегодняшний день по Алматы и отбор этого оператора.
+        (_sql, params), = cur.sql_with('AS dialogs')
+        self.assertEqual(params, {"department_id": 1954, "day": dial_service._today(), "operator_id": 7,
+                                  "answered": dial_service.ANSWERED_SQL,
+                                  "min_sec": dial_service.signing.SUCCESS_MIN_BILLSEC})
+        # Счётчики прогресса, счётчики базы и «сегодня» — три транзакции.
+        self.assertEqual(len(db.transactions), 3)
+        self.assertEqual([any('AS leads_talked' in sql for sql in tx) for tx in db.transactions], [False, True, False])
+        self.assertEqual([any('AS dialogs' in sql for sql in tx) for tx in db.transactions], [False, False, True])
+
+    def test_no_dialogs_no_pay(self):
+        res, _, _ = self._progress(base_row=(0, 0, 3), day_rows=())
+        salary = res["salary"]
+        self.assertEqual((salary["called"], salary["dialogs"], salary["no_dialog"], salary["percent"],
+                          salary["price"], salary["amount"], salary["next"]), (3, 0, 3, None, 30, 0, None))
+        self.assertEqual(salary["today"], {"dialogs": 0, "successes": 0})
+        self.assertIsNone(res["conversion"]["percent"])
+
+    def test_today_failure_keeps_salary(self):
+        res, cur, db = self._progress(broken=('AS dialogs',))
+        self.assertNotIn("today", res["salary"])
+        self.assertEqual(res["salary"]["amount"], 45000)
+        self.assertEqual(res["conversion"]["leads_talked"], 500)
+        self.assertEqual(db.rolled_back, [False, False, True])
+
+    def test_base_counts_failure_drops_conversion_and_salary(self):
+        res, cur, db = self._progress(broken=('AS leads_talked',))
+        self.assertNotIn("conversion", res)
+        self.assertNotIn("salary", res)
+        # Остальной прогресс — как всегда.
+        self.assertEqual(res["month"]["issued"], 1)
+        self.assertEqual(res["month"]["talk_sec"], 30)
+        self.assertEqual(res["today_stats"]["attempts"], 0)
+        self.assertEqual(res["outcomes"], [])
+        # «Сегодня» без зарплаты не нужно — и не читается.
+        self.assertEqual(cur.sql_with('AS dialogs'), [])
+        self.assertEqual(db.rolled_back, [False, True])
+
+    def test_day_results_follow_conversion_definition(self):
+        sql = ' '.join(dial_service.DialListService._DAY_RESULTS_SQL.split())
+        for fragment in (
+                "COUNT(*) FILTER (WHERE NOT t.cancelled) AS attempts",
+                "COUNT(DISTINCT a.lead_id) FILTER ( WHERE t.state = 'finished' AND UPPER(t.disposition) IN "
+                "%(answered)s AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s) AS dialogs",
+                # Сутки по Алматы — у звонков и у засчитанной попытки успешки.
+                "t.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty' "
+                "AND t.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'",
+                "JOIN dial_list_attempts st ON st.id = l.success_attempt_id",
+                "st.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty' "
+                "AND st.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'",
+                "(%(operator_id)s IS NULL OR t.operator_id = %(operator_id)s)",
+                "(%(operator_id)s IS NULL OR l.success_operator_id = %(operator_id)s)",
+                "FULL JOIN suc s ON s.operator_id = c.operator_id"):
+            self.assertIn(fragment, sql)
+        # Отдел — отдел базы (линии), а не отдел человека; месяц базы рейтингу не важен.
+        self.assertEqual(sql.count("l.department_id = %(department_id)s"), 2)
+        self.assertNotIn('l.period', sql)
+
+
+class OperatorRatingTests(unittest.TestCase):
+    """«Рейтинг» на телефоне (владелец, 14.10.2026): места операторов отдела за день по заработку,
+    виден с 21:00 до 10:00 по Алматы, до того — отсчёт и только свои числа. Суммы коллег сервер не
+    отдаёт, id операторов — тоже."""
+
+    TZ = dial_service.PERIOD_TZ
+    # (оператор, имя, попыток, диалогов, подписавших) — строки _DAY_RESULTS_SQL.
+    ROWS = [(520, 'Своев Сава', 8, 4, 2),             # 50 % → 75 тн × 4 = 300
+            (521, 'Новичков Назар', 4, 3, 3),         # 100 % → 135 тн × 3 = 405
+            (522, 'Третьякова Тамара', 4, 4, 2),      # те же 300, 2 и 4 — то же место
+            (523, 'Пустых Прохор', 0, 0, 0),          # одни отменённые до ответа — не звонил
+            (None, '', 0, 0, 1)]                      # успешка удалённого сотрудника — ничья
+
+    def _rating(self, now, user=520, broken=False):
+        rows = self.ROWS
+
+        class _Cursor(_RoutedCursor):
+            def execute(self, sql, params=None):
+                if broken:
+                    raise RuntimeError('canceling statement due to statement timeout')
+                super().execute(sql, params)
+
+        # Подделка отбирает строки, как отбор оператора в SQL: с ним — только его строку.
+        cur = _Cursor([('AS dialogs', {'all': lambda p: [r for r in rows if p["operator_id"] in (None, r[0])]})])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1954, "name": "Оператор"}
+        return svc.operator_rating(user, now=now), cur
+
+    def test_route_is_phone_only_and_takes_no_day(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        manager_part = src[src.index('# ── руководитель'):]
+        self.assertIn("@bp.route('/api/operator/dial_list/rating', methods=['GET', 'OPTIONS'])", operator_part)
+        self.assertNotIn('dial_list/rating', manager_part)
+        chunk = operator_part[operator_part.index('/api/operator/dial_list/rating'):]
+        chunk = chunk[:chunk.index('@bp.route')]
+        self.assertIn('@require_api_key', chunk)
+        self.assertIn('@_guard', chunk)
+        self.assertIn('svc.operator_rating(user_id)', chunk)
+        # День выбирает окно на сервере: ни параметров, ни тела запроса.
+        self.assertNotIn('request', chunk)
+
+    def test_hidden_until_nine_pm_shows_only_own_numbers(self):
+        res, cur = self._rating(datetime(2026, 10, 14, 15, 0, tzinfo=self.TZ))
+        self.assertEqual(res, {"visible": False, "day": "2026-10-14", "day_label": "14 октября",
+                               "opens_at": "2026-10-14T21:00:00+05:00", "closes_at": "2026-10-15T10:00:00+05:00",
+                               "currency": "тн", "seconds_to_open": 6 * 3600,
+                               "me": {"dialogs": 4, "successes": 2}})
+        # О коллегах ничего — ни имён, ни чисел, ни их количества; из базы читались только свои.
+        for name in ('Новичков', 'Третьякова', 'Пустых'):
+            self.assertNotIn(name, repr(res))
+        (_sql, params), = cur.executed
+        self.assertEqual((params["operator_id"], params["department_id"], params["day"]),
+                         (520, 1954, date(2026, 10, 14)))
+
+    def test_hidden_window_survives_a_failed_query(self):
+        res, _ = self._rating(datetime(2026, 10, 14, 12, 0, tzinfo=self.TZ), broken=True)
+        self.assertEqual((res["visible"], res["seconds_to_open"], res["me"]), (False, 9 * 3600, None))
+        self.assertNotIn("operators", res)
+
+    def test_open_window_hides_colleagues_amounts(self):
+        res, cur = self._rating(datetime(2026, 10, 14, 21, 30, tzinfo=self.TZ))
+        self.assertEqual((res["visible"], res["day"], res["seconds_to_close"], res["total"]),
+                         (True, "2026-10-14", 12 * 3600 + 30 * 60, 3))
+        # Место — по заработку дня (405 выше 300 при меньшей конверсии у 300); полное равенство —
+        # одно место, внутри него — по имени. Пустых (только отменённые) и ничья успешка — не в рейтинге.
+        self.assertEqual(res["operators"], [
+            {"place": 1, "name": "Новичков Назар", "me": False, "dialogs": 3, "successes": 3, "percent": 100.0},
+            {"place": 2, "name": "Своев Сава", "me": True, "dialogs": 4, "successes": 2, "percent": 50.0,
+             "price": 75, "amount": 300},
+            {"place": 2, "name": "Третьякова Тамара", "me": False, "dialogs": 4, "successes": 2, "percent": 50.0},
+        ])
+        self.assertEqual(res["me"], res["operators"][1])
+        # Сумм коллег нет вовсе — ни ключей, ни чисел; id операторов наружу не уходят.
+        values = [value for row in res["operators"] for value in row.values()]
+        self.assertNotIn(405, values)
+        self.assertNotIn(135, values)
+        for row in res["operators"]:
+            self.assertNotIn("operator_id", row)
+            self.assertNotIn("id", row)
+        (_sql, params), = cur.executed
+        self.assertIsNone(params["operator_id"])
+
+    def test_colleague_without_name_is_not_shown_by_id(self):
+        # Пустое users.name: у руководителя в аналитике это «#id», а коллегам в рейтинг id не
+        # уходит — нейтральная подпись (ревью 14.10.2026).
+        self.ROWS = [(520, 'Своев Сава', 8, 4, 2), (524, '', 3, 2, 1), (525, '   ', 1, 1, 0)]
+        res, _ = self._rating(datetime(2026, 10, 14, 21, 30, tzinfo=self.TZ))
+        self.assertEqual([row["name"] for row in res["operators"]], ["Своев Сава", "Сотрудник", "Сотрудник"])
+        self.assertNotIn('#', repr(res))
+        self.assertNotIn('524', repr(res))
+        self.assertNotIn('525', repr(res))
+
+    def test_operator_without_calls_sees_no_amounts_at_all(self):
+        res, _ = self._rating(datetime(2026, 10, 14, 23, 0, tzinfo=self.TZ), user=523)
+        self.assertIsNone(res["me"])
+        self.assertEqual(res["total"], 3)
+        self.assertFalse(any(row["me"] for row in res["operators"]))
+        self.assertFalse(any("amount" in row or "price" in row for row in res["operators"]))
+
+    def test_yesterday_stays_open_until_ten_am(self):
+        # 04:59:59 UTC — 09:59:59 по Алматы: ещё итоги вчерашнего дня.
+        res, cur = self._rating(datetime(2026, 10, 15, 4, 59, 59, tzinfo=timezone.utc))
+        self.assertEqual((res["visible"], res["day"], res["day_label"], res["seconds_to_close"]),
+                         (True, "2026-10-14", "14 октября", 1))
+        self.assertEqual(cur.executed[0][1]["day"], date(2026, 10, 14))
+        # В 10:00 рейтинг закрыт, отсчёт — до итогов нового дня.
+        res, cur = self._rating(datetime(2026, 10, 15, 10, 0, tzinfo=self.TZ))
+        self.assertEqual((res["visible"], res["day"], res["seconds_to_open"]), (False, "2026-10-15", 11 * 3600))
+        self.assertEqual(cur.executed[0][1]["day"], date(2026, 10, 15))
 
 
 class SignedDriversNeverIssuedTests(unittest.TestCase):

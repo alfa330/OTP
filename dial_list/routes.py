@@ -26,7 +26,17 @@
                                                              auto_hangup — почему плечо положил сам телефон)
     GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
                                                              (outcomes[].subtypes — счётчики по типам итога,
-                                                             conversion — конверсия за базу месяца)
+                                                             conversion — конверсия за базу месяца, salary —
+                                                             оплата по конверсии за ту же базу (14.10.2026):
+                                                             диалоги × цена диалога по тарифу, из чего она
+                                                             сложилась — обзвонено, не подняли, подписали,
+                                                             следующая ступень, тариф, — и today: свои диалоги
+                                                             и подписавшие за сегодня)
+    GET  /api/operator/dial_list/rating                      «Рейтинг» дня (14.10.2026): с 21:00 до 10:00 по
+                                                             Алматы — места операторов отдела по заработку
+                                                             дня (у коллег — диалоги, подписавшие, конверсия;
+                                                             сумма — только своя), до 21:00 — отсчёт до итогов
+                                                             (seconds_to_open) и только свои числа дня
     GET  /api/operator/dial_list/worked[?q=]                 вкладки итогов: отработанные за месяц
                                                              (items[].subtype_name — тип итога,
                                                              items[].can_call_again / call_again_block — можно
@@ -266,9 +276,20 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_progress():
-        """«Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня, без ФИО и номеров."""
+        """«Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня, без ФИО и номеров;
+        salary — оплата по конверсии за базу месяца и из чего она сложилась."""
         user_id, _ = _operator()
         return jsonify({"status": "success", **svc.operator_progress(user_id)}), 200
+
+    @bp.route('/api/operator/dial_list/rating', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_rating():
+        """«Рейтинг» на телефоне (владелец, 14.10.2026): места операторов отдела за день по
+        заработку — с 21:00 до 10:00 по Алматы, до того отсчёт и только свои числа. Суммы
+        коллег сервер не отдаёт. Параметров нет: день выбирает сервер по своим часам."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.operator_rating(user_id)}), 200
 
     @bp.route('/api/operator/dial_list/worked', methods=['GET', 'OPTIONS'])
     @require_api_key

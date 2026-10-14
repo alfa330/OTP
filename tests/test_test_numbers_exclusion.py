@@ -286,14 +286,22 @@ class PackageSqlTests(unittest.TestCase):
         cursor.sql.clear()
         svc.operator_context = lambda uid: {'user_id': uid, 'department_id': 1954, 'name': 'Оператор'}
         svc.operator_progress(7)
-        # Четвёртый запрос (11.10.2026) — конверсия: поговорившие и успешки, у каждого
-        # подзапроса своё соединение с лидом и своё условие реестра.
-        progress, outcomes, subtypes, conversion = cursor.sql
+        # Четвёртый запрос (11.10.2026) — конверсия: поговорившие, успешки и (14.10.2026)
+        # обзвонённые для зарплаты, у каждого подзапроса своё соединение с лидом и своё условие
+        # реестра. Пятый (14.10.2026) — свои диалоги и подписавшие за сегодня для зарплаты:
+        # у звонков и у успешек дня — тоже своё.
+        progress, outcomes, subtypes, conversion, today = cursor.sql
         self.assertEqual(progress.count(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL), 1)
         self.assertEqual(progress.count(keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL), 1)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, outcomes)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, subtypes)
-        self.assertEqual(conversion.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertEqual(conversion.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 3)
+        self.assertEqual(today.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        # «Рейтинг» дня (14.10.2026) — тот же запрос дня, без отбора оператора.
+        cursor.sql.clear()
+        svc.operator_rating(7, now=datetime(2026, 10, 14, 21, 30, tzinfo=service.PERIOD_TZ))
+        rating, = cursor.sql
+        self.assertEqual(rating.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
 
     def test_resource_fte_chat(self):
         from resource_fte import chat

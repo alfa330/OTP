@@ -137,6 +137,7 @@ from crm import sapar as sapar_api
 from test_numbers import keys as test_keys
 
 from . import live_calls
+from . import pay
 from . import signing
 from .sign_check import IN_FLIGHT_STATES, SignChecker
 
@@ -3770,8 +3771,12 @@ class DialListService:
     # обзваниваемого месяца отдела; поговорившие — водители, с которыми ЭТОТ оператор
     # говорил (попытка завершена, водитель ответил, не короче SUCCESS_MIN_BILLSEC, и это не
     # сообщение сети — автоответчик, плечо на котором положил телефон); успешки —
-    # подписавшие, засчитанные ему. Только счётчики: номер лида читает лишь условие
-    # «Реестра тестовых номеров», как и в аналитике.
+    # подписавшие, засчитанные ему. Третий счётчик (владелец, 14.10.2026, «Оплата по
+    # конверсии») — обзвонённые: водители базы, которым оператор звонил, без попыток,
+    # отменённых до ответа (leads_called аналитики), — «не подняли» в зарплате. Один запрос —
+    # один снимок: конверсия и зарплата считаются из одних чисел. Новые колонки — только в
+    # конец. Только счётчики: номер лида читает лишь условие «Реестра тестовых номеров»,
+    # как и в аналитике.
     _PROGRESS_CONVERSION_SQL = """
         SELECT
             (SELECT COUNT(DISTINCT a.lead_id)
@@ -3788,26 +3793,129 @@ class DialListService:
              FROM dial_list_leads l
              WHERE l.success_operator_id = %(operator_id)s AND l.success_attempt_id IS NOT NULL
                AND l.department_id = %(department_id)s AND l.period = %(period)s
-               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """) AS successes
+               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """) AS successes,
+            (SELECT COUNT(DISTINCT a.lead_id)
+             FROM dial_list_attempts t
+             JOIN dial_list_assignments a ON a.id = t.assignment_id
+             JOIN dial_list_leads l ON l.id = a.lead_id
+             WHERE t.operator_id = %(operator_id)s AND NOT t.cancelled
+               AND l.department_id = %(department_id)s AND l.period = %(period)s
+               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """) AS leads_called
+    """
+    # Итоги дня по операторам базы отдела (владелец, 14.10.2026) — «Рейтинг» на телефоне и
+    # «сегодня» у зарплаты. День — по Алматы, звонок — по началу попытки; границы суток —
+    # моменты, как у _PROGRESS_SQL (индекс по requested_at работает). Базы — все базы отдела:
+    # рейтинг — о работе за день, а не о месяце базы. Диалоги — по определению конверсии
+    # (_PROGRESS_CONVERSION_SQL): водители, с которыми оператор в этот день поговорил не
+    # меньше SUCCESS_MIN_BILLSEC, и это не сообщение сети. Подписавшие дня — успешки
+    # оператора, чья засчитанная попытка (success_attempt_id) начата в этот же день: так они
+    # всегда из диалогов того же дня, и конверсия дня не больше 100 %. Подпись не бывает
+    # раньше засчитанного разговора (sign_check._RESOLVE_SQL), поэтому граница по signed_at
+    # ничего не отсекает — она для индекса (success_operator_id, signed_at): без неё запрос
+    # читал бы все успешки отдела за всё время. attempts — попытки без отменённых до ответа:
+    # по ним видно, звонил ли оператор в этот день. %(operator_id)s — только этот оператор
+    # (NULL — все). Наружу — числа и имена операторов; ни ФИО водителей, ни номеров: номер
+    # читает лишь условие «Реестра тестовых номеров», у каждой части своё.
+    _DAY_RESULTS_SQL = """
+        WITH calls AS (
+            SELECT t.operator_id,
+                   COUNT(*) FILTER (WHERE NOT t.cancelled) AS attempts,
+                   COUNT(DISTINCT a.lead_id) FILTER (
+                       WHERE t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+                         AND t.auto_hangup <> 'announcement'
+                         AND t.billsec >= %(min_sec)s) AS dialogs
+            FROM dial_list_attempts t
+            JOIN dial_list_assignments a ON a.id = t.assignment_id
+            JOIN dial_list_leads l ON l.id = a.lead_id
+            WHERE l.department_id = %(department_id)s
+              AND t.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND t.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND (%(operator_id)s IS NULL OR t.operator_id = %(operator_id)s)
+              AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+            GROUP BY t.operator_id
+        ), suc AS (
+            SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
+            FROM dial_list_leads l
+            JOIN dial_list_attempts st ON st.id = l.success_attempt_id
+            WHERE l.department_id = %(department_id)s AND l.success_attempt_id IS NOT NULL
+              AND l.signed_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND st.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND st.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'
+              AND (%(operator_id)s IS NULL OR l.success_operator_id = %(operator_id)s)
+              AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+            GROUP BY l.success_operator_id
+        )
+        SELECT COALESCE(c.operator_id, s.operator_id), COALESCE(u.name, ''),
+               COALESCE(c.attempts, 0), COALESCE(c.dialogs, 0), COALESCE(s.successes, 0)
+        FROM calls c
+        FULL JOIN suc s ON s.operator_id = c.operator_id
+        LEFT JOIN users u ON u.id = COALESCE(c.operator_id, s.operator_id)
     """
 
-    def _operator_conversion(self, ctx):
-        """Конверсия оператора за базу обзваниваемого месяца (_PROGRESS_CONVERSION_SQL)."""
+    def _operator_base_counts(self, ctx):
+        """Счётчики оператора за базу обзваниваемого месяца (_PROGRESS_CONVERSION_SQL), своей
+        транзакцией: (период базы, диалоги, подписавшие, обзвонённые)."""
         period = (ctx.get("settings") or {}).get("_period") or current_period()
         params = {"operator_id": ctx["user_id"], "department_id": ctx["department_id"], "period": period,
                   "answered": ANSWERED_SQL, "min_sec": signing.SUCCESS_MIN_BILLSEC}
         with self.db._get_cursor() as cur:
             cur.execute(self._PROGRESS_CONVERSION_SQL, params)
-            r = cur.fetchone() or (0, 0)
-        talked, successes = int(r[0] or 0), int(r[1] or 0)
+            # Нет строки или колонок в ней меньше — недостающие счётчики нулями.
+            r = tuple(cur.fetchone() or ()) + (0, 0, 0)
+        return period, int(r[0] or 0), int(r[1] or 0), int(r[2] or 0)
+
+    def _operator_conversion(self, ctx, counts=None):
+        """Конверсия оператора за базу обзваниваемого месяца. counts — уже прочитанные
+        _operator_base_counts: «Мой прогресс» читает их один раз на конверсию и зарплату."""
+        period, talked, successes, _called = counts or self._operator_base_counts(ctx)
         return {
             "successes": successes,
             "leads_talked": talked,
-            # Как _pct аналитики: доля с одним знаком; не с кем было говорить — пусто.
-            "percent": round(100.0 * successes / talked, 1) if talked else None,
+            # Как _pct аналитики: доля с одним знаком; не с кем было говорить — пусто. Одно
+            # отличие (14.10.2026, pay.display_percent): через порог тарифа округление не
+            # переводит — рядом с зарплатой не будет «70,0 %» при цене диалога за 60 %.
+            "percent": pay.display_percent(successes, talked),
             "period": period.isoformat(),
             "period_label": period_label(period),
         }
+
+    @staticmethod
+    def _operator_salary(counts):
+        """Оплата по конверсии за базу обзваниваемого месяца (pay.salary; владелец, 14.10.2026)
+        из того же снимка счётчиков, что и конверсия: диалоги × цена диалога по конверсии и
+        из чего она сложилась."""
+        period, talked, successes, called = counts
+        return dict(pay.salary(called, talked, successes), period=period.isoformat(),
+                    period_label=period_label(period))
+
+    def _day_results(self, department_id, day, operator_id=None):
+        """Итоги дня `day` (date по Алматы) по операторам базы отдела (_DAY_RESULTS_SQL), своей
+        транзакцией: [{operator_id, name, dialogs, successes}] — кто в этот день звонил или
+        получил успешку. operator_id — только он: чужие строки тогда даже не читаются."""
+        params = {"department_id": int(department_id), "day": day,
+                  "operator_id": None if operator_id is None else int(operator_id),
+                  "answered": ANSWERED_SQL, "min_sec": signing.SUCCESS_MIN_BILLSEC}
+        with self.db._get_cursor() as cur:
+            cur.execute(self._DAY_RESULTS_SQL, params)
+            rows = cur.fetchall()
+        results = []
+        for r in rows:
+            attempts, successes = int(r[2] or 0), int(r[4] or 0)
+            # Успешка без оператора (сотрудника удалили) — ничья; одни отменённые до ответа
+            # попытки — не звонил.
+            if r[0] is None or not (attempts or successes):
+                continue
+            # Имя уходит коллегам в рейтинг: без имени — нейтральная подпись, а не «#id», как в
+            # аналитике руководителя (id операторов телефону не отдаём).
+            results.append({"operator_id": int(r[0]), "name": (r[1] or "").strip() or "Сотрудник",
+                            "dialogs": int(r[3] or 0), "successes": successes})
+        return results
+
+    def _operator_day(self, ctx, day):
+        """Свои диалоги и подписавшие за день (_DAY_RESULTS_SQL с отбором оператора)."""
+        rows = self._day_results(ctx["department_id"], day, operator_id=ctx["user_id"])
+        mine = next((r for r in rows if r["operator_id"] == ctx["user_id"]), None)
+        return {"dialogs": mine["dialogs"] if mine else 0, "successes": mine["successes"] if mine else 0}
 
     def operator_progress(self, user_id):
         """«Мой прогресс» на телефоне: сколько строк выдано и обработано, попыток,
@@ -3815,8 +3923,11 @@ class DialListService:
         (по Алматы) и отдельно за сегодня. Никаких ФИО и номеров — только счётчики.
 
         conversion — конверсия за базу обзваниваемого месяца, как в «Аналитике»
-        руководителя (_operator_conversion). Не посчиталась — ключа нет, остальное
-        приходит как всегда."""
+        руководителя (_operator_conversion). salary (владелец, 14.10.2026) — оплата по
+        конверсии за ту же базу и из того же снимка счётчиков (_operator_salary); today в
+        ней — свои диалоги и подписавшие за сегодня (_operator_day). Не посчитались счётчики
+        базы — нет ни conversion, ни salary; не посчиталось только «сегодня» — salary без
+        today; остальное приходит как всегда."""
         ctx = self.operator_context(user_id)
         month = current_period()
         today = datetime.now(PERIOD_TZ).date()
@@ -3850,12 +3961,72 @@ class DialListService:
             },
             "outcomes": outcomes,
         }
-        # Своей транзакцией: сбой конверсии не трогает счётчики выше.
+        # Своими транзакциями: сбой конверсии и зарплаты не трогает счётчики выше, а сбой
+        # «сегодня» — саму зарплату.
         try:
-            progress["conversion"] = self._operator_conversion(ctx)
+            counts = self._operator_base_counts(ctx)
         except Exception as exc:
-            log.warning("dial_list: конверсия оператора %s не посчитана: %s", ctx["user_id"], exc)
+            log.warning("dial_list: конверсия и зарплата оператора %s не посчитаны: %s", ctx["user_id"], exc)
+            return progress
+        progress["conversion"] = self._operator_conversion(ctx, counts)
+        salary = self._operator_salary(counts)
+        try:
+            salary["today"] = self._operator_day(ctx, today)
+        except Exception as exc:
+            log.warning("dial_list: итоги дня оператора %s для зарплаты не посчитаны: %s", ctx["user_id"], exc)
+        progress["salary"] = salary
         return progress
+
+    def operator_rating(self, user_id, now=None):
+        """«Рейтинг» на телефоне (владелец, 14.10.2026): операторы отдела за день, место — по
+        заработку дня (диалоги дня × цена диалога по конверсии дня, pay). Чтобы сохранять
+        интригу, рейтинг виден с 21:00 до 10:00 следующего утра по Алматы (pay.rating_window);
+        день задаёт только окно — другой день запросом не выбрать. now — для тестов.
+
+        Всегда: visible, day, day_label, opens_at, closes_at, currency.
+        Скрыт: seconds_to_open и me — свои диалоги и подписавшие за этот день (не
+        посчитались — None). О коллегах ничего: ни имён, ни чисел, ни их количества.
+        Открыт: seconds_to_close; operators — все, кто в этот день звонил или получил
+        успешку, по местам: {place, name, me, dialogs, successes, percent}, а price и amount —
+        только у своей строки: суммы коллег сервер не отдаёт (решение владельца); total —
+        сколько их; me — своя строка или None, если оператор в этот день не звонил. id
+        операторов наружу не уходят."""
+        ctx = self.operator_context(user_id)
+        window = pay.rating_window(now or datetime.now(PERIOD_TZ))
+        day = window["day"]
+        result = {
+            "visible": window["visible"],
+            "day": day.isoformat(),
+            "day_label": pay.day_label(day),
+            "opens_at": window["opens_at"].isoformat(),
+            "closes_at": window["closes_at"].isoformat(),
+            "currency": pay.CURRENCY,
+        }
+        if not window["visible"]:
+            result["seconds_to_open"] = window["seconds_to_open"]
+            # До итогов читаются только свои числа: отбор оператора — в самом запросе.
+            try:
+                result["me"] = self._operator_day(ctx, day)
+            except Exception as exc:
+                log.warning("dial_list: свои итоги дня оператора %s не посчитаны: %s", ctx["user_id"], exc)
+                result["me"] = None
+            return result
+        rows = []
+        for row in self._day_results(ctx["department_id"], day):
+            cost = pay.price(row["successes"], row["dialogs"])
+            rows.append(dict(row, price=cost, amount=row["dialogs"] * cost))
+        operators, mine = [], None
+        for row in pay.rank(rows):
+            item = {"place": row["place"], "name": row["name"], "me": row["operator_id"] == ctx["user_id"],
+                    "dialogs": row["dialogs"], "successes": row["successes"],
+                    "percent": pay.display_percent(row["successes"], row["dialogs"])}
+            if item["me"]:
+                item.update(price=row["price"], amount=row["amount"])
+                mine = item
+            operators.append(item)
+        result.update(seconds_to_close=window["seconds_to_close"], operators=operators,
+                      total=len(operators), me=mine)
+        return result
 
     # «Позвонить ещё раз» (владелец, 12.10.2026; до того — «Перезвонить» раньше срока): всё,
     # что решает recall_verdict, — одним куском SQL и для ручки recall (_RECALL_LEAD_SQL), и
