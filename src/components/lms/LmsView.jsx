@@ -15,6 +15,10 @@ import {
 } from "lucide-react";
 import "react-quill/dist/quill.snow.css";
 import "./LmsRichText.css";
+import { ensureSectionFonts } from "../common/sectionFonts";
+
+// DM Sans раздела приходил ссылкой из модуля «Задач»; теперь каждый раздел — своим чанком.
+ensureSectionFonts();
 
 const CurriculumSkeleton = ({ modules = 3, lessonsPerModule = 4 }) => (
   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden" aria-busy="true">

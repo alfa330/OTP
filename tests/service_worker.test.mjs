@@ -11,7 +11,7 @@ const javascript = (text = 'export default {}') => new Response(text, {
 });
 const html = (text) => new Response(text, { headers: { 'content-type': 'text/html' } });
 
-const worker = ({ fetchImpl = async () => javascript(), brokenStorage = false } = {}) => {
+const worker = ({ fetchImpl = async () => javascript(), brokenStorage = false, timeScale = 1, registration = {} } = {}) => {
     const handlers = new Map();
     const stores = new Map();
     const calls = [];
@@ -32,7 +32,8 @@ const worker = ({ fetchImpl = async () => javascript(), brokenStorage = false } 
     };
     vm.runInNewContext(source, {
         URL,
-        setTimeout,
+        // timeScale ужимает таймауты воркера (2 с, 7 с), чтобы тест не ждал их по-настоящему.
+        setTimeout: (callback, ms, ...args) => setTimeout(callback, Math.round(ms * timeScale), ...args),
         clearTimeout,
         fetch: async (request, options) => {
             calls.push({ request, options });
@@ -51,17 +52,18 @@ const worker = ({ fetchImpl = async () => javascript(), brokenStorage = false } 
             delete: async (name) => { storageCheck(); return stores.delete(name); },
         },
         self: {
-            registration: { scope: origin + '/OTP/' },
+            registration: { scope: origin + '/OTP/', ...registration },
             location: { origin },
             addEventListener: (type, callback) => handlers.set(type, callback),
             skipWaiting: async () => { skipped = true; },
             clients: { claim: async () => { claimed = true; } },
         },
     });
-    const dispatch = async (type, request) => {
+    const dispatch = async (type, request, extra = {}) => {
         const work = [];
         let response;
         handlers.get(type)({
+            ...extra,
             request,
             waitUntil: (promise) => work.push(promise),
             respondWith: (promise) => { response = promise; },
@@ -76,9 +78,9 @@ const worker = ({ fetchImpl = async () => javascript(), brokenStorage = false } 
         stores,
         dispatch,
         put: async (cache, request, response) => (await open(cache)).put(request, response),
-        fetch: (url = moduleUrl, properties = {}) => dispatch('fetch', {
+        fetch: (url = moduleUrl, properties = {}, extra = {}) => dispatch('fetch', {
             url, method: 'GET', mode: 'cors', headers: new Headers(), cache: 'default', ...properties,
-        }),
+        }, extra),
         get claimed() { return claimed; },
         get skipped() { return skipped; },
     };
@@ -99,6 +101,60 @@ test('offline navigation uses only the current shell cache', async () => {
     await sw.put('icore-shell-v2', '/OTP/', html('current offline build'));
     const response = await sw.fetch(origin + '/OTP/?view=wazzup_chats', { mode: 'navigate' });
     assert.equal(await response.text(), 'current offline build');
+});
+
+// Решение владельца 14.10.2026: при сохранённой копии сеть ждём не дольше 2 с.
+// timeScale 0.01: 2 с воркера = 20 мс теста, 7 с = 70 мс.
+const slowNetwork = (text, ms) => () => new Promise((resolve) => setTimeout(() => resolve(html(text)), ms));
+
+test('a slow network yields the saved shell after two seconds and refreshes it for the next launch', async () => {
+    const sw = worker({ timeScale: 0.01, fetchImpl: slowNetwork('fresh build', 60) });
+    await sw.put('icore-shell-v2', '/OTP/', html('saved build'));
+    const response = await sw.fetch(origin + '/OTP/', { mode: 'navigate' });
+    assert.equal(await response.text(), 'saved build');
+    assert.equal(await sw.stores.get('icore-shell-v2').get(origin + '/OTP/').text(), 'fresh build');
+});
+
+test('a network answering within two seconds still wins over the saved shell', async () => {
+    const sw = worker({ timeScale: 0.01, fetchImpl: slowNetwork('fresh build', 5) });
+    await sw.put('icore-shell-v2', '/OTP/', html('saved build'));
+    const response = await sw.fetch(origin + '/OTP/', { mode: 'navigate' });
+    assert.equal(await response.text(), 'fresh build');
+});
+
+test('without a saved shell the navigation keeps waiting for the network past two seconds', async () => {
+    const sw = worker({ timeScale: 0.01, fetchImpl: slowNetwork('fresh build', 40) });
+    await sw.put('icore-shell-v2', '/OTP/offline.html', html('offline page'));
+    const response = await sw.fetch(origin + '/OTP/', { mode: 'navigate' });
+    assert.equal(await response.text(), 'fresh build');
+});
+
+test('a fresh navigation preload answers without a second request', async () => {
+    const sw = worker({ fetchImpl: async () => html('second request') });
+    const preloaded = new Response('preloaded build', {
+        headers: { 'content-type': 'text/html', date: new Date().toUTCString() },
+    });
+    const response = await sw.fetch(origin + '/OTP/', { mode: 'navigate' }, { preloadResponse: Promise.resolve(preloaded) });
+    assert.equal(await response.text(), 'preloaded build');
+    assert.equal(sw.calls.length, 0);
+    assert.equal(await sw.stores.get('icore-shell-v2').get(origin + '/OTP/').text(), 'preloaded build');
+});
+
+test('a navigation preload served from the HTTP cache is replaced by a request past the cache', async () => {
+    const sw = worker({ fetchImpl: async () => html('current build') });
+    const stale = new Response('ten minutes old', {
+        headers: { 'content-type': 'text/html', date: new Date(Date.now() - 10 * 60 * 1000).toUTCString() },
+    });
+    const response = await sw.fetch(origin + '/OTP/', { mode: 'navigate' }, { preloadResponse: Promise.resolve(stale) });
+    assert.equal(await response.text(), 'current build');
+    assert.equal(sw.calls[0].options.cache, 'no-store');
+});
+
+test('activation turns navigation preload on', async () => {
+    let enabled = false;
+    const sw = worker({ registration: { navigationPreload: { enable: async () => { enabled = true; } } } });
+    await sw.dispatch('activate');
+    assert.equal(enabled, true);
 });
 
 test('previously loaded chunks remain available after a deployment', async () => {

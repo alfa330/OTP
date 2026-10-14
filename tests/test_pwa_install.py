@@ -155,15 +155,21 @@ class ServiceWorkerTests(unittest.TestCase):
         return self.code[start:end]
 
     def test_document_is_taken_from_the_network_first(self):
-        """Кэш для документа — запасной выход, иначе старая сборка залипнет."""
+        """Кэш для документа — запасной выход, иначе старая сборка залипнет.
+
+        С 14.10.2026 (решение владельца) сохранённая копия отвечает и тогда,
+        когда сеть молчит дольше 2 с, — но запрос к сети уходит ПЕРВЫМ, а
+        потолок в 2 с действует только при сохранённой копии: без неё ждём
+        прежние 7 с, а не отдаём страницу «нет связи»."""
         body = self._function_body('handleNavigation')
-        network = body.index('fetchWithTimeout(')
+        network = body.index('readNetworkDocument(')
         cache = body.index('matchSafely(')
         self.assertLess(
             network, cache,
             'В handleNavigation кэш опрашивается раньше сети — так устаревшая '
             'сборка становится вечной',
         )
+        self.assertIn('cached ? NAVIGATION_CACHED_WAIT_MS : NAVIGATION_TIMEOUT_MS', body)
 
     def test_only_hashed_assets_are_cache_first(self):
         """Из кэша без вопросов — только файлы с хэшем в имени."""

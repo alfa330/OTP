@@ -72,9 +72,15 @@ export default function MobilePageChrome({ active, view }) {
 
         /* Цвет читаем СЛЕДУЮЩИМ кадром: на кадре смены раздела старый блок уже
            снят, а новый ещё не отрисован, и getComputedStyle вернул бы цвет
-           предыдущего экрана. */
-        const frame = requestAnimationFrame(() => {
-            const root = document.querySelector('.main-content')?.firstElementChild;
+           предыдущего экрана.
+           Корень раздела — первый ВИДИМЫЙ ребёнок: скрытый фрейм «Журнала
+           оценок» (display: none, живёт до выхода) стоит в разметке раньше
+           большинства разделов, и полоса красилась его фоном во всех них. */
+        const paint = () => {
+            const main = document.querySelector('.main-content');
+            const root = main
+                ? Array.from(main.children).find((child) => getComputedStyle(child).display !== 'none')
+                : null;
             const color = root ? getComputedStyle(root).backgroundColor : '';
             if (isOpaque(color)) {
                 body.style.setProperty('--mobile-page-bg', color);
@@ -83,9 +89,24 @@ export default function MobilePageChrome({ active, view }) {
                 body.style.removeProperty('--mobile-page-bg');
                 meta?.setAttribute('content', FALLBACK_BG);
             }
-        });
+        };
+        let frame = requestAnimationFrame(paint);
+
+        /* Раздел, который приезжает отдельным чанком, встаёт уже ПОСЛЕ этого
+           кадра: сначала на его месте заглушка Suspense, у неё фона нет. Когда
+           заглушку сменяет сам раздел, у .main-content меняются дети — тогда и
+           перечитываем. */
+        const main = document.querySelector('.main-content');
+        const observer = main && typeof MutationObserver === 'function'
+            ? new MutationObserver(() => {
+                cancelAnimationFrame(frame);
+                frame = requestAnimationFrame(paint);
+            })
+            : null;
+        observer?.observe(main, { childList: true });
 
         return () => {
+            observer?.disconnect();
             cancelAnimationFrame(frame);
             window.removeEventListener('scroll', sync, { passive: true });
             delete body.dataset.mobileScrolled;

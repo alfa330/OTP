@@ -66,12 +66,10 @@ import {
 import { IosLightbox } from '../ui/ios';
 import { isPreviewablePhoto, splitTaskFiles } from './taskPhotos';
 import useTaskPhotoPreviews from './useTaskPhotoPreviews';
+import { ensureSectionFonts } from '../common/sectionFonts';
 
-/* ─── Google Fonts ─── */
-const fontLink = document.createElement('link');
-fontLink.rel = 'stylesheet';
-fontLink.href = 'https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap';
-document.head.appendChild(fontLink);
+/* ─── Google Fonts ─── (общие с «Курсами», см. common/sectionFonts.js) */
+ensureSectionFonts();
 
 /* ─── Styles ─── */
 const styleTag = document.createElement('style');

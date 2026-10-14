@@ -2,7 +2,9 @@ import React, { Suspense, useState, useEffect, useLayoutEffect, useCallback, use
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
-import _ from 'lodash';
+/* Из lodash портал берёт одну функцию — и раньше за неё платил всей
+   библиотекой (82 КБ) в файле, который грузится при каждом запуске. */
+import debounce from 'lodash/debounce';
 import Papa from 'papaparse';
 import ToastContainer from './components/common/ToastContainer';
 import { attachmentCache } from './components/wazzup/attachmentCache';
@@ -27,18 +29,21 @@ import NotificationsBell from './components/notifications/NotificationsBell';
    примитивы iOS в бандле и так есть. */
 import NewsOfDayModal from './components/news/NewsOfDayModal';
 import { emitNewsPoke } from './components/news/newsShared';
-import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
-import SurveysView from './components/surveys/SurveysView';
-import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
+/* Стили «Задач» и «Курсов» — здесь, на местах прежних импортов самих разделов,
+   хотя код разделов грузится отдельными чанками (lazySection ниже). Стили
+   весят ~10 КБ сжатыми, а порядок каскада решает: отдельный чанк вставил бы
+   их ПОСЛЕ mobile-shell.css, и равные по весу правила начали бы побеждать
+   иначе. Отсюда же приходят общие .custom-scrollbar и .custom-scrollbar-x —
+   они живут в LmsRichText.css, а стоят на контейнере всех разделов. */
+import './components/tasks/tasks-mobile.css';
 import {
     FALLBACK_COMMENT_REQUIRED_REASONS,
     normalizeCommentRules,
     findCommentRule,
     commentRequiredMessage,
 } from './components/technical/commentRules';
-import RecruitingView from './components/recruiting/RecruitingView';
-import LmsView from './components/lms/LmsView';
-import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
+import 'react-quill/dist/quill.snow.css';
+import './components/lms/LmsRichText.css';
 // Виджет табло переживает уход из раздела — иначе он бесполезен: смысл окна поверх других
 // программ в том, чтобы линия была видна, пока работаешь в другом месте. Поэтому обычным
 // импортом: отдельным чанком он грузился бы уже после нажатия, а разрешение на окно
@@ -132,7 +137,7 @@ import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal'
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
-import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
+import { AUTH_REFRESH_OUTCOME, createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { startFileDownload } from './utils/fileDownload';
 import { hoursScreenModelCode } from './utils/hoursScreenModel';
@@ -277,6 +282,45 @@ const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'
 const LowRatingAttribution = lazyWithRetry(() => import('./components/c2d_eval/LowRatingAttribution'));
 const LowRatingHistory = lazyWithRetry(() => import('./components/c2d_eval/LowRatingHistory'));
 const QrAccessView = lazyWithRetry(() => import('./components/qr/QrAccessView'));
+
+/* Разделы, которые при запуске не нужны, — отдельными чанками.
+ *
+ * Жили обычным импортом и ехали в главном файле приложения: «Курсы» вместе с
+ * редактором Quill, «Задачи», «Опросы», «Подбор» с графиками recharts и
+ * framer-motion, «Тех. проблемы», «Шкала мониторинга» — 1,9 МБ из 4,6 МБ
+ * кода, который телефон качал и исполнял при КАЖДОМ запуске, хотя открывает
+ * человек из них разве что один. Главный файл меняется с каждой выкладкой, а
+ * выкладок 10–35 в день, поэтому этот мегабайт приходил заново почти на каждый
+ * запуск с иконки (жалоба владельца 14.10.2026 «грузится слишком долго»).
+ *
+ * Suspense зашит в обёртку, поэтому места отрисовки разделов не изменились.
+ * Надпись проявляется через 300 мс, как у «Вики»: код раздела из кэша
+ * приходит за кадр, и мигать ей незачем. */
+const lazySection = (name, importer) => {
+    const Lazy = lazyWithRetry(importer);
+    const Section = (props) => (
+        <Suspense fallback={<div className="p-6 text-sm text-slate-500 motion-safe:animate-fade-in-soft motion-safe:![animation-delay:300ms]">Загрузка раздела...</div>}>
+            <Lazy {...props} />
+        </Suspense>
+    );
+    Section.displayName = name;
+    return Section;
+};
+const TasksView = lazySection('TasksView', () => import('./components/tasks/TasksView'));
+const SurveysView = lazySection('SurveysView', () => import('./components/surveys/SurveysView'));
+const TechnicalIssuesView = lazySection('TechnicalIssuesView', () => import('./components/technical/TechnicalIssuesView'));
+const RecruitingView = lazySection('RecruitingView', () => import('./components/recruiting/RecruitingView'));
+const LmsView = lazySection('LmsView', () => import('./components/lms/LmsView'));
+const MonitoringScaleView = lazySection('MonitoringScaleView', () => import('./components/monitoring/MonitoringScaleView'));
+/* Закреплённая задача живёт в модуле «Задач»: модуль приезжает, только когда
+   задача действительно закреплена, а до него на месте виджета пусто. */
+const PinnedTaskWidgetLazy = lazyWithRetry(() => import('./components/tasks/TasksView')
+    .then((module) => ({ default: module.PinnedTaskWidget })));
+const PinnedTaskWidget = (props) => (
+    <Suspense fallback={null}>
+        <PinnedTaskWidgetLazy {...props} />
+    </Suspense>
+);
 
 
 if (typeof window !== 'undefined') {
@@ -3348,6 +3392,11 @@ const forceReloadAfterFailedAuthRefresh = () => {
     return new Promise(() => {});
 };
 
+/* Обновление сессии, начатое при запуске (см. «Запуск с сохранённой сессией»
+   ниже). Пока оно в полёте, запросы axios ждут его, а не уходят со старым
+   токеном за отказом. */
+let bootAuthRefresh = null;
+
 if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
     if (!window.__otpFetchAuthInterceptorInstalled && typeof window.fetch === 'function') {
         window.__otpFetchAuthInterceptorInstalled = true;
@@ -3371,11 +3420,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!window.__otpAxiosAuthRequestInterceptorInstalled) {
                 window.__otpAxiosAuthRequestInterceptorInstalled = true;
-                axios.interceptors.request.use((config) => {
+                axios.interceptors.request.use(async (config) => {
                     const url = String(config?.url || '');
                     if (url.includes('/api/login') || url.includes('/api/auth/refresh')) {
                         return config;
                     }
+                    if (bootAuthRefresh) await bootAuthRefresh;
                     const nextConfig = config || {};
                     nextConfig.headers = withAccessTokenHeader(nextConfig.headers || {});
                     return nextConfig;
@@ -3430,6 +3480,118 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             }
         }
+
+/* ЗАПУСК С СОХРАНЁННОЙ СЕССИЕЙ (жалоба владельца 14.10.2026: портал с иконки на
+ * телефоне «грузится слишком долго»).
+ *
+ * Раньше каждый запуск начинался экраном «Проверка сессии…»: портал ждал ответа
+ * /api/auth/me и только потом рисовался и шёл за данными раздела — два запроса
+ * к Render подряд, и перед каждым браузер ещё переспрашивает чужой домен
+ * (OPTIONS). Токен доступа живёт 30 минут, поэтому после перерыва первый
+ * /api/auth/me получал 401, шёл обновлять сессию и спрашивал заново: 13.10.2026
+ * так начались 325 запусков (журнал Render).
+ *
+ * Теперь, если на устройстве сохранён человек и его токены, портал рисуется им
+ * сразу, а /api/auth/me сверяет его в фоне: что-то изменилось — подставится
+ * свежий, сессию отозвали — уйдёт на вход тем же путём, что и любой отвергнутый
+ * запрос. Истёкший токен обновляется сразу при загрузке, до первого запроса, а
+ * не после его отказа. */
+const ACCESS_TOKEN_REFRESH_MARGIN_MS = 15000;
+
+/* Срок токена — из него самого (JWT, поле exp). Подпись здесь не проверяется и
+   не нужна: решается только, обновить ли токен заранее. */
+const readTokenExpiryMs = (token) => {
+    try {
+        const payload = String(token || '').split('.')[1];
+        if (!payload) return 0;
+        const exp = Number(JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))?.exp);
+        return Number.isFinite(exp) && exp > 0 ? exp * 1000 : 0;
+    } catch (_error) {
+        return 0;
+    }
+};
+
+/* Фото в профиле — подписанная ссылка Google Storage, живёт сутки
+   (X-Goog-Date + X-Goog-Expires). Сервер переподписывает её после каждой
+   выкладки, поэтому от запуска к запуску она меняется сама по себе. */
+const readSignedUrlExpiryMs = (url) => {
+    try {
+        const params = new URL(String(url || '')).searchParams;
+        const stamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(params.get('X-Goog-Date') || '');
+        const ttl = Number(params.get('X-Goog-Expires'));
+        if (!stamp || !Number.isFinite(ttl)) return 0;
+        const [, y, mo, d, h, mi, s] = stamp.map(Number);
+        return Date.UTC(y, mo - 1, d, h, mi, s) + ttl * 1000;
+    } catch (_error) {
+        return 0;
+    }
+};
+/* Фото должно прожить смену: ссылку из памяти устройства портал держит, пока
+   его не перезапустят, и картинки, открытые позже (профиль, шторка), идут по ней. */
+const AVATAR_KEEP_MS = 12 * 60 * 60 * 1000;
+const avatarLastsAShift = (url) => {
+    if (!url) return true;
+    const expiresAt = readSignedUrlExpiryMs(url);
+    return !expiresAt || expiresAt - Date.now() >= AVATAR_KEEP_MS;
+};
+
+/* Человек, которым можно рисовать портал до ответа сервера: сохранён на
+   устройстве И у него есть токены. Без токенов (вышел, сессию стёрла другая
+   вкладка) — прежний путь через «Проверку сессии». Тот же путь, если подпись
+   фото доживает последние часы: свежий ответ отличался бы от сохранённого, а
+   ДРУГОЙ объект user перезапускает эффект «восстановить раздел» — тот читает
+   адрес, каким он был при запуске, и уводил бы человека, успевшего открыть
+   другой раздел, обратно в раздел по умолчанию. */
+const readStoredSessionUser = () => {
+    if (typeof window === 'undefined') return null;
+    if (!getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)) return null;
+    try {
+        const stored = sanitizeClientUser(JSON.parse(window.localStorage.getItem('user')));
+        if (!stored || typeof stored !== 'object' || !stored.id) return null;
+        return avatarLastsAShift(stored.avatar_url) ? stored : null;
+    } catch (_error) {
+        return null;
+    }
+};
+
+/* Ответ /api/auth/me — тот же человек? Тогда портал не трогаем: новый объект
+   перезапустил бы каждый эффект, зависящий от user, — разделы запросили бы
+   свои данные второй раз, а эффект «восстановить раздел» увёл бы в раздел по
+   умолчанию. Порядок ключей не важен; фото сравнивается не по ссылке (сервер
+   переподписывает её после каждой выкладки), а по файлу, пока прежней подписи
+   хватает на смену. */
+const canonicalUserJson = (value) => {
+    if (Array.isArray(value)) return `[${value.map(canonicalUserJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalUserJson(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value ?? null);
+};
+const signedUrlFile = (url) => String(url || '').split('?')[0];
+const isSameSessionUser = (current, next) => {
+    if (!current || !next) return false;
+    const { avatar_url: currentAvatar, ...currentRest } = current;
+    const { avatar_url: nextAvatar, ...nextRest } = next;
+    if (canonicalUserJson(currentRest) !== canonicalUserJson(nextRest)) return false;
+    if ((currentAvatar || null) === (nextAvatar || null)) return true;
+    return Boolean(currentAvatar && nextAvatar)
+        && signedUrlFile(currentAvatar) === signedUrlFile(nextAvatar)
+        && avatarLastsAShift(currentAvatar);
+};
+
+if (typeof window !== 'undefined' && readStoredSessionUser()) {
+    const accessExpiresAt = readTokenExpiryMs(getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY));
+    if (accessExpiresAt - Date.now() < ACCESS_TOKEN_REFRESH_MARGIN_MS) {
+        bootAuthRefresh = refreshAuthSession().then((result) => {
+            bootAuthRefresh = null;
+            /* Сессию отозвали или refresh-токен истёк — на вход, как при любом
+               отвергнутом обновлении. Сеть и 5xx о сессии не говорят ничего:
+               запросы сами обновят её по своему 401. */
+            if (result.outcome === AUTH_REFRESH_OUTCOME.REJECTED) forceReloadAfterFailedAuthRefresh();
+            return result;
+        });
+    }
+}
 
         // Error Boundary Component
         class ErrorBoundary extends React.Component {
@@ -43066,7 +43228,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return [single];
             };
 
-            const [user, setUser] = useState(null);
+            /* Сохранённый на устройстве человек — сразу: портал не ждёт ответа
+               /api/auth/me (см. «Запуск с сохранённой сессией» у перехватчиков). */
+            const [user, setUser] = useState(readStoredSessionUser);
             useEffect(() => {
                 attachmentCache.setOwner(user?.id);
                 return () => attachmentCache.clear();
@@ -43227,7 +43391,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canManageFourYouSection = canManageFourYouForUser(user);
             const canAccessDevLetterSection = canAccessDevLetterForUser(user);
             const canChangeAccountAvatar = isAdminLikeRole || isDepartmentManager;
-            const [isAuthInitializing, setIsAuthInitializing] = useState(true);
+            const [isAuthInitializing, setIsAuthInitializing] = useState(() => !user);
             const [showAuthEntranceSplash, setShowAuthEntranceSplash] = useState(false);
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
             const [login, setLogin] = useState('');
@@ -43882,6 +44046,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                класс на <body>, по которому включается вся мобильная вёрстка;
                side — сторона бара, она же меняется при повороте экрана. */
             const { shell: isMobileShell, side: mobileTabSide } = useMobileShell();
+            /* «Журнал оценок» — отдельное приложение во фрейме (call_evaluation.html):
+               свой бандл, шрифты Google и flatpickr с CDN, свой gtag и пять
+               запросов к API. Фрейм ставился при КАЖДОМ запуске у всех, кому журнал
+               открыт (админы, СВ, главы отделов), даже если журнал не открывали, и
+               на телефоне грузился наперегонки с самим порталом (замер 14.10.2026:
+               20 лишних файлов на старте у админа). Теперь на телефоне фрейм
+               ставится при первом открытии журнала, на компьютере — заранее, но
+               когда портал уже встал: там журнал открывают часто, и к нажатию он
+               должен быть готов. Поставленный однажды — живёт до выхода.
+               Условие повторяет canSeeCallEvaluation ниже: та считается уже после
+               ранних return экранов входа, а хук обязан стоять до них. */
+            const canMountCallEvaluation = isAdminLikeRole || isDepartmentManager || isMarketingObserverUser;
+            const [callEvaluationMountedFor, setCallEvaluationMountedFor] = useState(null);
+            const callEvaluationMounted = Boolean(user?.id) && callEvaluationMountedFor === user.id;
+            useEffect(() => {
+                if (!canMountCallEvaluation || !user?.id || callEvaluationMounted) return undefined;
+                const userId = user.id;
+                const mount = () => setCallEvaluationMountedFor(userId);
+                if (view === 'call_evaluation') {
+                    mount();
+                    return undefined;
+                }
+                if (isMobileShell || typeof window === 'undefined') return undefined;
+                let idleHandle = null;
+                const timer = window.setTimeout(() => {
+                    if (typeof window.requestIdleCallback === 'function') {
+                        idleHandle = window.requestIdleCallback(mount, { timeout: 5000 });
+                    } else {
+                        mount();
+                    }
+                }, 2500);
+                return () => {
+                    window.clearTimeout(timer);
+                    if (idleHandle !== null) window.cancelIdleCallback?.(idleHandle);
+                };
+            }, [canMountCallEvaluation, user?.id, callEvaluationMounted, view, isMobileShell]);
             /* Под открытой шторкой страница стоит намертво — как под листом в
                мобильном приложении. Без замка палец, попавший мимо списка
                разделов, увозил раздел ПОД шторкой, и, закрыв её, человек
@@ -46680,12 +46880,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 telegram_id: data.telegram_id,
                                 gender: data.gender
                             });
-                            setUser(sessionUser);
+                            /* Портал уже нарисован сохранённым человеком — тот же
+                               ответ его не пересобирает. На устройство же кладём
+                               свежий ответ: с новой подписью фото следующий запуск
+                               тоже пойдёт без «Проверки сессии». */
+                            setUser((current) => (isSameSessionUser(current, sessionUser) ? current : sessionUser));
+                            try {
+                                localStorage.setItem('user', JSON.stringify(sessionUser));
+                            } catch (_error) {
+                                /* Хранилище закрыто — следующий запуск пройдёт «Проверкой сессии». */
+                            }
                         }
                     } catch (err) {
                         if (!cancelled) {
                             if (parsedStoredUser && !err?.response) {
-                                setUser(parsedStoredUser);
+                                setUser((current) => current || parsedStoredUser);
                             } else {
                                 setUser(null);
                                 localStorage.removeItem('user');
@@ -49790,7 +49999,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                (_four_you_access_for_requester) — тому, кому раздел закрыт,
                колокол вернёт по нему ноль. */
 
-            const debouncedFetch = useCallback(_.debounce((fn) => {
+            const debouncedFetch = useCallback(debounce((fn) => {
                 if (isMounted.current) {
                     try {
                         fn();
@@ -56128,7 +56337,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 showToast={showToast}
                             />
                         )}
-                        {canSeeCallEvaluation && (
+                        {canSeeCallEvaluation && (callEvaluationMounted || isCallEvaluationView) && (
                         <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: callEvaluationCanvas, display: isCallEvaluationView ? undefined : 'none' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}

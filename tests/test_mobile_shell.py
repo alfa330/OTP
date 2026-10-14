@@ -816,9 +816,18 @@ class PageChromeTests(unittest.TestCase):
     def test_page_colour_is_read_from_the_section_itself(self):
         """Списка «какой раздел какого цвета» быть не должно: у разделов
         разные классы (bg-white, bg-slate-50, градиент), и список разъедется
-        с разметкой на первой же правке. Читаем вычисленный стиль."""
-        self.assertIn("document.querySelector('.main-content')?.firstElementChild", self.CHROME)
+        с разметкой на первой же правке. Читаем вычисленный стиль.
+
+        Корень — первый ВИДИМЫЙ ребёнок .main-content: скрытый фрейм «Журнала
+        оценок» стоит в разметке раньше разделов и красил полосу своим фоном
+        (замер 14.10.2026). Раздел, приехавший отдельным чанком, встаёт уже
+        после заглушки Suspense — цвет перечитывается, когда у .main-content
+        меняются дети."""
+        self.assertIn("document.querySelector('.main-content')", self.CHROME)
+        self.assertIn("getComputedStyle(child).display !== 'none'", self.CHROME)
         self.assertIn('getComputedStyle(root).backgroundColor', self.CHROME)
+        self.assertIn('observer?.observe(main, { childList: true });', self.CHROME)
+        self.assertIn('observer?.disconnect();', self.CHROME)
         self.assertIn("body.style.setProperty('--mobile-page-bg', color)", self.CHROME)
         self.assertIn('background: var(--mobile-page-bg, transparent);', SHELL_CSS)
 

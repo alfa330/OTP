@@ -54,7 +54,6 @@
     <meta name="apple-mobile-web-app-title" content="iCORE" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-DDGZC3W1MZ"></script>
     <script>
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
@@ -64,6 +63,21 @@
       // page_title (см. trackAppViewAnalytics в src/App.jsx). Иначе на загрузке
       // улетал бы лишний page_view со статичным title "iCORE".
       gtag('config', 'G-DDGZC3W1MZ', { send_page_view: false });
+
+      // Сама библиотека (180 КБ) — после того как портал встал: раньше она
+      // стояла первой строкой и при запуске с иконки делила с порталом и
+      // канал, и процессор. События не теряются: gtag() выше копит их в
+      // dataLayer, и библиотека разберёт очередь, когда приедет.
+      window.addEventListener('load', function () {
+        var start = function () {
+          var script = document.createElement('script');
+          script.async = true;
+          script.src = 'https://www.googletagmanager.com/gtag/js?id=G-DDGZC3W1MZ';
+          document.head.appendChild(script);
+        };
+        if ('requestIdleCallback' in window) window.requestIdleCallback(start, { timeout: 4000 });
+        else window.setTimeout(start, 1500);
+      });
     </script>
   </head>
   <body class="bg-gray-50 font-sans antialiased text-gray-900">

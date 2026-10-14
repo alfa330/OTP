@@ -31,9 +31,13 @@ export default defineConfig({
         offices: resolve(rootDir, 'offices.html')
       },
       output: {
+        // Сюда — только то, что нужно при КАЖДОМ запуске: группа грузится
+        // целиком вместе с главным файлом. Здесь же лежали сканер QR (jsqr,
+        // 131 КБ — нужен одному разделу «QR доступ») и весь lodash (82 КБ — ради
+        // одной debounce); теперь jsqr едет в чанке своего раздела.
         manualChunks: {
           react: ['react', 'react-dom'],
-          vendor: ['axios', 'lodash', 'papaparse', 'jsqr']
+          vendor: ['axios', 'papaparse']
         }
       }
     }

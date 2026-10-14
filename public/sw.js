@@ -9,7 +9,8 @@
  * иначе показывает системную страницу «нет интернета».
  *
  * ГЛАВНОЕ ПРАВИЛО ЭТОГО ФАЙЛА: документ берётся ИЗ СЕТИ, кэш — только запасной
- * выход. У портала фронт лежит на GitHub Pages, и он уже наступал на устаревшую
+ * выход: при обрыве и когда сеть молчит дольше 2 с, а сохранённая копия есть
+ * (NAVIGATION_CACHED_WAIT_MS). У портала фронт лежит на GitHub Pages, и он уже наступал на устаревшую
  * сборку: публикация Pages иногда не доезжает, у людей остаётся старый бандл, и
  * приложение падает на ChunkLoadError (для этого в src/staleBundleRecovery.js
  * живёт перезагрузка с ?v=). Воркер, который отдавал бы index.html из кэша,
@@ -43,6 +44,20 @@ const CALL_EVALUATION_URL = SCOPE_PATH + 'call_evaluation.html';
    порталом авторизации. Без таймаута человек смотрел бы в белый экран, пока
    браузер сам не сдастся. */
 const NAVIGATION_TIMEOUT_MS = 7000;
+
+/* Если сохранённая копия страницы есть, сеть ждём не дольше 2 с, а потом
+   открываем копию (решение владельца 14.10.2026, жалоба «с иконки грузится
+   слишком долго»: на плохой связи запуск стоял по 7 с). Обычный ответ
+   GitHub Pages с телефона — 0,4–0,8 с, поэтому на нормальной связи страница
+   по-прежнему всегда свежая. Документ, пришедший позже, всё равно ложится в
+   кэш — к следующему запуску. */
+const NAVIGATION_CACHED_WAIT_MS = 2000;
+
+/* Предзагрузка навигации начинает запрос страницы, пока воркер ещё
+   просыпается (при запуске с иконки он спит). Но идёт она через HTTP-кэш
+   браузера, а Pages отдаёт страницу с max-age=600: ответ, чей Date старше
+   минуты, взят из этого кэша, и его заменяет запрос мимо кэша. */
+const PRELOAD_FRESH_MS = 60 * 1000;
 
 /* Потолок кэша сборочных ассетов. Каждая публикация приносит около сотни новых
    файлов со свежими хэшами, старые из кэша сами не уходят: без потолка кэш рос
@@ -89,37 +104,65 @@ const trimCache = async (cacheName, limit) => {
 
 /* Обычный fetch(request) тоже читает HTTP-кэш браузера. Документ всегда
    запрашиваем заново, иначе он может ссылаться на уже удалённые чанки.
-   Проигравший таймауту запрос дозагрузится сам. */
-const fetchWithTimeout = (request, timeoutMs) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('network timeout')), timeoutMs);
-    fetch(request, { cache: 'no-store' }).then(resolve, reject).finally(() => clearTimeout(timer));
-});
+   Предзагрузку берём, только если она свежая (см. PRELOAD_FRESH_MS). */
+const readNetworkDocument = async (event) => {
+    try {
+        const preloaded = await event.preloadResponse;
+        if (preloaded) {
+            const servedAt = Date.parse(preloaded.headers.get('date') || '');
+            if (Number.isFinite(servedAt) && Math.abs(Date.now() - servedAt) <= PRELOAD_FRESH_MS) {
+                return preloaded;
+            }
+        }
+    } catch (error) {
+        /* Предзагрузка сорвалась — обычный запрос ниже. */
+    }
+    return fetch(event.request, { cache: 'no-store' });
+};
 
-/* Документ: сеть → свежая копия в кэш → при обрыве кэш → страница «нет связи».
-   В кэше держим только две точки входа (приложение и «Журнал оценок»), а любой
-   внутренний адрес вида /wiki/... в офлайне отдаём оболочкой приложения —
-   маршрут разберёт роутер уже в браузере. */
+/* Документ: сеть → свежая копия в кэш → при обрыве (или через 2 с, если копия
+   есть) кэш → страница «нет связи». В кэше держим только две точки входа
+   (приложение и «Журнал оценок»), а любой внутренний адрес вида /wiki/... в
+   офлайне отдаём оболочкой приложения — маршрут разберёт роутер уже в браузере. */
 const handleNavigation = async (event) => {
     const request = event.request;
     const path = new URL(request.url).pathname;
     const isEntryPoint = path === CALL_EVALUATION_URL;
     const shellKey = isEntryPoint ? CALL_EVALUATION_URL : SHELL_URL;
-    try {
-        const response = await fetchWithTimeout(request, NAVIGATION_TIMEOUT_MS);
-        const copy = response.ok ? response.clone() : null;
-        event.waitUntil((async () => {
+
+    /* Копию снимаем сразу по приходе ответа — до того, как его начнёт читать
+       страница (см. putSafely), — и кладём, когда бы ответ ни пришёл: в том
+       числе если страница уже открылась сохранённой копией. */
+    const network = readNetworkDocument(event)
+        .then((response) => ({ response, copy: response.ok ? response.clone() : null }));
+    event.waitUntil(network
+        .then(async ({ copy }) => {
             /* Ключ канонический: адрес мог приехать с ?v= от восстановления
                после устаревшей сборки, и такие метки в кэше не нужны. */
             await putSafely(SHELL_CACHE, shellKey, copy);
             await trimCache(ASSET_CACHE, ASSET_CACHE_LIMIT);
-        })());
-        return response;
+        })
+        .catch(() => {}));
+
+    const cached = await matchSafely(SHELL_CACHE, shellKey);
+    let timer = null;
+    try {
+        return await Promise.race([
+            network.then(({ response }) => response),
+            new Promise((resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error('network timeout')),
+                    cached ? NAVIGATION_CACHED_WAIT_MS : NAVIGATION_TIMEOUT_MS
+                );
+            }),
+        ]);
     } catch (error) {
-        const cached = await matchSafely(SHELL_CACHE, shellKey);
         if (cached) return cached;
         const offline = await matchSafely(SHELL_CACHE, OFFLINE_URL);
         if (offline) return offline;
         throw error;
+    } finally {
+        clearTimeout(timer);
     }
 };
 
@@ -218,6 +261,13 @@ self.addEventListener('activate', (event) => {
             );
         } catch (error) {
             /* Заблокированное хранилище не должно удерживать старый воркер. */
+        }
+        /* Запрос страницы — параллельно с пробуждением воркера, см.
+           readNetworkDocument. */
+        try {
+            if (self.registration.navigationPreload) await self.registration.navigationPreload.enable();
+        } catch (error) {
+            /* Нет поддержки — страница пойдёт обычным запросом из воркера. */
         }
         await self.clients.claim();
     })());
