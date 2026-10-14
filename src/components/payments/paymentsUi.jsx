@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Check, ChevronDown, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw,
+    Check, ChevronDown, ChevronUp, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw,
     ShoppingCart, Trash2, UsersRound, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
+import IosDatePicker from '../ui/DatePicker';
 import { iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented, prefersReducedMotion } from '../ui/ios';
 import { foldFollowStep, foldMotion } from '../../utils/foldMotion';
 import { windowResizeMotion } from '../../utils/windowResize';
@@ -12,7 +13,8 @@ import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
     ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
-    pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, toneEdge, tonePill, toneRow,
+    issueKeys, issueStep, pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, toneEdge, tonePill,
+    toneRow,
 } from './paymentsMeta';
 
 /*
@@ -67,26 +69,178 @@ export const FieldHint = ({ hint }) => {
     return <InfoHint side="left"><ChoiceHint {...hint} /></InfoHint>;
 };
 
+/* ── Чего не хватает: поле в красной рамке ─────────────────────────────────────
+   Нажали «Отправить» (или кнопку этапа), а обязательное не заполнено, — поле
+   обводится красным, под ним красным написано, чего в нём нет, и окно подводит
+   прокрутку к первому такому полю (просьба владельца 14.10.2026). Рамка — та же,
+   что у неверной строки позиции: ring-2 ring-rose-300. */
+export const INVALID_RING = 'ring-2 ring-rose-300';
+
+/* У поля с пунктом элементы управления внутри — AmountInput, FormSelect, FormDate,
+   Choice, FilePicker, FormInput — обводятся сами; явное `invalid` у элемента
+   старше (так списки позиций и поставщиков красят только нужную строку). В
+   контексте — и id строки «чего не хватает»: поле ввода ссылается на неё
+   (aria-describedby), и читалка произносит причину вместе с полем. */
+const NO_ISSUE = { bad: false, id: undefined };
+const FieldIssueContext = React.createContext(NO_ISSUE);
+export const useFieldIssue = (invalid) => {
+    const inField = React.useContext(FieldIssueContext);
+    return invalid ?? inField.bad;
+};
+const useFieldIssueId = (bad) => {
+    const inField = React.useContext(FieldIssueContext);
+    return bad && inField.bad ? inField.id : undefined;
+};
+
 /* Подпись поля. Пояснение — под «i» у метки, а не строкой под полем (решение
    владельца 27.08.2026): текст нужен один раз, когда человек не понял поле.
    `as="div"` — для полей с несколькими элементами управления внутри (сегменты,
    файлы): <label> вокруг нескольких кнопок отдавал бы щелчок по подписи первой.
    Строка подписи одной высоты с «i» и без него (`min-h-5` — высота кнопки
    InfoHint): иначе в ряду из двух полей то, что с подсказкой, стояло на
-   несколько пикселей ниже соседнего. */
-export const Field = ({ label, hint, required = false, optionalMark = true, children, className = '', as = 'label' }) => {
+   несколько пикселей ниже соседнего.
+
+   `anchor` — ключ поля для пунктов «чего не хватает» (paymentsMeta.purchaseIssues):
+   по нему стрелки находят поле на экране. `issue` — что в поле не так; пока его
+   нет, строки под полем нет вовсе. `issueFirst` — строка сразу под подписью, над
+   содержимым: у высокого поля (список поставщиков, позиции) строка под списком
+   уходила за нижний край, когда к полю подводили.
+
+   Провайдер стоит ВСЕГДА, меняется только значение: оберни его только у поля с
+   пунктом — и содержимое на этом месте дерева меняло бы тип, React пересоздавал
+   бы поле ввода, и первая же набранная буква, снявшая пункт, выбивала бы человека
+   из поля (разбор 14.10.2026: «Бумага А4» превращалась в «Б»). */
+export const Field = ({ label, hint, required = false, optionalMark = true, children, className = '', as = 'label', anchor, issue = '',
+    issueFirst = false }) => {
     const Tag = as;
+    const id = useId();
+    const issueContext = useMemo(() => ({ bad: true, id }), [id]);
+    const line = issue ? <IssueLine id={id} text={issue} /> : null;
     return (
-        <Tag className={`block space-y-1.5 ${className}`}>
-            <span className="flex min-h-5 items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                {label}
-                {!required && optionalMark && (
-                    <span className="font-normal normal-case tracking-normal text-slate-400">необязательно</span>
-                )}
-                <FieldHint hint={hint} />
-            </span>
-            {children}
+        <Tag className={`block space-y-1.5 ${className}`} data-issue-anchor={anchor} data-issue={issue ? 'true' : undefined}>
+            {/* Без подписи — только место для строки «чего не хватает» (файл счёта под полями счёта). */}
+            {label && (
+                <span data-field-label className="flex min-h-5 items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    {label}
+                    {!required && optionalMark && (
+                        <span className="font-normal normal-case tracking-normal text-slate-400">необязательно</span>
+                    )}
+                    <FieldHint hint={hint} />
+                </span>
+            )}
+            {issueFirst && line}
+            <FieldIssueContext.Provider value={issue ? issueContext : NO_ISSUE}>{children}</FieldIssueContext.Provider>
+            {!issueFirst && line}
         </Tag>
+    );
+};
+
+/* Строка «чего не хватает» под полем. Появляется мягко — как раскрытие строки. */
+export const IssueLine = ({ text, id }) => (
+    <span id={id} className="block px-1 text-[12.5px] leading-snug text-rose-600 motion-safe:animate-reveal" data-issue-text>{text}</span>
+);
+
+/* Поле, к которому подвели, коротко «вспыхивает» мягкой красной волной вокруг себя:
+   глаз находит его, даже когда рядом на экране другие красные поля. При «Уменьшить
+   движение» волны нет — поле на полторы секунды обведено неподвижной каймой, которая
+   потом гаснет: без неё не видно, к какому из красных полей подвели. */
+const ISSUE_FLASH = [
+    { boxShadow: '0 0 0 0 rgba(244, 63, 94, 0.30)', borderRadius: '14px' },
+    { boxShadow: '0 0 0 8px rgba(244, 63, 94, 0.12)', borderRadius: '14px', offset: 0.4 },
+    { boxShadow: '0 0 0 12px rgba(244, 63, 94, 0)', borderRadius: '14px' },
+];
+const ISSUE_MARK = [
+    { boxShadow: '0 0 0 5px rgba(244, 63, 94, 0.22)', borderRadius: '14px' },
+    { boxShadow: '0 0 0 5px rgba(244, 63, 94, 0.22)', borderRadius: '14px', offset: 0.8 },
+    { boxShadow: '0 0 0 5px rgba(244, 63, 94, 0)', borderRadius: '14px' },
+];
+
+const scrollParent = (node) => {
+    for (let el = node?.parentElement; el; el = el.parentElement) {
+        if (/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight) return el;
+    }
+    return null;
+};
+
+/* Что в поле получает фокус, когда к нему подвели с клавиатуры: первый элемент управления
+   самого поля — не «i» подсказки в подписи (она стоит в разметке раньше поля). */
+const FOCUSABLE = 'input:not([type="file"]):not([disabled]), textarea:not([disabled]), button:not([disabled]), [role="tab"]';
+const fieldControl = (el) => [...el.querySelectorAll(FOCUSABLE)].find((node) => !node.closest('[data-field-label]')) || null;
+
+/* Подвести прокрутку к полю: невысокое — в середину окна, высокое (список
+   поставщиков) — началом к верху, иначе его начало ушло бы за край. `focus` —
+   кнопку нажали с клавиатуры: фокус переходит в само поле (мышью и пальцем — нет:
+   на телефоне фокус в поле открыл бы клавиатуру поверх формы). */
+export const revealAnchor = (el, { focus = false } = {}) => {
+    if (!el) return;
+    const reduce = prefersReducedMotion();
+    const scroller = scrollParent(el);
+    const tall = scroller ? el.offsetHeight > scroller.clientHeight * 0.6 : false;
+    el.scrollIntoView({ block: tall ? 'start' : 'center', behavior: reduce ? 'auto' : 'smooth' });
+    if (typeof el.animate === 'function') {
+        el.animate(reduce ? ISSUE_MARK : ISSUE_FLASH, reduce ? { duration: 1600, easing: 'linear' } : { duration: 900, easing: 'ease-out' });
+    }
+    if (focus) fieldControl(el)?.focus({ preventScroll: true });
+};
+
+/* Нажатие пришло с клавиатуры (Enter, пробел): у щелчка мышью и касания detail ≥ 1. */
+export const fromKeyboard = (event) => Boolean(event && event.detail === 0);
+
+/* Переход по полям, где чего-то не хватает. `rootRef` — форма (поля ищутся в ней по
+   data-issue-anchor), `keys` — поля с пунктами (paymentsMeta.issueKeys). `first()` —
+   к первому по экрану: так форма отвечает на «Отправить»; `step(1)` и `step(-1)` — к
+   следующему и предыдущему, по кругу. Переход идёт после отрисовки: по нажатию
+   «Отправить» поля ещё не красные, а скрытый блок (счёт) ещё не раскрыт. Пункт,
+   чьего поля на экране нет, стрелки пропускают: шаг, после которого ничего не
+   происходит, выглядел бы поломкой. */
+export const useIssueNav = (rootRef, keys) => {
+    const currentRef = useRef(null);
+    const pendingRef = useRef(null);
+    const [tick, setTick] = useState(0);
+    const keysRef = useRef(keys);
+    keysRef.current = keys;
+    useIsoLayoutEffect(() => {
+        const pending = pendingRef.current;
+        pendingRef.current = null;
+        const root = rootRef.current;
+        if (!pending || !root) return;
+        const anchorOf = (key) => root.querySelector(`[data-issue-anchor="${key}"]`);
+        const screen = [...root.querySelectorAll('[data-issue-anchor]')].map((el) => el.getAttribute('data-issue-anchor'));
+        const sorted = issueKeys(keysRef.current.map((key) => ({ key })), screen).filter((key) => anchorOf(key));
+        const target = pending.how === 'first' ? sorted[0] : issueStep(sorted, currentRef.current, pending.how, screen);
+        if (!target) return;
+        currentRef.current = target;
+        revealAnchor(anchorOf(target), { focus: pending.focus });
+    }, [tick]);
+    const go = useCallback((how, { focus = false } = {}) => { pendingRef.current = { how, focus }; setTick((value) => value + 1); }, []);
+    return useMemo(() => ({ first: (options) => go('first', options), step: (how, options) => go(how, options) }), [go]);
+};
+
+const ISSUE_NAV_BUTTON = 'grid h-7 w-7 place-items-center rounded-lg text-rose-600 transition hover:bg-rose-100 active:scale-95';
+
+/* «Не хватает: 3 ⌃ ⌄» — в нижней панели окна, когда незаполненных полей больше
+   одного: стрелки переводят от поля к полю, как «следующее совпадение» в поиске
+   по странице. Одно поле — переключатель не нужен: к нему уже подвели. На
+   телефоне — отдельной строкой во всю ширину над кнопками. */
+export const IssueNav = ({ count, onStep }) => {
+    if (!(count > 1)) return null;
+    return (
+        <div
+            data-issue-nav
+            role="group"
+            aria-label="Поля, где не хватает данных"
+            className="inline-flex items-center gap-0.5 rounded-xl bg-rose-50 py-0.5 pl-3 pr-0.5 text-[12.5px] font-medium text-rose-700 ring-1 ring-rose-200 motion-safe:animate-reveal max-sm:order-first max-sm:w-full max-sm:justify-between"
+        >
+            <span className="mr-1 tabular-nums" aria-live="polite">Не хватает: {count}</span>
+            <span className="flex items-center">
+                <button type="button" className={ISSUE_NAV_BUTTON} onClick={() => onStep(-1)} aria-label="К предыдущему полю, где не хватает данных" title="Предыдущее">
+                    <ChevronUp size={16} />
+                </button>
+                <button type="button" className={ISSUE_NAV_BUTTON} onClick={() => onStep(1)} aria-label="К следующему полю, где не хватает данных" title="Следующее">
+                    <ChevronDown size={16} />
+                </button>
+            </span>
+        </div>
     );
 };
 
@@ -95,11 +249,14 @@ export const Field = ({ label, hint, required = false, optionalMark = true, chil
    (решение владельца 06.10.2026: такие варианты выбирают, а не пишут словами и
    не отмечают галочкой). Значение `null` — «ещё не выбрано»: ни один сегмент не
    подсвечен, и молчаливого «нет» по умолчанию не бывает. */
-export const Choice = ({ value, onChange, options, ariaLabel, stretch = false, disabled = false }) => (
-    <div className={`${stretch ? '' : 'inline-flex max-w-full'} ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
-        <IosSegmented value={value} options={options} onChange={onChange} ariaLabel={ariaLabel} stretch={stretch} />
-    </div>
-);
+export const Choice = ({ value, onChange, options, ariaLabel, stretch = false, disabled = false, invalid }) => {
+    const bad = useFieldIssue(invalid);
+    return (
+        <div className={`${stretch ? '' : 'inline-flex max-w-full'} ${disabled ? 'pointer-events-none opacity-60' : ''}${bad ? ` rounded-[10px] ${INVALID_RING}` : ''}`}>
+            <IosSegmented value={value} options={options} onChange={onChange} ariaLabel={ariaLabel} stretch={stretch} />
+        </div>
+    );
+};
 
 /* ── Заявка в списке: карточка доски, строка «Моих задач», карточка реестра ──
    Детали — те же, что у карточек раздела «Задачи» (TaskBoardWorkspace.jsx):
@@ -371,10 +528,12 @@ export const Lifecycle = ({ stages = [], stopped = false, oneLine = false }) => 
 
 /* Поле суммы: печатается как обычный текст, на потере фокуса приводится к
    формату «1 234,50». Число уходит наружу числом. */
-export const AmountInput = ({ value, onChange, placeholder = '0', className = '', disabled = false, ariaLabel }) => {
+export const AmountInput = ({ value, onChange, placeholder = '0', className = '', disabled = false, ariaLabel, invalid }) => {
     const [text, setText] = useState(() => (value === '' || value === null || value === undefined ? '' : fmtMoney(value, { currency: false })));
     const [focused, setFocused] = useState(false);
     const inputRef = useRef(null);
+    const bad = useFieldIssue(invalid);
+    const describedBy = useFieldIssueId(bad);
     const shown = focused ? text : (value === '' || value === null || value === undefined || value === 0 ? '' : fmtMoney(value, { currency: false }));
     /* При входе в поле сумма выделяется целиком: набранное заменяет прежнее
        значение, а не дописывается к нему. Выделяем в layout-эффекте — сразу
@@ -390,8 +549,10 @@ export const AmountInput = ({ value, onChange, placeholder = '0', className = ''
             type="text"
             inputMode="decimal"
             aria-label={ariaLabel}
+            aria-invalid={bad || undefined}
+            aria-describedby={describedBy}
             disabled={disabled}
-            className={`${iosInput} tabular-nums ${className}`}
+            className={`${iosInput} tabular-nums ${className}${bad ? ` ${INVALID_RING}` : ''}`}
             placeholder={placeholder}
             value={shown}
             onFocus={() => { setFocused(true); setText(value ? String(value).replace('.', ',') : ''); }}
@@ -410,7 +571,7 @@ export const QuantityInput = ({ value, onChange, className = '', ariaLabel = 'К
         inputMode="decimal"
         aria-label={ariaLabel}
         aria-invalid={invalid || undefined}
-        className={`${iosInput} tabular-nums ${invalid ? 'ring-2 ring-rose-300' : ''} ${className}`}
+        className={`${iosInput} tabular-nums ${invalid ? INVALID_RING : ''} ${className}`}
         value={value}
         onFocus={(event) => event.target.select()}
         onChange={(event) => onChange(event.target.value.replace(/[^\d.,]/g, ''))}
@@ -421,11 +582,41 @@ export const QuantityInput = ({ value, onChange, className = '', ariaLabel = 'К
    iosInput. Сам CustomSelect по умолчанию рассчитан на панель фильтров (35 px,
    12.5 px) — в одном ряду формы такие поля стояли вразнобой. */
 export const FORM_SELECT_TEXT = '!px-3.5 !py-2.5 text-[14px] text-slate-900';
-export const FormSelect = (props) => <CustomSelect variant="ios" textClassName={FORM_SELECT_TEXT} {...props} />;
+export const FormSelect = ({ invalid, ...props }) => {
+    const bad = useFieldIssue(invalid);
+    return <CustomSelect variant="ios" textClassName={FORM_SELECT_TEXT} invalid={bad} {...props} />;
+};
+
+/* Поля ввода формы: iosInput и красная рамка, когда в поле не хватает значения. */
+export const FormInput = ({ invalid, className = '', ...props }) => {
+    const bad = useFieldIssue(invalid);
+    const describedBy = useFieldIssueId(bad);
+    return <input className={`${iosInput}${className ? ` ${className}` : ''}${bad ? ` ${INVALID_RING}` : ''}`} aria-invalid={bad || undefined} aria-describedby={describedBy} {...props} />;
+};
+
+export const FormText = ({ invalid, className = '', ...props }) => {
+    const bad = useFieldIssue(invalid);
+    const describedBy = useFieldIssueId(bad);
+    return <textarea className={`${iosInput} resize-y${className ? ` ${className}` : ''}${bad ? ` ${INVALID_RING}` : ''}`} aria-invalid={bad || undefined} aria-describedby={describedBy} {...props} />;
+};
+
+/* Дата в форме: тот же вид, что у полей ввода (DATE_TRIGGER), и пустое значение можно. */
+export const FormDate = ({ invalid, triggerClassName = '', ...props }) => {
+    const bad = useFieldIssue(invalid);
+    return (
+        <IosDatePicker
+            allowEmpty
+            placeholder="Дата"
+            {...props}
+            triggerClassName={`${DATE_TRIGGER}${triggerClassName ? ` ${triggerClassName}` : ''}${bad ? ` ${INVALID_RING}` : ''}`}
+        />
+    );
+};
 
 /* Выбор сотрудника — CustomSelect с поиском; варианты собираются один раз.
    `compact` — мелкий вид для строки, где рядом стоят такие же мелкие поля. */
-export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false, compact = false }) => {
+export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false, compact = false, invalid }) => {
+    const bad = useFieldIssue(invalid);
     const options = useMemo(() => (users || [])
         .filter((user) => !exclude.includes(user.id))
         .map((user) => ({
@@ -443,6 +634,7 @@ export const UserSelect = ({ users, value, onChange, placeholder = 'Выбери
             searchable
             ariaLabel={ariaLabel || placeholder}
             multiple={multiple}
+            invalid={bad}
         />
     );
 };
@@ -453,8 +645,10 @@ const ACCEPT = '.pdf,.jpg,.jpeg,.png,.webp,.heic,.doc,.docx,.xls,.xlsx,.csv,.txt
 
 /* Очередь файлов ДО отправки: имя, размер, вид документа. Вид спрашивается у
    каждого файла, потому что от него зависит проверка шага («счёт приложен?»). */
-export const FilePicker = ({ files, onChange, kinds, disabled = false, label = 'Приложить файлы' }) => {
+export const FilePicker = ({ files, onChange, kinds, disabled = false, label = 'Приложить файлы', invalid }) => {
     const inputRef = useRef(null);
+    const bad = useFieldIssue(invalid);
+    const describedBy = useFieldIssueId(bad);
     const defaultKind = kinds?.[0]?.value || 'other';
     const add = useCallback((list) => {
         const next = Array.from(list || []).map((file) => ({
@@ -505,10 +699,13 @@ export const FilePicker = ({ files, onChange, kinds, disabled = false, label = '
                 disabled={disabled}
                 onChange={(event) => { add(event.target.files); event.target.value = ''; }}
             />
+            {/* Нужного файла нет — кнопка в красной рамке: файл и есть то, чего не хватает. */}
             <button
                 type="button"
                 disabled={disabled}
-                className={`${iosBtnGhost} -ml-2`}
+                aria-invalid={bad || undefined}
+                aria-describedby={describedBy}
+                className={`${iosBtnGhost} -ml-2${bad ? ` !text-rose-600 ${INVALID_RING}` : ''}`}
                 onClick={() => inputRef.current?.click()}
             >
                 <Paperclip size={14} />

@@ -1,14 +1,15 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Check, Loader2, Pencil } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
-import IosDatePicker from '../ui/DatePicker';
-import PaymentAssetsEditor, { assetGaps, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
+import PaymentAssetsEditor, { assetIssues, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
 import {
-    CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, fileKindOptions, fmtDate, fmtMoney, parseAmount, quantityText,
-    todayISO,
+    CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, fileKindOptions, fmtDate, fmtMoney, issueKeys, issueSentence, issuesByKey,
+    parseAmount, quantityText, todayISO,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, DATE_TRIGGER, Field, FileChips, FilePicker, FormSelect, NoticeBox, ReturnNotice, Row, TonePill,
+    AmountInput, CardNumber, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING, IssueNav,
+    NoticeBox, ReturnNotice, Row, TonePill, fromKeyboard, useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -23,9 +24,13 @@ import {
  *    отделу — получатель, карта, сумма и назначение. Это строки и кнопки-файлы,
  *    а не копия разделов карточки.
  *
- * 2. ЧТО ОСТАЛОСЬ СДЕЛАТЬ — СЛОВАМИ У КНОПКИ. Кнопка действия неактивна, пока
- *    не заполнено обязательное, и рядом написано, чего именно не хватает.
- *    Сервер проверяет то же самое (workflow.missing_for_action).
+ * 2. ЧЕГО НЕ ХВАТАЕТ — КРАСНЫМ У САМОГО ПОЛЯ (просьба владельца 14.10.2026).
+ *    Кнопка действия нажимается всегда; не хватает обязательного — действие не
+ *    уходит, а пустые поля обводятся красным, под каждым написано, чего в нём нет,
+ *    и окно подводит прокрутку к первому (кнопка — внизу формы). Таких полей
+ *    несколько — в нижней панели окна «Не хватает: N» со стрелками ⌃ ⌄ (окно
+ *    заявки даёт для них место — `issueSlot`). Сервер проверяет то же самое
+ *    (workflow.missing_for_action).
  *
  * 3. КОММЕНТАРИЙ ОБЯЗАТЕЛЕН ТАМ, ГДЕ ЕГО ТРЕБУЕТ ТЗ: возврат на доработку и
  *    отклонение (п. 7), «Запросить информацию» — причина из списка (п. 8).
@@ -43,8 +48,43 @@ const useAttachments = (data, kind) => useMemo(() => {
     return { all, own: all.filter((item) => item.subtask_kind === kind) };
 }, [data, kind]);
 
+/* Чего не хватает этапу — пунктами с ключом поля, как у формы заявки
+   (paymentsMeta.purchaseIssues): по ключу поле обводится красным и к нему ведут
+   стрелки. Правила — те же, что у сервера (workflow.missing_for_action). */
+export const stageIssues = (kind, { request = {}, paid = {}, received = {}, assets = [], kinds = new Set(), queued = 0 } = {}) => {
+    const issues = [];
+    const add = (key, text) => issues.push({ key, text });
+    if (kind === 'invoice_payment') {
+        if (!paid.paid_on) add('paid_on', 'укажите дату оплаты');
+        if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите фактическую сумму');
+        if (!kinds.has('payment_order')) add('files', 'приложите платёжное поручение');
+    } else if (kind === 'card_topup') {
+        if (!paid.paid_on) add('paid_on', 'укажите дату перевода');
+        if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите сумму');
+        if (!kinds.has('transfer_proof')) add('files', 'приложите подтверждение перевода');
+    } else if (kind === 'receipt_confirm') {
+        if (!kinds.has('receipt')) add('files', 'приложите чек или другое подтверждение расхода');
+    } else if (kind === 'receiving') {
+        if (!received.received_on) add('received_on', 'укажите дату получения');
+        if (request.object_type === 'goods' && !String(received.received_quantity || '').trim()) {
+            add('received_quantity', 'укажите полученное количество');
+        }
+    } else if (kind === 'asset_registration') {
+        issues.push(...assetIssues(assets));
+        if (!kinds.has('handover_act')) add('files', 'приложите акт приёма-передачи');
+    } else if (kind === 'closing_docs' && (request.closing_docs_status || 'none') === 'none') {
+        // Скан выбран, но ещё не загружен (`queued`): закрыть мешает уже не ожидание, а кнопка «Загрузить».
+        add('files', queued
+            ? 'нажмите «Загрузить», чтобы приложить выбранный скан'
+            : 'дождитесь скана или оригинала закрывающих документов — или приложите скан сами');
+    }
+    return issues;
+};
+
+/* Заявке инициатора не хватает данных (их правят в форме заявки, не здесь) — список
+   красным: «Доработать заявку» откроет форму сразу на этих полях. */
 const Missing = ({ items }) => (items.length ? (
-    <div className="px-1 text-[12.5px] text-slate-500">Чтобы продолжить: {items.join('; ')}.</div>
+    <div className="px-1 text-[12.5px] leading-relaxed text-rose-600" data-issue-text>Чтобы продолжить: {items.join('; ')}.</div>
 ) : null);
 
 const Comment = ({ value, onChange, placeholder = 'Что важно знать следующему по маршруту' }) => (
@@ -53,34 +93,53 @@ const Comment = ({ value, onChange, placeholder = 'Что важно знать 
     </Field>
 );
 
-/* Панель «вернуть / отклонить / запросить информацию»: причина обязательна. */
+/* Панель «вернуть / отклонить / запросить информацию»: причина обязательна. Нажали,
+   а её нет, — пустое поле краснеет, как в форме этапа. */
 const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
     const [reason, setReason] = useState(null);
     const [text, setText] = useState('');
+    const [reveal, setReveal] = useState(false);
+    const panelRef = useRef(null);
     const info = mode === 'request_info';
     const chosen = reasons.find((item) => item.code === reason) || null;
-    const ready = info ? Boolean(reason) && (reason !== 'other' || text.trim()) : Boolean(text.trim());
+    const issues = [];
+    if (info && !reason) issues.push({ key: 'reason', text: 'выберите причину' });
+    if (info ? reason === 'other' && !text.trim() : !text.trim()) {
+        issues.push({ key: 'text', text: { request_info: 'напишите, какая информация нужна', reject: 'укажите причину отклонения', return: 'напишите, что доработать' }[mode] });
+    }
+    const keys = issueKeys(issues);
+    const nav = useIssueNav(panelRef, keys);
+    const issueOf = (key) => (reveal ? issueSentence(issues.filter((item) => item.key === key).map((item) => item.text)) : '');
+    const submit = (event) => {
+        if (busy) return;
+        if (issues.length) { setReveal(true); nav.first({ focus: fromKeyboard(event) }); return; }
+        onSubmit({ reason, comment: text.trim() });
+    };
     const copy = {
         return: { intro: 'Заявка вернётся инициатору. Напишите, что доработать, — он увидит это в заявке.', action: 'Вернуть', placeholder: 'Что доработать' },
         reject: { intro: 'Заявка будет закрыта как отклонённая. Укажите причину — её увидит инициатор.', action: 'Отклонить заявку', placeholder: 'Причина отклонения' },
         request_info: { intro: 'Задача вернётся инициатору с вашей причиной; после его ответа — снова к вам.', action: 'Запросить', placeholder: 'Что именно нужно (необязательно)' },
     }[mode];
     return (
-        <div className="space-y-2 rounded-xl bg-slate-50 p-3 motion-safe:animate-reveal">
+        <div ref={panelRef} className="space-y-2 rounded-xl bg-slate-50 p-3 motion-safe:animate-reveal">
             <div className="text-[12.5px] text-slate-600">{copy.intro}</div>
             {info && (
-                <FormSelect value={reason} onChange={setReason} options={reasons.map((item) => ({ value: item.code, label: item.label }))} placeholder="Выберите причину" ariaLabel="Причина запроса" />
+                <Field as="div" anchor="reason" issue={issueOf('reason')}>
+                    <FormSelect value={reason} onChange={setReason} options={reasons.map((item) => ({ value: item.code, label: item.label }))} placeholder="Выберите причину" ariaLabel="Причина запроса" />
+                </Field>
             )}
             {info && chosen?.ask && <div className="px-1 text-[12.5px] text-slate-500">Инициатор увидит: «{chosen.ask}»</div>}
-            <textarea
-                className={`${iosInput} min-h-[56px] resize-y bg-white`}
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                placeholder={info && reason === 'other' ? 'Какая информация нужна' : copy.placeholder}
-                maxLength={4000}
-            />
+            <Field as="div" anchor="text" issue={issueOf('text')}>
+                <FormText
+                    className="min-h-[56px] bg-white"
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    placeholder={info && reason === 'other' ? 'Какая информация нужна' : copy.placeholder}
+                    maxLength={4000}
+                />
+            </Field>
             <div className="flex gap-2">
-                <button type="button" className={mode === 'reject' ? `${iosBtnPrimary} !bg-rose-600 hover:!bg-rose-700` : iosBtnPrimary} disabled={busy || !ready} onClick={() => onSubmit({ reason, comment: text.trim() })}>
+                <button type="button" className={mode === 'reject' ? `${iosBtnPrimary} !bg-rose-600 hover:!bg-rose-700` : iosBtnPrimary} disabled={busy} onClick={submit}>
                     {copy.action}
                 </button>
                 <button type="button" className={iosBtnSecondary} onClick={onCancel}>Отмена</button>
@@ -89,9 +148,11 @@ const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
     );
 };
 
+/* issueSlot — место в нижней панели окна заявки для «Не хватает: N ⌃ ⌄»: кнопка этапа —
+   внизу формы, а после нажатия человек уже наверху, у первого пустого поля. */
 const PaymentStageForm = ({
     data, subtask, dictionaries, users, meta, apiBaseUrl, headers, busy, showToast, permissions,
-    onAct, onEdit, onReply, onAttach, loadCard,
+    onAct, onEdit, onReply, onAttach, loadCard, issueSlot = null,
 }) => {
     const request = data.request;
     const kind = subtask.kind;
@@ -104,8 +165,27 @@ const PaymentStageForm = ({
         received_on: todayISO(), received_quantity: request.object_type === 'goods' ? quantityText(data.items) : '',
     });
     const [assets, setAssets] = useState(() => assetsFromRequest(request, data.items));
+    // Нажали кнопку этапа, а чего-то не хватало: с этого момента пустые поля красные.
+    const [reveal, setReveal] = useState(false);
+    const formRef = useRef(null);
 
     const kinds = new Set([...own.map((item) => item.kind), ...files.map((entry) => entry.kind)]);
+    const issues = stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length });
+    const byKey = issuesByKey(issues);
+    const keys = issueKeys(issues);
+    const nav = useIssueNav(formRef, keys);
+    const issueOf = (key) => (reveal && byKey[key] ? issueSentence(byKey[key].map((item) => item.text)) : '');
+    /* Кнопка этапа: не хватает обязательного — действие не уходит, поля краснеют, и окно
+       подводит к первому из них (нажали с клавиатуры — фокус в это поле). Панель «вернуть /
+       запросить информацию» при этом закрывается: человек выбрал действие этапа. И наоборот —
+       открыли панель, красные поля этапа гаснут: тому, кто запрашивает информацию, «Приложите
+       платёжное поручение» как обязательное не нужно (разбор 14.10.2026). */
+    const attempt = (run) => (event) => {
+        if (busy) return;
+        if (issues.length) { setMode(null); setReveal(true); nav.first({ focus: fromKeyboard(event) }); return; }
+        run();
+    };
+    const toggleMode = (next) => { setMode((prev) => (prev === next ? null : next)); setReveal(false); };
     const act = (action, fields = {}, withFiles = true) => onAct({
         action, fields: { comment: comment.trim(), ...fields }, files: withFiles ? files : [],
     });
@@ -137,10 +217,18 @@ const PaymentStageForm = ({
         />
     ) : null;
 
+    /* В нижней панели окна — своей строкой над кнопками: в ряду с переключателем статуса
+       (у бухгалтерии в нём четыре статуса) и «К заявке» / «Готово» стрелкам места нет —
+       «Готово» уезжал бы отдельной строкой. */
+    const navigator = reveal && issueSlot && keys.length > 1
+        ? createPortal(<div className="order-first w-full"><IssueNav count={keys.length} onStep={nav.step} /></div>, issueSlot)
+        : null;
+
     const wrap = (children) => (
-        <div data-stage-form={kind} className="space-y-3 rounded-2xl bg-white p-3.5 ring-1 ring-blue-100">
+        <div ref={formRef} data-stage-form={kind} className="space-y-3 rounded-2xl bg-white p-3.5 ring-1 ring-blue-100">
             {head}
             {children}
+            {navigator}
         </div>
     );
 
@@ -156,7 +244,7 @@ const PaymentStageForm = ({
                     <Comment value={comment} onChange={setComment} placeholder="Ответ тому, кто запросил (необязательно)" />
                 )}
                 <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={problems.length ? iosBtnPrimary : iosBtnSecondary} disabled={busy} onClick={onEdit}>
+                    <button type="button" className={problems.length ? iosBtnPrimary : iosBtnSecondary} disabled={busy} onClick={() => onEdit?.({ reveal: problems.length > 0 })}>
                         <Pencil size={14} /> {asked ? 'Доработать заявку' : 'Открыть заявку'}
                     </button>
                     {problems.length === 0 && (
@@ -180,10 +268,10 @@ const PaymentStageForm = ({
                     <button type="button" className={iosBtnPrimary} disabled={busy} onClick={() => act('approve', {}, false)}>
                         {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Согласовать
                     </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setMode(mode === 'return' ? null : 'return')}>
+                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('return')}>
                         Вернуть на доработку
                     </button>
-                    <button type="button" className={`${iosBtnGhost} !text-rose-600 hover:!bg-rose-50`} disabled={busy} onClick={() => setMode(mode === 'reject' ? null : 'reject')}>
+                    <button type="button" className={`${iosBtnGhost} !text-rose-600 hover:!bg-rose-50`} disabled={busy} onClick={() => toggleMode('reject')}>
                         Отклонить
                     </button>
                 </div>
@@ -198,10 +286,6 @@ const PaymentStageForm = ({
         const approved = parseAmount(request.amount_approved);
         const check = data.contract_check || {};
         const lastPayments = (data.history || []).filter((row) => (row.matched || []).includes('counterparty')).slice(0, 3);
-        const missing = [];
-        if (!paid.paid_on) missing.push('укажите дату оплаты');
-        if (!(parseAmount(paid.paid_amount) > 0)) missing.push('укажите фактическую сумму');
-        if (!kinds.has('payment_order')) missing.push('приложите платёжное поручение');
         return wrap(
             <>
                 {(data.duplicates || []).length > 0 && (
@@ -242,23 +326,22 @@ const PaymentStageForm = ({
                 </div>
                 {chips('Счёт:', invoiceFiles)}
                 <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Дата оплаты" required optionalMark={false}>
-                        <IosDatePicker value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Дата оплаты" />
+                    <Field label="Дата оплаты" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
+                        <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата оплаты" />
                     </Field>
-                    <Field label="Фактическая сумма, ₸" required optionalMark={false} hint="Сколько ушло поставщику. Подставлена сумма заявки — поправьте, если оплатили другую.">
+                    <Field label="Фактическая сумма, ₸" required optionalMark={false} hint="Сколько ушло поставщику. Подставлена сумма заявки — поправьте, если оплатили другую." anchor="paid_amount" issue={issueOf('paid_amount')}>
                         <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Фактическая сумма" />
                     </Field>
                 </div>
-                <Field as="div" label="Платёжное поручение" required optionalMark={false}>
+                <Field as="div" label="Платёжное поручение" required optionalMark={false} anchor="files" issue={issueOf('files')}>
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('invoice_payment')} label="Приложить платёжное поручение" />
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий к оплате (необязательно)" />
-                <Missing items={missing} />
                 <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={iosBtnPrimary} disabled={busy || missing.length > 0} onClick={() => act('pay', paid)}>
+                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('pay', paid))}>
                         {busy && <Loader2 size={14} className="animate-spin" />} Оплачено
                     </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setMode(mode ? null : 'request_info')}>
+                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
                         Запросить информацию
                     </button>
                 </div>
@@ -269,10 +352,6 @@ const PaymentStageForm = ({
 
     // ── Финансовый отдел: пополнение карты (п. 9) ──
     if (kind === 'card_topup') {
-        const missing = [];
-        if (!paid.paid_on) missing.push('укажите дату перевода');
-        if (!(parseAmount(paid.paid_amount) > 0)) missing.push('укажите сумму');
-        if (!kinds.has('transfer_proof')) missing.push('приложите подтверждение перевода');
         return wrap(
             <>
                 <div className="rounded-xl bg-slate-50 px-3 py-1.5">
@@ -286,23 +365,22 @@ const PaymentStageForm = ({
                     <Row label="Срок">{request.due_on ? fmtDate(request.due_on) : null}</Row>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Дата перевода" required optionalMark={false}>
-                        <IosDatePicker value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Дата перевода" />
+                    <Field label="Дата перевода" required optionalMark={false} anchor="paid_on" issue={issueOf('paid_on')}>
+                        <FormDate value={paid.paid_on} onChange={(value) => setPaid((prev) => ({ ...prev, paid_on: value || '' }))} ariaLabel="Дата перевода" />
                     </Field>
-                    <Field label="Сумма перевода, ₸" required optionalMark={false}>
+                    <Field label="Сумма перевода, ₸" required optionalMark={false} anchor="paid_amount" issue={issueOf('paid_amount')}>
                         <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Сумма перевода" />
                     </Field>
                 </div>
-                <Field as="div" label="Подтверждение перевода" required optionalMark={false}>
+                <Field as="div" label="Подтверждение перевода" required optionalMark={false} anchor="files" issue={issueOf('files')}>
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('card_topup')} label="Приложить подтверждение" />
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий к переводу (необязательно)" />
-                <Missing items={missing} />
                 <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={iosBtnPrimary} disabled={busy || missing.length > 0} onClick={() => act('top_up', paid)}>
+                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('top_up', paid))}>
                         {busy && <Loader2 size={14} className="animate-spin" />} Пополнено
                     </button>
-                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setMode(mode ? null : 'request_info')}>
+                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('request_info')}>
                         Запросить информацию
                     </button>
                 </div>
@@ -313,18 +391,16 @@ const PaymentStageForm = ({
 
     // ── Инициатор: чек (п. 5.3) ──
     if (kind === 'receipt_confirm') {
-        const missing = kinds.has('receipt') ? [] : ['приложите чек или другое подтверждение расхода'];
         return wrap(
             <>
                 <div className="text-[12.5px] text-slate-600">
                     На карту переведено {fmtMoney(request.paid_amount ?? request.amount)}{request.paid_on ? ` · ${fmtDate(request.paid_on)}` : ''}.
                 </div>
-                <Field as="div" label="Чек" required optionalMark={false}>
+                <Field as="div" label="Чек" required optionalMark={false} anchor="files" issue={issueOf('files')}>
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('receipt_confirm')} label="Приложить чек" />
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
-                <Missing items={missing} />
-                <button type="button" className={iosBtnPrimary} disabled={busy || missing.length > 0} onClick={() => act('provide')}>
+                <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('provide'))}>
                     {busy && <Loader2 size={14} className="animate-spin" />} Отправить чек
                 </button>
             </>,
@@ -334,18 +410,15 @@ const PaymentStageForm = ({
     // ── Инициатор: получение (п. 10.1) ──
     if (kind === 'receiving') {
         const goods = request.object_type === 'goods';
-        const missing = [];
-        if (!received.received_on) missing.push('укажите дату получения');
-        if (goods && !received.received_quantity.trim()) missing.push('укажите полученное количество');
         return wrap(
             <>
                 <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Дата получения" required optionalMark={false}>
-                        <IosDatePicker value={received.received_on} onChange={(value) => setReceived((prev) => ({ ...prev, received_on: value || '' }))} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Дата получения" />
+                    <Field label="Дата получения" required optionalMark={false} anchor="received_on" issue={issueOf('received_on')}>
+                        <FormDate value={received.received_on} onChange={(value) => setReceived((prev) => ({ ...prev, received_on: value || '' }))} ariaLabel="Дата получения" />
                     </Field>
                     {goods && (
-                        <Field label="Количество получено" required optionalMark={false} hint={HINTS.received}>
-                            <input className={iosInput} value={received.received_quantity} onChange={(event) => setReceived((prev) => ({ ...prev, received_quantity: event.target.value }))} maxLength={200} />
+                        <Field label="Количество получено" required optionalMark={false} hint={HINTS.received} anchor="received_quantity" issue={issueOf('received_quantity')}>
+                            <FormInput value={received.received_quantity} onChange={(event) => setReceived((prev) => ({ ...prev, received_quantity: event.target.value }))} maxLength={200} />
                         </Field>
                     )}
                 </div>
@@ -353,8 +426,7 @@ const PaymentStageForm = ({
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('receiving')} label="Приложить документ" />
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
-                <Missing items={missing} />
-                <button type="button" className={iosBtnPrimary} disabled={busy || missing.length > 0} onClick={() => act('confirm', received)}>
+                <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('confirm', received))}>
                     {busy && <Loader2 size={14} className="animate-spin" />} Подтвердить получение
                 </button>
             </>,
@@ -363,23 +435,14 @@ const PaymentStageForm = ({
 
     // ── Ответственный за учёт имущества (п. 10.2, п. 11) ──
     if (kind === 'asset_registration') {
-        const missing = [];
-        assets.forEach((asset, index) => {
-            const gaps = assetGaps(asset);
-            if (gaps.length) missing.push(`имущество${assets.length > 1 ? ` ${index + 1}` : ''}: ${gaps.join(', ')}`);
-        });
-        const numbers = assets.map((asset) => asset.inventory_number.trim().toLowerCase()).filter(Boolean);
-        if (new Set(numbers).size !== numbers.length) missing.push('инвентарные номера не должны повторяться');
-        if (!kinds.has('handover_act')) missing.push('приложите акт приёма-передачи');
         return wrap(
             <>
-                <PaymentAssetsEditor assets={assets} onChange={setAssets} users={users} dictionaries={dictionaries} />
-                <Field as="div" label="Акт приёма-передачи" required optionalMark={false} hint="Подписанный акт передачи имущества ответственному сотруднику.">
+                <PaymentAssetsEditor assets={assets} onChange={setAssets} users={users} dictionaries={dictionaries} issueOf={issueOf} />
+                <Field as="div" label="Акт приёма-передачи" required optionalMark={false} hint="Подписанный акт передачи имущества ответственному сотруднику." anchor="files" issue={issueOf('files')}>
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('asset_registration')} label="Приложить акт" />
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
-                <Missing items={missing} />
-                <button type="button" className={iosBtnPrimary} disabled={busy || missing.length > 0} onClick={() => act('register', { assets: assets.map(assetPayload) })}>
+                <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('register', { assets: assets.map(assetPayload) }))}>
                     {busy && <Loader2 size={14} className="animate-spin" />} Поставить на учёт
                 </button>
             </>,
@@ -398,23 +461,23 @@ const PaymentStageForm = ({
                     {!received_ && <span className="text-[12.5px] text-slate-500">Инициатору отправлено напоминание приложить документы.</span>}
                 </div>
                 {chips('Документы:', closingFiles)}
-                <Field as="div" label="Добавить скан" hint="Если скан или оригинал пришёл к вам, а не через инициатора, — приложите его сами.">
-                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('closing_docs')} label="Приложить документ" />
+                <Field as="div" label="Добавить скан" hint="Если скан или оригинал пришёл к вам, а не через инициатора, — приложите его сами." anchor="files" issue={issueOf('files')}>
+                    {/* Скан выбран, но не загружен — красной рамкой обведена «Загрузить», а не выбор файла. */}
+                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('closing_docs')} label="Приложить документ" invalid={files.length > 0 ? false : undefined} />
                     {files.length > 0 && (
-                        <button type="button" className={`${iosBtnSecondary} mt-2`} disabled={busy} onClick={async () => { if (await onAttach(files)) setFiles([]); }}>
+                        <button type="button" className={`${iosBtnSecondary} mt-2${issueOf('files') ? ` ${INVALID_RING}` : ''}`} disabled={busy} onClick={async () => { if (await onAttach(files)) setFiles([]); }}>
                             {busy && <Loader2 size={14} className="animate-spin" />} Загрузить
                         </button>
                     )}
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
-                {!received_ && <Missing items={['дождитесь скана или оригинала закрывающих документов']} />}
                 <div className="flex flex-wrap items-center gap-2">
                     {status !== 'original' && (
                         <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => act('docs_original', {}, false)}>
                             Оригинал получен
                         </button>
                     )}
-                    <button type="button" className={iosBtnPrimary} disabled={busy || !received_} onClick={() => act('docs_close', {}, false)}>
+                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('docs_close', {}, false))}>
                         {busy && <Loader2 size={14} className="animate-spin" />} Закрыть документы
                     </button>
                 </div>

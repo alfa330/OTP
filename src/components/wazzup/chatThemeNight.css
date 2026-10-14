@@ -82,6 +82,7 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-100 { --tw-ring-color: #255b51 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-200 { --tw-ring-color: #216b59 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-rose-100 { --tw-ring-color: #693746 !important; }
+:is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-rose-300 { --tw-ring-color: #9b3a4f !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-slate-200 { --tw-ring-color: #2e333c !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-slate-200\/60 { --tw-ring-color: rgba(46, 51, 60, 0.6) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-slate-200\/70 { --tw-ring-color: rgba(46, 51, 60, 0.7) !important; }

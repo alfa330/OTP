@@ -48,6 +48,9 @@ import { APPLE_FONT } from './ios';
  *                       списком. При строке поиска «Выбрать» берёт найденные,
  *                       а не весь список: набрал «Астана» — отметил Астану.
  *                       С maxSelected не сочетается: «все» там не бывает.
+ *   invalid           — (только variant="ios") в поле не хватает значения: кнопка
+ *                       обведена красным, как поля ввода формы рядом с ней. Без
+ *                       него кнопка та же, что всегда.
  *
  *   Вложенный уровень — у опции поле `parent` (значение родительской опции).
  *   Такие строки скрыты, пока родителя не раскрыли стрелкой справа (или
@@ -96,6 +99,7 @@ export default function CustomSelect({
   textClassName = '',
   roomy = false,
   expandLabel = 'вложенные',
+  invalid = false,
 }) {
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
@@ -329,6 +333,7 @@ export default function CustomSelect({
         type="button"
         disabled={disabled}
         aria-label={ariaLabel}
+        aria-invalid={isIos && invalid ? true : undefined}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
@@ -353,7 +358,7 @@ export default function CustomSelect({
           ? `flex w-full items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-left ${textClassName || 'text-[12.5px] font-medium text-slate-700'} ring-1 transition-all ${
             disabled
               ? 'cursor-not-allowed opacity-50 ring-slate-200/70'
-              : 'cursor-pointer ring-slate-200/70 hover:bg-slate-50 active:scale-[0.99]'
+              : `cursor-pointer ${invalid && !open ? 'ring-2 ring-rose-300' : 'ring-slate-200/70'} hover:bg-slate-50 active:scale-[0.99]`
           } ${open ? 'ring-2 ring-blue-500/60' : 'shadow-[0_1px_2px_rgba(15,23,42,0.04)]'}${roomyAdd('trigger')}${textClassName ? '' : roomyAdd('triggerText')}`
           : `flex w-full items-center justify-between gap-2 rounded-lg border bg-white px-3 py-2 text-left text-sm text-gray-900 transition-all ${
             disabled

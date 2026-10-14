@@ -106,6 +106,8 @@ const PaymentRequestCard = ({
     const [page, setPage] = useState('request');
     const [pageMotion, setPageMotion] = useState(PAGE_APPEAR);
     const [turning, setTurning] = useState(false);
+    // Место в нижней панели для «Не хватает: N ⌃ ⌄» формы этапа (PaymentStageForm рисует их туда порталом).
+    const [issueSlot, setIssueSlot] = useState(null);
     const pageScrollRef = useRef(null);
     const requestScroll = useRef(0);
     const modePanelRef = useRef(null);
@@ -366,6 +368,9 @@ const PaymentRequestCard = ({
                     <Pencil size={14} /> Доработать
                 </button>
             )}
+            {/* Форма этапа ставит сюда стрелки «Не хватает», когда незаполненных полей несколько:
+                кнопка этапа — внизу формы, а человек после нажатия уже у первого пустого поля. */}
+            {onTask && <div ref={setIssueSlot} data-issue-slot className="contents" />}
             {onTask && (
                 <button type="button" data-card-turn="request" className={iosBtnSecondary} onClick={goRequest}>
                     <ChevronLeft size={15} className="-ml-1" /> К заявке
@@ -845,10 +850,11 @@ const PaymentRequestCard = ({
                                             showToast={showToast}
                                             permissions={permissions}
                                             onAct={act}
-                                            onEdit={() => onEdit?.(data)}
+                                            onEdit={(options) => onEdit?.(data, options)}
                                             onReply={reply}
                                             onAttach={attach}
                                             loadCard={loadCard}
+                                            issueSlot={issueSlot}
                                         />
                                     </section>
                                 </div>

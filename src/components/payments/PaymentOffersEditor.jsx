@@ -2,8 +2,8 @@ import React, { useRef } from 'react';
 import { Check, FileText, Paperclip, Plus, X } from 'lucide-react';
 import { iosBtnGhost, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { fileSizeLabel, isBlankOffer } from './paymentsMeta';
-import { AmountInput } from './paymentsUi';
+import { fileSizeLabel, isBlankOffer, offerName, parseAmount } from './paymentsMeta';
+import { AmountInput, INVALID_RING } from './paymentsUi';
 
 /*
  * Варианты поставщиков заявки (ТЗ «Закуп и оплата», п. 4.2): у каждого —
@@ -64,9 +64,18 @@ export const offerPayload = (offer) => ({
     is_recommended: Boolean(offer.is_recommended),
 });
 
-const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], savedFilesByOffer = {}, single = false }) => {
+/* `issues` — пункты «чего не хватает» о поставщиках (ключ offers) после неудачной
+   попытки отправить. Красным обводится то, что надо сделать: у начатого варианта —
+   его пустое название или стоимость; если вариантов меньше нужного — пустые
+   строки (а если пустых нет — кнопка «Поставщик»); если не выбран рекомендуемый —
+   кнопки «Рекомендуемый». */
+const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], savedFilesByOffer = {}, single = false, issues = [] }) => {
     const fileRefs = useRef({});
     const shown = single ? offers.slice(0, 1) : offers;
+    const parts = new Set(issues.map((item) => item.part));
+    const incomplete = new Set(issues.flatMap((item) => (item.part === 'incomplete' ? item.rows || [] : [])));
+    const fillBlank = parts.has('count') || parts.has('empty');
+    const addBad = parts.has('count') && !shown.some(isBlankOffer);
     const update = (key, patch) => onChange(offers.map((offer) => (offer.key === key ? { ...offer, ...patch } : offer)));
     const recommend = (key) => onChange(offers.map((offer) => ({ ...offer, is_recommended: offer.key === key })));
     const remove = (key) => {
@@ -82,6 +91,9 @@ const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], saved
                 const recommended = single || offer.is_recommended;
                 const saved = (offer.id && savedFilesByOffer[offer.id]) || [];
                 const open = (key) => offer.extras.includes(key) || Boolean(key === 'file' ? offer.file : offer[key]);
+                const supplierBad = (incomplete.has(offer.key) && !offerName(offer)) || (fillBlank && blank);
+                const amountBad = (incomplete.has(offer.key) && !(parseAmount(offer.amount) > 0)) || (fillBlank && blank);
+                const recommendBad = parts.has('recommend') && !blank;
                 return (
                     <div
                         key={offer.key}
@@ -90,14 +102,17 @@ const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], saved
                     >
                         {/* На телефоне поставщик занимает строку целиком, стоимость и «Рекомендуемый»
                             встают под ним: оболочка телефона обнуляет min-w-[…], и в одну строку
-                            список поставщика сжимался до полоски в букву шириной. */}
+                            список поставщика сжимался до полоски в букву шириной. Минимум — из шкалы
+                            (min-w-52), а не произвольным min-w-[…]: на такого ребёнка оболочка телефона
+                            делает строке прокрутку вбок, и она срезала красную рамку полей. */}
                         <div className="flex flex-wrap items-end gap-2">
-                            <div className="w-full sm:w-auto sm:min-w-[200px] sm:flex-1">
+                            <div className="w-full sm:w-auto sm:min-w-52 sm:flex-1">
                                 <span className={CAPTION}>Поставщик {index + 1}</span>
                                 {offer.custom ? (
                                     <div className="flex items-center gap-1.5">
                                         <input
-                                            className={`${iosInput} !py-2 !text-[13.5px]`}
+                                            className={`${iosInput} !py-2 !text-[13.5px]${supplierBad ? ` ${INVALID_RING}` : ''}`}
+                                            aria-invalid={supplierBad || undefined}
                                             placeholder="Название поставщика"
                                             aria-label={`Поставщик ${index + 1}: название`}
                                             value={offer.supplier_name}
@@ -120,12 +135,13 @@ const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], saved
                                         searchable
                                         textClassName="text-[13.5px] text-slate-900"
                                         ariaLabel={`Поставщик ${index + 1}`}
+                                        invalid={supplierBad}
                                     />
                                 )}
                             </div>
                             <div className="min-w-0 grow basis-0 sm:w-[150px] sm:shrink-0 sm:grow-0 sm:basis-auto">
                                 <span className={`${CAPTION} text-right`}>Стоимость, ₸</span>
-                                <AmountInput ariaLabel={`Поставщик ${index + 1}: стоимость`} className="!py-2 text-right !text-[13.5px]" value={offer.amount} onChange={(value) => update(offer.key, { amount: value })} />
+                                <AmountInput ariaLabel={`Поставщик ${index + 1}: стоимость`} className="!py-2 text-right !text-[13.5px]" invalid={amountBad} value={offer.amount} onChange={(value) => update(offer.key, { amount: value })} />
                             </div>
                             {!single && (
                                 <button
@@ -135,7 +151,7 @@ const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], saved
                                     onClick={() => recommend(offer.key)}
                                     title="У этого поставщика предлагаю купить"
                                     className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-[12.5px] font-medium transition active:scale-[0.98] ${
-                                        offer.is_recommended ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                        offer.is_recommended ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}${recommendBad ? ` ${INVALID_RING}` : ''}`}
                                 >
                                     {offer.is_recommended && <Check size={13} strokeWidth={3} />}
                                     Рекомендуемый
@@ -217,7 +233,7 @@ const PaymentOffersEditor = ({ offers, onChange, counterpartyOptions = [], saved
                 );
             })}
             {!single && (
-                <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => onChange([...offers, newOffer()])}>
+                <button type="button" className={`${iosBtnGhost} -ml-1${addBad ? ` !text-rose-600 ${INVALID_RING}` : ''}`} onClick={() => onChange([...offers, newOffer()])}>
                     <Plus size={14} /> Поставщик
                 </button>
             )}

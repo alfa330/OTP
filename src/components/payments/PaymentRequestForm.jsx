@@ -2,18 +2,19 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { ArrowRight, FileText, Loader2, Paperclip, Plus, RefreshCcw, ShoppingCart, X } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSection } from '../ui/ios';
-import IosDatePicker from '../ui/DatePicker';
 import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
 import {
     ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CARD_RECIPIENT_OPTIONS, CONTRACT_THRESHOLD, HINTS,
     OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, UNSTAFFED, approvalSummary, cardDigits, cardLuhnOk,
     cardNumberLabel, cardProblem, fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
-    itemQuantity, itemsTotal, legacyProblems, parseAmount, priceTrend, purchaseProblems, regularProblems, trendLabel,
+    issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, legacyIssues, parseAmount, priceTrend, purchaseIssues,
+    regularIssues, trendLabel,
 } from './paymentsMeta';
 import {
-    AmountInput, ApprovalHint, Choice, DATE_TRIGGER, ErrorBox, Field, FieldHint, FilePicker, FormSelect, NoticeBox,
-    RequisitesBox, Row, UserSelect, errorText, multipart,
+    AmountInput, ApprovalHint, Choice, ErrorBox, Field, FieldHint, FilePicker, FormDate, FormInput, FormSelect, FormText,
+    INVALID_RING, IssueNav, NoticeBox, RequisitesBox, Row, UserSelect, errorText, fromKeyboard, multipart, useFieldIssue,
+    useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -35,13 +36,21 @@ import {
  * Чего в форме нет намеренно: выбора руководителя и согласующего. Маршрут
  * определяет система (п. 6) — форма только показывает, кому заявка уйдёт.
  *
- * Кнопка отправки неактивна, пока не заполнено обязательное, и рядом написано,
- * чего именно не хватает: человек, который пришёл впервые, не должен
- * угадывать, почему кнопка серая. Сервер проверяет то же самое
- * (workflow.missing_for_submit) — здесь только подсказка.
+ * ЧЕГО НЕ ХВАТАЕТ — КРАСНЫМ У САМОГО ПОЛЯ (просьба владельца 14.10.2026). Кнопка
+ * отправки нажимается всегда; не хватает обязательного — заявка не уходит, а
+ * поля, в которых пусто, обводятся красным, под каждым красным написано, чего в
+ * нём нет, и окно само подводит прокрутку к первому из них (кнопка — в подвале,
+ * поля — выше). Таких полей несколько — в подвале «Не хватает: N» со стрелками
+ * ⌃ ⌄: от поля к полю. Заполнили — рамка снимается сразу. До первой попытки
+ * форма ничего не красит: пустая форма — ещё не ошибка. Сервер проверяет то же
+ * самое (workflow.missing_for_submit) — здесь только подсказка.
  */
 
 const HISTORY_DEBOUNCE_MS = 400;
+/* Пункты счёта у заявки первой версии без способа оплаты стоят у «Как платим» — и
+   говорят о том, что в этом поле можно сделать. */
+const LEGACY_METHOD_ISSUE = 'выберите способ оплаты: для оплаты счёта понадобятся сам счёт, его номер и дата';
+const TEMPLATE_ENTITY_ISSUE = 'в справочнике у платежа не указана компания — попросите администратора дополнить';
 const PREVIEW_DEBOUNCE_MS = 350;
 const NEW_CARD = '__new__';
 
@@ -129,6 +138,8 @@ const draftFromData = (data, me) => {
    пока выбран новый, показан зачёркнутым. */
 const InvoiceFile = ({ file, saved, onPick, onClear }) => {
     const inputRef = useRef(null);
+    // Счёт обязателен, а его нет — кнопка «Приложить счёт» в красной рамке, как у FilePicker.
+    const bad = useFieldIssue();
     return (
         <div className="flex flex-wrap items-center gap-1.5">
             {(saved || []).map((item) => (
@@ -147,7 +158,7 @@ const InvoiceFile = ({ file, saved, onPick, onClear }) => {
                 </span>
             )}
             <input ref={inputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.doc,.docx,.xls,.xlsx" className="hidden" onChange={(event) => { onPick(event.target.files?.[0] || null); event.target.value = ''; }} />
-            <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => inputRef.current?.click()}>
+            <button type="button" aria-invalid={bad || undefined} className={`${iosBtnGhost} -ml-1${bad ? ` !text-rose-600 ${INVALID_RING}` : ''}`} onClick={() => inputRef.current?.click()}>
                 <Paperclip size={14} /> {file || (saved || []).length ? 'Заменить файл счёта' : 'Приложить счёт'}
             </button>
         </div>
@@ -165,8 +176,12 @@ const KIND_CARDS = [
    обращения выбран, но ещё ничего не введено): по нему видно, тронута ли форма. */
 const fingerprint = (draft) => JSON.stringify({ ...draft, request_kind: null });
 
+/* revealIssues — окно открыли, чтобы дописать недостающее (кнопка «Доработать заявку»
+   в задаче инициатора, над ней уже названо, чего не хватает): поля красные сразу, и
+   окно подводит к первому, не дожидаясь нажатия «Отправить». */
 const PaymentRequestForm = ({
     open, onClose, apiBaseUrl, headers, dictionaries, users, me, meta, settings, staffed, data = null, onSaved, showToast,
+    revealIssues = false,
 }) => {
     const editing = Boolean(data?.request);
     const request = data?.request || null;
@@ -190,7 +205,10 @@ const PaymentRequestForm = ({
        «назад» выбор типа возвращается слева. Новое окно начинает без сдвига —
        у него своё появление. */
     const [kindMotion, setKindMotion] = useState('');
+    // Пытались отправить, а чего-то не хватало: с этого момента поля с пунктами красные.
+    const [reveal, setReveal] = useState(false);
     const errorRef = useRef(null);
+    const formRef = useRef(null);
     const pristineRef = useRef('');
 
     const toastRef = useRef(showToast);
@@ -222,6 +240,7 @@ const PaymentRequestForm = ({
             setPreview(null);
             setCardEditing(false);
             setConfirmClose(false);
+            setReveal(Boolean(revealIssues && data?.request));
             // Новое окно начинает без сдвига содержимого — у него своё появление.
             setKindMotion('');
             let next = emptyDraft(me);
@@ -305,14 +324,61 @@ const PaymentRequestForm = ({
         || (draft.card_recipient === 'supplier' && supplierId !== (request.counterparty_id ?? null))));
     const cardKept = Boolean(editing && request?.has_card && !cardEditing && !holderChanged);
 
-    const problems = useMemo(() => {
+    /* Чего не хватает — пунктами с ключом поля (paymentsMeta.purchaseIssues). Пункт,
+       чьего поля сейчас нет на экране, стоит у того, что надо сделать раньше, и
+       говорит о том, что можно сделать там: счёт старой заявки без способа оплаты — у
+       «Как платим», компания регулярного платежа — у выбора платежа (её задаёт
+       справочник). Номер карты до выбора получателя не показан вовсе: его поле
+       появится вместе с выбором (уже красным, если попытка была). */
+    const issues = useMemo(() => {
         if (!kind) return [];
-        if (legacy) return legacyProblems({ ...draft, offers }, { fileKinds });
-        if (regular) return regularProblems(draft, { fileKinds, template, staffed });
-        return purchaseProblems({ ...draft, offers }, {
-            minSuppliers: settings?.min_suppliers ?? 3, fileKinds, hasCard: cardKept, staffed,
+        let list;
+        if (legacy) list = legacyIssues({ ...draft, offers }, { fileKinds });
+        else if (regular) list = regularIssues(draft, { fileKinds, template, staffed });
+        else {
+            list = purchaseIssues({ ...draft, offers }, {
+                minSuppliers: settings?.min_suppliers ?? 3, fileKinds, hasCard: cardKept, staffed,
+            });
+        }
+        const placed = [];
+        list.forEach((item) => {
+            if (item.key === 'card_number' && !draft.card_recipient) return;
+            if (item.key.startsWith('invoice_') && !regular && draft.payment_method !== 'invoice') {
+                if (!placed.some((other) => other.text === LEGACY_METHOD_ISSUE)) placed.push({ key: 'payment_method', text: LEGACY_METHOD_ISSUE });
+                return;
+            }
+            if (item.key === 'legal_entity_id' && regular) {
+                placed.push({ key: 'fixed_template_id', text: TEMPLATE_ENTITY_ISSUE });
+                return;
+            }
+            placed.push(item);
         });
+        return placed;
     }, [kind, legacy, regular, draft, offers, fileKinds, settings, cardKept, template, staffed]);
+    const byKey = useMemo(() => issuesByKey(issues), [issues]);
+    const keys = useMemo(() => issueKeys(issues), [issues]);
+    const nav = useIssueNav(formRef, keys);
+    // Что написать под полем; пока не пытались отправить — ничего.
+    const issueOf = (key) => (reveal && byKey[key] ? issueSentence(byKey[key].map((item) => item.text)) : '');
+
+    /* Окно открыли дописывать недостающее — сразу к первому полю, где пусто. Один раз
+       на открытие: дальше человек ходит по полям сам. */
+    const revealedFor = useRef(null);
+    useEffect(() => {
+        if (!open) { revealedFor.current = null; return; }
+        if (!revealIssues || !reveal || !keys.length || revealedFor.current === fillKey) return;
+        revealedFor.current = fillKey;
+        if (draft.payment_method === 'invoice' && keys.some((key) => key.startsWith('invoice_'))) setInvoiceOpen(true);
+        nav.first();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, reveal, fillKey, revealIssues]);
+
+    /* Пункты счёта появились, когда поля уже красные (у старой заявки переключили
+       «Как платим» на счёт), — блок счёта раскрывается сам: иначе пункты стояли бы у
+       полей, которых на экране нет. */
+    useEffect(() => {
+        if (reveal && !invoiceOpen && draft.payment_method === 'invoice' && keys.some((key) => key.startsWith('invoice_'))) setInvoiceOpen(true);
+    }, [reveal, invoiceOpen, draft.payment_method, keys]);
 
     // ── Справка «История оплат»: похожие ранее оплаченные заявки ──
     useEffect(() => {
@@ -454,8 +520,21 @@ const PaymentRequestForm = ({
         return [...list, ...files];
     };
 
+    /* «Отправить»: не хватает обязательного — заявка не уходит, поля краснеют, и окно
+       подводит к первому из них (после отрисовки: блок счёта, может быть, ещё свёрнут).
+       Нажали с клавиатуры — фокус переходит в это поле. */
+    const trySubmit = (event) => {
+        if (saving) return;
+        if (issues.length) {
+            if (draft.payment_method === 'invoice' && keys.some((key) => key.startsWith('invoice_'))) setInvoiceOpen(true);
+            setReveal(true);
+            nav.first({ focus: fromKeyboard(event) });
+            return;
+        }
+        save(true);
+    };
+
     const save = async (submit) => {
-        if (submit && problems.length) { setError(`Чтобы отправить: ${problems.join('; ')}.`); return; }
         setSaving(submit ? 'submit' : 'save');
         setError('');
         try {
@@ -508,12 +587,20 @@ const PaymentRequestForm = ({
     } else if (kind) {
         footer = (
             <>
+                {/* Полей, где не хватает, несколько — стрелки ведут от одного к другому. Стоят слева;
+                    уже 768 px (там окно уже своего предела) — своей строкой над кнопками: в одном
+                    ряду с тремя кнопками они вытесняли «Отправить» отдельной строкой. */}
+                {reveal && keys.length > 1 && (
+                    <div className="mr-auto max-md:order-first max-md:mr-0 max-md:w-full">
+                        <IssueNav count={keys.length} onStep={nav.step} />
+                    </div>
+                )}
                 <button type="button" className={iosBtnSecondary} onClick={requestClose} disabled={busy}>Отмена</button>
                 {/* Черновик сохраняется и у новой заявки: недозаполненное не должно пропадать. */}
                 <button type="button" className={iosBtnSecondary} onClick={() => save(false)} disabled={busy}>
                     {saving === 'save' && <Loader2 size={14} className="animate-spin" />} {editing ? 'Сохранить' : 'Сохранить черновик'}
                 </button>
-                <button type="button" className={iosBtnPrimary} onClick={() => save(true)} disabled={busy || problems.length > 0}>
+                <button type="button" className={iosBtnPrimary} onClick={trySubmit} disabled={busy}>
                     {saving === 'submit' && <Loader2 size={14} className="animate-spin" />}
                     {editing ? 'Сохранить и отправить' : 'Отправить на согласование'}
                 </button>
@@ -525,7 +612,7 @@ const PaymentRequestForm = ({
         <IosModal
             open={open}
             onClose={requestClose}
-            onBack={!editing && kind ? () => { setKindMotion('motion-safe:animate-pop-in'); set('request_kind', null); } : null}
+            onBack={!editing && kind ? () => { setKindMotion('motion-safe:animate-pop-in'); setReveal(false); set('request_kind', null); } : null}
             title={editing ? `Заявка №${request.id} — доработка` : (kind ? (regular ? 'Оплата по действующему/регулярному обязательству' : 'Новый закуп') : 'Создать заявку')}
             subtitle={editing ? request.expense_name : (kind ? '' : 'Выберите тип обращения')}
             maxWidth="max-w-3xl"
@@ -533,7 +620,7 @@ const PaymentRequestForm = ({
             // Выбор типа — две плитки, форма — во весь рост окна: рамка доезжает, а не перескакивает.
             sizeKey={kind ? 'form' : 'kind'}
         >
-            <div key={kind ? 'form' : 'kind'} className={`space-y-4 ${kindMotion}`}>
+            <div key={kind ? 'form' : 'kind'} ref={formRef} className={`space-y-4 ${kindMotion}`}>
                 <div ref={errorRef} className="scroll-mt-4"><ErrorBox text={error} /></div>
 
                 {editing && request.clarify_reason && (
@@ -569,7 +656,7 @@ const PaymentRequestForm = ({
                 {regular && (
                     <>
                         <IosSection title="Регулярный платёж">
-                            <Field label="Платёж из справочника" required hint={HINTS.template}>
+                            <Field label="Платёж из справочника" required hint={HINTS.template} anchor="fixed_template_id" issue={issueOf('fixed_template_id')}>
                                 <FormSelect
                                     value={draft.fixed_template_id}
                                     onChange={pickTemplate}
@@ -596,10 +683,10 @@ const PaymentRequestForm = ({
 
                         <IosSection title="Оплата">
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Период оплаты" required hint={HINTS.paymentPeriod}>
-                                    <input className={iosInput} value={draft.payment_period} onChange={(event) => set('payment_period', event.target.value)} maxLength={120} placeholder="Например: октябрь 2026" />
+                                <Field label="Период оплаты" required hint={HINTS.paymentPeriod} anchor="payment_period" issue={issueOf('payment_period')}>
+                                    <FormInput value={draft.payment_period} onChange={(event) => set('payment_period', event.target.value)} maxLength={120} placeholder="Например: октябрь 2026" />
                                 </Field>
-                                <Field label="Сумма, ₸" required>
+                                <Field label="Сумма, ₸" required anchor="amount" issue={issueOf('amount')}>
                                     <AmountInput value={draft.amount} onChange={(value) => set('amount', value)} ariaLabel="Сумма" />
                                 </Field>
                             </div>
@@ -609,26 +696,26 @@ const PaymentRequestForm = ({
                                 </div>
                             )}
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Номер счёта" required hint={HINTS.invoice}>
-                                    <input className={iosInput} value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
+                                <Field label="Номер счёта" required hint={HINTS.invoice} anchor="invoice_number" issue={issueOf('invoice_number')}>
+                                    <FormInput value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
                                 </Field>
-                                <Field label="Дата счёта" required>
-                                    <IosDatePicker value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Дата счёта" />
+                                <Field label="Дата счёта" required anchor="invoice_date" issue={issueOf('invoice_date')}>
+                                    <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
                                 </Field>
                             </div>
-                            <Field as="div" label="Счёт" required optionalMark={false}>
+                            <Field as="div" label="Счёт" required optionalMark={false} anchor="invoice_file" issue={issueOf('invoice_file')}>
                                 <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
                             </Field>
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Подразделение" required hint={HINTS.department}>
+                                <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
                                     <FormSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Подразделение" ariaLabel="Подразделение" />
                                 </Field>
                                 <Field label="Срок оплаты" hint={HINTS.dueOn}>
-                                    <IosDatePicker value={draft.due_on} onChange={(value) => set('due_on', value || '')} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Срок оплаты" />
+                                    <FormDate value={draft.due_on} onChange={(value) => set('due_on', value || '')} ariaLabel="Срок оплаты" />
                                 </Field>
                             </div>
                             <Field label="Комментарий">
-                                <textarea className={`${iosInput} min-h-[56px] resize-y`} value={draft.notes} onChange={(event) => set('notes', event.target.value)} maxLength={4000} />
+                                <FormText className="min-h-[56px]" value={draft.notes} onChange={(event) => set('notes', event.target.value)} maxLength={4000} />
                             </Field>
                         </IosSection>
                     </>
@@ -638,11 +725,11 @@ const PaymentRequestForm = ({
                 {kind === 'purchase' && (
                     <>
                         <IosSection title="Что закупаем">
-                            <Field label="Наименование закупа" required hint="Коротко и конкретно: «Бумага А4 для офиса», а не «хоз. товары». Подробности — в позициях ниже.">
-                                <input className={iosInput} value={draft.expense_name} onChange={(event) => set('expense_name', event.target.value)} placeholder="Например: Бумага А4 и канцелярия для офиса" maxLength={300} />
+                            <Field label="Наименование закупа" required hint="Коротко и конкретно: «Бумага А4 для офиса», а не «хоз. товары». Подробности — в позициях ниже." anchor="expense_name" issue={issueOf('expense_name')}>
+                                <FormInput value={draft.expense_name} onChange={(event) => set('expense_name', event.target.value)} placeholder="Например: Бумага А4 и канцелярия для офиса" maxLength={300} />
                             </Field>
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Категория закупа" required hint={HINTS.category}>
+                                <Field label="Категория закупа" required hint={HINTS.category} anchor="category_id" issue={issueOf('category_id')}>
                                     <FormSelect
                                         value={draft.category_id}
                                         onChange={(value) => setDraft((prev) => ({ ...prev, category_id: value, subcategory_id: null }))}
@@ -660,38 +747,38 @@ const PaymentRequestForm = ({
                                     </Field>
                                 )}
                             </div>
-                            <Field label="Описание и обоснование" required hint={HINTS.justification}>
-                                <textarea className={`${iosInput} min-h-[72px] resize-y`} value={draft.justification} onChange={(event) => set('justification', event.target.value)} maxLength={4000} placeholder="Что покупаем и почему это нужно сейчас" />
+                            <Field label="Описание и обоснование" required hint={HINTS.justification} anchor="justification" issue={issueOf('justification')}>
+                                <FormText className="min-h-[72px]" value={draft.justification} onChange={(event) => set('justification', event.target.value)} maxLength={4000} placeholder="Что покупаем и почему это нужно сейчас" />
                             </Field>
-                            <Field as="div" label="Позиции и количество" required optionalMark={false} hint={HINTS.items}>
-                                <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} />
+                            <Field as="div" label="Позиции и количество" required optionalMark={false} hint={HINTS.items} anchor="items" issue={issueOf('items')} issueFirst>
+                                <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} issue={reveal ? byKey.items?.[0] || null : null} />
                             </Field>
                             <div className="flex flex-wrap gap-x-6 gap-y-3">
-                                <Field as="div" label="Тип объекта" required optionalMark={false} hint={HINTS.objectType}>
+                                <Field as="div" label="Тип объекта" required optionalMark={false} hint={HINTS.objectType} anchor="object_type" issue={issueOf('object_type')}>
                                     <Choice value={draft.object_type} options={OBJECT_TYPE_OPTIONS} onChange={(value) => setDraft((prev) => ({ ...prev, object_type: value, accounting_category: value === 'goods' ? prev.accounting_category : null }))} ariaLabel="Тип объекта" />
                                 </Field>
                                 {draft.object_type === 'goods' && (
-                                    <Field as="div" label="Категория учёта" required optionalMark={false} hint={HINTS.accountingCategory}>
+                                    <Field as="div" label="Категория учёта" required optionalMark={false} hint={HINTS.accountingCategory} anchor="accounting_category" issue={issueOf('accounting_category')}>
                                         <Choice value={draft.accounting_category} options={ACCOUNTING_CATEGORY_OPTIONS} onChange={(value) => set('accounting_category', value)} ariaLabel="Категория учёта приобретения" />
                                     </Field>
                                 )}
                             </div>
-                            {draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed?.asset_keeper === false && (
+                            {draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed?.asset_keeper === false && !reveal && (
                                 <NoticeBox text={`Сейчас так отправить нельзя: ${UNSTAFFED.asset_keeper}.`} />
                             )}
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Желаемый срок" required hint={HINTS.dueOn}>
-                                    <IosDatePicker value={draft.due_on} onChange={(value) => set('due_on', value || '')} allowEmpty placeholder="Выберите дату" triggerClassName={DATE_TRIGGER} ariaLabel="Желаемый срок" />
+                                <Field label="Желаемый срок" required hint={HINTS.dueOn} anchor="due_on" issue={issueOf('due_on')}>
+                                    <FormDate value={draft.due_on} onChange={(value) => set('due_on', value || '')} placeholder="Выберите дату" ariaLabel="Желаемый срок" />
                                 </Field>
                             </div>
                         </IosSection>
 
                         <IosSection title="Для кого">
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Компания" required hint={HINTS.legalEntity}>
+                                <Field label="Компания" required hint={HINTS.legalEntity} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
                                     <FormSelect value={draft.legal_entity_id} onChange={(value) => set('legal_entity_id', value)} options={legalEntityOptions} placeholder={legalEntityOptions.length ? 'Выберите компанию' : 'Справочник компаний пуст'} disabled={!legalEntityOptions.length} ariaLabel="Компания" />
                                 </Field>
-                                <Field label="Подразделение" required hint={HINTS.department}>
+                                <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
                                     <FormSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Подразделение" ariaLabel="Подразделение" />
                                 </Field>
                             </div>
@@ -713,26 +800,27 @@ const PaymentRequestForm = ({
                             </Field>
                             {draft.no_alternatives && (
                                 <div className="grid gap-3 sm:grid-cols-2">
-                                    <Field label="Причина отсутствия альтернатив" required>
+                                    <Field label="Причина отсутствия альтернатив" required anchor="no_alternatives_reason" issue={issueOf('no_alternatives_reason')}>
                                         <FormSelect value={draft.no_alternatives_reason} onChange={(value) => set('no_alternatives_reason', value)} options={reasonOptions} placeholder="Выберите причину" ariaLabel="Причина отсутствия альтернатив" />
                                     </Field>
-                                    <Field label="Пояснение" required={draft.no_alternatives_reason === 'other'}>
-                                        <input className={iosInput} value={draft.no_alternatives_comment} onChange={(event) => set('no_alternatives_comment', event.target.value)} maxLength={2000} />
+                                    <Field label="Пояснение" required={draft.no_alternatives_reason === 'other'} anchor="no_alternatives_comment" issue={issueOf('no_alternatives_comment')}>
+                                        <FormInput value={draft.no_alternatives_comment} onChange={(event) => set('no_alternatives_comment', event.target.value)} maxLength={2000} />
                                     </Field>
                                 </div>
                             )}
-                            <Field as="div" label={draft.no_alternatives ? 'Поставщик' : 'Варианты поставщиков'} required optionalMark={false} hint={draft.no_alternatives ? null : { ...HINTS.offers, intro: `${HINTS.offers.intro} Нужно не меньше ${settings?.min_suppliers ?? 3}.` }}>
+                            <Field as="div" label={draft.no_alternatives ? 'Поставщик' : 'Варианты поставщиков'} required optionalMark={false} hint={draft.no_alternatives ? null : { ...HINTS.offers, intro: `${HINTS.offers.intro} Нужно не меньше ${settings?.min_suppliers ?? 3}.` }} anchor="offers" issue={issueOf('offers')} issueFirst>
                                 <PaymentOffersEditor
                                     offers={draft.offers}
                                     onChange={(next) => set('offers', next)}
                                     counterpartyOptions={counterpartyOptions}
                                     savedFilesByOffer={savedFilesByOffer}
                                     single={Boolean(draft.no_alternatives)}
+                                    issues={reveal ? byKey.offers || [] : []}
                                 />
                             </Field>
                             {!draft.no_alternatives && (
-                                <Field label="Обоснование выбора поставщика" required hint={HINTS.choiceReason}>
-                                    <textarea className={`${iosInput} min-h-[56px] resize-y`} value={draft.supplier_choice_reason} onChange={(event) => set('supplier_choice_reason', event.target.value)} maxLength={2000} />
+                                <Field label="Обоснование выбора поставщика" required hint={HINTS.choiceReason} anchor="supplier_choice_reason" issue={issueOf('supplier_choice_reason')}>
+                                    <FormText className="min-h-[56px]" value={draft.supplier_choice_reason} onChange={(event) => set('supplier_choice_reason', event.target.value)} maxLength={2000} />
                                 </Field>
                             )}
                             {history.length > 0 && (
@@ -757,10 +845,10 @@ const PaymentRequestForm = ({
                         </IosSection>
 
                         <IosSection title="Способ оплаты">
-                            <Field as="div" label="Как платим" required optionalMark={false} hint={HINTS.paymentMethod}>
+                            <Field as="div" label="Как платим" required optionalMark={false} hint={HINTS.paymentMethod} anchor="payment_method" issue={issueOf('payment_method')}>
                                 <Choice value={draft.payment_method} options={PAYMENT_METHOD_OPTIONS} onChange={(value) => set('payment_method', value)} ariaLabel="Способ оплаты" />
                             </Field>
-                            {draft.payment_method === 'card' && staffed?.finance === false && (
+                            {draft.payment_method === 'card' && staffed?.finance === false && !reveal && (
                                 <NoticeBox text={`Сейчас так отправить нельзя: ${UNSTAFFED.finance}.`} />
                             )}
 
@@ -786,14 +874,17 @@ const PaymentRequestForm = ({
                                     {invoiceOpen ? (
                                         <>
                                             <div className="grid gap-3 sm:grid-cols-2">
-                                                <Field label="Номер счёта" required hint={HINTS.invoice}>
-                                                    <input className={iosInput} value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
+                                                <Field label="Номер счёта" required hint={HINTS.invoice} anchor="invoice_number" issue={issueOf('invoice_number')}>
+                                                    <FormInput value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
                                                 </Field>
-                                                <Field label="Дата счёта" required>
-                                                    <IosDatePicker value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Дата счёта" />
+                                                <Field label="Дата счёта" required anchor="invoice_date" issue={issueOf('invoice_date')}>
+                                                    <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
                                                 </Field>
                                             </div>
-                                            <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
+                                            {/* Без подписи, как и было: файл счёта стоит сразу под полями счёта. */}
+                                            <Field as="div" anchor="invoice_file" issue={issueOf('invoice_file')}>
+                                                <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
+                                            </Field>
                                         </>
                                     ) : (
                                         <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-slate-500">
@@ -806,17 +897,17 @@ const PaymentRequestForm = ({
 
                             {draft.payment_method === 'card' && (
                                 <>
-                                    <Field as="div" label="Получатель" required optionalMark={false} hint={HINTS.cardRecipient}>
+                                    <Field as="div" label="Получатель" required optionalMark={false} hint={HINTS.cardRecipient} anchor="card_recipient" issue={issueOf('card_recipient')}>
                                         <Choice value={draft.card_recipient} options={CARD_RECIPIENT_OPTIONS} onChange={(value) => setDraft((prev) => ({ ...prev, card_recipient: value, card_id: null }))} ariaLabel="Чью карту пополнить" />
                                     </Field>
                                     {draft.card_recipient === 'employee' && (
-                                        <Field label="Сотрудник" required>
+                                        <Field label="Сотрудник" required anchor="card_holder_user_id" issue={issueOf('card_holder_user_id')}>
                                             <UserSelect users={users} value={draft.card_holder_user_id} onChange={(value) => setDraft((prev) => ({ ...prev, card_holder_user_id: value, card_id: null }))} placeholder="Чья карта" />
                                         </Field>
                                     )}
                                     {draft.card_recipient === 'supplier' && (
-                                        <Field label="ФИО владельца карты" required>
-                                            <input className={iosInput} value={draft.card_holder_name} onChange={(event) => set('card_holder_name', event.target.value)} maxLength={200} placeholder="Как на карте" />
+                                        <Field label="ФИО владельца карты" required anchor="card_holder_name" issue={issueOf('card_holder_name')}>
+                                            <FormInput value={draft.card_holder_name} onChange={(event) => set('card_holder_name', event.target.value)} maxLength={200} placeholder="Как на карте" />
                                         </Field>
                                     )}
                                     {draft.card_recipient && (cardKept ? (
@@ -839,9 +930,9 @@ const PaymentRequestForm = ({
                                                 </Field>
                                             )}
                                             {!draft.card_id && (
-                                                <Field label="Номер карты" required hint={HINTS.cardNumber}>
-                                                    <input
-                                                        className={`${iosInput} tabular-nums ${lunaWarn ? 'ring-2 ring-amber-300' : ''}`}
+                                                <Field label="Номер карты" required hint={HINTS.cardNumber} anchor="card_number" issue={issueOf('card_number')}>
+                                                    <FormInput
+                                                        className={`tabular-nums ${lunaWarn ? 'ring-2 ring-amber-300' : ''}`}
                                                         inputMode="numeric"
                                                         autoComplete="off"
                                                         value={cardNumberLabel(draft.card_number)}
@@ -856,8 +947,8 @@ const PaymentRequestForm = ({
                                     {lunaWarn && (
                                         <div className="px-1 text-[12.5px] text-amber-700">Проверьте номер: контрольная цифра не сходится — возможно, опечатка.</div>
                                     )}
-                                    <Field label="Назначение перевода" required hint={HINTS.paymentPurpose}>
-                                        <input className={iosInput} value={draft.payment_purpose} onChange={(event) => set('payment_purpose', event.target.value)} maxLength={2000} placeholder="На что пойдут деньги" />
+                                    <Field label="Назначение перевода" required hint={HINTS.paymentPurpose} anchor="payment_purpose" issue={issueOf('payment_purpose')}>
+                                        <FormInput value={draft.payment_purpose} onChange={(event) => set('payment_purpose', event.target.value)} maxLength={2000} placeholder="На что пойдут деньги" />
                                     </Field>
                                 </>
                             )}
@@ -935,12 +1026,6 @@ const PaymentRequestForm = ({
                             <ApprovalHint basis={preview.route} />
                         </div>
                         {route.basisText && <div className="mt-0.5 text-[12.5px] text-slate-500">{route.basisText}</div>}
-                    </div>
-                )}
-
-                {kind && problems.length > 0 && (
-                    <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
-                        Чтобы отправить: {problems.join('; ')}.
                     </div>
                 )}
             </div>

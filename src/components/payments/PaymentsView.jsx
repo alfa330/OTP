@@ -116,6 +116,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     const [formOpen, setFormOpen] = useState(false);
     const [createWanted, setCreateWanted] = useState(false);
     const [editing, setEditing] = useState(null);
+    // Форму доработки открыли из задачи инициатора, чтобы дописать недостающее.
+    const [revealIssues, setRevealIssues] = useState(false);
     const [openedId, setOpenedId] = useState(link.request);
 
     const toastRef = useRef(showToast);
@@ -849,6 +851,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     const back = editing?.request?.id;
                     setFormOpen(false);
                     setEditing(null);
+                    setRevealIssues(false);
                     if (back) setOpenedId(back);
                 }}
                 apiBaseUrl={apiBaseUrl}
@@ -860,6 +863,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 settings={settings}
                 staffed={ping?.roles_staffed}
                 data={editing}
+                revealIssues={revealIssues}
                 onSaved={(body) => {
                     applyChanged(body?.request);
                     // Новый поставщик мог появиться прямо в заявке — справочник перечитываем.
@@ -880,7 +884,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 me={ping?.me}
                 meta={meta}
                 onChanged={applyChanged}
-                onEdit={(data) => { setOpenedId(null); setEditing(data); setFormOpen(true); }}
+                // Из задачи инициатора «Доработать заявку» — форма сразу показывает, чего не хватает.
+                onEdit={(data, options) => { setOpenedId(null); setEditing(data); setRevealIssues(Boolean(options?.reveal)); setFormOpen(true); }}
                 showToast={showToast}
             />
         </div>

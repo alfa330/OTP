@@ -3,7 +3,7 @@ import { Plus, X } from 'lucide-react';
 import { iosBtnGhost, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { DEFAULT_UNIT, fmtMoney, isBlankItem, itemQuantity, itemTotal, itemsTotal, unitOptions } from './paymentsMeta';
-import { AmountInput, QuantityInput } from './paymentsUi';
+import { AmountInput, INVALID_RING, QuantityInput } from './paymentsUi';
 
 /*
  * Позиции заявки — таблица как в счёте поставщика: что, сколько, в чём считаем,
@@ -26,7 +26,19 @@ export const newItem = () => ({
     key: Math.random().toString(36).slice(2, 9), name: '', quantity: '1', unit: DEFAULT_UNIT, unit_price: 0,
 });
 
-const PaymentItemsEditor = ({ items, onChange }) => {
+/* `issue` — пункт «чего не хватает» о позициях (paymentsMeta.purchaseIssues, ключ
+   items) после неудачной попытки отправить: красным обводится именно то поле
+   строки, о котором он, а не вся таблица. Название и количество у начатой
+   строки краснеют и без него — сразу, пока человек печатает. */
+const flaggedField = (issue, item, index, field) => {
+    if (!issue) return false;
+    if (issue.part === 'empty') return index === 0 && field === 'name';
+    if (issue.rows) return issue.rows.includes(item.key) && (issue.field || 'unit_price') === field;
+    // Заявка первой версии: суммы нет — цена у каждой начатой строки (или у первой, если начатых нет).
+    return issue.part === 'price' && field === 'unit_price' && (!isBlankItem(item) || index === 0);
+};
+
+const PaymentItemsEditor = ({ items, onChange, issue = null }) => {
     const total = itemsTotal(items);
     const update = (key, patch) => onChange(items.map((item) => (item.key === key ? { ...item, ...patch } : item)));
     const remove = (key) => onChange(items.length > 1 ? items.filter((row) => row.key !== key) : [newItem()]);
@@ -40,15 +52,16 @@ const PaymentItemsEditor = ({ items, onChange }) => {
                 <span className="text-right">Сумма, ₸</span>
                 <span />
             </div>
-            {items.map((item) => {
+            {items.map((item, index) => {
                 const blank = isBlankItem(item);
-                const nameMissing = !blank && !item.name.trim();
-                const quantityBad = !blank && !(itemQuantity(item) > 0);
+                const nameMissing = (!blank && !item.name.trim()) || flaggedField(issue, item, index, 'name');
+                const quantityBad = (!blank && !(itemQuantity(item) > 0)) || flaggedField(issue, item, index, 'quantity');
+                const priceBad = flaggedField(issue, item, index, 'unit_price');
                 return (
                     <div key={item.key} className={`border-t border-slate-200/60 px-3 py-2 ${ITEM_GRID}`}>
                         <div className="flex items-center gap-2 md:contents">
                             <input
-                                className={`${iosInput} min-w-0 flex-1 !py-2 !text-[13.5px] ${nameMissing ? 'ring-2 ring-rose-300' : ''}`}
+                                className={`${iosInput} min-w-0 flex-1 !py-2 !text-[13.5px] ${nameMissing ? INVALID_RING : ''}`}
                                 placeholder="Например: Бумага А4, 500 листов"
                                 aria-label="Товар или услуга"
                                 aria-invalid={nameMissing || undefined}
@@ -79,7 +92,7 @@ const PaymentItemsEditor = ({ items, onChange }) => {
                             </div>
                             <div className="min-w-0 flex-1 md:flex-none">
                                 <span className={`${ITEM_CAPTION} text-right`}>Цена за ед., ₸</span>
-                                <AmountInput ariaLabel="Цена за единицу" className="!py-2 text-right !text-[13.5px]" value={item.unit_price} onChange={(value) => update(item.key, { unit_price: value })} />
+                                <AmountInput ariaLabel="Цена за единицу" className="!py-2 text-right !text-[13.5px]" invalid={priceBad} value={item.unit_price} onChange={(value) => update(item.key, { unit_price: value })} />
                             </div>
                         </div>
                         {/* Сумма строки — чтобы формула была на виду: количество × цена. */}

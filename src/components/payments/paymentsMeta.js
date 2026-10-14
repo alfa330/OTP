@@ -616,13 +616,17 @@ export const isBlankItem = (item) => !String(item?.name || '').trim() && !parseA
    или пустая. Проверка та же, что на сервере, плюс «цена есть, названия нет»:
    такая строка видна в итоге на экране, а в заявку не попала бы — итог на
    экране и в сохранённой заявке расходились бы. */
-export const itemProblem = (item) => {
-    if (isBlankItem(item)) return '';
+export const itemProblem = (item) => itemIssue(item)?.text || '';
+
+/* То же со ссылкой на поле строки (`field` — name, quantity или unit_price): после
+   неудачной попытки отправить форма обводит красным именно его. */
+export const itemIssue = (item) => {
+    if (isBlankItem(item)) return null;
     const name = String(item?.name || '').trim();
-    if (!name) return 'У позиции с ценой нет названия — впишите его или удалите строку';
-    if (!(itemQuantity(item) > 0)) return `«${name}»: количество — число больше нуля`;
-    if (parseAmount(item?.unit_price) < 0) return `«${name}»: цена не может быть отрицательной`;
-    return '';
+    if (!name) return { field: 'name', text: 'У позиции с ценой нет названия — впишите его или удалите строку' };
+    if (!(itemQuantity(item) > 0)) return { field: 'quantity', text: `«${name}»: количество — число больше нуля` };
+    if (parseAmount(item?.unit_price) < 0) return { field: 'unit_price', text: `«${name}»: цена не может быть отрицательной` };
+    return null;
 };
 
 export const fmtQty = (value) => {
@@ -1240,70 +1244,90 @@ export const cardProblem = (value, [min, max] = [13, 19]) => {
 /* ── Форма заявки: чего не хватает ─────────────────────────────────────────────
    Те же правила, что workflow.missing_for_submit на сервере, — чтобы человек
    узнал о пропуске до нажатия «Отправить», а не после. Сервер проверяет сам;
-   здесь только подсказка. `fileKinds` — виды уже приложенных и выбранных файлов. */
+   здесь только подсказка. `fileKinds` — виды уже приложенных и выбранных файлов.
+
+   Пункт — { key, text }: `text` — что сделать, словами; `key` — поле формы, к
+   которому пункт относится (`anchor` у Field). Нажали «Отправить», а чего-то не
+   хватает, — форма обводит эти поля красным, пишет под каждым, чего в нём нет, и
+   подводит прокрутку к первому (просьба владельца 14.10.2026). У позиций и
+   поставщиков есть ещё `part` и `rows` — что именно подсветить внутри списка.
+   Строки (`…Problems`) — те же пункты одним текстом. */
+const issueOf = (key, text, extra = null) => (extra ? { key, text, ...extra } : { key, text });
+const issueTexts = (issues) => issues.map((item) => item.text);
+
 /* Чего не хватает, чтобы отправить заявку. `staffed` — у каких ролей есть участники
    ({finance, asset_keeper}): способ оплаты или категорию учёта, которые некому
    выполнить, сервер не примет — человек должен узнать об этом до отправки. */
-export const purchaseProblems = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {} } = {}) => {
-    const problems = [];
-    if (!draft.legal_entity_id) problems.push('выберите компанию');
-    if (!draft.department_id) problems.push('укажите подразделение');
-    if (!String(draft.expense_name || '').trim()) problems.push('назовите закуп');
-    if (!draft.category_id) problems.push('выберите категорию закупа');
-    if (!String(draft.justification || '').trim()) problems.push('опишите и обоснуйте закуп');
+export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {} } = {}) => {
+    const issues = [];
+    const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
+    if (!draft.legal_entity_id) add('legal_entity_id', 'выберите компанию');
+    if (!draft.department_id) add('department_id', 'укажите подразделение');
+    if (!String(draft.expense_name || '').trim()) add('expense_name', 'назовите закуп');
+    if (!draft.category_id) add('category_id', 'выберите категорию закупа');
+    if (!String(draft.justification || '').trim()) add('justification', 'опишите и обоснуйте закуп');
     const filled = (draft.items || []).filter((item) => !isBlankItem(item));
-    if (!filled.length) problems.push('добавьте хотя бы одну позицию');
+    if (!filled.length) add('items', 'добавьте хотя бы одну позицию', { part: 'empty' });
     else {
-        const problem = filled.map(itemProblem).find(Boolean);
-        if (problem) problems.push(problem);
-        else if (!(itemsTotal(filled) > 0)) problems.push('укажите цену за единицу');
+        const broken = filled.find((item) => itemIssue(item));
+        if (broken) {
+            const { field, text } = itemIssue(broken);
+            add('items', text, { part: 'row', rows: [broken.key], field });
+        } else if (!(itemsTotal(filled) > 0)) {
+            add('items', 'укажите цену за единицу', { part: 'price', rows: filled.map((item) => item.key) });
+        }
     }
-    if (!draft.due_on) problems.push('укажите желаемый срок');
-    if (!draft.object_type) problems.push('выберите: товар или услуга');
-    else if (draft.object_type === 'goods' && !draft.accounting_category) problems.push('выберите категорию учёта');
+    if (!draft.due_on) add('due_on', 'укажите желаемый срок');
+    if (!draft.object_type) add('object_type', 'выберите: товар или услуга');
+    else if (draft.object_type === 'goods' && !draft.accounting_category) add('accounting_category', 'выберите категорию учёта');
     else if (draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed.asset_keeper === false) {
-        problems.push(UNSTAFFED.asset_keeper);
+        add('accounting_category', UNSTAFFED.asset_keeper);
     }
-    if (!draft.payment_method) problems.push('выберите способ оплаты');
+    if (!draft.payment_method) add('payment_method', 'выберите способ оплаты');
 
     const offers = (draft.offers || []).filter((offer) => !isBlankOffer(offer));
-    const incomplete = offers.some((offer) => !offerName(offer) || !(parseAmount(offer.amount) > 0));
+    const incomplete = offers.filter((offer) => !offerName(offer) || !(parseAmount(offer.amount) > 0));
     if (draft.no_alternatives) {
-        if (!draft.no_alternatives_reason) problems.push('выберите причину отсутствия альтернатив');
+        if (!draft.no_alternatives_reason) add('no_alternatives_reason', 'выберите причину отсутствия альтернатив');
         else if (draft.no_alternatives_reason === 'other' && !String(draft.no_alternatives_comment || '').trim()) {
-            problems.push('опишите причину отсутствия альтернатив');
+            add('no_alternatives_comment', 'опишите причину отсутствия альтернатив');
         }
-        if (!offers.length) problems.push('укажите поставщика и стоимость');
+        if (!offers.length) add('offers', 'укажите поставщика и стоимость', { part: 'empty' });
     } else if (offers.length < minSuppliers) {
-        problems.push(`нужно не меньше ${plural(minSuppliers, ['варианта поставщика', 'вариантов поставщиков', 'вариантов поставщиков'])}`);
+        add('offers', `нужно не меньше ${plural(minSuppliers, ['варианта поставщика', 'вариантов поставщиков', 'вариантов поставщиков'])}`,
+            { part: 'count' });
     }
-    if (incomplete) problems.push('у каждого поставщика укажите название и стоимость');
+    if (incomplete.length) {
+        add('offers', 'у каждого поставщика укажите название и стоимость', { part: 'incomplete', rows: incomplete.map((offer) => offer.key) });
+    }
     // Единственный поставщик («альтернатив нет») рекомендуем по определению —
     // отмечать его и обосновывать выбор не из чего.
     if (offers.length && !draft.no_alternatives) {
-        if (offers.filter((offer) => offer.is_recommended).length !== 1) problems.push('отметьте рекомендуемого поставщика');
-        if (!String(draft.supplier_choice_reason || '').trim()) problems.push('обоснуйте выбор поставщика');
+        if (offers.filter((offer) => offer.is_recommended).length !== 1) add('offers', 'отметьте рекомендуемого поставщика', { part: 'recommend' });
+        if (!String(draft.supplier_choice_reason || '').trim()) add('supplier_choice_reason', 'обоснуйте выбор поставщика');
     }
 
     if (draft.payment_method === 'card') {
-        if (staffed.finance === false) problems.push(UNSTAFFED.finance);
-        if (!draft.card_recipient) problems.push('выберите, чью карту пополнить');
+        if (staffed.finance === false) add('payment_method', UNSTAFFED.finance);
+        if (!draft.card_recipient) add('card_recipient', 'выберите, чью карту пополнить');
         // У каждого получателя своё поле: сотрудник выбирается из списка, владельца
         // карты поставщика вписывают — заполненное «чужое» поле не считается.
-        else if (draft.card_recipient === 'employee' && !draft.card_holder_user_id) problems.push('укажите сотрудника');
+        else if (draft.card_recipient === 'employee' && !draft.card_holder_user_id) add('card_holder_user_id', 'укажите сотрудника');
         else if (draft.card_recipient === 'supplier' && !String(draft.card_holder_name || '').trim()) {
-            problems.push('укажите ФИО владельца карты');
+            add('card_holder_name', 'укажите ФИО владельца карты');
         }
-        if (!hasCard && !draft.card_id && cardProblem(draft.card_number)) problems.push('укажите полный номер карты');
-        if (!String(draft.payment_purpose || '').trim()) problems.push('укажите назначение перевода');
+        if (!hasCard && !draft.card_id && cardProblem(draft.card_number)) add('card_number', 'укажите полный номер карты');
+        if (!String(draft.payment_purpose || '').trim()) add('payment_purpose', 'укажите назначение перевода');
     } else if (draft.payment_method === 'invoice') {
         // Счёт у нового закупа обычно появляется после согласования; но если его
         // уже прикладывают — номер и дата нужны сразу.
         const started = fileKinds.includes('invoice') || String(draft.invoice_number || '').trim() || draft.invoice_date;
-        if (started) problems.push(...invoiceProblems(draft, fileKinds));
+        if (started) issues.push(...invoiceIssues(draft, fileKinds));
     }
-    return problems;
+    return issues;
 };
+
+export const purchaseProblems = (draft, options) => issueTexts(purchaseIssues(draft, options));
 
 /* Способ оплаты или категория учёта, для которых в «Участниках» нет исполнителя. */
 export const UNSTAFFED = {
@@ -1313,46 +1337,99 @@ export const UNSTAFFED = {
 
 /* Регулярный платёж: `template` — строка справочника. Поставщика, компанию и
    категорию учёта товара задаёт она — исправить их в заявке человек не может. */
-export const regularProblems = (draft, { fileKinds = [], template = null, staffed = {} } = {}) => {
-    const problems = [];
-    if (!draft.fixed_template_id) problems.push('выберите регулярный платёж');
+export const regularIssues = (draft, { fileKinds = [], template = null, staffed = {} } = {}) => {
+    const issues = [];
+    // Поставщика, компанию и категорию учёта задаёт строка справочника — пункты о
+    // них стоят у выбора платежа: в самой заявке этих полей нет.
+    if (!draft.fixed_template_id) issues.push(issueOf('fixed_template_id', 'выберите регулярный платёж'));
     if (template) {
         const gaps = [
             !template.counterparty_id && 'поставщик',
             !template.legal_entity_id && 'компания',
             template.object_type === 'goods' && !template.accounting_category && 'категория учёта товара',
         ].filter(Boolean);
-        if (gaps.length) problems.push(`в справочнике у платежа не указаны: ${gaps.join(', ')} — попросите администратора дополнить`);
-        else if (template.accounting_category === 'asset' && staffed.asset_keeper === false) problems.push(UNSTAFFED.asset_keeper);
+        if (gaps.length) {
+            issues.push(issueOf('fixed_template_id', `в справочнике у платежа не указаны: ${gaps.join(', ')} — попросите администратора дополнить`));
+        } else if (template.accounting_category === 'asset' && staffed.asset_keeper === false) {
+            issues.push(issueOf('fixed_template_id', UNSTAFFED.asset_keeper));
+        }
     }
-    if (!draft.department_id) problems.push('укажите подразделение');
-    if (!String(draft.payment_period || '').trim()) problems.push('укажите период оплаты');
-    if (!(parseAmount(draft.amount) > 0)) problems.push('укажите сумму');
-    problems.push(...invoiceProblems(draft, fileKinds));
-    return problems;
+    if (!draft.department_id) issues.push(issueOf('department_id', 'укажите подразделение'));
+    if (!String(draft.payment_period || '').trim()) issues.push(issueOf('payment_period', 'укажите период оплаты'));
+    if (!(parseAmount(draft.amount) > 0)) issues.push(issueOf('amount', 'укажите сумму'));
+    issues.push(...invoiceIssues(draft, fileKinds));
+    return issues;
 };
+
+export const regularProblems = (draft, options) => issueTexts(regularIssues(draft, options));
 
 /* Заявка, принятая ещё первой версией процесса (у неё есть `legacy_step`): трёх
    поставщиков и обоснования от неё не требовали. Нужно только то, без чего её
-   не оплатить, — как и на сервере (workflow.missing_for_submit). */
-export const legacyProblems = (draft, { fileKinds = [] } = {}) => {
-    const problems = [];
-    if (!draft.legal_entity_id) problems.push('выберите компанию');
-    if (!(draftTotal(draft) > 0)) problems.push('укажите сумму');
-    if (draft.payment_method !== 'card') problems.push(...invoiceProblems(draft, fileKinds));
-    return problems;
+   не оплатить, — как и на сервере (workflow.missing_for_submit). Сумма у закупа —
+   итог позиций, у регулярного платежа — своё поле. */
+export const legacyIssues = (draft, { fileKinds = [] } = {}) => {
+    const issues = [];
+    if (!draft.legal_entity_id) issues.push(issueOf('legal_entity_id', 'выберите компанию'));
+    if (!(draftTotal(draft) > 0)) {
+        issues.push(draft.request_kind === 'regular' ? issueOf('amount', 'укажите сумму') : issueOf('items', 'укажите сумму', { part: 'price' }));
+    }
+    if (draft.payment_method !== 'card') issues.push(...invoiceIssues(draft, fileKinds));
+    return issues;
 };
+
+export const legacyProblems = (draft, options) => issueTexts(legacyIssues(draft, options));
 
 const draftTotal = (draft) => (draft.request_kind === 'regular'
     ? parseAmount(draft.amount)
     : itemsTotal((draft.items || []).filter((item) => !isBlankItem(item))));
 
-export const invoiceProblems = (draft, fileKinds = []) => {
-    const problems = [];
-    if (!fileKinds.includes('invoice')) problems.push('приложите счёт');
-    if (!String(draft.invoice_number || '').trim()) problems.push('укажите номер счёта');
-    if (!draft.invoice_date) problems.push('укажите дату счёта');
-    return problems;
+export const invoiceIssues = (draft, fileKinds = []) => {
+    const issues = [];
+    if (!fileKinds.includes('invoice')) issues.push(issueOf('invoice_file', 'приложите счёт'));
+    if (!String(draft.invoice_number || '').trim()) issues.push(issueOf('invoice_number', 'укажите номер счёта'));
+    if (!draft.invoice_date) issues.push(issueOf('invoice_date', 'укажите дату счёта'));
+    return issues;
+};
+
+export const invoiceProblems = (draft, fileKinds = []) => issueTexts(invoiceIssues(draft, fileKinds));
+
+/* ── Пункты «чего не хватает» на экране ────────────────────────────────────────
+   Что писать под полем: пункты одного поля одной фразой, с заглавной буквы. */
+export const issueSentence = (texts) => {
+    const text = (Array.isArray(texts) ? texts : [texts]).filter(Boolean).join('; ');
+    return text ? text[0].toUpperCase() + text.slice(1) : '';
+};
+
+/* Пункты по полям: { ключ поля → [пункты] } — по нему поля узнают свои пункты. */
+export const issuesByKey = (issues) => {
+    const map = {};
+    (issues || []).forEach((item) => { (map[item.key] ||= []).push(item); });
+    return map;
+};
+
+/* Поля, к которым стоят пункты, — в том порядке, в каком они идут на экране
+   (`order` — ключи полей сверху вниз; чего в нём нет — в конце, по порядку пунктов).
+   Стрелки переходят по ним, а не по пунктам: у одного поля пунктов бывает несколько. */
+export const issueKeys = (issues, order = []) => {
+    const keys = [];
+    (issues || []).forEach((item) => { if (!keys.includes(item.key)) keys.push(item.key); });
+    const place = (key) => { const index = order.indexOf(key); return index < 0 ? order.length : index; };
+    return keys.map((key, index) => [key, index]).sort((a, b) => place(a[0]) - place(b[0]) || a[1] - b[1]).map(([key]) => key);
+};
+
+/* Куда перейти стрелкой из поля `current`: `step` = 1 — к следующему, −1 — к
+   предыдущему, по кругу. `current` мог уже исправиться и выйти из списка — тогда
+   соседи ищутся по его месту на экране (`order`). Нет `current` — с первого. */
+export const issueStep = (keys, current, step, order = []) => {
+    if (!keys.length) return null;
+    if (current === null || current === undefined) return step < 0 ? keys[keys.length - 1] : keys[0];
+    const index = keys.indexOf(current);
+    if (index >= 0) return keys[(index + step + keys.length) % keys.length];
+    const place = order.indexOf(current);
+    if (place < 0) return step < 0 ? keys[keys.length - 1] : keys[0];
+    const at = (key) => { const value = order.indexOf(key); return value < 0 ? Infinity : value; };
+    if (step > 0) return keys.find((key) => at(key) > place) ?? keys[0];
+    return [...keys].reverse().find((key) => at(key) < place) ?? keys[keys.length - 1];
 };
 
 export const offerName = (offer) => String(offer?.supplier_name || '').trim() || (offer?.counterparty_id ? '·' : '');
