@@ -4918,6 +4918,9 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                                             AND COALESCE(c.is_draft, FALSE) = FALSE)
                          AND """ + test_keys.sql_not_test(
                              "COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)")
+        # Исключённый («Исключить оценку») второй раз не предлагается — и после
+        # смены модели тоже: проверка «не оценён текущей моделью» ниже его не видит.
+        imported += " AND " + _not_excluded_sql("'imported_call'", "ic.id")
         with_audio = " AND ic.audio_path IS NOT NULL AND ic.audio_path <> ''"
         without_audio = " AND (ic.audio_path IS NULL OR ic.audio_path = '')"
         # Отбор панели сужает и подбор: кнопка «Оценить случайный звонок» при
@@ -4960,8 +4963,12 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                      AND c.audio_path <> ''
                      AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
         base += " AND " + test_keys.sql_not_test('c.phone_number')
-        # Исключённый звонок («Исключить оценку») второй раз не предлагается.
+        # Исключённый звонок («Исключить оценку») второй раз не предлагается — ни сам,
+        # ни как звонок из АТС, у которого потом появилась оценка в журнале: это один
+        # и тот же разговор (см. проверку двух видов ниже).
         base += " AND " + _not_excluded_sql("'call'", "c.id")
+        base += (" AND (c.imported_call_id IS NULL OR "
+                 + _not_excluded_sql("'imported_call'", "c.imported_call_id") + ")")
         journal_pick, journal_pick_params = _pick_filters_predicate(
             filters, operator_col="c.operator_id",
             # Тот же перевод, что в подписи и в фильтре списка: у calls время
@@ -5363,6 +5370,9 @@ def random_chat_episode(allowed_direction_ids=None, department=None, filters=Non
             day_expr=_CHAT_CANDIDATE_DAY[subject_kind],
             direction_expr="COALESCE(d.canonical_id, d.id)")
         base, params = base + pick_sql, (*params, *pick_params)
+        # Переписку, которую признали ненужной, «Случайный чат» не предлагает — и после
+        # смены модели тоже: «не оценена текущей моделью» её не видит.
+        base += " AND " + _not_excluded_sql(f"'{subject_kind}'", "t.id")
         cur.execute(base + f""" AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                                  WHERE rc.subject_kind = '{subject_kind}'
                                                    AND rc.call_id = t.id AND rc.model = %s)
@@ -5370,10 +5380,7 @@ def random_chat_episode(allowed_direction_ids=None, department=None, filters=Non
                     (*params, config.CLAUDE_MODEL))
         row = cur.fetchone()
         if not row:
-            # Всё уже оценено — берём любую, кроме исключённых: переписку, которую
-            # признали ненужной, «Случайный чат» второй раз не предлагает.
-            cur.execute(base + " AND " + _not_excluded_sql(f"'{subject_kind}'", "t.id")
-                        + " ORDER BY random() LIMIT 1", params)
+            cur.execute(base + " ORDER BY random() LIMIT 1", params)
             row = cur.fetchone()
     finally:
         cur.close(); conn.close()

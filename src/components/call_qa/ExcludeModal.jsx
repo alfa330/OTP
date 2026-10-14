@@ -53,6 +53,9 @@ export default function ExcludeModal({ open, call, department, apiBaseUrl, heade
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const fieldRef = useRef(null);
+    // Второе нажатие, пока первый запрос в пути: состояние busy ещё не отрисовалось,
+    // и без этой метки ушли бы два исключения — второе вернулось бы «уже исключили».
+    const inFlight = useRef(false);
     const headersRef = useRef(headers);
     headersRef.current = headers;
     const kind = call?.subject_kind || 'call';
@@ -94,7 +97,8 @@ export default function ExcludeModal({ open, call, department, apiBaseUrl, heade
 
     const submit = async () => {
         setAttempted(true);
-        if (!ready || busy || !call) return;
+        if (!ready || busy || !call || inFlight.current) return;
+        inFlight.current = true;
         setBusy(true); setError('');
         try {
             const r = await axios.post(`${apiBaseUrl}/api/ai-qa/exclusion`, {
@@ -113,6 +117,8 @@ export default function ExcludeModal({ open, call, department, apiBaseUrl, heade
             }
             setError(data.error || 'Не удалось исключить оценку — проверьте связь и повторите');
             setBusy(false);
+        } finally {
+            inFlight.current = false;
         }
     };
 

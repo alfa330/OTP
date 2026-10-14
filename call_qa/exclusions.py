@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 
@@ -37,6 +38,10 @@ REASON_MIN = 3        # «.» и «ок» — не причина
 REASON_MAX = 500
 TITLE_MAX = 60
 CATEGORIZE_MAX_ATTEMPTS = 3
+# После сбоя модели разбор отдела не повторяется раньше этой паузы: окно «Исключить
+# оценку» будит разбор при каждом открытии, и без паузы сбой Z.ai (429, таймаут)
+# превращался бы в серию платных повторов подряд.
+CATEGORIZE_COOLDOWN_S = 600
 CATEGORIZE_BATCH = 20
 EXAMPLES_PER_CATEGORY = 3
 EXAMPLE_MAX = 160
@@ -416,7 +421,17 @@ def categorize_pending(department: str, *, model_call=None) -> dict:
             existing = [{"id": int(r[0]), "title": r[1], "description": r[2] or "",
                          "examples": list(r[3] or [])} for r in cur.fetchall()]
             prompt = build_prompt(_department_name(cur, department), existing, pending)
-            answer = model_call(_SYSTEM, prompt)
+            try:
+                answer = model_call(_SYSTEM, prompt)
+            except Exception:
+                # Модель не ответила (сеть, 429, таймаут) — попытку не засчитываем: иначе
+                # три открытия окна во время сбоя сожгли бы все попытки, и причины навсегда
+                # остались бы без категории. Засчитывается ответ модели (и падение процесса
+                # посреди вызова), а частоту повторов держит пауза в schedule_categorize.
+                cur.execute("""UPDATE ai_qa_exclusions
+                                  SET categorize_attempts = GREATEST(categorize_attempts - 1, 0)
+                                WHERE id = ANY(%s)""", ([item["id"] for item in pending],))
+                raise
             plan = plan_assignments(answer, {item["id"] for item in pending},
                                     {item["id"] for item in existing})
             out.update(_apply_plan(cur, department, plan))
@@ -473,6 +488,7 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-qa-exclusio
 _guard = threading.Lock()
 _running: set[str] = set()
 _again: set[str] = set()
+_cooldown_until: dict[str, float] = {}
 
 
 def schedule_categorize(department: str) -> bool:
@@ -483,6 +499,8 @@ def schedule_categorize(department: str) -> bool:
     if not department:
         return False
     with _guard:
+        if time.monotonic() < _cooldown_until.get(department, 0.0):
+            return False
         if department in _running:
             _again.add(department)
             return False
@@ -497,8 +515,12 @@ def schedule_categorize(department: str) -> bool:
                     result = categorize_pending(department)
                     if result.get("pending"):
                         logging.info("ai-qa: причины исключений %s разобраны: %s", department, result)
+                    with _guard:
+                        _cooldown_until.pop(department, None)
                 except Exception:
                     logging.exception("ai-qa: не удалось разобрать причины исключений %s", department)
+                    with _guard:
+                        _cooldown_until[department] = time.monotonic() + CATEGORIZE_COOLDOWN_S
                     return
                 with _guard:
                     if department not in _again:

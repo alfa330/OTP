@@ -287,6 +287,7 @@ def _sample_chats(day, department, size) -> dict:
                       AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                        WHERE rc.subject_kind = %s AND rc.call_id = t.id
                                          AND rc.model = %s)
+                      AND """ + api._not_excluded_sql(f"'{kind}'", "t.id") + """
                     ORDER BY random() LIMIT %s""",
                             (*params, *pick_params, kind, kind, config.CLAUDE_MODEL, need))
                 ids = [int(row[0]) for row in cur.fetchall()]

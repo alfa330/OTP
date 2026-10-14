@@ -54,9 +54,21 @@ class SubjectPredicateTests(unittest.TestCase):
                       inspect.getsource(api.stats))
 
     def test_random_pickers_never_offer_an_excluded_subject_again(self):
-        self.assertIn("_not_excluded_sql(\"'call'\", \"c.id\")", inspect.getsource(api.random_call))
-        self.assertIn("_not_excluded_sql(f\"'{subject_kind}'\", \"t.id\")",
-                      inspect.getsource(api.random_chat_episode))
+        """Во ВСЕХ пулах и до первого запроса: после смены модели «не оценён текущей
+        моделью» исключённый разговор уже не отсекает."""
+        call = inspect.getsource(api.random_call)
+        pool1 = 'imported += " AND " + _not_excluded_sql("\'imported_call\'", "ic.id")'
+        self.assertIn(pool1, call)
+        self.assertLess(call.index(pool1), call.index("cur.execute(imported"))
+        self.assertIn('base += " AND " + _not_excluded_sql("\'call\'", "c.id")', call)
+        self.assertIn('_not_excluded_sql("\'imported_call\'", "c.imported_call_id")', call)
+        chat = inspect.getsource(api.random_chat_episode)
+        marker = 'base += " AND " + _not_excluded_sql(f"\'{subject_kind}\'", "t.id")'
+        self.assertIn(marker, chat)
+        self.assertLess(chat.index(marker), chat.index("cur.execute(base"))
+        from call_qa import daily_sample
+        self.assertIn('api._not_excluded_sql(f"\'{kind}\'", "t.id")',
+                      inspect.getsource(daily_sample._sample_chats))
 
     def test_excluded_list_is_the_same_selection_inverted(self):
         where = inspect.getsource(api._excluded_where)
@@ -298,8 +310,10 @@ class CategorizeTests(unittest.TestCase):
         self.assertIn('"category_id"', exclusions._SYSTEM)
         self.assertIn("Другое", exclusions._SYSTEM)
 
-    def test_attempt_is_counted_before_the_model_call(self):
-        """Упади модель или процесс посреди разбора — строка не просит вызов вечно."""
+    def test_attempt_is_counted_before_the_model_call_and_refunded_on_failure(self):
+        """Упади процесс посреди разбора — строка не просит вызов вечно (попытка
+        засчитана до вызова). А сбой самой модели (429, таймаут) попытку возвращает:
+        иначе три открытия окна во время сбоя сожгли бы все попытки."""
         cursor = _Cursor([(True,), [(41, "автоответчик", "imported_call")], [], ("Отдел продаж",), None])
         calls = []
 
@@ -312,6 +326,13 @@ class CategorizeTests(unittest.TestCase):
                 exclusions.categorize_pending("op", model_call=model)
         before_model = calls[0]
         self.assertTrue(any("categorize_attempts = categorize_attempts + 1" in sql for sql in before_model))
+        refund = [(sql, params) for sql, params in cursor.sql if "GREATEST(categorize_attempts - 1, 0)" in sql]
+        self.assertEqual(len(refund), 1)
+        self.assertEqual(refund[0][1], ([41],))
+        # Отбор не берёт строки сверх потолка попыток.
+        take = next((sql, params) for sql, params in cursor.sql if "categorize_attempts + 1" in sql)
+        self.assertIn("categorize_attempts < %s", take[0])
+        self.assertEqual(take[1][1], exclusions.CATEGORIZE_MAX_ATTEMPTS)
         self.assertIn("pg_advisory_unlock", cursor.sql[-1][0])
         self.assertFalse(any(sql.startswith("UPDATE ai_qa_exclusions SET category_id") for sql, _ in cursor.sql))
 
@@ -353,16 +374,176 @@ class CategorizeTests(unittest.TestCase):
             self.assertNotIn("op", exclusions._again)
             self.assertFalse(exclusions.schedule_categorize(""))
 
-    def test_scheduler_stops_on_model_failure_and_frees_the_department(self):
+    def test_scheduler_stops_on_model_failure_and_waits_a_cooldown(self):
+        now = [1000.0]
         with mock.patch.object(exclusions, "_executor") as executor, \
+                mock.patch.object(exclusions.time, "monotonic", side_effect=lambda: now[0]), \
                 mock.patch.object(exclusions, "categorize_pending", side_effect=RuntimeError("сеть")):
-            exclusions._running.clear(); exclusions._again.clear()
-            exclusions.schedule_categorize("szov")
+            exclusions._running.clear(); exclusions._again.clear(); exclusions._cooldown_until.clear()
+            self.assertTrue(exclusions.schedule_categorize("szov"))
             with self.assertLogs(level="ERROR"):
                 executor.submit.call_args.args[0]()
             self.assertNotIn("szov", exclusions._running)
+            # Сразу после сбоя — пауза: открытия окна не будят модель снова.
+            now[0] += exclusions.CATEGORIZE_COOLDOWN_S - 1
+            self.assertFalse(exclusions.schedule_categorize("szov"))
+            self.assertEqual(executor.submit.call_count, 1)
+            now[0] += 2
             self.assertTrue(exclusions.schedule_categorize("szov"))
+            # Другой отдел паузой не задет.
             exclusions._running.clear()
+            self.assertTrue(exclusions.schedule_categorize("op"))
+            exclusions._running.clear(); exclusions._cooldown_until.clear()
+
+
+class CountsTests(unittest.TestCase):
+    """Числа окна и экрана «Исключённые» — по действующим исключениям."""
+
+    def test_categories_count_only_active_and_pending_respects_the_cap(self):
+        cursor = _Cursor([[(7, "Ошибся номером", "", 2, 5)], (3,)])
+        with mock.patch.object(exclusions.config, "connect_ro", return_value=_Conn(cursor)):
+            out = exclusions.categories("op", "imported_call")
+        self.assertEqual(out, {"items": [{"id": 7, "title": "Ошибся номером", "description": "", "count": 5}],
+                               "pending": 3})
+        join_sql, join_params = cursor.sql[1]
+        self.assertIn("ON x.category_id = c.id AND x.restored_at IS NULL", join_sql)
+        self.assertEqual(join_params, (["call", "imported_call"], "op"))
+        pending_sql, pending_params = cursor.sql[2]
+        self.assertIn("restored_at IS NULL", pending_sql)
+        self.assertIn("categorize_attempts < %s", pending_sql)
+        self.assertEqual(pending_params, ("op", exclusions.CATEGORIZE_MAX_ATTEMPTS))
+
+    def test_category_pending_until_the_last_attempt(self):
+        def row(attempts, category=None):
+            return (1, category, None, None, "x", 5, "Имя", "14.10.2026", attempts)
+        self.assertTrue(exclusions._state_row(row(exclusions.CATEGORIZE_MAX_ATTEMPTS - 1))["category_pending"])
+        self.assertFalse(exclusions._state_row(row(exclusions.CATEGORIZE_MAX_ATTEMPTS))["category_pending"])
+        self.assertFalse(exclusions._state_row(row(0, category=3))["category_pending"])
+        self.assertIsNone(exclusions._state_row(None))
+
+    def _excluded_list(self, rows, facets, offset=0, extra=None):
+        answers = [facets, rows] + ([extra] if extra is not None else [])
+        cursor = _Cursor(answers)
+        with mock.patch.object(api.config, "connect_ro", return_value=_Conn(cursor)), \
+                mock.patch.object(api, "_excluded_where", return_value=(" WHERE TRUE", ())), \
+                mock.patch.object(api, "_marketing_join", return_value=""):
+            return api.excluded_list(limit=1, offset=offset, department="op"), cursor
+
+    def test_excluded_list_total_is_the_whole_selection_not_the_page(self):
+        import datetime as dt
+        row = (8930, "imported_call", "Основа", "Иванов", "13.10 09:13", dt.date(2026, 10, 13), 0.0,
+               1, 3, "Ошибся номером", "picked", "", "Петров", "14.10 12:30", 0, 5, 7)
+        out, cursor = self._excluded_list([row], [(3, "Ошибся номером", 5), (None, None, 2)])
+        self.assertEqual(out["total"], 7)
+        self.assertEqual(len(out["items"]), 1)
+        self.assertEqual(out["categories"], [{"id": 3, "title": "Ошибся номером", "count": 5}])
+        self.assertEqual(out["uncategorized"], 2)
+        self.assertEqual(out["items"][0]["exclusion"]["category"], "Ошибся номером")
+        self.assertEqual(out["items"][0]["day"], "2026-10-13")
+        self.assertIn("COUNT(*) OVER ()", cursor.sql[2][0])
+        # Страница за краем — общее число всё равно приходит, «Показать ещё» не теряется.
+        out, _ = self._excluded_list([], [(3, "Ошибся номером", 4)], offset=50, extra=(4,))
+        self.assertEqual(out["total"], 4)
+
+    def test_category_filter_must_be_an_id_or_none(self):
+        with self.assertRaises(ValueError):
+            api.excluded_list(category="abc")
+
+
+class RouteBehaviourTests(unittest.TestCase):
+    """Ручки — запуском (извлечены из bot_schedule2.py), а не поиском текста."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.nodes = {node.name: node for node in source_cache.parse(cls.src).body
+                     if isinstance(node, ast.FunctionDef) and node.name in (
+                         "api_ai_qa_exclusion", "api_ai_qa_exclusions", "api_ai_qa_exclusion_categories")}
+
+    def _route(self, name, *, method="POST", args=None, body=None, observer=False, **extra):
+        class _App:
+            def route(self, *a, **k):
+                return lambda fn: fn
+        namespace = {
+            "app": _App(), "require_api_key": lambda fn: fn,
+            "request": SimpleNamespace(method=method, args=dict(args or {}),
+                                       get_json=lambda silent=True, force=False: body),
+            "jsonify": lambda payload: payload,
+            "_build_cors_preflight_response": lambda: "preflight",
+            "_ai_qa_guard": lambda: (5, None),
+            "_ai_qa_subject_kind": lambda value, default=None: value or default,
+            "call_qa_config": SimpleNamespace(SUBJECT_CALL="call"),
+            "_is_marketing_observer": lambda uid: observer,
+            "logging": SimpleNamespace(info=lambda *a, **k: None, exception=lambda *a, **k: None),
+            **extra,
+        }
+        module = ast.Module(body=[self.nodes[name]], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, "<exclusion-route>", "exec"), namespace)
+        return namespace[name]()
+
+    def test_restore_needs_the_same_scope_as_exclude(self):
+        deny = ({"error": "субъект вне ваших направлений"}, 403)
+        with mock.patch.object(exclusions, "restore") as restore:
+            out = self._route("api_ai_qa_exclusion", method="DELETE",
+                              args={"subject_kind": "imported_call", "call_id": "8930"},
+                              _ai_qa_exclusion_subject=lambda uid, kind, cid: (None, deny))
+        self.assertEqual(out, deny)
+        restore.assert_not_called()
+
+    def test_department_comes_from_the_subject_not_the_request(self):
+        state = {"id": 1, "category_id": None}
+        with mock.patch.object(exclusions, "exclude", return_value=state) as exclude, \
+                mock.patch.object(exclusions, "schedule_categorize") as schedule:
+            out = self._route("api_ai_qa_exclusion",
+                              body={"subject_kind": "imported_call", "call_id": 8930,
+                                    "reason": "ошибся номером", "department": "op"},
+                              _ai_qa_exclusion_subject=lambda uid, kind, cid: ((69, "szov"), None))
+        self.assertEqual(out, ({"status": "success", "exclusion": state}, 200))
+        self.assertEqual(exclude.call_args.kwargs["department"], "szov")
+        self.assertEqual(exclude.call_args.kwargs["direction_id"], 69)
+        self.assertEqual(exclude.call_args.kwargs["user_id"], 5)
+        schedule.assert_called_once_with("szov")
+
+    def test_picked_category_does_not_wake_the_model(self):
+        with mock.patch.object(exclusions, "exclude", return_value={"id": 1, "category_id": 3}), \
+                mock.patch.object(exclusions, "schedule_categorize") as schedule:
+            self._route("api_ai_qa_exclusion", body={"subject_kind": "call", "call_id": 1, "category_id": 3},
+                        _ai_qa_exclusion_subject=lambda uid, kind, cid: ((73, "op"), None))
+        schedule.assert_not_called()
+
+    def test_refusal_keeps_its_status_and_the_first_reason(self):
+        error = exclusions.ExclusionError("Эту оценку уже исключили", 409, "already_excluded")
+        error.state = {"excluded_by": "Первый"}
+        with mock.patch.object(exclusions, "exclude", side_effect=error):
+            out = self._route("api_ai_qa_exclusion",
+                              body={"subject_kind": "call", "call_id": 1, "reason": "тест"},
+                              _ai_qa_exclusion_subject=lambda uid, kind, cid: ((73, "op"), None))
+        self.assertEqual(out, ({"error": "Эту оценку уже исключили", "code": "already_excluded",
+                                "exclusion": {"excluded_by": "Первый"}}, 409))
+
+    def test_observer_does_not_wake_the_model_and_cannot_restore(self):
+        common = {"_ai_qa_requested_department": lambda uid: ("op", None)}
+        for observer in (False, True):
+            with self.subTest(observer=observer), \
+                    mock.patch.object(exclusions, "categories", return_value={"items": [], "pending": 2}), \
+                    mock.patch.object(exclusions, "schedule_categorize") as schedule:
+                out = self._route("api_ai_qa_exclusion_categories", method="GET", args={"subject": "call"},
+                                  observer=observer, **common)
+                self.assertEqual(out[1], 200)
+                self.assertEqual(schedule.called, not observer)
+        listed = {"items": [], "total": 0, "categories": [], "uncategorized": 0}
+        for observer in (False, True):
+            with self.subTest(list_observer=observer), \
+                    mock.patch.object(api, "excluded_list", return_value=listed) as excluded:
+                out = self._route("api_ai_qa_exclusions", method="GET", args={"category": "3"},
+                                  observer=observer, _ai_qa_subject_filter=lambda value: "calls",
+                                  _ai_qa_list_filters=lambda: ({}, None),
+                                  _ai_qa_direction_scope=lambda uid: [73], **common)
+                self.assertEqual(out[0]["can_restore"], not observer)
+                self.assertEqual(excluded.call_args.kwargs["department"], "op")
+                self.assertEqual(excluded.call_args.kwargs["allowed_direction_ids"], [73])
+                self.assertEqual(excluded.call_args.kwargs["category"], "3")
 
 
 class RouteTests(unittest.TestCase):
