@@ -768,20 +768,22 @@ class LinesRoutesTests(unittest.TestCase):
         self.assertIn('headed_department_ids=_headed_department_ids,', call)
 
     def test_admin_heading_another_department_gets_no_right(self):
-        """Главный боевой случай: почти все админы на проде — главы своих отделов. Сервер
-        пускает их в ручки раздела (давняя нестыковка с меню), но права сажать и снимать
-        чужих это не даёт."""
+        """Главный боевой случай: почти все админы на проде — главы своих отделов. До 15.10.2026
+        сервер пускал их в ручки раздела (давняя нестыковка с меню); теперь админ раздела — как в
+        меню: роль admin без главенства или суперадмин. Глава чужого отдела мимо раздела, и ни
+        линий, ни посадки ему нет."""
         for heads in ([367], [560], [367, 560]):
             svc = self.Svc()
             client = self._client('admin', heads, svc)
-            body = client.get(self.URL).get_json()
-            self.assertIs(body["can_seat_anyone"], False, heads)
-            self.assertEqual(body["candidates"], [])
-            self.assertNotIn(('candidates', LINE_DEPARTMENT), svc.calls)
-            client.post(self.URL + '/assign', json={"user_id": 77, "internal_number": "906"})
-            client.post(self.URL + '/release', json={"user_id": 77})
-            self.assertIn(('assign', LINE_DEPARTMENT, 77, "906", 5, False), svc.calls)
-            self.assertIn(('release', LINE_DEPARTMENT, 77, 5, False), svc.calls)
+            self.assertEqual(client.get(self.URL).status_code, 403, heads)
+            self.assertEqual(client.post(self.URL + '/assign', json={"user_id": 77, "internal_number": "906"})
+                             .status_code, 403, heads)
+            self.assertEqual(client.post(self.URL + '/release', json={"user_id": 77}).status_code, 403, heads)
+            self.assertEqual(svc.calls, [], 'до права и до сервиса дело дойти не должно')
+        # Суперадмин — админ раздела, даже если возглавляет отдел (как в меню).
+        svc = self.Svc()
+        self.assertEqual(self._client('super_admin', [367], svc).get(self.URL).status_code, 200)
+        self.assertIn(('right', True, [367]), svc.calls)
 
     def test_section_stranger_gets_nothing(self):
         svc = self.Svc()

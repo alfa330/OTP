@@ -267,6 +267,9 @@ CALL_ERROR_PBX_BUSY = "pbx_busy"
 CALL_ERROR_RATE = "rate"
 CALL_ERROR_PBX = "pbx"
 CALL_ERRORS_NOT_COUNTED = (CALL_ERROR_LINE, CALL_ERROR_NETWORK, CALL_ERROR_PBX_BUSY, CALL_ERROR_RATE)
+# api_error попытки, когда у отдела не настроено подключение к Binotel (start_call): своя фраза, а
+# не текст АТС, — по ней её узнаёт и детализация звонков (calls_export.failure_note).
+BINOTEL_NOT_CONFIGURED = "подключение к Binotel не настроено"
 # Почему плечо положил сам телефон (dial_list_attempts.auto_hangup, ключ auto_hangup
 # события ended). Сообщение сети сильнее гудков: это всегда недозвон.
 AUTO_HANGUP_RING_TIMEOUT = "ring_timeout"
@@ -468,6 +471,13 @@ DIAL_LIST_SEAT_ANYONE_HEAD_CODES = frozenset({"szov"})
 # раздел удаленный КЦ всем супервайзерам СЗоВ с полным доступом»). Отдел — тот, где
 # СВ числится (users.department_id). Тот же список на фронте — в App.jsx.
 DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = frozenset({"szov"})
+
+# Глава этих отделов выгружает отчёты раздела только по своей группе (владелец, 15.10.2026:
+# «глава Регионов мог выгружать отчеты только по своей группе»; «Регионы» — группа отдела
+# «Фронт офисы», её люди с 15.10.2026 сидят на линиях удалённого КЦ). Раздел ему — одна
+# «Детализация»: звонки тех, кто в день звонка состоял в группах его отдела; ни вкладок, ни
+# остальных ручек. Тот же список на фронте — в App.jsx (пункт меню).
+DIAL_LIST_GROUP_REPORT_HEAD_CODES = frozenset({"front_office"})
 SEAT_ANYONE_DENIED = ("Сотрудника другого отдела сажают на линию и снимают с неё глава и супервайзеры СЗоВ "
                       "и суперадмины")
 # «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
@@ -841,6 +851,19 @@ def attempt_result(disposition, billsec=0, auto_hangup="", talk_detected=None):
     if result == "answered" and not attempt_talked(billsec, auto_hangup, talk_detected):
         return "no_answer"
     return result
+
+
+def attempt_outcome(state, disposition, billsec=0, auto_hangup="", talk_detected=None, cancelled=False):
+    """Исход попытки для руководителя — журнал, карточка водителя, детализация звонков:
+    answered | busy | no_answer | other | failed | cancelled; '' — исход от АТС ещё не пришёл.
+    Отмена (оператор сам завершил звонок до ответа водителя) сильнее исхода Binotel."""
+    if cancelled:
+        return "cancelled"
+    if state == "failed":
+        return "failed"
+    if state != "finished":
+        return ""
+    return attempt_result(disposition, billsec, auto_hangup, talk_detected) or "other"
 
 
 def _as_utc(value):
@@ -1563,6 +1586,23 @@ class DialListService:
             cur.execute("SELECT department_id FROM users WHERE id = %s", (int(supervisor_id),))
             row = cur.fetchone()
         return [int(row[0])] if row and row[0] is not None else []
+
+    def report_groups(self, headed_department_ids):
+        """Группы, по которым глава выгружает отчёты раздела (DIAL_LIST_GROUP_REPORT_HEAD_CODES): все
+        группы возглавляемых им отделов с кодом из списка — и архивные, по ним звонки прошлых дней.
+        [{id, name, active}]; [] — такого права нет."""
+        headed = sorted({int(x) for x in (headed_department_ids or [])})
+        if not headed:
+            return []
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT g.id, g.name, g.status = 'active'
+                FROM groups g
+                JOIN departments d ON d.id = g.department_id
+                WHERE g.department_id = ANY(%s) AND LOWER(COALESCE(d.code, '')) = ANY(%s)
+                ORDER BY g.status = 'active' DESC, g.name, g.id
+            """, (headed, sorted(DIAL_LIST_GROUP_REPORT_HEAD_CODES)))
+            return [{"id": int(r[0]), "name": r[1] or "", "active": bool(r[2])} for r in cur.fetchall()]
 
     def _heads_overseer(self, department_ids):
         """Возглавляет ли человек отдел-куратор раздела (код из DIAL_LIST_OVERSEER_DEPARTMENT_CODES)."""
@@ -3272,14 +3312,9 @@ class DialListService:
             state = r[23] or ""
             disposition = r[24] or ""
             # Исход — с поправкой на то, что услышал телефон (attempt_result): сообщение сети
-            # и ответ без разговора — недозвон, как у строки выдачи и у лида.
-            result = (attempt_result(disposition, r[25], r[48], r[49]) if state == "finished"
-                      else ("failed" if state == "failed" else ""))
-            if state == "finished" and not result:
-                result = "other"
-            if r[36]:
-                # Оператор сам завершил звонок до ответа водителя — попытка не в счёт.
-                result = "cancelled"
+            # и ответ без разговора — недозвон, как у строки выдачи и у лида. Отмена — оператор
+            # сам завершил звонок до ответа водителя, попытка не в счёт.
+            result = attempt_outcome(state, disposition, r[25], r[48], r[49], cancelled=r[36])
             last_call = {
                 "at": _iso(r[22]), "state": state, "disposition": disposition, "result": result,
                 "billsec": int(r[25] or 0), "api_error": (r[26] or "")[:200], "operator_name": r[27] or "",
@@ -3549,12 +3584,7 @@ class DialListService:
                 auto_hangup = r[30] or ""
                 # Исход — с поправкой на то, что услышал телефон (attempt_result): сообщение
                 # сети и ответ без разговора — недозвон.
-                result = (attempt_result(disposition, r[7], auto_hangup, r[31]) if state == "finished"
-                          else ("failed" if state == "failed" else ""))
-                if state == "finished" and not result:
-                    result = "other"
-                if r[24]:
-                    result = "cancelled"
+                result = attempt_outcome(state, disposition, r[7], auto_hangup, r[31], cancelled=r[24])
                 attempts.append({
                     # Оператор сам завершил звонок (когда — operator_hangup_at); cancelled —
                     # водитель при этом не ответил, попытка не засчитана.
@@ -5447,7 +5477,7 @@ class DialListService:
                 ctx["internal_number"], phone_norm, **extra)
         except DialListError as exc:
             # Подключение к Binotel у отдела не настроено — дело руководителя, не водителя.
-            self._fail_attempt(attempt_id, assignment_id, lead_id, "подключение к Binotel не настроено",
+            self._fail_attempt(attempt_id, assignment_id, lead_id, BINOTEL_NOT_CONFIGURED,
                                attempts_now, settings["max_attempts"], count_for_lead=False)
             exc.kind = CALL_ERROR_PBX
             raise
@@ -6906,6 +6936,28 @@ class DialListService:
         }
 
     # ------------------------------------------------------------ руководитель
+    def calls_export(self, department_id, day_from, day_to, generated_by="", text_warning_patch=None,
+                     groups=None):
+        """Детализация звонков отдела за дни day_from..day_to по Алматы (calls_export.py) →
+        (поток xlsx, звонков). Звонков нет — (None, 0): пустой файл никому не нужен, ручка
+        скажет это словами. Книга собирается, пока строки читаются одним запросом.
+        groups — [{id, name}] из report_groups: только звонки тех, кто в день звонка состоял в
+        этих группах (отчёт главы по своей группе); None — весь отдел."""
+        from . import calls_export
+        department_id = int(department_id)
+        group_ids = group_names = None
+        if groups is not None:
+            group_ids = [int(g["id"]) for g in groups]
+            # В «Контексте» — действующие группы; архивные фильтр берёт, а названием не шумят.
+            group_names = [g["name"] for g in groups if g.get("active", True)] or [g["name"] for g in groups]
+        with self.db._get_cursor() as cur:
+            department = calls_export.department_name(cur, department_id)
+            stream, written = calls_export.build_workbook(
+                calls_export.iter_calls(cur, department_id, day_from, day_to, group_ids=group_ids),
+                department=department, day_from=day_from, day_to=day_to, generated_by=generated_by,
+                text_warning_patch=text_warning_patch, groups=group_names)
+        return (stream, written) if written else (None, 0)
+
     # Сводка дня у отдела автообзвона Тез (15.10.2026): звонки автоцикла, согласия выйти на линию,
     # назначенные перезвоны, просрочки постобработки (итог — по due_kind).
     _OVERVIEW_TEZ_ATT = """,

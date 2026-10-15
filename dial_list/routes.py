@@ -125,10 +125,14 @@
 
 Ручки руководителя. Круг свой, не от «Настроек SIP»: админ, глава и СВ СЗоВ видят
 все отделы раздела, глава отдела — свои отделы, если они в периметре (Binotel,
-заведённые настройки обзвона или код из DIAL_LIST_DEPARTMENT_CODES):
+заведённые настройки обзвона или код из DIAL_LIST_DEPARTMENT_CODES). Админ — как в меню:
+роль admin без главенства или суперадмин; глава отдела с базовой ролью admin — руководитель
+только своего отдела (с 15.10.2026). Глава отдела из DIAL_LIST_GROUP_REPORT_HEAD_CODES («Регионы»
+фронт-офисов) — только две ручки: список отделов (с report_groups) и детализация звонков своих групп:
     GET     /api/dial_list/departments                       отделы раздела в моей зоне (?profile=remote_cc —
                                                              по умолчанию — | tez: автообзвон Тез; СВ Тез КЦ
-                                                             видит свой отдел)
+                                                             видит свой отдел); главе «Регионов» — только id
+                                                             и названия + report_groups
     POST    /api/dial_list/departments/<id>/enroll           подключить {profile?} — только админ
     GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела (у Тез — ещё auto_dial,
                                                              call_interval_sec, wrapup_sec, retry_schedule_min,
@@ -179,6 +183,12 @@
                                                              target: operator|pool} — список либо возврат в
                                                              очередь того же оператора (нет его в отделе —
                                                              в общий список); без номеров и ИИН
+    GET     /api/dial_list/departments/<id>/calls/export     детализация звонков за ?date_from=&date_to=
+                                                             (YYYY-MM-DD, дни по Алматы, не больше 31) — xlsx:
+                                                             звонки, итоги операторов, контекст; номер — маской,
+                                                             ИИН нет; звонков нет — 404 с кодом
+                                                             DIAL_LIST_CALLS_EXPORT_EMPTY; главе «Регионов» —
+                                                             звонки тех, кто в день звонка был в её группах
     GET     /api/dial_list/overview?date=YYYY-MM-DD[&department_id=]
 
 Binotel (без авторизации, токен в адресе И, по умолчанию, IP сервера Binotel — адрес, который
@@ -195,22 +205,24 @@ import os
 import uuid
 from datetime import date, datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
+from . import calls_export as calls_export_report
 from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
-                      DialListError, DialListService, parse_period, webhook_remote_addr)
+                      DialListError, DialListService, parse_period, pilot_allows, webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
 LEADS_MAX_FILE_SIZE_MB = 10
 LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
+XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 
 def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               resolve_requester, is_admin_role, headed_department_ids,
                               is_super_admin_role=None, is_supervisor_role=None,
                               department_code_of=None, service=None, tez_leads_mirror=None,
-                              is_global_admin=None):
+                              is_global_admin=None, excel_text_warning=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
     is_global_admin(requester_id, role) -> bool — администратор всей компании, а не глава отдела
@@ -223,7 +235,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     раздела не получают);
     tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period) -> dict —
     тот же файл базы автообзвона Тез ещё и в «Базу лидов ОП TEZ» (владелец, 15.10.2026: одна
-    загрузка на обе); не передан — только в раздел."""
+    загрузка на обе); не передан — только в раздел;
+    excel_text_warning(stream, sqref, sheet_path) — гасит в детализации звонков зелёный уголок
+    «Число сохранено как текст» (функция монолита; не передана — файл с уголком)."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -248,16 +262,26 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             return None
         return department_code_of(requester_id)
 
+    def _section_admin(role, headed):
+        """Админ всей компании для раздела — как в меню (isAdminLikeRole в App.jsx): роль admin без
+        главенства или суперадмин. Глава отдела с базовой ролью admin — руководитель СВОЕГО отдела:
+        до 15.10.2026 сервер считал его админом раздела, и глава «Регионов» через «Детализацию»
+        получила бы весь отдел, а не свою группу."""
+        if not is_admin_role(role):
+            return False
+        return not headed or bool(is_super_admin_role and is_super_admin_role(role))
+
     def _manager(department_id=None):
         """Руководитель раздела и его зона (None — все отделы раздела)."""
         requester_id, requester = _operator()
         role = requester[3]
         # Логин — восьмое поле строки get_user (u.login); по нему работает пилот.
         login = requester[7] if len(requester) > 7 else None
+        headed = list(headed_department_ids(requester_id) or [])
         # supervisor_id — у СВ: отдел, которому раздел открыт своим отделом (Тез КЦ, 15.10.2026).
         supervisor_code = _supervisor_department_code(requester_id, role)
         extra = {"supervisor_id": requester_id} if supervisor_code is not None else {}
-        scope = svc.manager_scope(bool(is_admin_role(role)), headed_department_ids(requester_id), login=login,
+        scope = svc.manager_scope(_section_admin(role, headed), headed, login=login,
                                   supervisor_department_code=supervisor_code, **extra)
         if scope is not None and not scope:
             raise DialListError("Раздел «Удаленный КЦ» вам недоступен", 403)
@@ -273,6 +297,20 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         if is_global_admin is not None:
             return bool(is_global_admin(requester_id, role))
         return bool(is_admin_role(role))
+
+    def _report_groups_or_raise(refusal):
+        """Отказ _manager — последняя проверка: глава отдела из DIAL_LIST_GROUP_REPORT_HEAD_CODES
+        выгружает отчёты своей группы (svc.report_groups). Нет такого права — прежний отказ."""
+        if refusal.status != 403:
+            raise refusal
+        requester_id, requester = _operator()
+        # Пилот раздела (DIAL_LIST_PILOT_LOGINS) действует и здесь, как в manager_scope.
+        if not pilot_allows(requester[7] if len(requester) > 7 else None):
+            raise refusal
+        groups = svc.report_groups(headed_department_ids(requester_id))
+        if not groups:
+            raise refusal
+        return groups
 
     def _seats_anyone():
         """Может ли запросивший сажать на линию сотрудника ДРУГОГО отдела и снимать
@@ -477,8 +515,25 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         подключение (отделы на Binotel, которых в разделе пока нет).
 
         ?profile=remote_cc (по умолчанию) | tez — отделы одного раздела сайта: «Удаленный КЦ» и
-        «Автообзвон Тез» (15.10.2026) живут на одном движке, но списки отделов у них свои."""
-        _requester_id, scope = _manager()
+        «Автообзвон Тез» (15.10.2026) живут на одном движке, но списки отделов у них свои.
+
+        Глава «Регионов» (отчёты своей группы) — только в «Удаленном КЦ»: отделы раздела с id и
+        названием и report_groups — по ним сайт открывает раздел одной «Детализацией», без вкладок."""
+        try:
+            _requester_id, scope = _manager()
+        except DialListError as refusal:
+            if (request.args.get('profile') or PROFILE_REMOTE_CC).strip().lower() != PROFILE_REMOTE_CC:
+                raise
+            groups = _report_groups_or_raise(refusal)
+            return jsonify({
+                "status": "success",
+                "profile": PROFILE_REMOTE_CC,
+                "departments": [{"department_id": d["department_id"], "department_name": d["department_name"],
+                                 "profile": PROFILE_REMOTE_CC}
+                                for d in svc.list_departments(None, profile=PROFILE_REMOTE_CC)],
+                "candidates": [],
+                "report_groups": [{"id": g["id"], "name": g["name"], "active": g["active"]} for g in groups],
+            }), 200
         profile = (request.args.get('profile') or PROFILE_REMOTE_CC).strip().lower()
         if profile not in PROFILES:
             raise DialListError("profile: remote_cc или tez")
@@ -916,6 +971,42 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         return jsonify({"status": "success", **svc.repair_cut_calls(
             department_id, payload.get('since'), apply=apply, target=payload.get('target') or 'operator',
             actor_id=requester_id)}), 200
+
+    # ── детализация звонков ─────────────────────────────────────────────────
+    @bp.route('/api/dial_list/departments/<int:department_id>/calls/export', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def calls_export(department_id):
+        """Детализация звонков отдела за дни ?date_from=&date_to= (YYYY-MM-DD, по Алматы) — xlsx
+        (dial_list/calls_export.py). Номер водителя — маской, как в журнале; ИИН нет. Звонков за
+        период нет — 404 с кодом: сайт скажет это словами, а не отдаст пустой файл.
+
+        Глава «Регионов» (DIAL_LIST_GROUP_REPORT_HEAD_CODES) — только звонки людей своих групп, и
+        только в отделах раздела."""
+        groups = None
+        try:
+            _manager(department_id)
+        except DialListError as refusal:
+            groups = _report_groups_or_raise(refusal)
+            remote_cc = svc.list_departments(None, profile=PROFILE_REMOTE_CC)
+            if int(department_id) not in {d["department_id"] for d in remote_cc}:
+                raise DialListError("Это не отдел раздела «Удаленный КЦ»", 403)
+        _requester_id, requester = _operator()
+        try:
+            day_from, day_to = calls_export_report.parse_days(request.args.get('date_from'),
+                                                              request.args.get('date_to'))
+        except ValueError as exc:
+            raise DialListError(str(exc))
+        stream, written = svc.calls_export(department_id, day_from, day_to,
+                                           generated_by=(requester[2] if len(requester) > 2 else '') or '',
+                                           text_warning_patch=excel_text_warning, groups=groups)
+        if not written:
+            return jsonify({"error": "За выбранный период звонков не было",
+                            "code": "DIAL_LIST_CALLS_EXPORT_EMPTY"}), 404
+        log.info("dial_list: детализация звонков отдела %s за %s..%s%s — %d звонков", department_id,
+                 day_from, day_to, '' if groups is None else f" (группы {[g['id'] for g in groups]})", written)
+        return send_file(stream, mimetype=XLSX_MIME, as_attachment=True,
+                         download_name=calls_export_report.report_filename(day_from, day_to))
 
     @bp.route('/api/dial_list/overview', methods=['GET', 'OPTIONS'])
     @require_api_key

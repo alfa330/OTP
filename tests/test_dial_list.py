@@ -777,9 +777,9 @@ class LeadsJournalTests(unittest.TestCase):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         journal_part = src[src.index('# ── журнал водителей'):src.index("@bp.route('/api/dial_list/overview'")]
         routes = [chunk for chunk in journal_part.split('@bp.route(')[1:]]
-        # Карточка, «вернуть», «исключить», «проверить подписание», заметка, запись, список и
-        # починка автосброса (13.10.2026).
-        self.assertEqual(len(routes), 8)
+        # Карточка, «вернуть», «исключить», «проверить подписание», заметка, запись, список,
+        # починка автосброса (13.10.2026) и детализация звонков (15.10.2026).
+        self.assertEqual(len(routes), 9)
         for chunk in routes:
             self.assertIn('_manager(', chunk, 'ручка журнала без проверки зоны руководителя')
             self.assertIn('@require_api_key', chunk)

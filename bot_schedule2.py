@@ -67154,6 +67154,8 @@ try:
         # Перевод отдела между разделами (профиль) — только администратору компании: у глав
         # отделов роль админская, но зона — свой отдел (_is_global_admin_requester).
         is_global_admin=lambda requester_id, role: _is_global_admin_requester(role, requester_id),
+        # Детализация звонков: линия в файле — текстом, без зелёного уголка Excel.
+        excel_text_warning=_excel_suppress_number_as_text_warning,
     )
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service
