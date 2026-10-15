@@ -21,6 +21,7 @@ MAX_TITLE = 160
 
 # Что сделать исполнителю — заголовок уведомления о новой задаче.
 TASK_TITLES = {
+    workflow.KIND_ENTITY: 'Уточните компанию',
     workflow.KIND_MANAGER: 'Согласуйте закуп',
     workflow.KIND_APPROVAL: 'Утвердите закуп',
     workflow.KIND_INVOICE: 'Новый счёт на оплату',
@@ -130,6 +131,20 @@ def clarification(request, *, reason_label, comment, by_label):
             'Запросил: %s' % _esc(by_label),
             'Причина: %s' % _esc(reason_label) if reason_label else '',
             _esc(comment, 600) if comment else '',
+        ]),
+    }
+
+
+def entity_set(request):
+    """Бухгалтерия указала компанию, которой инициатор не знал (просьба владельца 15.10.2026):
+    теперь он знает, на какую компанию просить счёт у поставщика."""
+    entity = request.get('legal_entity_name') or 'компания из справочника'
+    return {
+        'kind': 'entity_set',
+        'title': 'Компания указана',
+        'body': '%s — %s' % (brief(request), _cut(entity, 120)),
+        'telegram': _message('🏢 Оплата счетов — компания указана', request, [
+            'Компания: %s' % _esc(entity, MAX_TITLE),
         ]),
     }
 

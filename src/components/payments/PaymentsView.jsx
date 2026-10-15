@@ -456,6 +456,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     <>
                         <div className={`truncate ${text.main}`}>{request.stage_label || '—'}</div>
                         {st === 'clarification' && <div className="truncate text-[12px] leading-4 text-amber-700">{stageLine(request).toLowerCase()}</div>}
+                        {/* Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование. */}
+                        {request.current_kind === 'entity_clarify' && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>уточнение компании</div>}
                     </>
                 ) : <StatePill request={request} />;
             case 'responsible': {

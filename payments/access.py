@@ -56,6 +56,8 @@ BOARD_FINANCE = 'finance'
 
 # Подзадачи согласования (workflow.APPROVAL_KINDS): этап руководителя и утверждение.
 APPROVAL_KINDS = ('manager_approval', 'approval')
+# Уточнение компании бухгалтерией (workflow.KIND_ENTITY): заявка у бухгалтерии, но не в оплате.
+ENTITY_KIND = 'entity_clarify'
 
 
 def user_id(ctx):
@@ -262,6 +264,7 @@ def can_cancel_request(ctx, request):
     отменяет: платёж в банке мог уже уйти, а «Оплачено» ещё не нажато — отмена
     в этот момент оставила бы оплату без заявки. Отменяет администратор раздела;
     как только заявку вернули инициатору (уточнение), он снова вправе её отменить.
+    Пока бухгалтерия только уточняет компанию, до оплаты далеко — отмена открыта.
     """
     if not request or request.get('status') != 'active' or request.get('paid_on'):
         return False
@@ -270,6 +273,8 @@ def can_cancel_request(ctx, request):
     me = user_id(ctx)
     if me is None or _int(request.get('initiator_id')) != me:
         return False
+    if request.get('current_kind') == ENTITY_KIND:
+        return True
     return request.get('current_role_code') not in (ROLE_ACCOUNTING, ROLE_FINANCE)
 
 

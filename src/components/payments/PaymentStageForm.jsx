@@ -56,10 +56,12 @@ const useAttachments = (data, kind) => useMemo(() => {
 /* Чего не хватает этапу — пунктами с ключом поля, как у формы заявки
    (paymentsMeta.purchaseIssues): по ключу поле обводится красным и к нему ведут
    стрелки. Правила — те же, что у сервера (workflow.missing_for_action). */
-export const stageIssues = (kind, { request = {}, paid = {}, received = {}, assets = [], kinds = new Set(), queued = 0 } = {}) => {
+export const stageIssues = (kind, { request = {}, paid = {}, received = {}, assets = [], kinds = new Set(), queued = 0, entityId = null } = {}) => {
     const issues = [];
     const add = (key, text) => issues.push({ key, text });
-    if (kind === 'invoice_payment') {
+    if (kind === 'entity_clarify') {
+        if (!entityId) add('legal_entity_id', 'выберите компанию');
+    } else if (kind === 'invoice_payment') {
         if (!paid.paid_on) add('paid_on', 'укажите дату оплаты');
         if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите фактическую сумму');
         if (!kinds.has('payment_order')) add('files', 'приложите платёжное поручение');
@@ -170,12 +172,13 @@ const PaymentStageForm = ({
         received_on: todayISO(), received_quantity: request.object_type === 'goods' ? quantityText(data.items) : '',
     });
     const [assets, setAssets] = useState(() => assetsFromRequest(request, data.items));
+    const [entityId, setEntityId] = useState(null);
     // Нажали кнопку этапа, а чего-то не хватало: с этого момента пустые поля красные.
     const [reveal, setReveal] = useState(false);
     const formRef = useRef(null);
 
     const kinds = new Set([...own.map((item) => item.kind), ...files.map((entry) => entry.kind)]);
-    const issues = stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length });
+    const issues = stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length, entityId });
     const byKey = issuesByKey(issues);
     const keys = issueKeys(issues);
     const nav = useIssueNav(formRef, keys);
@@ -262,6 +265,38 @@ const PaymentStageForm = ({
                         </button>
                     )}
                 </div>
+            </>,
+        );
+    }
+
+    // ── Бухгалтерия: компания, которой не знал инициатор (просьба владельца 15.10.2026) ──
+    // Под рукой — то, по чему решают, чья это покупка: подразделение, инициатор, проект и
+    // филиал. Что закупают и у кого — в сводке над страницами.
+    if (kind === 'entity_clarify') {
+        const entityOptions = (dictionaries?.legal_entities || []).map((item) => ({ value: item.id, label: item.name }));
+        return wrap(
+            <>
+                <div className="rounded-xl bg-slate-50 px-3 py-1.5">
+                    <Row label="Подразделение">{request.department_name}</Row>
+                    <Row label="Инициатор">{request.initiator_name}</Row>
+                    <Row label="Проект">{request.project_name}</Row>
+                    <Row label="Филиал / регион">{request.branch}</Row>
+                </div>
+                <Field label="Компания" required optionalMark={false} hint={HINTS.entityClarify} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
+                    <FormSelect
+                        value={entityId}
+                        onChange={(value) => setEntityId(value || null)}
+                        options={entityOptions}
+                        placeholder={entityOptions.length ? 'Выберите компанию' : 'Справочник компаний пуст'}
+                        disabled={!entityOptions.length}
+                        searchable={entityOptions.length > 8}
+                        ariaLabel="Компания"
+                    />
+                </Field>
+                <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
+                <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('set_entity', { legal_entity_id: entityId }, false))}>
+                    {busy && <Loader2 size={14} className="animate-spin" />} Указать компанию
+                </button>
             </>,
         );
     }

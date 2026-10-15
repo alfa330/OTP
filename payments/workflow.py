@@ -165,6 +165,7 @@ KIND_RECEIPT = 'receipt_confirm'
 KIND_RECEIVING = 'receiving'
 KIND_ASSETS = 'asset_registration'
 KIND_CLOSING = 'closing_docs'
+KIND_ENTITY = 'entity_clarify'
 
 BOARD_APPROVAL = 'approval'
 BOARD_ACCOUNTING = 'accounting'
@@ -178,6 +179,17 @@ SUBTASKS = (
         'kind': KIND_INITIATION, 'position': 0, 'stage': STAGE_INITIATION, 'role': ROLE_INITIATOR,
         'title': 'Заявка у инициатора', 'board': None, 'statuses': ('draft', 'rework', 'clarification'),
         'brief': 'Дополните заявку и отправьте её дальше.',
+    },
+    # Просьба владельца 15.10.2026: компанию в новом закупе инициатор указывает, если знает.
+    # Не знает — оставляет поле пустым, и после отправки заявка сначала уходит бухгалтерии:
+    # она указывает компанию, и только потом заявка идёт на согласование — так матрица (п. 6)
+    # выбирает согласующего уже с компанией, а счёт выставляется на неё. Этап стоит на ступени
+    # «Согласование»: «Инициация» значила бы «заявка у инициатора» и открыла бы ему правку.
+    {
+        'kind': KIND_ENTITY, 'position': 5, 'stage': STAGE_APPROVAL, 'role': ROLE_ACCOUNTING,
+        'title': 'Уточнение компании', 'board': None, 'statuses': ('new',),
+        'brief': 'Инициатор не знает, для какой компании закуп. Выберите компанию — после этого '
+                 'заявка уйдёт на согласование.',
     },
     {
         'kind': KIND_MANAGER, 'position': 10, 'stage': STAGE_APPROVAL, 'role': ROLE_MANAGER,
@@ -970,6 +982,14 @@ def needs_asset_registration(request):
             and request.get('accounting_category') == ACCOUNTING_ASSET)
 
 
+def needs_entity_step(request):
+    """Компанию заявки уточняет бухгалтерия: инициатор нового закупа её не указал —
+    не знает, для какой компании закуп. Заявке первой версии и регулярному платежу
+    компания нужна при отправке (missing_for_submit) — этапа у них не бывает."""
+    return (request.get('request_kind') == KIND_PURCHASE and not request.get('legal_entity_id')
+            and not accepted_before(request))
+
+
 def needs_receipt(request):
     """Чек нужен, когда пополнили карту сотрудника (п. 5.3)."""
     return (request.get('payment_method') == METHOD_CARD
@@ -980,6 +1000,9 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
     """Подзадачи заявки по порядку — этапы п. 2 для ЭТОЙ заявки.
 
     initiator / manager / approver — {'id', 'name'} либо None. Что влияет:
+      * уточнение компании бухгалтерией — первым, если инициатор нового закупа
+        компанию не указал (needs_entity_step); после него маршрут строится
+        заново, уже с компанией (flow.act, действие `set_entity`);
       * этап руководителя — если предусмотрен (`manager_step`); предусмотрен,
         но руководитель у инициатора не определён (владелец, глава без
         начальника) — подзадача ПРОПУСКАЕТСЯ с пометкой, иначе заявка зависла
@@ -1000,6 +1023,8 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
         })
 
     add(KIND_INITIATION, assignee=initiator)
+    if needs_entity_step(request):
+        add(KIND_ENTITY)
     if manager_step:
         if manager and manager.get('id'):
             add(KIND_MANAGER, assignee=manager)
@@ -1077,7 +1102,9 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     Цель ТЗ — «исключить подачу заявок с неполными данными», поэтому поля
     заявки из п. 4 обязательны. У варианта поставщика (п. 4.2) обязательны
     название и стоимость; условия, ссылка, комментарий и вложение ТЗ
-    обязательными не называет — их заполняют, когда они есть.
+    обязательными не называет — их заполняют, когда они есть. Компания у нового
+    закупа — исключение (просьба владельца 15.10.2026): не знает её инициатор —
+    её укажет бухгалтерия первым этапом маршрута (needs_entity_step).
 
     `attachments` — вложения заявки (list of {'kind'}); `card_number_ok` — номер
     карты введён и годится (сам номер сюда не передаётся). `invoice_required` —
@@ -1102,7 +1129,9 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
         if method != METHOD_CARD and invoice_required:
             missing += _invoice_missing(request, kinds)
         return missing
-    if not request.get('legal_entity_id'):
+    if kind == KIND_REGULAR and not request.get('legal_entity_id'):
+        # Компанию регулярного платежа задаёт справочник (п. 4.4) — без неё платёж
+        # не отправить. У нового закупа пустая компания значит «не знаю».
         missing.append('Выберите компанию-плательщика')
     if not request.get('department_id'):
         missing.append('Укажите подразделение')
@@ -1226,6 +1255,7 @@ def _plural(count, forms):
 
 ACTIONS = {
     KIND_INITIATION: ('submit',),
+    KIND_ENTITY: ('set_entity',),
     KIND_MANAGER: ('approve', 'return', 'reject'),
     KIND_APPROVAL: ('approve', 'return', 'reject'),
     KIND_INVOICE: ('pay', 'request_info'),
@@ -1239,7 +1269,7 @@ ACTION_LABELS = {
     'submit': 'Отправить', 'approve': 'Согласовать', 'return': 'Вернуть на доработку',
     'reject': 'Отклонить', 'pay': 'Оплачено', 'top_up': 'Пополнено', 'request_info': 'Запросить информацию',
     'provide': 'Отправить чек', 'confirm': 'Подтвердить получение', 'register': 'Поставить на учёт',
-    'docs_original': 'Оригинал получен', 'docs_close': 'Закрыть документы',
+    'docs_original': 'Оригинал получен', 'docs_close': 'Закрыть документы', 'set_entity': 'Указать компанию',
 }
 
 ASSET_REQUIRED_FIELDS = (
@@ -1326,6 +1356,8 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
                 missing.append('Имущество №%s: не заполнено — %s' % (index, ', '.join(gaps)))
         if 'handover_act' not in kinds:
             missing.append('Приложите акт приёма-передачи')              # п. 11, п. 15
+    if action == 'set_entity' and not fields.get('legal_entity_id'):
+        missing.append('Выберите компанию')
     if action == 'docs_close' and CLOSING_DOC_ORDER.get(request.get('closing_docs_status'), 0) < CLOSING_DOC_ORDER[DOCS_SCAN]:
         missing.append('Закрывающие документы ещё не получены — нужен скан или оригинал')
     return missing

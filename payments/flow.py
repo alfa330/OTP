@@ -169,6 +169,11 @@ _ROLE_WITHOUT_PEOPLE = {
     workflow.ROLE_FINANCE: 'Пополнить карту некому: в роли «Финансовый отдел» нет участников',
     workflow.ROLE_ASSET_KEEPER: 'Поставить имущество на учёт некому: не назначен ответственный за учёт имущества',
 }
+# Этапы, которые роль выполняет помимо главного дела: уточнить компанию — тоже бухгалтерии,
+# но «оплатить счёт некому» сказало бы о другом.
+_KIND_WITHOUT_PEOPLE = {
+    workflow.KIND_ENTITY: 'Уточнить компанию некому: в роли «Бухгалтерия» нет участников',
+}
 
 
 def route_gaps(route, members, initiator_id):
@@ -178,17 +183,41 @@ def route_gaps(route, members, initiator_id):
     появилась бы ни у кого на рабочем столе. Своя заявка утверждающему не
     считается (см. access.approves_own_request).
     """
-    gaps = []
+    gaps, empty_roles = [], set()
     for entry in route:
         role = entry['role_code']
-        if entry.get('state') == 'skipped' or entry.get('assignee_id') or role not in _ROLE_WITHOUT_PEOPLE:
+        if (entry.get('state') == 'skipped' or entry.get('assignee_id') or role not in _ROLE_WITHOUT_PEOPLE
+                or role in empty_roles):
             continue
         people = {int(uid) for uid in (members or {}).get(role) or ()}
         if role == workflow.ROLE_APPROVER:
             people.discard(int(initiator_id or 0))
-        if not people and _ROLE_WITHOUT_PEOPLE[role] not in gaps:
-            gaps.append(_ROLE_WITHOUT_PEOPLE[role])
+        if not people:
+            # Пустая роль называется один раз — тем её этапом, что встретится первым.
+            empty_roles.add(role)
+            gaps.append(_KIND_WITHOUT_PEOPLE.get(entry['kind']) or _ROLE_WITHOUT_PEOPLE[role])
     return gaps
+
+
+def plan_route(cursor, request, initiator, manager):
+    """Маршрут заявки по матрице согласования (п. 6): (основание, подзадачи).
+
+    Им пользуются отправка заявки и уточнение компании: компания — условие
+    матрицы, и после её выбора согласующего и этап руководителя выбирают заново.
+    Маршрут с этапом, который некому выполнить, не проходит — FlowError.
+    """
+    basis = approval_basis(cursor, request)
+    approver = _approver_of(cursor, basis, initiator)
+    route = workflow.build_route(request, initiator=initiator, manager=manager,
+                                 manager_step=basis['manager_step'], approver=approver)
+    gaps = route_gaps(route, queries.role_member_ids(cursor), initiator['id'])
+    if workflow.needs_entity_step(request) and not directory.list_legal_entities(cursor):
+        # Без компании заявка ушла бы бухгалтерии, а той не из чего выбрать — застряла бы у неё.
+        gaps.append('Компанию указать не из чего: в справочнике «Реквизиты компаний» нет действующих компаний')
+    if gaps:
+        raise FlowError('%s. Обратитесь к администратору раздела' % '; '.join(gaps),
+                        code='PAYMENTS_ROLES_NOT_CONFIGURED', status=409, missing=gaps)
+    return basis, route
 
 
 def _invoice_gate(cursor, request):
@@ -306,21 +335,20 @@ def submit(cursor, request_id, actor, *, comment=None, outbox=None, base_url=Non
         queries.complete_subtask(cursor, initiation['id'], actor, outcome='submitted', comment=comment)
 
     if rerouted:
-        basis = approval_basis(cursor, request)
-        approver = _approver_of(cursor, basis, initiator)
-        route = workflow.build_route(request, initiator=initiator, manager=manager,
-                                     manager_step=basis['manager_step'], approver=approver)
-        gaps = route_gaps(route, queries.role_member_ids(cursor), initiator['id'])
-        if gaps:
-            raise FlowError('%s. Обратитесь к администратору раздела' % '; '.join(gaps),
-                            code='PAYMENTS_ROLES_NOT_CONFIGURED', status=409, missing=gaps)
-        queries.write_route(cursor, request_id, route)
+        basis, route = plan_route(cursor, request, initiator, manager)
+        entity_step = any(entry['kind'] == workflow.KIND_ENTITY for entry in route)
+        # Компанию бухгалтерия уже указала, а условия сменились по другой причине: этап уточнения
+        # пройден — в «Ходе заявки» он остаётся выполненным, а не «не требуется».
+        clarified = queries.read_subtask(cursor, request_id, workflow.KIND_ENTITY)
+        keep = (workflow.KIND_ENTITY,) if (not entity_step and clarified and clarified['state'] == 'done') else ()
+        queries.write_route(cursor, request_id, route, keep=keep)
         queries.mark_submitted(cursor, request_id, snapshot=workflow.essentials(request), basis=basis,
                                manager=manager, set_manager=True, reset_approval=True)
         queries.log_event(
             cursor, request_id, 'submitted', actor, comment=comment,
             payload={'first': first_time, 'changed': changed, 'approver': basis.get('approver_name'),
-                     'basis': basis.get('basis'), 'manager_step': basis.get('manager_step')})
+                     'basis': basis.get('basis'), 'manager_step': basis.get('manager_step'),
+                     'entity_step': entity_step})
         following = advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)
         return {'rerouted': True, 'next': following, 'changed': changed}
 
@@ -392,6 +420,10 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
         _fail_missing(missing, code='PAYMENT_ACTION_INCOMPLETE')
 
     done = dict(outbox=outbox, base_url=base_url)
+
+    # ── Уточнение компании (просьба владельца 15.10.2026) ──
+    if action == 'set_entity':
+        return _set_entity(cursor, request, subtask, actor, fields.get('legal_entity_id'), comment, **done)
 
     # ── Согласование ──
     if action == 'approve':
@@ -493,6 +525,81 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
         return {'next': advance(cursor, request_id, actor, **done)}
 
     raise FlowError('Действие не поддерживается', code='PAYMENT_ACTION_UNKNOWN', status=400)
+
+
+def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=None, base_url=None):
+    """Бухгалтерия указала компанию, которой инициатор не знал. Компания — условие
+    матрицы согласования (п. 6), поэтому маршрут после этапа строится заново: кому
+    из утверждающих уйдёт заявка и нужен ли этап руководителя, решается уже с ней.
+
+    Что решили люди, пока компанию уточняли, пересборка не отменяет: этап, который
+    администратор передал другому, остаётся у того, кому передан. Руководитель — тот,
+    кто стоит на этапе; уволили его за это время — руководителя ищут заново."""
+    request_id = request['id']
+    entity = directory.read_legal_entity(cursor, entity_id)
+    if not entity or not entity.get('is_active'):
+        raise FlowError('Компании нет среди действующих в справочнике «Реквизиты компаний»',
+                        code='PAYMENT_ENTITY_UNKNOWN', missing=['Выберите компанию'])
+    queries.update_request_fields(cursor, request_id, {'legal_entity_id': entity['id']})
+    request = queries.read_request(cursor, request_id)
+    initiator = {'id': request.get('initiator_id'), 'name': request.get('initiator_name')}
+    steps = {item['kind']: item for item in queries.list_subtasks(cursor, request_id)}
+    manager = _current_manager(cursor, request, steps.get(workflow.KIND_MANAGER))
+    basis, route = plan_route(cursor, request, initiator, manager)
+    # Утверждение администратор передал вручную — его выбор остаётся, даже если он совпал с
+    # тем, кого матрица назвала при отправке без компании.
+    approval = steps.get(workflow.KIND_APPROVAL) or {}
+    if approval.get('state') == 'pending' and _reassigned_since_sent(cursor, request_id, workflow.KIND_APPROVAL):
+        for entry in route:
+            if entry['kind'] == workflow.KIND_APPROVAL:
+                entry.update(assignee_id=approval.get('assignee_id'), assignee_name=approval.get('assignee_name'))
+
+    notices.clear_subtask(cursor, subtask['id'])
+    queries.complete_subtask(cursor, subtask['id'], actor, outcome='entity_set', comment=comment)
+    queries.write_route(cursor, request_id, route, keep=(workflow.KIND_ENTITY,))
+    queries.set_route_basis(cursor, request_id, basis)
+    # Условия, с которыми заявка ушла от инициатора, — теперь с компанией: иначе его ответ
+    # на будущий возврат счёл бы её «сменой условий» и отправил заявку на согласование заново.
+    snapshot = workflow.essentials(request)
+    if (request.get('submitted_snapshot') or {}).get('stale'):
+        snapshot['stale'] = True
+    queries.touch_snapshot(cursor, request_id, snapshot)
+    queries.log_event(cursor, request_id, 'entity_set', actor, comment=comment, payload={
+        'kind': subtask['kind'], 'legal_entity_id': entity['id'], 'legal_entity_name': entity.get('name'),
+        'approver': basis.get('approver_name'), 'basis': basis.get('basis')})
+    # Инициатор компании не знал — теперь знает, на какую компанию просить счёт у поставщика.
+    _notify_initiator(cursor, request, notify.entity_set(request), outbox=outbox, base_url=base_url, actor=actor)
+    return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)}
+
+
+def _reassigned_since_sent(cursor, request_id, kind):
+    """Передавал ли администратор этап вручную после последней отправки заявки (история п. 18)."""
+    manual = False
+    for event in queries.list_events(cursor, request_id):
+        if event['kind'] == 'submitted':
+            manual = False
+        elif event['kind'] == 'reassigned' and (event.get('payload') or {}).get('kind') == kind:
+            manual = True
+    return manual
+
+
+def _current_manager(cursor, request, step):
+    """Руководитель для маршрута после уточнения компании: тот, кто стоит на этапе
+    (администратор мог передать этап другому), иначе записанный при отправке. Уволен —
+    руководителя инициатора ищут заново, и заявка запоминает нового."""
+    if step and step.get('state') == 'pending' and step.get('assignee_id'):
+        manager = {'id': step['assignee_id'], 'name': step.get('assignee_name')}
+    elif request.get('manager_id'):
+        manager = {'id': request['manager_id'], 'name': request.get('manager_name')}
+    else:
+        return None
+    person = queries.user_brief(cursor, manager['id'])
+    if person and not person.get('fired'):
+        return manager
+    manager = queries.resolve_manager(cursor, request.get('initiator_id')) if request.get('initiator_id') else None
+    queries.update_request_fields(cursor, request['id'], {'manager_id': (manager or {}).get('id'),
+                                                          'manager_name': (manager or {}).get('name')})
+    return manager
 
 
 def _ask_initiator(cursor, request, subtask, actor, *, reason, comment, status, event_kind,

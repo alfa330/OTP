@@ -225,7 +225,7 @@ const PaymentRequestCard = ({
         approve: 'Согласовано', return: 'Заявка возвращена на доработку', reject: 'Заявка отклонена',
         request_info: 'Запрос отправлен инициатору', pay: 'Оплата записана', top_up: 'Пополнение записано',
         provide: 'Чек отправлен', confirm: 'Получение подтверждено', register: 'Имущество поставлено на учёт',
-        docs_original: 'Отмечено: оригинал получен', docs_close: 'Документы закрыты',
+        docs_original: 'Отмечено: оригинал получен', docs_close: 'Документы закрыты', set_entity: 'Компания указана',
     };
 
     const act = ({ action, fields, files }) => run(() => axios.post(
@@ -269,6 +269,16 @@ const PaymentRequestCard = ({
     }, [apiBaseUrl, headers, requestId]);
 
     const subtaskByKind = useMemo(() => Object.fromEntries(subtasks.map((item) => [item.kind, item])), [subtasks]);
+    // Компанию инициатор не знал — её укажет бухгалтерия (этап ещё впереди или идёт сейчас).
+    const entityPending = ['pending', 'open'].includes(subtaskByKind.entity_clarify?.state);
+    // Пока компании нет, согласующий не выбран: матрица (п. 6) решит по компании. Если этап
+    // утверждения администратор передал вручную после отправки — назван он, его и показываем
+    // (сервер при уточнении компании такой выбор сохраняет: flow._reassigned_since_sent).
+    const approvalReassigned = useMemo(() => (data?.events || []).reduce((manual, event) => {
+        if (event.kind === 'submitted') return false;
+        return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');
+    }, false), [data]);
+    const approverPending = entityPending && !approvalReassigned;
     const canRemoveAttachment = (attachment) => {
         if (permissions.can_delete) return true;
         const stage = attachment.subtask_kind ? subtaskByKind[attachment.subtask_kind] : null;
@@ -418,7 +428,7 @@ const PaymentRequestCard = ({
         const who = item.assignee_name || item.role_label;
         let right = '';
         if (item.state === 'done' && item.done_at) right = `${item.done_by_name || ''} · ${shortDateTime(item.done_at)}`;
-        else if (item.state !== 'skipped') right = who;
+        else if (item.state !== 'skipped') right = item.kind === 'approval' && approverPending ? 'после выбора компании' : who;
         // Этапы бухгалтерии и финансового отдела выполняет подразделение целиком
         // (пп. 2 и 9 ТЗ) — сотрудника им не назначают.
         const canReassign = permissions.can_reassign && item.kind !== 'initiation'
@@ -651,7 +661,9 @@ const PaymentRequestCard = ({
                                         </Row>
                                         <Row label="Тип объекта" wide>{[OBJECT_TYPE_LABELS[request.object_type], ACCOUNTING_CATEGORY_LABELS[request.accounting_category]].filter(Boolean).join(' · ')}</Row>
                                         <Row label="Категория закупа" wide>{[request.category_name, request.subcategory_name].filter(Boolean).join(' → ')}</Row>
-                                        <Row label="Компания" wide>{request.legal_entity_name}</Row>
+                                        <Row label="Компания" wide>
+                                            {request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}
+                                        </Row>
                                         <Row label="Подразделение" wide>{request.department_name}</Row>
                                         <Row label="Проект" wide>{request.project_name}</Row>
                                         <Row label="Филиал / регион" wide>{request.branch}</Row>
@@ -725,7 +737,7 @@ const PaymentRequestCard = ({
                                         )}
                                         <Row label="Руководитель" wide>{request.manager_name}</Row>
                                         <Row label="Согласует" wide>
-                                            {approval ? (
+                                            {approverPending ? <span className="text-slate-500">определят после выбора компании</span> : approval ? (
                                                 <span className="inline-flex flex-wrap items-center gap-1.5">
                                                     {approval.approver}
                                                     <ApprovalHint basis={request.route_basis} />

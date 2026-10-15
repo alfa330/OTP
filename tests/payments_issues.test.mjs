@@ -99,7 +99,7 @@ test('строки «чего не хватает» — те же пункты �
 
 test('новый закуп: каждый пункт стоит у своего поля формы', () => {
     const cases = [
-        [{ legal_entity_id: null }, 'legal_entity_id'], [{ department_id: null }, 'department_id'],
+        [{ department_id: null }, 'department_id'],
         [{ expense_name: ' ' }, 'expense_name'], [{ category_id: null }, 'category_id'],
         [{ justification: '' }, 'justification'], [{ due_on: '' }, 'due_on'],
         [{ object_type: null }, 'object_type'], [{ object_type: 'goods' }, 'accounting_category'],
@@ -107,6 +107,8 @@ test('новый закуп: каждый пункт стоит у своего 
         [{ items: [{ key: 'i1', name: '', quantity: '1', unit_price: 0 }] }, 'items'],
     ];
     for (const [patch, key] of cases) assert.deepEqual(keysOf(purchaseIssues(filledPurchase(patch))), [key], key);
+    // Компанию нового закупа инициатор может не знать — пункта о ней нет (её укажет бухгалтерия).
+    assert.deepEqual(purchaseIssues(filledPurchase({ legal_entity_id: null })), []);
     // Некому выполнить — пункт у того выбора, который его вызвал.
     assert.deepEqual(purchaseIssues(filledPurchase({ object_type: 'goods', accounting_category: 'asset' }), { staffed: { asset_keeper: false } }),
         [{ key: 'accounting_category', text: UNSTAFFED.asset_keeper }]);
@@ -231,6 +233,56 @@ test('этапы: пункты у полей формы — дата, сумма
     assert.deepEqual(stageIssues('closing_docs', { request: { closing_docs_status: 'scan' } }), []);
     // У согласования обязательного в форме нет — пунктов нет.
     assert.deepEqual(stageIssues('approval', {}), []);
+    // Бухгалтерия уточняет компанию (просьба владельца 15.10.2026): без компании этап не закрыть.
+    assert.deepEqual(stageIssues('entity_clarify', {}), [{ key: 'legal_entity_id', text: 'выберите компанию' }]);
+    assert.deepEqual(stageIssues('entity_clarify', { entityId: 2 }), []);
+});
+
+test('компанию не знает инициатор: поле необязательно, «Не знаю» — пункт списка, этап бухгалтерии — своей формой', () => {
+    // Поле «Компания» нового закупа без звёздочки обязательности; у заявки первой версии — как было.
+    const form = source('src/components/payments/PaymentRequestForm.jsx');
+    assert.ok(form.includes('const entityOptional = kind === \'purchase\' && !legacy;'));
+    assert.ok(form.includes('<Field label="Компания" required={!entityOptional} hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired} anchor="legal_entity_id" issue={issueOf(\'legal_entity_id\')}>'));
+    assert.ok(form.includes("const ENTITY_UNKNOWN = 'Не знаю — уточнит бухгалтерия';"));
+    assert.ok(form.includes('[{ value: null, label: ENTITY_UNKNOWN }, ...legalEntityOptions]'));
+    assert.ok(form.includes('onChange={(value) => set(\'legal_entity_id\', value || null)}'));
+    // Маршрут под формой называет бухгалтерию первой, а сообщение после отправки — что компанию уточнят.
+    assert.ok(form.includes('{entityStep && ('));
+    assert.ok(form.includes("body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — компанию уточнит бухгалтерия'"));
+    // Форма этапа бухгалтерии: выбор компании с якорем пункта и кнопка через attempt — пустое поле краснеет.
+    const stage = source('src/components/payments/PaymentStageForm.jsx');
+    assert.ok(stage.includes("if (kind === 'entity_clarify') {"));
+    assert.ok(stage.includes('anchor="legal_entity_id" issue={issueOf(\'legal_entity_id\')}'));
+    assert.ok(stage.includes("disabled={busy} onClick={attempt(() => act('set_entity', { legal_entity_id: entityId }, false))}"));
+    assert.ok(stage.includes('stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length, entityId })'));
+    // Окно заявки: пока компанию уточняют — строка «Компания» говорит, кто её укажет.
+    const card = source('src/components/payments/PaymentRequestCard.jsx');
+    assert.ok(card.includes("const entityPending = ['pending', 'open'].includes(subtaskByKind.entity_clarify?.state);"));
+    assert.ok(card.includes('{request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}'));
+    assert.ok(card.includes("set_entity: 'Компания указана'"));
+    // Реестр: бухгалтерия на «Согласовании» подписана — это уточнение компании; на столе — свой значок.
+    const view = source('src/components/payments/PaymentsView.jsx');
+    assert.ok(view.includes("{request.current_kind === 'entity_clarify' && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>уточнение компании</div>}"));
+    const desk = source('src/components/payments/PaymentsDesk.jsx');
+    assert.ok(desk.includes('    entity_clarify: Landmark,\n'));
+    // У каждого этапа маршрута на столе свой значок — и у уточнения компании тоже.
+    const workflowPy = source('payments/workflow.py');
+    const constants = Object.fromEntries([...workflowPy.matchAll(/^(KIND_\w+) = '(\w+)'/gm)].map((m) => [m[1], m[2]]));
+    const block = workflowPy.slice(workflowPy.indexOf('SUBTASKS = ('), workflowPy.indexOf('\n)\n', workflowPy.indexOf('SUBTASKS = (')));
+    const kinds = [...block.matchAll(/'kind': (KIND_\w+)/g)].map((m) => constants[m[1]]).filter((kind) => kind !== 'initiation');
+    assert.ok(kinds.includes('entity_clarify'), kinds.join(','));
+    const icons = desk.slice(desk.indexOf('const TASK_ICONS = {'), desk.indexOf('};', desk.indexOf('const TASK_ICONS = {')));
+    for (const kind of kinds) assert.match(icons, new RegExp(`\\n\\s+${kind}: \\w+,`), kind);
+    // Пока компании нет, согласующего не называют: ни под формой, ни в окне заявки, ни в «Ходе заявки».
+    assert.ok(form.includes('const entityStep = entityOptional && Boolean(preview?.entity_step);'));
+    assert.ok(form.includes('{entityStep ? <span className="text-slate-500">согласующего выберут по компании</span> : ('));
+    assert.ok(form.includes('{route.basisText && !entityStep && <div'));
+    assert.ok(form.includes('hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired}'));
+    assert.ok(card.includes("return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');"));
+    assert.ok(card.includes("if (event.kind === 'submitted') return false;"));
+    assert.ok(card.includes('const approverPending = entityPending && !approvalReassigned;'));
+    assert.ok(card.includes("right = item.kind === 'approval' && approverPending ? 'после выбора компании' : who;"));
+    assert.ok(card.includes('{approverPending ? <span className="text-slate-500">определят после выбора компании</span> : approval ? ('));
 });
 
 test('имущество: по пункту на пустое поле каждой карточки, повтор инвентарного — у обеих', async () => {

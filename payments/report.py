@@ -163,6 +163,9 @@ def enrich(request, items, offers=()):
     # Этап — у живой заявки; у закрытой он уже сказан состоянием.
     row['stage_text'] = (workflow.STAGE_LABELS.get(request.get('stage'), '')
                          if request.get('status') == 'active' else '')
+    if row['stage_text'] and request.get('current_kind') == workflow.KIND_ENTITY:
+        # Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
+        row['stage_text'] += ' — уточнение компании'
     row['object_label'] = workflow.OBJECT_TYPE_LABELS.get(request.get('object_type'), '')
     row['accounting_label'] = workflow.ACCOUNTING_CATEGORY_LABELS.get(request.get('accounting_category'), '')
     row['method_label'] = workflow.PAYMENT_METHOD_LABELS.get(request.get('payment_method'), '')

@@ -308,7 +308,7 @@ const filledPurchase = (patch = {}) => ({
 test('новый закуп: заполненная форма уходит, каждое обязательное поле названо словами', () => {
   assert.deepEqual(purchaseProblems(filledPurchase()), []);
   const cases = [
-    [{ legal_entity_id: null }, 'выберите компанию'], [{ department_id: null }, 'укажите подразделение'],
+    [{ department_id: null }, 'укажите подразделение'],
     [{ expense_name: ' ' }, 'назовите закуп'], [{ category_id: null }, 'выберите категорию закупа'],
     [{ justification: '' }, 'опишите и обоснуйте закуп'], [{ due_on: '' }, 'укажите желаемый срок'],
     [{ object_type: null }, 'выберите: товар или услуга'], [{ payment_method: null }, 'выберите способ оплаты'],
@@ -318,6 +318,8 @@ test('новый закуп: заполненная форма уходит, к�
   for (const [patch, text] of cases) {
     assert.ok(purchaseProblems(filledPurchase(patch)).includes(text), text);
   }
+  // Компания необязательна (просьба владельца 15.10.2026): не знает её инициатор — укажет бухгалтерия.
+  assert.deepEqual(purchaseProblems(filledPurchase({ legal_entity_id: null })), []);
   // У товара обязательна категория учёта (п. 10); у услуги её нет.
   assert.ok(purchaseProblems(filledPurchase({ object_type: 'goods' })).includes('выберите категорию учёта'));
   assert.deepEqual(purchaseProblems(filledPurchase({ object_type: 'goods', accounting_category: 'asset' })), []);
@@ -668,6 +670,9 @@ test('карточка реестра на телефоне: этап и у ко
   assert.equal(registryWhere({ status: 'done', current_assignee_name: 'Жумабаев Тимур' }), 'Закрыта');
   assert.equal(registryWhere({ status: 'rejected' }), 'Отклонена');
   assert.equal(registryWhere(null), '');
+  // Бухгалтерия на «Согласовании» уточняет компанию — телефон говорит то же, что таблица.
+  assert.equal(registryWhere({ ...active, stage_label: 'Согласование', current_role: 'accounting', current_kind: 'entity_clarify' }),
+    'Уточнение компании · Бухгалтерия');
 });
 
 test('имя файла выгрузки', () => {
@@ -743,6 +748,18 @@ test('история читается словами, а не кодами', () 
   // События первой версии раздела остаются в истории старых заявок.
   assert.equal(describeEvent({ kind: 'step_done', step_no: 7 }), 'Шаг 7 — отписка');
   assert.equal(describeEvent({ kind: 'migrated' }), 'Переведена на этапы');
+  // Бухгалтерия указала компанию, которой не знал инициатор (15.10.2026).
+  assert.equal(describeEvent({ kind: 'entity_set', payload: { legal_entity_name: 'ТОО «Север»' } }), 'Указана компания: ТОО «Север»');
+  assert.equal(describeEvent({ kind: 'entity_set', payload: {} }), 'Указана компания');
+  // Без компании заявка сначала у бухгалтерии — так и записано в истории.
+  assert.equal(describeEvent({ kind: 'submitted', payload: { first: true, entity_step: true } }), 'Отправлена: компанию уточнит бухгалтерия');
+  assert.equal(describeEvent({ kind: 'submitted', payload: { first: false, entity_step: true, changed: ['компания'] } }),
+    'Отправлена заново: изменено — компания; компанию уточнит бухгалтерия');
+  assert.equal(describeEvent({ kind: 'submitted', payload: { first: false, entity_step: true } }), 'Отправлена заново: компанию уточнит бухгалтерия');
+  assert.equal(describeEvent({ kind: 'submitted', payload: { first: true, entity_step: false } }), 'Отправлена на согласование');
+  // Подсказка обязательного поля (заявка первой версии) не обещает «Не знаю».
+  assert.ok(!HINTS.legalEntityRequired.options && !/Не знаю/.test(JSON.stringify(HINTS.legalEntityRequired)));
+  assert.ok(HINTS.legalEntity.options.some(([name]) => name === 'Не знаете'));
 });
 
 /* ── Варианты выбора и подсказки ───────────────────────────────────────────── */

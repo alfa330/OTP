@@ -104,7 +104,9 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                # ТЗ «Закуп и оплата»: этапы и подзадачи одной заявки
                'submitted', 'subtask_moved', 'approved', 'clarification', 'clarified', 'paid',
                'topped_up', 'receipt_provided', 'received', 'asset_registered',
-               'docs_status', 'closed', 'migrated', 'card_revealed')
+               'docs_status', 'closed', 'migrated', 'card_revealed',
+               # Бухгалтерия указала компанию, которой не знал инициатор (15.10.2026)
+               'entity_set')
 
 _STATEMENTS = [
 

@@ -51,6 +51,7 @@ const HISTORY_DEBOUNCE_MS = 400;
    говорят о том, что в этом поле можно сделать. */
 const LEGACY_METHOD_ISSUE = 'выберите способ оплаты: для оплаты счёта понадобятся сам счёт, его номер и дата';
 const TEMPLATE_ENTITY_ISSUE = 'в справочнике у платежа не указана компания — попросите администратора дополнить';
+const ENTITY_UNKNOWN = 'Не знаю — уточнит бухгалтерия';
 const PREVIEW_DEBOUNCE_MS = 350;
 const NEW_CARD = '__new__';
 
@@ -273,6 +274,13 @@ const PaymentRequestForm = ({
         ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
     const legalEntities = dictionaries?.legal_entities || [];
     const legalEntityOptions = useMemo(() => legalEntities.map((item) => ({ value: item.id, label: item.name })), [legalEntities]);
+    /* Компания нового закупа необязательна (просьба владельца 15.10.2026): не знает её
+       инициатор — после отправки её укажет бухгалтерия. «Не знаю» стоит первым пунктом
+       списка и подсказкой пустого поля — как «Без проекта» у проекта. У заявки первой
+       версии компания по-прежнему нужна: она уже согласована и ждёт оплаты. */
+    const entityOptional = kind === 'purchase' && !legacy;
+    const entityChoiceOptions = useMemo(() => (entityOptional && legalEntityOptions.length
+        ? [{ value: null, label: ENTITY_UNKNOWN }, ...legalEntityOptions] : legalEntityOptions), [entityOptional, legalEntityOptions]);
     const legalEntity = legalEntities.find((item) => item.id === draft.legal_entity_id) || null;
     const departmentOptions = useMemo(() => (dictionaries?.departments || [])
         .map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
@@ -546,6 +554,8 @@ const PaymentRequestForm = ({
             if (body.warnings?.length) toastRef.current?.(body.warnings.join('. '), 'info');
             let text = 'Заявка сохранена';
             if (body.submitted) text = body.rerouted ? 'Условия изменились — заявка ушла на согласование заново' : 'Заявка отправлена';
+            // Компанию не указали — заявка сначала у бухгалтерии, а не у согласующего.
+            if (body.submitted && body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — компанию уточнит бухгалтерия';
             toastRef.current?.(text, 'success');
             onSaved?.(body);
             onClose?.();
@@ -566,6 +576,7 @@ const PaymentRequestForm = ({
     };
 
     const route = approvalSummary(preview?.route);
+    const entityStep = entityOptional && Boolean(preview?.entity_step);
     const routeManager = preview?.manager?.name || '';
     const initiatorName = (editing ? request.initiator_name : me?.name) || '';
     // Руководитель: у своей новой заявки — из справочного набора, у чужой на доработке — записанный в заявке.
@@ -775,8 +786,15 @@ const PaymentRequestForm = ({
 
                         <IosSection title="Для кого">
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Компания" required hint={HINTS.legalEntity} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
-                                    <FormSelect value={draft.legal_entity_id} onChange={(value) => set('legal_entity_id', value)} options={legalEntityOptions} placeholder={legalEntityOptions.length ? 'Выберите компанию' : 'Справочник компаний пуст'} disabled={!legalEntityOptions.length} ariaLabel="Компания" />
+                                <Field label="Компания" required={!entityOptional} hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
+                                    <FormSelect
+                                        value={draft.legal_entity_id}
+                                        onChange={(value) => set('legal_entity_id', value || null)}
+                                        options={entityChoiceOptions}
+                                        placeholder={!legalEntityOptions.length ? 'Справочник компаний пуст' : (entityOptional ? ENTITY_UNKNOWN : 'Выберите компанию')}
+                                        disabled={!legalEntityOptions.length}
+                                        ariaLabel="Компания"
+                                    />
                                 </Field>
                                 <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
                                     <FormSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Подразделение" ariaLabel="Подразделение" />
@@ -1016,16 +1034,29 @@ const PaymentRequestForm = ({
                             Маршрут согласования <FieldHint hint="Кому направить заявку, определяет раздел: по лимитам и маршрутам согласования из справочников. Выбирать согласующего вручную не нужно." />
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-slate-900">
+                            {/* Компания не указана — первой заявку получит бухгалтерия, а согласующего
+                                матрица (п. 6) выберет уже по компании: называть его заранее нельзя. Заявке
+                                первой версии компания нужна при отправке — этапа у неё не будет. */}
+                            {entityStep && (
+                                <>
+                                    <span>Бухгалтерия <span className="text-slate-500">· уточнит компанию</span></span>
+                                    <ArrowRight size={13} className="text-slate-400" />
+                                </>
+                            )}
                             {route.managerStep && (
                                 <>
                                     <span>{routeManager || <span className="text-slate-500">руководитель не определён — этап будет пропущен</span>}</span>
                                     <ArrowRight size={13} className="text-slate-400" />
                                 </>
                             )}
-                            <span className="font-medium">{route.approver}</span>
-                            <ApprovalHint basis={preview.route} />
+                            {entityStep ? <span className="text-slate-500">согласующего выберут по компании</span> : (
+                                <>
+                                    <span className="font-medium">{route.approver}</span>
+                                    <ApprovalHint basis={preview.route} />
+                                </>
+                            )}
                         </div>
-                        {route.basisText && <div className="mt-0.5 text-[12.5px] text-slate-500">{route.basisText}</div>}
+                        {route.basisText && !entityStep && <div className="mt-0.5 text-[12.5px] text-slate-500">{route.basisText}</div>}
                     </div>
                 )}
             </div>

@@ -255,7 +255,20 @@ export const HINTS = {
     },
     legalEntity: {
         intro: 'Наша компания, с которой уйдёт оплата и на которую поставщик выставит счёт.',
+        options: [
+            ['Знаете компанию', 'выберите её — реквизиты появятся под полем, их можно скопировать и переслать поставщику'],
+            ['Не знаете', 'оставьте «Не знаю»: после отправки компанию укажет бухгалтерия, и потом заявка уйдёт на согласование'],
+        ],
+    },
+    // Заявка первой версии: она уже согласована, компания нужна для оплаты — «Не знаю» у неё нет.
+    legalEntityRequired: {
+        intro: 'Наша компания, с которой уйдёт оплата и на которую поставщик выставит счёт.',
         outro: 'Реквизиты компании появятся под полем — их можно скопировать и переслать поставщику.',
+    },
+    // Бухгалтерия указывает компанию, которой не знал инициатор (просьба владельца 15.10.2026).
+    entityClarify: {
+        intro: 'Для какой компании закуп: с её счёта уйдёт оплата, на неё поставщик выставит счёт.',
+        outro: 'Инициатор увидит выбранную компанию в заявке, а согласующего раздел выберет уже с её учётом.',
     },
     department: { intro: 'Подразделение, для которого делается закуп. По умолчанию — ваше.' },
     category: {
@@ -1130,7 +1143,8 @@ export const stageLine = (request) => {
    заявки исполнителя нет, а у задачи подразделения этап и исполнитель могут
    называться одинаково — дважды одно слово не печатаем. */
 export const registryWhere = (request) => {
-    const stage = stageLine(request);
+    // Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
+    const stage = request?.status === 'active' && request.current_kind === 'entity_clarify' ? 'Уточнение компании' : stageLine(request);
     if (!request || request.status !== 'active') return stage;
     const who = responsibleLines(request).name;
     return [stage, who].filter((part, index, list) => part && part !== '—' && list.indexOf(part) === index).join(' · ');
@@ -1299,7 +1313,8 @@ const issueTexts = (issues) => issues.map((item) => item.text);
 export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {} } = {}) => {
     const issues = [];
     const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
-    if (!draft.legal_entity_id) add('legal_entity_id', 'выберите компанию');
+    // Компании здесь нет намеренно (просьба владельца 15.10.2026): не знает её инициатор —
+    // её укажет бухгалтерия после отправки (workflow.needs_entity_step).
     if (!draft.department_id) add('department_id', 'укажите подразделение');
     if (!String(draft.expense_name || '').trim()) add('expense_name', 'назовите закуп');
     if (!draft.category_id) add('category_id', 'выберите категорию закупа');
@@ -1532,13 +1547,21 @@ export const describeEvent = (event, titleOf = () => '') => {
         case 'generated': return 'Создана календарём регулярных платежей';
         case 'migrated': return 'Переведена на этапы';
         case 'submitted': {
-            if (payload.first) return 'Отправлена на согласование';
             const changed = (payload.changed || []).join(', ');
+            // Компанию не указали — сначала заявка у бухгалтерии (просьба владельца 15.10.2026).
+            if (payload.entity_step) {
+                if (payload.first) return 'Отправлена: компанию уточнит бухгалтерия';
+                return changed
+                    ? `Отправлена заново: изменено — ${changed}; компанию уточнит бухгалтерия`
+                    : 'Отправлена заново: компанию уточнит бухгалтерия';
+            }
+            if (payload.first) return 'Отправлена на согласование';
             return changed
                 ? `Отправлена на согласование заново: изменено — ${changed}`
                 : 'Отправлена на согласование заново';
         }
         case 'clarified': return `Инициатор ответил${of}`;
+        case 'entity_set': return payload.legal_entity_name ? `Указана компания: ${payload.legal_entity_name}` : 'Указана компания';
         case 'approved': return payload.kind === 'manager_approval' ? 'Согласовано руководителем' : 'Утверждено';
         case 'returned': return `Возвращена на доработку${of}`;
         case 'clarification': return payload.system

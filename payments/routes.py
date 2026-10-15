@@ -916,6 +916,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             fields['received_on'] = as_date(data.get('received_on'), 'Дата получения')
         if 'received_quantity' in data:
             fields['received_quantity'] = as_text(data.get('received_quantity'), 'received_quantity')
+        if 'legal_entity_id' in data:
+            fields['legal_entity_id'] = as_int(data.get('legal_entity_id'), 'Компания')
         return fields
 
     def _guard_subtask(cursor, ctx, request_id, kind):
@@ -1404,6 +1406,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         return jsonify({
             'route': basis,
             'manager': manager,
+            # Компания не указана — первым заявку получит бухгалтерия: укажет компанию, и
+            # согласующего выберут заново, уже с ней (просьба владельца 15.10.2026).
+            'entity_step': workflow.needs_entity_step(draft),
             'contract_check': {'applies': draft['payment_method'] == workflow.METHOD_INVOICE,
                                'ok': ok, 'reason': reason},
         })

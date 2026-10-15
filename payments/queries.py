@@ -697,13 +697,18 @@ def ensure_initiation(cursor, request_id, initiator, *, status='draft'):
     return subtask_id
 
 
-def write_route(cursor, request_id, route):
+def write_route(cursor, request_id, route, *, keep=()):
     """Записывает маршрут заявки: подзадачи кроме инициации сбрасываются в
     начало («не начата» либо «пропущена»). Вид, которого в маршруте нет, а в
-    заявке он остался от прежнего маршрута, помечается пропущенным."""
-    kinds = []
+    заявке он остался от прежнего маршрута, помечается пропущенным.
+
+    `keep` — виды, уже пройденные в этом же маршруте: их не трогают вовсе
+    (маршрут после уточнения компании строится заново, а этап уточнения остаётся
+    выполненным — с тем, кто и когда указал компанию)."""
+    keep = tuple(keep or ())
+    kinds = list(keep)
     for entry in route:
-        if entry['kind'] == workflow.KIND_INITIATION:
+        if entry['kind'] == workflow.KIND_INITIATION or entry['kind'] in keep:
             continue
         kinds.append(entry['kind'])
         cursor.execute(
@@ -909,6 +914,15 @@ def mark_submitted(cursor, request_id, *, snapshot, basis=None, manager=None, se
     if reset_approval:
         sets += ["approved_at = NULL", "approved_by = NULL", "approved_by_name = NULL", "amount_approved = NULL"]
     cursor.execute("UPDATE payment_requests SET %s WHERE id = %%s" % ', '.join(sets), params + [int(request_id)])
+
+
+def set_route_basis(cursor, request_id, basis):
+    """Основание согласования, выбранное заново (после уточнения компании): кто
+    утверждает и по какому лимиту. Время отправки не меняется."""
+    cursor.execute(
+        "UPDATE payment_requests SET route_basis = %%s, approver_user_id = %%s, approval_order_id = %%s, "
+        "updated_at = %s WHERE id = %%s" % _NOW,
+        (Json(plain(basis)), basis.get('approver_user_id'), basis.get('limit_id'), int(request_id)))
 
 
 def touch_snapshot(cursor, request_id, snapshot):

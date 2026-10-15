@@ -373,8 +373,9 @@ class SubmitCompletenessTests(unittest.TestCase):
         self.assertEqual(self.missing(), [])
 
     def test_every_field_of_clause_4_1_is_required(self):
+        # Кроме компании: её не знает инициатор — укажет бухгалтерия (EntityStepTests).
         cases = [
-            ({'legal_entity_id': None}, 'компанию'), ({'department_id': None}, 'подразделение'),
+            ({'department_id': None}, 'подразделение'),
             ({'expense_name': ' '}, 'наименование'), ({'amount': 0}, 'больше нуля'),
             ({'category_id': None}, 'категорию закупа'), ({'justification': ''}, 'обоснуйте'),
             ({'due_on': None}, 'желаемый срок'), ({'object_type': None}, 'товар или услуга'),
@@ -468,6 +469,84 @@ class SubmitCompletenessTests(unittest.TestCase):
         self.assertEqual(len(wf.missing_for_submit({'request_kind': None})), 1)
 
 
+class EntityStepTests(unittest.TestCase):
+    """Просьба владельца 15.10.2026: компанию в новом закупе инициатор указывает, если знает.
+    Не знает — поле пустое, и после отправки заявка сначала у бухгалтерии: она указывает
+    компанию, и только потом заявка идёт на согласование."""
+
+    def test_purchase_without_a_company_can_be_sent(self):
+        self.assertEqual(wf.missing_for_submit(purchase(legal_entity_id=None), items=ITEMS, offers=OFFERS), [])
+
+    def test_regular_payment_still_needs_the_company_from_its_directory_entry(self):
+        regular = {'request_kind': 'regular', 'legal_entity_id': None, 'department_id': 5,
+                   'expense_name': 'Аренда офиса', 'amount': 200000, 'fixed_template_id': 9,
+                   'counterparty_id': 11, 'payment_period': 'октябрь 2026', 'payment_method': 'invoice'}
+        item = [{'name': 'Аренда офиса', 'quantity': 1, 'unit_price': 200000}]
+        self.assertEqual(wf.missing_for_submit(regular, items=item, invoice_required=False),
+                         ['Выберите компанию-плательщика'])
+        self.assertFalse(wf.needs_entity_step(regular), 'компанию регулярного платежа задаёт справочник')
+
+    def test_unknown_company_puts_accounting_first(self):
+        route = wf.build_route(purchase(legal_entity_id=None), initiator=INITIATOR, manager=MANAGER)
+        self.assertEqual(kinds(route), ['initiation', 'entity_clarify', 'manager_approval', 'approval',
+                                        'invoice_payment', 'receiving', 'closing_docs'])
+        step = route[1]
+        self.assertEqual((step['role_code'], step['assignee_id'], step['state']), ('accounting', None, 'pending'),
+                         'компанию указывает бухгалтерия целиком, как и оплату (п. 9)')
+        # «Согласование», а не «Инициация»: на инициации заявка считалась бы у инициатора.
+        self.assertEqual(step['stage'], 'approval')
+        card = wf.build_route(purchase(legal_entity_id=None, payment_method='card', card_recipient='employee'),
+                              initiator=INITIATOR, manager=None)
+        self.assertEqual(kinds(card)[:3], ['initiation', 'entity_clarify', 'manager_approval'])
+
+    def test_known_company_goes_straight_to_approval(self):
+        self.assertNotIn('entity_clarify', kinds(wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)))
+
+    def test_old_requests_never_get_the_step(self):
+        accepted = purchase(legal_entity_id=None, legacy_step=7)
+        self.assertFalse(wf.needs_entity_step(accepted), 'заявке первой версии компанию указывают при отправке')
+        self.assertEqual(wf.missing_for_submit(accepted, items=ITEMS, attachments=[{'kind': 'invoice'}])[:1],
+                         ['Выберите компанию-плательщика'])
+        # Перенос первой версии строит маршрут без типа заявки — этап не появляется.
+        self.assertNotIn('entity_clarify', kinds(wf.build_route({'payment_method': 'invoice', 'object_type': 'service'},
+                                                                initiator=INITIATOR)))
+
+    def test_the_step_is_accountings_and_has_one_action(self):
+        step = wf.subtask('entity_clarify')
+        self.assertEqual((step['title'], step['role'], step['board']), ('Уточнение компании', 'accounting', None))
+        positions = {item['kind']: item['position'] for item in wf.SUBTASKS}
+        self.assertLess(positions['initiation'], positions['entity_clarify'])
+        self.assertLess(positions['entity_clarify'], positions['manager_approval'])
+        self.assertEqual(wf.ACTIONS['entity_clarify'], ('set_entity',))
+        self.assertEqual(wf.ACTION_LABELS['set_entity'], 'Указать компанию')
+        self.assertFalse(wf.can_move('entity_clarify', 'review'), 'ступеней у этапа нет')
+        self.assertEqual(wf.clarify_reasons_for('entity_clarify'), [])
+
+    def test_company_is_required_to_finish_the_step(self):
+        request = purchase(legal_entity_id=None)
+        self.assertEqual(wf.missing_for_action('entity_clarify', 'set_entity', request=request, fields={}),
+                         ['Выберите компанию'])
+        self.assertEqual(wf.missing_for_action('entity_clarify', 'set_entity', request=request,
+                                               fields={'legal_entity_id': 2}), [])
+
+    def test_lifecycle_shows_approval_while_accounting_clarifies(self):
+        request = purchase(legal_entity_id=None, status='active', stage='approval', submitted_at='2026-10-15T10:00')
+        route = wf.build_route(request, initiator=INITIATOR, manager=MANAGER)
+        subtasks = [dict(entry, state='done' if entry['kind'] == 'initiation' else
+                         ('open' if entry['kind'] == 'entity_clarify' else entry['state'])) for entry in route]
+        states = {item['code']: item['state'] for item in wf.lifecycle(request, subtasks)}
+        self.assertEqual((states['initiation'], states['approval']), ('done', 'current'))
+        self.assertEqual(wf.request_state(request, today=date(2026, 10, 15)), 'active',
+                         'заявка у бухгалтерии — не «ждёт ответа инициатора»')
+
+    def test_company_chosen_by_accounting_is_not_a_change_of_terms(self):
+        # После уточнения снимок условий переписывается с компанией (flow._set_entity):
+        # ответ инициатора на возврат без правок не отправляет заявку на согласование заново.
+        clarified = purchase(legal_entity_id=2)
+        self.assertFalse(wf.essentials_changed(wf.essentials(clarified), clarified))
+        self.assertEqual(wf.essentials_diff(wf.essentials(purchase(legal_entity_id=None)), clarified), ['компания'])
+
+
 class LegacyRequestTests(unittest.TestCase):
     """Заявки первой версии процесса (12 шагов), которые застал перенос (payments/legacy.py).
 
@@ -543,6 +622,13 @@ class RouteExecutorsTests(unittest.TestCase):
         gaps = self.gaps({'approver': {3}})
         self.assertEqual(len([text for text in gaps if 'Бухгалтерия' in text]), 1,
                          'оплата и закрывающие документы — одна роль, одна строка')
+
+    def test_unknown_company_names_its_own_step_once(self):
+        # Компанию указывает та же бухгалтерия: строка одна — о первом её этапе.
+        gaps = self.gaps({'approver': {3}}, legal_entity_id=None)
+        accounting = [text for text in gaps if 'Бухгалтерия' in text]
+        self.assertEqual(accounting, ['Уточнить компанию некому: в роли «Бухгалтерия» нет участников'])
+        self.assertEqual(self.gaps(legal_entity_id=None), [], 'бухгалтерия есть — заявку уточнят')
 
     def test_initiator_is_not_their_own_approver(self):
         only_me = {'approver': {INITIATOR['id']}, 'accounting': {6}}

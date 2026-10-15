@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, MessageCircleQuestion,
+    BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, Landmark, MessageCircleQuestion,
     PackageCheck, Paperclip, PencilLine, ReceiptText, Send,
 } from 'lucide-react';
 import { iosCard } from '../ui/ios';
@@ -34,6 +34,7 @@ import { recall, remember } from './paymentsEntry';
    не читая заголовки подряд. Цвет у значка один на все задачи; жёлтым отмечена
    только заявка, которую человеку вернули, — там ждут его ответа. */
 const TASK_ICONS = {
+    entity_clarify: Landmark,
     manager_approval: BadgeCheck,
     approval: BadgeCheck,
     invoice_payment: Banknote,
