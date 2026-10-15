@@ -106,7 +106,9 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                'topped_up', 'receipt_provided', 'received', 'asset_registered',
                'docs_status', 'closed', 'migrated', 'card_revealed',
                # Бухгалтерия указала компанию, которой не знал инициатор (15.10.2026)
-               'entity_set')
+               'entity_set',
+               # наблюдатели заявки: кого добавили и кого сняли одним действием
+               'observers')
 
 _STATEMENTS = [
 
@@ -847,6 +849,26 @@ _STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_notifications_dedupe "
     "ON payment_notifications (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL",
 
+    # ── Наблюдатели заявки (просьба владельца 15.10.2026) ──────────────────
+    #
+    # «Уходишь в отпуск и добавляешь одного или нескольких наблюдателей, чтобы
+    # они следили за прогрессом; инициатор сам может добавить их в начале и в
+    # прогрессе заявки». Наблюдатель видит заявку и её ход, как инициатор, и
+    # получает в колокол те же сведения о ходе; действовать по заявке он не
+    # может. Строка — один человек у одной заявки; кто и когда добавил — рядом.
+    # Индекс по человеку — для «Наблюдаю» в реестре и для удаления учётки
+    # (каскад по user_id иначе читал бы таблицу целиком).
+    """
+    CREATE TABLE IF NOT EXISTS payment_request_observers (
+        request_id  INTEGER NOT NULL REFERENCES payment_requests(id) ON DELETE CASCADE,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        added_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        added_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        PRIMARY KEY (request_id, user_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payment_request_observers_user ON payment_request_observers (user_id)",
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
@@ -904,7 +926,7 @@ TABLES = (
     'payment_counterparty_accounts', 'payment_cards', 'payment_approval_routes',
     'payment_settings', 'payment_request_offers', 'payment_subtasks',
     'payment_asset_categories', 'payment_assets', 'payment_asset_moves',
-    'payment_notifications',
+    'payment_notifications', 'payment_request_observers',
 )
 
 

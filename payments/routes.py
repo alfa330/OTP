@@ -24,6 +24,7 @@ routes_assets.py. Правила процесса — в workflow.py, ход п�
 
 import logging
 import re
+import time
 from decimal import Decimal
 from functools import wraps
 from io import BytesIO
@@ -44,6 +45,8 @@ BOARD_PAGE_DEFAULT = 20
 BOARD_PAGE_MAX = 100
 # «Мои задачи» — страницами. Без `limit` стол отдаётся целиком, до этого предела.
 DESK_PAGE_MAX = 200
+# Сколько не пробовать подписывать фото после неудачной подписи (_avatar_urls).
+PHOTO_RETRY_SECONDS = 120
 
 _LINK_RE = re.compile(r'^https?://', re.IGNORECASE)
 
@@ -86,6 +89,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
     """
     gcs = gcs or {}
     bp = Blueprint('payments', __name__, url_prefix='/api/payments')
+    # До какого момента не подписывать фото после неудачи (см. _avatar_urls).
+    photo_pause = {'until': 0.0}
 
     def payments_route(rule, methods=('GET',), admin=False, open_to_all=False):
         """Маршрут раздела. `open_to_all` — ручка вне периметра раздела: ею
@@ -219,13 +224,16 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
     # ── Видимость и права ───────────────────────────────────────────────────
 
     def _visible(cursor, ctx, request_row):
-        # Участие в заявке (своя подзадача, личная или по роли) спрашиваем у базы,
-        # только когда правило не ответило без неё.
+        # Участие в заявке (своя подзадача, личная или по роли) и наблюдение за ней
+        # спрашиваем у базы, только когда правило не ответило без них.
         if access.can_see_request(ctx, request_row, ctx['roles']):
             return True
-        return access.can_see_request(
-            ctx, request_row, ctx['roles'],
-            participant=queries.participates(cursor, request_row['id'], ctx['user_id'], ctx['roles']))
+        if access.can_see_request(
+                ctx, request_row, ctx['roles'],
+                participant=queries.participates(cursor, request_row['id'], ctx['user_id'], ctx['roles'])):
+            return True
+        return access.can_see_request(ctx, request_row, ctx['roles'],
+                                      observer=queries.observes(cursor, request_row['id'], ctx['user_id']))
 
     def _history_scope(ctx):
         """Чьи прошлые оплаты показывать: бухгалтерии и администратору — все,
@@ -258,6 +266,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'can_attach': access.can_attach(ctx, request_row, ctx['roles'], can_act),
             'can_view_card': bool(request_row.get('has_card')
                                   and access.can_view_card_number(ctx, request_row, ctx['roles'])),
+            'can_manage_observers': access.can_manage_observers(ctx, request_row),
             'current_kind': current['kind'] if current else None,
             'actions': list(workflow.ACTIONS.get(current['kind'], ())) if can_act else [],
         }
@@ -277,6 +286,11 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         asset_rows = assets_sql.for_request(cursor, request_id)
         permissions = _permissions(ctx, request_row, subtasks, members)
         current_kind = permissions['current_kind']
+        observers = queries.list_observers(cursor, request_id)
+        for person in observers:
+            # Наблюдателю вне периметра раздела заявка не откроется — инициатор узнаёт
+            # об этом из списка, а не из «мне ничего не приходит» (как в «Участниках»).
+            person['section_open'] = access.can_open_section({'user_id': person['user_id']})
         full = {
             'request': request_row,
             'items': queries.list_items(cursor, request_id),
@@ -307,12 +321,28 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                 for item in workflow.clarify_reasons_for(current_kind)] if current_kind else [],
             'submit_problems': flow.submit_problems(cursor, request_row) if permissions['can_edit'] else [],
             'permissions': permissions,
+            'observers': observers,
+            # Фото наблюдателей — как на карточках досок: номер человека → ссылка. Ссылки
+            # подписывает _reply_card уже без соединения с базой (подпись может ходить в сеть).
+            'photos': {},
         }
+        g.payments_photo_refs = (queries.avatar_refs(cursor, [person['user_id'] for person in observers])
+                                 if observers and avatar_url else {})
         # П. 9: кто именно в бухгалтерии или финансовом отделе выполнил платёж,
         # знают само подразделение и администратор; остальным — название подразделения.
         if not access.sees_department_people(ctx, ctx['roles']):
             privacy.hide_department_people(full, members)
         return full
+
+    def _reply_card(full, status=200):
+        """Ответ с карточкой заявки (_full). Фото наблюдателей подписываются здесь, когда
+        соединение с базой уже отдано: подпись ссылки может ходить в сеть, и держать ради
+        неё транзакцию нельзя (на стенде без ключа она ждала, а DDL старта ждал её) — так же
+        сделаны доски (board_view)."""
+        refs = g.pop('payments_photo_refs', None)
+        if refs:
+            full['photos'] = {str(user_id): link for user_id, link in _avatar_urls(refs).items()}
+        return jsonify(full, status)
 
     # ── Разбор полей заявки ─────────────────────────────────────────────────
 
@@ -645,6 +675,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'action_labels': workflow.ACTION_LABELS,
             'contract_threshold': float(workflow.CONTRACT_REQUIRED_OVER),
             'card_digits': [cards.MIN_DIGITS, cards.MAX_DIGITS],
+            'max_observers': workflow.MAX_OBSERVERS,
         }
 
     @payments_route('/ping')
@@ -688,6 +719,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
     def users(ctx):
         with db._get_cursor() as cursor:
             people = queries.list_users(cursor)
+        for person in people:
+            # Открыт ли человеку раздел: наблюдатель вне периметра заявку не увидит, и
+            # форма заявки говорит об этом сразу, при выборе.
+            person['section_open'] = access.can_open_section({'user_id': person['id']})
         return jsonify({'users': people})
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -741,6 +776,19 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 privacy.hide_in_row(item)
         return jsonify({'items': items, 'total': total, 'counters': counters, 'limit': limit, 'offset': offset})
 
+    def _observer_ids(raw):
+        """Наблюдатели из запроса: список номеров сотрудников, без повторов."""
+        if raw in (None, ''):
+            return []
+        if not isinstance(raw, list):
+            raise ApiError('Наблюдатели: ожидается список сотрудников', code='PAYMENT_REQUEST_INVALID')
+        ids = []
+        for value in raw:
+            user_id = as_int(value, 'Наблюдатель')
+            if user_id and user_id not in ids:
+                ids.append(user_id)
+        return ids
+
     @payments_route('/requests', methods=('POST',))
     def request_create(ctx):
         if not access.can_create_request(ctx):
@@ -750,6 +798,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         actor = _actor(ctx)
         outbox = []
         submit = as_bool(data.get('submit', True))
+        observers_add = _observer_ids(data.get('observers_add'))
         with db._get_cursor() as cursor:
             members = queries.role_member_ids(cursor)
             if not members.get('approver') or not members.get('accounting'):
@@ -768,6 +817,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                                 initiator=initiator)
             offer_ids = queries.save_offers(cursor, request_id, offers) if offers is not None else []
             _apply_card(cursor, request_id, card, was_submitted=False)
+            # Наблюдатели «в начале» — до проверки и отправки: неверный список отказывает
+            # раньше, чем файлы уйдут в хранилище, а уведомления отправки уже застают их.
+            if observers_add:
+                flow.change_observers(cursor, queries.read_request(cursor, request_id), actor, add=observers_add)
             if submit:
                 _precheck_submit(cursor, request_id, uploads)
             _store_files(cursor, request_id, uploads, actor, subtask_kind=workflow.KIND_INITIATION,
@@ -778,7 +831,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                      outbox=outbox, base_url=web_app_base_url)
             full = _full(cursor, request_id, ctx)
         full.update({'status': 'success', 'submitted': bool(result), 'warnings': _flush(outbox)})
-        return jsonify(full, 201)
+        return _reply_card(full, 201)
 
     @payments_route('/requests/<int:request_id>')
     def request_read(ctx, request_id):
@@ -787,7 +840,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # Открыл заявку — уведомления «к сведению» по ней прочитаны.
             notices.mark_seen(cursor, ctx['user_id'], request_id)
             full = _full(cursor, request_id, ctx, request_row)
-        return jsonify(full)
+        return _reply_card(full)
 
     def _offers_key(offers):
         return [(offer.get('counterparty_id'), offer.get('supplier_name') or '',
@@ -829,6 +882,12 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             changes['card_number'] = ('•', '•')
         if changes:
             queries.log_event(cursor, request_id, 'edited', actor, payload={'changes': changes})
+        if 'observers_add' in data or 'observers_remove' in data:
+            # Форма присылает разницу с тем, что было при её открытии, а не список целиком:
+            # наблюдателей меняют и в окне заявки, и сохранение формы не должно молча снять
+            # добавленных там, пока она была открыта.
+            flow.change_observers(cursor, current, actor, add=_observer_ids(data.get('observers_add')),
+                                  remove=_observer_ids(data.get('observers_remove')))
         return offer_ids
 
     def _drop_old_invoices(cursor, request_id, data, uploads, actor):
@@ -865,7 +924,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             files.drop(gcs, stale)
         full.update({'status': 'success', 'submitted': bool(result),
                      'rerouted': bool(result and result.get('rerouted')), 'warnings': _flush(outbox)})
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/submit', methods=('POST',))
     def request_submit(ctx, request_id):
@@ -890,7 +949,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             files.drop(gcs, stale)
         full.update({'status': 'success', 'submitted': True, 'rerouted': bool(result.get('rerouted')),
                      'warnings': _flush(outbox)})
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>', methods=('DELETE',), admin=True)
     def request_delete(ctx, request_id):
@@ -966,7 +1025,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                               assets=asset_rows, outbox=outbox, base_url=web_app_base_url)
             full = _full(cursor, request_id, ctx)
         full.update({'status': 'success', 'next': result.get('next'), 'warnings': _flush(outbox)})
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/move', methods=('POST',))
     def request_move(ctx, request_id):
@@ -979,7 +1038,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             flow.move(cursor, request_id, kind, status, _actor(ctx))
             full = _full(cursor, request_id, ctx)
         full['status'] = 'success'
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/cancel', methods=('POST',))
     def request_cancel(ctx, request_id):
@@ -996,7 +1055,41 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                         base_url=web_app_base_url)
             full = _full(cursor, request_id, ctx)
         full['status'] = 'success'
-        return jsonify(full)
+        return _reply_card(full)
+
+    # ── Наблюдатели (просьба владельца 15.10.2026) ──────────────────────────
+
+    def _guard_observers(cursor, ctx, request_id):
+        """Заявка под блокировкой (список меняют по одному за раз — предел не обойти
+        двумя запросами разом) и право менять её наблюдателей."""
+        current = _load_visible(cursor, ctx, request_id, lock=True)
+        if not access.can_manage_observers(ctx, current):
+            raise ApiError('Наблюдателей меняет инициатор заявки, пока она в работе' if current.get('status') == 'active'
+                           else 'Заявка закрыта — наблюдателей у неё больше не меняют',
+                           code='PAYMENTS_FORBIDDEN', status=403)
+        return current
+
+    @payments_route('/requests/<int:request_id>/observers', methods=('POST',))
+    def observers_add(ctx, request_id):
+        """Добавить наблюдателей — в любой момент, пока заявка в работе."""
+        ids = _observer_ids(_payload().get('user_ids'))
+        if not ids:
+            raise ApiError('Выберите, кого добавить наблюдателем', code='PAYMENT_REQUEST_INVALID')
+        with db._get_cursor() as cursor:
+            current = _guard_observers(cursor, ctx, request_id)
+            flow.change_observers(cursor, current, _actor(ctx), add=ids)
+            full = _full(cursor, request_id, ctx)
+        full['status'] = 'success'
+        return _reply_card(full)
+
+    @payments_route('/requests/<int:request_id>/observers/<int:user_id>', methods=('DELETE',))
+    def observers_remove(ctx, request_id, user_id):
+        with db._get_cursor() as cursor:
+            current = _guard_observers(cursor, ctx, request_id)
+            flow.change_observers(cursor, current, _actor(ctx), remove=[user_id])
+            full = _full(cursor, request_id, ctx)
+        full['status'] = 'success'
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/assignee', methods=('POST',), admin=True)
     def request_assignee(ctx, request_id):
@@ -1031,7 +1124,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                    exclude=[ctx['user_id']])
             full = _full(cursor, request_id, ctx)
         full.update({'status': 'success', 'warnings': _flush(outbox)})
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/refund', methods=('POST',))
     def request_refund(ctx, request_id):
@@ -1053,7 +1146,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                               payload={'refund_amount': amount, 'refund_on': fields['refund_on']})
             full = _full(cursor, request_id, ctx)
         full['status'] = 'success'
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/card')
     def request_card(ctx, request_id):
@@ -1093,7 +1186,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             flow.files_added(cursor, request_id, kinds, actor)
             full = _full(cursor, request_id, ctx)
         full['status'] = 'success'
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/attachments/<int:attachment_id>', methods=('DELETE',))
     def attachments_remove(ctx, request_id, attachment_id):
@@ -1124,7 +1217,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         if gcs.get('client'):
             files.drop(gcs, [(item['bucket'], item['blob_path'])])
         full['status'] = 'success'
-        return jsonify(full)
+        return _reply_card(full)
 
     @payments_route('/attachments/<int:attachment_id>/download')
     def attachment_download(ctx, attachment_id):
@@ -1170,8 +1263,13 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
     def _avatar_urls(refs):
         """{user_id: ссылка на фото} по парам (бакет, путь). Фото — украшение карточки: отказ
-        подписи не должен стоить человеку доски, поэтому он только пишется в журнал."""
-        if not avatar_url:
+        подписи не должен стоить человеку доски, поэтому он только пишется в журнал.
+
+        Подпись не вышла — следующие PHOTO_RETRY_SECONDS фото не подписываем вовсе: каждая
+        неудачная попытка ждёт сеть (поиск учётных данных GCS), и окно заявки с десятью
+        наблюдателями открывалось 20 с (разбор 15.10.2026, стенд без ключа). Карточки и
+        список наблюдателей это время рисуют инициалы."""
+        if not avatar_url or time.monotonic() < photo_pause['until']:
             return {}
         urls = {}
         for user_id, (bucket, blob_path) in (refs or {}).items():
@@ -1180,8 +1278,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             except Exception:  # noqa: BLE001
                 logging.exception('Оплата счетов: не удалось подписать ссылку на фото пользователя %s', user_id)
                 link = None
-            if link:
-                urls[user_id] = link
+            if not link:
+                photo_pause['until'] = time.monotonic() + PHOTO_RETRY_SECONDS
+                break
+            urls[user_id] = link
         return urls
 
     def _with_faces(card, request_row, focus, photos, hide_people):

@@ -434,7 +434,7 @@ class ActRouteTests(unittest.TestCase):
         queries.list_subtasks.return_value = [entity_subtask()]
         queries.today_almaty.return_value = date(2026, 10, 15)
         for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
-                     'find_duplicates'):
+                     'find_duplicates', 'list_observers'):
             getattr(queries, name).return_value = []
         directory = mock.MagicMock()
         for name in ('read_contract', 'read_legal_entity', 'read_account'):

@@ -132,15 +132,17 @@ def sees_department_people(ctx, roles=()):
     return is_section_admin(ctx) or bool(_roles(roles) & {ROLE_ACCOUNTING, ROLE_FINANCE})
 
 
-def can_see_request(ctx, request, roles=(), participant=False):
+def can_see_request(ctx, request, roles=(), participant=False, observer=False):
     """Открыть карточку заявки.
 
     `participant` — у человека есть (или была) своя подзадача в этой заявке,
     личная или по роли: считает запрос, сюда приходит готовым ответом.
+    `observer` — человек в наблюдателях заявки (тоже ответ запроса): он видит
+    заявку и её ход, как инициатор, но ничего в ней не делает.
     """
     if not request:
         return False
-    if sees_all_requests(ctx, roles) or participant:
+    if sees_all_requests(ctx, roles) or participant or observer:
         return True
     me = user_id(ctx)
     if me is None:
@@ -280,6 +282,23 @@ def can_cancel_request(ctx, request):
 
 def can_delete_request(ctx):
     return is_section_admin(ctx)
+
+
+def can_manage_observers(ctx, request):
+    """Добавить или снять наблюдателей заявки.
+
+    Просьба владельца 15.10.2026: «инициатор заявки сам может добавить их в начале
+    и в прогрессе заявки» — то есть в любой момент, пока заявка в работе, а не
+    только пока она у него (правка полей закрыта после отправки, наблюдатели —
+    нет). Администратор раздела — тоже: на пилоте он действует за любого. У
+    закрытой заявки следить уже не за чем — список остаётся как был.
+    """
+    if not request or request.get('status') != 'active':
+        return False
+    if is_section_admin(ctx):
+        return True
+    me = user_id(ctx)
+    return me is not None and _int(request.get('initiator_id')) == me
 
 
 def can_refund(ctx, request, roles=()):

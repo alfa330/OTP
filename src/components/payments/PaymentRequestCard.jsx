@@ -1,19 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Ban, Check, ChevronLeft, ChevronRight, Circle, ExternalLink, Loader2, Minus, Pencil, RotateCcw, Trash2, UserRoundCog } from 'lucide-react';
+import { Ban, Check, ChevronLeft, ChevronRight, Circle, ExternalLink, Loader2, Minus, Pencil, Plus, RotateCcw, Trash2, UserRoundCog, X } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
 import useIsMobileShell from '../common/useIsMobileShell';
 import PaymentStageForm from './PaymentStageForm';
 import {
-    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META,
+    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, MAX_OBSERVERS,
     OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
     dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
-    isOverdue, netAmount, paidLabel, paidWord, recordView, requestState, routeSummary, stageStatusLabel, stageStep, tonePill,
+    isOverdue, netAmount, observersClosedLine, observersSummary, paidLabel, paidWord, recordView, requestState, routeSummary,
+    stageStatusLabel, stageStep, tonePill,
 } from './paymentsMeta';
 import {
-    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Field, FilePicker, Fold,
-    FoldGroup, Lifecycle, NoticeBox, RequisitesBox, ReturnNotice, Row, SectionTitle, StatePill, TonePill,
+    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FilePicker, Fold,
+    FoldGroup, Lifecycle, NoticeBox, PeopleValue, RequisitesBox, ReturnNotice, Row, SectionTitle, StatePill, TonePill,
     UserSelect, WindowSkeleton, errorText, multipart, useIsoLayoutEffect,
 } from './paymentsUi';
 
@@ -102,8 +103,14 @@ const PaymentRequestCard = ({
     const [mode, setMode] = useState(null);       // 'cancel' | 'refund' | 'delete' | 'reassign:<kind>'
     const [reassignTo, setReassignTo] = useState(null);
     const [refund, setRefund] = useState({ refund_on: '', refund_amount: 0 });
+    // Кого добавить наблюдателями — выбранные в списке, ещё не добавленные (номера строками).
+    const [observerPick, setObserverPick] = useState([]);
+    // Добавление наблюдателей идёт — крутится его кнопка, а не любая занятость окна.
+    const [addingObservers, setAddingObservers] = useState(false);
+    // Отказ «добавить / снять» — в самом разделе, а не плашкой над заявкой.
+    const [observerError, setObserverError] = useState('');
     const [showAllEvents, setShowAllEvents] = useState(false);
-    // Какие разделы «по запросу» человек раскрыл или свернул сам: { route, files, history }.
+    // Какие разделы «по запросу» человек раскрыл или свернул сам: { route, observers, files, history }.
     const [folds, setFolds] = useState({});
     // Какая страница под сводкой: 'request' — сама заявка, 'task' — задача человека.
     const [page, setPage] = useState('request');
@@ -154,6 +161,8 @@ const PaymentRequestCard = ({
         // Открыли другую заявку поверх прежней (щелчок по колоколу) — прежнюю не показываем.
         setData((prev) => (prev?.request?.id === requestId ? prev : null));
         setExtraFiles([]);
+        setObserverPick([]);
+        setObserverError('');
         setMode(null);
         setShowAllEvents(false);
         // Каждая заявка открывается коротко: раскрытое в прошлой — её дело.
@@ -257,6 +266,41 @@ const PaymentRequestCard = ({
     const removeAttachment = (attachment) => run(() => axios.delete(
         `${base}/attachments/${attachment.id}`, { headers: headers() },
     ), 'Файл снят');
+
+    /* Добавить и снять наблюдателей. Отказ (предел, уволенный) показывается в самом разделе:
+       общая плашка стоит над заявкой, окно уводило к ней, и раздел пропадал из виду, а под
+       ним та же фраза о пределе стояла второй раз (разбор 15.10.2026). */
+    const changeObservers = async (fn, successText) => {
+        setBusy(true);
+        setObserverError('');
+        try {
+            apply(await fn());
+            toastRef.current?.(successText, 'success');
+            return true;
+        } catch (err) {
+            setObserverError(errorText(err, 'Не удалось изменить наблюдателей'));
+            // Список успел измениться у другого — показываем его как есть сейчас.
+            if (err?.response?.status === 409) load({ keepError: true });
+            return false;
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const addObservers = async () => {
+        const ids = observerPick.map(Number).filter(Boolean);
+        if (!ids.length) return;
+        setAddingObservers(true);
+        await changeObservers(() => axios.post(`${base}/observers`, { user_ids: ids }, { headers: headers() }),
+            ids.length > 1 ? 'Наблюдатели добавлены' : 'Наблюдатель добавлен');
+        setAddingObservers(false);
+        // И после отказа: выбранный тогда человек не должен ждать в списке следующего «Добавить».
+        setObserverPick([]);
+    };
+
+    const removeObserver = (person) => changeObservers(() => axios.delete(
+        `${base}/observers/${person.user_id}`, { headers: headers() },
+    ), 'Наблюдатель снят');
 
     const remove = async () => {
         const ok = await run(() => axios.delete(base, { headers: headers() }), 'Заявка удалена');
@@ -421,6 +465,19 @@ const PaymentRequestCard = ({
         || subtaskByKind.closing_docs?.state === 'done'));
     const waiting = subtasks.find((item) => item.state === 'waiting') || null;
     const overdue = isOverdue(request);
+    /* Наблюдатели: раздел виден, когда они есть или их можно добавить (инициатор и
+       администратор, пока заявка в работе). В выборе нет самого инициатора и уже
+       добавленных; предел — общий с сервером (meta.max_observers). */
+    const observers = data?.observers || [];
+    const photos = data?.photos || {};
+    const maxObservers = Number(meta?.max_observers) || MAX_OBSERVERS;
+    const canManageObservers = Boolean(permissions.can_manage_observers);
+    const observerExclude = useMemo(() => [request?.initiator_id, ...(data?.observers || []).map((person) => person.user_id)]
+        .filter((id) => id !== null && id !== undefined), [request?.initiator_id, data]);
+    // Кому раздел не открыт — одной строкой под списком и только тому, кто управляет наблюдателями:
+    // остальным исправить нечего, а на пилоте (раздел открыт поимённо) строка стояла бы почти у каждого.
+    const observersClosed = observers.filter((person) => person.section_open === false && !person.fired)
+        .map((person) => person.name);
 
     /* Строка этапа в «Ходе заявки». */
     const renderSubtask = (item, isLast) => {
@@ -811,6 +868,81 @@ const PaymentRequestCard = ({
                                             <ol>{subtasks.filter((item) => item.kind !== 'initiation').map((item, index, list) => renderSubtask(item, index === list.length - 1))}</ol>
                                         </div>
                                     </Fold>
+
+                                    {/* Наблюдатели (просьба владельца 15.10.2026): кто следит за ходом заявки,
+                                        например пока инициатор в отпуске. Добавить и снять — инициатору,
+                                        пока заявка в работе; остальным — только список. */}
+                                    {(observers.length > 0 || canManageObservers) && (
+                                        <Fold id="observers" title="Наблюдатели" summary={observersSummary(observers, me?.id)} open={foldOpen('observers')} onToggle={() => toggleFold('observers')}>
+                                            <div className="space-y-2.5 p-3.5">
+                                                {observers.length === 0 && (
+                                                    <div className="px-0.5 text-[12.5px] leading-relaxed text-slate-500">
+                                                        Наблюдатель видит заявку и её ход, а в колокол ему приходят те же сообщения, что и инициатору, — удобно на время отпуска.
+                                                    </div>
+                                                )}
+                                                {observers.map((person) => (
+                                                    <div key={person.user_id} data-observer={person.user_id} className="flex items-center gap-3">
+                                                        <Face person={{ name: person.name, avatar_url: photos[String(person.user_id)] }} size={28} />
+                                                        <div className="min-w-0 grow basis-0">
+                                                            <div className="truncate text-[13.5px] text-slate-900">
+                                                                {person.name}
+                                                                {person.user_id === me?.id && <span className="text-slate-500"> · вы</span>}
+                                                            </div>
+                                                            {(person.fired || person.department_name) && (
+                                                                <div className="truncate text-[12px] text-slate-500">
+                                                                    {person.fired ? 'Больше не работает в компании' : person.department_name}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        {canManageObservers && (
+                                                            <button
+                                                                type="button"
+                                                                aria-label={`Снять наблюдателя: ${person.name}`}
+                                                                title="Снять"
+                                                                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                                                                disabled={busy}
+                                                                onClick={() => removeObserver(person)}
+                                                            >
+                                                                <X size={14} />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                                {/* Как в «Участниках»: вне периметра раздела заявку не открыть, и
+                                                    инициатор узнаёт об этом здесь, а не из «мне ничего не приходит». */}
+                                                {canManageObservers && observersClosed.length > 0 && (
+                                                    <div className="px-0.5 text-[12px] text-amber-700" data-observers-closed>
+                                                        {observersClosedLine(observersClosed, observers.filter((person) => !person.fired).length)}
+                                                    </div>
+                                                )}
+                                                {canManageObservers && observers.length < maxObservers && (
+                                                    // grow basis-0, а не flex-1: по нему оболочка телефона ставит ряд столбиком.
+                                                    <div className="flex flex-col gap-2 pt-1 sm:flex-row" data-observer-add>
+                                                        <div className="min-w-0 grow basis-0">
+                                                            <UserSelect
+                                                                multiple
+                                                                users={users}
+                                                                value={observerPick}
+                                                                onChange={setObserverPick}
+                                                                exclude={observerExclude}
+                                                                maxSelected={maxObservers - observers.length}
+                                                                renderValue={(ids) => <PeopleValue ids={ids} users={users} />}
+                                                                placeholder="Кого добавить наблюдателем"
+                                                            />
+                                                        </div>
+                                                        <button type="button" className={`${iosBtnPrimary} shrink-0`} disabled={busy || !observerPick.length} onClick={addObservers}>
+                                                            {addingObservers ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Добавить
+                                                        </button>
+                                                    </div>
+                                                )}
+                                                {observerError ? (
+                                                    <div className="px-0.5 text-[12.5px] text-rose-600" role="alert" data-observers-error>{observerError}</div>
+                                                ) : canManageObservers && observers.length >= maxObservers && (
+                                                    <div className="px-0.5 text-[12px] text-slate-500">Наблюдателей у заявки — не больше {maxObservers}.</div>
+                                                )}
+                                            </div>
+                                        </Fold>
+                                    )}
 
                                     {((data.attachments || []).length > 0 || permissions.can_attach) && (
                                         <Fold id="files" title="Документы" summary={filesSummary(data.attachments)} open={foldOpen('files')} onToggle={() => toggleFold('files')}>

@@ -177,7 +177,7 @@ test('«Заявки» помнят первую страницу без отб�
 });
 
 test('срезы реестра и имущества — те же, что были отбором', () => {
-    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
+    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
     const view = source('src/components/payments/PaymentsView.jsx');
     // Состояние без заявок плиткой не рисуется, пока его не выбрали: пустая плитка — шум.
     assert.ok(view.includes(".filter((item) => ['all', 'mine', 'open'].includes(item.key) || counters[item.counter] || state === item.key)"));

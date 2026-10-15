@@ -96,6 +96,8 @@ def task(request, subtask):
     definition = workflow.subtask(kind) or {}
     return {
         'kind': 'task',
+        # Вид подзадачи — по нему наблюдатель получает свой заголовок (for_observer).
+        'subtask': kind,
         'title': title,
         'body': brief(request),
         'telegram': _message('💳 Оплата счетов — новая задача', request, [
@@ -212,6 +214,45 @@ def unreachable(event):
     note = 'Исполнителю раздел не открыт — задачу видят только администраторы'
     return dict(event, body='%s. %s' % (event.get('body') or '', note) if event.get('body') else note,
                 telegram='%s\n\n⚠️ %s.' % (event.get('telegram') or '', note))
+
+
+def watching(request):
+    """Человека добавили наблюдателем заявки (просьба владельца 15.10.2026). Только колокол:
+    Telegram — канал о новой задаче, а у наблюдателя задач нет. Чья заявка — в теле: она
+    чужая, и по номеру с названием это не всегда понятно."""
+    who = request.get('initiator_name')
+    return {
+        'kind': 'watching',
+        'title': 'Вас добавили наблюдателем заявки',
+        'body': '%s · инициатор: %s' % (brief(request), _cut(who, 120)) if who else brief(request),
+        'telegram': _message('👀 Оплата счетов — вы наблюдатель заявки', request, [_who(request)]),
+    }
+
+
+# То, что инициатору говорит «сделайте» или зовёт к действию, наблюдателю — что происходит:
+# действовать по заявке он не может. Остальные заголовки («Заявка согласована», «Счёт
+# оплачен», «Заявку вернули на доработку») о ходе и так говорят нейтрально — как есть.
+_OBSERVER_TITLES = {
+    'docs_needed': 'Бухгалтерия ждёт закрывающие документы',
+    'clarification': 'Инициатора попросили уточнить заявку',
+}
+
+# Задачи самого инициатора — чек и получение. Наблюдатель узнаёт, что заявка ждёт его:
+# ради отпуска инициатора наблюдателей и добавляют (разбор 15.10.2026).
+_OBSERVER_TASK_TITLES = {
+    workflow.KIND_RECEIPT: 'Заявка ждёт чек от инициатора',
+    workflow.KIND_RECEIVING: 'Заявка ждёт подтверждения получения от инициатора',
+}
+
+
+def for_observer(event):
+    """То же событие о ходе заявки — для её наблюдателя."""
+    event = event or {}
+    if event.get('kind') == 'task':
+        title = _OBSERVER_TASK_TITLES.get(event.get('subtask'))
+        return dict(event, kind='waits_initiator', title=title) if title else event
+    title = _OBSERVER_TITLES.get(event.get('kind'))
+    return dict(event, title=title) if title else event
 
 
 def docs_needed(request):

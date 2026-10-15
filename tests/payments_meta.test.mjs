@@ -137,7 +137,10 @@ test('состояние берётся с сервера, а без него �
 
 test('легенда реестра и фильтр «Статус» досок покрывают все состояния', () => {
   assert.deepEqual(STATE_FILTERS.map((item) => item.key),
-    ['all', 'mine', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
+    ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
+  // «Наблюдаю» — срез по смотрящему, как «Ждут меня», а не состояние: без кружка, счётчик — свой.
+  const watching = STATE_FILTERS.find((item) => item.key === 'watching');
+  assert.deepEqual(watching, { key: 'watching', label: 'Наблюдаю', counter: 'watching', tone: null });
   for (const filter of STATE_FILTERS) {
     if (filter.tone) assert.ok(Object.values(STATE_META).some((meta) => meta.tone === filter.tone), filter.key);
   }
@@ -864,9 +867,9 @@ test('заготовка заявки не ниже окна на обычном
   assert.equal(ASSET_SKELETON.length, 2);
 });
 
-test('разделы «по запросу»: ход заявки, документы, история — в этом порядке', () => {
-  assert.deepEqual(CARD_FOLDS.map((fold) => fold.key), ['route', 'files', 'history']);
-  assert.deepEqual(CARD_FOLDS.map((fold) => fold.title), ['Ход заявки', 'Документы', 'История']);
+test('разделы «по запросу»: ход заявки, наблюдатели, документы, история — в этом порядке', () => {
+  assert.deepEqual(CARD_FOLDS.map((fold) => fold.key), ['route', 'observers', 'files', 'history']);
+  assert.deepEqual(CARD_FOLDS.map((fold) => fold.title), ['Ход заявки', 'Наблюдатели', 'Документы', 'История']);
 });
 
 test('свёрнутый «Ход заявки» говорит, у кого заявка сейчас', () => {

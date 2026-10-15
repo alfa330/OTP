@@ -5,16 +5,16 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSec
 import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CARD_RECIPIENT_OPTIONS, CONTRACT_THRESHOLD, HINTS,
+    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CARD_RECIPIENT_OPTIONS, CONTRACT_THRESHOLD, HINTS, MAX_OBSERVERS,
     OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, UNSTAFFED, approvalSummary, cardDigits, cardLuhnOk,
     cardNumberLabel, cardProblem, fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
-    issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, legacyIssues, parseAmount, priceTrend, purchaseIssues,
-    regularIssues, trendLabel,
+    issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, legacyIssues, observersClosedLine, observersPatch,
+    parseAmount, priceTrend, purchaseIssues, regularIssues, trendLabel,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, Choice, ErrorBox, Field, FieldHint, FilePicker, FormDate, FormInput, FormSelect, FormText,
-    INVALID_RING, IssueNav, NoticeBox, RequisitesBox, Row, UserSelect, errorText, fromKeyboard, multipart, useFieldIssue,
-    useIssueNav,
+    INVALID_RING, IssueNav, NoticeBox, PeopleValue, RequisitesBox, Row, UserSelect, errorText, fromKeyboard, multipart,
+    useFieldIssue, useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -60,7 +60,13 @@ const EXTRA_FIELDS = [
     { key: 'branch', label: 'Филиал / регион' },
     { key: 'notes', label: 'Комментарий' },
     { key: 'files', label: 'Вложения' },
+    { key: 'observer_ids', label: 'Наблюдатели' },
 ];
+/* У регулярного платежа комментарий стоит открытым в «Оплате», остального нет вовсе —
+   под чипом только наблюдатели. */
+const REGULAR_EXTRA_FIELDS = EXTRA_FIELDS.filter((field) => field.key === 'observer_ids');
+// Поле заполнено — его чип раскрыт: пустой список наблюдателей — то же, что пустое поле.
+const hasValue = (value) => (Array.isArray(value) ? value.length > 0 : Boolean(value));
 
 // Количество из базы («5.000») — в том виде, как его набирает человек («5», «2,5»).
 const quantityInput = (value) => {
@@ -81,6 +87,8 @@ const emptyDraft = (me, kind = null) => ({
     card_recipient: null, card_holder_user_id: me?.id || null, card_holder_name: '', card_id: null,
     card_number: '', payment_purpose: '', notes: '',
     fixed_template_id: null, amount: 0, payment_period: '',
+    // Наблюдатели — номерами строками, как их отдаёт список выбора нескольких сотрудников.
+    observer_ids: [],
 });
 
 const draftFromData = (data, me) => {
@@ -130,6 +138,9 @@ const draftFromData = (data, me) => {
         fixed_template_id: request.fixed_template_id ?? null,
         amount: parseAmount(request.amount),
         payment_period: request.payment_period || '',
+        // Уволенного в списке выбора нет (его не снять и не увидеть) — в форму он не попадает,
+        // а разница, которую форма шлёт, его не касается: снимают его в окне заявки.
+        observer_ids: (data.observers || []).filter((person) => !person.fired).map((person) => String(person.user_id)),
     };
 };
 
@@ -211,6 +222,8 @@ const PaymentRequestForm = ({
     const errorRef = useRef(null);
     const formRef = useRef(null);
     const pristineRef = useRef('');
+    // Наблюдатели, с которыми окно открыли: форма шлёт разницу с ними, а не список целиком.
+    const observersAtOpen = useRef([]);
 
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
@@ -247,7 +260,7 @@ const PaymentRequestForm = ({
             let next = emptyDraft(me);
             if (data?.request) {
                 next = draftFromData(data, me);
-                setExtras(EXTRA_FIELDS.map((field) => field.key).filter((key) => next[key]));
+                setExtras(EXTRA_FIELDS.map((field) => field.key).filter((key) => hasValue(next[key])));
                 setInvoiceOpen(Boolean(next.invoice_number || next.invoice_date
                     || (data.attachments || []).some((item) => item.kind === 'invoice')
                     || data.request.clarify_reason === 'invoice_missing'));
@@ -257,6 +270,7 @@ const PaymentRequestForm = ({
             }
             setDraft(next);
             pristineRef.current = fingerprint(next);
+            observersAtOpen.current = next.observer_ids;
         }
     }
 
@@ -458,8 +472,22 @@ const PaymentRequestForm = ({
     const removeExtra = (key) => {
         setExtras((prev) => prev.filter((item) => item !== key));
         if (key === 'files') setFiles([]);
+        else if (key === 'observer_ids') set('observer_ids', []);
         else set(key, key.endsWith('_id') ? null : '');
     };
+
+    /* Наблюдатели: не сам инициатор (он и так видит свою заявку), не больше общего предела.
+       Кому раздел не открыт, тот заявку не увидит, — форма говорит об этом сразу, при выборе. */
+    const initiatorId = editing ? request.initiator_id : me?.id;
+    const observerExclude = useMemo(() => (initiatorId ? [initiatorId] : []), [initiatorId]);
+    const maxObservers = Number(meta?.max_observers) || MAX_OBSERVERS;
+    const observersClosed = useMemo(() => {
+        const picked = new Set((draft.observer_ids || []).map(String));
+        return (users || []).filter((user) => picked.has(String(user.id)) && user.section_open === false)
+            .map((user) => user.name);
+    }, [users, draft.observer_ids]);
+    // Наблюдатели уходят разницей с тем, что было при открытии формы (paymentsMeta.observersPatch).
+    const observersPayload = () => observersPatch(draft.observer_ids, observersAtOpen.current);
 
     const pickTemplate = (id) => {
         const next = templates.find((item) => item.id === id) || null;
@@ -479,6 +507,7 @@ const PaymentRequestForm = ({
                 due_on: draft.due_on || null, invoice_number: draft.invoice_number.trim(),
                 invoice_date: draft.invoice_date || null, notes: draft.notes.trim(),
                 replace_invoice: Boolean(invoiceFile), submit,
+                ...observersPayload(),
             };
         }
         const sent = offers.filter((offer) => !isBlankOffer(offer));
@@ -513,6 +542,7 @@ const PaymentRequestForm = ({
             card_holder_name: draft.card_recipient === 'supplier' ? draft.card_holder_name.trim() : '',
             payment_purpose: draft.payment_purpose.trim(), notes: draft.notes.trim(),
             ...card,
+            ...observersPayload(),
             submit,
         };
     };
@@ -585,6 +615,77 @@ const PaymentRequestForm = ({
     const lunaWarn = !draft.card_id && cardDigits(draft.card_number).length >= 13 && !cardProblem(draft.card_number, meta?.card_digits)
         && !cardLuhnOk(draft.card_number);
     const cardSelect = cardOptions.length > 0;
+
+    /* «Дополнительно»: необязательное спрятано под чипы «+ …» и раскрывается полем по
+       нажатию. У нового закупа — проект, филиал, комментарий, вложения и наблюдатели; у
+       регулярного платежа — только наблюдатели. */
+    const extrasSection = (fields) => (
+        <IosSection title="Дополнительно">
+            {extras.filter((key) => fields.some((field) => field.key === key)).map((key) => {
+                const meta_ = fields.find((field) => field.key === key);
+                return (
+                    // grow basis-0, а не flex-1: по нему оболочка телефона ставит ряд столбиком.
+                    <div key={key} className="flex items-start gap-2">
+                        <div className="min-w-0 grow basis-0">
+                            {key === 'project_id' && (
+                                <Field label={meta_.label} hint={HINTS.project}>
+                                    <FormSelect value={draft.project_id} onChange={(value) => set('project_id', value)} options={projectOptions} placeholder="Без проекта" ariaLabel="Проект" searchable={projectOptions.length > 8} />
+                                </Field>
+                            )}
+                            {key === 'branch' && (
+                                <Field label={meta_.label} hint="Таксопарк (город), филиал или регион — в зависимости от проекта.">
+                                    <input className={iosInput} value={draft.branch} onChange={(event) => set('branch', event.target.value)} maxLength={200} placeholder="Например: Алматы" />
+                                </Field>
+                            )}
+                            {key === 'notes' && (
+                                <Field label={meta_.label}>
+                                    <textarea className={`${iosInput} min-h-[56px] resize-y`} value={draft.notes} onChange={(event) => set('notes', event.target.value)} maxLength={4000} />
+                                </Field>
+                            )}
+                            {key === 'files' && (
+                                <Field as="div" label={meta_.label} hint="Любые документы к закупу. Коммерческое предложение удобнее приложить к своему поставщику выше.">
+                                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('request').filter((option) => option.value !== 'invoice')} />
+                                </Field>
+                            )}
+                            {key === 'observer_ids' && (
+                                <Field label={meta_.label} hint={HINTS.observers}>
+                                    <UserSelect
+                                        multiple
+                                        users={users}
+                                        value={draft.observer_ids}
+                                        onChange={(ids) => set('observer_ids', ids)}
+                                        exclude={observerExclude}
+                                        maxSelected={maxObservers}
+                                        renderValue={(ids) => <PeopleValue ids={ids} users={users} />}
+                                        placeholder="Кто будет следить за заявкой"
+                                    />
+                                    {observersClosed.length > 0 && (
+                                        <span className="block px-1 text-[12.5px] text-amber-700">
+                                            {observersClosedLine(observersClosed, (draft.observer_ids || []).length)}
+                                        </span>
+                                    )}
+                                </Field>
+                            )}
+                        </div>
+                        {/* У наблюдателей, которые уже были у заявки, «Убрать поле» нет: крестик читается как
+                            «спрятать поле», а снял бы всех разом (разбор 15.10.2026). Снимают по одному — в списке. */}
+                        {!(key === 'observer_ids' && observersAtOpen.current.length > 0) && (
+                            <button type="button" aria-label={`Убрать поле ${meta_.label}`} className="mt-6 grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700" onClick={() => removeExtra(key)}>
+                                <X size={14} />
+                            </button>
+                        )}
+                    </div>
+                );
+            })}
+            <div className="flex flex-wrap gap-1.5">
+                {fields.filter((field) => !extras.includes(field.key)).map((field) => (
+                    <button key={field.key} type="button" onClick={() => addExtra(field.key)} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[12.5px] text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]">
+                        <Plus size={12} /> {field.label}
+                    </button>
+                ))}
+            </div>
+        </IosSection>
+    );
 
     let footer = <button type="button" className={iosBtnSecondary} onClick={requestClose}>Отмена</button>;
     if (confirmClose) {
@@ -729,6 +830,8 @@ const PaymentRequestForm = ({
                                 <FormText className="min-h-[56px]" value={draft.notes} onChange={(event) => set('notes', event.target.value)} maxLength={4000} />
                             </Field>
                         </IosSection>
+
+                        {extrasSection(REGULAR_EXTRA_FIELDS)}
                     </>
                 )}
 
@@ -972,48 +1075,7 @@ const PaymentRequestForm = ({
                             )}
                         </IosSection>
 
-                        <IosSection title="Дополнительно">
-                            {extras.map((key) => {
-                                const meta_ = EXTRA_FIELDS.find((field) => field.key === key);
-                                return (
-                                    // grow basis-0, а не flex-1: по нему оболочка телефона ставит ряд столбиком.
-                                    <div key={key} className="flex items-start gap-2">
-                                        <div className="min-w-0 grow basis-0">
-                                            {key === 'project_id' && (
-                                                <Field label={meta_.label} hint={HINTS.project}>
-                                                    <FormSelect value={draft.project_id} onChange={(value) => set('project_id', value)} options={projectOptions} placeholder="Без проекта" ariaLabel="Проект" searchable={projectOptions.length > 8} />
-                                                </Field>
-                                            )}
-                                            {key === 'branch' && (
-                                                <Field label={meta_.label} hint="Таксопарк (город), филиал или регион — в зависимости от проекта.">
-                                                    <input className={iosInput} value={draft.branch} onChange={(event) => set('branch', event.target.value)} maxLength={200} placeholder="Например: Алматы" />
-                                                </Field>
-                                            )}
-                                            {key === 'notes' && (
-                                                <Field label={meta_.label}>
-                                                    <textarea className={`${iosInput} min-h-[56px] resize-y`} value={draft.notes} onChange={(event) => set('notes', event.target.value)} maxLength={4000} />
-                                                </Field>
-                                            )}
-                                            {key === 'files' && (
-                                                <Field as="div" label={meta_.label} hint="Любые документы к закупу. Коммерческое предложение удобнее приложить к своему поставщику выше.">
-                                                    <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('request').filter((option) => option.value !== 'invoice')} />
-                                                </Field>
-                                            )}
-                                        </div>
-                                        <button type="button" aria-label={`Убрать поле ${meta_.label}`} className="mt-6 grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700" onClick={() => removeExtra(key)}>
-                                            <X size={14} />
-                                        </button>
-                                    </div>
-                                );
-                            })}
-                            <div className="flex flex-wrap gap-1.5">
-                                {EXTRA_FIELDS.filter((field) => !extras.includes(field.key)).map((field) => (
-                                    <button key={field.key} type="button" onClick={() => addExtra(field.key)} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[12.5px] text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]">
-                                        <Plus size={12} /> {field.label}
-                                    </button>
-                                ))}
-                            </div>
-                        </IosSection>
+                        {extrasSection(EXTRA_FIELDS)}
                     </>
                 )}
 

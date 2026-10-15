@@ -51,7 +51,7 @@ class CardOfTheRequestTests(unittest.TestCase):
         queries.list_subtasks.return_value = subtasks
         queries.today_almaty.return_value = None
         for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
-                     'find_duplicates'):
+                     'find_duplicates', 'list_observers'):
             getattr(queries, name).return_value = []
         directory = mock.MagicMock()
         directory.read_contract.return_value = None

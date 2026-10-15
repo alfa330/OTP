@@ -31,10 +31,12 @@ export const STATE_META = {
 };
 
 /* Полоса-легенда, она же фильтр. «Ждут меня» — не состояние заявки, а срез по
-   исполнителю, поэтому стоит сразу за «Все» и не имеет кружка. */
+   исполнителю, поэтому стоит сразу за «Все» и не имеет кружка. «Наблюдаю» — такой
+   же срез: заявки в работе, где смотрящий в наблюдателях (плитка есть, только когда они есть). */
 export const STATE_FILTERS = [
     { key: 'all', label: 'Все', counter: 'all', tone: null },
     { key: 'mine', label: 'Ждут меня', counter: 'mine', tone: null },
+    { key: 'watching', label: 'Наблюдаю', counter: 'watching', tone: null },
     { key: 'open', label: 'В работе', counter: 'open', tone: null },
     { key: 'clarification', label: 'Требуют уточнения', counter: 'clarification', tone: 'blocked' },
     { key: 'overdue', label: 'Просрочены', counter: 'overdue', tone: 'overdue' },
@@ -455,7 +457,15 @@ export const HINTS = {
             ['Списано', 'с учёта снято — из профиля сотрудника пропадает'],
         ],
     },
+    observers: {
+        intro: 'Кто будет следить за ходом заявки — например, пока вы в отпуске.',
+        outro: 'Наблюдатель видит заявку и её ход, а в колокол ему приходят те же сообщения, что и инициатору: согласовано, оплачено, вернули на доработку. Действовать по заявке он не может. Добавить и снять наблюдателей можно и потом — в окне заявки.',
+    },
 };
+
+/* Наблюдателей у заявки — не больше этого (workflow.MAX_OBSERVERS; сервер отдаёт его в
+   /ping → meta.max_observers, здесь значение по умолчанию до ответа). */
+export const MAX_OBSERVERS = 10;
 
 /* Выбор из двух вариантов — подписи. Значение у «не выбрано» — null. */
 export const VAT_OPTIONS = [{ value: false, label: 'Без НДС' }, { value: true, label: 'С НДС' }];
@@ -827,6 +837,7 @@ export const ASSET_SKELETON = [{ rows: 12, title: false }, 2];
    формулировку держал тест. */
 export const CARD_FOLDS = [
     { key: 'route', title: 'Ход заявки' },
+    { key: 'observers', title: 'Наблюдатели' },
     { key: 'files', title: 'Документы' },
     { key: 'history', title: 'История' },
 ];
@@ -911,6 +922,54 @@ export const routeSummary = (request, subtasks = []) => {
 
 export const filesSummary = (attachments = []) => (
     (attachments || []).length ? plural(attachments.length, FILE_FORMS) : 'нет файлов');
+
+/** Наблюдатели одной строкой для свёрнутого раздела: «Иванова Айгерим и ещё 2». Сам
+ *  смотрящий — «вы», и первым: ему важнее всего, что он в списке. */
+export const observersSummary = (observers = [], meId = null) => {
+    const list = observers || [];
+    if (!list.length) return 'не добавлены';
+    const mine = meId !== null && meId !== undefined && list.some((person) => person.user_id === meId);
+    const first = mine ? 'вы' : (list[0].name || '');
+    return list.length > 1 ? `${first} и ещё ${list.length - 1}` : first;
+};
+
+/** Что форма заявки шлёт о наблюдателях: разницу с тем, что было при её открытии, —
+ *  { observers_add, observers_remove } (пустые не шлются). Не список целиком: пока форма
+ *  открыта, в окне заявки могли добавить ещё кого-то, и сохранение формы сняло бы его
+ *  (разбор 15.10.2026). У новой заявки `atOpen` пуст — уходят только выбранные. */
+export const observersPatch = (draftIds = [], atOpen = []) => {
+    const now = new Set((draftIds || []).map(String));
+    const before = new Set((atOpen || []).map(String));
+    const add = [...now].filter((id) => !before.has(id)).map(Number).filter(Boolean);
+    const remove = [...before].filter((id) => !now.has(id)).map(Number).filter(Boolean);
+    return {
+        ...(add.length ? { observers_add: add } : {}),
+        ...(remove.length ? { observers_remove: remove } : {}),
+    };
+};
+
+/** Кому из наблюдателей раздел не открыт — одной короткой строкой: до двух имён, дальше «и ещё N»,
+ *  а если не открыт никому из трёх и больше — так и сказано. `names` — без доступа, `total` —
+ *  сколько наблюдателей всего. Десять длинных ФИО подряд на телефоне занимали восемь строк. */
+export const observersClosedLine = (names = [], total = 0) => {
+    const list = (names || []).filter(Boolean);
+    if (!list.length) return '';
+    const verb = list.length > 1 ? 'не увидят' : 'не увидит';
+    if (list.length === total && total > 2) return 'Никому из наблюдателей раздел пока не открыт — заявку они не увидят.';
+    const shown = list.length > 2 ? `${list.slice(0, 2).join(', ')} и ещё ${list.length - 2}` : list.join(', ');
+    return `Раздел не открыт: ${shown} — заявку пока ${verb}.`;
+};
+
+/** Выбранные люди для кнопки списка выбора нескольких сотрудников: первое имя и сколько
+ *  ещё — { first, rest, total }. `ids` — как их отдаёт список (строками). Одно имя, а не
+ *  два через запятую: на телефоне строка «А, Б» обрезалась на первом имени, и второй
+ *  человек пропадал из виду без счётчика (разбор 15.10.2026). */
+export const peopleParts = (ids = [], users = []) => {
+    const byId = new Map((users || []).map((user) => [String(user.id), user.name]));
+    const all = [...new Set((ids || []).map(String))];
+    const first = all.map((id) => byId.get(id)).find(Boolean) || '';
+    return { first, rest: first ? all.length - 1 : all.length, total: all.length };
+};
 
 /** `events` — в порядке записи, последнее — в конце (как отдаёт сервер). */
 export const historySummary = (events = []) => {
@@ -1592,6 +1651,18 @@ export const describeEvent = (event, titleOf = () => '') => {
         case 'edited': {
             const labels = unique(Object.keys(payload.changes || {}).map((key) => FIELD_LABELS[key] || key));
             return labels.length ? `Изменено: ${labels.join(', ')}` : 'Заявка изменена';
+        }
+        case 'observers': {
+            const names = (list) => (list || []).map((person) => person?.name).filter(Boolean);
+            const added = names(payload.added);
+            const removed = names(payload.removed);
+            if (added.length && removed.length) {
+                return `Наблюдатели: ${added.length > 1 ? 'добавлены' : 'добавлен'} — ${added.join(', ')}; `
+                    + `${removed.length > 1 ? 'сняты' : 'снят'} — ${removed.join(', ')}`;
+            }
+            if (added.length) return `${added.length > 1 ? 'Добавлены наблюдатели' : 'Добавлен наблюдатель'}: ${added.join(', ')}`;
+            if (removed.length) return `${removed.length > 1 ? 'Сняты наблюдатели' : 'Снят наблюдатель'}: ${removed.join(', ')}`;
+            return 'Изменены наблюдатели';
         }
         /* События первой версии раздела (12 шагов) остаются в истории старых заявок. */
         case 'step_done': return `Шаг ${event.step_no} — отписка`;

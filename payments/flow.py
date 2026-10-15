@@ -100,9 +100,26 @@ def announce_task(cursor, request_id, kind, *, outbox=None, base_url=None, exclu
             subtask_id=subtask['id'], actionable=True, exclude=exclude)
 
 
+def _notify_observers(cursor, request, event, *, actor=None, subtask_id=None):
+    """Наблюдателям заявки — то же событие о ходе, что инициатору, но только «к сведению»:
+    действовать по заявке им не нужно (и нельзя), поэтому ни Telegram, ни «ждёт вас» —
+    строка колокола гаснет, когда наблюдатель откроет заявку.
+
+    `subtask_id` — событие «заявка ждёт инициатора» (вернули, уточнение, чек, получение,
+    закрывающие документы): копия наблюдателя гаснет вместе с этой задачей и при закрытии
+    заявки (notices.clear_subtask, clear_request), а не висит, когда ждать уже нечего."""
+    ids = queries.observer_ids(cursor, request['id']) - {int(request.get('initiator_id') or 0)}
+    if ids:
+        _notify(cursor, request, notify.for_observer(event), ids, outbox=None, base_url=None,
+                subtask_id=subtask_id, exclude=[(actor or {}).get('id')])
+
+
 def _notify_initiator(cursor, request, event, *, outbox, base_url, actor=None, **kwargs):
+    """Инициатору — о ходе его заявки; наблюдателям — то же самое к сведению."""
     _notify(cursor, request, event, [request.get('initiator_id')], outbox=outbox, base_url=base_url,
             exclude=[(actor or {}).get('id')], **kwargs)
+    _notify_observers(cursor, request, event, actor=actor,
+                      subtask_id=kwargs.get('subtask_id') if kwargs.get('actionable') else None)
 
 
 # ─── Сборка контекста заявки ─────────────────────────────────────────────────
@@ -271,13 +288,18 @@ def advance(cursor, request_id, actor, *, outbox=None, base_url=None):
 
     opened = queries.open_subtask(cursor, request_id, kind)
     request = queries.read_request(cursor, request_id)
-    _notify(cursor, request, notify.task(request, opened), subtask_user_ids(opened, members),
+    task = notify.task(request, opened)
+    _notify(cursor, request, task, subtask_user_ids(opened, members),
             outbox=outbox, base_url=base_url, subtask_id=opened['id'], actionable=True,
             exclude=[(actor or {}).get('id')])
+    if opened.get('role_code') == workflow.ROLE_INITIATOR:
+        # Чек и получение — задачи самого инициатора: наблюдатель знает, что заявка ждёт его.
+        _notify_observers(cursor, request, task, actor=actor, subtask_id=opened['id'])
     if kind == workflow.KIND_CLOSING and request.get('closing_docs_status') == workflow.DOCS_NONE:
         # П. 17: инициатору — «необходимо приложить закрывающие документы».
         _notify(cursor, request, notify.docs_needed(request), [request.get('initiator_id')],
                 outbox=outbox, base_url=base_url, subtask_id=None, actionable=True)
+        _notify_observers(cursor, request, notify.docs_needed(request), actor=actor, subtask_id=opened['id'])
     return kind
 
 
@@ -658,10 +680,10 @@ def files_added(cursor, request_id, kinds, actor):
 
 
 def cancel(cursor, request_id, actor, comment=None, *, base_url=None):
-    """Отмена заявки. Тот, у кого она была в работе, и инициатор узнают об этом из
-    колокола: иначе карточка просто исчезла бы с доски исполнителя."""
+    """Отмена заявки. Тот, у кого она была в работе, инициатор и наблюдатели узнают об
+    этом из колокола: иначе карточка просто исчезла бы с доски исполнителя."""
     request = queries.read_request(cursor, request_id)
-    holders = {request.get('initiator_id')}
+    holders = {request.get('initiator_id')} | queries.observer_ids(cursor, request_id)
     if request.get('current_assignee_id'):
         holders.add(request['current_assignee_id'])
     elif request.get('current_role_code'):
@@ -672,26 +694,83 @@ def cancel(cursor, request_id, actor, comment=None, *, base_url=None):
             base_url=base_url, exclude=[(actor or {}).get('id')])
 
 
+# ─── Наблюдатели (просьба владельца 15.10.2026) ──────────────────────────────
+
+def change_observers(cursor, request, actor, *, add=(), remove=()):
+    """Добавить и снять наблюдателей заявки одним действием. Возвращает
+    {'added': [...], 'removed': [...]} — [{id, name}] тех, кого на самом деле
+    добавили и сняли.
+
+    Меняется разница, а не список целиком: пока у инициатора открыта форма
+    доработки, администратор мог добавить кого-то в окне заявки, и сохранение
+    формы, присланной списком, молча сняло бы его (разбор 15.10.2026). Номер и в
+    `add`, и в `remove` — остаётся наблюдателем.
+
+    Наблюдатель — действующий сотрудник и не сам инициатор: инициатор и так видит
+    свою заявку. Добавленным приходит в колокол «вас добавили наблюдателем», снятым
+    гаснут сведения по этой заявке — открыть её они больше не смогут. Изменение
+    ложится в историю заявки одной записью.
+    """
+    request_id = request['id']
+    wanted = list(dict.fromkeys(int(value) for value in add or ()))
+    dropped = list(dict.fromkeys(int(value) for value in remove or ()))
+    current = {item['user_id']: item for item in queries.list_observers(cursor, request_id)}
+    to_add = [user_id for user_id in wanted if user_id not in current]
+    to_remove = [user_id for user_id in dropped if user_id in current and user_id not in wanted]
+
+    initiator_id = int(request.get('initiator_id') or 0)
+    people = queries.users_brief(cursor, to_add)
+    for user_id in to_add:
+        if user_id == initiator_id:
+            raise FlowError('Инициатор и так видит свою заявку — наблюдателем его добавлять не нужно',
+                            code='PAYMENT_OBSERVER_INVALID')
+        person = people.get(user_id)
+        if not person or person['fired']:
+            raise FlowError('Сотрудник не найден или уволен', code='PAYMENT_OBSERVER_INVALID', status=404)
+    if len(current) - len(to_remove) + len(to_add) > workflow.MAX_OBSERVERS:
+        raise FlowError('Наблюдателей у заявки — не больше %s' % workflow.MAX_OBSERVERS,
+                        code='PAYMENT_OBSERVERS_LIMIT', status=409)
+
+    removed = queries.remove_observers(cursor, request_id, to_remove)
+    added = queries.add_observers(cursor, request_id, to_add, (actor or {}).get('id'))
+    if not (added or removed):
+        return {'added': [], 'removed': []}
+    change = {
+        'added': [{'id': user_id, 'name': people[user_id]['name']} for user_id in added],
+        'removed': [{'id': user_id, 'name': current[user_id]['name']} for user_id in removed],
+    }
+    queries.log_event(cursor, request_id, 'observers', actor, payload=change)
+    for user_id in removed:
+        notices.mark_seen(cursor, user_id, request_id)
+    if added:
+        _notify(cursor, request, notify.watching(request), added, outbox=None, base_url=None,
+                exclude=[(actor or {}).get('id')])
+    return change
+
+
 # ─── Сроки (п. 17) ───────────────────────────────────────────────────────────
 
 def remind_deadlines(cursor, *, today=None, outbox=None, base_url=None):
     """Напоминания о приближении срока и о просрочке — раз на срок, не каждый день.
 
-    Получают тот, у кого заявка сейчас (человек либо его подразделение), и
-    инициатор. Возвращает число созданных уведомлений.
+    Получают тот, у кого заявка сейчас (человек либо его подразделение),
+    инициатор и наблюдатели заявки. Возвращает число созданных уведомлений.
     """
     today = today or queries.today_almaty()
     soon_days = directory.get_settings(cursor)[workflow.SETTING_DUE_SOON_DAYS]
     members = queries.role_member_ids(cursor)
     created = 0
-    for request, mark in queries.due_requests(cursor, today, soon_days):
+    due = queries.due_requests(cursor, today, soon_days)
+    # Наблюдатели — одной выборкой на все заявки со сроком, а не запросом на каждую.
+    watchers = queries.observers_by_request(cursor, [request['id'] for request, _mark in due])
+    for request, mark in due:
         due_on = workflow._as_date(request.get('due_on'))
         holder = set()
         if request.get('current_assignee_id'):
             holder.add(int(request['current_assignee_id']))
         elif request.get('current_role_code'):
             holder |= {int(uid) for uid in members.get(request['current_role_code']) or ()}
-        recipients = open_to(holder | {request.get('initiator_id')})
+        recipients = open_to(holder | {request.get('initiator_id')} | watchers.get(request['id'], set()))
         if not recipients:
             continue
         if mark == 'overdue':

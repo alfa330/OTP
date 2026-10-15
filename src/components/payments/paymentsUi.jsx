@@ -13,8 +13,8 @@ import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
     ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
-    issueKeys, issueStep, pageRange, parseAmount, plural, requestState, requestType, requisitesText, stateMeta, toneEdge, tonePill,
-    toneRow,
+    issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText, stateMeta,
+    toneEdge, tonePill, toneRow,
 } from './paymentsMeta';
 
 /*
@@ -613,9 +613,25 @@ export const FormDate = ({ invalid, triggerClassName = '', ...props }) => {
     );
 };
 
+/* Выбранные люди в кнопке списка: первое имя обрезается по ширине, «и ещё N» видно всегда —
+   иначе на телефоне второй человек пропадал из виду вместе со счётчиком (разбор 15.10.2026). */
+export const PeopleValue = ({ ids, users }) => {
+    const { first, rest, total } = peopleParts(ids, users);
+    if (!first) return total ? `Выбрано: ${total}` : '';
+    return (
+        <span className="flex min-w-0 items-baseline" data-people-value>
+            <span className="min-w-0 truncate">{first}</span>
+            {rest > 0 && <span className="shrink-0 whitespace-pre"> и ещё {rest}</span>}
+        </span>
+    );
+};
+
 /* Выбор сотрудника — CustomSelect с поиском; варианты собираются один раз.
-   `compact` — мелкий вид для строки, где рядом стоят такие же мелкие поля. */
-export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false, compact = false, invalid }) => {
+   `compact` — мелкий вид для строки, где рядом стоят такие же мелкие поля.
+   `multiple` — несколько человек: значение — массив номеров СТРОКАМИ (так их отдаёт
+   CustomSelect); `renderValue` — что написать в кнопке, `maxSelected` — потолок. */
+export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false, compact = false, invalid,
+    renderValue = null, maxSelected = 0 }) => {
     const bad = useFieldIssue(invalid);
     const options = useMemo(() => (users || [])
         .filter((user) => !exclude.includes(user.id))
@@ -634,6 +650,8 @@ export const UserSelect = ({ users, value, onChange, placeholder = 'Выбери
             searchable
             ariaLabel={ariaLabel || placeholder}
             multiple={multiple}
+            renderValue={renderValue}
+            maxSelected={maxSelected}
             invalid={bad}
         />
     );

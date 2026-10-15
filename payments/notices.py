@@ -15,7 +15,9 @@
 * **«к сведению»** — согласовано, отклонено, оплачено, срок. Гаснет, когда
   человек открыл заявку. Кнопкой колокола «отметить прочитанным» не гасится —
   как ответы в «Обращениях»: уведомление про конкретную заявку, и прочитано оно
-  тогда, когда заявку открыли.
+  тогда, когда заявку открыли. Копия наблюдателя о том, что заявка ждёт
+  инициатора (вернули, уточнение, чек, получение, документы), привязана к
+  подзадаче и гаснет ещё и вместе с ней — когда ждать уже нечего.
 
 Колокол читает отсюда через notifications/sources.py::payments; тычок в канал
 реального времени шлёт триггер на этой таблице (database.py).
@@ -59,10 +61,12 @@ def _mark_read(cursor, where, params):
 
 
 def clear_subtask(cursor, subtask_id):
-    """Подзадача выполнена или ушла на уточнение — её «ждут вас» гаснут у всех исполнителей."""
+    """Подзадача выполнена или ушла на уточнение — её «ждут вас» гаснут у всех исполнителей,
+    а у наблюдателей — копии «заявка ждёт инициатора» по ней (flow._notify_observers):
+    к подзадаче привязаны только такие строки."""
     if not subtask_id:
         return 0
-    return _mark_read(cursor, "actionable AND subtask_id = %s", (int(subtask_id),))
+    return _mark_read(cursor, "subtask_id = %s", (int(subtask_id),))
 
 
 def clear_kind(cursor, request_id, kind):
@@ -71,8 +75,9 @@ def clear_kind(cursor, request_id, kind):
 
 
 def clear_request(cursor, request_id):
-    """Заявка закрыта, отклонена или отменена — действий по ней больше ни от кого не ждут."""
-    return _mark_read(cursor, "actionable AND request_id = %s", (int(request_id),))
+    """Заявка закрыта, отклонена или отменена — действий по ней больше ни от кого не ждут:
+    гаснут и «ждут вас», и копии наблюдателей «заявка ждёт инициатора» (привязаны к подзадаче)."""
+    return _mark_read(cursor, "request_id = %s AND (actionable OR subtask_id IS NOT NULL)", (int(request_id),))
 
 
 def mark_seen(cursor, user_id, request_id):

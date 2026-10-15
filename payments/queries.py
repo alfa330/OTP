@@ -356,13 +356,14 @@ _SEARCH_SQL = """
      OR COALESCE(r.initiator_name, '') ILIKE %(like)s)
 """
 
-# Что видит человек без полного реестра: заявки, где он инициатор, руководитель
-# или исполнитель (лично либо ролью).
+# Что видит человек без полного реестра: заявки, где он инициатор, руководитель,
+# исполнитель (лично либо ролью) или наблюдатель.
 _VISIBLE_SQL = (
     "(r.initiator_id = %(visible_to)s OR r.manager_id = %(visible_to)s OR EXISTS ("
     "SELECT 1 FROM payment_subtasks vs WHERE vs.request_id = r.id AND vs.state <> 'pending' "
     "AND vs.state <> 'skipped' AND (vs.assignee_id = %(visible_to)s OR vs.done_by = %(visible_to)s "
-    "OR (vs.assignee_id IS NULL AND vs.role_code = ANY(%(visible_roles)s)))))")
+    "OR (vs.assignee_id IS NULL AND vs.role_code = ANY(%(visible_roles)s)))) OR EXISTS ("
+    "SELECT 1 FROM payment_request_observers vo WHERE vo.request_id = r.id AND vo.user_id = %(visible_to)s))")
 
 _FILTER_KEYS = ('query', 'state', 'legal_entity_id', 'department_id', 'initiator_id', 'assignee_id',
                 'assignee_roles', 'approver_id', 'counterparty_id', 'request_kind', 'payment_method',
@@ -377,6 +378,13 @@ _MINE_SQL = (
     "OR (r.current_assignee_id IS NULL AND r.current_role_code = ANY(%(viewer_roles)s) "
     "AND (%(viewer_approves_own)s OR r.current_role_code <> 'approver' "
     "OR r.initiator_id IS DISTINCT FROM %(viewer_id)s)))")
+
+# Смотрящий — наблюдатель заявки в работе: срез «Наблюдаю» в реестре. Закрытые в нём не
+# считаются, как и в «Ждут меня»: снять наблюдателя с закрытой заявки нельзя, и плитка с
+# растущим числом стояла бы у человека навсегда (разбор 15.10.2026). Закрытые наблюдаемые
+# видны во «Все».
+_WATCHING_SQL = ("r.status = 'active' AND EXISTS (SELECT 1 FROM payment_request_observers wo "
+                 "WHERE wo.request_id = r.id AND wo.user_id = %(viewer_id)s)")
 
 
 def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, department_id=None,
@@ -406,6 +414,8 @@ def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, depa
         clauses.append(_SEARCH_SQL)
     if state == 'mine' or mine:
         clauses.append(mine_sql)
+    if state == 'watching':
+        clauses.append(_WATCHING_SQL)
     if state == 'open':
         clauses.append("r.status = 'active'")
     elif state == 'clarification':
@@ -503,16 +513,17 @@ def state_counters(cursor, **filters):
                         AND NOT (r.stage = 'initiation' AND r.submitted_at IS NOT NULL)) AS overdue,
                COUNT(*) FILTER (WHERE r.status = 'done') AS done,
                COUNT(*) FILTER (WHERE r.status = 'rejected') AS rejected,
-               COUNT(*) FILTER (WHERE r.status = 'cancelled') AS cancelled
+               COUNT(*) FILTER (WHERE r.status = 'cancelled') AS cancelled,
+               COUNT(*) FILTER (WHERE """ + _WATCHING_SQL + """) AS watching
           FROM payment_requests r
           LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
         """ + where,
         params,
     )
-    row = cursor.fetchone() or (0,) * 8
+    row = cursor.fetchone() or (0,) * 9
     return {'all': int(row[0] or 0), 'open': int(row[1] or 0), 'mine': int(row[2] or 0),
             'clarification': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
-            'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0)}
+            'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0), 'watching': int(row[8] or 0)}
 
 
 def requests_by_ids(cursor, request_ids):
@@ -1230,6 +1241,91 @@ def participates(cursor, request_id, user_id, roles):
         """,
         {'request_id': int(request_id), 'user_id': int(user_id), 'roles': sorted(roles or [])})
     return bool(cursor.fetchone()[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Наблюдатели заявки (просьба владельца 15.10.2026)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def list_observers(cursor, request_id):
+    """Наблюдатели заявки в порядке добавления: [{user_id, name, department_name, fired, added_at}].
+    Уволенный остаётся в списке с пометкой — его снимает инициатор, а не молчание."""
+    cursor.execute(
+        """
+        SELECT o.user_id, u.name, d.name, u.status, o.added_at
+          FROM payment_request_observers o
+          JOIN users u ON u.id = o.user_id
+          LEFT JOIN departments d ON d.id = u.department_id
+         WHERE o.request_id = %s
+         ORDER BY o.added_at, u.name, o.user_id
+        """,
+        (int(request_id),))
+    return [{'user_id': row[0], 'name': row[1], 'department_name': row[2], 'fired': row[3] == 'fired',
+             'added_at': row[4]} for row in cursor.fetchall()]
+
+
+def observers_by_request(cursor, request_ids):
+    """{id заявки: {кто наблюдает}} — одной выборкой на всю пачку заявок (напоминания о сроках).
+    Уволенных нет: уведомлять их незачем."""
+    ids = sorted({int(x) for x in request_ids or () if x})
+    if not ids:
+        return {}
+    cursor.execute(
+        "SELECT o.request_id, o.user_id FROM payment_request_observers o JOIN users u ON u.id = o.user_id "
+        "WHERE o.request_id = ANY(%s) AND u.status <> 'fired'",
+        (ids,))
+    result = {}
+    for request_id, user_id in cursor.fetchall():
+        result.setdefault(request_id, set()).add(int(user_id))
+    return result
+
+
+def observer_ids(cursor, request_id):
+    """Кто наблюдает за заявкой — кому слать сведения о её ходе."""
+    return observers_by_request(cursor, [request_id]).get(int(request_id), set())
+
+
+def observes(cursor, request_id, user_id):
+    """Человек в наблюдателях заявки — она ему видна."""
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM payment_request_observers WHERE request_id = %s AND user_id = %s)",
+                   (int(request_id), int(user_id)))
+    return bool(cursor.fetchone()[0])
+
+
+def add_observers(cursor, request_id, user_ids, actor_id):
+    """Добавляет наблюдателей; уже записанных не трогает. Возвращает номера добавленных."""
+    ids = sorted({int(x) for x in user_ids or () if x})
+    if not ids:
+        return []
+    cursor.execute(
+        """
+        INSERT INTO payment_request_observers (request_id, user_id, added_by)
+        SELECT %s, uid, %s FROM unnest(%s::int[]) AS uid
+        ON CONFLICT (request_id, user_id) DO NOTHING
+        RETURNING user_id
+        """,
+        (int(request_id), actor_id, ids))
+    return sorted(row[0] for row in cursor.fetchall())
+
+
+def remove_observers(cursor, request_id, user_ids):
+    """Снимает наблюдателей. Возвращает номера снятых."""
+    ids = sorted({int(x) for x in user_ids or () if x})
+    if not ids:
+        return []
+    cursor.execute(
+        "DELETE FROM payment_request_observers WHERE request_id = %s AND user_id = ANY(%s) RETURNING user_id",
+        (int(request_id), ids))
+    return sorted(row[0] for row in cursor.fetchall())
+
+
+def users_brief(cursor, user_ids):
+    """{id: {id, name, fired}} — одной выборкой на список людей."""
+    ids = sorted({int(x) for x in user_ids or () if x})
+    if not ids:
+        return {}
+    cursor.execute("SELECT id, name, status FROM users WHERE id = ANY(%s)", (ids,))
+    return {row[0]: {'id': row[0], 'name': row[1], 'fired': row[2] == 'fired'} for row in cursor.fetchall()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
