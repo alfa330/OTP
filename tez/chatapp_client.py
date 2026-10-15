@@ -227,6 +227,53 @@ class ChatAppClient:
                             (messenger.get('info') or {}).get('phone')))
         return out
 
+    # ── шаблоны WhatsApp (WABA) ──────────────────────────────────────────────
+    # Автообзвон Тез КЦ (15.10.2026): оператор отправляет водителю шаблон, который разрешил
+    # руководитель. По OpenAPI ChatApp (api.chatapp.online/docs/openapi.yaml): список —
+    # v1.templates.get.items, отправка — v1.messages.send.template; оба доступны для caWhatsApp,
+    # chatId для caWhatsApp — номер цифрами без «+» (79220000001).
+
+    def list_templates(self, license_id, messenger_type='caWhatsApp'):
+        """Шаблоны лицензии: [{id, elementName, data (текст, {{1}}… — переменные), languageCode,
+        status (APPROVED…), templateType (TEXT|IMAGE|…), category}]."""
+        data = self._get(f'/v1/licenses/{int(license_id)}/messengers/{messenger_type}/templates') or {}
+        items = data.get('items') if isinstance(data, dict) else data
+        return [item for item in (items or []) if isinstance(item, dict)]
+
+    def send_template(self, license_id, phone, template_id, params=None, tracking=None,
+                      messenger_type='caWhatsApp'):
+        """Отправить шаблон на номер (цифры без «+»). Возвращает id сообщения ChatApp.
+
+        Повторов при сбое НЕТ (в отличие от _get): сообщение могло уйти, а ответ — потеряться, и
+        повтор прислал бы водителю второе. Неоднозначный ответ — ChatAppError: вызывающий пишет
+        отправку неудачной, повтор — только новым нажатием оператора. Повторяем единственный случай —
+        протухший токен (тогда ChatApp запрос не принял)."""
+        digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+        if not digits:
+            raise ChatAppError('ChatApp: пустой номер')
+        payload = {'template': {'id': str(template_id), 'params': [str(p) for p in (params or [])]}}
+        if tracking:
+            payload['tracking'] = str(tracking)[:200]
+        path = (f'/v1/licenses/{int(license_id)}/messengers/{messenger_type}'
+                f'/chats/{digits}/messages/template')
+        token = self.access_token()
+        for retry_auth in (True, False):
+            try:
+                r = self.session.post(f'{self.api_url}{path}', json=payload,
+                                      headers={'Authorization': token, 'Lang': 'ru'}, timeout=HTTP_TIMEOUT)
+            except requests.RequestException as exc:
+                raise ChatAppError(f'ChatApp: нет ответа ({exc.__class__.__name__})')
+            body = _json_or_raise(r)
+            if body.get('success'):
+                data = body.get('data') or {}
+                return str(data.get('id') or '')
+            error = _error_from_body(body, r.status_code)
+            if error.code == 'ApiInvalidTokenError' and retry_auth:
+                token = self.access_token(force_new=True)
+                continue
+            raise error
+        raise ChatAppError('ChatApp: отправка не удалась')
+
     # ── чаты и сообщения ─────────────────────────────────────────────────────
 
     def iter_chats(self, company_id, license_ids=None, since_ts=None):

@@ -13,6 +13,10 @@
  *     перечень полей был переписан в трёх местах панели, и добавь типы только в
  *     два из них, кнопка «Сохранить» либо не загоралась, либо не гасла;
  *   • какие чипы типов показать под выбранным итогом в журнале.
+ *
+ * С 15.10.2026 у итога есть «нужна дата» (due_kind, автообзвон Тез): новое поле
+ * итога обязано быть во всех трёх местах — serializeOutcomes, outcomesSnapshot и
+ * validateOutcomes, — иначе повторится история с типами.
  */
 
 /* Разделитель итога и типа: пробел, средняя точка U+00B7, пробел. */
@@ -29,6 +33,26 @@ export const SUBTYPE_NONE = 'none';
 /* Несохранённые строки редактора живут с временным id `new-…`: на сервер они
    уходят без id, и сервер их вставляет. */
 export const isNewId = (id) => String(id ?? '').startsWith('new-');
+
+/* «Нужна дата» у итога (автообзвон Тез, контракт 15.10.2026): '' — нет;
+   'callback' — «Перезвонить», оператор обязан указать дату и время перезвона;
+   'online' — «Согласен выйти на линию», обязательна дата выхода. Водитель с таким
+   итогом возвращается к СВОЕМУ оператору к сроку, поэтому итог с датой всегда
+   «перезвонить» — сервер (save_outcomes) ставит requeue сам, и здесь так же, иначе
+   снимок «сохранено» и рабочая копия разошлись бы на первом же сохранении.
+   У удалённого КЦ дат нет: его итоги всегда уходят с ''. */
+export const DUE_KINDS = ['', 'callback', 'online'];
+export const DUE_KIND_OPTIONS = [
+    { value: '', label: 'Нет' },
+    { value: 'callback', label: 'Перезвон' },
+    { value: 'online', label: 'Выход на линию' },
+];
+
+/** Вид даты итога: '' | 'callback' | 'online'; всё прочее — ''. */
+export const normalizeDueKind = (value) => {
+    const kind = String(value ?? '').trim().toLowerCase();
+    return DUE_KINDS.includes(kind) ? kind : '';
+};
 
 /** Название типа из итога ({subtype: {name}}) или ''. */
 export const outcomeSubtypeName = (outcome) => {
@@ -71,22 +95,32 @@ export const serverHasSubtypes = (list) => {
  * снимок рабочей копии сравниваются строкой, и поле, забытое в одном из них,
  * дало бы вечное «изменено». Типы уходят ВСЕГДА и целиком: у сервера список
  * полный, и тип, которого в нём нет, выключается.
+ *
+ * due_kind («нужна дата», 15.10.2026) — только у автообзвона Тез ({ dueKinds: true }),
+ * и там всегда, '' тоже: ключа нет — сервер дату итога не трогает, и снятая в редакторе
+ * дата осталась бы. Итог с датой всегда «перезвонить» — см. DUE_KINDS. У удалённого КЦ
+ * ключа нет вовсе: его запрос — прежний.
  */
-export const serializeOutcomes = (items) => (Array.isArray(items) ? items : []).map((o) => ({
-    id: isNewId(o.id) ? undefined : o.id,
-    name: String(o.name ?? '').trim(),
-    color: o.color,
-    requeue: !!o.requeue,
-    is_active: o.is_active !== false,
-    subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).map((s) => ({
-        id: isNewId(s.id) ? undefined : s.id,
-        name: cleanName(s.name),
-        is_active: s.is_active !== false,
-    })),
-}));
+export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.isArray(items) ? items : []).map((o) => {
+    const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
+    return {
+        id: isNewId(o.id) ? undefined : o.id,
+        name: String(o.name ?? '').trim(),
+        color: o.color,
+        requeue: !!o.requeue || dueKind !== '',
+        is_active: o.is_active !== false,
+        ...(dueKinds ? { due_kind: dueKind } : {}),
+        subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).map((s) => ({
+            id: isNewId(s.id) ? undefined : s.id,
+            name: cleanName(s.name),
+            is_active: s.is_active !== false,
+        })),
+    };
+});
 
-/** Строка-снимок для сравнения «сохранено / в редакторе». */
-export const outcomesSnapshot = (items) => JSON.stringify(serializeOutcomes(items));
+/** Строка-снимок для сравнения «сохранено / в редакторе». Собирается тем же
+    serializeOutcomes с теми же опциями, поэтому новое поле итога (due_kind) попадает и сюда. */
+export const outcomesSnapshot = (items, options) => JSON.stringify(serializeOutcomes(items, options));
 
 /**
  * Проверка перед PUT — те же правила, что у сервера, чтобы руководитель видел
@@ -95,6 +129,13 @@ export const outcomesSnapshot = (items) => JSON.stringify(serializeOutcomes(item
 export const validateOutcomes = (payload) => {
     for (const o of payload) {
         if (!o.name) return 'У каждого итога должно быть название';
+    }
+    for (const o of payload) {
+        // Свёрнутое serializeOutcomes значение всегда допустимо; проверка — для
+        // списка, собранного мимо него (а сервер ответил бы 400 уже после запроса).
+        if (o.due_kind !== undefined && !DUE_KINDS.includes(o.due_kind)) {
+            return `У итога «${o.name}» неизвестный вид даты: «${o.due_kind}»`;
+        }
     }
     for (const o of payload) {
         const subs = o.subtypes || [];

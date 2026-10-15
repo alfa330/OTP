@@ -228,3 +228,248 @@ def department_analytics(cur, department_id, period, today=None, configured=None
             "min_billsec": signing.SUCCESS_MIN_BILLSEC,
         },
     }
+
+
+# ── Автообзвон Тез КЦ (ТЗ руководителя Тез, п. 14–15; 15.10.2026) ─────────────────────────────
+# Та же база одного месяца, но «цель» — водитель вышел на линию (signed_at из TEZ APP), у итогов
+# есть даты (согласие выйти — due_kind 'online', перезвон — 'callback'), у попыток — автоцикл и
+# просрочка постобработки, у итогов — офферы. Обработано / осталось — по статусу лида: осталось —
+# ещё в работе (new / in_progress) и не вышел на линию. Номеров и ФИО водителей здесь нет.
+_TEZ_CTE = """
+    leads AS (
+        SELECT l.id, l.status, l.signed_at, l.created_at, l.success_attempt_id, l.success_operator_id,
+               l.promised_online_at
+        FROM dial_list_leads l
+        WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+          AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+    ),
+    att AS (
+        SELECT a.lead_id, t.id AS attempt_id, t.operator_id, t.requested_at, t.cancelled, t.auto,
+               t.wrapup_expired_at, t.outcome_id, t.outcome_subtype_id, t.outcome_at, t.phone_ended_at,
+               COALESCE(o.due_kind, '') AS due_kind,
+               (t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+                AND t.auto_hangup <> 'announcement'
+                AND (t.talk_detected IS NOT FALSE OR t.billsec >= 1)) AS answered,
+               (t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+                AND t.auto_hangup <> 'announcement'
+                AND t.billsec >= %(min_sec)s) AS talked,
+               CASE WHEN t.state = 'finished' AND t.auto_hangup <> 'announcement'
+                    THEN t.billsec ELSE 0 END AS talk_sec
+        FROM leads l
+        JOIN dial_list_assignments a ON a.lead_id = l.id
+        JOIN dial_list_attempts t ON t.assignment_id = a.id
+        LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
+    )
+"""
+
+_TEZ_TOTALS_SQL = "WITH " + _TEZ_CTE + """,
+    per_lead AS (
+        SELECT lead_id,
+               COUNT(*) FILTER (WHERE NOT cancelled) AS attempts,
+               COUNT(*) FILTER (WHERE auto AND NOT cancelled) AS auto_attempts,
+               BOOL_OR(answered) AS answered,
+               BOOL_OR(talked) AS talked,
+               BOOL_OR(due_kind = 'online') AS agreed,
+               BOOL_OR(due_kind = 'callback') AS callback,
+               COUNT(*) FILTER (WHERE wrapup_expired_at IS NOT NULL) AS wrapup_expired
+        FROM att GROUP BY lead_id
+    )
+    SELECT
+        COUNT(*),
+        COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL AND l.signed_at <= l.created_at),
+        COUNT(*) FILTER (WHERE COALESCE(p.attempts, 0) > 0),
+        COUNT(*) FILTER (WHERE p.answered),
+        COUNT(*) FILTER (WHERE p.talked),
+        COUNT(*) FILTER (WHERE p.agreed),
+        COUNT(*) FILTER (WHERE p.callback),
+        COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL AND l.signed_at > l.created_at),
+        COUNT(*) FILTER (WHERE l.success_attempt_id IS NOT NULL),
+        COUNT(*) FILTER (WHERE l.promised_online_at IS NOT NULL AND l.promised_online_at < CURRENT_TIMESTAMP
+                           AND l.signed_at IS NULL),
+        COUNT(*) FILTER (WHERE l.status IN ('new', 'in_progress') AND l.signed_at IS NULL),
+        COUNT(*) FILTER (WHERE l.status = 'excluded' AND l.signed_at IS NULL),
+        COALESCE(SUM(p.attempts), 0),
+        COALESCE(SUM(p.auto_attempts), 0),
+        COALESCE(SUM(p.wrapup_expired), 0)
+    FROM leads l
+    LEFT JOIN per_lead p ON p.lead_id = l.id
+"""
+_TEZ_TOTAL_KEYS = ("leads", "online_at_upload", "called", "answered", "talked", "agreements", "callbacks",
+                   "went_online", "successes", "promised_not_online", "remaining", "excluded", "attempts",
+                   "auto_attempts", "wrapup_expired")
+
+# Итог водителя — итог его ПОСЛЕДНЕГО звонка, как у фильтра журнала по итогу (last_outcome — у
+# последней попытки): число в строке равно числу водителей, которых откроет нажатие на неё. Последний
+# звонок без итога (недозвон после «Перезвонить») — водителя в разбивке нет, как и в журнале.
+_TEZ_OUTCOMES_SQL = "WITH " + _TEZ_CTE + """,
+    last AS (
+        SELECT DISTINCT ON (lead_id) lead_id, outcome_id, outcome_subtype_id
+        FROM att
+        ORDER BY lead_id, requested_at DESC
+    )
+    SELECT o.id, o.name, o.color, s.id, s.name, COUNT(*)
+    FROM last
+    JOIN dial_list_outcomes o ON o.id = last.outcome_id
+    LEFT JOIN dial_list_outcome_subtypes s ON s.id = last.outcome_subtype_id
+    GROUP BY o.id, o.name, o.color, o.position, s.id, s.name, s.position
+    ORDER BY o.position, s.position NULLS FIRST
+"""
+
+_TEZ_BY_DAY_SQL = "WITH " + _TEZ_CTE + """
+    SELECT day, SUM(attempts), SUM(talked), SUM(agreements), SUM(went_online), SUM(successes)
+    FROM (
+        SELECT (requested_at AT TIME ZONE 'Asia/Almaty')::date AS day,
+               COUNT(*) FILTER (WHERE NOT cancelled) AS attempts,
+               COUNT(*) FILTER (WHERE talked) AS talked,
+               COUNT(*) FILTER (WHERE due_kind = 'online') AS agreements,
+               0 AS went_online, 0 AS successes
+        FROM att GROUP BY 1
+        UNION ALL
+        SELECT (signed_at AT TIME ZONE 'Asia/Almaty')::date, 0, 0, 0,
+               COUNT(*), COUNT(*) FILTER (WHERE success_attempt_id IS NOT NULL)
+        FROM leads WHERE signed_at IS NOT NULL AND signed_at > created_at GROUP BY 1
+    ) x
+    GROUP BY day ORDER BY day
+"""
+
+# Постобработка оператора — от конца разговора до итога; итог, сохранённый ещё во время
+# разговора, — ноль. Больше часа — не постобработка (итог поставили на следующий день).
+_TEZ_OPERATORS_SQL = "WITH " + _TEZ_CTE + """,
+    calls AS (
+        SELECT operator_id,
+               COUNT(*) FILTER (WHERE NOT cancelled) AS attempts,
+               COUNT(*) FILTER (WHERE auto AND NOT cancelled) AS auto_attempts,
+               COUNT(DISTINCT lead_id) FILTER (WHERE NOT cancelled) AS leads_called,
+               COUNT(DISTINCT lead_id) FILTER (WHERE talked) AS leads_talked,
+               COALESCE(SUM(talk_sec), 0) AS talk_sec,
+               COUNT(*) FILTER (WHERE due_kind = 'online') AS agreements,
+               COUNT(*) FILTER (WHERE due_kind = 'callback') AS callbacks,
+               COUNT(*) FILTER (WHERE wrapup_expired_at IS NOT NULL) AS wrapup_expired,
+               AVG(GREATEST(0, EXTRACT(EPOCH FROM (outcome_at - phone_ended_at))))
+                   FILTER (WHERE outcome_at IS NOT NULL AND phone_ended_at IS NOT NULL
+                             AND outcome_at < phone_ended_at + INTERVAL '1 hour') AS avg_wrapup
+        FROM att GROUP BY operator_id
+    ),
+    suc AS (
+        SELECT success_operator_id AS operator_id, COUNT(*) AS successes
+        FROM leads WHERE success_attempt_id IS NOT NULL GROUP BY success_operator_id
+    )
+    SELECT COALESCE(c.operator_id, s.operator_id), COALESCE(u.name, ''),
+           COALESCE(c.attempts, 0), COALESCE(c.auto_attempts, 0), COALESCE(c.leads_called, 0),
+           COALESCE(c.leads_talked, 0), COALESCE(c.talk_sec, 0), COALESCE(c.agreements, 0),
+           COALESCE(c.callbacks, 0), COALESCE(c.wrapup_expired, 0), c.avg_wrapup, COALESCE(s.successes, 0)
+    FROM calls c
+    FULL JOIN suc s ON s.operator_id = c.operator_id
+    LEFT JOIN users u ON u.id = COALESCE(c.operator_id, s.operator_id)
+"""
+
+# Офферы: сколько раз предлагали, сколько из этих звонков кончились согласием выйти на линию и
+# сколько водителей, которым его предлагали, вышли после разговора (успешка).
+_TEZ_OFFERS_SQL = "WITH " + _TEZ_CTE + """,
+    ao AS (
+        SELECT x.offer_id, att.lead_id, att.due_kind
+        FROM att JOIN dial_list_attempt_offers x ON x.attempt_id = att.attempt_id
+    )
+    SELECT o.id, o.title, o.is_active,
+           COUNT(ao.offer_id),
+           COUNT(*) FILTER (WHERE ao.due_kind = 'online'),
+           COUNT(DISTINCT ao.lead_id) FILTER (WHERE l.success_attempt_id IS NOT NULL)
+    FROM dial_list_offers o
+    LEFT JOIN ao ON ao.offer_id = o.id
+    LEFT JOIN leads l ON l.id = ao.lead_id
+    WHERE o.department_id = %(department_id)s
+    GROUP BY o.id, o.title, o.is_active, o.position
+    ORDER BY o.is_active DESC, o.position
+"""
+
+_TEZ_WA_SQL = """
+    SELECT COUNT(*) FILTER (WHERE w.status = 'sent'), COUNT(*) FILTER (WHERE w.status = 'failed')
+    FROM dial_list_wa_messages w
+    JOIN dial_list_leads l ON l.id = w.lead_id
+    WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+"""
+
+
+def tez_department_analytics(cur, department_id, period, today=None):
+    """Дашборд базы месяца автообзвона Тез: totals, rates, by_outcome, by_day, operators,
+    offers, whatsapp. Номеров и ФИО водителей нет — числа и имена операторов."""
+    today = today or datetime.now(signing.PERIOD_TZ).date()
+    params = {"department_id": int(department_id), "period": period, "answered": ANSWERED_SQL,
+              "min_sec": signing.SUCCESS_MIN_BILLSEC}
+
+    cur.execute(_TEZ_TOTALS_SQL, params)
+    r = cur.fetchone() or (0,) * len(_TEZ_TOTAL_KEYS)
+    totals = {key: int(r[i] or 0) for i, key in enumerate(_TEZ_TOTAL_KEYS)}
+    totals["processed"] = totals["leads"] - totals["remaining"]
+    cur.execute(_TEZ_WA_SQL, params)
+    w = cur.fetchone() or (0, 0)
+    totals["wa_sent"] = int(w[0] or 0)
+
+    cur.execute(_TEZ_OUTCOMES_SQL, params)
+    by_outcome, index = [], {}
+    for oid, name, color, sid, sname, count in cur.fetchall():
+        key = str(oid)
+        if key not in index:
+            index[key] = {"outcome_id": key, "name": name or "", "color": color or "#8E8E93", "count": 0,
+                          "subtypes": []}
+            by_outcome.append(index[key])
+        entry = index[key]
+        entry["count"] += int(count or 0)
+        if sid is not None:
+            entry["subtypes"].append({"id": str(sid), "name": sname or "", "count": int(count or 0)})
+
+    cur.execute(_TEZ_BY_DAY_SQL, params)
+    by_day_rows = {row[0]: row for row in cur.fetchall()}
+    start, end = period, min(_month_end(period), max(today, period))
+    tail = [d for d in by_day_rows if d > end]
+    if tail:
+        end = max(tail)
+    days, day = [], start
+    while day <= end:
+        row = by_day_rows.get(day)
+        days.append({"day": day.isoformat(),
+                     "attempts": int(row[1] or 0) if row else 0,
+                     "talked": int(row[2] or 0) if row else 0,
+                     "agreements": int(row[3] or 0) if row else 0,
+                     "went_online": int(row[4] or 0) if row else 0,
+                     "successes": int(row[5] or 0) if row else 0})
+        day += timedelta(days=1)
+
+    cur.execute(_TEZ_OPERATORS_SQL, params)
+    operators = []
+    for row in cur.fetchall():
+        if row[0] is None:
+            continue
+        leads_talked, successes = int(row[5] or 0), int(row[11] or 0)
+        operators.append({
+            "operator_id": int(row[0]), "name": row[1] or f"#{row[0]}",
+            "attempts": int(row[2] or 0), "auto_attempts": int(row[3] or 0), "leads_called": int(row[4] or 0),
+            "talked": leads_talked, "talk_sec": int(row[6] or 0), "agreements": int(row[7] or 0),
+            "callbacks": int(row[8] or 0), "wrapup_expired": int(row[9] or 0),
+            "avg_wrapup_sec": int(round(float(row[10]))) if row[10] is not None else None,
+            "successes": successes, "conversion": _pct(successes, leads_talked),
+        })
+    operators.sort(key=lambda o: (-o["successes"], -o["agreements"], -o["talked"], -o["attempts"], o["name"]))
+
+    cur.execute(_TEZ_OFFERS_SQL, params)
+    offers = [{"offer_id": str(row[0]), "title": row[1] or "", "is_active": bool(row[2]),
+               "offered": int(row[3] or 0), "agreements": int(row[4] or 0), "successes": int(row[5] or 0)}
+              for row in cur.fetchall()]
+
+    return {
+        "profile": "tez",
+        "totals": totals,
+        "rates": {
+            "called": _pct(totals["called"], totals["leads"]),
+            "talked": _pct(totals["talked"], totals["called"]),
+            "conversion": _pct(totals["successes"], totals["talked"]),
+            "agreement": _pct(totals["agreements"], totals["talked"]),
+            "processed": _pct(totals["processed"], totals["leads"]),
+        },
+        "by_outcome": by_outcome,
+        "by_day": days,
+        "operators": operators,
+        "offers": offers,
+        "whatsapp": {"sent": totals["wa_sent"], "failed": int(w[1] or 0)},
+        "min_billsec": signing.SUCCESS_MIN_BILLSEC,
+    }

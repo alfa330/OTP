@@ -11,6 +11,9 @@ import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
 import { monthLabel } from './dialListPeriods';
 import { sameSectionTitle } from './linePicker';
+import TezAutodialAnalytics from './TezAutodialAnalytics';
+import { TezOffersPanel, TezOperatorRow, TezWhatsAppPanel } from './TezAutodialPanels';
+import { PROFILE_REMOTE_CC, PROFILE_TEZ, TEZ_SECTION_TITLE, departmentsOfProfile, normalizeProfile } from './tezAutodial';
 
 /*
  * Раздел «Удаленный КЦ» (до 07.10.2026 — «Обзвон из телефона») — экран руководителя
@@ -28,6 +31,11 @@ import { sameSectionTitle } from './linePicker';
  * подтверждённым Binotel (вебхук или опрос по generalCallID) — телефон оператора
  * здесь ничего не «доказывает». Поэтому цифры могут догонять разговор на
  * несколько секунд.
+ *
+ * С 15.10.2026 тот же экран — раздел «Автообзвон Тез» (profile='tez'): тот же движок,
+ * но отделы своего профиля, цель лида — выход на линию (TEZ APP), а в настройках —
+ * автообзвон, постобработка, расписание недозвонов, офферы и WhatsApp. В статусе
+ * «Активный» телефон оператора звонит сам, подряд; в «Исходе» — оператор сам.
  */
 
 const TABS = [
@@ -68,9 +76,10 @@ const sortDepartments = (list) => [...list].sort((a, b) => (
 // Последний открытый отдел помним в браузере: раздел открывается на нём, а не на
 // первом в списке. Хранилище может быть недоступно (приватное окно) — тогда молча
 // без памяти.
-const LAST_DEPT_KEY = 'otp.dial_list.last_department';
-const readLastDept = () => { try { return window.localStorage.getItem(LAST_DEPT_KEY) || ''; } catch { return ''; } };
-const writeLastDept = (id) => { try { if (id) window.localStorage.setItem(LAST_DEPT_KEY, String(id)); } catch { /* нет хранилища */ } };
+// У «Автообзвона Тез» память своя: отделы разделов разные.
+const lastDeptKey = (tez) => (tez ? 'otp.tez_autodial.last_department' : 'otp.dial_list.last_department');
+const readLastDept = (tez) => { try { return window.localStorage.getItem(lastDeptKey(tez)) || ''; } catch { return ''; } };
+const writeLastDept = (tez, id) => { try { if (id) window.localStorage.setItem(lastDeptKey(tez), String(id)); } catch { /* нет хранилища */ } };
 
 const initials = (name) => String(name || '')
     .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '•';
@@ -127,7 +136,10 @@ const OperatorRow = ({ row, showDepartment }) => {
     );
 };
 
-const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true }) => {
+const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true, profile = PROFILE_REMOTE_CC }) => {
+    const sectionProfile = normalizeProfile(profile);
+    const tez = sectionProfile === PROFILE_TEZ;
+    const sectionTitle = tez ? TEZ_SECTION_TITLE : SECTION_TITLE;
     const authHeaders = useCallback(
         (extra = {}) => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? ''), ...extra }),
         [withAccessTokenHeader, user?.id]
@@ -160,10 +172,12 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     // подключённые) приходят только админу — для кнопки «Подключить отдел».
     const loadDepartments = useCallback(async (preferId = null) => {
         try {
-            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
+            // Отделы своего раздела: сервер режет список по профилю сам, departmentsOfProfile —
+            // страховка на время раскатки (сервер без профилей отдал бы все отделы).
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments?profile=${sectionProfile}`, { credentials: 'include', headers: authHeaders() });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            const list = sortDepartments(Array.isArray(data.departments) ? data.departments : []);
+            const list = sortDepartments(departmentsOfProfile(data.departments, sectionProfile));
             const cands = Array.isArray(data.candidates) ? data.candidates : [];
             setDepartments(list);
             setCandidates(cands);
@@ -172,7 +186,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
             setDepartmentId((current) => {
                 if (has(preferId)) return String(preferId);
                 if (has(current)) return current;
-                const remembered = readLastDept();
+                const remembered = readLastDept(tez);
                 if (has(remembered)) return remembered;
                 return list[0] ? String(list[0].department_id) : '';
             });
@@ -180,10 +194,10 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
             setDepartments([]);
             setError(e.message || 'Не удалось загрузить отделы');
         }
-    }, [apiBaseUrl, authHeaders]);
+    }, [apiBaseUrl, authHeaders, sectionProfile, tez]);
 
     useEffect(() => { loadDepartments(); }, [loadDepartments]);
-    useEffect(() => { writeLastDept(departmentId); setPeriod(''); }, [departmentId]);
+    useEffect(() => { writeLastDept(tez, departmentId); setPeriod(''); }, [departmentId, tez]);
 
     // Кандидаты приходят только админу: по ним же понимаем, что отключать отдел можно.
     const candidatesAdmin = Array.isArray(candidates);
@@ -215,12 +229,15 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
         setEnrolling(true);
         try {
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${enrollPick}/enroll`, {
-                method: 'POST', credentials: 'include', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{}',
+                method: 'POST', credentials: 'include', headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(tez ? { profile: PROFILE_TEZ } : {}),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
             const picked = candidates.find((d) => String(d.department_id) === String(enrollPick));
-            showToast?.(`Отдел «${picked?.department_name || ''}» подключён. Включите режим во вкладке «Настройки»`, 'success');
+            showToast?.(tez
+                ? `Отдел «${picked?.department_name || ''}» подключён к автообзвону. Включите операторов во вкладке «Настройки»`
+                : `Отдел «${picked?.department_name || ''}» подключён. Включите режим во вкладке «Настройки»`, 'success');
             await loadDepartments(enrollPick);
             setTab('settings');
         } catch (e) {
@@ -250,19 +267,27 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
 
     useEffect(() => { loadOverview(); }, [loadOverview]);
 
-    const dept = useDialListDepartment({ apiBaseUrl, authHeaders, departmentId: departmentId || null, period: period === 'all' ? '' : period });
+    const dept = useDialListDepartment({
+        apiBaseUrl, authHeaders, departmentId: departmentId || null, period: period === 'all' ? '' : period, profile: sectionProfile,
+    });
     const selected = (departments || []).find((d) => String(d.department_id) === String(departmentId));
 
     const sortedRows = useMemo(() => [...rows].sort((a, b) => (b.done - a.done) || (b.attempts - a.attempts)
         || String(a.operator_name || '').localeCompare(String(b.operator_name || ''), 'ru')), [rows]);
 
     const enabled = !!dept.settings?.enabled;
+    // У Тез режим отдела целиком всегда выключен (операторов включают лично): «включён» —
+    // это автообзвон.
+    const autoDial = !!dept.settings?.auto_dial;
     const isToday = date === todayIso();
 
+    const counts = selected
+        ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}`
+        : '';
     const subtitle = !selected
         ? (candidates.length ? 'Подключите отдел, чтобы начать' : 'Отделов для обзвона пока нет')
-        : enabled
-            ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}`
+        : tez || enabled
+            ? counts
             : 'Режим выключен: операторы вкладку «Обзвон» не видят';
 
     return (
@@ -276,16 +301,24 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         </div>
                         <div>
                             <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
-                                {SECTION_TITLE}
-                                <IosHint text="Оператор видит в iCORE Phone только ФИО и кнопку «Позвонить». Звонок инициирует сервер через Binotel API, номер водителя телефону не передаётся. Исход каждого звонка подтверждает Binotel, а не телефон." />
+                                {sectionTitle}
+                                <IosHint
+                                    text={tez
+                                        ? 'В статусе «Активный» телефон оператора звонит сам, подряд: после итога и паузы — следующему водителю пачки, а кому пора перезвонить — первым. В статусе «Исход» оператор звонит сам из своих списков. Номер водителя телефону не передаётся: звонок инициирует сервер через Binotel. Цель — водитель вышел на линию (заказ в TEZ APP).'
+                                        : 'Оператор видит в iCORE Phone только ФИО и кнопку «Позвонить». Звонок инициирует сервер через Binotel API, номер водителя телефону не передаётся. Исход каждого звонка подтверждает Binotel, а не телефон.'}
+                                />
                             </div>
                             <div className="text-[12.5px] text-slate-500">{subtitle}</div>
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                        {selected && (
+                        {selected && (tez ? (
+                            <IosBadge tone={autoDial ? 'green' : 'slate'} title="Автообзвон в статусе «Активный»">
+                                {autoDial ? 'Автообзвон включён' : 'Автообзвон выключен'}
+                            </IosBadge>
+                        ) : (
                             <IosBadge tone={enabled ? 'green' : 'slate'}>{enabled ? 'Включён' : 'Выключен'}</IosBadge>
-                        )}
+                        ))}
                         {selected && dept.settings?.period && (
                             <IosBadge tone="blue" title="Какой месяц базы сейчас обзванивается">
                                 <FaIcon className="fas fa-calendar" style={{ width: 10, height: 10 }} />
@@ -301,11 +334,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                 ariaLabel="Отдел"
                                 options={departments.map((d) => ({
                                     value: String(d.department_id),
-                                    label: `${d.department_name || `Отдел ${d.department_id}`}${d.enabled ? ' · включён' : ''}`,
+                                    label: `${d.department_name || `Отдел ${d.department_id}`}${d.enabled && !tez ? ' · включён' : ''}`,
                                 }))}
                             />
                         )}
-                        {departments && departments.length === 1 && !sameSectionTitle(selected?.department_name, SECTION_TITLE) && (
+                        {departments && departments.length === 1 && !sameSectionTitle(selected?.department_name, sectionTitle) && (
                             <span className="rounded-xl bg-slate-100 px-3 py-2 text-[13px] font-medium text-slate-700">{selected?.department_name}</span>
                         )}
                     </div>
@@ -315,7 +348,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     (отделы на Binotel, которых в разделе ещё нет). */}
                 {canEdit && candidates.length > 0 && (
                     <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5">
-                        <span className="text-[12.5px] text-slate-600">Подключить отдел к обзвону:</span>
+                        <span className="text-[12.5px] text-slate-600">{tez ? 'Подключить отдел к автообзвону:' : 'Подключить отдел к обзвону:'}</span>
                         <CustomSelect
                             className="w-60"
                             variant="ios"
@@ -345,7 +378,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     <div className="mt-1 text-[12.5px] text-slate-500">
                         {candidates.length
                             ? 'Выберите отдел в шапке и нажмите «Подключить».'
-                            : 'Заведите отдел удалённого колл-центра и переключите его телефонию на Binotel в «Настройках SIP» — тогда его можно будет подключить здесь.'}
+                            : tez
+                                ? 'Отдел подключает администратор: телефония отдела должна быть на Binotel («Настройки SIP»).'
+                                : 'Заведите отдел удалённого колл-центра и переключите его телефонию на Binotel в «Настройках SIP» — тогда его можно будет подключить здесь.'}
                     </div>
                 </div>
             )}
@@ -396,21 +431,37 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                             {isToday ? 'Сегодня звонков из списка ещё не было' : 'В этот день звонков из списка не было'}
                                         </div>
                                         <div className="mt-1 text-[12.5px] text-slate-500">
-                                            {!enabled
-                                                ? 'Включите режим во вкладке «Настройки» и перезапустите телефоны операторов.'
-                                                : (dept.summary?.pool_available ?? 0) === 0
-                                                    ? 'База пуста — загрузите список водителей во вкладке «База водителей».'
-                                                    : 'Операторы получают порции сами, нажимая «Ещё» в телефоне.'}
+                                            {(tez || enabled) && (dept.summary?.pool_available ?? 0) === 0
+                                                ? 'База пуста — загрузите список водителей во вкладке «База водителей».'
+                                                : tez
+                                                    ? 'Включите операторов во вкладке «Настройки» — в статусе «Активный» их телефоны звонят сами.'
+                                                    : !enabled
+                                                        ? 'Включите режим во вкладке «Настройки» и перезапустите телефоны операторов.'
+                                                        : 'Операторы получают порции сами, нажимая «Ещё» в телефоне.'}
                                         </div>
                                     </div>
-                                ) : sortedRows.map((r) => (
-                                    <OperatorRow key={r.operator_id} row={r} showDepartment={false} />
+                                ) : sortedRows.map((r) => (tez
+                                    ? <TezOperatorRow key={r.operator_id} row={r} />
+                                    : <OperatorRow key={r.operator_id} row={r} showDepartment={false} />
                                 ))}
                             </div>
                         </section>
                     )}
 
-                    {tab === 'analytics' && (
+                    {tab === 'analytics' && tez && (
+                        <TezAutodialAnalytics
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            periods={dept.summary?.periods || []}
+                            activePeriod={dept.summary?.active_period || dept.settings?.period || ''}
+                            period={period}
+                            onPeriodChange={setPeriod}
+                            onOpenJournal={openJournal}
+                        />
+                    )}
+
+                    {tab === 'analytics' && !tez && (
                         <DialListAnalytics
                             apiBaseUrl={apiBaseUrl}
                             authHeaders={authHeaders}
@@ -448,6 +499,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             onChanged={dept.reload}
                             canEdit={canEdit}
                             showToast={showToast}
+                            profile={sectionProfile}
                         />
                     )}
 
@@ -465,6 +517,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             canEdit={canEdit}
                             showToast={showToast}
                             preset={journalPreset}
+                            profile={sectionProfile}
                         />
                     )}
 
@@ -479,8 +532,12 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     )}
 
                     {tab === 'settings' && (
-                        dept.error
-                            ? <div className={`${iosCard} p-4 text-[13px] text-rose-600`}>{dept.error}</div>
+                        dept.error || dept.mismatch
+                            ? (
+                                <div className={`${iosCard} p-4 text-[13px] text-rose-600`}>
+                                    {dept.error || `Этот отдел — в разделе «${tez ? SECTION_TITLE : TEZ_SECTION_TITLE}»: его настройки там.`}
+                                </div>
+                            )
                             : (
                                 <div className="space-y-4">
                                     <DialListSettingsPanel
@@ -492,6 +549,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         onSaved={() => { dept.reload(); loadDepartments(selected.department_id); }}
                                         canEdit={canEdit}
                                         showToast={showToast}
+                                        profile={sectionProfile}
                                     />
                                     <DialListOutcomesPanel
                                         apiBaseUrl={apiBaseUrl}
@@ -499,7 +557,26 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         departmentId={selected.department_id}
                                         canEdit={canEdit}
                                         showToast={showToast}
+                                        dueKinds={tez}
                                     />
+                                    {tez && (
+                                        <TezOffersPanel
+                                            apiBaseUrl={apiBaseUrl}
+                                            authHeaders={authHeaders}
+                                            departmentId={selected.department_id}
+                                            canEdit={canEdit}
+                                            showToast={showToast}
+                                        />
+                                    )}
+                                    {tez && (
+                                        <TezWhatsAppPanel
+                                            apiBaseUrl={apiBaseUrl}
+                                            authHeaders={authHeaders}
+                                            departmentId={selected.department_id}
+                                            canEdit={canEdit}
+                                            showToast={showToast}
+                                        />
+                                    )}
                                     <DialListOperatorsPanel
                                         apiBaseUrl={apiBaseUrl}
                                         authHeaders={authHeaders}
@@ -507,6 +584,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         departmentEnabled={enabled}
                                         canEdit={canEdit}
                                         showToast={showToast}
+                                        profile={sectionProfile}
                                     />
                                     {canEdit && candidatesAdmin && (
                                         <div className="flex justify-end">

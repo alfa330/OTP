@@ -90,7 +90,7 @@ class _Svc(dial_service.DialListService):
     def _heads_department_with_code(self, department_ids, codes):
         return any(DEPARTMENT_CODES.get(int(x), '') in codes for x in (department_ids or []))
 
-    def list_departments(self, department_ids=None):
+    def list_departments(self, department_ids=None, profile=None):
         section = [LINE_DEPARTMENT, TEZ]
         ids = section if department_ids is None else [i for i in department_ids if i in section]
         return [{"department_id": i} for i in ids]

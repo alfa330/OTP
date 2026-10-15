@@ -1486,11 +1486,14 @@ class OutcomeSubtypesTests(unittest.TestCase):
     def test_journal_rows_types_counts_and_total(self):
         columns = [c.strip() for c in dial_service.DialListService._JOURNAL_COLUMNS.split(',')]
         # Новые — в конце: типы итога, за ними подписание документов (29.09.2026), за ним —
-        # что телефон сообщил о последнем звонке (12.10.2026).
+        # что телефон сообщил о последнем звонке (12.10.2026), за ним — автообзвон Тез (15.10.2026).
         self.assertEqual(columns[37:39], ['last_outcome_subtype_id', 'last_outcome_subtype_name'])
-        self.assertEqual(columns[39:], ['iin', 'sign_status', 'sign_checked_at', 'sign_error', 'signed_at',
-                                        'success_attempt_id', 'success_operator_id', 'success_operator_name',
-                                        'success_resolved_at', 'last_auto_hangup', 'last_talk_detected'])
+        self.assertEqual(columns[39:50], ['iin', 'sign_status', 'sign_checked_at', 'sign_error', 'signed_at',
+                                          'success_attempt_id', 'success_operator_id', 'success_operator_name',
+                                          'success_resolved_at', 'last_auto_hangup', 'last_talk_detected'])
+        self.assertEqual(columns[50:], ['due_kind', 'owner_call_at', 'promised_online_at', 'owner_operator_id',
+                                        'owner_operator_name', 'month_first_order_at', 'last_order_before_at',
+                                        'trip_checked_at', 'driver_id'])
         # stage, outcome, subtype, for_stage, for_outcome
         summary = [['answered', self.R, self.S1, 2, 3], ['answered', self.R, None, 1, 1],
                    ['exhausted', self.R, self.S2, 0, 2], ['queue', None, None, 5, 5],
@@ -4190,7 +4193,8 @@ class PhoneVersionGateTests(unittest.TestCase):
         # Разбирает и решает сервис — у ручек своей копии правила нет.
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         self.assertIn('request.headers.get(PHONE_VERSION_HEADER)', src)
-        self.assertEqual(src.count('phone_version=_phone_version()'), 4)
+        # Пятая — автоцикл Тез (POST …/auto/next, 15.10.2026): его ответ — то же состояние.
+        self.assertEqual(src.count('phone_version=_phone_version()'), 5)
         for own_rule in ('phone_guards_speech(', 'parse_phone_version(', 'SPEECH_GUARD_PHONE_VERSION',
                          'phone_has_ring_timer(', 'RING_TIMER_MIN_VERSION'):
             self.assertNotIn(own_rule, src)
@@ -5097,7 +5101,11 @@ class AnnouncementTests(unittest.TestCase):
             ('answered', '', False, True),
         ])
         attempts_sql = cur.sql_with('os.id, os.name')[0][0]
-        self.assertIn('os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected\n', attempts_sql)
+        # За ними — только колонки автообзвона Тез (15.10.2026): прежние номера не сдвинуты.
+        self.assertIn('os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected,\n'
+                      "                       t.due_at, t.auto, t.operator_status, t.wrapup_expired_at, "
+                      "COALESCE(o.due_kind, '')\n",
+                      attempts_sql)
         # Ручка записи судит так же, как recording_available: по ответу Binotel с длительностью.
         recording = inspect.getsource(dial_service.DialListService.attempt_recording)
         self.assertIn('map_disposition(disposition) != "answered"', recording)

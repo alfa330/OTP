@@ -36,6 +36,16 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_line_members         сотрудник ДРУГОГО отдела на линии отдела: отдел
                                    и номер линии, её учётка у Binotel. Его
                                    собственные SIP-настройки при этом не меняются.
+    dial_list_offers               акции и офферы отдела (автообзвон Тез КЦ): что
+                                   оператор может предложить водителю в разговоре.
+    dial_list_attempt_offers       какие офферы оператор отметил в итоге звонка.
+    dial_list_wa_messages          журнал и outbox отправок шаблона WhatsApp
+                                   (ChatApp) водителю: строка пишется до запроса.
+
+Профиль отдела (dial_list_department_settings.profile, 15.10.2026): 'remote_cc' —
+удалённый КЦ, как было; 'tez' — автообзвон Тез КЦ на том же движке: база без ИИН,
+«цель» лида — водитель вышел на линию (поездка в TEZ APP, trips_check.py), сроки
+повторов и перезвонов (next_call_at, owner_*), постобработка, офферы, WhatsApp.
 
 Почему свои таблицы настроек, а не колонки в sip_department_config:
 _SIP_OPERATOR_SELECT читает строки по индексам, и каждая новая колонка там —
@@ -350,6 +360,105 @@ DDL = [
         released_at TIMESTAMP WITH TIME ZONE
     )
     """,
+    # Автообзвон Тез КЦ (ТЗ руководителя Тез и решения владельца 15.10.2026): тот же движок
+    # с профилем отдела. Значения профиля — 'remote_cc' | 'tez'; проверяет их код
+    # (service.PROFILES), CHECK в базе не заводим: новый профиль — правка кода, а не миграция.
+    # Отдел, подключённый раньше, остаётся 'remote_cc' — переключает админ в настройках.
+    #   auto_dial            автоцикл в «Активном»: телефон сам звонит подряд (у tez при подключении — да)
+    #   call_interval_sec    пауза между звонками автоцикла, 0..600
+    #   wrapup_sec           срок постобработки: 0 — без срока, иначе 10..1800
+    #   retry_schedule_min   паузы перед повторами недозвона в минутах: элемент i — перед попыткой
+    #                        i+2, последний повторяется; [] — как раньше, retry_after_hours
+    #   callback_own_minutes сколько перезвон/дожим ждёт своего оператора после срока, 0..1440
+    #   followup_after_min   через сколько после обещанного выхода на линию «дожать», 0..1440
+    #   wa_license_id        лицензия ChatApp (caWhatsApp); NULL — WhatsApp выключен
+    #   wa_templates         разрешённые руководителем шаблоны: [{id, title, text, params}]
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS profile VARCHAR(16) NOT NULL"
+    " DEFAULT 'remote_cc'",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS auto_dial BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS call_interval_sec SMALLINT NOT NULL"
+    " DEFAULT 10",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS wrapup_sec SMALLINT NOT NULL DEFAULT 60",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS retry_schedule_min JSONB NOT NULL"
+    " DEFAULT '[]'::jsonb",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS callback_own_minutes SMALLINT NOT NULL"
+    " DEFAULT 120",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS followup_after_min SMALLINT NOT NULL"
+    " DEFAULT 60",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS wa_license_id INTEGER",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS wa_templates JSONB NOT NULL"
+    " DEFAULT '[]'::jsonb",
+    # Сроки лида (автообзвон Тез). У удалённого КЦ next_call_at всегда NULL — пул как раньше.
+    #   next_call_at         общий пул не выдаёт лида раньше этого момента (NULL — сразу)
+    #   owner_operator_id    чей перезвон/дожим; owner_call_at — когда ему звонить;
+    #   due_kind             почему: 'callback' (перезвон) | 'online' (обещал выйти на линию) | ''
+    #   promised_online_at   последнее обещанное время выхода на линию — не чистится никогда:
+    #                        по нему аналитика видит «обещал и не вышел»
+    #   trip_*, month_first_order_at, last_order_before_at — ответ TEZ APP (trips_check.py);
+    #                        вышел на линию — signed_at = month_first_order_at, sign_status 'online'
+    #   driver_id            id водителя в TEZ APP — на будущее (API его пока не отдаёт)
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS next_call_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS owner_operator_id INTEGER"
+    " REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS owner_call_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS due_kind VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS promised_online_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS trip_checked_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS trip_error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS month_first_order_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS last_order_before_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS driver_id VARCHAR(64) NOT NULL DEFAULT ''",
+    # Итог с датой: 'callback' — «Перезвонить» (дата и время перезвона обязательны), 'online' —
+    # «Согласен выйти на линию» (когда выйдет — обязательно). Такой итог всегда «перезвонить».
+    "ALTER TABLE dial_list_outcomes ADD COLUMN IF NOT EXISTS due_kind VARCHAR(16) NOT NULL DEFAULT ''",
+    # Попытка автообзвона: дата, выбранная с итогом; начал ли звонок автоцикл; статус телефона
+    # при звонке ('active' | 'outbound' | '' — не сообщил); когда телефон сообщил, что срок
+    # постобработки вышел (оператор ушёл в «Офлайн», решение владельца 15.10.2026).
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS due_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS auto BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_status VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS wrapup_expired_at TIMESTAMP WITH TIME ZONE",
+    # Акции и офферы отдела: оператор отмечает в итоге, какие предложил. Не удаляются, а
+    # выключаются — история попыток на них ссылается (как итоги и их типы).
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_offers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        title VARCHAR(120) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        position SMALLINT NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_attempt_offers (
+        attempt_id UUID NOT NULL REFERENCES dial_list_attempts(id) ON DELETE CASCADE,
+        offer_id UUID NOT NULL REFERENCES dial_list_offers(id) ON DELETE CASCADE,
+        PRIMARY KEY (attempt_id, offer_id)
+    )
+    """,
+    # Отправки шаблона WhatsApp оператором: строка 'sending' пишется и фиксируется ДО запроса в
+    # ChatApp, итог — 'sent' / 'failed'. Неоднозначный ответ (таймаут) — 'failed', повтор только
+    # новым нажатием; не чаще раза в сутки на водителя. attempt_id без FK, как success_attempt_id.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_wa_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+        lead_id UUID NOT NULL REFERENCES dial_list_leads(id) ON DELETE CASCADE,
+        attempt_id UUID,
+        operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        license_id INTEGER,
+        template_id VARCHAR(64) NOT NULL DEFAULT '',
+        template_title VARCHAR(120) NOT NULL DEFAULT '',
+        status VARCHAR(16) NOT NULL DEFAULT 'sending' CHECK (status IN ('sending', 'sent', 'failed')),
+        provider_message_id VARCHAR(128) NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        sent_at TIMESTAMP WITH TIME ZONE
+    )
+    """,
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -419,6 +528,17 @@ DDL = [
     " WHERE state IN ('requested', 'leg_ringing', 'leg_answered', 'ended')",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_operator_requested"
     " ON dial_list_attempts(operator_id, requested_at)",
+    # Автообзвон Тез (15.10.2026). Пул по сроку — только открытые лиды; свои сроки оператора
+    # (перезвон, дожим) — по владельцу; кому пора проверять поездки — только не вышедшие на линию.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_next_call ON dial_list_leads(department_id, period, next_call_at)"
+    " WHERE status IN ('new', 'in_progress')",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_owner_due ON dial_list_leads(owner_operator_id, owner_call_at)"
+    " WHERE owner_operator_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_trip_due ON dial_list_leads(period, trip_checked_at)"
+    " WHERE signed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_wa_messages_lead ON dial_list_wa_messages(lead_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempt_offers_offer ON dial_list_attempt_offers(offer_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_offers_department ON dial_list_offers(department_id, position)",
 ]
 
 

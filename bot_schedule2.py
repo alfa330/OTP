@@ -54148,14 +54148,27 @@ def tez_leads_upload():
 
     department_id = request.values.get('department_id')
     try:
-        counts = tez_lead_service.import_lead_batch(
-            db,
+        result = _tez_leads_import_rows(
+            requester_id,
             int(department_id) if department_id else None,
-            year, month, requester_id, file_name, rows
+            year, month, file_name, rows
         )
     except Exception:
         logging.exception('tez_leads: импорт строк не удался')
         return jsonify({"error": "Не удалось сохранить базу лидов"}), 500
+    return jsonify(result)
+
+
+def _tez_leads_import_rows(requester_id, department_id, year, month, file_name, rows):
+    """Разобранный файл → помесячная база лидов и фоновая проверка «кто уже работает».
+
+    Ответ — как у /api/tez_leads/upload. Общая с загрузкой базы автообзвона Тез КЦ
+    (_dial_list_tez_leads_mirror): одна загрузка на обе базы, решение владельца 15.10.2026.
+    """
+    from tez import lead_service as tez_lead_service
+    counts = tez_lead_service.import_lead_batch(
+        db, department_id, year, month, requester_id, file_name, rows
+    )
 
     batch_id = counts['batch_id']
 
@@ -54180,7 +54193,7 @@ def tez_leads_upload():
         for r in rows if r[3] is None
     ]
 
-    return jsonify({
+    return {
         "batch_id": batch_id,
         "year": year,
         "month": month,
@@ -54190,7 +54203,7 @@ def tez_leads_upload():
         "rows_invalid": counts['rows_invalid'],
         "invalid_rows": invalid_rows[:200],
         "check_status": "pending",
-    })
+    }
 
 
 @app.route('/api/tez_leads/stats', methods=['GET'])
@@ -67065,8 +67078,56 @@ except Exception:
 # Оператор видит в iCORE Phone только ФИО и кнопку; звонок инициирует сервер
 # через Binotel API, номер водителя телефону не передаётся. См. dial_list/.
 _dial_list_service = None
+
+
+def _dial_list_trips_configured():
+    """Задан ли токен TEZ APP — без него проверки поездок автообзвона Тез нет (fail-open)."""
+    from tez import first_orders as tez_first_orders
+    return tez_first_orders.api_ready()
+
+
+def _dial_list_trips_fetch(phones, month, timeout=None):
+    """Поездки водителей автообзвона Тез КЦ (dial_list/trips_check.py): тот же клиент TEZ APP,
+    что у «Базы лидов ОП TEZ». timeout — у проверки «сейчас» (её ждёт оператор или
+    руководитель); без него — как у клиента."""
+    client = _tez_leads_first_orders_client()
+    if timeout is not None:
+        client.timeout = timeout
+    return client.fetch_first_orders(phones, month=month)
+
+
+def _dial_list_wa_client_factory():
+    """Фабрика клиента ChatApp для шаблонов WhatsApp автообзвона Тез или None — доступы ChatApp
+    не заданы (тогда WhatsApp в карточке выключен). Пара токенов — в БД, как у сбора чатов:
+    квота ChatApp 100 tokens.make в сутки на всё приложение."""
+    try:
+        from tez import chatapp_client
+        cfg = chatapp_client.get_config()
+        if not chatapp_client.api_ready(cfg):
+            return None
+    except Exception:
+        logging.exception("dial_list: не удалось прочитать доступы ChatApp — WhatsApp выключен")
+        return None
+    return lambda: chatapp_client.ChatAppClient.from_config(cfg, token_store=_ChatAppDbTokenStore())
+
+
+def _dial_list_tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period):
+    """Файл базы автообзвона Тез КЦ — ещё и в «Базу лидов ОП TEZ» того же месяца: там считаются
+    успешки и зарплата ОП (одна загрузка на обе базы, владелец 15.10.2026). Файл, который её
+    разбор не принял, — {"error"}: загрузку в раздел это не отменяет. Номеров в ответе нет."""
+    from tez import lead_service as tez_lead_service
+    try:
+        rows = tez_lead_service.parse_leads_file(raw_bytes, file_ext)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    result = _tez_leads_import_rows(requester_id, int(department_id), period.year, period.month, file_name, rows)
+    return {key: result[key] for key in ("batch_id", "year", "month", "rows_total", "rows_new",
+                                         "rows_duplicate", "rows_invalid", "check_status")}
+
+
 try:
     from dial_list.routes import build_dial_list_blueprint  # noqa: E402
+    from dial_list.service import DialListService  # noqa: E402
 
     _dial_list_bp = build_dial_list_blueprint(
         db=db,
@@ -67084,6 +67145,15 @@ try:
         # владельца 10.10.2026, dial_list.service.full_access_supervisor).
         is_supervisor_role=_is_supervisor_role,
         department_code_of=_department_code_of_user,
+        # Автообзвон Тез КЦ (15.10.2026): поездки — TEZ APP, шаблоны WhatsApp — ChatApp; пакет
+        # tez разделу не зависимость, клиенты приходят отсюда.
+        service=DialListService(db, trips_fetch=_dial_list_trips_fetch,
+                                trips_configured=_dial_list_trips_configured,
+                                wa_client_factory=_dial_list_wa_client_factory()),
+        tez_leads_mirror=_dial_list_tez_leads_mirror,
+        # Перевод отдела между разделами (профиль) — только администратору компании: у глав
+        # отделов роль админская, но зона — свой отдел (_is_global_admin_requester).
+        is_global_admin=lambda requester_id, role: _is_global_admin_requester(role, requester_id),
     )
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service
@@ -70731,6 +70801,16 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error scheduling dial_list sign check: {e}")
 
+    async def dial_list_trips_check_job():
+        # Автообзвон Тез КЦ: вышли ли водители базы на линию (поездки в TEZ APP). Так же,
+        # как подписание: джоба ставит прогон в поток раздела и не ждёт; кому пора —
+        # решает dial_list/trips_check.py. Без токена TEZ APP — no-op с предупреждением.
+        try:
+            if _dial_list_service is not None:
+                _dial_list_service.request_trip_check('планировщик')
+        except Exception as e:
+            logging.exception(f"Error scheduling dial_list trips check: {e}")
+
     async def reg_contest_sync_job():
         # Конкурс «Топ по регистрациям»: срез засчитанных водителей из CRM
         # каждые полчаса — рейтинг живёт сам, без кнопки. После дедлайна
@@ -70843,6 +70923,17 @@ if __name__ == '__main__':
         dial_list_sign_check_job,
         CronTrigger(minute='20,50', timezone=ZoneInfo('Asia/Almaty')),
         id='dial_list_sign_check',
+        misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Автообзвон Тез КЦ: проверка поездок водителей в TEZ APP — каждые полчаса, в
+    # стороне от :05/:35, :12/:42 и :20/:50 (вышедшие на линию уходят из обзвона).
+    scheduler.add_job(
+        dial_list_trips_check_job,
+        CronTrigger(minute='27,57', timezone=ZoneInfo('Asia/Almaty')),
+        id='dial_list_trips_check',
         misfire_grace_time=600,
         max_instances=1,
         coalesce=True

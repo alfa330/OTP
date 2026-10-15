@@ -140,6 +140,7 @@ from . import live_calls
 from . import pay
 from . import signing
 from .sign_check import IN_FLIGHT_STATES, SignChecker
+from .trips_check import TripChecker
 
 log = logging.getLogger(__name__)
 
@@ -391,7 +392,9 @@ COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 # ring_timeout — телефон досчитал гудки до сброса и спрашивает, класть ли плечо;
 # ended с ring_timeout — положил: водитель не взял трубку. С 3.22.34 ended несёт ещё
 # auto_hangup (почему телефон положил плечо сам) и talk_detected (был ли разговор по звуку).
-PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup", "ring_timeout")
+# wrapup_expired (автообзвон Тез, 15.10.2026) — время постобработки вышло, а итога нет: телефон
+# поставил оператору «Офлайн»; сервер только помечает попытку (аналитика просрочек).
+PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup", "ring_timeout", "wrapup_expired")
 # Для SQL `UPPER(disposition) IN %s` (psycopg2 разворачивает tuple в список).
 ANSWERED_SQL = tuple(sorted(ANSWERED_DISPOSITIONS))
 
@@ -469,6 +472,310 @@ SEAT_ANYONE_DENIED = ("Сотрудника другого отдела сажа
                       "и суперадмины")
 # «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
 MEMBER_NOT_GIVEN = object()
+
+# ── Автообзвон Тез КЦ (ТЗ руководителя Тез и решения владельца 15.10.2026) ──────────────────
+# Тот же движок с ПРОФИЛЕМ отдела (dial_list_department_settings.profile). 'remote_cc' — удалённый
+# КЦ, всё как было; 'tez' — база ФИО + телефон без ИИН, «цель» лида — водитель вышел на линию
+# (завершённый заказ в TEZ APP в месяце базы, trips_check.py; хранится в тех же signed_at /
+# sign_status = 'online', поэтому пул, снятие строк и успешка работают без правок), автоцикл в
+# статусе «Активный», постобработка, сроки перезвонов и дожима, офферы, шаблон WhatsApp. Зарплата
+# по тарифу pay.py и «Рейтинг» — не для Тез: их зарплата — «База лидов ОП TEZ» (tez_leads).
+PROFILE_REMOTE_CC = "remote_cc"
+PROFILE_TEZ = "tez"
+PROFILES = (PROFILE_REMOTE_CC, PROFILE_TEZ)
+# Подключение отдела профилем tez (и смена профиля на tez в настройках, если поля не переданы
+# явно): своя компания Binotel, автоцикл включён, повторы недозвона — расписанием через 1 ч, 3 ч и
+# сутки, а retry_after_hours — 0: сроки ведёт next_call_at.
+TEZ_DEFAULT_SETTINGS = {
+    "binotel_company": binotel.COMPANY_TEZ,
+    "auto_dial": True,
+    "retry_after_hours": 0,
+    "retry_schedule_min": [60, 180, 1440],
+}
+# Итог с датой (dial_list_outcomes.due_kind): 'callback' — «Перезвонить» (дата и время перезвона),
+# 'online' — «Согласен выйти на линию» (когда выйдет); '' — без даты. Итог с датой всегда
+# «перезвонить» (requeue): водитель ждёт своего срока, а не уходит в «обработанные».
+DUE_CALLBACK = "callback"
+DUE_ONLINE = "online"
+DUE_KINDS = ("", DUE_CALLBACK, DUE_ONLINE)
+DUE_REQUIRED = {DUE_CALLBACK: "Укажите дату и время перезвона",
+                DUE_ONLINE: "Укажите, когда водитель выйдет на линию"}
+# Дата с итогом: не раньше «сейчас − 5 минут» (оператор выбирал её минуту назад) и не позже месяца.
+DUE_PAST_TOLERANCE_MIN = 5
+DUE_MAX_DAYS = 31
+# Стартовый набор итогов отдела tez (имя, цвет, «перезвонить», дата).
+DEFAULT_TEZ_OUTCOMES = (
+    ("Согласен выйти на линию", "#34C759", True, DUE_ONLINE),
+    ("Перезвонить", "#FF9F0A", True, DUE_CALLBACK),
+    ("Отказ", "#FF3B30", False, ""),
+    ("Неверный номер", "#8E8E93", False, ""),
+    ("Уже работает", "#5856D6", False, ""),
+)
+# Пределы настроек автообзвона.
+CALL_INTERVAL_MAX_SEC = 600
+WRAPUP_MIN_SEC = 10
+WRAPUP_MAX_SEC = 1800
+RETRY_SCHEDULE_MAX_ITEMS = 10
+RETRY_SCHEDULE_MAX_MIN = 43200
+CALLBACK_OWN_MAX_MIN = 1440
+FOLLOWUP_MAX_MIN = 1440
+# Автоцикл (POST …/auto/next): строку выдачи, по которой уже был звонок (отмена до ответа, отказ
+# АТС), автоцикл берёт снова не раньше AUTO_RETRY_GAP_SEC после этого звонка; ждать —
+# телефону retry_after_sec не меньше AUTO_WAIT_MIN_SEC; пул пуст — спросить через минуту.
+AUTO_RETRY_GAP_SEC = 120
+# Сколько своих наступивших сроков автоцикл перебирает за раз (ждущие повтора пропускаются).
+AUTO_OWN_DUE_SCAN = 20
+AUTO_WAIT_MIN_SEC = 5
+AUTO_EMPTY_RETRY_SEC = 60
+AUTO_NOT_ENABLED = "Автообзвон для отдела не включён"
+AUTO_STATUS_ONLY_ACTIVE = "Автообзвон — в статусе «Активный»"
+# Статус телефона при звонке (решение владельца 15.10.2026): «Активный» — автоцикл, «Исход» —
+# оператор звонит сам из своих списков; в прочих статусах (Тренинг, Перерыв, Тех. перерыв,
+# Офлайн) звонков у Тез нет.
+OPERATOR_STATUS_ACTIVE = "active"
+OPERATOR_STATUS_OUTBOUND = "outbound"
+OPERATOR_CALL_STATUSES = (OPERATOR_STATUS_ACTIVE, OPERATOR_STATUS_OUTBOUND)
+CALL_STATUS_REFUSED = "Звонить можно в статусе «Активный» или «Исход»"
+# Отказ звонка, по которому телефон сразу берёт следующего (error_kind): водитель уже у цели —
+# вышел на линию (tez) или подписал (remote_cc), строка снята; и не тот статус телефона.
+CALL_ERROR_GOAL = "goal"
+CALL_ERROR_STATUS = "status"
+GOAL_ROW_CLOSED_TEZ = "Водитель уже вышел на линию — строка убрана из списка"
+# Проверка поездок «сейчас» (TEZ APP, trips_check.py) — вне транзакций, как Sapar: перед выдачей
+# пачки — кандидаты пула с запасом, перед звонком — этот водитель; данные свежее 15 минут не
+# переспрашиваем. TEZ APP не настроен или лежит — выдаём и звоним, как раньше.
+TRIP_PRECHECK_FRESH_MINUTES = 15
+TRIP_PRECHECK_BUDGET_SEC = 8
+TRIP_PRECHECK_TIMEOUT_SEC = 5
+TRIP_CALL_FRESH_MINUTES = 15
+TRIP_CALL_TIMEOUT_SEC = 3
+# «Проверить сейчас» в карточке водителя Тез у руководителя: его ждёт человек, а не звонок.
+TRIP_MANAGER_TIMEOUT_SEC = 10
+TRIP_MANAGER_BUDGET_SEC = 15
+# Метка водителя: последний заказ до месяца базы старше стольких дней — отток (то же правило
+# 30 дней, что у «Базы лидов ОП TEZ»).
+CHURN_DAYS = 30
+# Ссылка на профиль водителя в админке TEZ APP (п.13 ТЗ): шаблон вида https://…/drivers/{driver_id}
+# из окружения сервера. Пока TEZ APP id водителя не отдаёт, ссылки нет ни у кого.
+DRIVER_URL_TEMPLATE_ENV = "TEZ_DRIVER_ADMIN_URL_TEMPLATE"
+# Офферы отдела — список целиком, как итоги.
+OFFERS_MAX = 50
+OFFER_TITLE_MAX = 120
+OFFER_DESCRIPTION_MAX = 2000
+OFFER_UNKNOWN = "Такого оффера нет — обновите список"
+# Шаблоны WhatsApp (ChatApp, WABA): разрешает руководитель, до 10; параметры — до 10 строк по 200
+# символов с подстановками {name} (ФИО водителя), {first_name} (имя), {operator} (имя оператора).
+WA_TEMPLATES_MAX = 10
+WA_PARAMS_MAX = 10
+WA_PARAM_MAX = 200
+WA_TEMPLATE_ID_MAX = 64
+WA_TEMPLATE_TITLE_MAX = 120
+WA_TEMPLATE_TEXT_MAX = 4000
+WA_PLACEHOLDERS = ("{name}", "{first_name}", "{operator}")
+_WA_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
+_WA_VARIABLE_RE = re.compile(r"\{\{\s*(\d{1,2})\s*\}\}")
+WA_TEMPLATES_CACHE_SEC = 600
+# Одному водителю — не больше одной отправки (отправляется или отправлено) за столько часов.
+WA_RESEND_HOURS = 24
+WA_RESENT_TODAY = "Сообщение этому водителю уже отправляли сегодня"
+# Отдать ChatApp можно только одобренный текстовый шаблон (без картинок и документов).
+WA_SUPPORTED_STATUS = "APPROVED"
+WA_SUPPORTED_TYPE = "TEXT"
+# Живой статус оператора в сводке «Операторы» (ключ последнего события телефона за 16 ч).
+LIVE_STATUS_MAP = {
+    "готов": "active", "автодозвон": "active",
+    "перезвон": "outbound", "исход": "outbound",
+    "занят": "talking", "соединение": "talking",
+    "офлайн": "offline",
+    "перерыв": "break", "тренинг": "break", "тех причина": "break",
+    "выключен": "off",
+}
+# Этапы лида в журнале отдела tez: «подписал» здесь — вышел на линию, и есть свои сроки.
+TEZ_LEAD_STAGES = {
+    "queue": "В очереди",
+    "waiting": "Ждёт повтора",
+    "callback": "Перезвон назначен",
+    "followup": "Обещал выйти — дожать",
+    "issued": "У оператора",
+    "answered": "Дозвонились",
+    "exhausted": "Не дозвонились",
+    "excluded": "Исключён",
+    "signed": "Вышел на линию",
+}
+# Супервайзер отдела с этим кодом работает в разделе со своим отделом (руководитель Тез, 15.10.2026),
+# если отдел подключён. Не DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES: тем — весь раздел.
+DIAL_LIST_OWN_SUPERVISOR_CODES = frozenset({"tez"})
+# «Значение не прислано» для новых необязательных ключей итога (due_at, offer_ids): старый телефон
+# их не шлёт, и офферы попытки тогда не трогаются.
+VALUE_NOT_SENT = object()
+
+
+def is_tez(settings):
+    """Отдел профиля tez (автообзвон Тез КЦ) — по настройкам отдела (department_settings или
+    ctx["settings"]). Нет ключа — удалённый КЦ: всё, что было до профилей, им и остаётся."""
+    return str((settings or {}).get("profile") or "").strip().lower() == PROFILE_TEZ
+
+
+def own_supervisor_code(code):
+    """Код отдела супервайзера, которому раздел открыт своим отделом (DIAL_LIST_OWN_SUPERVISOR_CODES)."""
+    return str(code or "").strip().lower() in DIAL_LIST_OWN_SUPERVISOR_CODES
+
+
+def schedule_from(value):
+    """retry_schedule_min из базы (jsonb: psycopg2 отдаёт список, драйвер постарше — текст) → [int]."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "[]")
+        except ValueError:
+            value = []
+    return [int(v) for v in (value or []) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0]
+
+
+def retry_delay_minutes(schedule, attempts_total):
+    """Пауза перед следующей попыткой после attempts_total-го недозвона: элемент attempts_total−1
+    расписания, последний повторяется. Расписание пустое — None (работает retry_after_hours)."""
+    schedule = [int(v) for v in (schedule or [])]
+    if not schedule:
+        return None
+    index = max(0, min(int(attempts_total or 0) - 1, len(schedule) - 1))
+    return schedule[index]
+
+
+def clean_retry_schedule(value):
+    """Интервалы повторов из настроек → список минут; ошибка — DialListError с понятным текстом."""
+    if not isinstance(value, list):
+        raise DialListError("Интервалы повторов: ожидается список минут, например [60, 180, 1440]")
+    if len(value) > RETRY_SCHEDULE_MAX_ITEMS:
+        raise DialListError(f"Интервалов повторов не больше {RETRY_SCHEDULE_MAX_ITEMS}")
+    cleaned = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or int(item) != item:
+            raise DialListError("Интервалы повторов: каждое значение — целое число минут")
+        if not 1 <= int(item) <= RETRY_SCHEDULE_MAX_MIN:
+            raise DialListError(f"Интервал повтора: от 1 до {RETRY_SCHEDULE_MAX_MIN} минут")
+        cleaned.append(int(item))
+    return cleaned
+
+
+def parse_due_at(value, due_kind, now):
+    """Дата и время с итогом (ISO 8601; без пояса — время Алматы) → момент с поясом. Нет —
+    400 со словами итога; не разобрать или вне окна «сейчас − 5 минут … + 31 день» — 400."""
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "").strip() if isinstance(value, (str, int, float)) else ""
+        if not text:
+            raise DialListError(DUE_REQUIRED.get(due_kind) or "Укажите дату и время", 400)
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise DialListError("Дата и время: ожидается ISO 8601, например 2026-10-16T18:00:00+05:00", 400)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=PERIOD_TZ)
+    what = "Время перезвона" if due_kind == DUE_CALLBACK else "Время выхода на линию"
+    if moment < now - timedelta(minutes=DUE_PAST_TOLERANCE_MIN):
+        raise DialListError(f"{what} уже прошло — выберите время позже", 400)
+    if moment > now + timedelta(days=DUE_MAX_DAYS):
+        raise DialListError(f"{what} — не дальше чем через {DUE_MAX_DAYS} день", 400)
+    return moment
+
+
+def clean_operator_status(value):
+    """Статус телефона из тела звонка/автоцикла → нижний регистр без пробелов; не прислан — None."""
+    if value is None:
+        return None
+    return str(value).strip().lower()[:16]
+
+
+def due_label(due_kind, owner_call_at, promised_online_at):
+    """Подпись своего срока на телефоне: «Перезвон 16.10 18:00», «Обещал выйти 16.10 10:00 —
+    дожать». Время — по Алматы."""
+    def hm(value):
+        return value.astimezone(PERIOD_TZ).strftime("%d.%m %H:%M") if isinstance(value, datetime) else ""
+    if due_kind == DUE_CALLBACK and owner_call_at is not None:
+        return f"Перезвон {hm(owner_call_at)}"
+    if due_kind == DUE_ONLINE:
+        promised = promised_online_at or owner_call_at
+        return f"Обещал выйти {hm(promised)} — дожать" if promised is not None else "Обещал выйти — дожать"
+    return ""
+
+
+def driver_label(month_first_order_at, last_order_before_at, checked_at, now=None):
+    """Метка водителя по ответу TEZ APP (п.1 ТЗ). Отличить «нет аккаунта» от «не ездил» TEZ APP не
+    даёт: обе даты пусты — «Заказов не было»; не проверяли — пусто."""
+    now = now or _utcnow()
+    if isinstance(month_first_order_at, datetime):
+        return f"Вышел на линию {month_first_order_at.astimezone(PERIOD_TZ):%d.%m}"
+    if isinstance(last_order_before_at, datetime):
+        local = last_order_before_at.astimezone(PERIOD_TZ)
+        if _as_utc(last_order_before_at) < now - timedelta(days=CHURN_DAYS):
+            return f"Отток · последний заказ {local:%d.%m.%Y}"
+        return f"Работал {local:%d.%m}"
+    if checked_at is not None:
+        return "Заказов не было"
+    return ""
+
+
+def driver_profile_url(driver_id):
+    """Ссылка на водителя в админке TEZ APP: шаблон из окружения и id водителя; нет — ''."""
+    driver_id = str(driver_id or "").strip()
+    template = (os.getenv(DRIVER_URL_TEMPLATE_ENV) or "").strip()
+    if not driver_id or not template or "{driver_id}" not in template:
+        return ""
+    from urllib.parse import quote
+    return template.replace("{driver_id}", quote(driver_id, safe=""))
+
+
+def driver_block(month_first_order_at, last_order_before_at, checked_at, driver_id, now=None):
+    """Блок driver для телефона: метка поездок и ссылка в админку. Номера нет."""
+    return {"label": driver_label(month_first_order_at, last_order_before_at, checked_at, now),
+            "profile_url": driver_profile_url(driver_id)}
+
+
+def first_name_of(full_name):
+    """Имя для обращения в шаблоне: второе слово ФИО («Иванов Иван Иванович» → «Иван»), нет — первое."""
+    words = str(full_name or "").split()
+    if len(words) >= 2:
+        return words[1]
+    return words[0] if words else ""
+
+
+def wa_params(params, full_name, operator_name):
+    """Параметры шаблона WhatsApp с подстановками: {name}, {first_name}, {operator}."""
+    values = {"{name}": str(full_name or "").strip(), "{first_name}": first_name_of(full_name),
+              "{operator}": str(operator_name or "").strip()}
+    out = []
+    for raw in params or []:
+        text = str(raw or "")
+        for key, value in values.items():
+            text = text.replace(key, value)
+        out.append(text)
+    return out
+
+
+def wa_preview(text, params, operator_name):
+    """Текст шаблона для превью оператору: переменные {{1}}… — параметры отдела; водитель —
+    словами (в общем состоянии он ещё не выбран), имя оператора — его; номера нет."""
+    operator = str(operator_name or "").strip()
+    values = [str(raw or "").replace("{name}", "[ФИО водителя]").replace("{first_name}", "[имя водителя]")
+              .replace("{operator}", operator) for raw in (params or [])]
+
+    def put(match):
+        index = int(match.group(1)) - 1
+        return values[index] if 0 <= index < len(values) else match.group(0)
+    return _WA_VARIABLE_RE.sub(put, str(text or ""))
+
+
+def wa_variables_count(text):
+    """Сколько разных переменных {{n}} в тексте шаблона ChatApp."""
+    return len({m.group(1) for m in _WA_VARIABLE_RE.finditer(str(text or ""))})
+
+
+def live_status_of(status_key):
+    """Ключ последнего события телефона → живой статус для сводки: active | outbound | talking |
+    offline | break | off. Незнакомый ключ и «нет событий» — off."""
+    key = " ".join(str(status_key or "").strip().lower().split())
+    return LIVE_STATUS_MAP.get(key, "off")
 
 
 def pilot_allows(login):
@@ -1062,13 +1369,22 @@ JOURNAL_MAX_LIMIT = 200
 class DialListService:
     """Вся логика раздела. `db` — экземпляр Database из database.py."""
 
-    def __init__(self, db, client_factory=None, sign_checker=None, calls_submit=None):
+    def __init__(self, db, client_factory=None, sign_checker=None, calls_submit=None, trip_checker=None,
+                 trips_fetch=None, trips_configured=None, wa_client_factory=None):
         self.db = db
         self._client_factory = client_factory or self._default_client
         self._clients = {}
         self._clients_lock = threading.Lock()
         # Проверка подписания в Sapar: свой поток, запросы склеиваются (sign_check.py).
         self.sign_checker = sign_checker or SignChecker(db)
+        # Автообзвон Тез (15.10.2026): поездки в TEZ APP — свой поток (trips_check.py); клиент TEZ
+        # APP (trips_fetch) и клиент ChatApp (wa_client_factory) приходят из bot_schedule2: пакет
+        # tez разделу не зависимость. Не переданы — проверки поездок и WhatsApp нет (fail-open).
+        self.trip_checker = trip_checker or TripChecker(db, fetch=trips_fetch, configured=trips_configured)
+        self._wa_client_factory = wa_client_factory
+        # Шаблоны ChatApp по лицензии — кэш на WA_TEMPLATES_CACHE_SEC: руководитель листает настройки.
+        self._wa_cache = {}
+        self._wa_cache_lock = threading.Lock()
         # Живые звонки у Binotel: опрос call-details и его кэш — по одному на компанию
         # (live_calls.CompanyCalls). Сервис в процессе один (bot_schedule2 собирает один
         # blueprint), поэтому кэш сервиса и есть общий кэш процесса. calls_submit — где
@@ -1087,7 +1403,8 @@ class DialListService:
                (SELECT COUNT(*) FROM dial_list_leads l WHERE l.department_id = d.id) AS leads_total,
                (SELECT COUNT(*) FROM dial_list_leads l
                  WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')
-                   AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open
+                   AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open,
+               COALESCE(s.profile, 'remote_cc') AS profile
         FROM departments d
         LEFT JOIN sip_department_config dc ON dc.department_id = d.id
         LEFT JOIN dial_list_department_settings s ON s.department_id = d.id
@@ -1102,36 +1419,68 @@ class DialListService:
             "department_id": int(r[0]), "department_name": r[1] or "", "code": r[2] or "",
             "provider": r[3] or "asterisk", "configured": bool(r[4]), "enabled": bool(r[5]),
             "portion_size": int(r[6]), "leads_total": int(r[7] or 0), "leads_open": int(r[8] or 0),
+            # Профиль отдела (15.10.2026): удалённый КЦ или автообзвон Тез.
+            "profile": (r[9] if len(r) > 9 else None) or PROFILE_REMOTE_CC,
         }
 
-    def list_departments(self, department_ids=None):
+    def list_departments(self, department_ids=None, profile=None):
         """Отделы раздела: ЯВНО подключённые (есть строка настроек) либо с кодом из
         DIAL_LIST_DEPARTMENT_CODES. «Отдел на Binotel» сам по себе в раздел не попадает —
         иначе здесь оказывался бы любой отдел с этой АТС (замечание владельца 23.09.2026).
-        department_ids=None — все такие (админ)."""
+        department_ids=None — все такие (админ). profile — только отделы этого профиля
+        (remote_cc | tez); None — любого: зона руководителя, дистрибутив телефона и посадка на
+        линию профиля не различают. Ручка списка отделов по умолчанию отдаёт только remote_cc."""
         params = [DEFAULT_PORTION_SIZE]
         where = "(s.department_id IS NOT NULL OR LOWER(COALESCE(d.code, '')) = ANY(%s))"
         params.append(sorted(DIAL_LIST_DEPARTMENT_CODES))
         if department_ids is not None:
             where += " AND d.id = ANY(%s)"
             params.append([int(x) for x in department_ids])
+        if profile is not None:
+            where += " AND COALESCE(s.profile, 'remote_cc') = %s"
+            params.append(str(profile))
         with self.db._get_cursor() as cur:
             cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
             return [self._department_row(r) for r in cur.fetchall()]
 
-    def candidate_departments(self):
+    # Отдел подключён к удалённому КЦ, но не обзвонил ни одного водителя: ни базы, ни выдач.
+    _NO_DIAL_DATA_SQL = ("NOT EXISTS (SELECT 1 FROM dial_list_leads l2 WHERE l2.department_id = d.id) "
+                         "AND NOT EXISTS (SELECT 1 FROM dial_list_portions p2 WHERE p2.department_id = d.id)")
+
+    def candidate_departments(self, profile=None):
         """Отделы, которые МОЖНО подключить: телефония Binotel, но в разделе их ещё нет.
-        Из них админ выбирает в кнопке «Подключить отдел»."""
+        Из них админ выбирает в кнопке «Подключить отдел».
+
+        profile 'tez' (раздел «Автообзвон Тез») — ещё и отделы, подключённые к удалённому КЦ, но не
+        обзвонившие ни одного водителя: так подключили Тез КЦ 01.10.2026; подключение к автообзвону
+        переведёт такой отдел (enroll_department)."""
         params = [DEFAULT_PORTION_SIZE, sorted(DIAL_LIST_DEPARTMENT_CODES)]
-        where = ("COALESCE(dc.provider, 'asterisk') = 'binotel' AND s.department_id IS NULL "
-                 "AND NOT (LOWER(COALESCE(d.code, '')) = ANY(%s))")
+        if profile == PROFILE_TEZ:
+            where = ("COALESCE(dc.provider, 'asterisk') = 'binotel' AND (s.department_id IS NULL OR "
+                     "(COALESCE(s.profile, 'remote_cc') = 'remote_cc' AND " + self._NO_DIAL_DATA_SQL + ")) "
+                     "AND NOT (LOWER(COALESCE(d.code, '')) = ANY(%s))")
+        else:
+            where = ("COALESCE(dc.provider, 'asterisk') = 'binotel' AND s.department_id IS NULL "
+                     "AND NOT (LOWER(COALESCE(d.code, '')) = ANY(%s))")
         with self.db._get_cursor() as cur:
             cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
             return [self._department_row(r) for r in cur.fetchall()]
 
-    def enroll_department(self, department_id, changed_by=None):
-        """Подключить отдел к разделу: завести строку настроек (режим пока выключен)."""
+    def enroll_department(self, department_id, changed_by=None, profile=None):
+        """Подключить отдел к разделу: завести строку настроек (режим пока выключен).
+
+        profile 'tez' (автообзвон Тез КЦ, 15.10.2026) — сразу со значениями Тез
+        (TEZ_DEFAULT_SETTINGS: компания Binotel 'tez', автоцикл, расписание повторов) и
+        стартовым набором итогов Тез. Режим отдела и тут выключен: операторов под
+        распределение руководитель включает лично. Отдел уже подключён к удалённому КЦ, но не
+        обзвонил ни одного водителя (Тез КЦ, 01.10.2026), — переводится в автообзвон, как сменой
+        профиля в настройках; с данными обзвона и в обратную сторону — 409: профиль меняется в
+        его настройках, а не повторным подключением."""
         department_id = int(department_id)
+        profile = str(profile or PROFILE_REMOTE_CC).strip().lower()
+        if profile not in PROFILES:
+            raise DialListError("profile: remote_cc или tez")
+        convert = False
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT d.id, COALESCE(dc.provider, 'asterisk')
@@ -1145,30 +1494,75 @@ class DialListService:
             if row[1] != "binotel":
                 raise DialListError(
                     "Телефония отдела не Binotel: сначала переключите провайдера отдела в «Настройках SIP»", 409)
-            cur.execute("""
-                INSERT INTO dial_list_department_settings (department_id, enabled, updated_by)
-                VALUES (%s, FALSE, %s)
-                ON CONFLICT (department_id) DO NOTHING
-            """, (department_id, changed_by))
-        log.info("dial_list: отдел %s подключён к разделу (пользователь %s)", department_id, changed_by)
-        return self.department_settings(department_id)
+            if profile == PROFILE_TEZ:
+                cur.execute("""
+                    INSERT INTO dial_list_department_settings (department_id, enabled, updated_by, profile,
+                                                               binotel_company, auto_dial, retry_after_hours,
+                                                               retry_schedule_min)
+                    VALUES (%s, FALSE, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (department_id) DO NOTHING
+                    RETURNING department_id
+                """, (department_id, changed_by, PROFILE_TEZ, TEZ_DEFAULT_SETTINGS["binotel_company"],
+                      TEZ_DEFAULT_SETTINGS["auto_dial"], TEZ_DEFAULT_SETTINGS["retry_after_hours"],
+                      json.dumps(TEZ_DEFAULT_SETTINGS["retry_schedule_min"])))
+                if cur.fetchone():
+                    cur.execute("SELECT 1 FROM dial_list_outcomes WHERE department_id = %s LIMIT 1", (department_id,))
+                    if not cur.fetchone():
+                        self._seed_outcomes(cur, department_id, profile=PROFILE_TEZ)
+                elif self._department_profile(cur, department_id) == PROFILE_REMOTE_CC:
+                    cur.execute("""
+                        SELECT NOT EXISTS (SELECT 1 FROM dial_list_leads WHERE department_id = %s)
+                           AND NOT EXISTS (SELECT 1 FROM dial_list_portions WHERE department_id = %s)
+                    """, (department_id, department_id))
+                    convert = bool(cur.fetchone()[0])
+            else:
+                cur.execute("""
+                    INSERT INTO dial_list_department_settings (department_id, enabled, updated_by)
+                    VALUES (%s, FALSE, %s)
+                    ON CONFLICT (department_id) DO NOTHING
+                """, (department_id, changed_by))
+        if convert:
+            # Значения Тез и итоги Тез вместо ни разу не выбранных — тем же путём, что смена профиля.
+            self.save_department_settings(department_id, {"profile": PROFILE_TEZ}, changed_by=changed_by)
+        settings = self.department_settings(department_id)
+        if settings.get("profile", PROFILE_REMOTE_CC) != profile:
+            raise DialListError("Отдел уже подключён к разделу с другим профилем — профиль меняется в его "
+                                "настройках", 409)
+        log.info("dial_list: отдел %s подключён к разделу (профиль %s, пользователь %s)", department_id, profile,
+                 changed_by)
+        return settings
 
-    def manager_scope(self, is_admin, headed_department_ids, login=None, supervisor_department_code=None):
+    def manager_scope(self, is_admin, headed_department_ids, login=None, supervisor_department_code=None,
+                      supervisor_id=None):
         """Что видит руководитель: None — всё (админ; глава отдела из
         DIAL_LIST_OVERSEER_DEPARTMENT_CODES, то есть СЗоВ; СВ СЗоВ —
         full_access_supervisor); список id — глава отдела периметра видит свои
         отделы; [] — раздел не его. Пилот (DIAL_LIST_PILOT_LOGINS) снят 25.09.2026:
-        список пуст, правило общее для всех."""
+        список пуст, правило общее для всех.
+
+        СВ отдела с кодом из DIAL_LIST_OWN_SUPERVISOR_CODES (Тез КЦ, 15.10.2026) — свой отдел,
+        если он подключён к разделу; supervisor_id — кто это (отдел, где он числится, читается
+        здесь); не передан — как раньше, ничего."""
         if not pilot_allows(login):
             return []
         if is_admin or full_access_supervisor(supervisor_department_code):
             return None
         headed = sorted({int(x) for x in (headed_department_ids or [])})
-        if not headed:
+        own = self._own_supervisor_departments(supervisor_department_code, supervisor_id)
+        if not headed and not own:
             return []
-        if self._heads_overseer(headed):
+        if headed and self._heads_overseer(headed):
             return None
-        return [d["department_id"] for d in self.list_departments(headed)]
+        return [d["department_id"] for d in self.list_departments(sorted(set(headed) | set(own)))]
+
+    def _own_supervisor_departments(self, supervisor_department_code, supervisor_id):
+        """Отдел супервайзера, которому раздел открыт своим отделом (own_supervisor_code), — [id] или []."""
+        if supervisor_id is None or not own_supervisor_code(supervisor_department_code):
+            return []
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT department_id FROM users WHERE id = %s", (int(supervisor_id),))
+            row = cur.fetchone()
+        return [int(row[0])] if row and row[0] is not None else []
 
     def _heads_overseer(self, department_ids):
         """Возглавляет ли человек отдел-куратор раздела (код из DIAL_LIST_OVERSEER_DEPARTMENT_CODES)."""
@@ -1468,11 +1862,32 @@ class DialListService:
                        OR m.department_id = %s)
                 ORDER BY u.name
             """, (inactive, department_id, department_id, department_id))
-            return [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
-                     "sip_number": (r[4] or "").strip(), "status": r[5],
-                     "dial_list_enabled": None if r[6] is None else bool(r[6]),
-                     "guest": bool(r[7]), "department_name": (r[8] or "") if r[7] else ""}
-                    for r in cur.fetchall()]
+            users = [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
+                      "sip_number": (r[4] or "").strip(), "status": r[5],
+                      "dial_list_enabled": None if r[6] is None else bool(r[6]),
+                      "guest": bool(r[7]), "department_name": (r[8] or "") if r[7] else ""}
+                     for r in cur.fetchall()]
+            # Ставка оператора (users.rate) — только у отдела автообзвона Тез (15.10.2026): сайт
+            # показывает её рядом с личным включением режима — это и есть «операторы под
+            # распределение». Отдельным запросом после списка: у удалённого КЦ всё как было.
+            if users and self._department_profile(cur, department_id) == PROFILE_TEZ:
+                cur.execute("SELECT id, rate FROM users WHERE id = ANY(%s)", ([u["id"] for u in users],))
+                rates = {r[0]: (float(r[1]) if r[1] is not None else None) for r in cur.fetchall()}
+                for user in users:
+                    user["rate"] = rates.get(user["id"])
+            return users
+
+    @staticmethod
+    def _department_profile(cur, department_id):
+        """Профиль отдела (remote_cc | tez) в транзакции вызывающего; строки настроек нет — remote_cc."""
+        cur.execute("SELECT profile FROM dial_list_department_settings WHERE department_id = %s", (int(department_id),))
+        row = cur.fetchone()
+        return str((row[0] if row else None) or PROFILE_REMOTE_CC).strip().lower()
+
+    def department_profile(self, department_id):
+        """Профиль отдела своей короткой транзакцией."""
+        with self.db._get_cursor() as cur:
+            return self._department_profile(cur, department_id)
 
     def unenroll_department(self, department_id):
         """Отключить отдел от раздела. Только пока по нему нет выдач и базы: иначе
@@ -1644,13 +2059,20 @@ class DialListService:
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT enabled, portion_size, max_attempts, retry_after_hours,
-                       caller_id_for_employee, updated_at, binotel_company, active_period
+                       caller_id_for_employee, updated_at, binotel_company, active_period,
+                       profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
+                       callback_own_minutes, followup_after_min, wa_license_id, wa_templates
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
         company = ((row[6] or "").strip() if row else "") or DEFAULT_BINOTEL_COMPANY
         active_period = row[7] if row else None
         effective = active_period or current_period()
+        # Колонки автообзвона Тез (15.10.2026) — в конце строки; строки нет — значения по умолчанию.
+        tail = tuple(row[8:17]) if row and len(row) >= 17 else (None,) * 9
+        wa_templates = tail[8]
+        if isinstance(wa_templates, str):
+            wa_templates = json.loads(wa_templates or "[]")
         settings = {
             "department_id": int(department_id),
             "configured": bool(row),
@@ -1666,6 +2088,16 @@ class DialListService:
             "period": effective.isoformat(),
             "period_label": period_label(effective),
             "_period": effective,
+            # Профиль и автообзвон Тез (15.10.2026). У удалённого КЦ — значения по умолчанию.
+            "profile": (tail[0] or PROFILE_REMOTE_CC).strip().lower(),
+            "auto_dial": bool(tail[1]),
+            "call_interval_sec": int(tail[2]) if tail[2] is not None else 10,
+            "wrapup_sec": int(tail[3]) if tail[3] is not None else 60,
+            "retry_schedule_min": schedule_from(tail[4]),
+            "callback_own_minutes": int(tail[5]) if tail[5] is not None else 120,
+            "followup_after_min": int(tail[6]) if tail[6] is not None else 60,
+            "wa_license_id": int(tail[7]) if tail[7] is not None else None,
+            "wa_templates": [t for t in (wa_templates or []) if isinstance(t, dict)],
         }
         return settings
 
@@ -1708,13 +2140,55 @@ class DialListService:
         else:
             active_period = parse_period(current["active_period"])
 
+        # Профиль и автообзвон Тез (15.10.2026). Профиль меняет только тот, кому открыт весь
+        # раздел (проверяет ручка). Смена на tez — со значениями Тез (TEZ_DEFAULT_SETTINGS) для
+        # всего, что в том же запросе не передано явно или передано прежним (форма сайта шлёт
+        # настройки целиком — прежняя компания 'remote_cc' не должна пережить смену профиля).
+        old_profile = current.get("profile") or PROFILE_REMOTE_CC
+        profile = old_profile
+        if payload.get("profile") is not None:
+            profile = str(payload["profile"]).strip().lower()
+            if profile not in PROFILES:
+                raise DialListError("Профиль отдела: remote_cc или tez")
+        switched_to_tez = profile == PROFILE_TEZ and old_profile != PROFILE_TEZ
+        if switched_to_tez:
+            if payload.get("binotel_company") is None or company == current["binotel_company"]:
+                company = TEZ_DEFAULT_SETTINGS["binotel_company"]
+            if payload.get("retry_after_hours") is None or retry_after_hours == current["retry_after_hours"]:
+                retry_after_hours = TEZ_DEFAULT_SETTINGS["retry_after_hours"]
+        auto_dial = current.get("auto_dial", False) if payload.get("auto_dial") is None else payload["auto_dial"]
+        if switched_to_tez and (payload.get("auto_dial") is None or auto_dial == current.get("auto_dial", False)):
+            auto_dial = TEZ_DEFAULT_SETTINGS["auto_dial"]
+        if not isinstance(auto_dial, bool):
+            raise DialListError("Поле auto_dial: true или false")
+        call_interval_sec = _int("call_interval_sec", current.get("call_interval_sec", 10), 0, CALL_INTERVAL_MAX_SEC)
+        wrapup_sec = _int("wrapup_sec", current.get("wrapup_sec", 60), 0, WRAPUP_MAX_SEC)
+        if 0 < wrapup_sec < WRAPUP_MIN_SEC:
+            raise DialListError(f"Поле wrapup_sec: 0 — без срока, иначе от {WRAPUP_MIN_SEC} до {WRAPUP_MAX_SEC}")
+        callback_own_minutes = _int("callback_own_minutes", current.get("callback_own_minutes", 120), 0,
+                                    CALLBACK_OWN_MAX_MIN)
+        followup_after_min = _int("followup_after_min", current.get("followup_after_min", 60), 0, FOLLOWUP_MAX_MIN)
+        if payload.get("retry_schedule_min") is not None:
+            retry_schedule = clean_retry_schedule(payload["retry_schedule_min"])
+        else:
+            retry_schedule = list(current.get("retry_schedule_min") or [])
+        if switched_to_tez and retry_schedule == list(current.get("retry_schedule_min") or []):
+            retry_schedule = list(TEZ_DEFAULT_SETTINGS["retry_schedule_min"])
+        # wa_license_id: null — WhatsApp выключен; ключа нет — как было.
+        wa_license_id = current.get("wa_license_id")
+        if "wa_license_id" in payload:
+            wa_license_id = self._clean_license_id(payload.get("wa_license_id"))
+
         with self.db._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO dial_list_department_settings (
                     department_id, enabled, portion_size, max_attempts, retry_after_hours,
-                    caller_id_for_employee, binotel_company, active_period, updated_by, updated_at)
+                    caller_id_for_employee, binotel_company, active_period, updated_by, updated_at,
+                    profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
+                    callback_own_minutes, followup_after_min, wa_license_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                 ON CONFLICT (department_id) DO UPDATE SET
                     enabled = EXCLUDED.enabled,
                     portion_size = EXCLUDED.portion_size,
@@ -1724,12 +2198,53 @@ class DialListService:
                     binotel_company = EXCLUDED.binotel_company,
                     active_period = EXCLUDED.active_period,
                     updated_by = EXCLUDED.updated_by,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    profile = EXCLUDED.profile,
+                    auto_dial = EXCLUDED.auto_dial,
+                    call_interval_sec = EXCLUDED.call_interval_sec,
+                    wrapup_sec = EXCLUDED.wrapup_sec,
+                    retry_schedule_min = EXCLUDED.retry_schedule_min,
+                    callback_own_minutes = EXCLUDED.callback_own_minutes,
+                    followup_after_min = EXCLUDED.followup_after_min,
+                    wa_license_id = EXCLUDED.wa_license_id
             """, (int(department_id), enabled, portion_size, max_attempts, retry_after_hours,
-                  caller_id, company, active_period, changed_by))
+                  caller_id, company, active_period, changed_by,
+                  profile, auto_dial, call_interval_sec, wrapup_sec, json.dumps(retry_schedule),
+                  callback_own_minutes, followup_after_min, wa_license_id))
+            if switched_to_tez:
+                # Итоги — стартовый набор Тез (с датами). Заведённые раньше, но ни разу не выбранные
+                # (так у Тез КЦ: подключён к удалённому КЦ 01.10.2026 со стандартным набором и не
+                # обзванивался), заменяются им. Выбранные хоть раз не трогаем: на них ссылается
+                # история — руководитель правит их сам (дату у итога включает там же).
+                cur.execute("""
+                    SELECT EXISTS (SELECT 1 FROM dial_list_attempts t
+                                   JOIN dial_list_outcomes o ON o.id = t.outcome_id
+                                   WHERE o.department_id = %s)
+                """, (int(department_id),))
+                if not cur.fetchone()[0]:
+                    cur.execute("DELETE FROM dial_list_outcomes WHERE department_id = %s", (int(department_id),))
+                    self._seed_outcomes(cur, department_id, profile=PROFILE_TEZ)
+        if profile != old_profile:
+            log.info("dial_list: отдел %s — профиль %s → %s (пользователь %s)", department_id, old_profile, profile,
+                     changed_by)
         with self._clients_lock:
             self._clients.pop(int(department_id), None)
         return self.department_settings(department_id)
+
+    @staticmethod
+    def _clean_license_id(value):
+        """Лицензия ChatApp: null — WhatsApp выключен, иначе положительное целое."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise DialListError("Лицензия WhatsApp: число или null")
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise DialListError("Лицензия WhatsApp: число или null")
+        if number <= 0:
+            raise DialListError("Лицензия WhatsApp: число или null")
+        return number
 
     def user_setting(self, user_id):
         with self.db._get_cursor() as cur:
@@ -1774,6 +2289,10 @@ class DialListService:
             # журнал. Флаг отдельный, чтобы при разборе инцидента его можно было
             # временно снять одному оператору.
             "hide_numbers": True,
+            # Профиль отдела и автоцикл (15.10.2026): телефону нужны на старте — какие вкладки
+            # строить (у Тез нет «Рейтинга») и включён ли автообзвон в «Активном».
+            "profile": dept.get("profile") or PROFILE_REMOTE_CC,
+            "auto": bool(is_tez(dept) and dept.get("auto_dial")),
         }
 
     # ------------------------------------------------------------ Binotel
@@ -1922,14 +2441,17 @@ class DialListService:
         RETURNING (xmax = 0) AS inserted
     """
 
-    def import_leads(self, department_id, uploaded_by, file_name, rows, period=None):
+    def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True):
         """rows — из common.leads_file.parse_leads_file(..., with_iin=True):
         (row_number, fio, phone_raw, phone_norm, iin_raw). period — база какого месяца
         (date, первый день); пусто — месяц, который обзванивается.
 
         ИИН обязателен (запрос владельца 29.09.2026): строка без него или с ошибкой
         в нём не загружается — без ИИН не проверить подписание. Внутри месяца ИИН,
-        как и номер, уникален: тот же водитель с другим номером — повтор."""
+        как и номер, уникален: тот же водитель с другим номером — повтор.
+
+        require_iin=False — база автообзвона Тез (15.10.2026): ФИО + телефон, ИИН не нужен и не
+        хранится (цель лида — выход на линию по TEZ APP, а не подписание в Sapar)."""
         department_id = int(department_id)
         period = period or self.department_settings(department_id)["_period"]
         counts = {"rows_total": len(rows), "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0,
@@ -1955,18 +2477,19 @@ class DialListService:
                     if len(counts["invalid_rows"]) < ROW_SAMPLE_MAX:
                         counts["invalid_rows"].append(int(row_number))
                     continue
-                iin = clean_iin(row[4] if len(row) > 4 else "")
-                if not iin:
+                iin = clean_iin(row[4] if len(row) > 4 else "") if require_iin else ""
+                if require_iin and not iin:
                     counts["rows_bad_iin"] += 1
                     if len(counts["bad_iin_rows"]) < ROW_SAMPLE_MAX:
                         counts["bad_iin_rows"].append(int(row_number))
                     continue
-                owner = iin_owner.get(iin)
-                if phone_norm in seen_phones or iin in seen_iins or (owner and owner != phone_norm):
+                owner = iin_owner.get(iin) if iin else None
+                if phone_norm in seen_phones or (iin and iin in seen_iins) or (owner and owner != phone_norm):
                     counts["rows_duplicate"] += 1
                     continue
                 seen_phones.add(phone_norm)
-                seen_iins.add(iin)
+                if iin:
+                    seen_iins.add(iin)
                 values.append((department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id,
                                period, iin))
             if values:
@@ -2039,7 +2562,7 @@ class DialListService:
         if not any(p["period"] == active.isoformat() for p in periods):
             periods.insert(0, {"period": active.isoformat(), "label": period_label(active), "total": 0,
                                "answered": 0, "open": 0, "signed": 0, "active": True})
-        return {
+        summary = {
             "department_id": department_id,
             "period": period.isoformat(),
             "period_label": period_label(period),
@@ -2053,6 +2576,45 @@ class DialListService:
             "batches": batches,
             "periods": periods,
         }
+        if is_tez(settings):
+            summary.update(self._tez_summary(department_id, period))
+        return summary
+
+    def _tez_summary(self, department_id, period):
+        """Сводка базы автообзвона Тез (15.10.2026): вышли на линию (всего и «уже работали при
+        загрузке»), сроки к звонку прямо сейчас, проверено TEZ APP, состояние проверки поездок."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FILTER (WHERE signed_at IS NOT NULL),
+                       COUNT(*) FILTER (WHERE signed_at IS NOT NULL AND signed_at <= created_at),
+                       COUNT(*) FILTER (WHERE due_kind = 'callback' AND owner_call_at <= CURRENT_TIMESTAMP
+                                          AND status IN ('new', 'in_progress') AND signed_at IS NULL),
+                       COUNT(*) FILTER (WHERE due_kind = 'online' AND owner_call_at <= CURRENT_TIMESTAMP
+                                          AND status IN ('new', 'in_progress') AND signed_at IS NULL),
+                       COUNT(*) FILTER (WHERE trip_checked_at IS NOT NULL),
+                       COUNT(*) FILTER (WHERE due_kind = 'callback' AND status IN ('new', 'in_progress')
+                                          AND signed_at IS NULL),
+                       COUNT(*) FILTER (WHERE due_kind = 'online' AND status IN ('new', 'in_progress')
+                                          AND signed_at IS NULL)
+                FROM dial_list_leads
+                WHERE department_id = %s AND period = %s
+            """, (int(department_id), period))
+            r = cur.fetchone() or (0,) * 7
+        trip = self.trip_checker.state()
+        last = trip.get("last_run") or {}
+        return {
+            "profile": PROFILE_TEZ,
+            "online": int(r[0] or 0),
+            "online_at_upload": int(r[1] or 0),
+            "callbacks_due": int(r[2] or 0),
+            "followups_due": int(r[3] or 0),
+            "trip_checked": int(r[4] or 0),
+            "callbacks": int(r[5] or 0),
+            "followups": int(r[6] or 0),
+            "trip_check": {"configured": trip.get("configured", False), "running": trip.get("running", False),
+                           "last_run": last.get("at"), "checked": last.get("checked"), "online": last.get("online"),
+                           "errors": last.get("errors"), "stopped": last.get("stopped")},
+        }
 
     # ------------------------------------------------------------ итоги звонка
     # Справочник отдела: оператор после каждого разговора обязан выбрать итог (и
@@ -2064,6 +2626,7 @@ class DialListService:
         # Типы итога (29.09.2026) — json-колонкой в том же запросе: у каждого итога
         # сразу его список, без второго запроса и без склейки по id в Python.
         # active_only — только включённые итоги и только включённые типы (телефон).
+        # due_kind (15.10.2026) — последней колонкой: дата с итогом у отдела автообзвона Тез.
         cur.execute("""
             SELECT id, name, color, position, requeue, is_active,
                    (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id) AS used,
@@ -2073,7 +2636,8 @@ class DialListService:
                                         WHERE t2.outcome_subtype_id = s.id))
                            ORDER BY s.is_active DESC, s.position, s.created_at), '[]'::json)
                     FROM dial_list_outcome_subtypes s
-                    WHERE s.outcome_id = o.id {sub_active}) AS subtypes
+                    WHERE s.outcome_id = o.id {sub_active}) AS subtypes,
+                   due_kind
             FROM dial_list_outcomes o
             WHERE department_id = %s {active}
             ORDER BY is_active DESC, position, created_at
@@ -2088,9 +2652,22 @@ class DialListService:
                 return self._outcome_rows(cur, department_id, active_only=True)
         return [{"id": _sid(r[0]), "name": r[1], "color": r[2], "position": int(r[3]),
                  "requeue": bool(r[4]), "is_active": bool(r[5]), "used": int(r[6] or 0),
-                 "subtypes": _subtypes_from_json(r[7])} for r in rows]
+                 "subtypes": _subtypes_from_json(r[7]),
+                 "due_kind": ((r[8] if len(r) > 8 else "") or "")} for r in rows]
 
-    def _seed_outcomes(self, cur, department_id):
+    def _seed_outcomes(self, cur, department_id, profile=None):
+        """Стартовый набор итогов отдела. У отдела автообзвона Тез — свой, с датами (DEFAULT_TEZ_OUTCOMES);
+        профиль не передан — читается здесь же."""
+        if profile is None:
+            profile = self._department_profile(cur, department_id)
+        if profile == PROFILE_TEZ:
+            for position, (name, color, requeue, due_kind) in enumerate(DEFAULT_TEZ_OUTCOMES, start=1):
+                cur.execute("""
+                    INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, due_kind)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (int(department_id), name, color, position, requeue, due_kind))
+            log.info("dial_list: отделу %s заведён стартовый набор итогов автообзвона Тез", department_id)
+            return
         for position, (name, color, requeue) in enumerate(DEFAULT_OUTCOMES, start=1):
             cur.execute("""
                 INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue)
@@ -2201,10 +2778,19 @@ class DialListService:
             color = str(raw.get("color") or "#8E8E93").strip().upper()
             if not OUTCOME_COLOR_RE.match(color):
                 raise DialListError(f"Цвет итога «{name}»: ожидается #RRGGBB")
+            # Дата у итога (автообзвон Тез, 15.10.2026): ключа нет — не трогаем (старая сборка
+            # сайта шлёт итоги без него); итог с датой всегда «перезвонить» — водитель ждёт срока.
+            due_kind = None
+            if "due_kind" in raw:
+                due_kind = str(raw.get("due_kind") or "").strip().lower()
+                if due_kind not in DUE_KINDS:
+                    raise DialListError(f"Итог «{name}»: дата — нет, перезвон (callback) или выход на линию (online)")
             cleaned.append({
                 "id": _sid(raw.get("id")) or None, "name": name, "color": color,
-                "requeue": bool(raw.get("requeue")), "is_active": raw.get("is_active", True) is not False,
+                "requeue": bool(raw.get("requeue")) or bool(due_kind),
+                "is_active": raw.get("is_active", True) is not False,
                 "subtypes": self._clean_subtypes(name, raw["subtypes"]) if "subtypes" in raw else None,
+                "due_kind": due_kind,
             })
         if not any(c["is_active"] for c in cleaned):
             raise DialListError("Хотя бы один итог должен быть включён")
@@ -2214,18 +2800,25 @@ class DialListService:
             kept = set()
             for position, c in enumerate(cleaned, start=1):
                 if c["id"] and c["id"] in existing:
+                    # due_kind не прислан — остаётся прежний (COALESCE), и «перезвонить» у итога с
+                    # датой не снимается, чем бы ни был requeue в запросе.
                     cur.execute("""
                         UPDATE dial_list_outcomes
-                        SET name = %s, color = %s, position = %s, requeue = %s, is_active = %s,
+                        SET name = %s, color = %s, position = %s, is_active = %s,
+                            due_kind = COALESCE(%s, due_kind),
+                            requeue = %s OR COALESCE(%s, due_kind) <> '',
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s AND department_id = %s
-                    """, (c["name"], c["color"], position, c["requeue"], c["is_active"], c["id"], department_id))
+                    """, (c["name"], c["color"], position, c["is_active"], c["due_kind"], c["requeue"],
+                          c["due_kind"], c["id"], department_id))
                     outcome_id = c["id"]
                 else:
                     cur.execute("""
-                        INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active)
-                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-                    """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"]))
+                        INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active,
+                                                        due_kind)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+                    """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"],
+                          c["due_kind"] or ""))
                     outcome_id = str(cur.fetchone()[0])
                 kept.add(outcome_id)
                 if c["subtypes"] is not None:
@@ -2302,19 +2895,30 @@ class DialListService:
             raise DialListError(
                 f"Сначала укажите итог звонка: {pending['full_name'] or 'предыдущий разговор'}", 409)
 
-    def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment="", subtype_id=SUBTYPE_NOT_SENT):
+    def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment="", subtype_id=SUBTYPE_NOT_SENT,
+                            due_at=VALUE_NOT_SENT, offer_ids=VALUE_NOT_SENT):
         """Оператор указал итог разговора (и, возможно, комментарий).
 
         subtype_id — тип итога (29.09.2026). SUBTYPE_NOT_SENT — телефон до типов
         итога ключ не шлёт: итог сохраняется без типа, иначе такие операторы
         навсегда застряли бы на «Сначала укажите итог звонка». Ключ прислан —
-        новый телефон: у итога с включёнными типами тип обязателен."""
+        новый телефон: у итога с включёнными типами тип обязателен.
+
+        Автообзвон Тез (15.10.2026; у удалённого КЦ оба ключа не читаются):
+          due_at    — срок итога с датой (due_kind): «Перезвонить» — когда перезвонить,
+                      «Согласен выйти на линию» — когда выйдет. Обязателен у такого итога. Лид
+                      ждёт своего срока у этого оператора (owner_*), а через callback_own_minutes
+                      после срока — в общем пуле (next_call_at); дожим — через followup_after_min
+                      после обещанного выхода, если водитель так и не выехал.
+          offer_ids — офферы, которые оператор предложил: набор попытки заменяется целиком;
+                      ключа нет — не трогаем."""
         ctx = self.operator_context(user_id)
         attempt_id = str(attempt_id)
         outcome_id = str(outcome_id or "").strip()
         comment = str(comment or "").strip()[:COMMENT_MAX]
         if not outcome_id:
             raise DialListError("Выберите итог звонка")
+        tez = is_tez(ctx.get("settings"))
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT t.state, a.lead_id, t.outcome_id, t.cancelled, t.operator_hangup_at, t.disposition,
@@ -2356,12 +2960,25 @@ class DialListService:
                 raise DialListError("Разговор не подтверждён: итог нужен, только если водитель "
                                     "ответил. Дождитесь исхода от АТС", 409)
             cur.execute("""
-                SELECT id, name, color, requeue FROM dial_list_outcomes
+                SELECT id, name, color, requeue, due_kind FROM dial_list_outcomes
                 WHERE id = %s AND department_id = %s AND is_active
             """, (outcome_id, ctx["department_id"]))
             outcome = cur.fetchone()
             if not outcome:
                 raise DialListError("Такого итога нет — обновите список", 400)
+            # Автообзвон Тез: срок итога с датой и офферы — проверяем до записи.
+            due_kind = (str(outcome[4] or "").strip().lower() if len(outcome) > 4 else "") if tez else ""
+            if due_kind and due_at is VALUE_NOT_SENT:
+                # Телефон без дат у итога (до 3.22.37) ключа due_at не шлёт: итог принимаем без срока —
+                # водитель вернётся по расписанию повторов, а оператор не застрянет с долгом по итогу,
+                # который его телефон поставить не может. Новый телефон дату без неё не отправит.
+                due_kind = ""
+            due_moment = None
+            if due_kind:
+                due_moment = parse_due_at(due_at, due_kind, _utcnow())
+            offers = None
+            if tez and offer_ids is not VALUE_NOT_SENT:
+                offers = self._clean_offer_ids(cur, ctx["department_id"], offer_ids)
             subtype = None
             if subtype_id is not SUBTYPE_NOT_SENT:
                 subtype_text = str(subtype_id or "").strip()
@@ -2402,12 +3019,100 @@ class DialListService:
                         attempts_total = 0, updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (str(row[1]),))
-        log.info("dial_list: оператор %s указал итог %s%s по попытке %s", ctx["user_id"], outcome[1],
-                 f" · {subtype[1]}" if subtype else "", attempt_id)
-        return {"attempt_id": attempt_id,
-                "outcome": {"id": _sid(outcome[0]), "name": outcome[1], "color": outcome[2], "requeue": bool(outcome[3]),
-                            "subtype": {"id": _sid(subtype[0]), "name": subtype[1]} if subtype else None},
-                "comment": comment}
+            if tez:
+                self._apply_tez_outcome(cur, ctx, attempt_id, str(row[1]), bool(outcome[3]), due_kind, due_moment,
+                                        offers)
+        log.info("dial_list: оператор %s указал итог %s%s по попытке %s%s", ctx["user_id"], outcome[1],
+                 f" · {subtype[1]}" if subtype else "", attempt_id,
+                 f", срок {due_moment.isoformat()}" if due_moment else "")
+        result = {"attempt_id": attempt_id,
+                  "outcome": {"id": _sid(outcome[0]), "name": outcome[1], "color": outcome[2],
+                              "requeue": bool(outcome[3]),
+                              "subtype": {"id": _sid(subtype[0]), "name": subtype[1]} if subtype else None},
+                  "comment": comment}
+        if tez:
+            result["outcome"]["due_kind"] = due_kind
+            result["due_at"] = _iso(due_moment)
+            if offers is not None:
+                result["offer_ids"] = offers
+        return result
+
+    def _clean_offer_ids(self, cur, department_id, offer_ids):
+        """offer_ids из итога → список id включённых офферов отдела (без повторов, в порядке
+        запроса). Чужой, выключенный или кривой id — 400: оператор видит устаревший список."""
+        if offer_ids is None:
+            offer_ids = []
+        if not isinstance(offer_ids, list) or len(offer_ids) > OFFERS_MAX:
+            raise DialListError(OFFER_UNKNOWN, 400)
+        cleaned = []
+        for raw in offer_ids:
+            try:
+                value = str(uuid.UUID(str(raw)))
+            except (ValueError, AttributeError, TypeError):
+                raise DialListError(OFFER_UNKNOWN, 400)
+            if value not in cleaned:
+                cleaned.append(value)
+        if not cleaned:
+            return []
+        cur.execute("""
+            SELECT id FROM dial_list_offers
+            WHERE department_id = %s AND is_active AND id = ANY(%s::uuid[])
+        """, (int(department_id), cleaned))
+        known = {str(r[0]) for r in cur.fetchall()}
+        if any(value not in known for value in cleaned):
+            raise DialListError(OFFER_UNKNOWN, 400)
+        return cleaned
+
+    def _apply_tez_outcome(self, cur, ctx, attempt_id, lead_id, requeue, due_kind, due_moment, offers):
+        """Итог автообзвона Тез (15.10.2026), в транзакции вызывающего: срок попытки, офферы и
+        сроки лида. Порядок «итог до финала попытки» и «после» равноправен: _touch_lead при
+        requeue сроков не трогает, а без requeue — снимает «свой» срок сам.
+
+          итог с датой  — водитель ждёт СВОЕГО срока у этого оператора: owner_call_at = срок
+                          перезвона или обещанный выход + followup_after_min (дожим); в общий пул —
+                          через callback_own_minutes после него (next_call_at);
+          «перезвонить» без даты — общий повтор по расписанию (первый интервал; пусто — сразу,
+                          как retry_after_hours отдела Тез = 0), свой срок снимается;
+          прочий итог   — свой срок снимается (лид обработан — его закроет финал попытки); пауза
+                          повтора (next_call_at), которую поставил финал недозвона, остаётся: иначе
+                          при Тез-овом retry_after_hours = 0 водитель сразу снова попал бы в пул."""
+        settings = ctx["settings"]
+        cur.execute("UPDATE dial_list_attempts SET due_at = %s WHERE id = %s", (due_moment, attempt_id))
+        if offers is not None:
+            cur.execute("DELETE FROM dial_list_attempt_offers WHERE attempt_id = %s", (attempt_id,))
+            for offer_id in offers:
+                cur.execute("""
+                    INSERT INTO dial_list_attempt_offers (attempt_id, offer_id) VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (attempt_id, offer_id))
+        if due_kind and due_moment is not None:
+            owner_at = due_moment
+            if due_kind == DUE_ONLINE:
+                owner_at = due_moment + timedelta(minutes=int(settings.get("followup_after_min") or 0))
+            pool_at = owner_at + timedelta(minutes=int(settings.get("callback_own_minutes") or 0))
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET owner_operator_id = %s, owner_call_at = %s, due_kind = %s, next_call_at = %s,
+                    promised_online_at = CASE WHEN %s = 'online' THEN %s ELSE promised_online_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (ctx["user_id"], owner_at, due_kind, pool_at, due_kind, due_moment, lead_id))
+        elif requeue:
+            delay = retry_delay_minutes(settings.get("retry_schedule_min") or [], 1)
+            if delay is None:
+                delay = int(settings.get("retry_after_hours") or 0) * 60
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET owner_operator_id = NULL, owner_call_at = NULL, due_kind = '',
+                    next_call_at = CURRENT_TIMESTAMP + make_interval(mins => %s), updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (int(delay), lead_id))
+        else:
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET owner_operator_id = NULL, owner_call_at = NULL, due_kind = ''
+                WHERE id = %s
+            """, (lead_id,))
 
     # ------------------------------------------------------------ журнал водителей
     # Один запрос и для списка, и для карточки: этап (stage) считается в SQL, чтобы
@@ -2442,16 +3147,24 @@ class DialListService:
                        WHEN l.sign_status = 'processing' THEN 'sign_wait'
                        WHEN l.status = 'excluded' THEN 'excluded'
                        WHEN oa.operator_id IS NOT NULL THEN 'issued'
+                       WHEN l.due_kind = 'callback' AND l.status IN ('new', 'in_progress') THEN 'callback'
+                       WHEN l.due_kind = 'online' AND l.status IN ('new', 'in_progress') THEN 'followup'
                        WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
                        WHEN l.status = 'done' THEN 'exhausted'
                        WHEN l.attempts_total >= %(max_attempts)s THEN 'exhausted'
+                       WHEN l.next_call_at IS NOT NULL AND l.next_call_at > CURRENT_TIMESTAMP THEN 'waiting'
                        WHEN l.last_attempt_at IS NOT NULL
                             AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
                            THEN 'waiting'
                        ELSE 'queue'
                    END AS stage,
-                   l.last_attempt_at + make_interval(hours => %(retry_hours)s) AS next_retry_at
+                   COALESCE(l.next_call_at,
+                            l.last_attempt_at + make_interval(hours => %(retry_hours)s)) AS next_retry_at,
+                   l.due_kind, l.owner_call_at, l.promised_online_at, l.owner_operator_id,
+                   owu.name AS owner_operator_name, l.month_first_order_at, l.last_order_before_at,
+                   l.trip_checked_at, l.driver_id
             FROM dial_list_leads l
+            LEFT JOIN users owu ON owu.id = l.owner_operator_id
             LEFT JOIN dial_list_lead_batches fb ON fb.id = l.first_batch_id
             LEFT JOIN dial_list_lead_batches lb ON lb.id = l.last_batch_id
             LEFT JOIN LATERAL (
@@ -2495,7 +3208,9 @@ class DialListService:
                last_cancelled, last_outcome_subtype_id, last_outcome_subtype_name,
                iin, sign_status, sign_checked_at, sign_error, signed_at, success_attempt_id,
                success_operator_id, success_operator_name, success_resolved_at,
-               last_auto_hangup, last_talk_detected"""
+               last_auto_hangup, last_talk_detected,
+               due_kind, owner_call_at, promised_online_at, owner_operator_id, owner_operator_name,
+               month_first_order_at, last_order_before_at, trip_checked_at, driver_id"""
     # Сколько колонок у строки журнала: сразу за ними идёт total (индекс не
     # зашит числом — иначе новая колонка молча сдвигала бы «всего» на rn).
     _JOURNAL_COLUMN_COUNT = len([c for c in _JOURNAL_COLUMNS.split(",") if c.strip()])
@@ -2548,7 +3263,7 @@ class DialListService:
         ORDER BY page.rn
     """
 
-    def _journal_row(self, r, max_attempts):
+    def _journal_row(self, r, max_attempts, tez=False):
         stage = r[29]
         responsible_id = r[16] if r[16] is not None else r[18]
         responsible_name = r[17] if r[16] is not None else r[19]
@@ -2572,7 +3287,7 @@ class DialListService:
                 # Почему плечо положил сам телефон: 'ring_timeout' | 'announcement' | ''.
                 "auto_hangup": r[48] or "",
             }
-        return {
+        row = {
             "id": _sid(r[0]), "department_id": int(r[1]), "full_name": r[2] or "",
             "phone_masked": mask_phone(r[3]), "status": r[4], "stage": stage,
             "stage_label": LEAD_STAGES.get(stage, stage), "attempts_total": int(r[5] or 0),
@@ -2600,6 +3315,18 @@ class DialListService:
             "has_iin": bool(r[39]),
             "sign": self._sign_block(r[39], r[40], r[41], r[42], r[43], r[44], r[45], r[46], r[47]),
         }
+        if tez:
+            # Автообзвон Тез (15.10.2026): этапы со своими подписями («Вышел на линию»), срок
+            # перезвона или дожима и чей он, поездки по TEZ APP. Подписания и ИИН у Тез нет.
+            row["stage_label"] = TEZ_LEAD_STAGES.get(stage, row["stage_label"])
+            row["due_kind"] = r[50] or ""
+            row["owner_call_at"] = _iso(r[51])
+            row["promised_online_at"] = _iso(r[52])
+            row["owner_operator"] = {"id": int(r[53]), "name": r[54] or ""} if r[53] is not None else None
+            row["trip"] = {"month_first_order_at": _iso(r[55]), "last_order_before_at": _iso(r[56]),
+                           "checked_at": _iso(r[57]), "label": driver_label(r[55], r[56], r[57])}
+            row["profile_url"] = driver_profile_url(r[58])
+        return row
 
     @staticmethod
     def _sign_block(iin, sign_status, checked_at, sign_error, signed_at, success_attempt_id,
@@ -2672,9 +3399,12 @@ class DialListService:
             if sign not in JOURNAL_SIGN_FILTERS:
                 raise DialListError("sign: неизвестное состояние подписания")
             filters.append(f"({JOURNAL_SIGN_FILTERS[sign]})")
+        # Автообзвон Тез (15.10.2026): свои этапы — перезвон, дожим, «вышел на линию».
+        tez = is_tez(settings)
+        stages = TEZ_LEAD_STAGES if tez else LEAD_STAGES
         stage = str(stage or "").strip()
         if stage:
-            if stage not in LEAD_STAGES:
+            if stage not in stages:
                 raise DialListError("stage: неизвестный этап")
             params["stage"] = stage
             stage_ok = "stage = %(stage)s"
@@ -2712,8 +3442,8 @@ class DialListService:
             summary = (rows[0][-1] if rows else None) or []
             page = [r for r in rows if r[0] is not None]
             total = int(page[0][self._JOURNAL_COLUMN_COUNT]) if page else 0
-            items = [self._journal_row(r, settings["max_attempts"]) for r in page]
-            by_stage = {k: 0 for k in LEAD_STAGES}
+            items = [self._journal_row(r, settings["max_attempts"], tez=tez) for r in page]
+            by_stage = {k: 0 for k in stages}
             outcome_counts = {}
             # (итог, тип) → водители; тип None — итог без типа («Без типа»).
             subtype_counts = {}
@@ -2750,7 +3480,8 @@ class DialListService:
             "period": None if period == "all" else period.isoformat(),
             "period_label": "Все месяцы" if period == "all" else period_label(period),
             "active_period": settings["period"],
-            "by_stage": by_stage, "stages": LEAD_STAGES, "by_outcome": by_outcome,
+            "by_stage": by_stage, "stages": stages, "by_outcome": by_outcome,
+            "profile": PROFILE_TEZ if tez else PROFILE_REMOTE_CC,
             "sort": sort if sort in JOURNAL_SORTS else "activity",
         }
 
@@ -2784,12 +3515,15 @@ class DialListService:
         params = {"max_attempts": settings["max_attempts"], "retry_hours": settings["retry_after_hours"],
                   "lead_id": lead_id, "limit": 1, "offset": 0}
         sql = self._JOURNAL_SQL.format(scope="l.id = %(lead_id)s", filters="TRUE", order="created_at")
+        tez = is_tez(settings)
         with self.db._get_cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
             if not row:
                 raise DialListError("Водитель не найден в журнале", 404)
-            lead = self._journal_row(row, settings["max_attempts"])
+            lead = self._journal_row(row, settings["max_attempts"], tez=tez)
+            # r[32:36] — автообзвон Тез (15.10.2026): срок итога, автоцикл, статус телефона,
+            # просрочка постобработки.
             cur.execute("""
                 SELECT t.id, t.requested_at, t.operator_id, COALESCE(u.name, ''), t.internal_number, t.state,
                        t.disposition, t.billsec, t.waitsec, t.api_error, t.final_source, t.finished_at,
@@ -2798,7 +3532,8 @@ class DialListService:
                        a.id, a.result, a.state, a.created_at,
                        o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at,
                        t.cancelled, t.operator_hangup_at, t.leg_sec,
-                       os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected
+                       os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected,
+                       t.due_at, t.auto, t.operator_status, t.wrapup_expired_at, COALESCE(o.due_kind, '')
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
@@ -2855,7 +3590,37 @@ class DialListService:
                     # Этому разговору засчитана успешка за подписание документов.
                     "is_success": bool(lead["sign"]["success"])
                                   and lead["sign"]["success"]["attempt_id"] == _sid(r[0]),
+                    # Автообзвон Тез: срок с итогом и его вид (callback | online — подпись «перезвонить» /
+                    # «выйдет на линию»), кто начал звонок, просрочка постобработки; у удалённого КЦ нет.
+                    **({"due_at": _iso(r[32]), "due_kind": (r[36] if len(r) > 36 else "") or "",
+                        "auto": bool(r[33]), "operator_status": r[34] or "",
+                        "wrapup_expired_at": _iso(r[35]), "offers": []} if tez else {}),
                 })
+            if tez:
+                # Офферы, отмеченные в итогах, и отправки WhatsApp этому водителю.
+                cur.execute("""
+                    SELECT x.attempt_id, o.id, o.title
+                    FROM dial_list_attempt_offers x
+                    JOIN dial_list_offers o ON o.id = x.offer_id
+                    JOIN dial_list_attempts t ON t.id = x.attempt_id
+                    JOIN dial_list_assignments a ON a.id = t.assignment_id
+                    WHERE a.lead_id = %s
+                    ORDER BY o.position
+                """, (lead_id,))
+                by_attempt = {}
+                for r in cur.fetchall():
+                    by_attempt.setdefault(_sid(r[0]), []).append({"id": _sid(r[1]), "title": r[2] or ""})
+                for attempt in attempts:
+                    attempt["offers"] = by_attempt.get(attempt["id"], [])
+                cur.execute("""
+                    SELECT w.template_title, w.status, COALESCE(u.name, ''), w.created_at, w.sent_at, w.error
+                    FROM dial_list_wa_messages w
+                    LEFT JOIN users u ON u.id = w.operator_id
+                    WHERE w.lead_id = %s ORDER BY w.created_at DESC LIMIT 50
+                """, (lead_id,))
+                lead["wa_messages"] = [{"template_title": r[0] or "", "status": r[1], "operator_name": r[2],
+                                        "created_at": _iso(r[3]), "sent_at": _iso(r[4]),
+                                        "error": (r[5] or "")[:200]} for r in cur.fetchall()]
             cur.execute("""
                 SELECT e.id, e.kind, e.note, e.created_at, e.actor_id, COALESCE(u.name, '')
                 FROM dial_list_lead_events e
@@ -2926,9 +3691,13 @@ class DialListService:
             row = cur.fetchone()
             if not row:
                 raise DialListError("Водитель не найден в журнале", 404)
+            tez = self._department_profile(cur, row[0]) == PROFILE_TEZ
             if row[2] is not None or row[3] == signing.PROCESSING:
                 # Правило владельца 29.09.2026: подписавший в список не возвращается. «На
-                # проверке у Яндекса» — тоже подписал (11.10.2026): пул его не выдаст.
+                # проверке у Яндекса» — тоже подписал (11.10.2026): пул его не выдаст. У Тез
+                # то же место занимает «вышел на линию».
+                if tez:
+                    raise DialListError("Водитель уже вышел на линию — звонить ему незачем", 409)
                 raise DialListError("Водитель уже подписал документы — звонить ему незачем", 409)
             cur.execute("SELECT 1 FROM dial_list_assignments WHERE lead_id = %s AND state = 'issued'", (lead_id,))
             if cur.fetchone():
@@ -2938,6 +3707,13 @@ class DialListService:
                 SET status = 'new', attempts_total = 0, last_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (lead_id,))
+            if tez:
+                # Автообзвон Тез: свой срок оператора и пауза повтора снимаются — водитель в пуле сразу.
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET owner_operator_id = NULL, owner_call_at = NULL, due_kind = '', next_call_at = NULL
+                    WHERE id = %s
+                """, (lead_id,))
             reopened = self._reopen_in_latest_portion(cur, lead_id)
             self._log_lead_event(cur, lead_id, row[0], actor_id,
                                  "restore" if row[1] == "excluded" else "requeue", note)
@@ -3269,6 +4045,9 @@ class DialListService:
     # «На проверке у Яндекса» (sign_status 'processing') — тоже: водитель уже
     # подписал, ждём только Яндекс (владелец, 11.10.2026). Те же условия — у этапа
     # журнала (CASE в _JOURNAL_BASE_SQL) и у leads_open отдела.
+    # next_call_at (автообзвон Тез, 15.10.2026) — срок лида: повтор недозвона по расписанию,
+    # перезвон и дожим «своего» оператора; раньше срока общий пул лида не выдаёт. У удалённого
+    # КЦ он всегда NULL — условие прежнее.
     _POOL_SQL = """
         SELECT l.id
         FROM dial_list_leads l
@@ -3281,6 +4060,7 @@ class DialListService:
                           WHERE a.lead_id = l.id AND a.state = 'issued')
           AND (l.last_attempt_at IS NULL
                OR l.last_attempt_at < CURRENT_TIMESTAMP - make_interval(hours => %s))
+          AND (l.next_call_at IS NULL OR l.next_call_at <= CURRENT_TIMESTAMP)
           AND l.attempts_total < %s
         ORDER BY l.attempts_total ASC, l.last_attempt_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %s {lock}
@@ -3396,15 +4176,23 @@ class DialListService:
         r = r or (None, None, None)
         return self._last_comment_fields(r[0], r[1], r[2], today or _today())
 
-    def _portion_items(self, cur, portion_id, today=None):
+    # Строка пачки автообзвона Тез (15.10.2026): свой срок оператора и поездки водителя
+    # (_tez_lead_block) — r[23:31]; у удалённого КЦ их в запросе нет вовсе.
+    _PORTION_TEZ_COLUMNS = """,
+                   (l.owner_operator_id = a.operator_id), l.due_kind, l.owner_call_at, l.promised_online_at,
+                   l.month_first_order_at, l.last_order_before_at, l.trip_checked_at, l.driver_id"""
+
+    def _portion_items(self, cur, portion_id, today=None, tez=False):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
         # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS, r[22] — текст
-        # отказа АТС у последней попытки (наружу — только его вид, last_error_kind).
+        # отказа АТС у последней попытки (наружу — только его вид, last_error_kind); у Тез —
+        # ещё _PORTION_TEZ_COLUMNS.
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
                    o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id,
-                   os.name, t.auto_hangup, """ + self._LAST_COMMENT_COLUMNS + """, t.api_error
+                   os.name, t.auto_hangup, """ + self._LAST_COMMENT_COLUMNS + """, t.api_error"""
+                    + (self._PORTION_TEZ_COLUMNS if tez else "") + """
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
@@ -3450,8 +4238,37 @@ class DialListService:
                 # Последний звонок не удался — почему (CALL_ERROR_*): телефон пишет «Нет связи с
                 # АТС — позвоните ещё раз» вместо «Ошибка АТС». Сам текст отказа телефону не уходит.
                 **({"last_error_kind": call_error_kind(None, r[22] or "")} if r[8] == "failed" else {}),
+                # Автообзвон Тез: свой срок этого оператора и что известно о водителе по TEZ APP.
+                **(self._tez_lead_block(bool(r[23]), r[24], r[25], r[26], r[27], r[28], r[29], r[30])
+                   if tez else {}),
             })
         return items
+
+    @staticmethod
+    def _tez_lead_block(own, due_kind, owner_call_at, promised_online_at, month_first_order_at,
+                        last_order_before_at, trip_checked_at, driver_id):
+        """Поля водителя для телефона у отдела Тез (строка пачки, идущий звонок, вкладки итогов):
+        due_kind / due_at / due_label — только когда лид ждёт СВОЕГО срока этого оператора
+        (перезвон, дожим), driver — метка по TEZ APP и ссылка в админку. Номера нет."""
+        kind = (due_kind or "") if own else ""
+        return {
+            "due_kind": kind,
+            "due_at": _iso(owner_call_at) if kind else None,
+            "due_label": due_label(kind, owner_call_at, promised_online_at) if kind else "",
+            "driver": driver_block(month_first_order_at, last_order_before_at, trip_checked_at, driver_id),
+        }
+
+    def _tez_lead_fields(self, cur, lead_id, operator_id):
+        """То же для одного водителя (идущий звонок), в транзакции вызывающего."""
+        cur.execute("""
+            SELECT (owner_operator_id = %s), due_kind, owner_call_at, promised_online_at,
+                   month_first_order_at, last_order_before_at, trip_checked_at, driver_id
+            FROM dial_list_leads WHERE id = %s
+        """, (int(operator_id), str(lead_id)))
+        r = cur.fetchone()
+        if not r:
+            return {}
+        return self._tez_lead_block(bool(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7])
 
     def _active_attempt(self, cur, user_id, include_ended=False):
         """Идущий звонок оператора: плечо по телефону ещё идёт (LEG_UP_STATES) и попытка моложе
@@ -3523,15 +4340,20 @@ class DialListService:
         settings = ctx["settings"]
         today = _today()
         guarded = phone_guards_speech(phone_version)
+        tez = is_tez(settings)
         with self.db._get_cursor() as cur:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
             # экране с итогами, пока оператор не возьмёт следующую («Ещё»).
             portion = self._last_portion(cur, user_id)
-            items = self._portion_items(cur, portion["id"], today) if portion else []
+            items = self._portion_items(cur, portion["id"], today, tez=tez) if portion else []
             active = self._active_attempt(cur, user_id, include_ended=not guarded)
             if active:
                 # Что оператор записал по этому водителю раньше — в карточку звонка.
                 active.update(self._last_comment(cur, user_id, active["lead_id"], today))
+                # Автообзвон Тез: что известно о водителе звонка и зачем звоним по сроку.
+                if tez and active.get("lead_id"):
+                    active.update(self._tez_lead_fields(cur, active["lead_id"], user_id))
+            offers = self._offer_rows(cur, ctx["department_id"], active_only=True) if tez else []
             cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
                 ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"]))
             pool = len(cur.fetchall())
@@ -3548,8 +4370,12 @@ class DialListService:
         # на вопрос «класть ли плечо» всего пять секунд, а молчание и ошибку понимают как «класть» —
         # так рвались разговоры (12.10.2026). Настройку отдела для них даже не читаем.
         ring_timeout_sec = self._ring_timeout_sec(ctx["department_id"]) if phone_has_ring_timer(phone_version) else 0
-        return {
+        state = {
             "enabled": True,
+            # Профиль отдела и часы сервера (15.10.2026): по профилю телефон включает автообзвон
+            # Тез, по часам — считает срок постобработки после перезапуска (pending_outcome.ended_at).
+            "profile": settings.get("profile") or PROFILE_REMOTE_CC,
+            "server_time": _iso(_utcnow()),
             "operator": {"id": ctx["user_id"], "name": ctx["name"], "internal_number": ctx["internal_number"]},
             "portion_size": settings["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
@@ -3572,12 +4398,23 @@ class DialListService:
             # Справочник итогов для окна после разговора и попытка, по которой итог
             # ещё не указан (телефон не даст звонить дальше, сервер — тоже). subtypes —
             # включённые типы итога по порядку: есть хоть один — телефон просит выбрать тип.
-            "outcomes": [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"],
-                          "subtypes": [{"id": s["id"], "name": s["name"]} for s in o["subtypes"]]}
+            # Дата у итога (автообзвон Тез): due_kind callback | online | ''; у удалённого КЦ ключа нет.
+            "outcomes": [dict({"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"],
+                               "subtypes": [{"id": s["id"], "name": s["name"]} for s in o["subtypes"]]},
+                              **({"due_kind": o.get("due_kind") or ""} if tez else {}))
                          for o in outcomes],
             "pending_outcome": pending_outcome,
             "script_version": script_version,
         }
+        if tez:
+            # Автообзвон Тез (15.10.2026): настройки автоцикла и постобработки, офферы для карточки и
+            # шаблоны WhatsApp (номер водителя сюда не попадает: шлёт сервер).
+            state["auto"] = {"enabled": bool(settings.get("auto_dial")),
+                             "interval_sec": int(settings.get("call_interval_sec") or 0),
+                             "wrapup_sec": int(settings.get("wrapup_sec") or 0)}
+            state["offers"] = [{"id": o["id"], "title": o["title"], "description": o["description"]} for o in offers]
+            state["whatsapp"] = self._wa_phone_block(settings, ctx["name"])
+        return state
 
     # ------------------------------------------------------------ скрипт разговора
     def _script_rows(self, cur, department_id, active_only=False):
@@ -3969,6 +4806,11 @@ class DialListService:
             log.warning("dial_list: конверсия и зарплата оператора %s не посчитаны: %s", ctx["user_id"], exc)
             return progress
         progress["conversion"] = self._operator_conversion(ctx, counts)
+        if is_tez(ctx.get("settings")):
+            # Автообзвон Тез (15.10.2026): зарплата отдела считается по «Базе лидов ОП TEZ», а не по
+            # тарифу удалённого КЦ — плитки зарплаты у них нет; успешка в конверсии — вышел на линию.
+            progress["salary"] = None
+            return progress
         salary = self._operator_salary(counts)
         try:
             salary["today"] = self._operator_day(ctx, today)
@@ -3992,6 +4834,10 @@ class DialListService:
         сколько их; me — своя строка или None, если оператор в этот день не звонил. id
         операторов наружу не уходят."""
         ctx = self.operator_context(user_id)
+        if is_tez(ctx.get("settings")):
+            # Автообзвон Тез: рейтинг считает заработок по тарифу удалённого КЦ — у Тез его нет
+            # (их телефон вкладку «Рейтинг» и не строит).
+            return {"visible": False, "disabled": True}
         window = pay.rating_window(now or datetime.now(PERIOD_TZ))
         day = window["day"]
         result = {
@@ -4317,10 +5163,15 @@ class DialListService:
         with self.db._get_cursor() as cur:
             self._refuse_next_portion(cur, ctx)
         try:
-            self._precheck_signatures(ctx)
+            # Автообзвон Тез (15.10.2026): у его лидов нет ИИН и Sapar, цель — выход на линию:
+            # вместо подписания перед выдачей сверяются поездки в TEZ APP.
+            if is_tez(settings):
+                self._precheck_trips(ctx)
+            else:
+                self._precheck_signatures(ctx)
         except Exception:
             # Проверка — страховка, а не условие выдачи: её сбой не оставит оператора без списка.
-            log.exception("dial_list: проверка подписания перед выдачей оператору %s упала — выдаём без неё",
+            log.exception("dial_list: проверка водителей перед выдачей оператору %s упала — выдаём без неё",
                           ctx["user_id"])
         for round_no in (1, 2):
             try:
@@ -4499,21 +5350,34 @@ class DialListService:
                      summary["elapsed_sec"])
         return summary
 
-    def start_call(self, user_id, assignment_id):
+    def start_call(self, user_id, assignment_id, auto=False, operator_status=None):
         """Клик «Позвонить»: попытка + звонок через Binotel. Возвращает попытку.
 
         Подписавшему (и «на проверке у Яндекса» — водитель уже подписал) не звоним
         (владелец, 11.10.2026): строка снимается со списка, оператору — 409. Проверка
         подписания устарела — сначала спрашиваем Sapar про этого водителя, вне
-        транзакций (_precheck_call_signature), а транзакция звонка смотрит на её итог."""
+        транзакций (_precheck_call_signature), а транзакция звонка смотрит на её итог.
+
+        Автообзвон Тез (15.10.2026): auto — звонок начал автоцикл, operator_status — статус
+        телефона ('active' | 'outbound'); оба пишутся в попытку. Звонок в другом статусе — 409
+        (error_kind status): у Тез звонят только в «Активном» и «Исходе». Вместо Sapar — проверка
+        поездок этого водителя: вышел на линию — строка снимается, 409 с error_kind goal (тот же
+        вид — у подписавшего удалённого КЦ: телефон по нему сразу берёт следующего)."""
         ctx = self.operator_context(user_id)
         settings = ctx["settings"]
         assignment_id = str(assignment_id)
+        tez = is_tez(settings)
+        operator_status = clean_operator_status(operator_status)
+        if tez and operator_status is not None and operator_status not in OPERATOR_CALL_STATUSES:
+            raise DialListError(CALL_STATUS_REFUSED, 409, kind=CALL_ERROR_STATUS)
         try:
-            self._precheck_call_signature(ctx, assignment_id)
+            if tez:
+                self._precheck_call_trips(ctx, assignment_id)
+            else:
+                self._precheck_call_signature(ctx, assignment_id)
         except Exception:
             # Страховка, а не условие звонка: сбой проверки звонок не останавливает.
-            log.exception("dial_list: проверка подписания перед звонком (строка %s) упала — звоним без неё",
+            log.exception("dial_list: проверка водителя перед звонком (строка %s) упала — звоним без неё",
                           assignment_id)
         with self.db._get_cursor() as cur:
             cur.execute("""
@@ -4554,9 +5418,10 @@ class DialListService:
             else:
                 phone_norm, full_name, lead_id = row[3], row[4] or "", str(row[5])
                 cur.execute("""
-                    INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number)
-                    VALUES (%s, %s, %s) RETURNING id, requested_at
-                """, (assignment_id, ctx["user_id"], ctx["internal_number"]))
+                    INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number, auto, operator_status)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id, requested_at
+                """, (assignment_id, ctx["user_id"], ctx["internal_number"], bool(auto) and tez,
+                      (operator_status or "") if tez else ""))
                 attempt_id, requested_at = cur.fetchone()
                 attempt_id = str(attempt_id)
                 cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s",
@@ -4565,9 +5430,9 @@ class DialListService:
                 # Что оператор записал по водителю раньше — в карточку звонка (12.10.2026).
                 last_comment = self._last_comment(cur, ctx["user_id"], lead_id)
         if signed:
-            log.info("dial_list: оператор %s → строка %s: водитель уже подписал, строка снята со списка",
-                     ctx["user_id"], assignment_id)
-            raise DialListError(SIGNED_ROW_CLOSED, 409)
+            log.info("dial_list: оператор %s → строка %s: водитель уже %s, строка снята со списка",
+                     ctx["user_id"], assignment_id, "вышел на линию" if tez else "подписал")
+            raise DialListError(GOAL_ROW_CLOSED_TEZ if tez else SIGNED_ROW_CLOSED, 409, kind=CALL_ERROR_GOAL)
 
         # Что линия оператора увидит во From. Без подмены Binotel ставит туда номер
         # водителя — и он виден в SIP-пакете (Wireshark), что и было главным
@@ -4713,6 +5578,20 @@ class DialListService:
                 return self._ring_timeout_unguarded(user_id, attempt_id, ring_sec, phone_version,
                                                     "у отдела автосброс выключен")
             return self._ring_timeout_event(ctx, attempt_id, ring_sec)
+        if event == "wrapup_expired":
+            # Автообзвон Тез: только отметка, состояние попытки и долг по итогу не меняются.
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    UPDATE dial_list_attempts
+                    SET wrapup_expired_at = COALESCE(wrapup_expired_at, CURRENT_TIMESTAMP)
+                    WHERE id = %s AND operator_id = %s
+                    RETURNING id
+                """, (attempt_id, ctx["user_id"]))
+                if not cur.fetchone():
+                    raise DialListError("Попытка не найдена", 404)
+            log.info("dial_list: оператор %s не заполнил итог попытки %s за время постобработки — «Офлайн»",
+                     ctx["user_id"], attempt_id)
+            return {"ok": True}
         ended = event == "ended"
         # Плечо положил сам телефон: прежний ключ ring_timeout — это гудки; auto_hangup
         # называет причину сам. Такой конец — не отбой оператора.
@@ -5294,10 +6173,12 @@ class DialListService:
         if not row:
             return
         cur.execute("""
-            SELECT max_attempts FROM dial_list_department_settings WHERE department_id = %s
+            SELECT max_attempts, profile, retry_schedule_min
+            FROM dial_list_department_settings WHERE department_id = %s
         """, (row[0],))
         s = cur.fetchone()
         max_attempts = int(s[0]) if s else DEFAULT_MAX_ATTEMPTS
+        tez = bool(s) and str(s[1] or "").strip().lower() == PROFILE_TEZ
         attempts_total = int(row[1] or 0) + (1 if count_attempt else 0)
         if requeue:
             # Итог «перезвонить»: попытки с нуля, лид вернётся в пул через retry_after_hours.
@@ -5319,6 +6200,21 @@ class DialListService:
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
         """, (attempts_total, bool(answered), status, lead_id))
+        if tez and not requeue:
+            # Автообзвон Тез (15.10.2026). Попытка завершилась без итога «с датой» — свой срок
+            # оператора (перезвон, дожим) снят: новый ставит только новый итог с датой
+            # (set_attempt_outcome). Недозвон, пока попытки есть, ждёт повтора по расписанию отдела
+            # (retry_schedule_min; пусто — как раньше, retry_after_hours); обработанному срок не нужен.
+            # Итог «перезвонить» (requeue) сроки поставил сам — их не трогаем, в каком бы порядке
+            # ни пришли итог и финал попытки.
+            delay = retry_delay_minutes(schedule_from(s[2]), attempts_total) if status == "in_progress" else None
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET owner_operator_id = NULL, owner_call_at = NULL, due_kind = '',
+                    next_call_at = CASE WHEN %s::int IS NULL THEN NULL
+                                        ELSE CURRENT_TIMESTAMP + make_interval(mins => %s::int) END
+                WHERE id = %s
+            """, (delay, delay, lead_id))
 
     # ------------------------------------------------------------ отмена до ответа
     def _cancel_attempt(self, cur, attempt_id, assignment_id, late=False):
@@ -5581,7 +6477,13 @@ class DialListService:
                  general_call_id or "—", disposition or "без исхода", billsec,
                  "попытка обзвона найдена" if matched else "это не звонок обзвона")
         payload = json.dumps(data, ensure_ascii=False)
-        if len(payload) > WEBHOOK_PAYLOAD_MAX_CHARS:
+        if not matched:
+            # Звонок не обзвона: у компании Тез вебхук приходит по ВСЕМ звонкам линии (поддержка,
+            # входящие водителей) — номер и данные чужого звонка 30 дней не храним, только что
+            # пришло (автообзвон Тез, 15.10.2026).
+            payload = json.dumps({"_not_dial": True, "generalCallID": general_call_id,
+                                  "disposition": disposition}, ensure_ascii=False)
+        elif len(payload) > WEBHOOK_PAYLOAD_MAX_CHARS:
             payload = json.dumps({"_truncated": True, "generalCallID": general_call_id,
                                   "disposition": disposition}, ensure_ascii=False)
         with self.db._get_cursor() as cur:
@@ -5603,13 +6505,21 @@ class DialListService:
 
     def check_lead_signature(self, lead_id):
         """«Проверить сейчас» в карточке водителя: один запрос в Sapar, сразу, из
-        базы любого месяца. Подписавшего не перепроверяем — он из обзвона ушёл."""
+        базы любого месяца. Подписавшего не перепроверяем — он из обзвона ушёл.
+        У водителя автообзвона Тез — поездки в TEZ APP (_check_lead_trips)."""
         lead_id = str(lead_id)
         with self.db._get_cursor() as cur:
-            cur.execute("SELECT iin, signed_at FROM dial_list_leads WHERE id = %s", (lead_id,))
+            cur.execute("""
+                SELECT l.iin, l.signed_at, COALESCE(s.profile, %s)
+                FROM dial_list_leads l
+                LEFT JOIN dial_list_department_settings s ON s.department_id = l.department_id
+                WHERE l.id = %s
+            """, (PROFILE_REMOTE_CC, lead_id))
             row = cur.fetchone()
         if not row:
             raise DialListError("Водитель не найден в журнале", 404)
+        if row[2] == PROFILE_TEZ:
+            return self._check_lead_trips(lead_id, row[1])
         if not row[0]:
             raise DialListError("У водителя нет ИИН — подписание не проверить. Загрузите его заново "
                                 "в файле с колонкой iin", 409)
@@ -5621,6 +6531,21 @@ class DialListService:
             if summary.get("errors") and not summary.get("checked"):
                 card = self.lead_card(lead_id)
                 raise DialListError(f"Sapar не ответил: {card['sign']['error'] or 'повторите позже'}", 502)
+        return self.lead_card(lead_id)
+
+    def _check_lead_trips(self, lead_id, online_at):
+        """«Проверить сейчас» у водителя автообзвона Тез: подписания у Тез нет — спрашиваем TEZ APP о
+        поездках сейчас. Вышедшего на линию не перепроверяем; вышел этой проверкой — его строка
+        снимается со списка, как в получасовом прогоне."""
+        if online_at is None:
+            if not self.trip_checker.configured():
+                raise DialListError("Проверка поездок не настроена на сервере (TEZ APP)", 503)
+            summary = self.trip_checker.check_now([lead_id], fresh_minutes=0, timeout=TRIP_MANAGER_TIMEOUT_SEC,
+                                                  budget_sec=TRIP_MANAGER_BUDGET_SEC)
+            if summary.get("online"):
+                self.sign_checker.close_signed_rows(summary["online"])
+            elif summary.get("stopped"):
+                raise DialListError("TEZ APP не ответил — повторите через минуту", 502)
         return self.lead_card(lead_id)
 
     # «Проверить на подписание» с телефона (владелец, 12.10.2026: «и во время звонка проверить
@@ -5825,6 +6750,15 @@ class DialListService:
         department_id = int(department_id)
         settings = self.department_settings(department_id)
         period = period or settings["_period"]
+        if is_tez(settings):
+            # Автообзвон Тез (ТЗ, п. 14–15): свой дашборд — объём, обработано / осталось, итоги,
+            # согласия и выход на линию, операторы, офферы, WhatsApp. Подписания нет.
+            with self.db._get_cursor() as cur:
+                data = dial_analytics.tez_department_analytics(cur, department_id, period)
+            data.update({"department_id": department_id, "period": period.isoformat(),
+                         "period_label": period_label(period), "active_period": settings["period"],
+                         "is_active_period": period == settings["_period"]})
+            return data
         with self.db._get_cursor() as cur:
             data = dial_analytics.department_analytics(cur, department_id, period,
                                                        configured=self.sign_checker.configured())
@@ -5972,10 +6906,26 @@ class DialListService:
         }
 
     # ------------------------------------------------------------ руководитель
-    def overview(self, department_ids, day):
+    # Сводка дня у отдела автообзвона Тез (15.10.2026): звонки автоцикла, согласия выйти на линию,
+    # назначенные перезвоны, просрочки постобработки (итог — по due_kind).
+    _OVERVIEW_TEZ_ATT = """,
+                           COUNT(*) FILTER (WHERE t.auto) AS auto_attempts,
+                           COUNT(*) FILTER (WHERE o.due_kind = 'online') AS agreements,
+                           COUNT(*) FILTER (WHERE o.due_kind = 'callback') AS callbacks,
+                           COUNT(*) FILTER (WHERE t.wrapup_expired_at IS NOT NULL) AS wrapup_expired"""
+    _OVERVIEW_TEZ_JOIN = """
+                    LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id"""
+    _OVERVIEW_TEZ_COLUMNS = """,
+                       COALESCE(att.auto_attempts, 0), COALESCE(att.agreements, 0), COALESCE(att.callbacks, 0),
+                       COALESCE(att.wrapup_expired, 0)"""
+
+    def overview(self, department_ids, day, tez=False):
         """Сводка за день по операторам: сколько строк выдано/обработано, попыток,
         дозвонов, секунд разговора, успешек (водитель подписал в этот день и
-        подпись засчитана оператору). department_ids=None — все отделы."""
+        подпись засчитана оператору). department_ids=None — все отделы.
+
+        tez — отдел автообзвона Тез: ещё auto_attempts, agreements, callbacks, wrapup_expired и
+        live_status — статус оператора в телефоне сейчас (active | outbound | break | offline | off)."""
         params = {"day": day}
         # Отбор — по отделу БАЗЫ, которую обзванивали, а не по отделу человека: на линии
         # отдела может сидеть сотрудник другого отдела, и его звонки — показатели отдела
@@ -5987,6 +6937,9 @@ class DialListService:
         if department_ids is not None:
             lead_filter += " AND l.department_id = ANY(%(departments)s)"
             params["departments"] = [int(d) for d in department_ids]
+        tez_att = self._OVERVIEW_TEZ_ATT if tez else ""
+        tez_join = self._OVERVIEW_TEZ_JOIN if tez else ""
+        tez_columns = self._OVERVIEW_TEZ_COLUMNS if tez else ""
         with self.db._get_cursor() as cur:
             cur.execute(f"""
                 WITH att AS (
@@ -5998,10 +6951,10 @@ class DialListService:
                            COALESCE(SUM(t.billsec) FILTER (WHERE t.state = 'finished'
                                                            AND {ATTEMPT_TALK_SQL}), 0) AS talk_sec,
                            COUNT(*) FILTER (WHERE t.state = 'failed') AS failed,
-                           COUNT(*) FILTER (WHERE t.cancelled) AS cancelled
+                           COUNT(*) FILTER (WHERE t.cancelled) AS cancelled{tez_att}
                     FROM dial_list_attempts t
                     JOIN dial_list_assignments a ON a.id = t.assignment_id
-                    JOIN dial_list_leads l ON l.id = a.lead_id
+                    JOIN dial_list_leads l ON l.id = a.lead_id{tez_join}
                     WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
                     GROUP BY t.operator_id
                 ), asg AS (
@@ -6023,7 +6976,7 @@ class DialListService:
                        COALESCE(asg.issued, 0), COALESCE(asg.done, 0),
                        COALESCE(att.attempts, 0), COALESCE(att.answered, 0),
                        COALESCE(att.talk_sec, 0), COALESCE(att.failed, 0), COALESCE(att.cancelled, 0),
-                       COALESCE(suc.successes, 0)
+                       COALESCE(suc.successes, 0){tez_columns}
                 FROM users u
                 LEFT JOIN departments dep ON dep.id = u.department_id
                 LEFT JOIN att ON att.operator_id = u.id
@@ -6033,15 +6986,540 @@ class DialListService:
                        OR suc.operator_id IS NOT NULL)
                 ORDER BY dep.name NULLS LAST, u.name
             """, params)
-            rows = [{
-                "operator_id": r[0], "operator_name": r[1] or "", "department_id": r[2],
-                "department_name": r[3] or "", "issued": int(r[4]), "done": int(r[5]),
-                "attempts": int(r[6]), "answered": int(r[7]), "talk_sec": int(r[8]), "failed": int(r[9]),
-                # Отменённые оператором до ответа водителя — в attempts входят, но не в счёт лидам.
-                "cancelled": int(r[10]),
-                "successes": int(r[11]),
-            } for r in cur.fetchall()]
+            rows = []
+            for r in cur.fetchall():
+                row = {
+                    "operator_id": r[0], "operator_name": r[1] or "", "department_id": r[2],
+                    "department_name": r[3] or "", "issued": int(r[4]), "done": int(r[5]),
+                    "attempts": int(r[6]), "answered": int(r[7]), "talk_sec": int(r[8]), "failed": int(r[9]),
+                    # Отменённые оператором до ответа водителя — в attempts входят, но не в счёт лидам.
+                    "cancelled": int(r[10]),
+                    "successes": int(r[11]),
+                }
+                if tez:
+                    row.update({"auto_attempts": int(r[12]), "agreements": int(r[13]), "callbacks": int(r[14]),
+                                "wrapup_expired": int(r[15])})
+                rows.append(row)
+        if tez:
+            if department_ids is not None and len(department_ids) == 1:
+                self._add_enabled_operators(rows, int(department_ids[0]))
+            self._add_live_statuses(rows)
         return rows
+
+    def _add_enabled_operators(self, rows, department_id):
+        """Автообзвон Тез: включённые лично операторы отдела — и те, кто за день ещё не звонил
+        (нулями), чтобы руководитель видел всех «под распределением» и их статус сейчас."""
+        seen = {row["operator_id"] for row in rows}
+        try:
+            users = self.department_users(department_id)
+        except Exception as exc:
+            log.warning("dial_list: операторы отдела %s для сводки не прочитаны: %s", department_id, exc)
+            return rows
+        for user in users:
+            if user.get("dial_list_enabled") is not True or user["id"] in seen:
+                continue
+            rows.append({
+                "operator_id": user["id"], "operator_name": user.get("name") or "", "department_id": None,
+                "department_name": user.get("department_name") or "", "issued": 0, "done": 0, "attempts": 0,
+                "answered": 0, "talk_sec": 0, "failed": 0, "cancelled": 0, "successes": 0,
+                "auto_attempts": 0, "agreements": 0, "callbacks": 0, "wrapup_expired": 0,
+            })
+        return rows
+
+    def _add_live_statuses(self, rows):
+        """live_status каждой строки — по последнему событию телефона за 16 ч (как табло Тез). Не
+        прочитали — 'off': сводка дня без него не ломается."""
+        statuses = {}
+        reader = getattr(self.db, "get_operator_live_statuses", None)
+        if rows and callable(reader):
+            try:
+                statuses = reader([row["operator_id"] for row in rows]) or {}
+            except Exception as exc:
+                log.warning("dial_list: живые статусы операторов для сводки не прочитаны: %s", exc)
+        for row in rows:
+            live = statuses.get(row["operator_id"]) or {}
+            row["live_status"] = live_status_of(live.get("status_key")) if live else "off"
+        return rows
+
+    # ================================================================ автообзвон Тез КЦ
+    # ТЗ руководителя Тез и решения владельца 15.10.2026. Всё ниже — только для отделов профиля tez.
+
+    # ------------------------------------------------------------ офферы
+    def _offer_rows(self, cur, department_id, active_only=False):
+        """Акции и офферы отдела по порядку; used — сколько раз их отмечали в итогах."""
+        cur.execute("""
+            SELECT o.id, o.title, o.description, o.position, o.is_active,
+                   (SELECT COUNT(*) FROM dial_list_attempt_offers x WHERE x.offer_id = o.id) AS used
+            FROM dial_list_offers o
+            WHERE o.department_id = %s {active}
+            ORDER BY o.is_active DESC, o.position, o.created_at
+        """.format(active="AND o.is_active" if active_only else ""), (int(department_id),))
+        return [{"id": _sid(r[0]), "title": r[1] or "", "description": r[2] or "", "position": int(r[3] or 0),
+                 "is_active": bool(r[4]), "used": int(r[5] or 0)} for r in cur.fetchall()]
+
+    def offers(self, department_id):
+        with self.db._get_cursor() as cur:
+            return {"department_id": int(department_id), "items": self._offer_rows(cur, department_id)}
+
+    def save_offers(self, department_id, items, changed_by=None):
+        """Список офферов от редактора целиком, как итоги: с id — обновить, без id — добавить,
+        отсутствующие — выключить (история отметок на них ссылается). Порядок — как в списке."""
+        department_id = int(department_id)
+        if not isinstance(items, list):
+            raise DialListError("items: ожидается список офферов")
+        if len(items) > OFFERS_MAX:
+            raise DialListError(f"Офферов не больше {OFFERS_MAX}")
+        cleaned, seen = [], set()
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise DialListError("Каждый оффер — объект {id?, title, description, is_active}")
+            title = " ".join(str(raw.get("title") or "").split())[:OFFER_TITLE_MAX]
+            if not title:
+                raise DialListError("У оффера должно быть название")
+            if title.lower() in seen:
+                raise DialListError(f"Оффер «{title}» повторяется")
+            seen.add(title.lower())
+            cleaned.append({"id": _sid(raw.get("id")) or None, "title": title,
+                            "description": str(raw.get("description") or "").strip()[:OFFER_DESCRIPTION_MAX],
+                            "is_active": raw.get("is_active", True) is not False})
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT id FROM dial_list_offers WHERE department_id = %s", (department_id,))
+            existing = {str(r[0]) for r in cur.fetchall()}
+            kept = set()
+            for position, c in enumerate(cleaned, start=1):
+                if c["id"] and c["id"] in existing:
+                    cur.execute("""
+                        UPDATE dial_list_offers
+                        SET title = %s, description = %s, position = %s, is_active = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND department_id = %s
+                    """, (c["title"], c["description"], position, c["is_active"], c["id"], department_id))
+                    kept.add(c["id"])
+                else:
+                    cur.execute("""
+                        INSERT INTO dial_list_offers (department_id, title, description, position, is_active)
+                        VALUES (%s, %s, %s, %s, %s) RETURNING id
+                    """, (department_id, c["title"], c["description"], position, c["is_active"]))
+                    kept.add(str(cur.fetchone()[0]))
+            gone = existing - kept
+            if gone:
+                cur.execute("""
+                    UPDATE dial_list_offers SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                    WHERE department_id = %s AND id = ANY(%s::uuid[])
+                """, (department_id, list(gone)))
+        log.info("dial_list: офферы отдела %s сохранены (%d, пользователь %s)", department_id, len(cleaned),
+                 changed_by)
+        return self.offers(department_id)
+
+    # ------------------------------------------------------------ WhatsApp (ChatApp, WABA)
+    def _wa_client(self):
+        if self._wa_client_factory is None:
+            raise DialListError("WhatsApp не настроен на сервере", 503)
+        return self._wa_client_factory()
+
+    @staticmethod
+    def _wa_template_row(raw):
+        """Шаблон ChatApp → строка для руководителя. Отправлять можно только одобренный текстовый."""
+        text = str(raw.get("data") or "")
+        status = str(raw.get("status") or "").strip().upper()
+        kind = str(raw.get("templateType") or "").strip().upper()
+        return {"id": str(raw.get("id") or ""), "title": str(raw.get("elementName") or raw.get("id") or ""),
+                "text": text, "language": str(raw.get("languageCode") or ""), "status": status, "type": kind,
+                "params_count": wa_variables_count(text),
+                "supported": status == WA_SUPPORTED_STATUS and kind == WA_SUPPORTED_TYPE}
+
+    def _wa_templates(self, license_id, force=False):
+        """Шаблоны лицензии из ChatApp с кэшем на WA_TEMPLATES_CACHE_SEC (руководитель листает
+        настройки, а токенов у ChatApp 100 в сутки). Сбой — DialListError 502 текстом."""
+        license_id = int(license_id)
+        now = time.monotonic()
+        with self._wa_cache_lock:
+            cached = self._wa_cache.get(license_id)
+        if cached and not force and now - cached[0] < WA_TEMPLATES_CACHE_SEC:
+            return cached[1]
+        try:
+            raw = self._wa_client().list_templates(license_id)
+        except DialListError:
+            raise
+        except Exception as exc:
+            log.warning("dial_list: шаблоны ChatApp лицензии %s не получены: %s", license_id, str(exc)[:300])
+            raise DialListError("ChatApp не отдал шаблоны — попробуйте позже", 502)
+        rows = [self._wa_template_row(t) for t in raw if isinstance(t, dict)]
+        with self._wa_cache_lock:
+            self._wa_cache[license_id] = (now, rows)
+        return rows
+
+    def _wa_phone_block(self, settings, operator_name):
+        """Блок whatsapp для телефона: включён ли и разрешённые шаблоны с текстом для подтверждения
+        (переменные — параметрами руководителя, водитель — словами, номера нет)."""
+        templates = [t for t in (settings.get("wa_templates") or []) if isinstance(t, dict) and t.get("id")]
+        enabled = bool(settings.get("wa_license_id")) and bool(templates) and self._wa_client_factory is not None
+        if not enabled:
+            return {"enabled": False, "templates": []}
+        return {"enabled": True,
+                "templates": [{"id": str(t.get("id")), "title": str(t.get("title") or t.get("id")),
+                               "text": wa_preview(t.get("text"), t.get("params"), operator_name)}
+                              for t in templates]}
+
+    def whatsapp_settings(self, department_id, refresh=False):
+        """Настройки WhatsApp отдела для руководителя: лицензия, лицензии ChatApp, шаблоны
+        выбранной лицензии и разрешённые. ChatApp не настроен или лежит — шаблонов нет, error
+        текстом, разрешённые — из базы."""
+        settings = self.department_settings(department_id)
+        result = {"department_id": int(department_id), "license_id": settings.get("wa_license_id"),
+                  "licenses": [], "templates": [], "allowed": settings.get("wa_templates") or [],
+                  "configured": self._wa_client_factory is not None, "error": ""}
+        if self._wa_client_factory is None:
+            result["error"] = "WhatsApp не настроен на сервере (ChatApp)"
+            return result
+        try:
+            licenses = self._wa_client().active_messenger_licenses()
+            result["licenses"] = [{"id": int(lic[0]), "name": str(lic[2] or lic[0]), "type": str(lic[1] or "")}
+                                  for lic in licenses if str(lic[1] or "") == "caWhatsApp"]
+            if result["license_id"]:
+                result["templates"] = self._wa_templates(result["license_id"], force=bool(refresh))
+        except DialListError as exc:
+            result["error"] = str(exc)
+        except Exception as exc:
+            log.warning("dial_list: ChatApp недоступен для настроек отдела %s: %s", department_id, str(exc)[:300])
+            result["error"] = "ChatApp не ответил — попробуйте позже"
+        return result
+
+    def save_whatsapp(self, department_id, payload, changed_by=None):
+        """Лицензия и разрешённые шаблоны: {license_id: int|null, allowed: [{id, title, text, params}]}.
+
+        license_id null — WhatsApp выключен; разрешённые шаблоны при этом сохраняются (кнопки у
+        операторов нет — _wa_phone_block), чтобы включить его снова без повторной настройки.
+        Шаблоны — только той лицензии, с которой отправлять (у каждой лицензии ChatApp свои):
+        ChatApp ответил — чужие id отклоняются; не ответил — сохраняем без этой сверки."""
+        payload = payload or {}
+        license_id = self._clean_license_id(payload.get("license_id"))
+        allowed_raw = payload.get("allowed") or []
+        if not isinstance(allowed_raw, list):
+            raise DialListError("allowed: ожидается список шаблонов")
+        if len(allowed_raw) > WA_TEMPLATES_MAX:
+            raise DialListError(f"Разрешённых шаблонов не больше {WA_TEMPLATES_MAX}")
+        allowed, seen = [], set()
+        for raw in allowed_raw:
+            if not isinstance(raw, dict):
+                raise DialListError("Каждый шаблон — объект {id, title, text, params}")
+            template_id = str(raw.get("id") or "").strip()[:WA_TEMPLATE_ID_MAX]
+            if not template_id or template_id in seen:
+                raise DialListError("У шаблона должен быть свой id")
+            seen.add(template_id)
+            params = raw.get("params") or []
+            if not isinstance(params, list) or len(params) > WA_PARAMS_MAX:
+                raise DialListError(f"Параметров шаблона не больше {WA_PARAMS_MAX}")
+            allowed.append({"id": template_id,
+                            "title": str(raw.get("title") or template_id).strip()[:WA_TEMPLATE_TITLE_MAX],
+                            "text": str(raw.get("text") or "")[:WA_TEMPLATE_TEXT_MAX],
+                            "params": [str(p if p is not None else "")[:WA_PARAM_MAX] for p in params]})
+        current = self.department_settings(department_id)
+        if not current.get("configured"):
+            raise DialListError("Отдел не подключён к разделу", 404)
+        if license_id and allowed and self._wa_client_factory is not None:
+            try:
+                known = {t["id"] for t in self._wa_templates(license_id)}
+            except DialListError as exc:
+                known = None
+                log.warning("dial_list: шаблоны лицензии %s не сверены при сохранении (отдел %s): %s", license_id,
+                            department_id, exc)
+            foreign = [t for t in allowed if known is not None and t["id"] not in known]
+            if foreign:
+                raise DialListError(f"Шаблона «{foreign[0]['title']}» нет у выбранной лицензии — сохраните лицензию "
+                                    "и выберите шаблоны из её списка")
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                UPDATE dial_list_department_settings
+                SET wa_license_id = %s, wa_templates = %s::jsonb, updated_by = %s,
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE department_id = %s
+            """, (license_id, json.dumps(allowed, ensure_ascii=False), changed_by, int(department_id)))
+        log.info("dial_list: WhatsApp отдела %s: лицензия %s, разрешено шаблонов %d (пользователь %s)",
+                 department_id, license_id, len(allowed), changed_by)
+        return self.whatsapp_settings(department_id)
+
+    def send_whatsapp(self, user_id, lead_id, template_id, attempt_id=None):
+        """Оператор шлёт водителю шаблон WhatsApp (ТЗ руководителя Тез, п. 12). Номер — только здесь.
+
+        Свой водитель: у оператора открыта его строка или последний звонок водителю — его. Не чаще
+        раза в WA_RESEND_HOURS на водителя: строка outbox 'sending' пишется и фиксируется ДО запроса
+        (двойной клик упрётся в неё), запрос в ChatApp — вне транзакций, итог — 'sent' / 'failed'."""
+        ctx = self.operator_context(user_id)
+        settings = ctx["settings"]
+        if not is_tez(settings):
+            raise DialListError("WhatsApp из карточки — только у автообзвона Тез", 409)
+        license_id = settings.get("wa_license_id")
+        templates = {str(t.get("id")): t for t in (settings.get("wa_templates") or []) if isinstance(t, dict)}
+        if not license_id or not templates:
+            raise DialListError("WhatsApp для отдела не настроен", 409)
+        template = templates.get(str(template_id or "").strip())
+        if not template:
+            raise DialListError("Такого шаблона нет — обновите список", 400)
+        try:
+            lead_id = str(uuid.UUID(str(lead_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise DialListError("Водитель не найден", 404)
+        attempt_ref = None
+        if attempt_id:
+            try:
+                attempt_ref = str(uuid.UUID(str(attempt_id)))
+            except (ValueError, AttributeError, TypeError):
+                attempt_ref = None
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT l.phone_norm, l.full_name, l.department_id,
+                       EXISTS (SELECT 1 FROM dial_list_assignments a
+                               WHERE a.lead_id = l.id AND a.operator_id = %(me)s AND a.state = 'issued'),
+                       (SELECT t.operator_id FROM dial_list_attempts t
+                        JOIN dial_list_assignments a ON a.id = t.assignment_id
+                        WHERE a.lead_id = l.id ORDER BY t.requested_at DESC LIMIT 1)
+                FROM dial_list_leads l WHERE l.id = %(lead)s
+                FOR UPDATE OF l
+            """, {"me": ctx["user_id"], "lead": lead_id})
+            row = cur.fetchone()
+            if not row or int(row[2]) != ctx["department_id"]:
+                raise DialListError("Водитель не найден", 404)
+            if not row[3] and row[4] != ctx["user_id"]:
+                raise DialListError("Это не ваш водитель: писать можно тем, кому вы звоните", 403)
+            cur.execute("""
+                SELECT 1 FROM dial_list_wa_messages
+                WHERE lead_id = %s AND status IN ('sending', 'sent')
+                  AND created_at > CURRENT_TIMESTAMP - make_interval(hours => %s)
+                LIMIT 1
+            """, (lead_id, WA_RESEND_HOURS))
+            if cur.fetchone():
+                raise DialListError(WA_RESENT_TODAY, 409)
+            cur.execute("""
+                INSERT INTO dial_list_wa_messages (department_id, lead_id, attempt_id, operator_id, license_id,
+                                                   template_id, template_title, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'sending') RETURNING id
+            """, (ctx["department_id"], lead_id, attempt_ref, ctx["user_id"], int(license_id),
+                  str(template.get("id"))[:WA_TEMPLATE_ID_MAX], str(template.get("title") or "")[:WA_TEMPLATE_TITLE_MAX]))
+            message_id = str(cur.fetchone()[0])
+            phone, full_name = row[0], row[1] or ""
+        params = wa_params(template.get("params"), full_name, ctx["name"])
+        title = str(template.get("title") or template.get("id"))
+        try:
+            provider_id = self._wa_client().send_template(int(license_id), phone, str(template.get("id")), params,
+                                                          tracking=message_id)
+        except Exception as exc:
+            error = scrub_digits(str(exc))[:500]
+            with self.db._get_cursor() as cur:
+                cur.execute("UPDATE dial_list_wa_messages SET status = 'failed', error = %s WHERE id = %s",
+                            (error, message_id))
+            log.warning("dial_list: WhatsApp водителю %s не отправлен (оператор %s, шаблон %s): %s", lead_id,
+                        ctx["user_id"], title, error)
+            raise DialListError(f"WhatsApp не отправлен: {error or 'ChatApp не ответил'}", 502)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                UPDATE dial_list_wa_messages
+                SET status = 'sent', provider_message_id = %s, sent_at = CURRENT_TIMESTAMP
+                WHERE id = %s RETURNING sent_at
+            """, (str(provider_id or "")[:128], message_id))
+            sent_at = cur.fetchone()[0]
+        log.info("dial_list: WhatsApp водителю %s отправлен (оператор %s, шаблон %s)", lead_id, ctx["user_id"], title)
+        return {"sent": True, "sent_at": _iso(sent_at), "template_title": title}
+
+    # ------------------------------------------------------------ поездки (TEZ APP)
+    def request_trip_check(self, reason=""):
+        """Прогон проверки поездок в своём потоке (планировщик, загрузка базы Тез)."""
+        return self.trip_checker.request(reason)
+
+    def _precheck_trips(self, ctx):
+        """Перед выдачей пачки Тез — свежая проверка поездок тех, кто в неё попадёт (с запасом):
+        вышедшие на линию уходят из пула сами (signed_at). Сбой TEZ APP — выдаём как есть."""
+        settings = ctx["settings"]
+        size = int(settings["portion_size"])
+        with self.db._get_cursor() as cur:
+            cur.execute(self._POOL_SQL.format(lock=""), (
+                ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"],
+                size + max(5, size // 2)))
+            ids = [str(r[0]) for r in cur.fetchall()]
+        summary = self.trip_checker.check_now(ids, fresh_minutes=TRIP_PRECHECK_FRESH_MINUTES,
+                                              timeout=TRIP_PRECHECK_TIMEOUT_SEC, budget_sec=TRIP_PRECHECK_BUDGET_SEC)
+        if summary.get("checked") or summary.get("stopped"):
+            log.info("dial_list: поездки перед выдачей оператору %s: проверено %d, вышли на линию %d%s",
+                     ctx["user_id"], summary.get("checked", 0), len(summary.get("online") or []),
+                     f"; {summary['stopped']}" if summary.get("stopped") else "")
+        return summary
+
+    def _precheck_call_trips(self, ctx, assignment_id):
+        """Перед звонком Тез — вышел ли этот водитель на линию (проверка старше
+        TRIP_CALL_FRESH_MINUTES). Вышел — транзакция звонка закроет строку и ответит goal."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT a.lead_id FROM dial_list_assignments a
+                WHERE a.id = %s AND a.operator_id = %s AND a.state = 'issued'
+            """, (str(assignment_id), ctx["user_id"]))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return self.trip_checker.check_now([str(row[0])], fresh_minutes=TRIP_CALL_FRESH_MINUTES,
+                                           timeout=TRIP_CALL_TIMEOUT_SEC, budget_sec=TRIP_CALL_TIMEOUT_SEC)
+
+    # ------------------------------------------------------------ автоцикл
+    # Свои сроки, которые наступили, — с последним звонком водителю (по любой строке): правила
+    # «можно ли звонить снова» у них те же, что у строк выдачи (_auto_ready_at), иначе цикл звонил
+    # бы одному водителю по кругу — после отмены до ответа срок оператора остаётся (ревью 15.10.2026).
+    _AUTO_OWN_DUE_SQL = """
+        SELECT l.id, l.due_kind, lt.state, lt.requested_at
+        FROM dial_list_leads l
+        LEFT JOIN LATERAL (
+            SELECT t.state, t.requested_at
+            FROM dial_list_attempts t
+            JOIN dial_list_assignments a2 ON a2.id = t.assignment_id
+            WHERE a2.lead_id = l.id
+            ORDER BY t.requested_at DESC
+            LIMIT 1
+        ) lt ON TRUE
+        WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+          AND l.owner_operator_id = %(me)s AND l.owner_call_at <= CURRENT_TIMESTAMP
+          AND l.status IN ('new', 'in_progress')
+          AND l.signed_at IS NULL AND l.sign_status <> 'processing'
+          AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a
+                          WHERE a.lead_id = l.id AND a.state = 'issued' AND a.operator_id <> %(me)s)
+        ORDER BY l.owner_call_at ASC
+        LIMIT %(limit)s
+        FOR UPDATE OF l SKIP LOCKED
+    """
+    _AUTO_ROWS_SQL = """
+        SELECT a.id, a.lead_id, l.full_name, a.position,
+               (SELECT MAX(t.requested_at) FROM dial_list_attempts t WHERE t.assignment_id = a.id),
+               (SELECT t.state FROM dial_list_attempts t WHERE t.assignment_id = a.id
+                ORDER BY t.requested_at DESC LIMIT 1)
+        FROM dial_list_assignments a
+        JOIN dial_list_leads l ON l.id = a.lead_id
+        WHERE a.portion_id = %s AND a.state = 'issued'
+        ORDER BY a.position
+    """
+
+    @staticmethod
+    def _auto_ready_at(last_state, last_at, now):
+        """С какого момента автоцикл может звонить водителю, чей последний звонок — (state, когда):
+        None — нельзя вовсе (плечо кончилось, исход едет от АТС: строку закроет он); иначе момент.
+        Звонков не было — сейчас; плечо по серверу ещё идёт — через ACTIVE_ATTEMPT_WINDOW_MINUTES;
+        отмена до ответа, отказ АТС, недозвон, зависшая попытка — через AUTO_RETRY_GAP_SEC, не сразу.
+        Одно правило для строк выдачи и для своих сроков (перезвон, дожим)."""
+        if last_at is None:
+            return now
+        last_at = _as_utc(last_at)
+        if last_state == "ended" and last_at > now - timedelta(minutes=ATTEMPT_STALE_MINUTES):
+            return None
+        if last_state in LEG_UP_STATES and last_at > now - timedelta(minutes=ACTIVE_ATTEMPT_WINDOW_MINUTES):
+            return last_at + timedelta(minutes=ACTIVE_ATTEMPT_WINDOW_MINUTES)
+        return last_at + timedelta(seconds=AUTO_RETRY_GAP_SEC)
+
+    def auto_next(self, user_id, status=None, phone_version=None):
+        """Автоцикл Тез (POST …/auto/next): кому звонить следующим. Под замком оператора, без сети:
+          1. свой срок (перезвон, дожим), который уже наступил, — строкой в последней выдаче;
+          2. строка открытой выдачи: сначала без попыток вовсе (не по a.attempts — отмена до ответа
+             откатывает счётчик, и такая строка выглядела бы новой, а цикл звонил бы тому же
+             водителю по кругу), по порядку; потом с попытками старше AUTO_RETRY_GAP_SEC;
+          3. строки есть, но ждут исхода АТС или паузы — reason 'wait' и retry_after_sec;
+          4. выдача обработана — новая пачка (issue_next_portion: перед ней — проверка поездок);
+             пул пуст — reason 'empty'.
+        Ответ — состояние телефона и next {assignment_id, lead_id, full_name, kind} или null."""
+        ctx = self.operator_context(user_id)
+        settings = ctx["settings"]
+        if not is_tez(settings) or not settings.get("auto_dial"):
+            raise DialListError(AUTO_NOT_ENABLED, 409, kind="auto_off")
+        status = clean_operator_status(status)
+        if status is not None and status != OPERATOR_STATUS_ACTIVE:
+            raise DialListError(AUTO_STATUS_ONLY_ACTIVE, 409, kind=CALL_ERROR_STATUS)
+        chosen, kind, wait_sec, need_portion = None, "", None, False
+        waiting = []
+        with self.db._get_cursor() as cur:
+            self._lock_operator(cur, ctx["user_id"])
+            active = self._active_attempt(cur, ctx["user_id"])
+            if active:
+                raise DialListError(f"Идёт звонок ({active['full_name']}). Дождитесь его завершения", 409)
+            self._require_outcome_done(cur, ctx)
+            now = _utcnow()
+            cur.execute(self._AUTO_OWN_DUE_SQL, {"department_id": ctx["department_id"], "period": settings["_period"],
+                                                 "me": ctx["user_id"], "limit": AUTO_OWN_DUE_SCAN})
+            for own_id, own_kind, last_state, last_at in cur.fetchall():
+                ready_at = self._auto_ready_at(last_state, last_at, now)
+                if ready_at is None:
+                    continue
+                if ready_at > now:
+                    waiting.append(ready_at)
+                    continue
+                lead_id, kind = str(own_id), (own_kind or "")
+                cur.execute("""
+                    SELECT id FROM dial_list_assignments
+                    WHERE lead_id = %s AND operator_id = %s AND state = 'issued' LIMIT 1
+                """, (lead_id, ctx["user_id"]))
+                mine = cur.fetchone()
+                if mine:
+                    chosen = str(mine[0])
+                else:
+                    cur.execute("SAVEPOINT dial_auto_own")
+                    try:
+                        chosen, _how = self._recall_row(cur, ctx, lead_id)
+                        cur.execute("RELEASE SAVEPOINT dial_auto_own")
+                    except psycopg2.errors.UniqueViolation:
+                        # Водителя только что выдали другому оператору общим пулом — следующий срок.
+                        cur.execute("ROLLBACK TO SAVEPOINT dial_auto_own")
+                        chosen, kind = None, ""
+                if chosen is not None:
+                    break
+            if chosen is None:
+                kind = "queue"
+                portion = self._open_portion(cur, ctx["user_id"])
+                rows = []
+                if portion:
+                    cur.execute(self._AUTO_ROWS_SQL, (portion["id"],))
+                    rows = cur.fetchall()
+                fresh = [r for r in rows if r[4] is None]
+                if fresh:
+                    chosen = str(fresh[0][0])
+                else:
+                    chosen_at = None
+                    for r in rows:
+                        ready_at = self._auto_ready_at(r[5], r[4], now)
+                        if ready_at is None:
+                            # Исход едет от АТС: строку закроет он, а новая пачка перенесёт её с собой
+                            # (issue_next_portion) — звонить ей сейчас нельзя.
+                            continue
+                        if ready_at > now:
+                            waiting.append(ready_at)
+                            continue
+                        last_at = _as_utc(r[4])
+                        if chosen is None or last_at < chosen_at:
+                            chosen, chosen_at = str(r[0]), last_at
+                    if chosen is None:
+                        if waiting:
+                            wait_sec = max(AUTO_WAIT_MIN_SEC, int((min(waiting) - now).total_seconds()) + 1)
+                        else:
+                            need_portion = True
+        if need_portion:
+            try:
+                self.issue_next_portion(ctx["user_id"], phone_version=phone_version)
+            except DialListError as exc:
+                if exc.status == 404:
+                    return {"next": None, "reason": "empty", "retry_after_sec": AUTO_EMPTY_RETRY_SEC,
+                            **self.get_state(ctx["user_id"], phone_version=phone_version)}
+                raise
+            with self.db._get_cursor() as cur:
+                portion = self._open_portion(cur, ctx["user_id"])
+                if portion:
+                    cur.execute(self._AUTO_ROWS_SQL, (portion["id"],))
+                    for r in cur.fetchall():
+                        if r[4] is None:
+                            chosen, kind = str(r[0]), "queue"
+                            break
+            if chosen is None:
+                wait_sec = AUTO_WAIT_MIN_SEC
+        state = self.get_state(ctx["user_id"], phone_version=phone_version)
+        if chosen is None:
+            return {"next": None, "reason": "wait", "retry_after_sec": int(wait_sec or AUTO_WAIT_MIN_SEC), **state}
+        item = next((i for i in ((state.get("portion") or {}).get("items") or []) if i["assignment_id"] == chosen),
+                    None)
+        log.info("dial_list: автообзвон оператора %s — следующий: строка %s (%s)", ctx["user_id"], chosen, kind)
+        return {"next": {"assignment_id": chosen, "lead_id": item["lead_id"] if item else None,
+                         "full_name": item["full_name"] if item else "", "kind": kind or "queue"},
+                "reason": "", "retry_after_sec": 0, **state}
 
 
 def _to_int(value, default=0):

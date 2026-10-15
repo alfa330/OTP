@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosToggle } from '../ui/ios';
+import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented, IosToggle } from '../ui/ios';
 import {
-    SUBTYPES_MAX, SUBTYPE_NAME_MAX, isNewId, outcomeLabel, outcomeSubtypeName, outcomesSnapshot, remapExpanded,
-    serializeOutcomes, serverHasSubtypes, subtypesToggleLabel, toEditable, validateOutcomes,
+    DUE_KIND_OPTIONS, SUBTYPES_MAX, SUBTYPE_NAME_MAX, isNewId, normalizeDueKind, outcomeLabel, outcomeSubtypeName,
+    outcomesSnapshot, remapExpanded, serializeOutcomes, serverHasSubtypes, subtypesToggleLabel, toEditable, validateOutcomes,
 } from './outcomeFormat';
 
 /*
@@ -20,6 +20,12 @@ import {
  * итога есть хоть один включённый тип, оператор в телефоне обязан выбрать и его.
  * Цвет и «перезвонить» у типа свои не заводим — они у итога. Типы, как и итоги,
  * не удаляются, а выключаются: на них ссылаются попытки в истории.
+ *
+ * «Нужна дата» (автообзвон Тез, контракт 15.10.2026; только при dueKinds): у
+ * «Перезвонить» оператор обязан указать дату и время перезвона, у «Согласен выйти
+ * на линию» — когда водитель выйдет. Водитель вернётся к этому же оператору к
+ * сроку, поэтому итог с датой всегда «перезвонить» — переключатель тогда включён и
+ * заперт (так же решает сервер). У удалённого КЦ выбора нет вовсе.
  */
 
 // Системная палитра iOS — те же цвета, что у бейджей сайта.
@@ -172,7 +178,7 @@ const SubtypeList = ({ outcome, canEdit, onPatch, onMove, onAdd, onRemove }) => 
     );
 };
 
-const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = true, showToast }) => {
+const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = true, showToast, dueKinds = false }) => {
     const [items, setItems] = useState(null);     // рабочая копия
     const [saved, setSaved] = useState(null);     // что на сервере (для «есть изменения»)
     const [error, setError] = useState('');
@@ -194,17 +200,17 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             const list = toEditable(data.outcomes);
             setTypesSupported(serverHasSubtypes(data.outcomes));
             setItems(list);
-            setSaved(outcomesSnapshot(list));
+            setSaved(outcomesSnapshot(list, { dueKinds }));
             setError('');
         } catch (e) {
             setError(e.message || 'Не удалось загрузить итоги');
         }
-    }, [apiBaseUrl, authHeaders, departmentId]);
+    }, [apiBaseUrl, authHeaders, departmentId, dueKinds]);
 
     useEffect(() => { load(); }, [load]);
 
     // Один и тот же снимок для сохранённого и для рабочей копии (outcomeFormat.js).
-    const snapshot = useMemo(() => (items ? outcomesSnapshot(items) : null), [items]);
+    const snapshot = useMemo(() => (items ? outcomesSnapshot(items, { dueKinds }) : null), [items, dueKinds]);
     const dirty = items && snapshot !== saved;
 
     const patch = (idx, changes) => setItems((list) => list.map((o, i) => (i === idx ? { ...o, ...changes } : o)));
@@ -217,7 +223,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     });
     const add = () => setItems((list) => [...(list || []), {
         id: tempId(), name: '', color: OUTCOME_PALETTE[(list?.length || 0) % OUTCOME_PALETTE.length],
-        requeue: false, is_active: true, used: 0, subtypes: [],
+        requeue: false, is_active: true, used: 0, subtypes: [], due_kind: '',
     }]);
     const remove = (idx) => setItems((list) => list.filter((_, i) => i !== idx));
 
@@ -239,7 +245,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         if (!items) return;
         // Типы уходят всегда и целиком — и у свёрнутых итогов тоже: для сервера
         // список полный, и тип, которого в нём нет, выключился бы.
-        const payload = serializeOutcomes(items);
+        const payload = serializeOutcomes(items, { dueKinds });
         const problem = validateOutcomes(payload);
         if (problem) { toast(problem, 'error'); return; }
         setSaving(true);
@@ -255,7 +261,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             setExpanded((cur) => remapExpanded(items, cur, list));
             setTypesSupported(serverHasSubtypes(data.outcomes));
             setItems(list);
-            setSaved(outcomesSnapshot(list));
+            setSaved(outcomesSnapshot(list, { dueKinds }));
             toast('Итоги звонка сохранены. Телефоны подхватят список при следующем обновлении', 'success');
         } catch (e) {
             toast(e.message || 'Не удалось сохранить итоги', 'error');
@@ -267,7 +273,14 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     return (
         <section className="space-y-1.5">
             <div className="flex items-center justify-between gap-3 px-1">
-                <div className={iosGroupLabel}>Итоги звонка</div>
+                {dueKinds ? (
+                    <div className="flex items-center gap-1.5">
+                        <span className={iosGroupLabel}>Итоги звонка</span>
+                        <IosHint text="«Нужна дата»: у итога «Перезвон» оператор обязан указать дату и время перезвона, у «Выход на линию» — когда водитель выйдет. К сроку водитель вернётся к этому же оператору; не выйдет на линию к обещанному времени — его вернут «дожать». Итог с датой всегда возвращает водителя в обзвон." />
+                    </div>
+                ) : (
+                    <div className={iosGroupLabel}>Итоги звонка</div>
+                )}
                 <span className="text-[11.5px] text-slate-500">Оператор выбирает один после каждого разговора</span>
             </div>
             <div className={`${iosCard} overflow-hidden`}>
@@ -281,6 +294,14 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                             {items.map((o, idx) => {
                                 const typesLabel = typesSupported ? subtypesToggleLabel(o, canEdit) : '';
                                 const open = !!expanded[o.id];
+                                // Итог с датой всегда «перезвонить» (outcomeFormat.js, DUE_KINDS).
+                                const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
+                                const requeueForced = dueKind !== '';
+                                const requeueTitle = requeueForced
+                                    ? 'Итог с датой всегда возвращает водителя его оператору к сроку'
+                                    : dueKinds
+                                        ? 'Водитель снова попадёт в пачки через первый интервал недозвона'
+                                        : 'Водитель снова попадёт в порции через «Повтор через, часов»';
                                 return (
                                     <li key={o.id} className={`px-3 py-2.5 ${o.is_active ? '' : 'bg-slate-50/60'}`}>
                                         <div className="flex flex-wrap items-center gap-3 sm:flex-nowrap">
@@ -293,8 +314,12 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 placeholder="Название итога"
                                                 className={`${iosInput} min-w-[140px] flex-1 py-2 text-[13.5px] ${o.is_active ? '' : 'text-slate-400 line-through'}`}
                                             />
-                                            <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600" title="Водитель снова попадёт в порции через «Повтор через, часов»">
-                                                <IosToggle checked={!!o.requeue} disabled={!canEdit} onChange={(v) => patch(idx, { requeue: v })} />
+                                            <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600" title={requeueTitle}>
+                                                <IosToggle
+                                                    checked={!!o.requeue || requeueForced}
+                                                    disabled={!canEdit || requeueForced}
+                                                    onChange={(v) => patch(idx, { requeue: v })}
+                                                />
                                                 перезвонить
                                             </label>
                                             <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600">
@@ -318,6 +343,20 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 </div>
                                             )}
                                         </div>
+                                        {dueKinds && (
+                                            <div className="ml-[38px] mt-1.5 flex flex-wrap items-center gap-2">
+                                                <span className="text-[12px] text-slate-500">Нужна дата</span>
+                                                <div className={canEdit ? '' : 'pointer-events-none opacity-60'}>
+                                                    <IosSegmented
+                                                        size="xs"
+                                                        value={dueKind}
+                                                        options={DUE_KIND_OPTIONS}
+                                                        onChange={(v) => patch(idx, { due_kind: v })}
+                                                        ariaLabel={`Нужна дата: ${o.name || 'итог'}`}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
                                         {typesLabel && (
                                             <button
                                                 type="button"

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Ban, Check, ChevronRight, Clock3, FileCheck2, FileClock, Hourglass, Loader2, PhoneCall, PhoneMissed, PhoneOff,
-    PhoneOutgoing, Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
+    Ban, CalendarClock, CarFront, Check, ChevronRight, Clock3, FileCheck2, FileClock, Hourglass, Loader2, PhoneCall,
+    PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert,
+    Undo2, X,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosHint, IosModal,
@@ -14,6 +15,10 @@ import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
 import { operatorsForFilter } from './linePicker';
+import {
+    PROFILE_TEZ, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, leadDue, normalizeProfile,
+    tezStageLabel, tezSuccessText, tripLabel,
+} from './tezAutodial';
 
 /*
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
@@ -59,6 +64,13 @@ import { operatorsForFilter } from './linePicker';
  * телефон оператора (автосброс, по умолчанию — после пятого гудка): это обычная
  * засчитанная попытка, а не отмена оператором. С 12.10.2026 телефон кладёт трубку
  * и на сообщении сети «абонент недоступен» — приписка об этом своя (attemptHints.js).
+ *
+ * С 15.10.2026 журнал служит и «Автообзвону Тез» (profile='tez'): цель лида там —
+ * выход водителя на линию по TEZ APP, а не подписание. Свои этапы (TEZ_STAGES:
+ * «Перезвон назначен», «Обещали выйти», «Вышли на линию»), в строке — срок и метка
+ * поездок вместо состояния документов, в карточке — поездки вместо документов,
+ * у звонка — кто его начал (автообзвон или оператор сам), срок и офферы из итога,
+ * отправки WhatsApp. ИИН у Тез нет — ни в поиске, ни в фильтрах.
  */
 
 const PAGE = 50;
@@ -79,10 +91,13 @@ const STAGES = [
     { value: 'sign_wait', label: 'На проверке у Яндекса', dot: 'bg-sky-500', onlyIfReported: true },
     { value: 'signed', label: 'Подписали', dot: 'bg-emerald-600', check: true },
 ];
-const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
+// Общие этапы у Тез — тех же цветов (tezAutodial.js), свои — «Перезвон назначен» и «Обещали выйти».
+const STAGE_DOT = Object.fromEntries([...STAGES, ...TEZ_STAGES].map((s) => [s.value, s.dot]));
 
 /* Состояние документов, которое стоит показать в строке (см. шапку файла). */
 const SIGN_NOTE = { processing: 'на проверке у Яндекса', expired: 'срок подписания истёк', no_iin: 'нет ИИН' };
+/* Отбор «вышли на линию» у Тез — тот же фильтр сервера sign, но словами Тез (чип под полосой). */
+const TEZ_SIGN_CHIP = { success: 'после разговора — успешка', self: 'сами, без разговора' };
 
 const RESULT_LABEL = {
     answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не поднял трубку', other: 'Не состоялся', failed: 'Ошибка АТС',
@@ -225,8 +240,8 @@ const initials = (name) => {
     return parts.length ? parts.slice(0, 2).map((p) => p[0].toUpperCase()).join('') : '•';
 };
 
-/** Что стоит за этапом строки — одна короткая фраза под ним. */
-const stageDetail = (lead) => {
+/** Что стоит за этапом строки — одна короткая фраза под ним. tez — автообзвон Тез. */
+const stageDetail = (lead, tez = false) => {
     const last = lead.last_call;
     const result = last?.result ? lower(RESULT_LABEL[last.result] || last.result) : '';
     // «Звонили ли» — по последнему звонку, а не по счётчику: итог «Перезвонить» и
@@ -245,10 +260,14 @@ const stageDetail = (lead) => {
             return lead.attempts_total
                 ? `${lead.attempts_total} ${plural(lead.attempts_total, 'попытка', 'попытки', 'попыток')} без ответа`
                 : result;
+        case 'callback':
+        case 'followup':
+            // Автообзвон Тез: свой срок оператора — перезвон или «дожать» обещавшего выйти.
+            return [leadDue(lead)?.text, lead.owner_operator?.name].filter(Boolean).join(' · ');
         case 'sign_wait':
             return 'водитель подписал, ждём Яндекс';
         case 'signed':
-            return successText(lead.sign);
+            return tez ? tezSuccessText(lead.sign) : successText(lead.sign);
         default:
             return '';
     }
@@ -262,9 +281,11 @@ const successText = (sign) => {
     return 'подписал сам, без разговора';
 };
 
-/** Этап и его подробность одной строкой + состояние документов, когда оно важно. */
-const detailWithSign = (lead) => {
-    const detail = stageDetail(lead);
+/** Этап и его подробность одной строкой + состояние документов, когда оно важно. У Тез
+    документов нет: вместо них — метка водителя по TEZ APP (кроме «вышел на линию» — это этап). */
+const detailWithSign = (lead, tez = false) => {
+    const detail = stageDetail(lead, tez);
+    if (tez) return [detail, lead.stage !== 'signed' ? tripLabel(lead.trip) : ''].filter(Boolean).join(' · ');
     // У подписавшего и у ждущего Яндекс состояние документов уже названо этапом —
     // второй раз «на проверке у Яндекса» в той же строке был бы повтором.
     const note = lead.stage !== 'signed' && lead.stage !== 'sign_wait' ? SIGN_NOTE[lead.sign?.status] : '';
@@ -297,9 +318,12 @@ const Skeleton = ({ className = '' }) => <div className={`animate-pulse rounded-
    стопка на широком экране не даёт пробежать глазами столбец этапов. */
 const GRID = 'lg:grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_minmax(0,1fr)_14px] lg:items-center lg:gap-4';
 
-const LeadRow = ({ lead, onOpen, showMonth }) => {
+const LeadRow = ({ lead, onOpen, showMonth, tez = false }) => {
     const excluded = lead.stage === 'excluded';
-    const detail = detailWithSign(lead);
+    const detail = detailWithSign(lead, tez);
+    const stageLabel = tez ? tezStageLabel(lead) : lead.stage_label;
+    // Срок перезвона или дожима наступил — пора звонить: подробность янтарная (цвет со смыслом).
+    const detailTone = tez && leadDue(lead)?.overdue ? 'text-amber-600' : 'text-slate-500';
     const operatorSub = lead.responsible_is_current ? 'в списке сейчас' : fmtWhen(lead.last_call?.at);
     const name = lead.full_name || 'Без имени';
     return (
@@ -316,10 +340,10 @@ const LeadRow = ({ lead, onOpen, showMonth }) => {
                         <span className={`min-w-0 flex-1 truncate text-[14.5px] font-semibold ${excluded ? 'text-slate-400' : 'text-slate-900'}`}>{name}</span>
                         {lead.last_call && <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{fmtWhen(lead.last_call.at)}</span>}
                     </div>
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12.5px] text-slate-500">
+                    <div className={`mt-0.5 flex min-w-0 items-center gap-1.5 text-[12.5px] ${detailTone}`}>
                         <Dot stage={lead.stage} />
                         <span className="min-w-0 truncate">
-                            <span className="text-slate-700">{lead.stage_label}</span>{detail ? ` · ${detail}` : ''}
+                            <span className="text-slate-700">{stageLabel}</span>{detail ? ` · ${detail}` : ''}
                         </span>
                     </div>
                     {(lead.outcome || lead.comment) && (
@@ -359,9 +383,9 @@ const LeadRow = ({ lead, onOpen, showMonth }) => {
             <div className="hidden min-w-0 lg:block">
                 <div className="flex items-center gap-1.5 text-[13px] text-slate-800">
                     <Dot stage={lead.stage} />
-                    <span className="truncate">{lead.stage_label}</span>
+                    <span className="truncate">{stageLabel}</span>
                 </div>
-                {detail && <div className="truncate pl-3.5 text-[12px] text-slate-500">{detail}</div>}
+                {detail && <div className={`truncate pl-3.5 text-[12px] ${detailTone}`}>{detail}</div>}
             </div>
             {/* Пустая клетка, а не «—»: столбец прочерков у каждой ещё не
                 обзвоненной строки — тот же шум, только ровными рядами. */}
@@ -387,8 +411,8 @@ const LeadRow = ({ lead, onOpen, showMonth }) => {
    кладёт туда все свои этапы, и нулевые тоже, а сервер, который этапа ещё не
    знает, на отбор по нему ответил бы 400 «stage: неизвестный этап». Выбранный
    чип не прячем — иначе отбор было бы нечем снять. */
-const StageStrip = ({ value, onChange, counts }) => {
-    const stages = STAGES.filter((s) => !s.onlyIfReported || value === s.value
+const StageStrip = ({ value, onChange, counts, stages: list = STAGES }) => {
+    const stages = list.filter((s) => !s.onlyIfReported || value === s.value
         || Object.prototype.hasOwnProperty.call(counts, s.value));
     const all = stages.reduce((sum, s) => sum + (Number(counts[s.value]) || 0), 0);
     const items = [{ value: '', label: 'Все', count: all }, ...stages.map((s) => ({ ...s, count: Number(counts[s.value]) || 0 }))];
@@ -522,7 +546,7 @@ const TimelineLine = ({ last }) => (last ? null : (
     <span aria-hidden className="absolute bottom-[-12px] left-[15.5px] top-12 w-px bg-slate-200" />
 ));
 
-const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
+const AttemptItem = ({ attempt, recording, onRecording, last = false, tez = false }) => {
     const result = attempt.result;
     const tone = result === 'answered' ? 'green' : result === 'failed' ? 'red'
         : result === 'cancelled' ? 'slate' : result ? 'amber' : 'blue';
@@ -552,7 +576,9 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
                     {attempt.is_success && (
                         <span
                             className="inline-flex items-center gap-1 self-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11.5px] font-medium text-emerald-700 ring-1 ring-emerald-100"
-                            title="Водитель подписал документы после этого разговора — успешка засчитана оператору"
+                            title={tez
+                                ? 'Водитель вышел на линию после этого разговора — успешка засчитана оператору'
+                                : 'Водитель подписал документы после этого разговора — успешка засчитана оператору'}
                         >
                             <FileCheck2 size={11} /> Успешка
                         </span>
@@ -568,10 +594,30 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
                 <div className="text-[12.5px] text-slate-500">
                     {attempt.operator?.name || 'Оператор'}
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
+                    {tez && attemptModeText(attempt) && <> · {attemptModeText(attempt)}</>}
                     {cancelledHint}
                     {autoHint}
                 </div>
                 {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
+                {tez && attemptDueText(attempt) && (
+                    <div className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-slate-600">
+                        <CalendarClock size={13} className="shrink-0 text-slate-400" />
+                        {attemptDueText(attempt)}
+                    </div>
+                )}
+                {tez && Array.isArray(attempt.offers) && attempt.offers.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                        <span className="text-[12px] text-slate-500">Предложили:</span>
+                        {attempt.offers.map((o) => (
+                            <span key={o.id} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11.5px] text-slate-700">{o.title}</span>
+                        ))}
+                    </div>
+                )}
+                {tez && attempt.wrapup_expired_at && (
+                    <div className="mt-1.5 text-[12px] text-amber-600">
+                        Итог не успели поставить за время постобработки — телефон поставил «Офлайн»
+                    </div>
+                )}
                 {attempt.comment && <Bubble>{attempt.comment}</Bubble>}
                 {attempt.recording_available && (
                     <div className="mt-2">
@@ -627,7 +673,7 @@ const EventItem = ({ event, last = false }) => {
 
 /* История по дням: заголовок дня (прилипает к верху колонки, пока листаешь его
    события), под ним события без повторения даты у каждого. */
-const History = ({ lead, recordings, onRecording }) => {
+const History = ({ lead, recordings, onRecording, tez = false }) => {
     const groups = useMemo(() => {
         const timeline = [
             ...(lead.attempts || []).map((a) => ({ kind: 'attempt', at: a.requested_at, item: a })),
@@ -660,7 +706,7 @@ const History = ({ lead, recordings, onRecording }) => {
             </div>
             <ul className="px-4 pb-1 lg:px-5">
                 {g.items.map((t, i) => (t.kind === 'attempt'
-                    ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} recording={recordings[t.item.id]} onRecording={onRecording} last={i === g.items.length - 1} />
+                    ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} recording={recordings[t.item.id]} onRecording={onRecording} last={i === g.items.length - 1} tez={tez} />
                     : <EventItem key={`e-${t.item.id}`} event={t.item} last={i === g.items.length - 1} />))}
             </ul>
         </section>
@@ -679,11 +725,15 @@ const STAGE_BADGE = {
     excluded: { Icon: Ban, tone: 'slate' },
     sign_wait: { Icon: FileClock, tone: 'sky' },
     signed: { Icon: FileCheck2, tone: 'green' },
+    // Автообзвон Тез: свой срок оператора и цель — выход на линию, а не документы.
+    callback: { Icon: CalendarClock, tone: 'amber' },
+    followup: { Icon: CalendarClock, tone: 'sky' },
 };
+const TEZ_SIGNED_BADGE = { Icon: CarFront, tone: 'green' };
 
-const LeadSummary = ({ lead }) => {
-    const badge = STAGE_BADGE[lead.stage] || STAGE_BADGE.queue;
-    const detail = detailWithSign(lead);
+const LeadSummary = ({ lead, tez = false }) => {
+    const badge = (tez && lead.stage === 'signed' ? TEZ_SIGNED_BADGE : STAGE_BADGE[lead.stage]) || STAGE_BADGE.queue;
+    const detail = detailWithSign(lead, tez);
     const attempts = Array.isArray(lead.attempts) ? lead.attempts : null;
     const calls = attempts ? attempts.filter((a) => a.result !== 'cancelled').length : null;
     const talk = attempts ? attempts.reduce((sum, a) => sum + (a.result === 'answered' ? Number(a.billsec) || 0 : 0), 0) : null;
@@ -699,7 +749,7 @@ const LeadSummary = ({ lead }) => {
                     <badge.Icon size={17} />
                 </div>
                 <div className="min-w-0 pt-0.5">
-                    <div className="text-[15px] font-semibold leading-tight text-slate-900">{lead.stage_label}</div>
+                    <div className="text-[15px] font-semibold leading-tight text-slate-900">{tez ? tezStageLabel(lead) : lead.stage_label}</div>
                     {detail && <div className="mt-0.5 text-[12.5px] leading-snug text-slate-500">{detail}</div>}
                 </div>
             </div>
@@ -833,6 +883,77 @@ const SignSection = ({ lead }) => {
     );
 };
 
+/* Автообзвон Тез: вместо документов — поездки водителя по TEZ APP и кому засчитан
+   выход на линию. Кнопка «Проверить поездки» — в полосе действий внизу окна. */
+const TripSection = ({ lead }) => {
+    const trip = lead.trip || {};
+    const sign = lead.sign || {};
+    const online = lead.stage === 'signed';
+    const label = tripLabel(trip);
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>Поездки в TEZ APP</span>
+                <IosHint text="Сервер спрашивает TEZ APP по номеру раз в час и перед звонком: был ли у водителя завершённый заказ в месяце базы. Вышел на линию — водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до первого заказа. «Нет аккаунта» от «не ездил» TEZ APP не отличает." />
+            </div>
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="ml-4 divide-y divide-slate-100">
+                    {online ? (
+                        <InfoRow
+                            label="Успешка"
+                            sub={trip.month_first_order_at ? `первый заказ ${fmtWhen(trip.month_first_order_at)}` : ''}
+                        >
+                            {sign.success ? sign.success.operator?.name || 'Оператор'
+                                : <span className="text-slate-500">{tezSuccessText(sign)}</span>}
+                        </InfoRow>
+                    ) : (
+                        <InfoRow label="Поездки">
+                            {label || <span className="text-slate-400">ещё не проверяли</span>}
+                        </InfoRow>
+                    )}
+                    {lead.promised_online_at && (
+                        <InfoRow label="Обещал выйти">{fmtWhen(lead.promised_online_at)}</InfoRow>
+                    )}
+                    <InfoRow label="Проверено">
+                        {trip.checked_at ? fmtWhen(trip.checked_at) : <span className="text-slate-400">ещё нет</span>}
+                    </InfoRow>
+                    {lead.profile_url && (
+                        <InfoRow label="Профиль">
+                            <a href={lead.profile_url} target="_blank" rel="noreferrer" className="font-medium text-blue-600 hover:underline">
+                                открыть в админке
+                            </a>
+                        </InfoRow>
+                    )}
+                </div>
+            </div>
+        </section>
+    );
+};
+
+/* Сообщения WhatsApp, которые операторы отправили водителю из карточки звонка. */
+const WaSection = ({ messages }) => (
+    <section className="space-y-1.5">
+        <div className={iosGroupLabel}>WhatsApp</div>
+        <div className={`${iosCard} overflow-hidden`}>
+            <div className="ml-4 divide-y divide-slate-100">
+                {messages.map((m, i) => (
+                    // eslint-disable-next-line react/no-array-index-key
+                    <InfoRow
+                        key={i}
+                        label={m.template_title || 'Шаблон'}
+                        sub={[m.operator_name, fmtWhen(m.sent_at || m.created_at)].filter(Boolean).join(' · ')}
+                        subTitle={m.error || undefined}
+                    >
+                        <span className={m.status === 'failed' ? 'text-rose-600' : m.status === 'sent' ? 'text-slate-900' : 'text-slate-500'}>
+                            {WA_STATUS_LABEL[m.status] || m.status}
+                        </span>
+                    </InfoRow>
+                ))}
+            </div>
+        </div>
+    </section>
+);
+
 const CONFIRM_TEXT = {
     exclude: 'Исключить водителя из обзвона? Операторы больше его не получат.',
     requeue: 'Вернуть водителя в список? Попытки обнулятся. Если его строка ещё на экране у оператора — '
@@ -842,7 +963,7 @@ const CONFIRM_TEXT = {
 
 const LeadSheet = ({
     open, lead, loading, error, canEdit, busy, recordings,
-    onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording, onSignCheck, checking,
+    onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording, onSignCheck, checking, tez = false,
 }) => {
     const [confirm, setConfirm] = useState(null); // 'requeue' | 'restore' | 'exclude' | null
     const [reason, setReason] = useState('');
@@ -882,7 +1003,10 @@ const LeadSheet = ({
     }, [open]);
 
     const historyReady = Array.isArray(lead?.attempts);
-    const canRequeue = canEdit && historyReady && ['answered', 'exhausted', 'waiting', 'excluded'].includes(lead.stage);
+    // У Тез вернуть в список можно и того, кто ждёт своего перезвона или дожима: срок снимается.
+    const requeueStages = tez ? ['answered', 'exhausted', 'waiting', 'excluded', 'callback', 'followup']
+        : ['answered', 'exhausted', 'waiting', 'excluded'];
+    const canRequeue = canEdit && historyReady && requeueStages.includes(lead.stage);
     // Подписавшему ни возврат, ни исключение не нужны: обзвон для него окончен.
     // Ждущему Яндекс — тоже: из обзвона он ушёл, а этап «На проверке у Яндекса»
     // сервер ставит раньше «Исключён», так что исключение не было бы видно.
@@ -899,7 +1023,9 @@ const LeadSheet = ({
     };
 
     // «Проверить подписание» — водителю с ИИН, пока он не подписал (подписавшего не перепроверяем).
-    const canCheck = canEdit && historyReady && lead.has_iin && lead.stage !== 'signed' && lead.sign?.can_check !== false;
+    // У Тез — «Проверить поездки»: ИИН не нужен, вышедшего на линию не перепроверяем.
+    const canCheck = canEdit && historyReady && lead.stage !== 'signed'
+        && (tez || (lead.has_iin && lead.sign?.can_check !== false));
 
     /* Полоса действий внизу окна — все действия над водителем в одном месте:
        разрушительное слева и отдельно от остальных, главное — справа, последним. */
@@ -944,7 +1070,7 @@ const LeadSheet = ({
                 {canCheck && (
                     <button type="button" onClick={onSignCheck} disabled={checking} className={iosBtnSecondary}>
                         {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                        Проверить подписание
+                        {tez ? 'Проверить поездки' : 'Проверить подписание'}
                     </button>
                 )}
                 {canRequeue && (
@@ -997,7 +1123,7 @@ const LeadSheet = ({
                         aria-label="О водителе"
                         className="thin-scroll space-y-4 px-4 lg:order-2 lg:overflow-y-auto lg:overscroll-contain lg:border-l lg:border-slate-200/70 lg:px-5 lg:py-5"
                     >
-                        <LeadSummary lead={lead} />
+                        <LeadSummary lead={lead} tez={tez} />
 
                         <section className="space-y-1.5">
                             <div className={iosGroupLabel}>Обзвон</div>
@@ -1017,11 +1143,23 @@ const LeadSheet = ({
                                     >
                                         {monthLabel(lead.period) || '—'}
                                     </InfoRow>
+                                    {tez && leadDue(lead) && (
+                                        <InfoRow label="Срок" sub={lead.owner_operator?.name ? `ждёт оператора ${lead.owner_operator.name}` : ''}>
+                                            <span className={leadDue(lead).overdue ? 'text-amber-600' : ''}>{leadDue(lead).text}</span>
+                                        </InfoRow>
+                                    )}
                                 </div>
                             </div>
                         </section>
 
-                        {historyReady && lead.sign && <SignSection lead={lead} />}
+                        {tez ? (
+                            <>
+                                <TripSection lead={lead} />
+                                {historyReady && Array.isArray(lead.wa_messages) && lead.wa_messages.length > 0 && (
+                                    <WaSection messages={lead.wa_messages} />
+                                )}
+                            </>
+                        ) : historyReady && lead.sign && <SignSection lead={lead} />}
 
                         <NoteSection lead={lead} canEdit={canEdit && historyReady} busy={busy} draft={noteDraft} setDraft={setNoteDraft} onSave={saveNote} />
                     </aside>
@@ -1035,7 +1173,7 @@ const LeadSheet = ({
                             {historyCount && <span className="text-[12px] tabular-nums text-slate-400">{historyCount}</span>}
                         </div>
                         {historyReady ? (
-                            <History lead={lead} recordings={recordings} onRecording={onRecording} />
+                            <History lead={lead} recordings={recordings} onRecording={onRecording} tez={tez} />
                         ) : error ? (
                             <div className="px-4 py-8 text-center text-[13px] text-rose-600">
                                 {error}
@@ -1062,17 +1200,18 @@ const LeadSheet = ({
 
 const DialListJournal = ({
     apiBaseUrl, authHeaders, departmentId, batches = [], periods = [], activePeriod = '',
-    period = '', onPeriodChange, canEdit = true, showToast, onChanged, preset = null,
+    period = '', onPeriodChange, canEdit = true, showToast, onChanged, preset = null, profile = '',
 }) => {
+    const tez = normalizeProfile(profile) === PROFILE_TEZ;
     const [q, setQ] = useState('');
     const [qDebounced, setQDebounced] = useState('');
     // Отбор из «Аналитики» применяется сразу при открытии — без запроса с пустыми фильтрами.
     const [stage, setStage] = useState(() => preset?.stage || '');
     const [operatorId, setOperatorId] = useState(() => preset?.operatorId || '');
     const [batchId, setBatchId] = useState('');
-    const [outcomeId, setOutcomeId] = useState('');
+    const [outcomeId, setOutcomeId] = useState(() => preset?.outcomeId || '');
     // Тип итога: '' — все, uuid — тип, 'none' — «Без типа». Имеет смысл только при outcomeId.
-    const [outcomeSubtypeId, setOutcomeSubtypeId] = useState('');
+    const [outcomeSubtypeId, setOutcomeSubtypeId] = useState(() => (preset?.outcomeId && preset?.outcomeSubtypeId) || '');
     const [range, setRange] = useState({ from: '', to: '' });
     // Подписание документов: '' — любые, иначе ключ service.JOURNAL_SIGN_FILTERS.
     const [sign, setSign] = useState(() => preset?.sign || '');
@@ -1119,7 +1258,10 @@ const DialListJournal = ({
     useEffect(() => {
         if (!preset?.nonce || preset.nonce === appliedPreset.current) return;
         appliedPreset.current = preset.nonce;
-        setQ(''); setQDebounced(''); setBatchId(''); setOutcomeId(''); setOutcomeSubtypeId(''); setRange({ from: '', to: '' });
+        setQ(''); setQDebounced(''); setBatchId(''); setRange({ from: '', to: '' });
+        // Итог (и его тип) — из «Аналитики» Тез: нажатие на строку итога.
+        setOutcomeId(preset.outcomeId || '');
+        setOutcomeSubtypeId((preset.outcomeId && preset.outcomeSubtypeId) || '');
         setStage(preset.stage || '');
         setSign(preset.sign || '');
         setOperatorId(preset.operatorId || '');
@@ -1302,7 +1444,13 @@ const DialListJournal = ({
                     load(0, { keepSize: true }); onChanged?.();
                 }
                 const label = data.lead.sign?.label || '';
-                toast(data.lead.stage === 'signed' ? `Подписал документы — ${lower(successText(data.lead.sign))}` : `Sapar: ${lower(label)}`, 'success');
+                if (tez) {
+                    toast(data.lead.stage === 'signed'
+                        ? `Вышел на линию — ${lower(tezSuccessText(data.lead.sign))}`
+                        : `TEZ APP: ${lower(tripLabel(data.lead.trip) || 'заказов не было')}`, 'success');
+                } else {
+                    toast(data.lead.stage === 'signed' ? `Подписал документы — ${lower(successText(data.lead.sign))}` : `Sapar: ${lower(label)}`, 'success');
+                }
             }
         } catch (e) {
             toast(e.message || 'Не удалось проверить', 'error');
@@ -1358,8 +1506,9 @@ const DialListJournal = ({
             clear: () => setRange({ from: '', to: '' }),
         },
         sign && {
-            key: 'sign', name: 'Документы',
-            label: SIGN_FILTER_OPTIONS.find((o) => o.value === sign)?.label || sign,
+            // У Тез отбор приходит только из «Аналитики» (успешки): документов там нет.
+            key: 'sign', name: tez ? 'Вышли на линию' : 'Документы',
+            label: (tez ? TEZ_SIGN_CHIP[sign] : SIGN_FILTER_OPTIONS.find((o) => o.value === sign)?.label) || sign,
             clear: () => setSign(''),
         },
     ].filter(Boolean);
@@ -1387,7 +1536,7 @@ const DialListJournal = ({
                         type="search"
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
-                        placeholder="ФИО, последние цифры номера или ИИН"
+                        placeholder={tez ? 'ФИО или последние цифры номера' : 'ФИО, последние цифры номера или ИИН'}
                         className={`${iosInput} pl-9`}
                         aria-label="Поиск по журналу"
                     />
@@ -1453,7 +1602,7 @@ const DialListJournal = ({
                    подпись внутри <label> занимала строку высотой со шрифт самого
                    label (~24 px), а подпись-блок — свою (18 px), и поле дат
                    стояло на 6 px выше соседей. */
-                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-4`}>
+                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 ${tez ? 'lg:grid-cols-3' : 'lg:grid-cols-4'}`}>
                     <label className="block space-y-1.5">
                         <span className={FIELD_HEAD}>Оператор</span>
                         <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} variant="ios" searchable={users.length > 8} ariaLabel="Оператор" />
@@ -1462,10 +1611,13 @@ const DialListJournal = ({
                         <span className={FIELD_HEAD}>Файл загрузки</span>
                         <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} variant="ios" ariaLabel="Файл загрузки" />
                     </label>
-                    <label className="block space-y-1.5">
-                        <span className={FIELD_HEAD}>Документы</span>
-                        <CustomSelect value={sign} onChange={setSign} options={SIGN_FILTER_OPTIONS} variant="ios" ariaLabel="Подписание документов" />
-                    </label>
+                    {/* У Тез документов нет: цель — выход на линию, он — этап. */}
+                    {!tez && (
+                        <label className="block space-y-1.5">
+                            <span className={FIELD_HEAD}>Документы</span>
+                            <CustomSelect value={sign} onChange={setSign} options={SIGN_FILTER_OPTIONS} variant="ios" ariaLabel="Подписание документов" />
+                        </label>
+                    )}
                     {/* div, а не label: календарь раскрывается внутри, и label
                         отдавал бы щелчок по пустому месту календаря кнопке-чипу —
                         календарь закрывался бы на полуслове. */}
@@ -1483,7 +1635,7 @@ const DialListJournal = ({
                 </div>
             )}
 
-            <StageStrip value={stage} onChange={setStage} counts={byStage} />
+            <StageStrip value={stage} onChange={setStage} counts={byStage} stages={tez ? TEZ_STAGES : STAGES} />
             <OutcomeStrip
                 outcomes={byOutcome}
                 value={outcomeId}
@@ -1551,7 +1703,7 @@ const DialListJournal = ({
                         <>
                             <div className={`divide-y divide-slate-100 transition-opacity ${loading ? 'opacity-60' : ''}`}>
                                 {items.map((lead) => (
-                                    <LeadRow key={lead.id} lead={lead} onOpen={openLead} showMonth={shownPeriod === 'all'} />
+                                    <LeadRow key={lead.id} lead={lead} onOpen={openLead} showMonth={shownPeriod === 'all'} tez={tez} />
                                 ))}
                             </div>
                             {items.length < total && (
@@ -1584,6 +1736,7 @@ const DialListJournal = ({
                 onRecording={fetchRecording}
                 onSignCheck={checkSign}
                 checking={checking}
+                tez={tez}
             />
         </section>
     );

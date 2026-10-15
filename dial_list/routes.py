@@ -105,11 +105,38 @@
                                                              тип итога: ключа нет (телефон до типов) — без типа;
                                                              ключ есть — у итога с включёнными типами обязателен
 
+Автообзвон Тез КЦ (15.10.2026) — тот же движок, отдел с профилем tez (state.profile): звонит
+сам телефон, пока оператор в «Активном»; в «Исходе» — только вручную; в остальных статусах —
+никак. Цель лида — выход на линию по TEZ APP (signed_at, sign_status 'online'), а не подписание:
+    POST /api/operator/dial_list/items/<assignment_id>/call  тело {auto, status: active|outbound|other}: другой
+                                                             статус — 409 error_kind status; водитель уже на
+                                                             линии — 409 error_kind goal (строка снята)
+    POST /api/operator/dial_list/auto/next                   {status} → next {assignment_id, lead_id, full_name,
+                                                             kind: queue|callback|online} или null с reason
+                                                             wait|empty и retry_after_sec; + состояние
+    POST /api/operator/dial_list/attempts/<attempt_id>/outcome
+                                                             ещё due_at (ISO; обязателен у итога с due_kind) и
+                                                             offer_ids (офферы, предложенные водителю)
+    POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
+                                                             ещё event wrapup_expired — время на итог вышло,
+                                                             телефон перевёл оператора в «Офлайн»
+    POST /api/operator/dial_list/leads/<lead_id>/whatsapp    {template_id, attempt_id?} — шаблон WhatsApp своему
+                                                             водителю (ChatApp); не чаще раза в сутки водителю
+
 Ручки руководителя. Круг свой, не от «Настроек SIP»: админ, глава и СВ СЗоВ видят
 все отделы раздела, глава отдела — свои отделы, если они в периметре (Binotel,
 заведённые настройки обзвона или код из DIAL_LIST_DEPARTMENT_CODES):
-    GET     /api/dial_list/departments                       отделы раздела в моей зоне
-    GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела
+    GET     /api/dial_list/departments                       отделы раздела в моей зоне (?profile=remote_cc —
+                                                             по умолчанию — | tez: автообзвон Тез; СВ Тез КЦ
+                                                             видит свой отдел)
+    POST    /api/dial_list/departments/<id>/enroll           подключить {profile?} — только админ
+    GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела (у Тез — ещё auto_dial,
+                                                             call_interval_sec, wrapup_sec, retry_schedule_min,
+                                                             callback_own_minutes, followup_after_min; profile
+                                                             меняет только админ)
+    GET/PUT /api/dial_list/departments/<id>/offers           офферы автообзвона Тез {items: [...]}
+    GET/PUT /api/dial_list/departments/<id>/whatsapp         лицензия и разрешённые шаблоны WhatsApp (Тез)
+    POST    /api/dial_list/departments/<id>/trips/check      внеочередная проверка поездок в TEZ APP (Тез)
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
     GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
                                                              посадить (candidates — сотрудники других
@@ -118,7 +145,9 @@
                                                              другого отдела — только они же, иначе 403
     POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
-                                                             ИИН обязателен, после загрузки — проверка подписания
+                                                             ИИН обязателен, после загрузки — проверка подписания;
+                                                             у Тез — ФИО + телефон, проверка поездок и тот же
+                                                             файл в «Базу лидов ОП TEZ» (mirror)
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
@@ -168,8 +197,8 @@ from datetime import date, datetime
 
 from flask import Blueprint, jsonify, request
 
-from .service import (PHONE_VERSION_HEADER, SUBTYPE_NOT_SENT, DialListError, DialListService, parse_period,
-                      webhook_remote_addr)
+from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
+                      DialListError, DialListService, parse_period, webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
@@ -180,13 +209,21 @@ LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
 def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               resolve_requester, is_admin_role, headed_department_ids,
                               is_super_admin_role=None, is_supervisor_role=None,
-                              department_code_of=None, service=None):
+                              department_code_of=None, service=None, tez_leads_mirror=None,
+                              is_global_admin=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
+    is_global_admin(requester_id, role) -> bool — администратор всей компании, а не глава отдела
+    с ролью «админ» (у глав роль админская, а зона — свой отдел): только ему перевод отдела между
+    разделами (профиль) и подключение к автообзвону Тез; не передан — как is_admin_role;
     is_super_admin_role(role) -> bool — кому, кроме главы СЗоВ, можно сажать на линию
     сотрудника другого отдела (не передан — суперадминов для раздела нет);
     is_supervisor_role(role) -> bool и department_code_of(user_id) -> код отдела —
-    по ним СВ СЗоВ получает раздел целиком (не переданы — СВ раздела не получают)."""
+    по ним СВ СЗоВ получает раздел целиком, а СВ Тез КЦ — свой отдел (не переданы — СВ
+    раздела не получают);
+    tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period) -> dict —
+    тот же файл базы автообзвона Тез ещё и в «Базу лидов ОП TEZ» (владелец, 15.10.2026: одна
+    загрузка на обе); не передан — только в раздел."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -217,13 +254,25 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         role = requester[3]
         # Логин — восьмое поле строки get_user (u.login); по нему работает пилот.
         login = requester[7] if len(requester) > 7 else None
+        # supervisor_id — у СВ: отдел, которому раздел открыт своим отделом (Тез КЦ, 15.10.2026).
+        supervisor_code = _supervisor_department_code(requester_id, role)
+        extra = {"supervisor_id": requester_id} if supervisor_code is not None else {}
         scope = svc.manager_scope(bool(is_admin_role(role)), headed_department_ids(requester_id), login=login,
-                                  supervisor_department_code=_supervisor_department_code(requester_id, role))
+                                  supervisor_department_code=supervisor_code, **extra)
         if scope is not None and not scope:
             raise DialListError("Раздел «Удаленный КЦ» вам недоступен", 403)
         if department_id is not None and scope is not None and int(department_id) not in set(scope):
             raise DialListError("Это не ваш отдел", 403)
         return requester_id, scope
+
+    def _global_admin():
+        """Администратор всей компании (is_global_admin). Глава отдела с ролью «админ» им не
+        считается: перевести чужой отдел в другой раздел он не должен (ревью 15.10.2026)."""
+        requester_id, requester = _operator()
+        role = requester[3]
+        if is_global_admin is not None:
+            return bool(is_global_admin(requester_id, role))
+        return bool(is_admin_role(role))
 
     def _seats_anyone():
         """Может ли запросивший сажать на линию сотрудника ДРУГОГО отдела и снимать
@@ -330,7 +379,37 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_call(assignment_id):
         user_id, _ = _operator()
-        return jsonify({"status": "success", "attempt": svc.start_call(user_id, assignment_id)}), 200
+        payload = request.get_json(silent=True) or {}
+        # Автообзвон Тез (15.10.2026): auto — звонок поставил автоцикл телефона, status — статус
+        # оператора в телефоне (active | outbound | other). Телефон удалённого КЦ тела не шлёт —
+        # и вызов сервиса у него прежний.
+        extra = {}
+        if 'auto' in payload or 'status' in payload:
+            extra = {"auto": payload.get('auto') is True, "operator_status": payload.get('status')}
+        return jsonify({"status": "success", "attempt": svc.start_call(user_id, assignment_id, **extra)}), 200
+
+    @bp.route('/api/operator/dial_list/auto/next', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_auto_next():
+        """Автоцикл Тез: кому звонить следующим ({status} — статус оператора в телефоне). Ответ —
+        состояние, как у GET, и next {assignment_id, lead_id, full_name, kind} либо next: null с
+        reason wait | empty и retry_after_sec — когда спросить снова."""
+        user_id, _ = _operator()
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", **svc.auto_next(user_id, status=payload.get('status'),
+                                                             phone_version=_phone_version())}), 200
+
+    @bp.route('/api/operator/dial_list/leads/<lead_id>/whatsapp', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_whatsapp(lead_id):
+        """Шаблон WhatsApp своему водителю из карточки звонка ({template_id, attempt_id?}). Номер
+        водителя телефону не уходит и тут: его знает только сервер, который и шлёт сообщение."""
+        user_id, _ = _operator()
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", **svc.send_whatsapp(user_id, lead_id, payload.get('template_id'),
+                                                                 attempt_id=payload.get('attempt_id'))}), 200
 
     @bp.route('/api/operator/dial_list/leads/<lead_id>/recall', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -383,8 +462,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         payload = request.get_json(silent=True) or {}
         # Ключ subtype_id шлёт только телефон с типами итога; его отсутствие (старый
         # телефон) и null (тип не выбран) сервис различает — пропуск ключа передаём как есть.
+        # due_at и offer_ids (автообзвон Тез) — так же: ключа нет — телефон их не знает.
+        extra = {key: payload[key] for key in ('due_at', 'offer_ids') if key in payload}
         result = svc.set_attempt_outcome(user_id, attempt_id, payload.get('outcome_id'), payload.get('comment', ''),
-                                         subtype_id=payload.get('subtype_id', SUBTYPE_NOT_SENT))
+                                         subtype_id=payload.get('subtype_id', SUBTYPE_NOT_SENT), **extra)
         return jsonify({"status": "success", **result}), 200
 
     # ── руководитель ────────────────────────────────────────────────────────
@@ -393,23 +474,45 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def departments():
         """Подключённые отделы в зоне запросившего; админу — ещё и кандидаты на
-        подключение (отделы на Binotel, которых в разделе пока нет)."""
+        подключение (отделы на Binotel, которых в разделе пока нет).
+
+        ?profile=remote_cc (по умолчанию) | tez — отделы одного раздела сайта: «Удаленный КЦ» и
+        «Автообзвон Тез» (15.10.2026) живут на одном движке, но списки отделов у них свои."""
         _requester_id, scope = _manager()
+        profile = (request.args.get('profile') or PROFILE_REMOTE_CC).strip().lower()
+        if profile not in PROFILES:
+            raise DialListError("profile: remote_cc или tez")
+        candidates = []
+        if scope is None:
+            if profile != PROFILE_TEZ:
+                candidates = svc.candidate_departments()
+            elif _global_admin():
+                # Кандидаты автообзвона — и отделы удалённого КЦ без данных: перевод отдела между
+                # разделами — только администратору компании, не главе с ролью «админ».
+                candidates = svc.candidate_departments(profile=PROFILE_TEZ)
         return jsonify({
             "status": "success",
-            "departments": svc.list_departments(scope),
-            "candidates": svc.candidate_departments() if scope is None else [],
+            "profile": profile,
+            "departments": svc.list_departments(scope, profile=profile),
+            "candidates": candidates,
         }), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/enroll', methods=['POST', 'OPTIONS'])
     @require_api_key
     @_guard
     def department_enroll(department_id):
-        """Подключить отдел к разделу. Только админ: глава видит лишь уже подключённые."""
+        """Подключить отдел к разделу ({profile: remote_cc | tez}, по умолчанию remote_cc). Только
+        админ: глава видит лишь уже подключённые."""
         requester_id, scope = _manager()
         if scope is not None:
             raise DialListError("Подключить отдел к обзвону может администратор", 403)
-        settings = svc.enroll_department(department_id, changed_by=requester_id)
+        payload = request.get_json(silent=True) or {}
+        # К автообзвону Тез подключение может и перевести отдел удалённого КЦ (без данных) —
+        # только администратору компании (_global_admin), как и смена профиля в настройках.
+        if str(payload.get('profile') or '').strip().lower() == PROFILE_TEZ and not _global_admin():
+            raise DialListError("Подключить отдел к автообзвону может администратор", 403)
+        extra = {"profile": payload['profile']} if payload.get('profile') else {}
+        settings = svc.enroll_department(department_id, changed_by=requester_id, **extra)
         return jsonify({"status": "success", "settings": settings}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/unenroll', methods=['POST', 'OPTIONS'])
@@ -442,10 +545,16 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def department_settings(department_id):
-        requester_id, _scope = _manager(department_id)
+        requester_id, scope = _manager(department_id)
         if request.method == 'GET':
             return jsonify({"status": "success", "settings": svc.department_settings(department_id)}), 200
         payload = request.get_json(silent=True) or {}
+        # Профиль переводит отдел из раздела в раздел — только администратору компании: глава
+        # отдела с ролью «админ» (scope None) перевёл бы чужой отдел (ревью 15.10.2026).
+        if payload.get('profile') is not None:
+            current = svc.department_profile(department_id)
+            if str(payload.get('profile')).strip().lower() != current and (scope is not None or not _global_admin()):
+                raise DialListError("Профиль отдела меняет администратор", 403)
         settings = svc.save_department_settings(department_id, payload, changed_by=requester_id)
         return jsonify({"status": "success", "settings": settings}), 200
 
@@ -544,20 +653,45 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError(f"Файл слишком большой. Лимит: {LEADS_MAX_FILE_SIZE_MB} MB", 413)
         # База какого месяца: поле формы period=YYYY-MM; пусто — обзваниваемый месяц.
         period = parse_period(request.form.get('period'))
+        # Автообзвон Тез (15.10.2026): ФИО + телефон, ИИН не нужен — цель лида не подписание в
+        # Sapar, а выход на линию по TEZ APP.
+        tez = svc.department_profile(department_id) == PROFILE_TEZ
         # Общий разбор файла «fio + phone» и общая нормализация номера — одна
         # точка правды для всей телефонии проекта. ИИН в базе обзвона обязателен
         # (владелец, 29.09.2026): по нему проверяется подписание документов.
         from common.leads_file import parse_leads_file
         try:
-            rows = parse_leads_file(raw_bytes, file_ext, with_iin=True)
+            if tez:
+                rows = parse_leads_file(raw_bytes, file_ext, with_iin=False)
+            else:
+                rows = parse_leads_file(raw_bytes, file_ext, with_iin=True)
         except ValueError as exc:
             raise DialListError(str(exc))
-        counts = svc.import_leads(department_id, requester_id, file_name, rows, period=period)
-        # Свежую базу проверяем сразу, не дожидаясь получасового прогона: подписавшие
-        # ещё до загрузки не должны уйти операторам. Проверка идёт в своём потоке.
-        if counts.get("rows_new") or counts.get("rows_duplicate"):
-            svc.request_sign_check("загрузка базы")
-        return jsonify({"status": "success", **counts}), 200
+        counts = svc.import_leads(department_id, requester_id, file_name, rows,
+                                  period=period, require_iin=not tez)
+        fresh = bool(counts.get("rows_new") or counts.get("rows_duplicate"))
+        if not tez:
+            # Свежую базу проверяем сразу, не дожидаясь получасового прогона: подписавшие
+            # ещё до загрузки не должны уйти операторам. Проверка идёт в своём потоке.
+            if fresh:
+                svc.request_sign_check("загрузка базы")
+            return jsonify({"status": "success", **counts}), 200
+        # Тез: кто уже ездит — тоже сразу (свой поток), и тот же файл — в «Базу лидов ОП TEZ»,
+        # где считаются успешки и зарплата (одна загрузка на обе, владелец 15.10.2026). Её сбой
+        # загрузку в раздел не отменяет: руководитель увидит mirror.error и загрузит файл там.
+        trip_check = ""
+        if fresh:
+            svc.request_trip_check("загрузка базы")
+            trip_check = "queued"
+        mirror = None
+        if tez_leads_mirror is not None:
+            period_date = date.fromisoformat(counts["period"])
+            try:
+                mirror = tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period_date)
+            except Exception:
+                log.exception("dial_list: файл базы Тез не попал в «Базу лидов ОП TEZ» (отдел %s)", department_id)
+                mirror = {"error": "В «Базу лидов ОП TEZ» файл не попал — загрузите его там вручную"}
+        return jsonify({"status": "success", **counts, "mirror": mirror, "trip_check": trip_check}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/summary', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -598,6 +732,53 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             return jsonify({"status": "success",
                             "outcomes": svc.save_outcomes(department_id, items, changed_by=requester_id)}), 200
         return jsonify({"status": "success", "outcomes": svc.outcomes(department_id)}), 200
+
+    # ── автообзвон Тез: офферы, WhatsApp, поездки (15.10.2026) ─────────────────
+    def _tez_department(department_id):
+        """Руководитель отдела автообзвона Тез: у отдела другого профиля этих настроек нет."""
+        requester_id, scope = _manager(department_id)
+        if svc.department_profile(department_id) != PROFILE_TEZ:
+            raise DialListError("Это настройка автообзвона Тез", 409)
+        return requester_id, scope
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/offers', methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def offers(department_id):
+        """Офферы, которые оператор отмечает в карточке звонка: {items: [{id?, title, description,
+        is_active}]} — список целиком, как итоги (кого нет — выключается, история на них ссылается)."""
+        requester_id, _scope = _tez_department(department_id)
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True) or {}
+            return jsonify({"status": "success",
+                            **svc.save_offers(department_id, payload.get('items'), changed_by=requester_id)}), 200
+        return jsonify({"status": "success", **svc.offers(department_id)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/whatsapp', methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def whatsapp(department_id):
+        """Шаблоны WhatsApp (ChatApp, WABA), которые оператор шлёт из карточки: GET — лицензия,
+        лицензии и шаблоны ChatApp (?refresh=1 — мимо кэша), разрешённые; PUT {license_id,
+        allowed: [{id, title, text, params}]}. Токенов и ключей ChatApp в ответе нет."""
+        requester_id, _scope = _tez_department(department_id)
+        # Ключи настроек — в корне ответа (error — текст сбоя ChatApp, а не отказ ручки).
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True) or {}
+            return jsonify({"status": "success",
+                            **svc.save_whatsapp(department_id, payload, changed_by=requester_id)}), 200
+        refresh = (request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+        return jsonify({"status": "success", **svc.whatsapp_settings(department_id, refresh=refresh)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/trips/check', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def trips_check(department_id):
+        """«Проверить поездки сейчас»: внеочередной прогон проверки TEZ APP в своём потоке (кому пора —
+        как в получасовом). started: false — прогон уже идёт, после него пройдёт ещё раз."""
+        _tez_department(department_id)
+        started = svc.request_trip_check("руководитель")
+        return jsonify({"status": "success", "started": bool(started), "state": svc.trip_checker.state()}), 200
 
     # ── скрипт разговора ────────────────────────────────────────────────────
     @bp.route('/api/dial_list/departments/<int:department_id>/script', methods=['GET', 'PUT', 'OPTIONS'])
@@ -748,6 +929,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError("date: ожидается YYYY-MM-DD")
         department_ids = scope
         wanted = request.args.get('department_id')
+        tez = False
         if wanted:
             try:
                 wanted_id = int(wanted)
@@ -756,8 +938,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             if scope is not None and wanted_id not in set(scope):
                 raise DialListError("Это не ваш отдел", 403)
             department_ids = [wanted_id]
-        return jsonify({"status": "success", "date": day.isoformat(),
-                        "operators": svc.overview(department_ids, day)}), 200
+            # Отдел автообзвона Тез — ещё звонки автоцикла, согласия, перезвоны и статус сейчас.
+            tez = svc.department_profile(wanted_id) == PROFILE_TEZ
+        operators = svc.overview(department_ids, day, tez=True) if tez else svc.overview(department_ids, day)
+        return jsonify({"status": "success", "date": day.isoformat(), "operators": operators}), 200
 
     # ── Binotel ─────────────────────────────────────────────────────────────
     @bp.route('/api/dial_list/webhook/binotel', methods=['GET', 'POST'])

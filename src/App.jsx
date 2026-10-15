@@ -465,6 +465,9 @@ const DIAL_LIST_OVERSEER_DEPARTMENT_CODES = new Set(['szov']);
 // полным доступом»). Тот же список на бэкенде —
 // dial_list.service.DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES, и решающий он.
 const DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = new Set(['szov']);
+// Раздел «Автообзвон Тез» (15.10.2026): супервайзеры этого отдела работают в нём своим
+// отделом. Тот же список на бэкенде — dial_list.service.DIAL_LIST_OWN_SUPERVISOR_CODES.
+const TEZ_AUTODIAL_DEPARTMENT_CODES = new Set(['tez']);
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -567,6 +570,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // ограничены, а рядовым сотрудникам их задаёт набор «только это»
     // (DEPARTMENT_ONLY_VIEWS в departmentViews.js).
     dial_list: ['remote_cc'],
+    // «Автообзвон Тез» (15.10.2026) — тот же движок обзвона, отдел Тез КЦ (профиль tez).
+    tez_autodial: ['tez'],
     // Обучение
     trainings: ['szov', 'op'],
     voice_trainer: ['szov'],
@@ -43340,6 +43345,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 || (isSupervisorRole(currentUserRole)
                     && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
                         normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));
+            // «Автообзвон Тез» (15.10.2026): тот же движок, что «Удаленный КЦ», но раздел
+            // отдела Тез КЦ (профиль tez) — админы, глава Тез КЦ и его супервайзеры. Решающий —
+            // сервер (dial_list.service.manager_scope: СВ отдела из DIAL_LIST_OWN_SUPERVISOR_CODES
+            // видит свой отдел, глава — свой).
+            const canAccessTezAutodialSection = dialListPilotAllows(user) && (isAdminLikeRole
+                || isSipSettingsTezDepartmentHead(user)
+                || (isSupervisorRole(currentUserRole)
+                    && (TEZ_AUTODIAL_DEPARTMENT_CODES.has(
+                        normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))
+                        || Number(user?.department_id ?? user?.departmentId) === SIP_SETTINGS_TEZ_DEPARTMENT_ID)));
             // Раздел один, провайдер выбирается внутри. Порядок важен: первым
             // открывается первый доступный, и главе ТЭЗ это должен быть Binotel.
             const sipSettingsProviders = [
@@ -46989,6 +47004,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     // путь, он ведёт на ?view=oktell_guard, и новая вкладка молча
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
+                    (requestedViewFromUrl !== 'tez_autodial' || canAccessTezAutodialSection) &&
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
@@ -47013,7 +47029,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -53030,6 +53046,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
                 // «Удаленный КЦ» — раздел отделов на Binotel, вне allowlist отдела.
                 if (view === 'dial_list' && canAccessDialListSection) return;
+                // «Автообзвон Тез» — так же, свой круг доступа.
+                if (view === 'tez_autodial' && canAccessTezAutodialSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
@@ -55447,6 +55465,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
                                                 canAccessTestNumbersSection,
                                                 canAccessDialListSection && deptAllowsInner('dial_list'),
+                                                canAccessTezAutodialSection && deptAllowsInner('tez_autodial'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
                                                 canAccessPaymentsSection,
@@ -55486,6 +55505,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessTezAutodialSection && (
+                                                <SidebarDeptScope section="tez_autodial" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'tez_autodial')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_autodial' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Автообзвон Тез</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -55552,7 +55583,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
-                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessTestNumbersSection, canAccessFleetEdm, canAccessDriverMailings)}
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessTestNumbersSection, canAccessTezAutodialSection, canAccessFleetEdm, canAccessDriverMailings)}
 
                                             {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                                             <li>
@@ -55583,6 +55614,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* Глава Тез КЦ и его супервайзеры — свой отдел (canAccessTezAutodialSection). */}
+                                            {canAccessTezAutodialSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'tez_autodial')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_autodial' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Автообзвон Тез</span>
                                                 </button>
                                             </li>
                                             )}
@@ -58148,6 +58190,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     canEdit={canAccessDialListSection}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* «Автообзвон Тез»: тот же экран с профилем tez — телефон оператора звонит
+                            сам в статусе «Активный»; цель — выход водителя на линию. Свой круг доступа.
+                            key — чтобы переход между двумя разделами не унёс состояние одного в другой. */}
+                        {( view === "tez_autodial" && canAccessTezAutodialSection && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <DialListView
+                                    key="tez_autodial"
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEdit={canAccessTezAutodialSection}
+                                    profile="tez"
                                 />
                             </Suspense>
                         ))}

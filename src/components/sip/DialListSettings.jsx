@@ -2,7 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosToggle, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import useStableCallback from '../wiki/useStableCallback';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
+import {
+    LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
+    formatSeconds, mirrorSummary, normalizeProfile, rateLabel, retryPlanText, scheduleFromInputs, tezSettingsForm,
+    tezSettingsPayload, tezUploadSummary, validateTezSettings, whenText, wrapupText,
+} from '../dial_list/tezAutodial';
 
 /*
  * Обзвон из телефона (раздел dial_list): панели настроек отдела, базы водителей
@@ -16,6 +22,11 @@ import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
  *
  * Компоненты самостоятельные: сами ходят в /api/dial_list/… и не зависят от
  * состояния «Настроек SIP».
+ *
+ * С 15.10.2026 те же панели работают и в разделе «Автообзвон Тез» — с параметром
+ * profile='tez' (контракт сервер ↔ сайт ↔ телефон): там нет ИИН и Sapar, цель лида —
+ * выход водителя на линию, а в настройках — автообзвон, постобработка и расписание
+ * недозвонов. Без параметра (profile='remote_cc') панели те же, что были.
  */
 
 const OPERATOR_MODES = [
@@ -66,11 +77,16 @@ const fmtDate = (iso) => {
     return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 
-/* Строка iOS-списка настроек: подпись слева, элемент управления справа. */
-const Row = ({ label, hint, children, wrap = false }) => (
+/* Строка iOS-списка настроек: подпись слева, элемент управления справа.
+   info — пояснение под «i» рядом с подписью (правило владельца: на экране числа и
+   названия); им пользуются строки автообзвона Тез, у прежних строк — видимый hint. */
+const Row = ({ label, hint, info, children, wrap = false }) => (
     <div className={`flex ${wrap ? 'flex-col gap-2' : 'items-center justify-between gap-3'} px-4 py-3`}>
         <div className="min-w-0">
-            <div className="text-[13.5px] text-slate-800">{label}</div>
+            <div className="flex items-center gap-1.5 text-[13.5px] text-slate-800">
+                {label}
+                {info && <IosHint text={info} label={`Что значит «${label}»`} />}
+            </div>
             {hint && <div className="text-[11.5px] leading-snug text-slate-500">{hint}</div>}
         </div>
         <div className={wrap ? '' : 'shrink-0'}>{children}</div>
@@ -78,8 +94,13 @@ const Row = ({ label, hint, children, wrap = false }) => (
 );
 
 /* Загрузка состояния отдела: настройки + сводка базы за месяц (period — ISO
- * первого дня; пусто — обзваниваемый месяц). Один хук на все панели. */
-export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, period = '' }) => {
+ * первого дня; пусто — обзваниваемый месяц). Один хук на все панели.
+ *
+ * profile — какого профиля отделы показывает раздел ('remote_cc' — «Удаленный КЦ»,
+ * 'tez' — «Автообзвон Тез»). Профиль самого отдела приходит в его настройках
+ * (сервер до профилей ключа не присылал — значит, удалённый КЦ); mismatch — отдел
+ * чужого профиля: раздел его не показывает, а не правит чужими панелями. */
+export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, period = '', profile = PROFILE_REMOTE_CC }) => {
     const [settings, setSettings] = useState(null);
     const [summary, setSummary] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -112,11 +133,172 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, p
 
     useEffect(() => { load(); }, [load]);
 
-    return { settings, summary, loading, error, forbidden, reload: load };
+    const departmentProfile = settings ? normalizeProfile(settings.profile) : null;
+    return {
+        settings, summary, loading, error, forbidden, reload: load,
+        profile: departmentProfile,
+        mismatch: departmentProfile !== null && departmentProfile !== normalizeProfile(profile),
+    };
 };
 
-/** Панель настроек отдела: режим, порция, повторы, обзваниваемый месяц, номер для линии оператора. */
-export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, periods = [], onSaved, canEdit = true, showToast }) => {
+/* Интервалы недозвона автообзвона Тез: список минут, у каждого — вид словами, под
+   списком — что это значит для попыток («2-я попытка — через 1 ч, 3-я — через 3 ч»). */
+const RetryScheduleEditor = ({ values, onChange, maxAttempts, canEdit }) => {
+    const list = Array.isArray(values) ? values : [];
+    const schedule = scheduleFromInputs(list);
+    const plan = retryPlanText(schedule, maxAttempts);
+    const set = (idx, value) => onChange(list.map((v, i) => (i === idx ? value : v)));
+    const remove = (idx) => onChange(list.filter((_, i) => i !== idx));
+    // Новый интервал — копия последнего: так обычно и растёт лесенка «1 ч, 3 ч, 24 ч».
+    const add = () => onChange([...list, list.length ? list[list.length - 1] : '60']);
+    return (
+        <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+                {list.map((value, idx) => (
+                    // eslint-disable-next-line react/no-array-index-key
+                    <div key={idx} className="flex items-center gap-1.5 rounded-xl bg-slate-50 py-1 pl-1 pr-1.5 ring-1 ring-slate-200/70">
+                        <input
+                            type="number"
+                            min={1}
+                            max={RETRY_MINUTES_MAX}
+                            value={value}
+                            onChange={(e) => set(idx, e.target.value)}
+                            disabled={!canEdit}
+                            aria-label={`Интервал ${idx + 1}, минут`}
+                            className={`${iosInput} w-20 bg-white py-1.5 text-center font-mono`}
+                        />
+                        <span className="min-w-[3rem] text-[12px] tabular-nums text-slate-500">{formatMinutes(value) || '—'}</span>
+                        {canEdit && (
+                            <button type="button" onClick={() => remove(idx)} className={`${iosBtnGhost} px-1.5 py-1`} aria-label={`Убрать интервал ${idx + 1}`}>
+                                <FaIcon className="fas fa-xmark" style={{ width: 10, height: 10 }} />
+                            </button>
+                        )}
+                    </div>
+                ))}
+                {canEdit && list.length < RETRY_SCHEDULE_MAX && (
+                    <button type="button" onClick={add} className={`${iosBtnGhost} py-1.5 text-[12.5px]`}>
+                        <FaIcon className="fas fa-plus" style={{ width: 10, height: 10 }} /> Интервал
+                    </button>
+                )}
+            </div>
+            <div className="text-[12px] text-slate-500">
+                {!schedule.length
+                    ? 'Список пуст — повтор через «Повтор через, часов»'
+                    : plan || 'Одна попытка: после недозвона водитель не возвращается'}
+            </div>
+        </div>
+    );
+};
+
+/* Настройки автообзвона Тез (контракт 15.10.2026, §2) — вместо группы «Режим». Режима
+   отдела целиком здесь нет намеренно (решение владельца): у Тез он остаётся выключенным,
+   иначе «Настройки SIP» заперли бы карточки всех операторов, а телефоны всего отдела
+   переключились бы в обзвон. Кому работать в режиме, руководитель включает лично —
+   «Сотрудники» ниже; это и есть «операторы под распределение». Пояснения — под «i»,
+   на экране числа и их вид словами. */
+const TezAutodialRows = ({ form, setForm, canEdit, numberInput }) => {
+    const schedule = scheduleFromInputs(form.retry_schedule);
+    return (
+        <>
+            <section className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                    <span className={iosGroupLabel}>Автообзвон</span>
+                    <IosHint
+                        label="Как включается режим"
+                        text="Режим включают каждому оператору лично — «Сотрудники» ниже: им сервер и раздаёт пачки. Режим отдела целиком у Тез не включается. Телефон подхватывает эти настройки при следующем обновлении списка."
+                    />
+                </div>
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    <Row
+                        label="Автообзвон"
+                        info="В статусе «Активный» телефон звонит сам, подряд: после итога и паузы — следующему водителю своей пачки, а кому пора перезвонить — первым. В статусе «Исход» автообзвон стоит: оператор сам звонит водителям из своих списков. В перерыве, тренинге, тех. перерыве и офлайне звонков нет. Выключено — телефон сам не звонит."
+                    >
+                        <IosToggle checked={!!form.auto_dial} disabled={!canEdit} onChange={(v) => setForm((f) => ({ ...f, auto_dial: v }))} />
+                    </Row>
+                    <Row
+                        label="Пауза между звонками, с"
+                        hint={formatSeconds(form.call_interval_sec)}
+                        info="Сколько секунд телефон ждёт после итога, прежде чем звонить следующему водителю. Слишком короткая пауза упирается в лимит Binotel на число звонков."
+                    >
+                        {numberInput('call_interval_sec', ...LIMITS.call_interval_sec)}
+                    </Row>
+                    <Row
+                        label="Постобработка, с"
+                        hint={wrapupText(form.wrapup_sec)}
+                        info="Сколько секунд после разговора у оператора на итог. Не успел — телефон сам ставит статус «Офлайн» (это время не оплачивается); чтобы продолжить, оператор заполняет итог и сам выбирает «Активный». 0 — без ограничения."
+                    >
+                        {numberInput('wrapup_sec', 0, LIMITS.wrapup_sec[1])}
+                    </Row>
+                    <Row
+                        label="Строк за раз"
+                        info="Сколько водителей оператор получает одной пачкой. Пачки выдаются по очереди, как в удалённом КЦ."
+                    >
+                        {numberInput('portion_size', ...LIMITS.portion_size)}
+                    </Row>
+                </div>
+            </section>
+
+            <section className="space-y-1.5">
+                <div className={iosGroupLabel}>Недозвон</div>
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    <Row
+                        label="Попыток на номер"
+                        info="Сколько раз звонить водителю, который не берёт трубку. После последнего недозвона он в обзвон не возвращается."
+                    >
+                        {numberInput('max_attempts', ...LIMITS.max_attempts)}
+                    </Row>
+                    <Row
+                        label="Интервалы недозвона, мин"
+                        hint={formatSchedule(schedule) || 'не заданы'}
+                        info="Пауза перед следующей попыткой после недозвона, в минутах: первое число — после первого недозвона, второе — после второго, последнее повторяется. Например 60, 180, 1440 — через 1 ч, 3 ч и 24 ч. Недозвон берёт любой оператор."
+                        wrap
+                    >
+                        <RetryScheduleEditor
+                            values={form.retry_schedule}
+                            onChange={(list) => setForm((f) => ({ ...f, retry_schedule: list }))}
+                            maxAttempts={Number(form.max_attempts) || 1}
+                            canEdit={canEdit}
+                        />
+                    </Row>
+                    {schedule.length === 0 && (
+                        <Row
+                            label="Повтор через, часов"
+                            info="Пока интервалы не заданы, недозвон возвращается в пачки через столько часов."
+                        >
+                            {numberInput('retry_after_hours', ...LIMITS.retry_after_hours)}
+                        </Row>
+                    )}
+                </div>
+            </section>
+
+            <section className="space-y-1.5">
+                <div className={iosGroupLabel}>Перезвоны и дожим</div>
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    <Row
+                        label="Перезвон ждёт своего оператора, мин"
+                        hint={formatMinutes(form.callback_own_minutes) || 'сразу любой'}
+                        info="Перезвон и дожим сначала ждут оператора, который их назначил. Не позвонил за столько минут после срока — водителя может взять любой оператор. 0 — сразу любой."
+                    >
+                        {numberInput('callback_own_minutes', ...LIMITS.callback_own_minutes)}
+                    </Row>
+                    <Row
+                        label="Дожать через, мин"
+                        hint={formatMinutes(form.followup_after_min) || 'сразу'}
+                        info="Водитель обещал выйти на линию, а завершённого заказа в TEZ APP так и нет — через столько минут после обещанного времени он вернётся к своему оператору, чтобы дожать."
+                    >
+                        {numberInput('followup_after_min', ...LIMITS.followup_after_min)}
+                    </Row>
+                </div>
+            </section>
+        </>
+    );
+};
+
+/** Панель настроек отдела: режим, порция, повторы, обзваниваемый месяц, номер для линии оператора.
+    profile='tez' — вместо режима отдела автообзвон, постобработка, расписание недозвонов,
+    перезвоны и дожим (TezAutodialRows выше). */
+export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, periods = [], onSaved, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
+    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
     const [form, setForm] = useState(null);
     const [saving, setSaving] = useState(false);
 
@@ -133,14 +315,22 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             retry_after_hours: String(settings.retry_after_hours ?? 24),
             caller_id_for_employee: settings.caller_id_for_employee || '',
             active_period: settings.active_period || '',
+            ...(isTez ? tezSettingsForm(settings) : {}),
         });
-    }, [settings]);
+    }, [settings, isTez]);
 
     const save = async () => {
         if (!form) return;
+        // Тез: пределы проверяем до запроса (tezAutodial.js — те же, что у сервера), а
+        // режим отдела не отправляем вовсе — он у Тез остаётся выключенным.
+        const tezPayload = isTez ? tezSettingsPayload(form) : null;
+        if (tezPayload) {
+            const problem = validateTezSettings(tezPayload);
+            if (problem) { toast(problem, 'error'); return; }
+        }
         setSaving(true);
         try {
-            const payload = {
+            const payload = tezPayload || {
                 enabled: form.enabled,
                 portion_size: numOr(form.portion_size, 20),
                 max_attempts: numOr(form.max_attempts, 3),
@@ -155,7 +345,7 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                 body: JSON.stringify(payload),
             });
             if (!resp.ok) throw new Error(await readError(resp));
-            toast('Настройки обзвона сохранены', 'success');
+            toast(isTez ? 'Настройки автообзвона сохранены. Телефоны подхватят их при следующем обновлении списка' : 'Настройки обзвона сохранены', 'success');
             onSaved?.();
         } catch (e) {
             toast(e.message || 'Не удалось сохранить', 'error');
@@ -182,20 +372,24 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
 
     return (
         <div className="space-y-4">
-            <section className="space-y-1.5">
-                <div className={iosGroupLabel}>Режим</div>
-                <div className={`${iosCard} divide-y divide-slate-100`}>
-                    <Row
-                        label="Обзвон из телефона включён"
-                        hint="У операторов отдела в iCORE Phone появляется вкладка «Обзвон». Применяется после перезапуска телефона."
-                    >
-                        <IosToggle checked={form.enabled} disabled={!canEdit} onChange={(v) => setForm((f) => ({ ...f, enabled: v }))} />
-                    </Row>
-                    <Row label="Строк за раз" hint="Сколько ФИО оператор получает одной порцией">{numberInput('portion_size', 1, 100)}</Row>
-                    <Row label="Попыток на номер" hint="После этого водитель в список не возвращается">{numberInput('max_attempts', 1, 20)}</Row>
-                    <Row label="Повтор через, часов" hint="Через сколько недозвон снова попадёт в порции">{numberInput('retry_after_hours', 0, 720)}</Row>
-                </div>
-            </section>
+            {isTez ? (
+                <TezAutodialRows form={form} setForm={setForm} canEdit={canEdit} numberInput={numberInput} />
+            ) : (
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Режим</div>
+                    <div className={`${iosCard} divide-y divide-slate-100`}>
+                        <Row
+                            label="Обзвон из телефона включён"
+                            hint="У операторов отдела в iCORE Phone появляется вкладка «Обзвон». Применяется после перезапуска телефона."
+                        >
+                            <IosToggle checked={form.enabled} disabled={!canEdit} onChange={(v) => setForm((f) => ({ ...f, enabled: v }))} />
+                        </Row>
+                        <Row label="Строк за раз" hint="Сколько ФИО оператор получает одной порцией">{numberInput('portion_size', 1, 100)}</Row>
+                        <Row label="Попыток на номер" hint="После этого водитель в список не возвращается">{numberInput('max_attempts', 1, 20)}</Row>
+                        <Row label="Повтор через, часов" hint="Через сколько недозвон снова попадёт в порции">{numberInput('retry_after_hours', 0, 720)}</Row>
+                    </div>
+                </section>
+            )}
 
             <section className="space-y-1.5">
                 <div className={iosGroupLabel}>База</div>
@@ -250,14 +444,91 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
 };
 
 /** Панель базы водителей отдела за месяц: цифры, загрузка файла, последние загрузки. */
-export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, canEdit = true, showToast }) => {
+/* Плитки базы автообзвона Тез (контракт §5, leads/summary): цель — выход на линию,
+   поэтому «Подписали» здесь нет. Цвет — только со смыслом: зелёный — цель,
+   янтарный — перезвоны и дожим, по которым пора звонить. Сервер, который новых
+   ключей ещё не присылает, даёт прочерк, а не ноль: ноль соврал бы. */
+const tezLeadTiles = (summary) => {
+    const status = summary?.by_status || {};
+    const has = (key) => summary && Object.prototype.hasOwnProperty.call(summary, key);
+    const due = has('callbacks_due') || has('followups_due')
+        ? (Number(summary.callbacks_due) || 0) + (Number(summary.followups_due) || 0) : '—';
+    return [
+        { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900',
+            info: 'Водители базы выбранного месяца.' },
+        { label: 'Уже на линии при загрузке', value: has('online_at_upload') ? summary.online_at_upload : '—', tone: 'text-slate-900',
+            info: 'Работали ещё до загрузки базы: первый заказ месяца раньше, чем водителя загрузили. Обзвон им не нужен, успешек по ним нет.' },
+        { label: 'Вышли на линию', value: has('online') ? summary.online : (summary?.signed ?? 0), tone: 'text-emerald-600',
+            info: 'Всего водителей базы с завершённым заказом в TEZ APP в месяце базы. Такой водитель уходит из обзвона.' },
+        { label: 'В обзвоне', value: (Number(status.new) || 0) + (Number(status.in_progress) || 0), tone: 'text-slate-900',
+            info: 'Ещё не вышли на линию и не закрыты: новые и те, кому уже звонили.' },
+        { label: 'Перезвоны и дожим к звонку', value: due, tone: Number(due) > 0 ? 'text-amber-600' : 'text-slate-900',
+            info: 'Срок наступил: перезвон, который назначил оператор, или «дожать» водителя, обещавшего выйти на линию.' },
+        { label: 'Обработано', value: (Number(status.done) || 0) + (Number(status.excluded) || 0), tone: 'text-slate-900',
+            info: 'Обзвон закончен: дозвонились без перезвона, попытки кончились или руководитель исключил.' },
+    ];
+};
+
+/* Проверка поездок в TEZ APP (leads/summary → trip_check): идёт / когда была / что нашла. */
+const TripCheckCard = ({ check }) => {
+    if (!check) return null;
+    let state;
+    if (check.configured === false) state = 'TEZ APP не настроен на сервере — поездки не проверяются';
+    else if (check.running) state = 'идёт проверка…';
+    else if (check.last_run) state = `проверено ${whenText(check.last_run)}`;
+    else state = 'ещё не проверяли';
+    const stats = check.configured === false ? [] : [
+        { label: 'Проверено', value: check.checked },
+        { label: 'Вышли на линию', value: check.online },
+        { label: 'Ошибок', value: check.errors },
+    ].filter((s) => s.value !== undefined && s.value !== null);
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>Поездки в TEZ APP</span>
+                <IosHint text="Раз в 30 минут и сразу после загрузки базы сервер спрашивает TEZ APP по номеру, был ли у водителя завершённый заказ в месяце базы. Вышел на линию — водитель уходит из обзвона, а успешка засчитывается оператору, который последним поговорил с ним не меньше 10 секунд до первого заказа. «Нет аккаунта» от «не ездил» TEZ APP не отличает." />
+            </div>
+            <div className={`${iosCard} flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3`}>
+                <div className={`flex min-w-0 items-center gap-2 text-[13px] ${check.configured === false ? 'text-amber-700' : 'text-slate-700'}`}>
+                    {check.running && <FaIcon className="fas fa-spinner fa-spin" />}
+                    <span className="min-w-0">{state}</span>
+                </div>
+                {stats.map((s) => (
+                    <div key={s.label} className="text-[12.5px] text-slate-500">
+                        {s.label} <span className={`font-semibold tabular-nums ${s.label === 'Ошибок' && Number(s.value) > 0 ? 'text-rose-600' : 'text-slate-900'}`}>{s.value}</span>
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+};
+
+export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
+    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
     const [uploading, setUploading] = useState(false);
     const [dragOver, setDragOver] = useState(false);
+    // Тез: что сказал сервер о последней загрузке (зеркало в «Базу лидов ОП TEZ»,
+    // проверка поездок) — живёт до смены отдела, тост пропадает за секунды.
+    const [lastUpload, setLastUpload] = useState(null);
+    // Тез: до какого момента опрашивать сводку после загрузки — проверка поездок
+    // идёт фоном, и плитки «вышли на линию» догоняют её сами, без кнопки «Обновить».
+    const [pollUntil, setPollUntil] = useState(0);
     const fileRef = useRef(null);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
     }, [showToast]);
+    // onChanged — перечитать отдел (настройки + сводку); в зависимости опроса не кладём.
+    const reloadSummary = useStableCallback(() => onChanged?.());
+
+    useEffect(() => { setLastUpload(null); setPollUntil(0); }, [departmentId]);
+
+    const tripRunning = !!summary?.trip_check?.running;
+    useEffect(() => {
+        if (!isTez || (!tripRunning && Date.now() > pollUntil)) return undefined;
+        const timer = setTimeout(reloadSummary, 5000);
+        return () => clearTimeout(timer);
+    }, [isTez, tripRunning, pollUntil, summary, reloadSummary]);
 
     const shownPeriod = period || summary?.period || '';
     const isActive = summary ? summary.is_active_period !== false : true;
@@ -280,7 +551,17 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
             // Не загрузилось ничего из-за ИИН — это ошибка файла, а не успех.
             const failedAll = !data.rows_new && !data.rows_duplicate && (data.rows_bad_iin || data.rows_invalid);
-            toast(uploadSummary(data, shownPeriod), failedAll ? 'error' : 'success');
+            if (isTez) {
+                toast(tezUploadSummary(data, monthLabel(data.period || shownPeriod)), failedAll ? 'error' : 'success');
+                // Сбой зеркала загрузку не валит (контракт §5) — но руководитель должен
+                // знать, что во второй базе этого файла нет: отдельным тостом-ошибкой.
+                const mirror = mirrorSummary(data.mirror);
+                if (mirror && !mirror.ok) toast(mirror.text, 'error');
+                setLastUpload({ fileName: file.name, at: new Date().toISOString(), data, mirror });
+                setPollUntil(Date.now() + 90 * 1000);
+            } else {
+                toast(uploadSummary(data, shownPeriod), failedAll ? 'error' : 'success');
+            }
             onChanged?.();
         } catch (e) {
             toast(e.message || 'Не удалось загрузить список', 'error');
@@ -298,7 +579,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
 
     // Подписавшие документы — своей плиткой: их больше не обзванивают, и в «Не
     // звонили» / «В работе» они бы врали (сервер их туда и не считает).
-    const tiles = [
+    const tiles = isTez ? tezLeadTiles(summary) : [
         { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900' },
         { label: 'Не звонили', value: summary?.by_status?.new ?? 0, tone: 'text-slate-900' },
         { label: 'В работе', value: summary?.by_status?.in_progress ?? 0, tone: 'text-amber-600' },
@@ -333,10 +614,39 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                 {tiles.map((t) => (
                     <div key={t.label} className={`${iosCard} px-3 py-3`}>
                         <div className={`text-[20px] font-semibold tabular-nums ${t.tone}`}>{t.value}</div>
-                        <div className="text-[11.5px] text-slate-500">{t.label}</div>
+                        {t.info ? (
+                            <div className="flex items-start gap-1 text-[11.5px] text-slate-500">
+                                <span className="min-w-0">{t.label}</span>
+                                <IosHint text={t.info} label={`Что значит «${t.label}»`} align="right" />
+                            </div>
+                        ) : (
+                            <div className="text-[11.5px] text-slate-500">{t.label}</div>
+                        )}
                     </div>
                 ))}
             </div>
+
+            {isTez && <TripCheckCard check={summary?.trip_check} />}
+
+            {isTez && lastUpload && (
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Последняя загрузка</div>
+                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+                            <div className="min-w-0">
+                                <div className="truncate text-[13.5px] font-medium text-slate-800">{lastUpload.fileName}</div>
+                                <div className="text-[11.5px] text-slate-500">{tezUploadSummary(lastUpload.data, monthLabel(lastUpload.data.period || shownPeriod))}</div>
+                            </div>
+                            {lastUpload.data.trip_check === 'queued' && <IosBadge tone="blue">проверка поездок поставлена</IosBadge>}
+                        </div>
+                        {lastUpload.mirror && (
+                            <div className={`px-4 py-3 text-[12.5px] ${lastUpload.mirror.ok ? 'text-slate-600' : 'text-rose-600'}`}>
+                                {lastUpload.mirror.text}
+                            </div>
+                        )}
+                    </div>
+                </section>
+            )}
 
             {canEdit && (
                 <div
@@ -351,15 +661,27 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                         <FaIcon className={uploading ? 'fas fa-spinner fa-spin' : 'fas fa-file-arrow-up'} style={{ width: 18, height: 18 }} />
                     </div>
                     <div className="mt-3 text-[14px] font-semibold text-slate-800">Загрузить список водителей{shownPeriod ? ` за ${monthLabel(shownPeriod)}` : ''}</div>
-                    <div className="mt-1 text-[12.5px] text-slate-500">
-                        Перетащите сюда CSV или Excel с колонками <b>fio</b>, <b>phone</b> и <b>iin</b>, или выберите файл.{' '}
-                        <span className="inline-block align-middle">
-                            <IosHint
-                            align="right"
-                                text="ИИН обязателен: по нему раз в 3 часа проверяется, подписал ли водитель документы. Строки без ИИН или с ошибкой в нём не загружаются — после загрузки покажем их номера. В Excel задайте колонке iin текстовый формат: иначе длинный ИИН может превратиться в число вида 5,03E+11. Внутри месяца повторные номера и ИИН не дублируются; в базе другого месяца тот же водитель допускается."
-                            />
-                        </span>
-                    </div>
+                    {isTez ? (
+                        <div className="mt-1 text-[12.5px] text-slate-500">
+                            Перетащите сюда CSV или Excel с колонками <b>fio</b> и <b>phone</b>, или выберите файл.{' '}
+                            <span className="inline-block align-middle">
+                                <IosHint
+                                    align="right"
+                                    text="ИИН не нужен: колонку iin, если она есть, сервер пропустит. Тот же файл сам попадает в «Базу лидов ОП TEZ» за этот месяц — успешки и зарплата ОП считаются там. Сразу после загрузки сервер проверяет поездки в TEZ APP: кто уже вышел на линию, из обзвона уходит. Внутри месяца повторные номера не дублируются; в базе другого месяца тот же водитель допускается."
+                                />
+                            </span>
+                        </div>
+                    ) : (
+                        <div className="mt-1 text-[12.5px] text-slate-500">
+                            Перетащите сюда CSV или Excel с колонками <b>fio</b>, <b>phone</b> и <b>iin</b>, или выберите файл.{' '}
+                            <span className="inline-block align-middle">
+                                <IosHint
+                                align="right"
+                                    text="ИИН обязателен: по нему раз в 3 часа проверяется, подписал ли водитель документы. Строки без ИИН или с ошибкой в нём не загружаются — после загрузки покажем их номера. В Excel задайте колонке iin текстовый формат: иначе длинный ИИН может превратиться в число вида 5,03E+11. Внутри месяца повторные номера и ИИН не дублируются; в базе другого месяца тот же водитель допускается."
+                                />
+                            </span>
+                        </div>
+                    )}
                     <input
                         ref={fileRef}
                         type="file"
@@ -459,7 +781,14 @@ export const DialListDepartmentCard = ({ apiBaseUrl, authHeaders, departmentId, 
  * выключен. Сохраняется сразу. Живёт во вкладке «Настройки» раздела — в
  * «Настройках SIP» этих переключателей нет (решение владельца 23.09.2026).
  */
-export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentEnabled, canEdit = true, showToast }) => {
+/* Автообзвон Тез (profile='tez'): вместо «как у отдела / вкл / выкл» — переключатель
+   вкл/выкл. Режим отдела у Тез всегда выключен, и «как у отдела» значило бы просто
+   «выключен»; включённые лично и есть «операторы под распределение» (контракт §0.2).
+   Выключение снимает личную настройку (null), а не пишет false: перейди человек
+   потом в отдел, где режим включён целиком, он получит его «как у отдела». Рядом с
+   линией — ставка (users.rate), если сервер её отдаёт. */
+export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentEnabled, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
+    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
     const [users, setUsers] = useState(null);
     const [error, setError] = useState('');
     const [busyId, setBusyId] = useState(null);
@@ -505,12 +834,24 @@ export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, 
         }
     };
 
+    const effectiveOf = (u) => (u.dial_list_enabled == null ? departmentEnabled : u.dial_list_enabled);
+    const enabledCount = (users || []).filter(effectiveOf).length;
+
     return (
         <section className="space-y-1.5">
             <div className="flex items-center justify-between gap-3 px-1">
-                <div className={iosGroupLabel}>Сотрудники</div>
+                {isTez ? (
+                    <div className="flex items-center gap-1.5">
+                        <span className={iosGroupLabel}>Сотрудники</span>
+                        <IosHint text="Включённые здесь операторы и есть те, кому сервер раздаёт пачки водителей — по очереди, как в удалённом КЦ. У включённого телефон переходит в режим обзвона после перезапуска: в статусе «Активный» звонит сам, в «Исходе» оператор звонит сам из своих списков." />
+                    </div>
+                ) : (
+                    <div className={iosGroupLabel}>Сотрудники</div>
+                )}
                 <span className="text-[11.5px] text-slate-500">
-                    «Как у отдела» сейчас значит {departmentEnabled ? 'включён' : 'выключен'}
+                    {isTez
+                        ? (users ? `В режиме: ${enabledCount} из ${users.length}` : '')
+                        : `«Как у отдела» сейчас значит ${departmentEnabled ? 'включён' : 'выключен'}`}
                 </span>
             </div>
             <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
@@ -521,7 +862,8 @@ export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, 
                 ) : users.length === 0 ? (
                     <div className="px-4 py-5 text-center text-[13px] text-slate-500">В отделе пока нет сотрудников</div>
                 ) : users.map((u) => {
-                    const effective = u.dial_list_enabled == null ? departmentEnabled : u.dial_list_enabled;
+                    const effective = effectiveOf(u);
+                    const rate = isTez ? rateLabel(u.rate) : '';
                     return (
                         <div key={u.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
                             <div className="min-w-0">
@@ -536,16 +878,27 @@ export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, 
                                 </div>
                                 <div className="text-[11.5px] text-slate-500">
                                     {u.sip_number ? `линия ${u.sip_number}` : 'линия не назначена — см. вкладку «Линии»'}
+                                    {rate ? ` · ${rate}` : ''}
                                 </div>
                             </div>
-                            <div className={canEdit && busyId !== u.id ? '' : 'pointer-events-none opacity-60'}>
-                                <IosSegmented
-                                    value={modeFrom(u.dial_list_enabled)}
-                                    options={OPERATOR_MODES}
-                                    onChange={(mode) => change(u, mode)}
-                                    ariaLabel={`Обзвон: ${u.name}`}
+                            {isTez ? (
+                                <IosToggle
+                                    checked={!!effective}
+                                    disabled={!canEdit || busyId === u.id}
+                                    // Выключить: личную настройку снять (null), а если отдел вдруг
+                                    // включён целиком — записать «выключен» явно.
+                                    onChange={(on) => change(u, on ? 'on' : (departmentEnabled ? 'off' : 'inherit'))}
                                 />
-                            </div>
+                            ) : (
+                                <div className={canEdit && busyId !== u.id ? '' : 'pointer-events-none opacity-60'}>
+                                    <IosSegmented
+                                        value={modeFrom(u.dial_list_enabled)}
+                                        options={OPERATOR_MODES}
+                                        onChange={(mode) => change(u, mode)}
+                                        ariaLabel={`Обзвон: ${u.name}`}
+                                    />
+                                </div>
+                            )}
                         </div>
                     );
                 })}

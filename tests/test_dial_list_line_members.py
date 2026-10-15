@@ -1056,8 +1056,11 @@ class SectionNameTests(unittest.TestCase):
         self.assertEqual(app.count("handleSidebarViewNavigation(e, 'dial_list')"), 2)
         view = _read(os.path.join(ROOT, 'src', 'components', 'dial_list', 'DialListView.jsx'))
         self.assertIn("const SECTION_TITLE = 'Удаленный КЦ';", view)
+        # С 15.10.2026 тот же экран — и «Автообзвон Тез» (profile='tez'): заголовок — по профилю,
+        # у удалённого КЦ — прежний SECTION_TITLE.
+        self.assertIn('const sectionTitle = tez ? TEZ_SECTION_TITLE : SECTION_TITLE;', view)
         header = view[view.index('fas fa-list-check'):view.index('<IosHint')]
-        self.assertIn('{SECTION_TITLE}', header)
+        self.assertIn('{sectionTitle}', header)
         self.assertNotIn('Обзвон из телефона', header)
         # Открытый выбор «Кому» — состояние вкладки: при смене отдела он сбрасывается.
         self.assertIsNotNone(re.search(r'<DialListLinesPanel\s+key=\{selected\.department_id\}', view),
@@ -1066,7 +1069,7 @@ class SectionNameTests(unittest.TestCase):
         # должна повторять его в той же строке шапки (само правило исполняется в
         # tests/dial_list_line_picker.test.mjs).
         self.assertIn("import { sameSectionTitle } from './linePicker';", view)
-        self.assertIn('departments.length === 1 && !sameSectionTitle(selected?.department_name, SECTION_TITLE) && (',
+        self.assertIn('departments.length === 1 && !sameSectionTitle(selected?.department_name, sectionTitle) && (',
                       view)
 
     def test_pointers_to_the_section_use_the_new_name(self):
