@@ -67125,6 +67125,24 @@ def _dial_list_tez_leads_mirror(department_id, requester_id, file_name, raw_byte
                                          "rows_duplicate", "rows_invalid", "check_status")}
 
 
+# Автоинформатор удалённого КЦ (15.10.2026): робот на шлюзе звонит водителю и проигрывает запись.
+# Рассылки — вкладка «Удаленного КЦ» (сервис уходит в его blueprint), диспетчер шлюза ходит в свои
+# ручки по подписи моста. Схема — своей транзакцией при старте, сбой не роняет приложение.
+_informer_service = None
+try:
+    from informer import schema as _informer_schema  # noqa: E402
+    from informer.agent_routes import build_informer_agent_blueprint  # noqa: E402
+    from informer.service import InformerService  # noqa: E402
+
+    _informer_service = InformerService(db)
+    _informer_schema.ensure_schema(db)
+    app.register_blueprint(build_informer_agent_blueprint(
+        service=_informer_service, build_cors_preflight_response=_build_cors_preflight_response))
+    logging.info("Автоинформатор: ручки диспетчера подключены на /api/informer/agent")
+except Exception:
+    _informer_service = None
+    logging.exception("Автоинформатор: НЕ подключён")
+
 try:
     from dial_list.routes import build_dial_list_blueprint  # noqa: E402
     from dial_list.service import DialListService  # noqa: E402
@@ -67156,6 +67174,7 @@ try:
         is_global_admin=lambda requester_id, role: _is_global_admin_requester(role, requester_id),
         # Детализация звонков: линия в файле — текстом, без зелёного уголка Excel.
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        informer_service=_informer_service,
     )
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service

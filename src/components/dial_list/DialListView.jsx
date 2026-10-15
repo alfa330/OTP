@@ -10,6 +10,7 @@ import DialListAnalytics from './DialListAnalytics';
 import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
 import DialListCallsExport from './DialListCallsExport';
+import DialListInformerPanel from './DialListInformerPanel';
 import { monthLabel } from './dialListPeriods';
 import { sameSectionTitle } from './linePicker';
 import TezAutodialAnalytics from './TezAutodialAnalytics';
@@ -50,6 +51,8 @@ const TABS = [
     { value: 'lines', label: 'Линии', icon: <FaIcon className="fas fa-phone" /> },
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
     { value: 'journal', label: 'Журнал', icon: <FaIcon className="fas fa-clock-rotate-left" /> },
+    // Автоинформатор (15.10.2026) — только у удалённого КЦ: робот звонит с его линии.
+    { value: 'informer', label: 'Автоинформатор', icon: <FaIcon className="fas fa-phone-volume" /> },
     { value: 'settings', label: 'Настройки', icon: <FaIcon className="fas fa-sliders" /> },
     { value: 'script', label: 'Скрипт', icon: <FaIcon className="fas fa-file-lines" /> },
 ];
@@ -440,7 +443,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         <IosSegmented
                             value={tab}
                             onChange={setTab}
-                            options={TABS.map((t) => (t.value === 'leads' ? { ...t, count: dept.summary?.pool_available } : t))}
+                            options={TABS
+                                .filter((t) => !tez || t.value !== 'informer')
+                                .map((t) => (t.value === 'leads' ? { ...t, count: dept.summary?.pool_available } : t))}
                             stretch
                             size="lg"
                             className="min-w-max"
@@ -563,6 +568,17 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             showToast={showToast}
                             preset={journalPreset}
                             profile={sectionProfile}
+                        />
+                    )}
+
+                    {tab === 'informer' && !tez && (
+                        <DialListInformerPanel
+                            key={selected.department_id}
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            canEdit={canEdit}
+                            showToast={showToast}
                         />
                     )}
 

@@ -190,6 +190,22 @@
                                                              DIAL_LIST_CALLS_EXPORT_EMPTY; главе «Регионов» —
                                                              звонки тех, кто в день звонка был в её группах
     GET     /api/dial_list/overview?date=YYYY-MM-DD[&department_id=]
+    GET     /api/dial_list/departments/<id>/informer         автоинформатор (15.10.2026): робот на шлюзе
+                                                             (в сети, линии) и рассылки отдела
+    POST    /api/dial_list/departments/<id>/informer/campaigns  новая рассылка: multipart name, audio (WAV
+                                                             8 кГц моно — склеивает браузер: сначала
+                                                             казахская, потом русская), parts (JSON границ
+                                                             частей), recipients (.csv/.xlsx номеров),
+                                                             window_start/_end, max_per_minute (≤10, закон
+                                                             РК), max_attempts, retry_after_min
+    GET     /api/dial_list/departments/<id>/informer/voices  голоса озвучки (Soniox), темпы, предел текста
+    POST    /api/dial_list/departments/<id>/informer/tts     {lang: kz|ru, text, voice, speed} → WAV 8 кГц
+    POST    /api/dial_list/departments/<id>/informer/ai      ИИ для текста: generate {brief} → {kz, ru};
+                                                             polish {text, lang}; translate {text, source, target}
+    GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>        аналитика и водители (маска номера)
+    POST    /api/dial_list/departments/<id>/informer/campaigns/<cid>/<act>  start | pause | finish
+    GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/audio  запись рассылки (прослушать)
+    GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/export xlsx: водители, звонки, контекст
 
 Binotel (без авторизации, токен в адресе И, по умолчанию, IP сервера Binotel — адрес, который
 дописал справа в X-Forwarded-For прокси Render; отказ — WARNING в журнале сервера с адресом,
@@ -200,10 +216,12 @@ Binotel (без авторизации, токен в адресе И, по ум
 Номер телефона водителя ни одна ручка оператора не отдаёт — это весь смысл
 раздела; проверяется тестом.
 """
+import json
 import logging
 import os
 import uuid
 from datetime import date, datetime
+from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
@@ -222,7 +240,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                               resolve_requester, is_admin_role, headed_department_ids,
                               is_super_admin_role=None, is_supervisor_role=None,
                               department_code_of=None, service=None, tez_leads_mirror=None,
-                              is_global_admin=None, excel_text_warning=None):
+                              is_global_admin=None, excel_text_warning=None, informer_service=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
     is_global_admin(requester_id, role) -> bool — администратор всей компании, а не глава отдела
@@ -237,7 +255,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     тот же файл базы автообзвона Тез ещё и в «Базу лидов ОП TEZ» (владелец, 15.10.2026: одна
     загрузка на обе); не передан — только в раздел;
     excel_text_warning(stream, sqref, sheet_path) — гасит в детализации звонков зелёный уголок
-    «Число сохранено как текст» (функция монолита; не передана — файл с уголком)."""
+    «Число сохранено как текст» (функция монолита; не передана — файл с уголком);
+    informer_service — informer.service.InformerService: вкладка «Автоинформатор» (не передан —
+    её ручки отвечают 503)."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -1064,5 +1084,171 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             # Binotel ретраит только на не-200; свои ошибки чиним по журналу.
             return "error", 500
         return jsonify({"status": "success", **result}), 200
+
+    # ── автоинформатор (15.10.2026) ─────────────────────────────────────────
+    # Робот звонит водителю и проигрывает запись (пакет informer). Рассылками распоряжается
+    # руководитель раздела (_manager); робот — линия удалённого КЦ, поэтому и рассылки — только у
+    # отделов этого профиля.
+    def _informer(department_id):
+        if informer_service is None:
+            raise DialListError("Автоинформатор не подключён на сервере", 503)
+        if svc.department_profile(department_id) != PROFILE_REMOTE_CC:
+            raise DialListError("Автоинформатор есть только у удалённого КЦ", 403)
+        return informer_service
+
+    def _informer_do(call):
+        from informer.service import InformerError
+        try:
+            return call()
+        except InformerError as exc:
+            raise DialListError(str(exc), exc.status)
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_overview(department_id):
+        _manager(department_id)
+        inf = _informer(department_id)
+        robot = _informer_do(inf.robot_status)
+        campaigns = _informer_do(lambda: inf.list_campaigns(department_id))
+        return jsonify({"status": "success", "robot": robot, "campaigns": campaigns}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_create(department_id):
+        requester_id, _scope = _manager(department_id)
+        inf = _informer(department_id)
+        audio = request.files.get('audio')
+        listing = request.files.get('recipients')
+        if not audio:
+            raise DialListError("Нет записи рассылки")
+        if not listing:
+            raise DialListError("Нет списка водителей")
+        from informer import recipients as informer_recipients
+        from informer import wav as informer_wav
+        wav_bytes = audio.read(informer_wav.MAX_BYTES + 1)
+        if len(wav_bytes) > informer_wav.MAX_BYTES:
+            raise DialListError("Запись длиннее пяти минут", 413)
+        list_name = os.path.basename(str(listing.filename or 'drivers.xlsx'))
+        list_ext = os.path.splitext(list_name)[1].lower()
+        list_bytes = listing.read(LEADS_MAX_FILE_SIZE_BYTES + 1)
+        if len(list_bytes) > LEADS_MAX_FILE_SIZE_BYTES:
+            raise DialListError(f"Список слишком большой. Лимит: {LEADS_MAX_FILE_SIZE_MB} MB", 413)
+        try:
+            parsed = informer_recipients.parse(list_bytes, list_ext)
+            parts = json.loads(request.form.get('parts') or '[]')
+        except ValueError as exc:
+            raise DialListError(str(exc))
+        form = request.form
+        try:
+            script = json.loads(form.get('script') or '{}')
+        except ValueError:
+            script = {}
+        campaign = _informer_do(lambda: inf.create_campaign(
+            department_id, requester_id, name=form.get('name'), wav_bytes=wav_bytes, parts=parts,
+            recipients=parsed, file_name=list_name, window_start=form.get('window_start'),
+            window_end=form.get('window_end'), max_per_minute=form.get('max_per_minute'),
+            max_attempts=form.get('max_attempts'), retry_after_min=form.get('retry_after_min'),
+            script=script))
+        return jsonify({"status": "success", "campaign": campaign,
+                        "recipients": {"rows": len(parsed["rows"]), "invalid": parsed["invalid"],
+                                       "duplicates": parsed["duplicates"]}}), 200
+
+    # Озвучка текста (Soniox) и ИИ для текста — до создания рассылки, ничего не сохраняют.
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/voices', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_voices(department_id):
+        _manager(department_id)
+        _informer(department_id)
+        from informer import tts as informer_tts
+        return jsonify({"status": "success", "voices": informer_tts.VOICES, "default": informer_tts.DEFAULT_VOICE,
+                        "speeds": list(informer_tts.SPEEDS), "default_speed": informer_tts.DEFAULT_SPEED,
+                        "text_max": informer_tts.TEXT_MAX}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/tts', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_tts_speak(department_id):
+        """{lang: kz|ru, text, voice, speed} → WAV 8 кГц моно — та же запись, что потом сыграет робот."""
+        _manager(department_id)
+        _informer(department_id)
+        from informer import tts as informer_tts
+        payload = request.get_json(silent=True) or {}
+        try:
+            audio = informer_tts.synthesize(payload.get('text'), payload.get('lang'), payload.get('voice'),
+                                            payload.get('speed') or informer_tts.DEFAULT_SPEED)
+        except informer_tts.TTSError as exc:
+            raise DialListError(str(exc), exc.status)
+        return send_file(BytesIO(audio), mimetype='audio/wav', as_attachment=False, download_name='speech.wav')
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/ai', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_ai(department_id):
+        """{mode: generate, brief} → {kz, ru}; {mode: polish, text, lang} → {text};
+        {mode: translate, text, source, target} → {text}. Языки — kz | ru."""
+        _manager(department_id)
+        _informer(department_id)
+        from informer import ai as informer_ai_text
+        payload = request.get_json(silent=True) or {}
+        mode = payload.get('mode')
+        try:
+            if mode == 'generate':
+                result = informer_ai_text.generate(payload.get('brief'))
+            elif mode == 'polish':
+                result = informer_ai_text.polish(payload.get('text'), payload.get('lang'))
+            elif mode == 'translate':
+                result = informer_ai_text.translate(payload.get('text'), payload.get('source'), payload.get('target'))
+            else:
+                raise DialListError("mode: generate | polish | translate")
+        except informer_ai_text.ScriptAIError as exc:
+            raise DialListError(str(exc), exc.status)
+        return jsonify({"status": "success", "result": result}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>',
+              methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_campaign(department_id, campaign_id):
+        _manager(department_id)
+        inf = _informer(department_id)
+        detail = _informer_do(lambda: inf.campaign_detail(department_id, campaign_id))
+        return jsonify({"status": "success", "campaign": detail}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>/<action>',
+              methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_campaign_action(department_id, campaign_id, action):
+        _manager(department_id)
+        inf = _informer(department_id)
+        detail = _informer_do(lambda: inf.campaign_action(department_id, campaign_id, action))
+        return jsonify({"status": "success", "campaign": detail}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>/audio',
+              methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_campaign_audio(department_id, campaign_id):
+        _manager(department_id)
+        inf = _informer(department_id)
+        data = _informer_do(lambda: inf.campaign_audio(department_id, campaign_id))
+        return send_file(BytesIO(data), mimetype='audio/wav', as_attachment=False,
+                         download_name=f'informer_{campaign_id}.wav')
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>/export',
+              methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_campaign_export(department_id, campaign_id):
+        _manager(department_id)
+        inf = _informer(department_id)
+        from informer import export as informer_export
+        detail, targets, calls = _informer_do(lambda: inf.export_rows(department_id, campaign_id))
+        stream = informer_export.build(detail, targets, calls)
+        return send_file(stream, mimetype=XLSX_MIME, as_attachment=True,
+                         download_name=f'informer_{campaign_id}.xlsx')
 
     return bp
