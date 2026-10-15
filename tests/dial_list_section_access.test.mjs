@@ -48,8 +48,8 @@ const declarationOf = (name) => {
 };
 
 const MODULE_NAMES = ['DIAL_LIST_DEPARTMENT_CODES', 'DIAL_LIST_PILOT_LOGINS', 'DIAL_LIST_OVERSEER_DEPARTMENT_CODES',
-    'DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES', 'dialListPilotAllows', 'normalizeDepartmentCode',
-    'aiQaHeadDepartmentCodesOf'];
+    'DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES', 'DIAL_LIST_GROUP_REPORT_HEAD_CODES', 'dialListPilotAllows',
+    'normalizeDepartmentCode', 'aiQaHeadDepartmentCodesOf'];
 const FLAG_NAMES = ['currentUserRole', 'isSuperAdmin', 'isDepartmentHeadUser', 'scopedDepartmentId',
     'isScopedDepartmentHead', 'isAdminLikeRole', 'isDepartmentManager'];
 const evaluateFlags = new Function(
@@ -101,6 +101,25 @@ test('прежний круг не изменился', () => {
     assert.equal(canOpen(head(1954, 'remote_cc')), true);            // глава удалённого КЦ
     assert.equal(canOpen(head(367, 'op')), false);                   // глава другого отдела
     assert.equal(canOpen(head(367, 'op', { role: 'operator' })), false);
+});
+
+test('глава «Регионов» (фронт-офисы) видит раздел — отчётами своей группы, в ветке руководителей', () => {
+    // Владелец, 15.10.2026: «глава Регионов мог выгружать отчеты только по своей группе».
+    // Что внутри — решает сервер (report_groups); портал только открывает пункт меню.
+    const regionsHead = head(909, 'front_office');
+    assert.equal(canOpen(regionsHead), true);
+    const f = flags(regionsHead);
+    assert.equal(f.isAdminLikeRole, false);
+    assert.equal(f.isDepartmentManager, true);
+    // Код в карточке отдела бывает записан как угодно.
+    assert.equal(canOpen(head(909, ' FRONT_OFFICE ')), true);
+    // СВ и операторы фронт-офисов — нет: право только у главы.
+    assert.equal(canOpen(profile({ department_id: 909, department_code: 'front_office' })), false);
+    assert.equal(canOpen(profile({ role: 'operator', department_id: 909, department_code: 'front_office' })), false);
+    // Тот же список, что на сервере.
+    const server = readLf('dial_list/service.py');
+    assert.match(server, /^DIAL_LIST_GROUP_REPORT_HEAD_CODES = frozenset\(\{"front_office"\}\)$/m);
+    assert.match(appSource, /^const DIAL_LIST_GROUP_REPORT_HEAD_CODES = new Set\(\['front_office'\]\);$/m);
 });
 
 test('пункт меню, страж маршрута и экран держатся на этом флаге', () => {

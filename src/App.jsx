@@ -468,6 +468,11 @@ const DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = new Set(['szov']);
 // Раздел «Автообзвон Тез» (15.10.2026): супервайзеры этого отдела работают в нём своим
 // отделом. Тот же список на бэкенде — dial_list.service.DIAL_LIST_OWN_SUPERVISOR_CODES.
 const TEZ_AUTODIAL_DEPARTMENT_CODES = new Set(['tez']);
+// Глава этих отделов видит раздел только отчётами своей группы (владелец, 15.10.2026: «глава
+// Регионов мог выгружать отчеты только по своей группе»; «Регионы» — группа «Фронт офисов»):
+// пункт меню есть, внутри — одна «Детализация». Что именно ей можно, решает сервер —
+// dial_list.service.DIAL_LIST_GROUP_REPORT_HEAD_CODES (ответ /departments несёт report_groups).
+const DIAL_LIST_GROUP_REPORT_HEAD_CODES = new Set(['front_office']);
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -43338,10 +43343,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Плюс главы отделов-кураторов (СЗоВ, DIAL_LIST_OVERSEER_DEPARTMENT_CODES) —
             // им сервер отдаёт весь раздел, как админам. И СВ СЗоВ
             // (DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES) — с тем же, что у главы.
+            // Глава «Регионов» (DIAL_LIST_GROUP_REPORT_HEAD_CODES) — только отчёты своей группы.
             const canAccessDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
                 || (isDepartmentHead(user)
                     && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code)
-                        || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)))
+                        || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)
+                        || DIAL_LIST_GROUP_REPORT_HEAD_CODES.has(code)))
                 || (isSupervisorRole(currentUserRole)
                     && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
                         normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));

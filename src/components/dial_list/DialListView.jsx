@@ -9,6 +9,7 @@ import DialListJournal from './DialListJournal';
 import DialListAnalytics from './DialListAnalytics';
 import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
+import DialListCallsExport from './DialListCallsExport';
 import { monthLabel } from './dialListPeriods';
 import { sameSectionTitle } from './linePicker';
 import TezAutodialAnalytics from './TezAutodialAnalytics';
@@ -22,7 +23,12 @@ import { PROFILE_REMOTE_CC, PROFILE_TEZ, TEZ_SECTION_TITLE, departmentsOfProfile
  * Вкладки: «Операторы» (кто сколько сделал за день), «Аналитика» (показатели базы
  * месяца: воронка, подписание документов, дни, операторы), «Линии», «База
  * водителей» (загрузка файла ФИО + телефон + ИИН), «Журнал», «Настройки» и
- * «Скрипт». Отдел выбирается в шапке; если он один — выбора нет.
+ * «Скрипт». Отдел выбирается в шапке; если он один — выбора нет. Там же —
+ * «Детализация»: звонки отдела за период в Excel (DialListCallsExport, 15.10.2026).
+ *
+ * Глава «Регионов» (группа «Фронт офисов», её люди на линиях удалённого КЦ) видит раздел
+ * только отчётами своей группы: сервер отдаёт ей report_groups, и экран — шапка с
+ * «Детализацией» и карточка о ней, без вкладок (владелец, 15.10.2026).
  *
  * Сводки над вкладками нет (просьба владельца 29.09.2026: «сверху сводку убрать,
  * чтобы не отвлекала») — показатели живут во вкладке «Аналитика».
@@ -166,6 +172,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const [rows, setRows] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    // Глава «Регионов» (владелец, 15.10.2026): сервер отдаёт ей не зону руководителя, а группы,
+    // по которым она выгружает отчёты (report_groups). Тогда раздел — одна «Детализация»: ни
+    // вкладок, ни их запросов (сервер на них ответил бы 403). null — обычный руководитель.
+    const [reportGroups, setReportGroups] = useState(null);
+    const reportsOnly = Array.isArray(reportGroups);
 
     // Отделы раздела — своим списком: бэкенд сам знает, какие отделы подключены
     // и какие из них в зоне запросившего. Кандидаты (на Binotel, но ещё не
@@ -179,6 +190,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
             const list = sortDepartments(departmentsOfProfile(data.departments, sectionProfile));
             const cands = Array.isArray(data.candidates) ? data.candidates : [];
+            setReportGroups(Array.isArray(data.report_groups) ? data.report_groups : null);
             setDepartments(list);
             setCandidates(cands);
             setEnrollPick((cur) => cur || (cands[0] ? String(cands[0].department_id) : ''));
@@ -248,7 +260,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     };
 
     const loadOverview = useCallback(async () => {
-        if (!departmentId) { setRows([]); setLoading(false); return; }
+        if (!departmentId || reportsOnly) { setRows([]); setLoading(false); return; }
         setLoading(true);
         try {
             const qs = new URLSearchParams({ date, department_id: departmentId });
@@ -263,14 +275,19 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
         } finally {
             setLoading(false);
         }
-    }, [apiBaseUrl, authHeaders, date, departmentId]);
+    }, [apiBaseUrl, authHeaders, date, departmentId, reportsOnly]);
 
     useEffect(() => { loadOverview(); }, [loadOverview]);
 
     const dept = useDialListDepartment({
-        apiBaseUrl, authHeaders, departmentId: departmentId || null, period: period === 'all' ? '' : period, profile: sectionProfile,
+        apiBaseUrl, authHeaders, departmentId: (!reportsOnly && departmentId) || null, period: period === 'all' ? '' : period,
+        profile: sectionProfile,
     });
     const selected = (departments || []).find((d) => String(d.department_id) === String(departmentId));
+    // Название группы в подписи — действующие группы; архивные сервер учитывает, но ими не шумим.
+    const activeReportGroups = (reportGroups || []).filter((g) => g.active !== false);
+    const reportGroupNames = (activeReportGroups.length ? activeReportGroups : reportGroups || [])
+        .map((g) => g.name).filter(Boolean).join(', ');
 
     const sortedRows = useMemo(() => [...rows].sort((a, b) => (b.done - a.done) || (b.attempts - a.attempts)
         || String(a.operator_name || '').localeCompare(String(b.operator_name || ''), 'ru')), [rows]);
@@ -284,11 +301,12 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const counts = selected
         ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}`
         : '';
-    const subtitle = !selected
+    let subtitle = !selected
         ? (candidates.length ? 'Подключите отдел, чтобы начать' : 'Отделов для обзвона пока нет')
         : tez || enabled
             ? counts
             : 'Режим выключен: операторы вкладку «Обзвон» не видят';
+    if (reportsOnly) subtitle = `Отчёты по вашей группе: ${reportGroupNames}`;
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-4 pb-24">
@@ -302,17 +320,19 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         <div>
                             <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
                                 {sectionTitle}
-                                <IosHint
-                                    text={tez
-                                        ? 'В статусе «Активный» телефон оператора звонит сам, подряд: после итога и паузы — следующему водителю пачки, а кому пора перезвонить — первым. В статусе «Исход» оператор звонит сам из своих списков. Номер водителя телефону не передаётся: звонок инициирует сервер через Binotel. Цель — водитель вышел на линию (заказ в TEZ APP).'
-                                        : 'Оператор видит в iCORE Phone только ФИО и кнопку «Позвонить». Звонок инициирует сервер через Binotel API, номер водителя телефону не передаётся. Исход каждого звонка подтверждает Binotel, а не телефон.'}
-                                />
+                                {!reportsOnly && (
+                                    <IosHint
+                                        text={tez
+                                            ? 'В статусе «Активный» телефон оператора звонит сам, подряд: после итога и паузы — следующему водителю пачки, а кому пора перезвонить — первым. В статусе «Исход» оператор звонит сам из своих списков. Номер водителя телефону не передаётся: звонок инициирует сервер через Binotel. Цель — водитель вышел на линию (заказ в TEZ APP).'
+                                            : 'Оператор видит в iCORE Phone только ФИО и кнопку «Позвонить». Звонок инициирует сервер через Binotel API, номер водителя телефону не передаётся. Исход каждого звонка подтверждает Binotel, а не телефон.'}
+                                    />
+                                )}
                             </div>
                             <div className="text-[12.5px] text-slate-500">{subtitle}</div>
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                        {selected && (tez ? (
+                        {selected && !reportsOnly && (tez ? (
                             <IosBadge tone={autoDial ? 'green' : 'slate'} title="Автообзвон в статусе «Активный»">
                                 {autoDial ? 'Автообзвон включён' : 'Автообзвон выключен'}
                             </IosBadge>
@@ -340,6 +360,16 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         )}
                         {departments && departments.length === 1 && !sameSectionTitle(selected?.department_name, sectionTitle) && (
                             <span className="rounded-xl bg-slate-100 px-3 py-2 text-[13px] font-medium text-slate-700">{selected?.department_name}</span>
+                        )}
+                        {/* Детализация звонков отдела за период — с любой вкладки. Только «Удаленный КЦ»:
+                            её просили для него, а успешка у автообзвона Тез — другая (вышел на линию). */}
+                        {selected && !tez && (
+                            <DialListCallsExport
+                                apiBaseUrl={apiBaseUrl}
+                                authHeaders={authHeaders}
+                                departmentId={selected.department_id}
+                                showToast={showToast}
+                            />
                         )}
                     </div>
                 </div>
@@ -385,7 +415,22 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                 </div>
             )}
 
-            {selected && (
+            {/* Глава «Регионов»: в разделе у неё одна «Детализация» (кнопка в шапке) — карточка
+                говорит, что в ней и где она, чтобы экран под шапкой не выглядел недогруженным. */}
+            {selected && reportsOnly && (
+                <div className={`${iosCard} p-8 text-center`}>
+                    <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-blue-600">
+                        <FaIcon className="fas fa-file-excel" style={{ width: 18, height: 18 }} />
+                    </div>
+                    <div className="mt-3 text-[14px] font-semibold text-slate-800">Детализация звонков вашей группы</div>
+                    <div className="mx-auto mt-1 max-w-md text-[12.5px] text-slate-500">
+                        Нажмите «Детализация» и выберите дни — скачается Excel со звонками сотрудников группы на линиях
+                        удалённого КЦ и итогами по каждому.
+                    </div>
+                </div>
+            )}
+
+            {selected && !reportsOnly && (
                 <>
                     {/* Пять вкладок на телефоне в ширину не помещаются: без прокрутки
                         «Журнал» и «Настройки» уезжали за край экрана, и попасть в
