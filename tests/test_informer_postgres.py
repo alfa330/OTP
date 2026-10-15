@@ -8,6 +8,7 @@ Postgres. Очередь звонков для диспетчера, темп з
     INFORMER_TEST_PORT=55441 python -m pytest tests/test_informer_postgres.py
 """
 import contextlib
+import hashlib
 import io
 import os
 import struct
@@ -15,6 +16,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pytest
 from openpyxl import load_workbook
 
@@ -23,6 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from informer import export as informer_export  # noqa: E402
 from informer import rules  # noqa: E402
 from informer import schema as informer_schema  # noqa: E402
+from informer import telephone as informer_telephone  # noqa: E402
+from informer import wav as informer_wav  # noqa: E402
 from informer.service import InformerError, InformerService  # noqa: E402
 
 PORT = os.environ.get('INFORMER_TEST_PORT') or os.environ.get('DIAL_LIST_TEST_PORT')
@@ -40,8 +44,15 @@ BASE_DDL = '''
 '''
 
 
+def master_wav_bytes(seconds=25.52):
+    """Оригинал: WAV 24 кГц, моно, 16 бит — тон 440 Гц, чтобы телефонной версии было что сводить."""
+    t = np.arange(int(informer_wav.MASTER_RATE * seconds)) / informer_wav.MASTER_RATE
+    pcm = np.rint(0.3 * np.sin(2 * np.pi * 440 * t) * 32767).astype('<i2').tobytes()
+    return informer_wav.encode(pcm, informer_wav.MASTER_RATE)
+
+
 def wav_bytes(seconds=25.52):
-    """WAV 8 кГц, моно, 16 бит: тишина нужной длины."""
+    """WAV 8 кГц, моно, 16 бит: тишина нужной длины — запись прежней страницы, без оригинала."""
     samples = int(8000 * seconds)
     data = b'\x00\x00' * samples
     fmt = struct.pack('<HHIIHH', 1, 1, 8000, 16000, 2, 16)
@@ -309,3 +320,58 @@ def test_robot_status(env):
     assert status['online'] is True and status['lines'] == LINES_939
     clock.tick(seconds=120)
     assert svc.robot_status()['online'] is False
+
+
+def test_master_for_listening_phone_version_for_robot(env):
+    """Владелец, 15.10.2026: голос в полном качестве. Руководитель слушает оригинал 24 кГц,
+    робот получает телефонную версию 8 кГц — её сводит сервер, а не браузер."""
+    svc, _, _ = env
+    original = master_wav_bytes()
+    campaign = make_campaign(svc, phones(1), wav_bytes=original)
+    assert campaign['audio_ms'] == 25520
+    sha, robot_audio = svc.agent_audio(campaign['id'])
+    assert informer_wav.inspect(robot_audio)['sample_rate'] == informer_wav.PHONE_RATE
+    assert robot_audio == informer_telephone.from_master(original)
+    assert sha == hashlib.sha256(robot_audio).hexdigest()
+    assert svc.campaign_audio(DEPT, campaign['id']) == original
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    call = poll(svc)['calls'][0]
+    assert call['audio_sha256'] == sha and call['audio_ms'] == 25520
+
+
+def test_phone_only_recording_of_previous_page_still_works(env):
+    svc, _, _ = env
+    old = wav_bytes()
+    campaign = make_campaign(svc, phones(1), wav_bytes=old)
+    assert svc.agent_audio(campaign['id']) == (hashlib.sha256(old).hexdigest(), old)
+    assert svc.campaign_audio(DEPT, campaign['id']) == old
+    with pytest.raises(InformerError, match='24 кГц или 8 кГц'):
+        make_campaign(svc, phones(1), wav_bytes=informer_wav.encode(b'\x00\x00' * 48000, 48000))
+
+
+def test_existing_table_gets_master_column():
+    """Боевая таблица создана до оригиналов: повторный apply добавляет колонку, рассылки целы."""
+    schema = 't_informer_' + uuid.uuid4().hex
+    db = _Db(schema)
+    admin = db.connect()
+    admin.autocommit = True
+    try:
+        with admin.cursor() as cur:
+            cur.execute('CREATE SCHEMA ' + schema)
+            cur.execute('SET search_path TO ' + schema)
+            cur.execute(BASE_DDL)
+            lines = informer_schema.DDL[0].splitlines()
+            old_ddl = '\n'.join(line for line in lines if 'audio_master' not in line and 'оригинал (24' not in line)
+            cur.execute(old_ddl)
+            cur.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = %s"
+                        " AND table_name = 'informer_campaigns' AND column_name = 'audio_master'", (schema,))
+            assert cur.fetchone()[0] == 0
+            cur.execute("INSERT INTO informer_campaigns (department_id, name, audio_wav, audio_sha256, audio_ms)"
+                        " VALUES (1954, 'Старая', '\\x00', 'sha', 1000)")
+            informer_schema.apply(cur)
+            cur.execute("SELECT name, audio_master FROM informer_campaigns")
+            assert cur.fetchall() == [('Старая', None)]
+    finally:
+        with admin.cursor() as cur:
+            cur.execute('DROP SCHEMA ' + schema + ' CASCADE')
+        admin.close()

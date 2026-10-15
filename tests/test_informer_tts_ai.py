@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from informer import ai, tts  # noqa: E402
 
 
-def _wav(seconds=1.0, rate=8000):
+def _wav(seconds=1.0, rate=24000):
     data = b'\x00\x00' * int(rate * seconds)
     fmt = struct.pack('<HHIIHH', 1, 1, rate, rate * 2, 2, 16)
     return (b'RIFF' + struct.pack('<I', 36 + len(data)) + b'WAVE' + b'fmt ' + struct.pack('<I', 16) + fmt
@@ -24,7 +24,7 @@ def soniox_key(monkeypatch):
     monkeypatch.setenv('SONIOX_API_KEY', 'test-key')
 
 
-def test_tts_request_is_phone_wav_with_soniox_language_code():
+def test_tts_request_is_full_quality_wav_with_soniox_language_code():
     sent = {}
 
     def post(url, headers, body):
@@ -35,7 +35,8 @@ def test_tts_request_is_phone_wav_with_soniox_language_code():
     assert audio.startswith(b'RIFF')
     body = sent['body']
     assert body['language'] == 'kk'                     # часть «kz» — у Soniox код kk
-    assert body['sample_rate'] == 8000 and body['audio_format'] == 'wav'
+    # Полное качество (владелец, 15.10.2026): 24 кГц — родная частота голоса, телефонную сводит сервер.
+    assert body['sample_rate'] == 24000 and body['audio_format'] == 'wav'
     assert body['model'] == 'tts-rt-v2' and body['voice'] == 'Iris' and body['speed'] == 1.1
     assert body['text'] == 'Сәлеметсіз бе!'             # пробелы схлопнуты
     assert sent['headers']['Authorization'] == 'Bearer test-key'
@@ -66,7 +67,7 @@ def test_tts_retries_busy_then_gives_clear_refusal():
 @pytest.mark.parametrize('answer, words', [
     ((500, b'oops'), 'не озвучил'),
     ((200, b'ID3notawav'), 'не в том формате'),
-    ((200, _wav(rate=24000)), 'не в том формате'),     # не 8 кГц — робот сыграл бы с ускорением
+    ((200, _wav(rate=8000)), 'не в том формате'),      # 8 кГц — не тот звук, что просили: глухой
 ])
 def test_tts_bad_answers(answer, words):
     with pytest.raises(tts.TTSError) as err:

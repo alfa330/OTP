@@ -193,18 +193,19 @@
     GET     /api/dial_list/departments/<id>/informer         автоинформатор (15.10.2026): робот на шлюзе
                                                              (в сети, линии) и рассылки отдела
     POST    /api/dial_list/departments/<id>/informer/campaigns  новая рассылка: multipart name, audio (WAV
-                                                             8 кГц моно — склеивает браузер: сначала
-                                                             казахская, потом русская), parts (JSON границ
+                                                             24 кГц моно, оригинал — склеивает браузер:
+                                                             сначала казахская, потом русская; телефонную
+                                                             8 кГц для робота сводит сервер), parts (JSON границ
                                                              частей), recipients (.csv/.xlsx номеров),
                                                              window_start/_end, max_per_minute (≤10, закон
                                                              РК), max_attempts, retry_after_min
     GET     /api/dial_list/departments/<id>/informer/voices  голоса озвучки (Soniox), темпы, предел текста
-    POST    /api/dial_list/departments/<id>/informer/tts     {lang: kz|ru, text, voice, speed} → WAV 8 кГц
+    POST    /api/dial_list/departments/<id>/informer/tts     {lang: kz|ru, text, voice, speed} → WAV 24 кГц
     POST    /api/dial_list/departments/<id>/informer/ai      ИИ для текста: generate {brief} → {kz, ru};
                                                              polish {text, lang}; translate {text, source, target}
     GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>        аналитика и водители (маска номера)
     POST    /api/dial_list/departments/<id>/informer/campaigns/<cid>/<act>  start | pause | finish
-    GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/audio  запись рассылки (прослушать)
+    GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/audio  запись рассылки (оригинал)
     GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/export xlsx: водители, звонки, контекст
 
 Binotel (без авторизации, токен в адресе И, по умолчанию, IP сервера Binotel — адрес, который
@@ -1127,8 +1128,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError("Нет списка водителей")
         from informer import recipients as informer_recipients
         from informer import wav as informer_wav
-        wav_bytes = audio.read(informer_wav.MAX_BYTES + 1)
-        if len(wav_bytes) > informer_wav.MAX_BYTES:
+        wav_bytes = audio.read(informer_wav.MAX_UPLOAD_BYTES + 1)
+        if len(wav_bytes) > informer_wav.MAX_UPLOAD_BYTES:
             raise DialListError("Запись длиннее пяти минут", 413)
         list_name = os.path.basename(str(listing.filename or 'drivers.xlsx'))
         list_ext = os.path.splitext(list_name)[1].lower()

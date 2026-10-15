@@ -14,7 +14,10 @@ DDL = [
         department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
         name VARCHAR(200) NOT NULL,
         status VARCHAR(16) NOT NULL DEFAULT 'draft',
+        -- телефонная версия (8 кГц) — её играет робот; audio_sha256 и audio_ms — о ней
         audio_wav BYTEA NOT NULL,
+        -- оригинал (24 кГц) — его слушает руководитель; NULL у рассылок прежней страницы (только 8 кГц)
+        audio_master BYTEA,
         audio_sha256 VARCHAR(64) NOT NULL,
         audio_ms INTEGER NOT NULL,
         -- [{lang, start_ms, end_ms}] — части записи по порядку (сначала казахская)
@@ -34,6 +37,7 @@ DDL = [
         finished_at TIMESTAMPTZ
     )
     """,
+    "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS audio_master BYTEA",
     "CREATE INDEX IF NOT EXISTS informer_campaigns_dept ON informer_campaigns (department_id, created_at DESC)",
     """
     CREATE TABLE IF NOT EXISTS informer_targets (

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """Озвучка текста рассылки: Soniox TTS (владелец, 15.10.2026: «генерация голоса через Soniox»).
 
-REST Soniox (POST https://tts-rt.soniox.com/tts, модель tts-rt-v2) отдаёт звук сразу в формате
-робота — WAV 8 кГц, моно, PCM 16 бит; проверено 15.10.2026 на казахском и русском. Каждый голос
+REST Soniox (POST https://tts-rt.soniox.com/tts, модель tts-rt-v2) отдаёт WAV моно PCM 16 бит на 8, 16,
+24, 44,1 или 48 кГц. Берём 24 кГц — родную частоту голоса: на 48 кГц выше 12 кГц у него пусто (замер
+15.10.2026). Своя 8-килогерцовая версия Soniox глуше: в полосе 3,4–3,9 кГц, где живут согласные, на
+~6 дБ тише нашей. Поэтому телефонную версию для робота сервер сводит сам (informer/telephone.py), а
+руководитель слушает оригинал (владелец 15.10.2026: «голос делать качественным, а не 8 кГц»). Каждый голос
 Soniox говорит на всех 63 языках модели, отдельных «казахских» голосов нет, поэтому список ниже —
 не вкус, а замер: голос озвучивал текст акции на обоих языках, распознавание Soniox записывало
 услышанное, и в список вошли те, кого оно поняло лучше всех.
@@ -59,7 +62,7 @@ def _clean(text):
 
 
 def synthesize(text, lang, voice=None, speed=DEFAULT_SPEED, post=None, sleep=None):
-    """Текст → WAV 8 кГц моно (bytes). TTSError — с причиной для человека."""
+    """Текст → WAV 24 кГц моно (bytes), оригинал. TTSError — с причиной для человека."""
     key = os.getenv("SONIOX_API_KEY")
     if not key:
         raise TTSError("Озвучка не настроена на сервере: нет ключа Soniox", 503)
@@ -72,7 +75,7 @@ def synthesize(text, lang, voice=None, speed=DEFAULT_SPEED, post=None, sleep=Non
         raise TTSError(f"Текст длиннее {TEXT_MAX} знаков — сократите его", 400)
     voice = voice if voice in _VOICE_IDS else DEFAULT_VOICE
     body = {"model": MODEL, "language": LANGS[lang], "voice": voice, "text": text,
-            "audio_format": "wav", "sample_rate": wav.SAMPLE_RATE,
+            "audio_format": "wav", "sample_rate": wav.MASTER_RATE,
             "speed": SPEEDS.get(speed, SPEEDS[DEFAULT_SPEED])}
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     status, content = 0, b""
@@ -92,9 +95,9 @@ def synthesize(text, lang, voice=None, speed=DEFAULT_SPEED, post=None, sleep=Non
         log.warning("informer tts: HTTP %s, %s", status, content[:200])
         raise TTSError("Soniox не озвучил текст — попробуйте ещё раз", 502)
     try:
-        wav.inspect(content)
+        wav.inspect(content, rates=(wav.MASTER_RATE,))
     except ValueError:
-        log.warning("informer tts: ответ не WAV 8 кГц (%d байт)", len(content))
+        log.warning("informer tts: ответ не WAV 24 кГц (%d байт)", len(content))
         raise TTSError("Soniox вернул звук не в том формате", 502)
     return content
 

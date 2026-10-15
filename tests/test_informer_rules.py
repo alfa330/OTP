@@ -67,9 +67,26 @@ def _wav(rate=8000, channels=1, bits=16, seconds=1.0):
 
 def test_wav_inspect():
     assert wav.inspect(_wav(seconds=25.52))['duration_ms'] == 25520
-    for bad in (_wav(rate=16000), _wav(channels=2), _wav(bits=8), b'', b'ID3' + b'\x00' * 100):
+    both = (wav.MASTER_RATE, wav.PHONE_RATE)
+    master = wav.inspect(_wav(rate=24000, seconds=25.52), rates=both)
+    assert master['duration_ms'] == 25520 and master['sample_rate'] == 24000
+    assert master['data_offset'] == 44 and master['data_bytes'] == 612480 * 2
+    assert wav.inspect(_wav(seconds=2), rates=both)['sample_rate'] == 8000
+    # По умолчанию — только телефонная: оригинал роботу не годится, он сыграл бы его в три раза медленнее.
+    for bad in (_wav(rate=24000), _wav(rate=16000), _wav(channels=2), _wav(bits=8), b'', b'ID3' + b'\x00' * 100):
         with pytest.raises(ValueError):
             wav.inspect(bad)
+    with pytest.raises(ValueError, match='24 кГц или 8 кГц'):
+        wav.inspect(_wav(rate=48000), rates=both)
+    with pytest.raises(ValueError, match='пяти минут'):
+        wav.inspect(_wav(rate=24000, seconds=301), rates=both)
+
+
+def test_wav_encode_round_trip():
+    pcm = struct.pack('<4h', 0, 32767, -32768, 100)
+    raw = wav.encode(pcm, wav.PHONE_RATE)
+    info = wav.inspect(raw)
+    assert raw[info['data_offset']:info['data_offset'] + info['data_bytes']] == pcm
 
 
 def test_recipients_csv_with_header_and_duplicates():

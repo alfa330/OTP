@@ -208,7 +208,8 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
         if (result) setText(lang, result.text);
     };
 
-    /* Озвучка части: та же, что потом сыграет робот. Кэш по тексту, голосу и темпу. */
+    /* Озвучка части в полном качестве (24 кГц); робот сыграет её телефонную версию — её сводит сервер.
+       Кэш по тексту, голосу и темпу. */
     const speech = async (lang) => {
         const text = form.texts[lang].trim();
         if (!text) throw new Error(`Напишите ${lang === 'kz' ? 'казахский' : 'русский'} текст`);
@@ -224,7 +225,7 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
         return entry;
     };
 
-    /* Вся запись целиком (казахская, потом русская) — именно её услышит водитель. */
+    /* Вся запись целиком (казахская, потом русская) — оригинал; водителю робот играет её телефонную версию. */
     const track = async () => {
         let sources;
         let key;

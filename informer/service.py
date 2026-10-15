@@ -9,7 +9,7 @@ from psycopg2.extras import execute_values
 
 from dial_list.service import mask_phone
 
-from . import rules, schema, wav
+from . import rules, schema, telephone, wav
 
 log = logging.getLogger(__name__)
 
@@ -86,13 +86,16 @@ class InformerService:
     def create_campaign(self, department_id, created_by, *, name, wav_bytes, parts, recipients,
                         file_name='', window_start=None, window_end=None, max_per_minute=None,
                         max_attempts=None, retry_after_min=None, script=None):
-        """Новая рассылка (черновик): запись, части, список водителей. Звонить начнёт «Запустить»."""
+        """Новая рассылка (черновик): запись, части, список водителей. Звонить начнёт «Запустить».
+
+        Запись — оригинал 24 кГц (склеивает браузер); робот играет её телефонную версию 8 кГц, которую
+        сводит сервер (informer/telephone.py). WAV 8 кГц — запись прежней страницы: оригинала у неё нет."""
         self.ready()
         name = str(name or '').strip()
         if not name:
             raise InformerError('Назовите рассылку')
         try:
-            audio = wav.inspect(wav_bytes)
+            audio = wav.inspect(wav_bytes, rates=(wav.MASTER_RATE, wav.PHONE_RATE))
             clean = rules.clean_parts(parts, audio['duration_ms'])
             start = rules.parse_hhmm(window_start, rules.DEFAULT_WINDOW[0])
             end = rules.parse_hhmm(window_end, rules.DEFAULT_WINDOW[1])
@@ -110,16 +113,22 @@ class InformerService:
         if not rows:
             raise InformerError('В списке нет ни одного номера')
         script_json = json.dumps(clean_script(script), ensure_ascii=False)
-        sha = hashlib.sha256(wav_bytes).hexdigest()
+        if audio['sample_rate'] == wav.MASTER_RATE:
+            master, phone = wav_bytes, telephone.from_master(wav_bytes)
+        else:
+            master, phone = None, wav_bytes
+        # Телефонная версия не короче оригинала (⌈n/3⌉ отсчётов), поэтому части в неё помещаются.
+        phone_ms = wav.inspect(phone)['duration_ms']
+        sha = hashlib.sha256(phone).hexdigest()
         with self.db._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO informer_campaigns
-                    (department_id, name, status, audio_wav, audio_sha256, audio_ms, parts, script,
-                     window_start, window_end, max_per_minute, max_attempts, retry_after_min,
+                    (department_id, name, status, audio_wav, audio_master, audio_sha256, audio_ms, parts,
+                     script, window_start, window_end, max_per_minute, max_attempts, retry_after_min,
                      targets_total, file_name, created_by, created_at)
-                VALUES (%s, %s, 'draft', %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, 'draft', %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (int(department_id), name[:200], wav_bytes, sha, audio['duration_ms'], json.dumps(clean),
+            """, (int(department_id), name[:200], phone, master, sha, phone_ms, json.dumps(clean),
                   script_json, start, end, per_minute, attempts, retry, len(rows), str(file_name or '')[:255],
                   created_by, self.clock()))
             campaign_id = cur.fetchone()[0]
@@ -294,9 +303,11 @@ class InformerService:
         return campaign
 
     def campaign_audio(self, department_id, campaign_id):
+        """Запись для руководителя: оригинал, а у рассылок прежней страницы — телефонная версия."""
         self.ready()
         with self.db._get_cursor() as cur:
-            cur.execute("SELECT audio_wav FROM informer_campaigns WHERE id = %s AND department_id = %s",
+            cur.execute("SELECT COALESCE(audio_master, audio_wav) FROM informer_campaigns"
+                        " WHERE id = %s AND department_id = %s",
                         (int(campaign_id), int(department_id)))
             row = cur.fetchone()
         if not row:

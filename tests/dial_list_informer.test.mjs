@@ -5,7 +5,8 @@
  * Что защищаем:
  *   • порядок частей — сначала казахская, потом русская (решение владельца), и границы частей,
  *     по которым сервер считает «на какой части положил трубку»;
- *   • WAV ровно того формата, что принимает сервер (informer/wav.py) и играет робот: 8 кГц, моно, PCM16;
+ *   • WAV-оригинал ровно того формата, что ждёт сервер (informer/wav.py): 24 кГц, моно, PCM16 — полное
+ *     качество голоса (владелец, 15.10.2026); телефонную версию для робота сервер сводит сам;
  *   • громкость частей выравнивается, пик не выше −1 dBFS, тишина по краям срезается;
  *   • «где положил трубку» в интерфейсе совпадает с сервером (informer/rules.py: listen_stage);
  *   • потолок темпа в форме — тот же, что закон в коде сервера (10 в минуту);
@@ -16,8 +17,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-    GAP_S, LEAD_IN_S, PART_ORDER, PEAK_LIMIT_DB, TAIL_S, TARGET_RATE, buildTrack, encodeWav, peakOf, speechLevelDb,
-    trimSilence,
+    GAP_S, LEAD_IN_S, MASTER_RATE, PART_ORDER, PEAK_LIMIT_DB, TAIL_S, buildTrack, encodeWav, mixToMono, peakOf,
+    speechLevelDb, trimSilence,
 } from '../src/components/dial_list/informerAudio.js';
 import {
     campaignActions, partsLabel, seconds, speechEstimate, stageLabel, stageShares,
@@ -26,7 +27,7 @@ import {
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r\n').join('\n');
 
 /* Синус нужной громкости и длины с тишиной по краям — «речь». */
-const tone = (seconds_, amp, padS = 0.3, rate = TARGET_RATE) => {
+const tone = (seconds_, amp, padS = 0.3, rate = MASTER_RATE) => {
     const pad = Math.round(rate * padS);
     const n = Math.round(rate * seconds_);
     const out = new Float32Array(pad * 2 + n);
@@ -53,7 +54,7 @@ test('склейка: тишина, казахская, пауза, русска
 
 test('громкость частей выравнивается, пик не выше −1 dBFS', () => {
     const track = buildTrack([{ lang: 'kz', samples: tone(3, 0.9) }, { lang: 'ru', samples: tone(3, 0.05) }]);
-    const rate = TARGET_RATE;
+    const rate = MASTER_RATE;
     const kz = track.samples.slice(Math.round((track.parts[0].start_ms * rate) / 1000), Math.round((track.parts[0].end_ms * rate) / 1000));
     const ru = track.samples.slice(Math.round((track.parts[1].start_ms * rate) / 1000), Math.round((track.parts[1].end_ms * rate) / 1000));
     assert.ok(Math.abs(speechLevelDb(kz, rate) - speechLevelDb(ru, rate)) < 0.5);
@@ -63,24 +64,37 @@ test('громкость частей выравнивается, пик не в
 test('пустая часть — понятный отказ, а не немая рассылка', () => {
     assert.throws(() => buildTrack([{ lang: 'kz', samples: new Float32Array(8000) }, { lang: 'ru', samples: tone(1, 0.5) }]),
         /казахская/);
-    assert.equal(trimSilence(new Float32Array(800), TARGET_RATE).length, 0);
+    assert.equal(trimSilence(new Float32Array(800), MASTER_RATE).length, 0);
 });
 
-test('WAV — PCM 16 бит, моно, 8 кГц: ровно то, что принимает сервер', () => {
-    const wav = encodeWav(new Float32Array([0, 1, -1, 0.5]), TARGET_RATE);
+test('стерео → моно средним: ни один канал не пропадает', () => {
+    const left = new Float32Array([1, 0, 0.5]);
+    const right = new Float32Array([0, 1, 0.5]);
+    const stereo = { numberOfChannels: 2, length: 3, getChannelData: (c) => (c === 0 ? left : right) };
+    assert.deepEqual([...mixToMono(stereo)], [0.5, 0.5, 0.5]);
+    const mono = { numberOfChannels: 1, length: 3, getChannelData: () => left };
+    const copy = mixToMono(mono);
+    assert.deepEqual([...copy], [...left]);
+    assert.notEqual(copy, left);                    // копия: буфер декодера не держим
+});
+
+test('WAV — PCM 16 бит, моно, 24 кГц: оригинал, который принимает сервер', () => {
+    const wav = encodeWav(new Float32Array([0, 1, -1, 0.5]), MASTER_RATE);
     const view = new DataView(wav.buffer);
     const ascii = (o, n) => String.fromCharCode(...wav.slice(o, o + n));
     assert.equal(ascii(0, 4), 'RIFF');
     assert.equal(ascii(8, 4), 'WAVE');
     assert.equal(view.getUint16(20, true), 1);      // PCM
     assert.equal(view.getUint16(22, true), 1);      // моно
-    assert.equal(view.getUint32(24, true), 8000);
+    assert.equal(view.getUint32(24, true), 24000);
+    assert.equal(view.getUint32(28, true), 48000);  // байт в секунду
     assert.equal(view.getUint16(34, true), 16);
     assert.equal(view.getUint32(40, true), 8);      // 4 отсчёта × 2 байта
     assert.equal(view.getInt16(46, true), 32767);
     assert.equal(view.getInt16(48, true), -32768);
     const server = read('../informer/wav.py');
-    assert.match(server, /SAMPLE_RATE = 8000/);
+    assert.match(server, new RegExp(`MASTER_RATE = ${MASTER_RATE}\\n`));
+    assert.match(server, /PHONE_RATE = 8000/);
     assert.match(server, /CHANNELS = 1/);
     assert.match(server, /BITS = 16/);
 });

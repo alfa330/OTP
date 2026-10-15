@@ -1,18 +1,20 @@
 /*
- * Запись автоинформатора — в браузере руководителя: две записи (казахская, русская) → один WAV,
- * который робот на шлюзе играет в звонок (informer/wav.py проверяет формат на сервере).
+ * Запись автоинформатора — в браузере руководителя: две записи (казахская, русская) → один WAV-оригинал.
+ * Телефонную версию 8 кГц, которую играет робот, из него один раз и с фильтром сводит сервер
+ * (informer/telephone.py); informer/wav.py проверяет формат.
  *
  * Порядок — решение владельца 15.10.2026: сначала казахская часть, потом русская.
- * Формат — телефонный: 8 кГц, моно, PCM 16 бит. Тишина 0,5 с в начале (первые доли секунды после
- * ответа теряются в сети), пауза 0,6 с между частями, 0,3 с в хвосте. Громкость частей выравнивается
- * по речи, общий пик не выше −1 dBFS — обе части звучат одинаково громко.
+ * Качество — тоже его решение: «голос делать качественным, а не 8 кГц». Оригинал — 24 кГц, моно,
+ * PCM 16 бит: родная частота голоса Soniox, выше у него пусто. Тишина 0,5 с в начале (первые доли
+ * секунды после ответа теряются в сети), пауза 0,6 с между частями, 0,3 с в хвосте. Громкость частей
+ * выравнивается по речи, общий пик не выше −1 dBFS — обе части звучат одинаково громко.
  *
  * Те же шаги проверены живыми звонками 15.10.2026 (скрипт build_informer_track.py): водители
  * дослушивали запись целиком, звук без хрипа. Чистые функции здесь — для тестов
- * (tests/dial_list_informer_audio.test.mjs); браузерное — decode и пересчёт частоты.
+ * (tests/dial_list_informer.test.mjs); браузерное — только декодирование.
  */
 
-export const TARGET_RATE = 8000;
+export const MASTER_RATE = 24000;
 export const LEAD_IN_S = 0.5;
 export const GAP_S = 0.6;
 export const TAIL_S = 0.3;
@@ -79,11 +81,11 @@ export const peakOf = (samples) => {
 };
 
 /*
- * Части (уже 8 кГц, моно) → одна дорожка и границы частей в миллисекундах.
+ * Части (одной частоты, моно) → одна дорожка и границы частей в миллисекундах.
  * parts: [{ lang, samples }] в порядке звучания. Громкость: каждая часть к TARGET_SPEECH_DB,
  * потом общий множитель, чтобы пик не превысил PEAK_LIMIT_DB, — уровни частей остаются равны.
  */
-export const buildTrack = (parts, rate = TARGET_RATE) => {
+export const buildTrack = (parts, rate = MASTER_RATE) => {
     const levelled = parts.map(({ lang, samples }) => {
         const trimmed = trimSilence(samples, rate);
         if (!trimmed.length) throw new Error(`В записи «${lang === 'kz' ? 'казахская' : 'русская'}» нет звука`);
@@ -112,7 +114,7 @@ export const buildTrack = (parts, rate = TARGET_RATE) => {
 };
 
 /* Float32 [-1, 1] → WAV PCM 16 бит моно. */
-export const encodeWav = (samples, rate = TARGET_RATE) => {
+export const encodeWav = (samples, rate = MASTER_RATE) => {
     const dataBytes = samples.length * 2;
     const buffer = new ArrayBuffer(44 + dataBytes);
     const view = new DataView(buffer);
@@ -137,44 +139,55 @@ export const encodeWav = (samples, rate = TARGET_RATE) => {
     return new Uint8Array(buffer);
 };
 
-/* ── браузер ───────────────────────────────────────────────────────────────── */
-
-/* Файл → моно 8 кГц. Пересчёт частоты — OfflineAudioContext: у браузера свой фильтр от наложения
-   частот, и он лучше, чем всё, что уместилось бы здесь. */
-export const decodeToPhoneRate = async (file) => {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    if (!AudioCtx || !OfflineCtx) throw new Error('Браузер не умеет читать аудио — откройте раздел в Chrome');
-    const bytes = await file.arrayBuffer();
-    const ctx = new AudioCtx();
-    let decoded;
-    try {
-        decoded = await ctx.decodeAudioData(bytes.slice(0));
-    } catch {
-        throw new Error(`Не удалось прочитать «${file.name}» — нужен MP3, WAV или M4A`);
-    } finally {
-        ctx.close?.();
+/* Каналы декодированного звука → моно, средним: у стерео-MP3 не пропадает ни левый, ни правый канал. */
+export const mixToMono = (buffer) => {
+    const channels = buffer.numberOfChannels;
+    if (channels === 1) return buffer.getChannelData(0).slice(0);
+    const out = new Float32Array(buffer.length);
+    for (let c = 0; c < channels; c += 1) {
+        const data = buffer.getChannelData(c);
+        for (let i = 0; i < out.length; i += 1) out[i] += data[i] / channels;
     }
-    if (decoded.duration > MAX_TRACK_S) throw new Error(`«${file.name}» длиннее пяти минут`);
-    const offline = new OfflineCtx(1, Math.ceil(decoded.duration * TARGET_RATE), TARGET_RATE);
-    const source = offline.createBufferSource();
-    source.buffer = decoded;
-    source.connect(offline.destination);
-    source.start();
-    const rendered = await offline.startRendering();
-    return rendered.getChannelData(0).slice(0);
+    return out;
 };
 
-/* { kz: File, ru: File } → { blob, parts, durationMs } — то, что уходит на сервер. */
+/* ── браузер ───────────────────────────────────────────────────────────────── */
+
+/* Файл → моно 24 кГц. Частоту пересчитывает сам декодер: decodeAudioData отдаёт звук на частоте
+   контекста, и у декодеров Chrome, Firefox и Safari есть фильтр от наложения частот. Проигрывать
+   буфер через AudioBufferSourceNode в контекст другой частоты нельзя: Chrome пересчитывает его
+   линейной интерполяцией, без фильтра. До 15.10.2026 так шипящие загруженных MP3 складывались
+   обратно в полосу речи: наложение всего на 14 дБ тише голоса, в трубке это хрип. */
+export const decodeAtMasterRate = async (file, label) => {
+    const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OfflineCtx) throw new Error('Браузер не умеет читать аудио — откройте раздел в Chrome');
+    const bytes = await file.arrayBuffer();
+    const ctx = new OfflineCtx(1, 1, MASTER_RATE);
+    let decoded;
+    try {
+        // Старый Safari знает только вариант с обратными вызовами, остальные возвращают Promise.
+        decoded = await new Promise((resolve, reject) => {
+            const pending = ctx.decodeAudioData(bytes, resolve, reject);
+            if (pending?.then) pending.then(resolve, reject);
+        });
+    } catch {
+        throw new Error(`Не удалось прочитать «${label}» — нужен MP3, WAV или M4A`);
+    }
+    if (decoded.duration > MAX_TRACK_S) throw new Error(`«${label}» длиннее пяти минут`);
+    return mixToMono(decoded);
+};
+
+/* { kz: File|Blob, ru: File|Blob } → { blob, parts, durationMs } — оригинал, который уходит на сервер. */
 export const prepareInformerTrack = async (files) => {
     const parts = [];
     for (const lang of PART_ORDER) {
         if (!files[lang]) throw new Error(lang === 'kz' ? 'Добавьте казахскую запись' : 'Добавьте русскую запись');
-        parts.push({ lang, samples: await decodeToPhoneRate(files[lang]) });
+        const label = files[lang].name || (lang === 'kz' ? 'казахская озвучка' : 'русская озвучка');
+        parts.push({ lang, samples: await decodeAtMasterRate(files[lang], label) });
     }
-    const track = buildTrack(parts, TARGET_RATE);
+    const track = buildTrack(parts, MASTER_RATE);
     return {
-        blob: new Blob([encodeWav(track.samples, TARGET_RATE)], { type: 'audio/wav' }),
+        blob: new Blob([encodeWav(track.samples, MASTER_RATE)], { type: 'audio/wav' }),
         parts: track.parts,
         durationMs: track.durationMs,
     };
