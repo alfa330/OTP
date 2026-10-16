@@ -97,7 +97,7 @@ def test_line_rate_is_what_robot_fits_with_fifteen_at_once():
     # Звонок держит место: ~12 с до ответа + запись + ~2 с на отбой; мест — не больше пятнадцати.
     assert rules.line_rate(18, 25520) == 22                 # 15 × 60 / 39,52 с
     assert rules.line_rate(18, 8120) == 40                  # запись короче — звонков больше: 900 / 22,12 с
-    assert rules.line_rate(18) == 22                        # записи ещё нет — обычные 25 с
+    assert rules.line_rate(18) == 23                        # записи ещё нет — обычные 25 с: 900 / 39 с
     assert rules.line_rate(0, 25520) == 3                   # линий не видно — как одна линия (2 звонка)
     assert rules.line_rate(2, 300000) == 1                  # даже на пятиминутной записи не ноль
     assert rules.line_rate(10000, 1000) == 60               # и тысяча линий — пятнадцать звонков разом

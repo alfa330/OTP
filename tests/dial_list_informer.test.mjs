@@ -147,7 +147,7 @@ test('темп в форме — сколько тянет робот при п�
     // Те же числа, что в tests/test_informer_rules.py: test_line_rate_is_what_robot_fits_with_fifteen_at_once.
     assert.equal(lineRate(18, 25520), 22);
     assert.equal(lineRate(18, 8120), 40);
-    assert.equal(lineRate(18, 0), 22);
+    assert.equal(lineRate(18, 0), 23);
     assert.equal(lineRate(0, 25520), 3);
     assert.equal(lineRate(2, 300000), 1);
     assert.equal(lineRate(10000, 1000), 60);
