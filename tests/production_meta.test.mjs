@@ -6,24 +6,33 @@ import {
   ACCEPT_ATTRIBUTE,
   BOARD_COLUMNS,
   DONE_GROUPS,
+  HISTORY_ACTION_LABELS,
+  LIBRARY_CATEGORIES,
   MAX_MATERIAL_BYTES,
-  VIDEO_ACCEPT_ATTRIBUTE,
   canCapturePoster,
   classifyFile,
   classifyLibraryFile,
   columnOf,
+  dayLabel,
   dueInfo,
   fileExtension,
+  fileKindOf,
   filesLabel,
   formatBytes,
+  formatDateTime,
   formatDuration,
   formatEta,
+  formatTime,
   groupBoard,
+  groupByDay,
   itemGroupOf,
+  libraryAccept,
+  libraryCategory,
   retryDelayMs,
   sessionOutcome,
   shortName,
   speedOf,
+  videosLabel,
 } from '../src/components/production/productionMeta.js';
 
 /* Раздел «Продакшн» (задача #316): расчёты без React — контрольная сумма файла,
@@ -134,11 +143,56 @@ test('загрузка: 408 от хранилища — повторить, а �
   assert.equal(sessionOutcome(400), 'fail');
 });
 
-test('«Ролики» принимают только ролики — отказ ещё до загрузки', () => {
-  assert.equal(classifyLibraryFile({ name: 'монтаж.mov', size: 10 }).ok, true);
-  assert.equal(classifyLibraryFile({ name: 'баннер.png', size: 10 }).ok, false);
-  assert.match(classifyLibraryFile({ name: 'баннер.png', size: 10 }).error, /только ролики/);
-  assert.equal(classifyLibraryFile({ name: 'virus.exe', size: 10 }).ok, false);
-  assert.deepEqual(VIDEO_ACCEPT_ATTRIBUTE.split(',').sort(), ['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.webm']);
+test('«Медиатека»: категория принимает свой вид файла — отказ ещё до загрузки', () => {
+  assert.deepEqual(LIBRARY_CATEGORIES.map((c) => [c.value, c.kind]),
+    [['banner', 'image'], ['animation', 'video'], ['ad', 'video'], ['reels', 'video']]);
+  assert.equal(libraryCategory('reels').label, 'Рилсы');
+  assert.equal(libraryCategory('нет'), null);
+  const reels = classifyLibraryFile({ name: 'монтаж.mov', size: 10 }, 'reels');
+  assert.deepEqual([reels.ok, reels.kind, reels.category], [true, 'video', 'reels']);
+  const banner = classifyLibraryFile({ name: 'баннер.PNG', size: 10 }, 'banner');
+  assert.deepEqual([banner.ok, banner.kind, banner.category], [true, 'image', 'banner']);
+  // Тем же текстом, что вернул бы сервер (materials.error_message).
+  assert.equal(classifyLibraryFile({ name: 'баннер.png', size: 10 }, 'ad').error,
+    'Это не ролик: в эту категорию подходят MP4, MOV, WebM, MKV или AVI');
+  assert.equal(classifyLibraryFile({ name: 'ролик.mp4', size: 10 }, 'banner').error,
+    'Это не картинка: в «Баннеры» подходят JPG, PNG, WebP, GIF, SVG, HEIC или TIFF');
+  assert.equal(classifyLibraryFile({ name: 'virus.exe', size: 10 }, 'reels').ok, false);
+  // Вид — раньше размера, как на сервере.
+  assert.match(classifyLibraryFile({ name: 'макет.pdf', size: 0 }, 'banner').error, /не картинка/);
+  assert.equal(classifyLibraryFile({ name: 'ролик.mp4', size: 0 }, 'reels').error, 'Файл пустой');
+  assert.match(classifyLibraryFile({ name: 'ролик.mp4', size: 10 }, null).error, /Выберите категорию/);
+  assert.match(classifyLibraryFile({ name: 'макет.pdf', size: 10 }, null).error, /не подходит/);
+  assert.deepEqual([fileKindOf({ name: 'a.MP4' }), fileKindOf({ name: 'a.webp' }), fileKindOf({ name: 'a.pdf' }), fileKindOf({ name: 'a' })],
+    ['video', 'image', 'file', null]);
+  assert.deepEqual(libraryAccept('reels').split(',').sort(), ['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.webm']);
+  assert.ok(libraryAccept('banner').split(',').includes('.png'));
+  assert.ok(!libraryAccept('banner').split(',').includes('.mp4'));
+  assert.ok(!libraryAccept('').split(',').includes('.pdf'));
+  assert.ok(libraryAccept('').split(',').includes('.mov') && libraryAccept('').split(',').includes('.jpg'));
+  assert.equal(videosLabel(1), '1 ролик');
+  assert.equal(videosLabel(3), '3 ролика');
+  assert.equal(videosLabel(12), '12 роликов');
+});
+
+test('«История»: дни, время и слова действий', () => {
+  const now = new Date('2026-10-16T12:00:00');
+  assert.equal(dayLabel('2026-10-16T08:05:00', now), 'Сегодня');
+  assert.equal(dayLabel('2026-10-15T23:59:00', now), 'Вчера');
+  assert.equal(dayLabel('2026-10-14T10:00:00', now), '14 октября');
+  assert.equal(dayLabel('2025-01-03T10:00:00', now), '3 января 2025');
+  assert.equal(dayLabel(null, now), '');
+  assert.equal(formatTime('2026-10-16T08:05:00'), '08:05');
+  assert.equal(formatDateTime('2026-10-16T08:05:00', now), '16 окт, 08:05');
+  const groups = groupByDay([
+    { id: 4, at: '2026-10-16T11:00:00' },
+    { id: 3, at: '2026-10-16T09:00:00' },
+    { id: 2, at: '2026-10-15T18:00:00' },
+    { id: 1, at: '2026-10-01T18:00:00' },
+  ], now);
+  assert.deepEqual(groups.map((g) => [g.label, g.events.map((e) => e.id)]),
+    [['Сегодня', [4, 3]], ['Вчера', [2]], ['1 октября', [1]]]);
+  assert.deepEqual(groupByDay(null, now), []);
+  assert.deepEqual(HISTORY_ACTION_LABELS, { added: 'Добавлен', moved: 'Перенесён', deleted: 'Удалён' });
 });
 

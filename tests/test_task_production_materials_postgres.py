@@ -323,13 +323,13 @@ def test_uploads_of_others_in_version(db):
         assert queries.uploading_by_others(cur, task_id, 2, VIDEO) == []
 
 
-def _library_video(cur, name, *, status='ready', uploader=VIDEO, size=100, fingerprint=None):
+def _library_video(cur, name, *, status='ready', uploader=VIDEO, size=100, fingerprint=None, category='reels'):
     material_id = uuid.uuid4()
     queries.insert_material(cur, material_id=material_id, task_id=None, version=1, kind='video', name=name,
                             extension='mp4', content_type='video/mp4', size=size, bucket='b',
                             blob_path='Production/library/%s.mp4' % material_id,
                             upload_session='https://s/%s' % material_id, upload_origin='https://o',
-                            uploaded_by=uploader, fingerprint=fingerprint)
+                            uploaded_by=uploader, fingerprint=fingerprint, library_category=category)
     if status == 'ready':
         queries.mark_ready(cur, material_id, version=1, duration=12.0, width=1080, height=1920)
     return str(material_id)
@@ -340,7 +340,7 @@ def test_library_lists_task_less_videos(db):
         task_id = _task(cur, 'Задача с файлом', status='in_progress')
         _material(cur, task_id, 1, 'в задаче.mp4')
         first = _library_video(cur, 'Промо 50%_осень.mp4')
-        second = _library_video(cur, 'Интервью.mp4', uploader=SMM)
+        second = _library_video(cur, 'Интервью.mp4', uploader=SMM, category='ad')
         _library_video(cur, 'недогруз.mp4', status='uploading')
 
         items, total = queries.library(cur)
@@ -353,6 +353,12 @@ def test_library_lists_task_less_videos(db):
         assert total == 1 and found[0]['id'] == first
         page, total = queries.library(cur, limit=1, offset=1)
         assert total == 2 and len(page) == 1
+        found, total = queries.library(cur, category='ad')
+        assert total == 1 and found[0]['id'] == second and found[0]['library_category'] == 'ad'
+        assert queries.library(cur, category='banner') == ([], 0)
+        # Числа на плитках: только готовые, без задачи; файл до категорий — под None.
+        _library_video(cur, 'старый.mp4', category=None)
+        assert queries.library_counts(cur) == {'reels': 1, 'ad': 1, None: 1}
         # Ролики без задачи не попадают ни в задачи, ни в уборку задачи.
         assert {m['name'] for m in queries.materials_of(cur, task_id)} == {'в задаче.mp4'}
         assert len(queries.blobs_of_task(cur, task_id)) == 2
@@ -364,7 +370,72 @@ def test_library_resume_matches_task_less_upload(db):
         found = queries.pending_for(cur, task_id=None, user_id=VIDEO, name='большой.mov', size=5000, fingerprint='42')
         assert found['id'] == pending and found['task_id'] is None
         task_id = _task(cur, 'Та же картинка в задаче', status='in_progress')
-        # Незаконченная загрузка «Роликов» не подхватывается загрузкой в задачу — и наоборот.
+        # Незаконченная загрузка «Медиатеки» не подхватывается загрузкой в задачу — и наоборот.
         assert queries.pending_for(cur, task_id=task_id, user_id=VIDEO, name='большой.mov', size=5000,
                                    fingerprint='42') is None
 
+
+def _event(cur, material_id, action, *, name='ролик.mp4', category='reels', from_category=None, actor=VIDEO,
+           kind='video', size=100):
+    queries.add_library_event(cur, material={'id': material_id, 'name': name, 'kind': kind, 'size': size},
+                              action=action, actor_id=actor, category=category, from_category=from_category)
+
+
+def test_library_move_touches_only_the_shelf(db):
+    with db.cursor() as cur:
+        shelf = _library_video(cur, 'реклама.mp4', category='ad')
+        task_id = _task(cur, 'Задача', status='in_progress')
+        in_task = _material(cur, task_id, 1, 'в задаче.mp4')
+        assert queries.set_library_category(cur, shelf, 'reels') == 1
+        assert queries.material(cur, shelf)['library_category'] == 'reels'
+        # Материал задачи категорией «Медиатеки» не помечается.
+        assert queries.set_library_category(cur, in_task, 'reels') == 0
+        assert queries.material(cur, in_task)['library_category'] is None
+
+
+def test_library_history_journal(db):
+    with db.cursor() as cur:
+        kept = _library_video(cur, 'Промо 50%_осень.mp4', category='ad')
+        gone = _library_video(cur, 'Интервью.mp4', uploader=SMM)
+        _library_video(cur, 'недогруз.mp4', status='uploading')
+        _event(cur, kept, 'added', name='Промо 50%_осень.mp4', category='ad')
+        _event(cur, gone, 'added', name='Интервью.mp4', actor=SMM)
+        _event(cur, kept, 'moved', name='Промо 50%_осень.mp4', category='animation', from_category='ad', actor=HEAD)
+        _event(cur, gone, 'deleted', name='Интервью.mp4', actor=HEAD)
+        cur.execute('DELETE FROM task_production_materials WHERE id = %s', (gone,))
+
+        events, total = queries.library_history(cur)
+        # Одна транзакция — одно время у всех строк: порядок держит id.
+        assert total == 4 and [e['action'] for e in events] == ['deleted', 'moved', 'added', 'added']
+        moved = events[1]
+        assert (moved['material_id'], moved['category'], moved['from_category']) == (kept, 'animation', 'ad')
+        assert moved['actor'] == {'id': HEAD, 'name': 'Главова Гульнара', 'avatar_bucket': None, 'avatar_blob_path': None}
+        assert events[0]['name'] == 'Интервью.mp4' and events[0]['size'] == 100 and events[0]['kind'] == 'video'
+        # Категория отбирает и перенос ИЗ неё.
+        assert [e['action'] for e in queries.library_history(cur, category='ad')[0]] == ['moved', 'added']
+        assert [e['action'] for e in queries.library_history(cur, category='reels')[0]] == ['deleted', 'added']
+        # Поиск — по файлу и по сотруднику; % и _ — буквы.
+        assert queries.library_history(cur, query='50%_')[1] == 2
+        assert queries.library_history(cur, query='%')[1] == 2
+        assert queries.library_history(cur, query='_')[1] == 2
+        assert queries.library_history(cur, query='50%x')[1] == 0
+        assert {e['action'] for e in queries.library_history(cur, query='сммова')[0]} == {'added'}
+        page, total = queries.library_history(cur, limit=1, offset=1)
+        assert total == 4 and [e['action'] for e in page] == ['moved']
+        # Удалённый файл: запись осталась, файла для просмотра нет.
+        alive = queries.library_materials(cur, [e['material_id'] for e in events])
+        assert set(alive) == {kept} and alive[kept]['name'] == 'Промо 50%_осень.mp4'
+        assert queries.library_materials(cur, []) == {}
+        # Ушёл сотрудник — запись остаётся, без имени.
+        cur.execute('DELETE FROM users WHERE id = %s', (SMM,))
+        added_by_smm = [e for e in queries.library_history(cur)[0] if e['name'] == 'Интервью.mp4' and e['action'] == 'added']
+        assert added_by_smm[0]['actor'] is None
+
+
+def test_library_materials_skip_tasks_and_unfinished(db):
+    with db.cursor() as cur:
+        ready = _library_video(cur, 'готов.mp4')
+        pending = _library_video(cur, 'грузится.mp4', status='uploading')
+        task_id = _task(cur, 'Задача', status='in_progress')
+        in_task = _material(cur, task_id, 1, 'в задаче.mp4')
+        assert set(queries.library_materials(cur, [ready, pending, in_task, str(uuid.uuid4())])) == {ready}

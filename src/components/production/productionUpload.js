@@ -94,14 +94,15 @@ export const uploadStore = {
         return items;
     },
     /** Поставить файлы в очередь. Неподходящие сразу отмечаются ошибкой.
-        library — ролик вкладки «Ролики» (без задачи): taskId тогда не нужен. */
-    add({ taskId = null, library = false, files, apiBaseUrl, headers, onDone }) {
+        library — файл «Медиатеки» (без задачи) в категорию category: taskId тогда не нужен. */
+    add({ taskId = null, library = false, category = null, files, apiBaseUrl, headers, onDone }) {
         Array.from(files || []).forEach((file) => {
-            const check = library ? classifyLibraryFile(file) : classifyFile(file);
+            const check = library ? classifyLibraryFile(file, category) : classifyFile(file);
             items.push({
                 key: nextKey++,
                 taskId: library ? null : Number(taskId),
                 library: Boolean(library),
+                category: library ? (category || null) : null,
                 file,
                 name: file?.name || 'файл',
                 size: Number(file?.size || 0),
@@ -138,7 +139,7 @@ export const uploadStore = {
     retry(key) {
         const item = items.find((entry) => entry.key === key);
         if (!item || item.state !== 'failed') return;
-        if (!(item.library ? classifyLibraryFile(item.file) : classifyFile(item.file)).ok) return;
+        if (!(item.library ? classifyLibraryFile(item.file, item.category) : classifyFile(item.file)).ok) return;
         forget(key);
         patch(key, { state: 'queued', error: '', loaded: 0, eta: null });
         pump();
@@ -388,7 +389,12 @@ const uploadOne = async (item) => {
                 ? `${apiBaseUrl}/api/production/library/uploads`
                 : `${apiBaseUrl}/api/production/tasks/${item.taskId}/uploads`,
             // Отпечаток (дата изменения файла): докачка подхватит только тот же файл.
-            { name: item.name, size: item.size, fingerprint: String(item.file?.lastModified || '') },
+            {
+                name: item.name,
+                size: item.size,
+                fingerprint: String(item.file?.lastModified || ''),
+                ...(item.library ? { category: item.category } : {}),
+            },
             { headers: headers() },
         );
         started = response.data || {};

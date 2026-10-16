@@ -102,7 +102,22 @@ SUBMITTED_STATUSES = frozenset({'completed', 'accepted'})
 
 UNSUPPORTED_TYPE = 'PRODUCTION_UNSUPPORTED_TYPE'
 LIBRARY_ONLY_VIDEO = 'PRODUCTION_LIBRARY_ONLY_VIDEO'
+LIBRARY_ONLY_IMAGE = 'PRODUCTION_LIBRARY_ONLY_IMAGE'
+LIBRARY_BAD_CATEGORY = 'PRODUCTION_LIBRARY_BAD_CATEGORY'
 LIBRARY_FOLDER = 'library'
+
+# Категории «Медиатеки» — список владельца 16.10.2026 (с типичными размерами:
+# баннеры 2–4 МБ, анимационные 25–30 МБ, рекламные 60–80 МБ, рилсы 120–150 МБ).
+# (код, подпись, что принимаем). Баннеры — фото, остальное — ролики. Тот же
+# список — в src/components/production/productionMeta.js (LIBRARY_CATEGORIES),
+# совпадение сверяет тест.
+LIBRARY_CATEGORIES = (
+    ('banner', 'Баннеры', KIND_IMAGE),
+    ('animation', 'Анимационные ролики', KIND_VIDEO),
+    ('ad', 'Рекламные ролики', KIND_VIDEO),
+    ('reels', 'Рилсы', KIND_VIDEO),
+)
+LIBRARY_CATEGORY_KIND = {code: kind for code, _label, kind in LIBRARY_CATEGORIES}
 TOO_LARGE = 'PRODUCTION_FILE_TOO_LARGE'
 EMPTY_FILE = 'PRODUCTION_FILE_EMPTY'
 BAD_NAME = 'PRODUCTION_BAD_NAME'
@@ -155,16 +170,31 @@ def classify(name, size):
     return clean, ext, kind, content_type
 
 
-def classify_library(name, size):
-    """Для вкладки «Ролики»: то же, что classify, но только ролики — о них и просили."""
-    found = classify(name, size)
-    if found[2] != KIND_VIDEO:
-        raise ValueError(LIBRARY_ONLY_VIDEO)
-    return found
+def library_category(value):
+    """Код категории «Медиатеки» или ValueError."""
+    code = str(value or '').strip().lower()
+    if code not in LIBRARY_CATEGORY_KIND:
+        raise ValueError(LIBRARY_BAD_CATEGORY)
+    return code
 
 
-def video_extensions():
-    return sorted(ext for ext, (kind, _ctype) in TYPES.items() if kind == KIND_VIDEO)
+def classify_library(name, size, category):
+    """Для «Медиатеки»: classify плюс вид файла под категорию — в баннеры только
+    картинки, в остальные только ролики. Вид проверяется раньше размера: PDF в
+    «Баннеры» — «это не картинка», а не «файл великоват». Порядок тот же, что у
+    classifyLibraryFile на сайте, — и ответ тот же."""
+    code = library_category(category)
+    wanted = LIBRARY_CATEGORY_KIND[code]
+    clean = clean_name(name)
+    known = TYPES.get(extension_of(clean))
+    if known is None or known[0] != wanted:
+        raise ValueError(LIBRARY_ONLY_IMAGE if wanted == KIND_IMAGE else LIBRARY_ONLY_VIDEO)
+    return classify(clean, size) + (code,)
+
+
+def library_kind_fits(material, category):
+    """Можно ли перенести файл в эту категорию: вид файла должен подходить."""
+    return LIBRARY_CATEGORY_KIND.get(category) == material.get('kind')
 
 
 def accepted_extensions():
@@ -182,7 +212,7 @@ def blob_path(task_id, material_id, ext, prefix=BLOB_PREFIX):
 
 
 def library_blob_path(material_id, ext, prefix=BLOB_PREFIX):
-    """Ролик без задачи — в своей папке, рядом с папками задач."""
+    """Файл «Медиатеки» (без задачи) — в своей папке, рядом с папками задач."""
     prefix = str(prefix or BLOB_PREFIX)
     if not prefix.endswith('/'):
         prefix += '/'
@@ -194,7 +224,7 @@ def is_library(material):
 
 
 def can_delete_library(material, *, user_id, is_super_admin, heads_marketing):
-    """Ролик «Роликов» удаляют загрузивший, глава маркетинга и супер-админ."""
+    """Файл «Медиатеки» удаляют и переносят загрузивший, глава маркетинга и супер-админ."""
     return bool(is_super_admin or heads_marketing or material.get('uploaded_by') == user_id)
 
 
@@ -388,7 +418,9 @@ def content_matches(ext, head):
 def error_message(code):
     """Текст для человека по коду ошибки."""
     return {
-        LIBRARY_ONLY_VIDEO: 'Во вкладку «Ролики» загружаются только ролики: MP4, MOV, WebM, MKV или AVI',
+        LIBRARY_ONLY_VIDEO: 'Это не ролик: в эту категорию подходят MP4, MOV, WebM, MKV или AVI',
+        LIBRARY_ONLY_IMAGE: 'Это не картинка: в «Баннеры» подходят JPG, PNG, WebP, GIF, SVG, HEIC или TIFF',
+        LIBRARY_BAD_CATEGORY: 'Выберите категорию: баннеры, анимационные ролики, рекламные ролики или рилсы',
         UNSUPPORTED_TYPE: 'Такой файл не принимается. Подходят ролики (MP4, MOV, WebM), '
                           'картинки (JPG, PNG, WebP, GIF, SVG, HEIC, TIFF), PDF, PSD, AI, EPS, '
                           'архивы ZIP, RAR, 7z и звук (MP3, WAV, M4A, AAC).',

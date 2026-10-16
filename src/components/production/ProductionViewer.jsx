@@ -4,7 +4,7 @@ import { Download, FileText, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
-import { formatBytes, formatDuration } from './productionMeta';
+import { formatBytes, formatDateTime, formatDuration, shortName } from './productionMeta';
 
 /*
  * Просмотр материала «Продакшна»: ролик — плеером, картинка — целиком, остальное —
@@ -85,8 +85,13 @@ const ProductionViewer = ({ items = [], index = -1, onIndex, onClose, onDownload
     const showVideo = item.kind === 'video' && item.view_url && !failed;
     const showImage = item.kind === 'image' && item.view_url && !failed;
     const counter = items.length > 1 ? `${index + 1} из ${items.length}` : '';
-    const meta = [formatBytes(item.size), item.kind === 'video' ? formatDuration(item.duration_seconds) : '']
-        .filter(Boolean).join(' · ');
+    // Кто и когда добавил — прямо под именем файла: просили видеть «кто когда добавлял».
+    const meta = [
+        formatBytes(item.size),
+        item.kind === 'video' ? formatDuration(item.duration_seconds) : '',
+        shortName(item.uploaded_by_name),
+        formatDateTime(item.ready_at || item.created_at),
+    ].filter(Boolean).join(' · ');
 
     return createPortal(
         <div

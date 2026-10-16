@@ -57,6 +57,12 @@ class TypesSyncTests(unittest.TestCase):
             self.assertIsNotNone(found, name)
             self.assertEqual(set(re.findall(r"'([^']+)'", found.group(1))), set(expected), name)
 
+    def test_library_categories_match_server(self):
+        source = _read(META_JS)
+        block = source[source.index('/* categories:start */'):source.index('/* categories:end */')]
+        js = re.findall(r"\{ value: '(\w+)', label: '([^']+)', kind: '(\w+)'", block)
+        self.assertEqual(js, [tuple(row) for row in materials.LIBRARY_CATEGORIES])
+
     def test_size_limit_matches(self):
         self.assertIn('export const MAX_MATERIAL_BYTES = 2 * 1024 * 1024 * 1024;', _read(META_JS))
         self.assertEqual(materials.MAX_MATERIAL_BYTES, 2 * 1024 ** 3)
@@ -106,14 +112,39 @@ class ClassifyTests(unittest.TestCase):
                          'Production-stand/35/%s.mp4' % mid)
         self.assertEqual(materials.poster_path('Production/35/a.mp4'), 'Production/35/a.mp4.poster.jpg')
 
-    def test_library_takes_only_videos(self):
-        self.assertEqual(materials.classify_library('Монтаж.MOV', 10)[2], 'video')
-        for name in ('баннер.png', 'макет.pdf', 'архив.zip'):
-            with self.subTest(name=name):
+    def test_library_categories_take_their_kind(self):
+        self.assertEqual(materials.classify_library('Монтаж.MOV', 10, 'reels')[2:], ('video', 'video/quicktime', 'reels'))
+        self.assertEqual(materials.classify_library('Баннер.PNG', 10, 'banner')[2:], ('image', 'image/png', 'banner'))
+        self.assertEqual(materials.classify_library('ролик.mp4', 10, ' AD ')[4], 'ad')
+        cases = (
+            (('баннер.png', 10, 'reels'), materials.LIBRARY_ONLY_VIDEO),
+            (('макет.pdf', 10, 'animation'), materials.LIBRARY_ONLY_VIDEO),
+            (('virus.exe', 10, 'ad'), materials.LIBRARY_ONLY_VIDEO),
+            (('ролик.mp4', 10, 'banner'), materials.LIBRARY_ONLY_IMAGE),
+            # Вид — раньше размера: пустой PDF в «Баннеры» — «это не картинка».
+            (('макет.pdf', 0, 'banner'), materials.LIBRARY_ONLY_IMAGE),
+            (('ролик.mp4', 0, 'reels'), materials.EMPTY_FILE),
+            (('ролик.mp4', materials.MAX_MATERIAL_BYTES + 1, 'reels'), materials.TOO_LARGE),
+            (('ролик.mp4', 10, None), materials.LIBRARY_BAD_CATEGORY),
+            (('ролик.mp4', 10, ''), materials.LIBRARY_BAD_CATEGORY),
+            (('ролик.mp4', 10, 'Рилсы'), materials.LIBRARY_BAD_CATEGORY),
+        )
+        for args, code in cases:
+            with self.subTest(args=args):
                 with self.assertRaises(ValueError) as caught:
-                    materials.classify_library(name, 10)
-                self.assertEqual(str(caught.exception), materials.LIBRARY_ONLY_VIDEO)
-        self.assertEqual(materials.video_extensions(), ['avi', 'm4v', 'mkv', 'mov', 'mp4', 'webm'])
+                    materials.classify_library(*args)
+                self.assertEqual(str(caught.exception), code)
+        self.assertTrue(materials.library_kind_fits({'kind': 'video'}, 'reels'))
+        self.assertTrue(materials.library_kind_fits({'kind': 'image'}, 'banner'))
+        self.assertFalse(materials.library_kind_fits({'kind': 'image'}, 'reels'))
+        self.assertFalse(materials.library_kind_fits({'kind': 'video'}, 'banner'))
+        self.assertFalse(materials.library_kind_fits({'kind': 'video'}, 'нет такой'))
+        texts = {materials.error_message(code) for code in (
+            materials.LIBRARY_ONLY_VIDEO, materials.LIBRARY_ONLY_IMAGE, materials.LIBRARY_BAD_CATEGORY)}
+        self.assertEqual(len(texts), 3)
+        self.assertFalse(any(text.startswith('PRODUCTION_') for text in texts))
+
+    def test_library_paths_and_rights(self):
         mid = uuid.UUID('12345678-1234-5678-1234-567812345678')
         self.assertEqual(materials.library_blob_path(mid, 'mp4'), 'Production/library/%s.mp4' % mid)
         self.assertTrue(materials.is_library({'task_id': None}))
@@ -416,6 +447,7 @@ class RouteTests(unittest.TestCase):
             },
             'materials': {},
             'history': {35: []},
+            'events': [],
         }
         self.user = {'id': self.VIDEO, 'role': 'marketing_manager', 'marketing': True, 'relation': True}
         self.fake_db = _FakeDb(self.store)
@@ -445,9 +477,15 @@ class RouteTests(unittest.TestCase):
             'mark_ready': self._mark_ready,
             'delete_material': lambda cursor, mid: store['materials'].pop(str(mid), None),
             'stale_uploads': lambda cursor, **kw: [],
-            'library': lambda cursor, **kw: (
-                [dict(m) for m in store['materials'].values() if m['task_id'] is None and m['status'] == 'ready'],
-                sum(1 for m in store['materials'].values() if m['task_id'] is None and m['status'] == 'ready')),
+            'library': self._library,
+            'library_counts': self._library_counts,
+            'set_library_category': self._set_category,
+            'add_library_event': self._add_event,
+            'library_history': self._history,
+            'library_materials': lambda cursor, ids: {
+                str(i): dict(store['materials'][str(i)]) for i in ids
+                if str(i) in store['materials'] and store['materials'][str(i)]['task_id'] is None
+                and store['materials'][str(i)]['status'] == 'ready'},
             'uploading_by_others': lambda cursor, task_id, version, user_id: [
                 {'name': m['name'], 'uploaded_by_name': 'Коллега'} for m in store['materials'].values()
                 if m['task_id'] == task_id and m['version'] == version and m['status'] == 'uploading'
@@ -510,8 +548,42 @@ class RouteTests(unittest.TestCase):
             'upload_session': kw['upload_session'], 'upload_origin': kw['upload_origin'],
             'poster_blob_path': None, 'duration_seconds': None, 'width': None, 'height': None,
             'uploaded_by': kw['uploaded_by'], 'uploaded_by_name': 'Видеограф', 'created_at': None, 'ready_at': None,
-            'fingerprint': kw.get('fingerprint'),
+            'fingerprint': kw.get('fingerprint'), 'library_category': kw.get('library_category'),
         }
+
+    def _shelf(self):
+        return [dict(m) for m in self.store['materials'].values() if m['task_id'] is None and m['status'] == 'ready']
+
+    def _library(self, cursor, *, query='', category=None, limit=30, offset=0):
+        rows = [m for m in self._shelf() if not category or m['library_category'] == category]
+        self.library_calls = getattr(self, 'library_calls', []) + [{'query': query, 'category': category}]
+        return rows[offset:offset + limit], len(rows)
+
+    def _library_counts(self, cursor):
+        counts = {}
+        for m in self._shelf():
+            counts[m['library_category']] = counts.get(m['library_category'], 0) + 1
+        return counts
+
+    def _set_category(self, cursor, mid, category):
+        material = self.store['materials'].get(str(mid))
+        if material is None or material['task_id'] is not None:
+            return 0
+        material['library_category'] = category
+        return 1
+
+    def _add_event(self, cursor, *, material, action, actor_id, category, from_category=None):
+        self.store['events'].append({
+            'id': len(self.store['events']) + 1, 'material_id': str(material['id']), 'action': action,
+            'name': material['name'], 'kind': material['kind'], 'size': material['size'], 'category': category,
+            'from_category': from_category, 'at': None,
+            'actor': {'id': actor_id, 'name': 'Сотрудник %s' % actor_id, 'avatar_bucket': None, 'avatar_blob_path': None},
+        })
+
+    def _history(self, cursor, *, query='', category=None, limit=50, offset=0):
+        rows = [dict(e) for e in reversed(self.store['events'])
+                if not category or category in (e['category'], e['from_category'])]
+        return rows[offset:offset + limit], len(rows)
 
     def _mark_ready(self, cursor, mid, *, version, duration, width, height):
         self.store['materials'][str(mid)].update(status='ready', version=version, duration_seconds=duration,
@@ -846,28 +918,42 @@ class RouteTests(unittest.TestCase):
 
 
 
-    # ── «Ролики»: просто загрузить ролик, без задачи ─────────────────────────
+    # ── «Медиатека»: просто загрузить файл, без задачи ───────────────────────
 
-    def _library_start(self, name='ролик.mp4', size=100):
-        return self.http.post('/api/production/library/uploads', json={'name': name, 'size': size},
+    def _library_start(self, name='ролик.mp4', size=100, category='reels'):
+        body = {'name': name, 'size': size}
+        if category is not None:
+            body['category'] = category
+        return self.http.post('/api/production/library/uploads', json=body,
                               headers={'Origin': 'https://alfa330.github.io'})
 
-    def _library_ready(self, name='ролик.mp4'):
-        mid = self._library_start(name=name).get_json()['material_id']
+    def _library_ready(self, name='ролик.mp4', category='reels'):
+        # Подпись формата должна совпасть с расширением, иначе «завершить» отклонит файл.
+        self.head_bytes = (b'\x89PNG\r\n\x1a\n' + b'\x00' * 16 if name.endswith('.png')
+                           else b'\x00\x00\x00\x18ftypisom' + b'\x00' * 8)
+        mid = self._library_start(name=name, category=category).get_json()['material_id']
         self.assertEqual(self.http.post('/api/production/uploads/%s/complete' % mid, json={}).status_code, 200)
         return mid
 
-    def test_library_upload_is_videos_only_and_lands_in_its_folder(self):
-        response = self._library_start(name='баннер.png')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()['code'], 'PRODUCTION_LIBRARY_ONLY_VIDEO')
-        response = self._library_start()
+    def test_library_upload_needs_a_fitting_category(self):
+        for name, category, code in (
+                ('ролик.mp4', None, 'PRODUCTION_LIBRARY_BAD_CATEGORY'),
+                ('ролик.mp4', 'всё', 'PRODUCTION_LIBRARY_BAD_CATEGORY'),
+                ('баннер.png', 'reels', 'PRODUCTION_LIBRARY_ONLY_VIDEO'),
+                ('ролик.mp4', 'banner', 'PRODUCTION_LIBRARY_ONLY_IMAGE')):
+            with self.subTest(name=name, category=category):
+                response = self._library_start(name=name, category=category)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['code'], code)
+        self.assertEqual([c for c in self.gcs_calls if c[0] == 'open'], [])  # до облака не дошло
+        response = self._library_start(name='баннер.png', category='banner')
         self.assertEqual(response.status_code, 201, response.get_json())
         material = self.store['materials'][response.get_json()['material_id']]
         self.assertIsNone(material['task_id'])
         self.assertEqual(material['version'], 1)
+        self.assertEqual(material['library_category'], 'banner')
         kind, path, kwargs = [c for c in self.gcs_calls if c[0] == 'open'][-1]
-        self.assertTrue(path.startswith('Production/library/') and path.endswith('.mp4'))
+        self.assertTrue(path.startswith('Production/library/') and path.endswith('.png'))
         self.assertEqual(kwargs['origin'], 'https://alfa330.github.io')
 
     def test_library_complete_and_list(self):
@@ -876,8 +962,119 @@ class RouteTests(unittest.TestCase):
         body = self.http.get('/api/production/library').get_json()
         self.assertEqual([item['id'] for item in body['items']], [mid])
         self.assertTrue(body['items'][0]['can_delete'])  # свой ролик
+        self.assertEqual(body['items'][0]['category'], 'reels')
         self.assertNotIn(mid, [m['id'] for v in self.http.get('/api/production/tasks/35').get_json()['versions']
                                for m in v['materials']])
+
+    def test_library_complete_writes_history(self):
+        mid = self._library_ready(category='ad')
+        self.assertEqual([(e['action'], e['material_id'], e['category'], e['actor']['id']) for e in self.store['events']],
+                         [('added', mid, 'ad', self.VIDEO)])
+        # Повторное «завершить» (сеть переспросила) второй записи не даёт.
+        self.http.post('/api/production/uploads/%s/complete' % mid, json={})
+        self.assertEqual(len(self.store['events']), 1)
+
+    def test_library_list_by_category_with_counts(self):
+        reels = self._library_ready('рилс.mp4', 'reels')
+        ad = self._library_ready('реклама.mp4', 'ad')
+        banner = self._library_ready('баннер.png', 'banner')
+        body = self.http.get('/api/production/library?category=ad&q=рекл').get_json()
+        self.assertEqual([item['id'] for item in body['items']], [ad])
+        self.assertEqual(self.library_calls[-1], {'query': 'рекл', 'category': 'ad'})
+        self.assertEqual(body['counts'], {'': 3, 'banner': 1, 'animation': 0, 'ad': 1, 'reels': 1})
+        self.assertEqual(body['category'], 'ad')
+        everything = self.http.get('/api/production/library').get_json()
+        self.assertEqual({item['id'] for item in everything['items']}, {reels, ad, banner})
+        self.assertIsNone(self.library_calls[-1]['category'])
+        # Файл, загруженный до категорий, входит в «Все файлы», но ни в одну плитку.
+        legacy = self._library_ready('старый.mp4', 'reels')
+        self.store['materials'][legacy]['library_category'] = None
+        counts = self.http.get('/api/production/library').get_json()['counts']
+        self.assertEqual(counts, {'': 4, 'banner': 1, 'animation': 0, 'ad': 1, 'reels': 1})
+        wrong = self.http.get('/api/production/library?category=nope')
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(wrong.get_json()['code'], 'PRODUCTION_LIBRARY_BAD_CATEGORY')
+
+    def test_library_move_between_categories(self):
+        mid = self._library_ready(category='ad')
+        response = self.http.patch('/api/production/library/%s' % mid, json={'category': 'reels'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
+        moved = self.store['events'][-1]
+        self.assertEqual((moved['action'], moved['from_category'], moved['category'], moved['actor']['id']),
+                         ('moved', 'ad', 'reels', self.VIDEO))
+        # В ту же категорию — без записи в истории.
+        self.assertEqual(self.http.patch('/api/production/library/%s' % mid, json={'category': 'reels'}).status_code, 200)
+        self.assertEqual(len(self.store['events']), 2)
+        # Ролик в баннеры не переносится.
+        wrong = self.http.patch('/api/production/library/%s' % mid, json={'category': 'banner'})
+        self.assertEqual((wrong.status_code, wrong.get_json()['code']), (400, 'PRODUCTION_LIBRARY_ONLY_IMAGE'))
+        bad = self.http.patch('/api/production/library/%s' % mid, json={'category': None})
+        self.assertEqual(bad.get_json()['code'], 'PRODUCTION_LIBRARY_BAD_CATEGORY')
+        self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
+
+    def test_library_move_rights(self):
+        mid = self._library_ready(category='ad')
+        self.user['id'] = 8  # другой сотрудник маркетинга
+        response = self.http.patch('/api/production/library/%s' % mid, json={'category': 'reels'})
+        self.assertEqual((response.status_code, response.get_json()['code']), (403, 'PRODUCTION_MOVE_FORBIDDEN'))
+        self.assertEqual(self.store['materials'][mid]['library_category'], 'ad')
+        with mock.patch.object(self, '_headed_codes', lambda uid: ['marketing']):
+            self.assertEqual(self.http.patch('/api/production/library/%s' % mid, json={'category': 'reels'}).status_code, 200)
+        # Материал задачи и недогруженный файл через «Медиатеку» не двигаются.
+        self.user['id'] = self.VIDEO
+        task_mid = self._start().get_json()['material_id']
+        self.http.post('/api/production/uploads/%s/complete' % task_mid, json={})
+        self.assertEqual(self.http.patch('/api/production/library/%s' % task_mid, json={'category': 'reels'}).status_code, 404)
+        pending = self._library_start(category='ad').get_json()['material_id']
+        self.assertEqual(self.http.patch('/api/production/library/%s' % pending, json={'category': 'reels'}).status_code, 404)
+        self.assertEqual(self.http.patch('/api/production/library/not-a-uuid', json={'category': 'reels'}).status_code, 404)
+        # Свой охват — «Медиатека» закрыта целиком.
+        self.user.update(id=50, role='admin', marketing=False, relation=True)
+        closed = self.http.patch('/api/production/library/%s' % mid, json={'category': 'animation'})
+        self.assertEqual(closed.get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+
+    def test_library_delete_and_cancel_in_history(self):
+        mid = self._library_ready(category='reels')
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 200)
+        self.assertEqual([(e['action'], e['category']) for e in self.store['events']],
+                         [('added', 'reels'), ('deleted', 'reels')])
+        # Отменённая недогрузка в истории не видна: файла и не было.
+        pending = self._library_start(category='ad').get_json()['material_id']
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % pending).status_code, 200)
+        self.assertEqual(len(self.store['events']), 2)
+
+    def test_library_history(self):
+        kept = self._library_ready('остался.mp4', 'reels')
+        gone = self._library_ready('удалён.mp4', 'ad')
+        self.http.patch('/api/production/library/%s' % kept, json={'category': 'animation'})
+        self.http.delete('/api/production/materials/%s' % gone)
+        body = self.http.get('/api/production/library/history').get_json()
+        self.assertEqual([e['action'] for e in body['events']], ['deleted', 'moved', 'added', 'added'])
+        self.assertEqual(body['total'], 4)
+        by_action = {e['action']: e for e in body['events']}
+        self.assertEqual(by_action['moved']['material']['id'], kept)  # файл на месте — можно открыть
+        self.assertIsNone(by_action['deleted']['material'])  # удалённый — только запись
+        self.assertEqual(by_action['deleted']['name'], 'удалён.mp4')
+        self.assertEqual(by_action['moved']['actor'], {'id': self.VIDEO, 'name': 'Сотрудник 7', 'avatar_url': None})
+        self.assertEqual((by_action['moved']['from_category'], by_action['moved']['category']), ('reels', 'animation'))
+        self.assertEqual(body['counts'], {'': 1, 'banner': 0, 'animation': 1, 'ad': 0, 'reels': 0})
+        # Плитка «Рилсы» показывает и перенос ИЗ неё.
+        reels = self.http.get('/api/production/library/history?category=reels').get_json()
+        self.assertEqual([e['action'] for e in reels['events']], ['moved', 'added'])
+        self.assertEqual(self.http.get('/api/production/library/history?category=x').status_code, 400)
+        self.user.update(id=50, role='admin', marketing=False, relation=True)
+        self.assertEqual(self.http.get('/api/production/library/history').get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+
+    def test_library_resume_takes_latest_category(self):
+        mid = self._library_start(category='ad').get_json()['material_id']
+        pending = dict(self.store['materials'][mid])
+        with mock.patch.object(self.queries, 'pending_for', lambda cursor, **kw: dict(pending)), \
+                mock.patch.object(storage, 'session_offset', lambda url, size, origin=None: (40, False)):
+            response = self._library_start(category='reels')
+        self.assertEqual(response.get_json()['material_id'], mid)
+        self.assertTrue(response.get_json()['resumed'])
+        self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
 
     def test_library_closed_for_own_scope(self):
         mid = self._library_ready()

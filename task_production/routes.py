@@ -226,6 +226,7 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             'uploaded_by_name': material['uploaded_by_name'],
             'created_at': material['created_at'],
             'ready_at': material['ready_at'],
+            'category': material.get('library_category'),
             'previewable': materials.can_preview(material['kind'], material['content_type']),
             'can_delete': bool(can_delete),
             'poster_url': None,
@@ -243,7 +244,7 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             'open': True,
             'scope': 'all' if ctx['scope_all'] else 'own',
             'marketing': ctx['marketing'],
-            # «Ролики» (без задачи) — рабочая полка маркетинга: видит и грузит тот, кто видит всё.
+            # «Медиатека» (файлы без задачи) — полка маркетинга: видит и грузит тот, кто видит всё.
             'library': ctx['scope_all'],
             'max_file_bytes': materials.MAX_MATERIAL_BYTES,
             'chunk_bytes': materials.CHUNK_BYTES,
@@ -474,9 +475,9 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
         return material, task_row
 
     def _material_access(cursor, material, ctx):
-        """Охват материала: задачи — как у задачи; ролика «Роликов» — у того, кто видит всё.
+        """Охват материала: задачи — как у задачи; файла «Медиатеки» — у того, кто видит всё.
 
-        Возвращает строку задачи или None для ролика без задачи.
+        Возвращает строку задачи или None для файла без задачи.
         """
         if materials.is_library(material):
             if not ctx['scope_all']:
@@ -544,6 +545,8 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 if locked is None:
                     raise ApiError('Загрузка отменена', 404, 'PRODUCTION_UPLOAD_NOT_FOUND')
                 queries.mark_ready(cursor, locked['id'], version=1, duration=duration, width=width, height=height)
+                queries.add_library_event(cursor, material=locked, action=queries.LIBRARY_EVENT_ADDED,
+                                          actor_id=ctx['user_id'], category=locked.get('library_category'))
             return _json({'material': {'id': material['id'], 'status': 'ready', 'version': 1}})
 
         with db._get_cursor() as cursor:
@@ -600,15 +603,33 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             queries.set_poster(cursor, material['id'], path)
         return _json({'ok': True})
 
-    # ── «Ролики»: просто загрузить ролик, без задачи ─────────────────────────
+    # ── «Медиатека»: просто загрузить файл, без задачи ───────────────────────
     # Просьба владельца 16.10.2026: «как можно просто загружать ролики — данная
-    # возможность тоже должна быть на сайте». Полка маркетинга: видит и грузит тот,
-    # у кого в разделе охват «всё» (маркетинг, админ со всеми задачами). Путь
-    # файла тот же, что у материалов задач: сессия докачки, сверка, обложка.
+    # возможность тоже должна быть на сайте», и в тот же день — категории: баннеры
+    # (фото), анимационные, рекламные ролики и рилсы. Полка маркетинга: видит и
+    # грузит тот, у кого в разделе охват «всё» (маркетинг, админ со всеми задачами).
+    # Путь файла тот же, что у материалов задач: сессия докачки, сверка, обложка.
 
     def _require_library(ctx):
         if not ctx['scope_all']:
-            raise ApiError('Вкладка «Ролики» открыта маркетингу', 403, 'PRODUCTION_LIBRARY_CLOSED')
+            raise ApiError('«Медиатека» открыта маркетингу', 403, 'PRODUCTION_LIBRARY_CLOSED')
+
+    def _category_or_error(value):
+        try:
+            return materials.library_category(value)
+        except ValueError as exc:
+            raise ApiError(materials.error_message(str(exc)), 400, str(exc))
+
+    def _can_manage_library(material, ctx):
+        return materials.can_delete_library(material, user_id=ctx['user_id'], is_super_admin=ctx['super_admin'],
+                                            heads_marketing=ctx['heads_marketing'])
+
+    def _library_counts(cursor):
+        """Числа на плитках: «Все файлы» ('') и каждая категория."""
+        by_category = queries.library_counts(cursor)
+        counts = {code: by_category.get(code, 0) for code, _label, _kind in materials.LIBRARY_CATEGORIES}
+        counts[''] = sum(by_category.values())
+        return counts
 
     @route('/library')
     def library_list(ctx):
@@ -616,23 +637,23 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
         limit = max(1, min(_int(request.args.get('limit'), 30) or 30, 60))
         offset = max(0, _int(request.args.get('offset'), 0) or 0)
         query = (request.args.get('q') or '').strip()[:200]
+        raw_category = (request.args.get('category') or '').strip()
+        category = _category_or_error(raw_category) if raw_category else None
         with db._get_cursor() as cursor:
-            rows, total = queries.library(cursor, query=query, limit=limit, offset=offset)
+            rows, total = queries.library(cursor, query=query, category=category, limit=limit, offset=offset)
+            counts = _library_counts(cursor)
         client, bucket = _client_or_none() if rows else (None, None)
-        items = []
-        for row in rows:
-            deletable = materials.can_delete_library(row, user_id=ctx['user_id'], is_super_admin=ctx['super_admin'],
-                                                     heads_marketing=ctx['heads_marketing'])
-            items.append(_material_out(row, client, bucket, can_delete=deletable))
+        items = [_material_out(row, client, bucket, can_delete=_can_manage_library(row, ctx)) for row in rows]
         return _json({'items': items, 'total': total, 'offset': offset, 'limit': limit,
-                      'extensions': materials.video_extensions()})
+                      'category': category or '', 'counts': counts})
 
     @route('/library/uploads', methods=('POST',))
     def start_library_upload(ctx):
         _require_library(ctx)
         data = _body()
         try:
-            name, ext, kind, content_type = materials.classify_library(data.get('name'), data.get('size'))
+            name, ext, kind, content_type, category = materials.classify_library(
+                data.get('name'), data.get('size'), data.get('category'))
         except ValueError as exc:
             code = str(exc)
             status = 413 if code == materials.TOO_LARGE else 400
@@ -652,6 +673,10 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             state = storage.session_offset(pending['upload_session'], pending['size'],
                                            origin=pending.get('upload_origin'))
             if state is not None:
+                if pending.get('library_category') != category:
+                    # Тот же файл добавили снова, уже в другую категорию, — ляжет в последнюю выбранную.
+                    with db._get_cursor() as cursor:
+                        queries.set_library_category(cursor, pending['id'], category)
                 offset, finished = state
                 return _json({'material_id': pending['id'], 'session_url': pending['upload_session'],
                               'offset': offset, 'finished': finished, 'size': pending['size'],
@@ -667,10 +692,74 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             queries.insert_material(
                 cursor, material_id=material_id, task_id=None, version=1, kind=kind, name=name, extension=ext,
                 content_type=content_type, size=size, bucket=bucket, blob_path=path, upload_session=session_url,
-                upload_origin=origin, uploaded_by=ctx['user_id'], fingerprint=fingerprint)
+                upload_origin=origin, uploaded_by=ctx['user_id'], fingerprint=fingerprint,
+                library_category=category)
         return _json({'material_id': str(material_id), 'session_url': session_url, 'offset': 0,
                       'finished': False, 'size': size, 'chunk_bytes': materials.CHUNK_BYTES,
                       'resumed': False}, 201)
+
+    @route('/library/<material_id>', methods=('PATCH',))
+    def move_library_material(material_id, ctx):
+        """Перенести файл в другую категорию. Кто вправе — те же, кто вправе удалить."""
+        _require_library(ctx)
+        _check_uuid(material_id)
+        category = _category_or_error(_body().get('category'))
+        with db._get_cursor() as cursor:
+            material = queries.material(cursor, material_id, lock=True)
+            if material is None or not materials.is_library(material) or material['status'] != 'ready':
+                raise ApiError('Файл не найден', 404, 'PRODUCTION_MATERIAL_NOT_FOUND')
+            if not _can_manage_library(material, ctx):
+                raise ApiError('Перенести файл могут загрузивший, глава маркетинга и супер-админ',
+                               403, 'PRODUCTION_MOVE_FORBIDDEN')
+            if not materials.library_kind_fits(material, category):
+                code = (materials.LIBRARY_ONLY_IMAGE if materials.LIBRARY_CATEGORY_KIND[category] == materials.KIND_IMAGE
+                        else materials.LIBRARY_ONLY_VIDEO)
+                raise ApiError(materials.error_message(code), 400, code)
+            previous = material.get('library_category')
+            if previous != category:
+                queries.set_library_category(cursor, material['id'], category)
+                queries.add_library_event(cursor, material=material, action=queries.LIBRARY_EVENT_MOVED,
+                                          actor_id=ctx['user_id'], category=category, from_category=previous)
+        return _json({'ok': True, 'category': category})
+
+    @route('/library/history')
+    def library_history(ctx):
+        """Кто и когда добавил, перенёс или удалил файл «Медиатеки»."""
+        _require_library(ctx)
+        limit = max(1, min(_int(request.args.get('limit'), 50) or 50, 100))
+        offset = max(0, _int(request.args.get('offset'), 0) or 0)
+        query = (request.args.get('q') or '').strip()[:200]
+        raw_category = (request.args.get('category') or '').strip()
+        category = _category_or_error(raw_category) if raw_category else None
+        with db._get_cursor() as cursor:
+            events, total = queries.library_history(cursor, query=query, category=category,
+                                                    limit=limit, offset=offset)
+            alive = queries.library_materials(cursor, [event['material_id'] for event in events])
+            counts = _library_counts(cursor)
+        client, bucket = _client_or_none() if alive else (None, None)
+        files = {mid: _material_out(row, client, bucket, can_delete=_can_manage_library(row, ctx))
+                 for mid, row in alive.items()}
+        people = {}
+        out = []
+        for event in events:
+            actor = event['actor']
+            if actor is not None and actor['id'] not in people:
+                people[actor['id']] = _person(actor)
+            out.append({
+                'id': event['id'],
+                'action': event['action'],
+                'at': event['at'],
+                'name': event['name'],
+                'kind': event['kind'],
+                'size': event['size'],
+                'category': event['category'],
+                'from_category': event['from_category'],
+                'actor': people.get(actor['id']) if actor is not None else None,
+                # Файл на месте — строку можно открыть; удалённый остаётся только записью.
+                'material': files.get(event['material_id']),
+            })
+        return _json({'events': out, 'total': total, 'offset': offset, 'limit': limit,
+                      'category': category or '', 'counts': counts})
 
     # ── Удаление и скачивание ────────────────────────────────────────────────
 
@@ -690,19 +779,20 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             if material['status'] == 'uploading':
                 allowed = material['uploaded_by'] == ctx['user_id'] or ctx['super_admin']
             elif task_row is None:
-                allowed = materials.can_delete_library(
-                    material, user_id=ctx['user_id'], is_super_admin=ctx['super_admin'],
-                    heads_marketing=ctx['heads_marketing'])
+                allowed = _can_manage_library(material, ctx)
             else:
                 allowed = materials.can_delete(
                     material, status=task_row['status'], completed_count=task_row['completed_count'],
                     user_id=ctx['user_id'], is_assignee=is_assignee, is_super_admin=ctx['super_admin'])
             if not allowed:
-                raise ApiError('Удалить ролик могут загрузивший, глава маркетинга и супер-админ'
+                raise ApiError('Удалить файл могут загрузивший, глава маркетинга и супер-админ'
                                if task_row is None else
                                'Этот файл уже отправлен на проверку — удалить его нельзя',
                                403, 'PRODUCTION_DELETE_FORBIDDEN')
             queries.delete_material(cursor, material['id'])
+            if task_row is None and material['status'] == 'ready':
+                queries.add_library_event(cursor, material=material, action=queries.LIBRARY_EVENT_DELETED,
+                                          actor_id=ctx['user_id'], category=material.get('library_category'))
         if material['status'] == 'uploading' and material.get('upload_session'):
             storage.cancel_session(material['upload_session'], origin=material.get('upload_origin'))
         storage.delete_objects(client, material['bucket'],

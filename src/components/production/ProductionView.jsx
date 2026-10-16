@@ -17,8 +17,9 @@ import {
  *
  * «Доска» — задачи по статусам: «К выполнению», «В работе», «На проверке».
  * «Готовое» — принятые задачи с их итоговыми материалами: поиск по названию,
- * отбор по виду (видео, digital, полиграфия, бренд). «Ролики» — просто загрузить
- * ролик, без задачи (видна маркетингу и админам со всеми задачами).
+ * отбор по виду (видео, digital, полиграфия, бренд). «Медиатека» — просто
+ * загрузить баннер или ролик, без задачи, по категориям и с историей (видна
+ * маркетингу и админам со всеми задачами).
  *
  * Задачу ставят в «Задачах» (там форма с брифом), а работают с ней здесь: в
  * карточке исполнитель загружает ролики и макеты и отправляет на проверку,
@@ -134,7 +135,7 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     const headers = useCallback(() => (withAccessTokenHeader ? withAccessTokenHeader() : {}), [withAccessTokenHeader]);
     const isNarrow = useIsMobileShell();
     const [tab, setTab] = useState('board');
-    // Есть ли у человека вкладка «Ролики» — решает сервер (охват «всё»).
+    // Есть ли у человека «Медиатека» — решает сервер (охват «всё»).
     const [libraryOpen, setLibraryOpen] = useState(false);
     const [board, setBoard] = useState(null);
     const [boardError, setBoardError] = useState('');
@@ -238,7 +239,7 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     const tabs = [
         { value: 'board', label: 'Доска' },
         { value: 'done', label: 'Готовое' },
-        libraryOpen && { value: 'videos', label: 'Ролики' },
+        libraryOpen && { value: 'media', label: 'Медиатека' },
     ].filter(Boolean);
 
     const renderColumn = (column, { single = false } = {}) => {
@@ -276,7 +277,8 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
             </header>
 
             <div className="mt-4">
-                <IosSegmented value={tab} options={tabs} onChange={setTab} ariaLabel="Раздел" />
+                {/* Крупный и с переездом плашки: это навигация раздела, а не мелкая настройка. */}
+                <IosSegmented value={tab} options={tabs} onChange={setTab} ariaLabel="Раздел" size="lg" slide stretch={isNarrow} />
             </div>
 
             {tab === 'board' && (
@@ -311,6 +313,7 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
                                 }))}
                                 onChange={setMobileColumn}
                                 stretch
+                                slide
                                 ariaLabel="Колонка"
                             />
                             {renderColumn(BOARD_COLUMNS.find((column) => column.id === mobileColumn) || BOARD_COLUMNS[0], { single: true })}
@@ -345,7 +348,7 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
                             )}
                         </label>
                         <div className="overflow-x-auto [scrollbar-width:none]">
-                            <IosSegmented value={group} options={DONE_GROUPS} onChange={setGroup} ariaLabel="Вид" className="min-w-max" />
+                            <IosSegmented value={group} options={DONE_GROUPS} onChange={setGroup} ariaLabel="Вид" className="min-w-max" slide />
                         </div>
                     </div>
 
@@ -401,7 +404,7 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
                 </div>
             )}
 
-            {tab === 'videos' && libraryOpen && (
+            {tab === 'media' && libraryOpen && (
                 <div className="mt-4">
                     <ProductionLibrary apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
                 </div>

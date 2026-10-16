@@ -64,11 +64,6 @@ export const fileExtension = (name) => {
 
 export const ACCEPT_ATTRIBUTE = Object.keys(PRODUCTION_FILE_TYPES).map((ext) => `.${ext}`).join(',');
 
-/* Вкладка «Ролики» — только ролики: о них владелец и просил («просто загружать ролики»). */
-export const VIDEO_ACCEPT_ATTRIBUTE = Object.entries(PRODUCTION_FILE_TYPES)
-    .filter(([, [kind]]) => kind === 'video')
-    .map(([ext]) => `.${ext}`)
-    .join(',');
 
 /** Годится ли файл, и если нет — почему (тем же текстом, что вернул бы сервер). */
 export const classifyFile = (file) => {
@@ -84,13 +79,56 @@ export const classifyFile = (file) => {
     return { ok: true, ext, kind, contentType, size };
 };
 
-/** То же для «Роликов»: не ролик — отказ сразу, до загрузки. */
-export const classifyLibraryFile = (file) => {
-    const check = classifyFile(file);
-    if (check.ok && check.kind !== 'video') {
-        return { ok: false, error: 'Во вкладку «Ролики» загружаются только ролики: MP4, MOV, WebM, MKV или AVI' };
+/* ── «Медиатека»: файлы без задачи ─────────────────────────────────────── */
+
+/* Категории — список владельца 16.10.2026, с его же обычными размерами файлов.
+   Баннеры — картинки, остальные — ролики. Тот же список (код, подпись, вид) — в
+   task_production/materials.py (LIBRARY_CATEGORIES): сервер принимает только свои
+   коды и сверяет вид файла; тест сверяет блок между отметками буквально.
+   short — подпись там, где тесно (телефон, меню); note — обычный размер файла. */
+/* categories:start */
+export const LIBRARY_CATEGORIES = [
+    { value: 'banner', label: 'Баннеры', kind: 'image', short: 'Баннеры', note: 'фото · обычно 2–4 МБ' },
+    { value: 'animation', label: 'Анимационные ролики', kind: 'video', short: 'Анимация', note: 'обычно 25–30 МБ' },
+    { value: 'ad', label: 'Рекламные ролики', kind: 'video', short: 'Реклама', note: 'обычно 60–80 МБ' },
+    { value: 'reels', label: 'Рилсы', kind: 'video', short: 'Рилсы', note: 'обычно 120–150 МБ' },
+];
+/* categories:end */
+
+export const libraryCategory = (value) => LIBRARY_CATEGORIES.find((category) => category.value === value) || null;
+
+/** Вид файла по расширению: 'video', 'image', 'file' или null — такого не принимаем. */
+export const fileKindOf = (file) => PRODUCTION_FILE_TYPES[fileExtension(file?.name)]?.[0] || null;
+
+const acceptOfKinds = (kinds) => Object.entries(PRODUCTION_FILE_TYPES)
+    .filter(([, [kind]]) => kinds.includes(kind))
+    .map(([ext]) => `.${ext}`)
+    .join(',');
+
+/** Атрибут accept выбора файлов: картинки для баннеров, ролики для остальных. */
+export const libraryAccept = (category) => {
+    const target = libraryCategory(category);
+    return acceptOfKinds(target ? [target.kind] : ['image', 'video']);
+};
+
+const LIBRARY_KIND_ERRORS = {
+    image: 'Это не картинка: в «Баннеры» подходят JPG, PNG, WebP, GIF, SVG, HEIC или TIFF',
+    video: 'Это не ролик: в эту категорию подходят MP4, MOV, WebM, MKV или AVI',
+};
+
+/** Годится ли файл в категорию «Медиатеки» — теми же словами и в том же порядке,
+    что у сервера (classify_library): сначала вид, потом размер. Без категории —
+    отказ: ролик сам не знает, анимационный он или рекламный. */
+export const classifyLibraryFile = (file, category) => {
+    const target = libraryCategory(category);
+    if (!target) {
+        return ['image', 'video'].includes(fileKindOf(file))
+            ? { ok: false, error: 'Выберите категорию: баннеры, анимационные ролики, рекламные ролики или рилсы' }
+            : { ok: false, error: 'Такой файл в медиатеку не подходит: сюда загружают баннеры (картинки) и ролики' };
     }
-    return check;
+    if (fileKindOf(file) !== target.kind) return { ok: false, error: LIBRARY_KIND_ERRORS[target.kind] };
+    const check = classifyFile(file);
+    return check.ok ? { ...check, category: target.value } : check;
 };
 
 export const canCapturePoster = (kind, contentType) => (
@@ -175,12 +213,47 @@ export const formatShortDate = (value, now = new Date()) => {
     return `${date.getDate()} ${MONTHS_SHORT[date.getMonth()]}${sameYear ? '' : ` ${date.getFullYear()}`}`;
 };
 
+export const formatTime = (value) => {
+    const date = toDate(value);
+    if (!date) return '';
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+
 export const formatDateTime = (value, now = new Date()) => {
     const date = toDate(value);
     if (!date) return '';
-    const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-    return `${formatShortDate(date, now)}, ${time}`;
+    return `${formatShortDate(date, now)}, ${formatTime(date)}`;
 };
+
+const MONTHS_FULL = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+/** Заголовок дня в «Истории»: «Сегодня», «Вчера», «14 октября», «3 января 2025». */
+export const dayLabel = (value, now = new Date()) => {
+    const date = toDate(value);
+    if (!date) return '';
+    const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    // Округление, а не деление нацело: в сутках перевода часов 23 или 25 часов.
+    const daysAgo = Math.round((dayStart(now) - dayStart(date)) / 86400000);
+    if (daysAgo === 0) return 'Сегодня';
+    if (daysAgo === 1) return 'Вчера';
+    return `${date.getDate()} ${MONTHS_FULL[date.getMonth()]}${date.getFullYear() === now.getFullYear() ? '' : ` ${date.getFullYear()}`}`;
+};
+
+/** События «Истории» по дням — в том порядке, в каком пришли (свежее сверху). */
+export const groupByDay = (events, now = new Date()) => {
+    const groups = [];
+    (events || []).forEach((event) => {
+        const label = dayLabel(event.at, now);
+        const last = groups[groups.length - 1];
+        if (last && last.label === label) last.events.push(event);
+        else groups.push({ label, events: [event] });
+    });
+    return groups;
+};
+
+/* Что сделали с файлом. Слово согласовано с «файлом», а не с человеком: род
+   сотрудника по имени не угадать. */
+export const HISTORY_ACTION_LABELS = { added: 'Добавлен', moved: 'Перенесён', deleted: 'Удалён' };
 
 /** Срок задачи: подпись и просрочка. Сданная и принятая задача не «горит». */
 export const dueInfo = (task, now = new Date()) => {
@@ -199,6 +272,7 @@ const plural = (n, one, few, many) => {
 };
 
 export const filesLabel = (n) => `${n} ${plural(n, 'файл', 'файла', 'файлов')}`;
+export const videosLabel = (n) => `${n} ${plural(n, 'ролик', 'ролика', 'роликов')}`;
 
 export const formatBytes = (bytes) => {
     const value = Number(bytes || 0);

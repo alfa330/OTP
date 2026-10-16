@@ -208,7 +208,7 @@ def done(cursor, *, scope_all, user_id, query='', group=None, limit=30, offset=0
     values = [TAG] + list(params)
     text = str(query or '').strip()
     if text:
-        like = '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        like = _like(text)
         filters.append("""(t.subject ILIKE %s OR EXISTS (
             SELECT 1 FROM task_production_materials m_q
              WHERE m_q.task_id = t.id AND m_q.status = 'ready' AND m_q.original_name ILIKE %s))""")
@@ -284,7 +284,7 @@ _MATERIAL_COLUMNS = """
     m.id, m.task_id, m.version, m.status, m.kind, m.original_name, m.extension,
     m.content_type, m.file_size, m.bucket, m.blob_path, m.upload_session, m.upload_origin,
     m.poster_blob_path, m.duration_seconds, m.width, m.height, m.uploaded_by, u.name,
-    m.created_at, m.ready_at
+    m.created_at, m.ready_at, m.library_category
 """
 
 
@@ -311,6 +311,7 @@ def _material_from_row(row):
         'uploaded_by_name': row[18],
         'created_at': row[19],
         'ready_at': row[20],
+        'library_category': row[21],
     }
 
 
@@ -380,15 +381,17 @@ def pending_for(cursor, *, task_id, user_id, name, size, fingerprint=None):
 
 
 def insert_material(cursor, *, material_id, task_id, version, kind, name, extension, content_type,
-                    size, bucket, blob_path, upload_session, upload_origin, uploaded_by, fingerprint=None):
+                    size, bucket, blob_path, upload_session, upload_origin, uploaded_by, fingerprint=None,
+                    library_category=None):
     cursor.execute("""
         INSERT INTO task_production_materials (
             id, task_id, version, status, kind, original_name, extension, content_type,
-            file_size, bucket, blob_path, upload_session, upload_origin, uploaded_by, client_fingerprint
-        ) VALUES (%s, %s, %s, 'uploading', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            file_size, bucket, blob_path, upload_session, upload_origin, uploaded_by, client_fingerprint,
+            library_category
+        ) VALUES (%s, %s, %s, 'uploading', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (str(material_id), None if task_id is None else int(task_id), int(version), kind, name, extension,
           content_type, int(size), bucket, blob_path, upload_session, upload_origin, int(uploaded_by),
-          fingerprint or None))
+          fingerprint or None, library_category))
 
 
 def mark_ready(cursor, material_id, *, version, duration, width, height):
@@ -411,18 +414,26 @@ def delete_material(cursor, material_id):
     cursor.execute("DELETE FROM task_production_materials WHERE id = %s", (str(material_id),))
 
 
-def library(cursor, *, query='', limit=30, offset=0):
-    """Ролики вкладки «Ролики» (без задачи), свежие сверху; (ролики, всего).
+def _like(text):
+    """Образец ILIKE «содержит text»: %, _ и \\ в поиске — буквы, а не шаблон."""
+    return '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
 
-    Поиск — по имени файла. Недогруженные сюда не попадают: их видит только
-    тот, кто грузит, — в своей строке загрузки.
+
+def library(cursor, *, query='', category=None, limit=30, offset=0):
+    """Файлы «Медиатеки» (без задачи), свежие сверху; (файлы, всего).
+
+    Отбор — по категории, поиск — по имени файла. Недогруженные сюда не
+    попадают: их видит только тот, кто грузит, — в своей строке загрузки.
     """
     filters = ["m.task_id IS NULL", "m.status = 'ready'"]
     values = []
+    if category:
+        filters.append("m.library_category = %s")
+        values.append(category)
     text = str(query or '').strip()
     if text:
         filters.append("m.original_name ILIKE %s")
-        values.append('%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+        values.append(_like(text))
     where = ' AND '.join(filters)
     cursor.execute("SELECT COUNT(*) FROM task_production_materials m WHERE " + where, tuple(values))
     total = int(cursor.fetchone()[0] or 0)
@@ -436,6 +447,106 @@ def library(cursor, *, query='', limit=30, offset=0):
     """.format(columns=_MATERIAL_COLUMNS, where=where),
         tuple(values) + (max(1, min(int(limit), 60)), max(0, int(offset))))
     return [_material_from_row(row) for row in cursor.fetchall()], total
+
+
+def library_counts(cursor):
+    """Сколько готовых файлов в каждой категории — числа на плитках.
+
+    Поиск их не меняет: плитка говорит, сколько всего лежит в категории, как
+    папка в Finder. {код: число}; файлы без категории — под None.
+    """
+    cursor.execute("""
+        SELECT library_category, COUNT(*) FROM task_production_materials
+         WHERE task_id IS NULL AND status = 'ready'
+         GROUP BY 1
+    """)
+    return {row[0]: int(row[1]) for row in cursor.fetchall()}
+
+
+def set_library_category(cursor, material_id, category):
+    cursor.execute("""
+        UPDATE task_production_materials SET library_category = %s WHERE id = %s AND task_id IS NULL
+    """, (category, str(material_id)))
+    return cursor.rowcount
+
+
+LIBRARY_EVENT_ADDED = 'added'
+LIBRARY_EVENT_MOVED = 'moved'
+LIBRARY_EVENT_DELETED = 'deleted'
+
+
+def add_library_event(cursor, *, material, action, actor_id, category, from_category=None):
+    """Строка «Истории»: имя, вид и размер берутся из файла — после удаления их больше негде взять."""
+    cursor.execute("""
+        INSERT INTO task_production_library_events
+            (material_id, action, file_name, kind, file_size, category, from_category, actor_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (str(material['id']), action, material['name'], material['kind'], int(material.get('size') or 0),
+          category, from_category, None if actor_id is None else int(actor_id)))
+
+
+def library_history(cursor, *, query='', category=None, limit=50, offset=0):
+    """«История» «Медиатеки», свежее сверху; (события, всего).
+
+    Категория отбирает и перенос ИЗ неё: файл ушёл из «Рилсов» — это тоже история «Рилсов».
+    Поиск — по имени файла и по имени сотрудника.
+    """
+    filters = ['TRUE']
+    values = []
+    if category:
+        filters.append('(e.category = %s OR e.from_category = %s)')
+        values += [category, category]
+    text = str(query or '').strip()
+    if text:
+        filters.append('(e.file_name ILIKE %s OR u.name ILIKE %s)')
+        values += [_like(text), _like(text)]
+    where = ' AND '.join(filters)
+    cursor.execute("""
+        SELECT COUNT(*) FROM task_production_library_events e
+          LEFT JOIN users u ON u.id = e.actor_id
+         WHERE """ + where, tuple(values))
+    total = int(cursor.fetchone()[0] or 0)
+    cursor.execute("""
+        SELECT e.id, e.material_id, e.action, e.file_name, e.kind, e.file_size, e.category, e.from_category,
+               e.actor_id, u.name, u.avatar_bucket, u.avatar_blob_path, e.created_at
+          FROM task_production_library_events e
+          LEFT JOIN users u ON u.id = e.actor_id
+         WHERE {where}
+         ORDER BY e.created_at DESC, e.id DESC
+         LIMIT %s OFFSET %s
+    """.format(where=where), tuple(values) + (max(1, min(int(limit), 100)), max(0, int(offset))))
+    events = []
+    for row in cursor.fetchall():
+        events.append({
+            'id': int(row[0]),
+            'material_id': str(row[1]),
+            'action': row[2],
+            'name': row[3],
+            'kind': row[4],
+            'size': int(row[5] or 0),
+            'category': row[6],
+            'from_category': row[7],
+            'actor': None if row[8] is None else {
+                'id': row[8], 'name': row[9] or '', 'avatar_bucket': row[10], 'avatar_blob_path': row[11],
+            },
+            'at': row[12],
+        })
+    return events, total
+
+
+def library_materials(cursor, material_ids):
+    """Готовые файлы «Медиатеки» по списку id одним запросом: {id: файл}."""
+    ids = sorted({str(value) for value in material_ids or []})
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT {columns}
+          FROM task_production_materials m
+          LEFT JOIN users u ON u.id = m.uploaded_by
+         WHERE m.id = ANY(%s::uuid[]) AND m.task_id IS NULL AND m.status = 'ready'
+    """.format(columns=_MATERIAL_COLUMNS), (ids,))
+    found = [_material_from_row(row) for row in cursor.fetchall()]
+    return {item['id']: item for item in found}
 
 
 def stale_uploads(cursor, *, limit=20):

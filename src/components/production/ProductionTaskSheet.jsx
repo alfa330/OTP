@@ -11,7 +11,7 @@ import ProductionViewer from './ProductionViewer';
 import { uploadOwnerId, uploadStore } from './productionUpload';
 import {
     ACCEPT_ATTRIBUTE, STATUS_LABELS, VERSION_STATE_LABELS, dueInfo, filesLabel, formatBytes, formatDateTime,
-    formatDuration, formatEta, initialsOf,
+    formatDuration, formatEta, formatShortDate, initialsOf, shortName,
 } from './productionMeta';
 
 /*
@@ -131,7 +131,9 @@ export const Thumb = ({ material }) => {
     );
 };
 
-export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = '' }) => {
+/* badge — метка поверх кадра слева сверху (категория «Медиатеки» в общем списке);
+   actions — свои пункты меню между «Скачать» и «Удалить» (перенос в категорию). */
+export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = '', badge = null, actions = [] }) => {
     /* Удаление подтверждается на самой плитке, а не вторым окном поверх карточки:
        окно на окне — двойное затемнение, а на телефоне целый экран ради одной строки. */
     const [confirming, setConfirming] = useState(false);
@@ -144,6 +146,7 @@ export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = ''
                 {[formatBytes(material.size), meta].filter(Boolean).join(' · ')}
             </span>
         </button>
+        {badge && !confirming && <span className="pointer-events-none absolute left-1.5 top-1.5">{badge}</span>}
         {confirming && (
             <div className="absolute inset-x-0 top-0 flex aspect-[16/10] flex-col items-center justify-center gap-2 rounded-xl bg-slate-900/75 px-2 text-center backdrop-blur-sm">
                 <span className="text-[12.5px] font-semibold text-white">Удалить файл?</span>
@@ -170,6 +173,7 @@ export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = ''
                 }}
                 items={[
                     { key: 'download', label: 'Скачать', icon: Download, onSelect: () => onDownload(material) },
+                    ...actions,
                     material.can_delete && { key: 'delete', label: 'Удалить', icon: Trash2, danger: true, separatorBefore: true, onSelect: () => setConfirming(true) },
                 ]}
             />
@@ -187,7 +191,8 @@ const UPLOAD_STATE_TEXT = {
     done: 'Загружено',
 };
 
-export const UploadRow = ({ item }) => {
+/* note — что дописать перед размером (категория «Медиатеки»). */
+export const UploadRow = ({ item, note = '' }) => {
     const percent = item.size > 0 ? Math.min(100, Math.floor((item.loaded / item.size) * 100)) : 0;
     const failed = item.state === 'failed';
     const status = failed ? item.error : (item.state === 'uploading'
@@ -201,7 +206,7 @@ export const UploadRow = ({ item }) => {
             <span className="min-w-0 flex-1">
                 <span className="flex items-baseline justify-between gap-2">
                     <span className="truncate text-[13px] font-medium text-slate-800" title={item.name}>{item.name}</span>
-                    <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">{formatBytes(item.size)}</span>
+                    <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">{[note, formatBytes(item.size)].filter(Boolean).join(' · ')}</span>
                 </span>
                 {!failed && (
                     <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-slate-100">
@@ -490,6 +495,8 @@ const ProductionTaskSheet = ({
                             <MaterialTile
                                 key={material.id}
                                 material={material}
+                                // Кто и когда добавил — как в «Медиатеке»: соисполнителей бывает несколько.
+                                meta={[shortName(material.uploaded_by_name), formatShortDate(material.ready_at || material.created_at)].filter(Boolean).join(' · ')}
                                 onOpen={(item) => openViewer(ready, item)}
                                 onDownload={download}
                                 onDelete={remove}

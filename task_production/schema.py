@@ -15,7 +15,7 @@ STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS task_production_materials (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        -- NULL — ролик вкладки «Ролики»: загружен просто так, без задачи.
+        -- NULL — файл «Медиатеки»: загружен просто так, без задачи.
         task_id          INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
         version          INTEGER NOT NULL CHECK (version >= 1),
         -- uploading: сессия докачки открыта, файла в хранилище ещё нет целиком.
@@ -48,10 +48,16 @@ STATEMENTS = (
     );
     """,
     "ALTER TABLE task_production_materials ADD COLUMN IF NOT EXISTS client_fingerprint VARCHAR(64);",
-    # «Ролики» без задачи (просьба владельца 16.10.2026: «как можно просто загружать
+    # Файлы «Медиатеки» без задачи (просьба владельца 16.10.2026: «как можно просто загружать
     # ролики — данная возможность тоже должна быть на сайте»). Снятие NOT NULL
     # идемпотентно: на уже снятом ограничении оператор ничего не делает.
     "ALTER TABLE task_production_materials ALTER COLUMN task_id DROP NOT NULL;",
+    # Категория файла «Медиатеки» (без задачи): баннеры, анимационные, рекламные,
+    # рилсы. Без CHECK намеренно: список правит код (materials.LIBRARY_CATEGORIES),
+    # а новый пункт не должен требовать перестройки ограничения на живой таблице.
+    "ALTER TABLE task_production_materials ADD COLUMN IF NOT EXISTS library_category VARCHAR(16);",
+    "CREATE INDEX IF NOT EXISTS idx_task_production_materials_library_category "
+    "ON task_production_materials (library_category, created_at DESC) WHERE task_id IS NULL;",
     "CREATE INDEX IF NOT EXISTS idx_task_production_materials_library "
     "ON task_production_materials (created_at DESC) WHERE task_id IS NULL;",
     "CREATE INDEX IF NOT EXISTS idx_task_production_materials_task "
@@ -62,4 +68,27 @@ STATEMENTS = (
     # Доска и «Готовое» читают только задачи продакшна — их единицы среди сотен.
     "CREATE INDEX IF NOT EXISTS idx_tasks_production_status "
     "ON tasks (status, updated_at DESC) WHERE tag = 'production';",
+    # «История» «Медиатеки»: кто и когда добавил, перенёс или удалил файл (просьба
+    # владельца 16.10.2026 — «историю кто когда добавлял»). Отдельным журналом, а
+    # не из таблицы файлов: удалённый файл из неё исчезает, а в истории остаётся —
+    # с тем, кто его удалил. Поэтому material_id без внешнего ключа, а имя, вид и
+    # размер файла записаны в саму строку. action — added | moved | deleted, без
+    # CHECK: список действий правит код. category — куда положили (added, moved)
+    # или откуда удалили (deleted); from_category — откуда перенесли.
+    """
+    CREATE TABLE IF NOT EXISTS task_production_library_events (
+        id            BIGSERIAL PRIMARY KEY,
+        material_id   UUID NOT NULL,
+        action        VARCHAR(16) NOT NULL,
+        file_name     VARCHAR(255) NOT NULL,
+        kind          VARCHAR(16) NOT NULL,
+        file_size     BIGINT NOT NULL DEFAULT 0,
+        category      VARCHAR(16),
+        from_category VARCHAR(16),
+        actor_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_production_library_events_created "
+    "ON task_production_library_events (created_at DESC, id DESC);",
 )
