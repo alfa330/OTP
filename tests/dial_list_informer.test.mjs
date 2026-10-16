@@ -47,6 +47,9 @@ test('склейка: тишина, казахская, пауза, русска
     const [kz, ru] = track.parts;
     assert.equal(kz.lang, 'kz');
     assert.equal(ru.lang, 'ru');
+    // Владелец, 16.10.2026: «на начало аудио 2 секунды паузы» — первые 2 с записи тишина.
+    assert.equal(LEAD_IN_S, 2);
+    assert.ok(track.samples.slice(0, 2 * MASTER_RATE).every((v) => v === 0));
     // Тишина по краям исходников срезана: часть начинается почти сразу после вступления.
     assert.ok(Math.abs(kz.start_ms - LEAD_IN_S * 1000) <= 1);
     assert.ok(kz.end_ms - kz.start_ms >= 12000 && kz.end_ms - kz.start_ms <= 12200);
@@ -136,8 +139,8 @@ test('темп в форме — сколько тянут линии робот
     assert.equal(lineRate(0, 25520), 3);
     assert.equal(lineRate(2, 300000), 1);
     assert.equal(lineRate(10000, 1000), MAX_PER_MINUTE);
-    // Длина записи по текстам: склейка 1,4 с + ~13 знаков в секунду; без текста — обычная длина.
-    assert.equal(trackEstimateMs({ kz: 'x'.repeat(130), ru: 'y'.repeat(130) }), 21400);
+    // Длина записи по текстам: склейка 2,9 с (пауза 2 с в начале) + ~13 знаков в секунду; без текста — обычная.
+    assert.equal(trackEstimateMs({ kz: 'x'.repeat(130), ru: 'y'.repeat(130) }), 22900);
     assert.equal(trackEstimateMs({ kz: '  ', ru: '' }), 0);
     // Двойник: постоянные совпадают с informer/rules.py.
     const rules = read('../informer/rules.py');
