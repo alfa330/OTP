@@ -103,7 +103,7 @@ def build(detail, targets, calls):
         ('Создана', detail.get("created_at")),
         ('Запись', f"{(detail.get('audio_ms') or 0) / 1000:.1f} с; {part_text}"),
         ('Окно звонков (Алматы)', f"{detail.get('window_start')}–{detail.get('window_end')}"),
-        ('Темп', f"не больше {detail.get('max_per_minute')} звонков в минуту (закон РК — не выше 10)"),
+        ('Темп', f"не больше {detail.get('max_per_minute')} звонков в минуту"),
         ('Попыток на водителя', detail.get("max_attempts")),
         ('Повтор недозвона через', f"{detail.get('retry_after_min')} мин"),
         ('Водителей в списке', detail.get("targets_total")),

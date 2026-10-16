@@ -167,18 +167,33 @@ def test_draft_does_not_call_and_start_issues_up_to_line_capacity(env):
     assert poll(svc, {'939': {'capacity': 2, 'active': 2}})['calls'] == []
 
 
-def test_law_cap_ten_per_minute_across_campaigns(env):
+NINE_LINES = {str(n): {'capacity': 2, 'active': 0} for n in (902, 907, 919, 923, 925, 928, 939, 942, 944)}
+
+
+def test_no_minute_cap_only_free_places_and_campaign_rate(env):
+    """Владелец, 16.10.2026: «сколько тянут линии, без предела» — общего потолка 10 в минуту нет."""
     svc, clock, _ = env
-    a = make_campaign(svc, phones(8))
-    b = make_campaign(svc, phones(8, start=100))
+    a = make_campaign(svc, phones(20), max_per_minute=600)
+    b = make_campaign(svc, phones(8, start=100), max_per_minute=600)
     svc.campaign_action(DEPT, a['id'], 'start')
     svc.campaign_action(DEPT, b['id'], 'start')
-    big = {str(900 + i): {'capacity': 2, 'active': 0} for i in range(10)}   # 20 свободных мест
-    issued = poll(svc, big)['calls']
-    assert len(issued) == 10                              # закон: не больше 10 соединений в минуту
-    assert poll(svc, big)['calls'] == []
-    clock.tick(seconds=61)
-    assert len(poll(svc, big)['calls']) == 6              # минута прошла — остаток очереди
+    issued = poll(svc, NINE_LINES)['calls']
+    assert len(issued) == 18                              # все 18 мест девяти линий, а не 10
+    per_line = {}
+    for call in issued:
+        per_line[call['line']] = per_line.get(call['line'], 0) + 1
+    assert set(per_line) == set(NINE_LINES) and set(per_line.values()) == {2}
+    busy = {line: {'capacity': 2, 'active': 2} for line in NINE_LINES}
+    assert poll(svc, busy)['calls'] == []                 # места заняты — ждём, а не звоним сверх линий
+    assert len(poll(svc, NINE_LINES)['calls']) == 10      # освободились — остаток очереди сразу, без минуты
+
+
+def test_default_rate_is_what_robot_lines_fit(env):
+    svc, _, _ = env
+    assert make_campaign(svc, phones(1))['max_per_minute'] == 3              # линий робота не видно — как одна
+    poll(svc, NINE_LINES)                                                     # робот сообщил девять линий
+    assert make_campaign(svc, phones(1))['max_per_minute'] == rules.line_rate(18, 25520) == 27
+    assert make_campaign(svc, phones(1), max_per_minute=5)['max_per_minute'] == 5
 
 
 def test_campaign_rate_and_window(env):
@@ -286,8 +301,10 @@ def test_validation_and_department_scope(env):
     svc, clock, _ = env
     with pytest.raises(InformerError):
         make_campaign(svc, phones(1), parts=list(reversed(PARTS)))      # порядок: казахская первой
-    with pytest.raises(InformerError):
-        make_campaign(svc, phones(1), max_per_minute=11)                # выше закона
+    for wrong in (0, rules.MAX_PER_MINUTE + 1, 'много'):
+        with pytest.raises(InformerError):
+            make_campaign(svc, phones(1), max_per_minute=wrong)         # верх поля — проверка ввода
+    assert make_campaign(svc, phones(1), max_per_minute=40)['max_per_minute'] == 40   # выше 10 — можно
     with pytest.raises(InformerError):
         make_campaign(svc, phones(1), wav_bytes=b'RIFF0000WAVEjunk')
     campaign = make_campaign(svc, phones(1))

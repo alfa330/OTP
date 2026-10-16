@@ -99,8 +99,9 @@ class InformerService:
             clean = rules.clean_parts(parts, audio['duration_ms'])
             start = rules.parse_hhmm(window_start, rules.DEFAULT_WINDOW[0])
             end = rules.parse_hhmm(window_end, rules.DEFAULT_WINDOW[1])
-            per_minute = rules.clamp_int(max_per_minute, rules.MAX_PER_MINUTE_LAW, 1,
-                                         rules.MAX_PER_MINUTE_LAW, 'Звонков в минуту')
+            # Не задан — сколько тянут линии робота при этой записи (то же число, что стоит в поле формы).
+            fits = rules.line_rate(rules.line_capacity(self.robot_status().get('lines')), audio['duration_ms'])
+            per_minute = rules.clamp_int(max_per_minute, fits, 1, rules.MAX_PER_MINUTE, 'Звонков в минуту')
             attempts = rules.clamp_int(max_attempts, rules.DEFAULT_MAX_ATTEMPTS, 1,
                                        rules.MAX_ATTEMPTS_LIMIT, 'Попыток на водителя')
             retry = rules.clamp_int(retry_after_min, rules.DEFAULT_RETRY_MINUTES, 5, 24 * 60,
@@ -386,11 +387,9 @@ class InformerService:
             free = {line: max(0, info["capacity"] - info["active"]) for line, info in lines.items()}
             if sum(free.values()) <= 0:
                 return {"calls": [], "next_poll_sec": POLL_SOON_SEC}
+            # Общего минутного потолка нет (владелец, 16.10.2026: «сколько тянут линии, без предела»):
+            # предел — свободные места на линиях и темп каждой рассылки.
             window_start = now - timedelta(seconds=60)
-            cur.execute("SELECT COUNT(*) FROM informer_calls WHERE issued_at > %s", (window_start,))
-            law_budget = rules.MAX_PER_MINUTE_LAW - int(cur.fetchone()[0])
-            if law_budget <= 0:
-                return {"calls": [], "next_poll_sec": self._seconds_until_budget(cur, window_start, now)}
             cur.execute("""
                 SELECT c.id, c.window_start, c.window_end, c.max_per_minute, c.audio_sha256, c.audio_ms,
                        (SELECT COUNT(*) FROM informer_calls x WHERE x.campaign_id = c.id AND x.issued_at > %s)
@@ -404,7 +403,7 @@ class InformerService:
             for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute in campaigns:
                 if not rules.in_window(now, w_start, w_end):
                     continue
-                room = min(sum(free.values()), law_budget, int(per_minute) - int(issued_last_minute))
+                room = min(sum(free.values()), int(per_minute) - int(issued_last_minute))
                 if room <= 0:
                     more_due = True
                     continue
@@ -433,8 +432,7 @@ class InformerService:
                     call_id = cur.fetchone()[0]
                     issued.append({"call_id": call_id, "campaign_id": cid, "phone": phone, "line": line,
                                    "audio_sha256": sha, "audio_ms": audio_ms})
-                law_budget -= len(due)
-                if law_budget <= 0 or sum(free.values()) <= 0:
+                if sum(free.values()) <= 0:
                     more_due = True
                     break
         return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC}
@@ -445,7 +443,7 @@ class InformerService:
         out = {}
         if not isinstance(raw, dict):
             return out
-        for name, info in list(raw.items())[:16]:
+        for name, info in list(raw.items())[:64]:          # в кабинете 45 линий — запас без молчаливой обрезки
             line = ''.join(ch for ch in str(name) if ch.isalnum())[:16]
             if not line or not isinstance(info, dict):
                 continue
@@ -456,16 +454,6 @@ class InformerService:
                 continue
             out[line] = {"capacity": capacity, "active": active}
         return out
-
-    @staticmethod
-    def _seconds_until_budget(cur, window_start, now):
-        """Через сколько секунд освободится место в минутном потолке закона."""
-        cur.execute("SELECT MIN(issued_at) FROM informer_calls WHERE issued_at > %s", (window_start,))
-        oldest = cur.fetchone()[0]
-        if not oldest:
-            return POLL_SOON_SEC
-        wait = 60 - (now - oldest).total_seconds()
-        return max(POLL_SOON_SEC, min(int(wait) + 1, 60))
 
     def _reclaim_stale(self, cur, now):
         """Звонки без итога дольше STALE_CALL_SECONDS — «итог не пришёл», водитель — в очередь."""

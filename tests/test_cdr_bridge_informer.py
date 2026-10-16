@@ -40,6 +40,9 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     ({'dialed_at': 0, 'ended_at': 1, 'cause': 1}, ('unavailable', '')),
     ({'dialed_at': 0, 'ended_at': 35, 'originate_reason': 3}, ('no_answer', '')),
     ({'dialed_at': 0, 'ended_at': 1, 'cause': None}, ('failed', '')),
+    # 16.10.2026: вызов шёл весь срок, причина 0 и ответа на набор не пришло (Binotel: CANCEL) — недозвон.
+    ({'dialed_at': 0, 'ended_at': 35, 'cause': 0, 'originate_reason': None}, ('no_answer', '')),
+    ({'dialed_at': 0, 'ended_at': 6.3, 'cause': 34}, ('failed', '')),     # 503 сети через 6 с — сбой
 ])
 def test_classify(call, expected):
     assert informer.classify(call) == expected
@@ -113,13 +116,14 @@ class Clock:
         return self.now
 
 
-def make(tmp_path, polls, audio=None, lines=('939',)):
+def make(tmp_path, polls, audio=None, lines=('939',), max_per_minute=0):
     clock = Clock()
     portal = FakePortal(polls, audio)
     ami = FakeAmi()
     config = {'portal': 'https://portal.test', 'proxy': '', 'ca_bundle': '', 'key_file': '', 'private_key': '',
               'lines': list(lines), 'per_line': 2, 'sounds_dir': str(tmp_path), 'heartbeat_file': '',
-              'ami_host': '127.0.0.1', 'ami_port': 5038, 'ami_user': 'dispatcher', 'ami_secret': 's'}
+              'ami_host': '127.0.0.1', 'ami_port': 5038, 'ami_user': 'dispatcher', 'ami_secret': 's',
+              'max_per_minute': max_per_minute}
     d = informer.Dispatcher(config, session=portal, ami=ami, clock=clock)
     d.signer = Signer()
     return d, portal, ami, clock
@@ -179,16 +183,37 @@ def test_played_to_end_and_originate_failure_without_channel(tmp_path):
     assert by_id[32]['result'] == 'busy'
 
 
-def test_law_guard_even_if_portal_overissues(tmp_path):
+def test_no_minute_cap_by_default(tmp_path):
+    """Владелец, 16.10.2026: «сколько тянут линии, без предела» — диспетчер набирает всё, что раздал портал."""
     jobs = [job(100 + i, line=str(900 + i)) for i in range(12)]
     d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV},
                                  lines=tuple(str(900 + i) for i in range(12)))
     d.tick()
-    assert len(ami.sent) == 10                                      # закон: не больше 10 в минуту
+    assert len(ami.sent) == 12
+    assert not [r for r in portal.results if r['result'] == 'line_busy']
+    assert d.rate_room() == float('inf')
+
+
+def test_minute_guard_when_configured(tmp_path):
+    """INFORMER_MAX_PER_MINUTE — страховка, если её вернут: сверх неё «линия занята», водитель в очереди."""
+    jobs = [job(100 + i, line=str(900 + i)) for i in range(12)]
+    d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV},
+                                 lines=tuple(str(900 + i) for i in range(12)), max_per_minute=10)
+    d.tick()
+    assert len(ami.sent) == 10
     refused = [r for r in portal.results if r['result'] == 'line_busy']
     assert len(refused) == 2                                        # остальные вернутся в очередь
     clock.now += 61
-    assert d.law_room() == 10
+    assert d.rate_room() == 10
+
+
+def test_config_reads_lines_and_minute_guard(monkeypatch):
+    monkeypatch.setenv('INFORMER_LINES', '902, 907,939')
+    monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '')
+    config = informer.load_config()
+    assert config['lines'] == ['902', '907', '939'] and config['max_per_minute'] == 0
+    monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '25')
+    assert informer.load_config()['max_per_minute'] == 25
 
 
 def test_bad_audio_and_unknown_line_do_not_call(tmp_path):

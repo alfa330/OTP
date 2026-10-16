@@ -7,8 +7,9 @@ import {
 } from '../ui/ios';
 import { prepareInformerTrack } from './informerAudio';
 import {
-    RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, campaignActions, partsLabel, percent, seconds,
-    shortDateTime, speechEstimate, stageLabel, stageShares,
+    MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds, campaignActions, lineCapacity,
+    lineRate, partsLabel, percent, plural, robotSummary, seconds, shortDateTime, speechEstimate, stageLabel,
+    stageShares, trackEstimateMs,
 } from './informerView';
 
 /*
@@ -86,7 +87,8 @@ const PlayButton = ({ getUrl, label = 'Прослушать', disabled = false, 
 /* ── робот ────────────────────────────────────────────────────────────────── */
 const RobotCard = ({ robot }) => {
     const online = !!robot?.online;
-    const lines = Object.entries(robot?.lines || {});
+    const lines = Object.keys(robot?.lines || {});
+    const summary = robotSummary(robot?.lines);
     return (
         <div className={`${iosCard} flex items-center gap-3 px-4 py-3`}>
             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${online ? 'bg-emerald-500' : 'bg-slate-300'}`} />
@@ -94,11 +96,12 @@ const RobotCard = ({ robot }) => {
                 <div className="flex items-center gap-1.5 text-[13.5px] font-semibold text-slate-800">
                     {online ? 'Робот на связи' : 'Робот не на связи'}
                     <IosHint text={'Робот — телефон на шлюзе в офисе: звонит с номера удалённого КЦ и проигрывает '
-                        + 'запись. Рассылка звонит, только пока он на связи; без него запущенная рассылка просто ждёт.'} />
+                        + 'запись. Рассылка звонит, только пока он на связи; без него запущенная рассылка просто ждёт.'
+                        + (lines.length ? ` Линии робота: ${lines.join(', ')}.` : '')} />
                 </div>
                 <div className="truncate text-[12px] text-slate-500">
-                    {online && lines.length
-                        ? lines.map(([line, info]) => `линия ${line}: ${info.active} из ${info.capacity}`).join(' · ')
+                    {online && summary
+                        ? summary
                         : online ? 'Линий нет' : 'Звонки начнутся, когда он подключится'}
                 </div>
             </div>
@@ -141,10 +144,12 @@ const CampaignRow = ({ campaign, onOpen }) => {
 /* ── новая рассылка ───────────────────────────────────────────────────────── */
 const emptyForm = () => ({
     name: '', source: 'tts', brief: '', texts: { kz: '', ru: '' }, files: { kz: null, ru: null },
-    recipients: null, windowStart: '10:00', windowEnd: '20:00', perMinute: '10', attempts: '2', retry: '60',
+    recipients: null, windowStart: '10:00', windowEnd: '20:00', attempts: '2', retry: '60',
+    // Темп: пока руководитель его не трогал — сколько тянут линии робота (считается заново под запись).
+    perMinute: '', perMinuteEdited: false,
 });
 
-const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
+const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }) => {
     const [form, setForm] = useState(emptyForm);
     const [voices, setVoices] = useState({ voices: [], default: '', default_speed: 'normal', text_max: 1500 });
     const [voice, setVoice] = useState('');
@@ -225,31 +230,50 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
         return entry;
     };
 
+    /* Какая запись сейчас в форме: тексты с голосом и темпом или два файла. Поменяли — собирать заново. */
+    const trackKey = () => (form.source === 'tts'
+        ? `tts|${voice}|${speed}|${form.texts.kz.trim()}|${form.texts.ru.trim()}`
+        : `upload|${form.files.kz?.name}|${form.files.kz?.size}|${form.files.ru?.name}|${form.files.ru?.size}`);
+
     /* Вся запись целиком (казахская, потом русская) — оригинал; водителю робот играет её телефонную версию. */
     const track = async () => {
         let sources;
-        let key;
         if (form.source === 'tts') {
             // По очереди, не разом: Soniox отвечает «занято» на одновременные озвучки одного ключа.
             const kz = await speech('kz');
             const ru = await speech('ru');
             sources = { kz: kz.blob, ru: ru.blob };
-            key = `tts|${kz.key}|${ru.key}`;
         } else {
             if (!form.files.kz || !form.files.ru) throw new Error('Добавьте обе записи: казахскую и русскую');
             sources = form.files;
-            key = `upload|${form.files.kz.name}|${form.files.kz.size}|${form.files.ru.name}|${form.files.ru.size}`;
         }
+        const key = trackKey();
         if (trackRef.current?.key === key) return trackRef.current;
         const prepared = await prepareInformerTrack(sources);
         if (trackRef.current?.url) URL.revokeObjectURL(trackRef.current.url);
         trackRef.current = { key, ...prepared, url: URL.createObjectURL(prepared.blob) };
-        setTrackInfo({ durationMs: prepared.durationMs, parts: prepared.parts });
+        setTrackInfo({ key, durationMs: prepared.durationMs, parts: prepared.parts });
         return trackRef.current;
     };
 
     const ready = form.name.trim() && form.recipients
         && (form.source === 'tts' ? (form.texts.kz.trim() && form.texts.ru.trim()) : (form.files.kz && form.files.ru));
+
+    // Темп — сколько тянут линии робота (владелец, 16.10.2026: «сразу максимальное кол-во, без предела»):
+    // запись собрана — по её длине, есть текст — по оценке, иначе — по обычной длине записи.
+    const lineCount = Object.keys(robot?.lines || {}).length;
+    const channels = lineCapacity(robot?.lines);
+    const audioMs = (trackInfo?.key === trackKey() && trackInfo.durationMs)
+        || (form.source === 'tts' ? trackEstimateMs(form.texts) : 0);
+    const fitsPerMinute = lineRate(channels, audioMs);
+    const perMinuteValue = form.perMinuteEdited ? form.perMinute : String(fitsPerMinute);
+    const perMinuteHint = (lineCount
+        ? `Столько звонков в минуту тянут линии робота: ${lineCount} ${plural(lineCount, 'линия', 'линии', 'линий')}, `
+          + `до ${channels} ${plural(channels, 'звонка', 'звонков', 'звонков')} одновременно`
+        : 'Робот ещё не сообщил свои линии — посчитано как для одной линии (2 звонка одновременно)')
+        + `, звонок с записью ≈ ${Math.round(callSeconds(audioMs))} с. Поставьте меньше, если рассылку нужно растянуть. `
+        + 'Закон РК «О связи» (с 20.08.2026): больше 10 автозвонков с записью в минуту оператор вправе не пропускать '
+        + 'без договора.';
 
     const create = async () => {
         setBusy('create');
@@ -263,7 +287,8 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
             body.append('recipients', form.recipients, form.recipients.name);
             body.append('window_start', form.windowStart);
             body.append('window_end', form.windowEnd);
-            body.append('max_per_minute', form.perMinute);
+            // Не трогали — по длине собранной записи, тем же расчётом, что в поле.
+            body.append('max_per_minute', form.perMinuteEdited ? form.perMinute : String(lineRate(channels, built.durationMs)));
             body.append('max_attempts', form.attempts);
             body.append('retry_after_min', form.retry);
             body.append('script', JSON.stringify(form.source === 'tts'
@@ -443,10 +468,10 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast }) => {
                         <div className="space-y-1.5">
                             <div className="flex items-center gap-1.5 px-0.5 text-[12px] font-medium text-slate-500">
                                 Звонков в минуту
-                                <IosHint text="Не больше 10: закон РК «О связи» (с 20.08.2026) запрещает операторам пропускать автозвонки с записью чаще. Одна линия робота держит 2 звонка одновременно." />
+                                <IosHint text={perMinuteHint} />
                             </div>
-                            <input type="number" min={1} max={10} className={iosInput} value={form.perMinute}
-                                onChange={(e) => set({ perMinute: e.target.value })} />
+                            <input type="number" min={1} max={MAX_PER_MINUTE} className={iosInput} value={perMinuteValue}
+                                onChange={(e) => set({ perMinute: e.target.value, perMinuteEdited: true })} />
                         </div>
                         <div className="space-y-1.5">
                             <div className="flex items-center gap-1.5 px-0.5 text-[12px] font-medium text-slate-500">
@@ -742,7 +767,7 @@ const DialListInformerPanel = ({ apiBaseUrl, authHeaders, departmentId, showToas
             </div>
 
             <CreateCampaignModal open={creating} onClose={() => setCreating(false)} api={api} showToast={showToast}
-                onCreated={(campaign) => { setCreating(false); load(); setOpenId(campaign.id); }} />
+                robot={overview?.robot} onCreated={(campaign) => { setCreating(false); load(); setOpenId(campaign.id); }} />
             <CampaignModal campaignId={openId} onClose={() => setOpenId(null)} api={api} robot={overview?.robot}
                 showToast={showToast} onChanged={load} canEdit={canEdit} />
         </section>

@@ -4,13 +4,20 @@ from datetime import datetime, time, timedelta, timezone
 
 ALMATY = timezone(timedelta(hours=5))
 
-# Закон РК «О связи», ст. 2 подп. 22-2 и ст. 21 п. 3-1 (с 20.08.2026): «генерированные
-# автоматические вызовы» — больше десяти соединений в минуту; с записанным сообщением оператор
-# их не пропускает без договора. Потолок общий на всех роботов, а не на рассылку.
-MAX_PER_MINUTE_LAW = 10
+# Темп — сколько тянут линии робота, без потолка закона: решение владельца 16.10.2026 («сколько тянут
+# линии, без предела»), принятое со знанием закона РК «О связи» (ст. 2 подп. 22-2 и ст. 21 п. 3-1, с
+# 20.08.2026): больше десяти автовызовов с записью в минуту оператор вправе не пропускать без договора.
+# Темп рассылки — её собственное поле; общий предел — свободные места на линиях робота.
 # Линия Binotel держит два звонка одновременно (15.10.2026: из пяти разом прошли два, трём —
 # 480 сразу). Значение по умолчанию для диспетчера; сам диспетчер присылает ёмкость линий.
 CALLS_PER_LINE = 2
+# Сколько звонков в минуту вытянут линии: место на линии звонок держит на время вызова (до ответа в
+# среднем ~12 с — замер 15.10.2026: 7–16 с), записи и отбоя (~2 с). Это оценка для поля формы, а не
+# обещание: недозвон держит место дольше (до 35 с), отказ сети — меньше. Двойник — informerView.js.
+EXPECTED_RING_SECONDS = 12
+CALL_OVERHEAD_SECONDS = 2
+DEFAULT_AUDIO_SECONDS = 25          # записи ещё нет — обычная длина: две части по ~12 с
+MAX_PER_MINUTE = 600                # верх поля — проверка ввода, а не темп: 45 линий по 2 звонка — меньше
 DEFAULT_WINDOW = (time(10, 0), time(20, 0))
 DEFAULT_MAX_ATTEMPTS = 2
 MAX_ATTEMPTS_LIMIT = 5
@@ -172,6 +179,25 @@ def clamp_int(value, default, low, high, name):
     if not low <= number <= high:
         raise ValueError(f'{name}: от {low} до {high}')
     return number
+
+
+def line_capacity(lines):
+    """Сколько звонков робот держит одновременно: сумма ёмкости линий {'939': {'capacity': 2, ...}}."""
+    total = 0
+    for info in (lines or {}).values():
+        try:
+            total += max(0, int((info or {}).get('capacity') or 0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return total
+
+
+def line_rate(channels, audio_ms=None):
+    """Звонков в минуту, которые вытянут channels одновременных звонков при записи audio_ms (оценка)."""
+    channels = max(0, int(channels or 0)) or CALLS_PER_LINE   # линий ещё не видно — как одна линия
+    audio_s = audio_ms / 1000 if audio_ms and audio_ms > 0 else DEFAULT_AUDIO_SECONDS
+    per_call = EXPECTED_RING_SECONDS + audio_s + CALL_OVERHEAD_SECONDS
+    return max(1, min(MAX_PER_MINUTE, int(channels * 60 // per_call)))
 
 
 def now_utc():

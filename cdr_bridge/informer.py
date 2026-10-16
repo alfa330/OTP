@@ -7,8 +7,9 @@
 звонок роботу через AMI Asterisk на 127.0.0.1 и ловит события звонка: вызов пошёл, водитель снял
 трубку, запись доиграла, нажатия, отбой. Итог — с точными секундами — уходит в портал
 (/api/informer/agent/result). Темп, окно времени, повторы и очередь решает портал; диспетчер
-держит только то, что видит сам: ёмкость линий (2 звонка на линию Binotel) и, на всякий случай,
-закон — не больше 10 соединений в минуту, даже если портал по ошибке раздал больше.
+держит только то, что видит сам: ёмкость линий (2 звонка на линию Binotel). Минутного потолка нет
+(владелец, 16.10.2026: «сколько тянут линии, без предела»); страховку можно вернуть числом
+INFORMER_MAX_PER_MINUTE — тогда больше него в минуту диспетчер не наберёт, даже если портал раздал.
 
 Робот — контейнер otp-informer (приватный репозиторий otp-gateway): Asterisk звонит с линии
 удалённого КЦ без регистрации на ней (15.10.2026: Binotel пропускает исходящий по паролю линии и
@@ -27,8 +28,9 @@
                                        — как у моста;
     INFORMER_AMI_HOST / _PORT          127.0.0.1 / 5038
     INFORMER_AMI_USER / _SECRET        dispatcher / секрет из /etc/otp-gateway/informer-ami.env
-    INFORMER_LINES                     линии робота через запятую: 939
+    INFORMER_LINES                     линии робота через запятую: 902,907,919,923,925,928,939,942,944
     INFORMER_CALLS_PER_LINE            2 (замер 15.10.2026: третий звонок Binotel отклоняет 480)
+    INFORMER_MAX_PER_MINUTE            наборов в минуту не больше этого; пусто или 0 — без предела
     INFORMER_SOUNDS_DIR                /var/lib/informer/sounds — общий с Asterisk каталог записей
     INFORMER_HEARTBEAT_FILE            файл пульса для проверки живости контейнера
 """
@@ -49,13 +51,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'informer/1.0.0'
+VERSION = 'informer/1.1.0'
 log = logging.getLogger('cdr_bridge.informer')
 
 PORTAL_TIMEOUT = (10, 60)
 AMI_TIMEOUT = 10
 RING_TIMEOUT_MS = 35000          # сколько звонить водителю, прежде чем бросить
-LAW_PER_MINUTE = 10              # закон РК «О связи», ст. 21 п. 3-1 — страховка поверх портала
 LINE_BUSY_WINDOW_S = 2.5         # 480 быстрее этого и без гудков — Binotel не дал линию
 STUCK_MARGIN_S = 90              # звонок дольше «вызов + запись + запас» без отбоя — закрываем сами,
                                  # чтобы не висела ёмкость линии (срок свой у каждой записи)
@@ -96,6 +97,10 @@ def classify(call):
         if ringing or reason == 3 or elapsed >= NO_ANSWER_AFTER_S:
             return 'no_answer', ''
         return 'unavailable', ''
+    # Без причины (0) и без ответа на набор, но вызов шёл весь срок — это недозвон, а не сбой: 16.10.2026
+    # такой 35-секундный вызов (Binotel: CANCEL) записался «Ошибкой АТС».
+    if not cause and elapsed >= NO_ANSWER_AFTER_S:
+        return 'no_answer', ''
     return 'failed', ''
 
 
@@ -243,6 +248,7 @@ def load_config():
         'ami_secret': value('INFORMER_AMI_SECRET'),
         'lines': lines,
         'per_line': max(1, int(value('INFORMER_CALLS_PER_LINE', '2') or 2)),
+        'max_per_minute': max(0, int(value('INFORMER_MAX_PER_MINUTE', '0') or 0)),
         'sounds_dir': value('INFORMER_SOUNDS_DIR', '/var/lib/informer/sounds'),
         'heartbeat_file': value('INFORMER_HEARTBEAT_FILE'),
     }
@@ -257,7 +263,7 @@ class Dispatcher:
         self.clock = clock
         self.calls = {}                 # call_id → состояние звонка
         self.pending = deque()          # итоги, которые ещё не принял портал
-        self.originated = deque()       # моменты наборов — страховка закона
+        self.originated = deque()       # моменты наборов — для страховки INFORMER_MAX_PER_MINUTE
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.agent_id = '%s-%d-informer' % (socket.gethostname()[:50], os.getpid())
@@ -286,11 +292,13 @@ class Dispatcher:
         return {line: {'capacity': self.config['per_line'], 'active': active.get(line, 0)}
                 for line in self.config['lines']}
 
-    def law_room(self):
+    def rate_room(self):
+        """Сколько ещё можно набрать в эту минуту: без страховки (0) — без предела."""
         now = self.clock()
         while self.originated and now - self.originated[0] >= 60:
             self.originated.popleft()
-        return LAW_PER_MINUTE - len(self.originated)
+        cap = self.config.get('max_per_minute') or 0
+        return cap - len(self.originated) if cap > 0 else float('inf')
 
     # ── записи ──
     def sound_path(self, sha):
@@ -455,8 +463,8 @@ class Dispatcher:
                                      'error': self.error, 'lines': self.lines_state()})
         self.error = ''
         for job in answer.get('calls') or []:
-            if self.law_room() <= 0:
-                # Портал раздал больше закона — не звоним, итог «линия занята» вернёт водителя в очередь.
+            if self.rate_room() <= 0:
+                # Сверх страховки INFORMER_MAX_PER_MINUTE не звоним: «линия занята» вернёт водителя в очередь.
                 self.finish({'call_id': int(job['call_id']), 'line': str(job.get('line')), 'dialed_at': self.clock(),
                              'ended_at': self.clock(), 'cause': 19, 'originate_reason': None})
                 continue
@@ -480,8 +488,10 @@ class Dispatcher:
                 pass
 
     def run(self):
-        log.info('Автоинформатор %s: линии %s по %d звонка, портал %s', VERSION, ','.join(self.config['lines']),
-                 self.config['per_line'], self.portal)
+        cap = self.config.get('max_per_minute') or 0
+        log.info('Автоинформатор %s: линии %s по %d звонка, %s, портал %s', VERSION, ','.join(self.config['lines']),
+                 self.config['per_line'], 'не больше %d в минуту' % cap if cap > 0 else 'без минутного предела',
+                 self.portal)
         backoff = RESULT_RETRY_S
         while True:
             try:

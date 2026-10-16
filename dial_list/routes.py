@@ -197,8 +197,9 @@
                                                              сначала казахская, потом русская; телефонную
                                                              8 кГц для робота сводит сервер), parts (JSON границ
                                                              частей), recipients (.csv/.xlsx номеров),
-                                                             window_start/_end, max_per_minute (≤10, закон
-                                                             РК), max_attempts, retry_after_min
+                                                             window_start/_end, max_per_minute (1–600; не
+                                                             задан — сколько тянут линии робота),
+                                                             max_attempts, retry_after_min
     GET     /api/dial_list/departments/<id>/informer/voices  голоса озвучки (Soniox), темпы, предел текста
     POST    /api/dial_list/departments/<id>/informer/tts     {lang: kz|ru, text, voice, speed} → WAV 24 кГц
     POST    /api/dial_list/departments/<id>/informer/ai      ИИ для текста: generate {brief} → {kz, ru};

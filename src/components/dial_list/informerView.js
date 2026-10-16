@@ -1,7 +1,55 @@
 /*
  * Подписи и расчёты вкладки «Автоинформатор» без React — их проверяют тесты
- * (tests/dial_list_informer_view.test.mjs). Двойники серверных — informer/rules.py.
+ * (tests/dial_list_informer.test.mjs). Двойники серверных — informer/rules.py.
  */
+import { GAP_S, LEAD_IN_S, TAIL_S } from './informerAudio.js';
+
+/* Сколько звонков в минуту вытянут линии робота — двойник informer/rules.py (line_capacity, line_rate).
+   Владелец, 16.10.2026: «в поле с кол-вом звонков сразу максимальное кол-во — сколько тянут линии, без
+   предела». Место на линии звонок держит на время вызова (~12 с до ответа), записи и отбоя (~2 с). */
+export const CALLS_PER_LINE = 2;
+export const EXPECTED_RING_S = 12;
+export const CALL_OVERHEAD_S = 2;
+export const DEFAULT_AUDIO_S = 25;
+export const MAX_PER_MINUTE = 600;
+
+export const plural = (n, one, few, many) => {
+    const mod100 = Math.abs(n) % 100;
+    const mod10 = mod100 % 10;
+    if (mod100 > 10 && mod100 < 20) return many;
+    if (mod10 === 1) return one;
+    if (mod10 > 1 && mod10 < 5) return few;
+    return many;
+};
+
+const count = (value) => Math.max(0, Math.trunc(Number(value) || 0));
+
+export const lineCapacity = (lines) => Object.values(lines || {}).reduce((sum, info) => sum + count(info?.capacity), 0);
+
+export const callSeconds = (audioMs) => EXPECTED_RING_S + (audioMs > 0 ? audioMs / 1000 : DEFAULT_AUDIO_S)
+    + CALL_OVERHEAD_S;
+
+export const lineRate = (channels, audioMs) => {
+    const ch = count(channels) || CALLS_PER_LINE;   // линий ещё не видно — как одна линия
+    return Math.max(1, Math.min(MAX_PER_MINUTE, Math.floor((ch * 60) / callSeconds(audioMs))));
+};
+
+/* Длина будущей записи по текстам, пока озвучки нет: вступление, пауза и хвост склейки плюс ~13 знаков
+   речи в секунду (как speechEstimate). Нет текста — 0: темп считается по обычной длине записи. */
+export const trackEstimateMs = (texts = {}) => {
+    const chars = String(texts.kz || '').trim().length + String(texts.ru || '').trim().length;
+    return chars ? Math.round((LEAD_IN_S + GAP_S + TAIL_S + chars / 13) * 1000) : 0;
+};
+
+/* Подпись робота: «9 линий · сейчас 0 из 18 звонков». */
+export const robotSummary = (lines) => {
+    const items = Object.values(lines || {});
+    if (!items.length) return '';
+    const capacity = lineCapacity(lines);
+    const active = items.reduce((sum, info) => sum + count(info?.active), 0);
+    return `${items.length} ${plural(items.length, 'линия', 'линии', 'линий')} · сейчас ${active} из ${capacity} `
+        + plural(capacity, 'звонка', 'звонков', 'звонков');
+};
 
 export const STATUS = {
     draft: { label: 'Черновик', tone: 'slate' },

@@ -9,7 +9,8 @@
  *     качество голоса (владелец, 15.10.2026); телефонную версию для робота сервер сводит сам;
  *   • громкость частей выравнивается, пик не выше −1 dBFS, тишина по краям срезается;
  *   • «где положил трубку» в интерфейсе совпадает с сервером (informer/rules.py: listen_stage);
- *   • потолок темпа в форме — тот же, что закон в коде сервера (10 в минуту);
+ *   • темп в форме сразу — сколько тянут линии робота, той же формулой, что сервер (rules.line_rate;
+ *     владелец, 16.10.2026: «без предела»);
  *   • вкладка есть только у удалённого КЦ и ходит в свои ручки отдела.
  */
 import test from 'node:test';
@@ -21,7 +22,8 @@ import {
     speechLevelDb, trimSilence,
 } from '../src/components/dial_list/informerAudio.js';
 import {
-    campaignActions, partsLabel, seconds, speechEstimate, stageLabel, stageShares,
+    CALLS_PER_LINE, CALL_OVERHEAD_S, DEFAULT_AUDIO_S, EXPECTED_RING_S, MAX_PER_MINUTE, campaignActions, lineCapacity,
+    lineRate, partsLabel, plural, robotSummary, seconds, speechEstimate, stageLabel, stageShares, trackEstimateMs,
 } from '../src/components/dial_list/informerView.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r\n').join('\n');
@@ -122,10 +124,44 @@ test('подписи: секунды, части, оценка длительн�
     assert.deepEqual(campaignActions('done'), { start: false, pause: false, finish: false });
 });
 
-test('потолок темпа в форме — закон в коде сервера', () => {
+test('темп в форме — сколько тянут линии робота, как на сервере', () => {
+    const nine = Object.fromEntries([902, 907, 919, 923, 925, 928, 939, 942, 944]
+        .map((n) => [String(n), { capacity: 2, active: 0 }]));
+    assert.equal(lineCapacity(nine), 18);
+    assert.equal(lineCapacity({ 939: { capacity: 'x' }, 940: null, 941: { capacity: 2 } }), 2);
+    // Те же числа, что в tests/test_informer_rules.py: test_line_rate_is_what_robot_lines_fit.
+    assert.equal(lineRate(18, 25520), 27);
+    assert.equal(lineRate(18, 8120), 48);
+    assert.equal(lineRate(18, 0), 27);
+    assert.equal(lineRate(0, 25520), 3);
+    assert.equal(lineRate(2, 300000), 1);
+    assert.equal(lineRate(10000, 1000), MAX_PER_MINUTE);
+    // Длина записи по текстам: склейка 1,4 с + ~13 знаков в секунду; без текста — обычная длина.
+    assert.equal(trackEstimateMs({ kz: 'x'.repeat(130), ru: 'y'.repeat(130) }), 21400);
+    assert.equal(trackEstimateMs({ kz: '  ', ru: '' }), 0);
+    // Двойник: постоянные совпадают с informer/rules.py.
+    const rules = read('../informer/rules.py');
+    assert.match(rules, new RegExp(`CALLS_PER_LINE = ${CALLS_PER_LINE}\\n`));
+    assert.match(rules, new RegExp(`EXPECTED_RING_SECONDS = ${EXPECTED_RING_S}\\n`));
+    assert.match(rules, new RegExp(`CALL_OVERHEAD_SECONDS = ${CALL_OVERHEAD_S}\\n`));
+    assert.match(rules, new RegExp(`DEFAULT_AUDIO_SECONDS = ${DEFAULT_AUDIO_S} `));
+    assert.match(rules, new RegExp(`MAX_PER_MINUTE = ${MAX_PER_MINUTE} `));
+    assert.doesNotMatch(rules, /MAX_PER_MINUTE_LAW/);
+    // Поле без потолка закона: верх — проверка ввода, значение — расчёт по линиям.
     const panel = read('../src/components/dial_list/DialListInformerPanel.jsx');
-    assert.match(panel, /type="number" min=\{1\} max=\{10\}/);
-    assert.match(read('../informer/rules.py'), /MAX_PER_MINUTE_LAW = 10/);
+    assert.match(panel, /type="number" min=\{1\} max=\{MAX_PER_MINUTE\}/);
+    assert.match(panel, /value=\{perMinuteValue\}/);
+    assert.doesNotMatch(panel, /max=\{10\}/);
+});
+
+test('робот: сводка линий и склонения', () => {
+    const nine = Object.fromEntries([902, 907, 919, 923, 925, 928, 939, 942, 944]
+        .map((n, i) => [String(n), { capacity: 2, active: i < 3 ? 1 : 0 }]));
+    assert.equal(robotSummary(nine), '9 линий · сейчас 3 из 18 звонков');
+    assert.equal(robotSummary({ 939: { capacity: 2, active: 0 } }), '1 линия · сейчас 0 из 2 звонков');
+    assert.equal(robotSummary({}), '');
+    assert.deepEqual([1, 2, 5, 11, 21, 22, 25, 111].map((n) => plural(n, 'линия', 'линии', 'линий')),
+        ['линия', 'линии', 'линий', 'линий', 'линия', 'линии', 'линий', 'линий']);
 });
 
 test('каждая иконка вкладки есть в наборе сайта (иначе вместо неё пустой кружок)', () => {

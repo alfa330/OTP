@@ -181,6 +181,7 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
     const [hover, setHover] = React.useState(false);
     const [pinned, setPinned] = React.useState(false);
     const [up, setUp] = React.useState(false);
+    const [shift, setShift] = React.useState(0);
     const btnRef = React.useRef(null);
     const tipRef = React.useRef(null);
     const open = hover || pinned;
@@ -214,6 +215,19 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
         const ceiling = Math.max(0, box ? box.getBoundingClientRect().top : 0);
         const need = tip.offsetHeight + 30;
         setUp(floor - rect.bottom < need && rect.top - ceiling >= need);
+        // По горизонтали — тот же предок: пузырёк шириной w-64 у «i» в правой колонке формы вылезал за
+        // край модалки, а на телефоне — за край экрана (16.10.2026, «Звонков в минуту» автоинформатора).
+        // Сдвигаем внутрь с отступом 8 px; shift — сдвиг прошлого открытия, он уже в разметке — вычитаем.
+        const tipRect = tip.getBoundingClientRect();
+        const boxRect = box ? box.getBoundingClientRect() : { left: 0, right: window.innerWidth };
+        const minX = Math.max(0, boxRect.left) + 8;
+        const maxX = Math.min(window.innerWidth, boxRect.right) - 8;
+        const left = tipRect.left - shift;
+        const right = tipRect.right - shift;
+        let dx = 0;
+        if (right > maxX) dx = maxX - right;
+        if (left + dx < minX) dx = minX - left;
+        setShift(Math.round(dx));
     }, [open]);
 
     return (
@@ -241,6 +255,7 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
                     className={`absolute z-30 w-64 rounded-xl bg-slate-900/95 px-3 py-2 text-[11.5px] font-normal leading-snug text-white shadow-lg backdrop-blur ${
                         up ? 'bottom-[24px]' : 'top-[24px]'
                     } ${align === 'right' ? 'right-0' : 'left-0'}`}
+                    style={shift ? { transform: `translateX(${shift}px)` } : undefined}
                 >
                     {text}
                 </span>
