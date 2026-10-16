@@ -7,8 +7,8 @@ import {
 } from '../ui/ios';
 import { prepareInformerTrack } from './informerAudio';
 import {
-    MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds, campaignActions,
-    lineCapacity,
+    CALLS_PER_LINE, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds,
+    campaignActions, lineCapacity,
     lineRate, partsLabel, percent, plural, robotSummary, seconds, shortDateTime, speechEstimate, stageLabel,
     stageShares, trackEstimateMs,
 } from './informerView';

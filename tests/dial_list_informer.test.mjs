@@ -165,6 +165,11 @@ test('темп в форме — сколько тянет робот при т�
     assert.doesNotMatch(rules, /MAX_PER_MINUTE_LAW/);
     // Поле без потолка закона: верх — проверка ввода, значение — расчёт по линиям.
     const panel = read('../src/components/dial_list/DialListInformerPanel.jsx');
+    // 16.10.2026: CALLS_PER_LINE попал в подсказку без импорта — «Ошибка приложения» на входе во вкладку.
+    const imported = panel.match(/import \{([^}]+)\} from '\.\/informerView'/)[1];
+    for (const name of ['CALLS_PER_LINE', 'MAX_ACTIVE_CALLS', 'MAX_PER_MINUTE', 'lineRate', 'lineCapacity', 'callSeconds']) {
+        assert.ok(new RegExp(`\\b${name}\\b`).test(imported), `${name} используется в панели, но не импортирован`);
+    }
     assert.match(panel, /type="number" min=\{1\} max=\{MAX_PER_MINUTE\}/);
     assert.match(panel, /value=\{perMinuteValue\}/);
     assert.doesNotMatch(panel, /max=\{10\}/);
