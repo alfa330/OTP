@@ -147,12 +147,72 @@ test('Rose, like Night, shows only after its stylesheet arrived', async () => {
     assert.equal(themes.useChatTheme(7).applied.id, 'standard', 'another person keeps the standard window');
 });
 
+test('Cherry stays personal even when another account saves or requests its id', async () => {
+    const storage = memory();
+    const themes = await freshTab(storage);
+    const cherry = themes.chatThemeById('cherry');
+    assert.equal(cherry.id, 'cherry');
+    assert.equal(cherry.owners.length, 1, 'the theme has one configured owner');
+    assert.ok(cherry.owners.every((owner) => Number.isInteger(owner) && owner > 0));
+    assert.equal(themes.CHAT_THEMES.some((theme) => theme.id === 'cherry'), false);
+    for (const owner of cherry.owners) {
+        assert.equal(themes.chatThemesFor(owner).some((theme) => theme.id === 'cherry'), true);
+        assert.deepEqual(themes.chatThemesFor(String(owner)), themes.chatThemesFor(owner));
+    }
+    const foreign = [7, 8, 9].find((owner) => !cherry.owners.includes(owner));
+    storage.setItem(`icore.wazzup.chatTheme.${foreign}`, 'cherry');
+    storage.setItem(`icore.wazzup.chatTheme.personal.${foreign}`, 'cherry');
+    for (const owner of [foreign, null, undefined, 0]) {
+        assert.equal(themes.chatThemesFor(owner).some((theme) => theme.id === 'cherry'), false);
+    }
+    assert.equal(themes.useChatTheme(foreign).selected, 'standard');
+    themes.setChatTheme(foreign, 'cherry');
+    assert.equal(themes.useChatTheme(foreign).selected, 'standard');
+    const roseOwner = themes.chatThemeById('rose').owners[0];
+    assert.equal(themes.useChatTheme(roseOwner).selected, 'rose', 'an existing personal theme is unchanged');
+});
+
+test('Cherry is the initial personal choice once and respects later choices across reloads', async () => {
+    const storage = memory();
+    let themes = await freshTab(storage);
+    const owner = themes.chatThemeById('cherry').owners[0];
+    const foreign = [7, 8, 9].find((candidate) => candidate !== owner);
+    storage.setItem(`icore.wazzup.chatTheme.${owner}`, 'sand');
+    themes.setChatTheme(foreign, 'lavender');
+    assert.equal(themes.useChatTheme(owner).selected, 'cherry');
+    themes.useChatTheme(owner).choose('sky');
+    themes = await freshTab(storage);
+    assert.equal(themes.useChatTheme(owner).selected, 'sky');
+    themes.useChatTheme(owner).choose('standard');
+    themes = await freshTab(storage);
+    assert.equal(themes.useChatTheme(owner).selected, 'standard', 'the personal default does not return');
+    themes.useChatTheme(owner).choose('cherry');
+    themes = await freshTab(storage);
+    assert.equal(themes.useChatTheme(owner).selected, 'cherry');
+    assert.equal(themes.useChatTheme(foreign).selected, 'lavender', 'another account retains its own preference');
+});
+
+test('Cherry is applied only after its own stylesheet loads', async () => {
+    const themes = await freshTab(memory());
+    const owner = themes.chatThemeById('cherry').owners[0];
+    assert.equal(themes.useChatTheme(owner).selected, 'cherry');
+    assert.equal(themes.useChatTheme(owner).applied.id, 'standard');
+    await themes.loadThemeLayer('rose');
+    assert.equal(themes.useChatTheme(owner).applied.id, 'standard', 'another layer cannot enable Cherry');
+    const loading = themes.loadThemeLayer('cherry');
+    assert.strictEqual(themes.loadThemeLayer('cherry'), loading, 'concurrent requests share a stylesheet load');
+    await loading;
+    assert.equal(themes.useChatTheme(owner).applied.id, 'cherry');
+});
+
 test('five themes besides the standard one, each with every colour the stylesheet reads', async () => {
     const themes = await freshTab(memory());
     assert.equal(themes.CHAT_THEMES.length, 6);
     assert.equal(new Set(themes.CHAT_THEMES.map((theme) => theme.name)).size, 6);
     assert.deepEqual(themes.chatThemeStyle(themes.chatThemeById('standard')), {});
-    for (const theme of themes.chatThemesFor(241).filter((item) => item.id !== 'standard')) {
+    const available = new Map([...themes.chatThemesFor(241), themes.chatThemeById('cherry')]
+        .map((theme) => [theme.id, theme]));
+    for (const theme of [...available.values()].filter((item) => item.id !== 'standard')) {
         const style = themes.chatThemeStyle(theme);
         assert.equal(Object.keys(style).length, 11, theme.id);
         for (const [name, value] of Object.entries(style)) assert.ok(value, `${theme.id}: ${name}`);

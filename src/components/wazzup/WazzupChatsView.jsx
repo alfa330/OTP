@@ -2088,7 +2088,7 @@ function ChatsWorkspace(props) {
                                     )}
                                 </div>
                             </div>
-                            <div className="relative min-h-0 flex-1">
+                            <div className="wz-thread-surface relative min-h-0 flex-1">
                             <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
                             <div className="mx-auto w-full max-w-[1040px] space-y-2">

@@ -12,7 +12,8 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
  * «Ночь» — тёмная палитра портала на всё окно раздела: chatThemeNight.css,
  * собран scripts/build_chat_night_theme.py и грузится, только когда её выбрали.
  * «Роза» так же красит всё окно розовым: chatThemeRose.css, собран
- * scripts/build_chat_rose_theme.py.
+ * scripts/build_chat_rose_theme.py. «Вишнёвый биом» — розовая палитра с
+ * пиксельным пейзажем: scripts/build_chat_cherry_theme.py.
  *
  * Выбор хранится в localStorage этого браузера под id сотрудника. В тёмном
  * режиме портала окно и так тёмное — там темы не действуют и выбора нет.
@@ -56,6 +57,13 @@ const ALL_THEMES = Object.freeze([
         incoming: '#ffffff', incomingLine: 'rgba(150, 64, 104, 0.14)', outgoing: '#f9dae6',
         accent: '#c0447a', quote: 'rgba(192, 68, 122, 0.1)', quoteInk: '#6a1f42', read: '#1d63c9', meta: '#7b5063',
         pill: 'rgba(255, 255, 255, 0.78)', pillInk: '#7a4a5e',
+    },
+    {
+        id: 'cherry', name: 'Вишнёвый биом', owners: Object.freeze([292]),
+        wall: '#fff0f5', swatch: '#f9dce9',
+        incoming: '#fffdfd', incomingLine: 'rgba(172, 44, 101, 0.14)', outgoing: '#f6bfd6',
+        accent: '#ac2c65', quote: '#f9dce9', quoteInk: '#492b3c', read: '#205980', meta: '#66334e',
+        pill: '#fffdfd', pillInk: '#75495f',
     },
     {
         id: 'night', name: 'Ночь', wall: '#121519',
@@ -142,13 +150,14 @@ function subscribe(listener) {
     return () => listeners.delete(listener);
 }
 
-/* Темы на всё окно — «Ночь» и «Роза» — своим слоем стилей: он запрашивается
+/* Темы на всё окно — своим слоем стилей: он запрашивается
    один раз за сессию и только у выбравших тему. Окно переключается на тему
    ПОСЛЕ загрузки стилей — иначе между атрибутом и приходом стилей оно
    моргнуло бы наполовину перекрашенным. */
 const LAYERS = {
     night: () => import('./chatThemeNight.css'),
     rose: () => import('./chatThemeRose.css'),
+    cherry: () => import('./chatThemeCherry.css'),
 };
 let layers = {};
 const layerReady = (id) => !LAYERS[id] || Boolean(layers[id]?.ready);
@@ -185,7 +194,7 @@ export function useChatTheme(owner) {
    всё окно метка на body даёт им ту же палитру, пока раздел открыт
    (chatThemeNight.css, chatThemeRose.css, chatThemes.css): светлое меню над
    тёмным окном было бы вторым видом на одном экране. */
-const MENU_MARKS = { night: 'data-wz-chat-night', rose: 'data-wz-chat-rose' };
+const MENU_MARKS = { night: 'data-wz-chat-night', rose: 'data-wz-chat-rose', cherry: 'data-wz-chat-cherry' };
 export function useThemeMenus(id) {
     useEffect(() => {
         const mark = MENU_MARKS[id];
