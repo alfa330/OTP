@@ -170,33 +170,34 @@ def test_draft_does_not_call_and_start_issues_up_to_line_capacity(env):
 NINE_LINES = {str(n): {'capacity': 2, 'active': 0} for n in (902, 907, 919, 923, 925, 928, 939, 942, 944)}
 
 
-def test_at_most_fifteen_calls_at_once_no_minute_cap(env):
+def test_at_most_twenty_calls_at_once_no_minute_cap(env):
     """Владелец, 16.10.2026: «сколько тянут линии, без предела» — общего потолка в минуту нет; но после того
     как залп 46 в минуту уронил исходящие всему кабинету — предел звонков разом («по 3 максимум», вечером
-    поднят до 10, затем до 15), сколько бы мест на линиях ни было."""
+    поднят до 10, 15, 20). Двенадцать линий держат 24 — предел 20 ниже."""
     svc, clock, _ = env
-    a = make_campaign(svc, phones(30), max_per_minute=600)
+    twelve = {str(n): {'capacity': 2, 'active': 0} for n in range(902, 914)}
+    a = make_campaign(svc, phones(40), max_per_minute=600)
     b = make_campaign(svc, phones(8, start=100), max_per_minute=600)
     svc.campaign_action(DEPT, a['id'], 'start')
     svc.campaign_action(DEPT, b['id'], 'start')
-    issued = poll(svc, NINE_LINES)['calls']
-    assert len(issued) == 15                              # пятнадцать мест, а не все 18 мест девяти линий
-    assert len({call['line'] for call in issued}) == 9    # раскладываем по всем линиям
+    issued = poll(svc, twelve)['calls']
+    assert len(issued) == 20                              # двадцать мест, а не все 24 места двенадцати линий
+    assert len({call['line'] for call in issued}) == 12   # раскладываем по всем линиям
     active = {}
     for call in issued:
         active[call['line']] = active.get(call['line'], 0) + 1
-    busy = {line: {'capacity': 2, 'active': active.get(line, 0)} for line in NINE_LINES}
-    assert poll(svc, busy)['calls'] == []                 # пятнадцать идут — новых не даём, хоть места у линий есть
+    busy = {line: {'capacity': 2, 'active': active.get(line, 0)} for line in twelve}
+    assert poll(svc, busy)['calls'] == []                 # двадцать идут — новых не даём, хоть места у линий есть
     one = dict(busy, **{issued[0]['line']: {'capacity': 2, 'active': active[issued[0]['line']] - 1}})
     assert len(poll(svc, one)['calls']) == 1              # один кончился — одно место
-    assert len(poll(svc, NINE_LINES)['calls']) == 15      # все кончились — снова пятнадцать, без минутного потолка
+    assert len(poll(svc, twelve)['calls']) == 20          # все кончились — снова двадцать, без минутного потолка
 
 
 def test_default_rate_is_what_robot_fits(env):
     svc, _, _ = env
     assert make_campaign(svc, phones(1))['max_per_minute'] == 3              # линий робота не видно — как одна
     poll(svc, NINE_LINES)                                                     # робот сообщил девять линий
-    assert make_campaign(svc, phones(1))['max_per_minute'] == rules.line_rate(18, 25520) == 22  # пятнадцать разом
+    assert make_campaign(svc, phones(1))['max_per_minute'] == rules.line_rate(18, 25520) == 27  # 18 мест, предел 20
     assert make_campaign(svc, phones(1), max_per_minute=5)['max_per_minute'] == 5
 
 

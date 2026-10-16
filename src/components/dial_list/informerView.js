@@ -7,10 +7,10 @@ import { GAP_S, LEAD_IN_S, TAIL_S } from './informerAudio.js';
 /* Сколько звонков в минуту вытянет робот — двойник informer/rules.py (line_capacity, line_rate).
    Одновременно — не больше MAX_ACTIVE_CALLS звонков (владелец, 16.10.2026, после того как залп 46 в минуту с общего
    номера кабинета уронил исходящие всем операторам: «жёстких залпов делать не надо вообще, по 3 максимум»; вечером
-   того же дня поднял до 10, затем до 15: «давай на 10 увеличим», «ещё до 15»). Место звонок держит на время вызова (~12 с до ответа),
+   того же дня поднял до 10, 15, 20: «давай на 10 увеличим», «ещё до 15», «до 20»). Место звонок держит на время вызова (~12 с до ответа),
    записи и отбоя (~2 с). */
 export const CALLS_PER_LINE = 2;
-export const MAX_ACTIVE_CALLS = 15;
+export const MAX_ACTIVE_CALLS = 20;
 export const EXPECTED_RING_S = 12;
 export const CALL_OVERHEAD_S = 2;
 export const DEFAULT_AUDIO_S = 25;
