@@ -11,6 +11,7 @@ import {
   hexColorsIn,
   isProductionPerson,
   newCustomSize,
+  productionAllowedFor,
   productionAvailableFor,
   productionBriefIssues,
   productionBriefRows,
@@ -56,6 +57,18 @@ test('без маркетолога в составе — первый пунк�
   const issues = productionBriefIssues(filled(), 'текст', { productionAllowed: false });
   assert.deepEqual(keys(issues), ['tag']);
   assert.match(issues[0].text, /маркетинга/);
+});
+
+test('правка: старый продакшн с прежним составом не требует маркетолога — как на сервере', () => {
+  // Маркетолог перешёл в отдел HR после постановки.
+  const recipients = [{ id: 7, department_code: 'hr' }, { id: 8, department_code: 'szov' }];
+  const initial = { tag: 'production', assigneeIds: ['7'] };
+  assert.equal(productionAllowedFor(['7'], recipients, initial), true, 'тот же состав — правится');
+  assert.equal(productionAllowedFor([7], [], initial), true, 'и когда человека нет в списке получателей');
+  assert.equal(productionAllowedFor(['7', '8'], recipients, initial), false, 'состав сменили — нужен маркетолог');
+  assert.equal(productionAllowedFor(['7'], recipients, { tag: 'task', assigneeIds: ['7'] }), false, 'тип только появляется');
+  assert.equal(productionAllowedFor(['7'], recipients), false, 'новая задача');
+  assert.equal(productionAllowedFor(['7'], [{ id: 7, department_code: 'marketing' }]), true);
 });
 
 test('«Свои тона» требуют написать, какие', () => {
@@ -118,9 +131,17 @@ test('бриф из ответа сервера возвращается в фо
   assert.deepEqual(briefFromTask(null), emptyProductionBrief());
 });
 
-test('пункты списка: заголовок группы у первого пункта каждой группы', () => {
-  const headed = PRODUCTION_ITEM_OPTIONS.filter((option) => option.groupLabel);
-  assert.deepEqual(headed.map((option) => option.groupLabel), ['Полиграфия', 'Digital', 'Видео и анимация', 'Бренд и упаковка']);
+test('пункты списка: у каждого своя группа — заголовки верны и в результатах поиска', () => {
+  assert.ok(PRODUCTION_ITEM_OPTIONS.every((option) => option.groupLabel));
+  // Так CustomSelect решает, где нарисовать заголовок группы (startsGroup).
+  const headers = (options) => options
+    .filter((option, index) => option.groupLabel !== options[index - 1]?.groupLabel)
+    .map((option) => option.groupLabel);
+  assert.deepEqual(headers(PRODUCTION_ITEM_OPTIONS), ['Полиграфия', 'Digital', 'Видео и анимация', 'Бренд и упаковка']);
+  const found = PRODUCTION_ITEM_OPTIONS.filter((option) => option.label.toLowerCase().includes('ан'));
+  const animated = found.find((option) => option.value === 'animation_2d');
+  assert.equal(animated.groupLabel, 'Видео и анимация');
+  assert.deepEqual(headers(found), ['Digital', 'Видео и анимация']);
   assert.equal(PRODUCTION_ITEM_OPTIONS[0].value, 'leaflet');
 });
 

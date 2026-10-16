@@ -99,7 +99,9 @@
 }
 .tv-root .tv-brief-chip:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
 .tv-root .tv-brief-chip:active:not(:disabled) { transform: scale(.97); }
-.tv-root .tv-brief-chip.is-active { background: var(--ink); border-color: var(--ink); color: #fff; }
+/* Выбранное — парой --accent / --accent-fg: в тёмной теме раздел меняет её местами,
+   а связка var(--ink) + #fff дала бы там белый текст на светлой плашке. */
+.tv-root .tv-brief-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .tv-root .tv-brief-chip:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── Размеры: плитки с рамкой формата, как в Canva ── */
@@ -147,7 +149,7 @@
   position: absolute; top: 6px; right: 6px;
   width: 16px; height: 16px; border-radius: 50%;
   display: grid; place-items: center;
-  background: var(--ink); color: #fff;
+  background: var(--accent); color: var(--accent-fg);
   animation: tvBriefCheck .18s cubic-bezier(.22, 1, .36, 1);
 }
 @keyframes tvBriefCheck { from { transform: scale(.4); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -243,9 +245,6 @@
 .tv-root .tv-brief-view-dims { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .tv-root .tv-brief-view-chip .tv-brief-frame i { border-width: 1.25px; border-radius: 2px; }
 
-/* Тип в списке и в карточке: свой цвет, как у остальных типов задачи. */
-.tv-root .tv-badge-fuchsia { background: #fae8ff; color: #86198f; border-color: #f5d0fe; }
-
 /* ── Телефон ───────────────────────────────────────────────────────────────
    Подписи групп встают над плитками, плитки — по три в ряд во всю ширину,
    поля и кнопки ростом под палец (как остальная форма на телефоне). */
@@ -284,8 +283,10 @@ body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-add { min-height: 36px; f
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-remove { width: 36px; height: 36px; }
 body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay .tv-modal-footer { flex-wrap: wrap; }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-issue-nav {
-  order: -1; width: 100%; margin-right: 0; justify-content: space-between;
+  order: -1; width: 100%; margin-right: 0;
 }
+/* Текст слева, стрелки парой справа — как на компьютере, а не вразброс по ширине. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-issue-nav span { margin-right: auto; }
 @media (max-width: 640px) {
   .tv-root .tv-brief-view-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .tv-root .tv-brief-view-grid dd { margin-bottom: 8px; }

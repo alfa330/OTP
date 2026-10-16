@@ -196,6 +196,12 @@ class NormalizeBriefTests(unittest.TestCase):
             _valid_brief(custom_sizes=[{"width": 10, "height": 90, "unit": "cm"}]),
             _valid_brief(custom_sizes=[{"width": True, "height": 90, "unit": "px"}]),
             _valid_brief(custom_sizes=[{"width": task_production.MAX_SIDE + 1, "height": 9, "unit": "px"}]),
+            _valid_brief(custom_sizes=[{"width": float("inf"), "height": 9, "unit": "px"}]),
+            _valid_brief(custom_sizes=[{"width": float("nan"), "height": 9, "unit": "px"}]),
+            _valid_brief(custom_sizes=[{"width": "1e400", "height": 9, "unit": "px"}]),
+            _valid_brief(custom_sizes=[{"width": "Infinity", "height": 9, "unit": "px"}]),
+            '{"item": "flyer", "channels": ["social"], "sizes": [], "color": "brandbook",'
+            ' "custom_sizes": [{"width": Infinity, "height": 9, "unit": "px"}]}',
             _valid_brief(custom_sizes=[
                 {"width": n, "height": 10, "unit": "px"} for n in range(1, task_production.MAX_CUSTOM_SIZES + 2)
             ]),
@@ -278,14 +284,21 @@ def _database_methods(names):
     found = {}
     for node in database_class.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
-            found[node.name] = textwrap.dedent("".join(lines[node.lineno - 1:node.end_lineno]))
+            # Декоратор (@staticmethod) выше `def` — без него метод теряет природу.
+            first = min([node.lineno] + [item.lineno for item in node.decorator_list])
+            found[node.name] = textwrap.dedent("".join(lines[first - 1:node.end_lineno]))
     missing = set(names) - set(found)
     assert not missing, f"в Database нет: {sorted(missing)}"
     return found
 
 
 def _fake_database():
-    names = ["_normalize_task_production_brief", "_require_task_production_assignee_tx"]
+    names = [
+        "_normalize_task_production_brief",
+        "_require_task_production_assignee_tx",
+        "_edited_task_production_brief",
+        "_task_production_needs_assignee_check",
+    ]
     body = _database_methods(names)
     namespace = {"task_production": task_production}
     exec("class FakeDatabase:\n" + "".join(textwrap.indent(body[name], "    ") + "\n" for name in names), namespace)
@@ -341,6 +354,87 @@ class TaskRulesTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self.DB._require_task_production_assignee_tx(_Cursor(row=None), [7])
         self.assertEqual(str(caught.exception), task_production.NEEDS_MARKETING_ASSIGNEE)
+
+
+class EditRulesTests(unittest.TestCase):
+    """Что правка делает с брифом — исполняем правила, а не ищем строки."""
+
+    DB = _fake_database()
+    STORED = task_production.normalize_brief(_valid_brief())
+
+    def edited(self, tag, *, current=STORED, has_brief=False, brief=None, description="Описание"):
+        return self.DB._edited_task_production_brief(tag, current, has_brief, brief, description)
+
+    def test_type_change_drops_the_brief(self):
+        for tag in ("task", "problem", "suggestion"):
+            self.assertIsNone(self.edited(tag, has_brief=True, brief=_valid_brief()))
+
+    def test_old_tab_without_brief_keeps_it_untouched(self):
+        # Вкладка, открытая до выхода «Продакшна», ключа production_brief не шлёт.
+        self.assertIs(self.edited("production"), self.STORED)
+
+    def test_kept_brief_is_not_rechecked_against_the_catalog(self):
+        legacy = dict(self.STORED, item="item_removed_later")
+        self.assertIs(self.edited("production", current=legacy), legacy)
+
+    def test_description_is_required_even_when_brief_is_kept(self):
+        with self.assertRaises(ValueError) as caught:
+            self.edited("production", description="   ")
+        self.assertEqual(str(caught.exception), "PRODUCTION_BRIEF_INCOMPLETE:description")
+
+    def test_sent_brief_replaces_the_old_one(self):
+        brief = self.edited("production", has_brief=True, brief=_valid_brief(color="designer"))
+        self.assertEqual(brief["color"], "designer")
+
+    def test_switching_to_production_needs_a_brief(self):
+        with self.assertRaises(ValueError) as caught:
+            self.edited("production", current=None)
+        self.assertEqual(str(caught.exception), "PRODUCTION_BRIEF_INCOMPLETE:item,channels,sizes,color")
+
+    def test_marketing_is_checked_only_when_production_appears_or_team_changes(self):
+        check = self.DB._task_production_needs_assignee_check
+        self.assertFalse(check(self.STORED, "production", "production", [], []))
+        self.assertTrue(check(self.STORED, "production", "task", [], []))
+        self.assertTrue(check(self.STORED, "production", "production", [7], []))
+        self.assertTrue(check(self.STORED, "production", "production", [], [7]))
+        self.assertFalse(check(None, "task", "production", [7], [8]))
+
+
+class TypeListsTests(unittest.TestCase):
+    """Список типов задачи перечислен в восьми местах — они обязаны совпадать."""
+
+    EXPECTED = {"task", "problem", "suggestion", "production"}
+
+    @staticmethod
+    def _block(source, start_marker, end_marker):
+        start = source.index(start_marker)
+        return source[start:source.index(end_marker, start + len(start_marker))]
+
+    def test_every_list_of_types_is_the_same(self):
+        view = _read(TASKS_VIEW_PATH)
+        meta = self._block(view, "const TAG_META = {", "};")
+        options = self._block(view, "const TAG_OPTIONS = [", "];")
+        lists = {
+            "CHECK в CREATE TABLE": set(re.findall(r"'(\w+)'", self._block(
+                DATABASE_SOURCE, "CHECK (tag IN (", "))"))),
+            "CHECK в миграции": set(re.findall(r"'(\w+)'", self._block(
+                DATABASE_SOURCE, "ADD CONSTRAINT tasks_tag_check", "));"))),
+            "TASK_TAG_CODES": set(re.findall(r"'(\w+)'", self._block(
+                DATABASE_SOURCE, "TASK_TAG_CODES = (", ")\n"))) | {task_production.PRODUCTION_TAG},
+            "TASK_ALLOWED_TAGS": set(re.findall(r"'(\w+)'", self._block(BOT_SOURCE, "TASK_ALLOWED_TAGS = {", "}"))),
+            "TASK_TAG_LABELS": set(re.findall(r"'(\w+)':", self._block(BOT_SOURCE, "TASK_TAG_LABELS = {", "}"))),
+            "CLI TAG_LABELS": set(re.findall(r"'(\w+)':", self._block(_read(CLI_PATH), "TAG_LABELS = {", "}"))),
+            # Во фронте продакшн записан константой PRODUCTION_TAG.
+            "TAG_META": set(re.findall(r"^\s+(\w+):\s+\{", meta, re.M))
+            | ({task_production.PRODUCTION_TAG} if "[PRODUCTION_TAG]: {" in meta else set()),
+            "TAG_OPTIONS": set(re.findall(r"value: '(\w+)'", options))
+            | ({task_production.PRODUCTION_TAG} if "value: PRODUCTION_TAG" in options else set()),
+            "TAG_LABEL доски": set(re.findall(r"(\w+): '", self._block(
+                _read(WORKSPACE_PATH), "const TAG_LABEL = {", "};"))),
+        }
+        for name, values in lists.items():
+            with self.subTest(name=name):
+                self.assertEqual(values, self.EXPECTED, name)
 
 
 def _insert_placeholders_and_params(method):
@@ -401,14 +495,19 @@ class DatabaseWiringTests(unittest.TestCase):
         self.assertIn("Json(production_brief_norm)", source)
         self.assertEqual(*_insert_placeholders_and_params("create_task"))
 
-    def test_edit_keeps_replaces_or_clears_brief(self):
+    def test_edit_wires_the_brief_rules(self):
+        """Сами правила исполняет EditRulesTests; здесь — что edit_task их зовёт."""
         source = _method_source("edit_task")
         self.assertIn("production_brief=_UNSET", source)
         self.assertIn("has_production_brief = production_brief is not _UNSET", source)
-        self.assertIn("production_brief_new = None", source)
+        self.assertIn("production_brief_new = self._edited_task_production_brief(", source)
+        self.assertIn("if self._task_production_needs_assignee_check(", source)
+        self.assertIn("self._require_task_production_assignee_tx(cursor, assignee_ids_new)", source)
         self.assertIn("production_brief = %s,", source)
         self.assertIn('changed_fields.append("production_brief")', source)
-        self.assertIn("self._require_task_production_assignee_tx(cursor, assignee_ids_new)", source)
+        # Сверка состава — после того, как известен диф исполнителей.
+        self.assertLess(source.index("removed_assignees = ["),
+                        source.index("if self._task_production_needs_assignee_check("))
 
     def test_regulation_insert_placeholders_match_params(self):
         self.assertEqual(*_insert_placeholders_and_params("materialize_due_regulation_tasks"))
@@ -467,8 +566,14 @@ class RouteWiringTests(unittest.TestCase):
         self.assertIn("'brief':       ('Бриф', 48),", BOT_SOURCE)
         self.assertIn("return task_production.describe_text(task.get('production_brief'))", BOT_SOURCE)
 
-    def test_telegram_names_what_to_make(self):
-        self.assertIn("production_item = task_production.item_label(created.get('production_brief'))", BOT_SOURCE)
+    def test_telegram_names_what_to_make_wherever_task_first_reaches_assignee(self):
+        # Постановка, вынос из бэклога и регламентная итерация — во всех трёх
+        # сообщениях исполнитель впервые узнаёт о задаче.
+        self.assertIn("production_line = _task_production_item_line(created.get('production_brief'))", BOT_SOURCE)
+        self.assertIn("_task_production_item_line(task_ctx.get('production_brief')) if event_norm == 'promoted'",
+                      BOT_SOURCE)
+        self.assertEqual(BOT_SOURCE.count("_task_production_item_line(task_ctx.get('production_brief'))"), 2)
+        self.assertIn('"production_brief": row[14]', BOT_SOURCE)
 
 
 class FrontWiringTests(unittest.TestCase):
@@ -481,6 +586,15 @@ class FrontWiringTests(unittest.TestCase):
         self.assertIn("production_brief: values.tag === PRODUCTION_TAG ? briefToPayload(values.productionBrief) : null,",
                       source)
         self.assertIn("body.append('production_brief', JSON.stringify(payload.production_brief))", source)
+
+    def test_pinned_quick_form_offers_production_only_for_production_tasks(self):
+        """У быстрой формы закреплённой задачи полей брифа нет — продакшн там
+        только показывается у задачи, которая уже этого типа."""
+        source = _read(TASKS_VIEW_PATH)
+        self.assertIn("(quickForm.tag === PRODUCTION_TAG ? TAG_OPTIONS : BASIC_TAG_OPTIONS).map(", source)
+        # Полный список типов — только там, где рядом есть поля брифа.
+        self.assertEqual(source.count("{TAG_OPTIONS.map((option) => ("), 1)
+        self.assertIn("productionAllowedFor(\n          values.assigneeIds,", source)
 
     def test_board_and_cli_name_the_type(self):
         self.assertIn("production: 'Продакшн'", _read(WORKSPACE_PATH))

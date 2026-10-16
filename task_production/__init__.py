@@ -30,6 +30,7 @@ database.py (там состав исполнителей), здесь — то�
 """
 
 import json
+import math
 
 PRODUCTION_TAG = 'production'
 PRODUCTION_DEPARTMENT_CODE = 'marketing'
@@ -193,7 +194,10 @@ def _clean_side(value):
         number = float(str(value).strip().replace(',', '.'))
     except (TypeError, ValueError):
         raise ValueError(INVALID_BRIEF)
-    if number != int(number):
+    # JSON пропускает Infinity и NaN, а 1e400 сам становится бесконечностью;
+    # int() на них бросает OverflowError и ValueError с английским текстом —
+    # мимо формы это был бы 500, а не отказ по брифу.
+    if not math.isfinite(number) or number != int(number):
         raise ValueError(INVALID_BRIEF)
     number = int(number)
     if number < 1 or number > MAX_SIDE:

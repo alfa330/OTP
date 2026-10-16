@@ -59304,21 +59304,9 @@ class Database:
             if tag_new not in TASK_TAG_CODES:
                 raise ValueError("INVALID_TAG")
 
-            if tag_new != task_production.PRODUCTION_TAG:
-                # Тип сменили с продакшна — бриф уходит вместе с типом: висеть
-                # невидимым в задаче другого типа ему незачем.
-                production_brief_new = None
-            elif has_production_brief or current_production_brief is None:
-                production_brief_new = self._normalize_task_production_brief(
-                    tag_new, production_brief if has_production_brief else None, description_new
-                )
-            else:
-                # Бриф не прислали — остаётся прежний. Заново его не проверяем:
-                # пункт, позже убранный из справочника, не должен запрещать
-                # поправить в старой задаче тему. Описание обязательно всегда.
-                production_brief_new = current_production_brief
-                if not str(description_new or '').strip():
-                    raise ValueError(task_production.incomplete(['description']))
+            production_brief_new = self._edited_task_production_brief(
+                tag_new, current_production_brief, has_production_brief, production_brief, description_new
+            )
 
             priority_new = current_priority if not has_priority else self._normalize_task_priority(priority)
 
@@ -59399,11 +59387,8 @@ class Database:
             removed_assignees = [pid for pid in current_assignee_ids if pid not in set(assignee_ids_new)]
             if added_assignees or removed_assignees:
                 changed_fields.append("assigned_to")
-            # Маркетинг в составе сверяем, когда продакшн только появляется или
-            # меняется состав. На правке одной темы — нет: сотрудник мог с тех
-            # пор перейти в другой отдел, и задача стала бы неправимой.
-            if production_brief_new is not None and (
-                    tag_new != current_tag or added_assignees or removed_assignees):
+            if self._task_production_needs_assignee_check(
+                    production_brief_new, tag_new, current_tag, added_assignees, removed_assignees):
                 self._require_task_production_assignee_tx(cursor, assignee_ids_new)
             if production_brief_new != current_production_brief:
                 changed_fields.append("production_brief")
@@ -65290,6 +65275,36 @@ class Database:
         if missing:
             raise ValueError(task_production.incomplete(missing))
         return brief
+
+    def _edited_task_production_brief(self, tag_new, current_brief, has_brief, brief_input, description):
+        """Бриф после правки задачи.
+
+        Тип сменили с продакшна — бриф уходит вместе с типом: висеть невидимым в
+        задаче другого типа ему незачем. Бриф прислали (или у задачи его ещё
+        нет) — проверяется заново целиком. Не прислали — остаётся прежний и
+        заново НЕ проверяется: пункт, позже убранный из справочника, не должен
+        запрещать поправить в старой задаче тему. Описание задания у продакшна
+        обязательно всегда.
+        """
+        if tag_new != task_production.PRODUCTION_TAG:
+            return None
+        if has_brief or current_brief is None:
+            return self._normalize_task_production_brief(
+                tag_new, brief_input if has_brief else None, description
+            )
+        if not str(description or '').strip():
+            raise ValueError(task_production.incomplete(['description']))
+        return current_brief
+
+    @staticmethod
+    def _task_production_needs_assignee_check(brief_new, tag_new, current_tag, added, removed):
+        """Сверять ли маркетинг в составе при правке.
+
+        Только когда продакшн появляется или меняется состав. На правке одной
+        темы — нет: сотрудник мог с тех пор перейти в другой отдел, и задача
+        стала бы неправимой.
+        """
+        return brief_new is not None and (tag_new != current_tag or bool(added) or bool(removed))
 
     def _require_task_production_assignee_tx(self, cursor, assignee_ids):
         """Продакшн — только если среди исполнителей есть сотрудник маркетинга.

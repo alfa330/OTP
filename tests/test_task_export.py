@@ -191,6 +191,30 @@ class TaskExcelExportTests(unittest.TestCase):
     def _headers(sheet):
         return [cell.value for cell in sheet[1]]
 
+    def test_brief_column_only_on_sheets_with_production(self):
+        """Бриф продакшна (#354) — строками «Поле: значение» перед описанием;
+        на листе без единого продакшна колонки нет вовсе."""
+        brief = {
+            "item": "static_banner", "channels": ["social", "outdoor"], "sizes": ["9x16"],
+            "custom_sizes": [{"width": 728, "height": 90, "unit": "px"}],
+            "color": "custom", "color_notes": "жёлтый #FFD400",
+        }
+        _db, _sent, book = self._export([
+            _task(id=1, status='assigned', tag='production', production_brief=brief),
+            _task(id=2, status='in_progress'),
+        ])
+        todo = book['К выполнению']
+        headers = self._headers(todo)
+        self.assertEqual(headers.index('Бриф') + 1, headers.index('Описание'))
+        self.assertEqual(todo.cell(row=1 + 1, column=headers.index('Тип') + 1).value, 'Продакшн')
+        self.assertEqual(todo.cell(row=2, column=headers.index('Бриф') + 1).value, "\n".join([
+            "Наименование: Статичный баннер",
+            "Адаптация: Социальные сети и мессенджеры; Наружная реклама",
+            "Размеры: 9:16 — 1080×1920 px; 728×90 px",
+            "Цветность: Свои тона: жёлтый #FFD400",
+        ]))
+        self.assertNotIn('Бриф', self._headers(book['В работе']))
+
     def test_sheet_per_board_column_in_board_order(self):
         _db, _sent, book = self._export([
             _task(id=1, status='accepted'),

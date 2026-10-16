@@ -407,6 +407,8 @@ import colorsys
 
 PALETTE_SOURCES = (
     ('src/components/tasks/TasksView.jsx', 'style'),
+    # Бриф продакшна в форме и карточке задачи (#354): своя палитра раздела «Задачи».
+    ('src/components/tasks/production-brief.css', 'css'),
     # Вики. Переменные --wiki-* перекрыты вручную в dark_theme_chrome.css, но
     # цвет ТЕКСТА СТАТЬИ переменной не задан: `.wiki-prose { color: #334155 }`
     # стоит литералом, и без разбора этого файла тело статьи оставалось

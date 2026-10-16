@@ -4025,7 +4025,8 @@ def _fetch_task_notification_context(task_id):
                 creator.telegram_id, creator.name,
                 t.assigned_to, assignee.telegram_id, assignee.name,
                 t.requested_by_id, requester.telegram_id,
-                COALESCE(requester.name, t.requested_by_name)
+                COALESCE(requester.name, t.requested_by_name),
+                t.production_brief
             FROM tasks t
             LEFT JOIN users creator ON creator.id = t.created_by
             LEFT JOIN users assignee ON assignee.id = t.assigned_to
@@ -4068,7 +4069,9 @@ def _fetch_task_notification_context(task_id):
         # Поручитель принимает итог — он должен получать уведомления по задаче.
         "requested_by": row[11],
         "requester_telegram_id": row[12],
-        "requester_name": row[13]
+        "requester_name": row[13],
+        # Бриф продакшна (#354): из него — строка «Что:» в сообщениях.
+        "production_brief": row[14]
     }
 
 
@@ -4208,6 +4211,14 @@ def _build_task_status_notification_html(
     return message
 
 
+def _task_production_item_line(production_brief):
+    """«Что:» в Telegram у продакшна (задача #354): тип без наименования ничего
+    не говорит исполнителю, а весь бриф — в карточке задачи."""
+    import task_production
+    item = task_production.item_label(production_brief)
+    return f"<b>Что:</b> {_escape_telegram_html(item, 120)}" if item else None
+
+
 def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None, task_link=None):
     event_norm = (event or '').strip().lower()
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
@@ -4235,6 +4246,11 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
     ]
     if due_label:
         lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
+    # Из бэклога задача впервые доходит до исполнителя — как и при постановке,
+    # ему сразу видно, что именно сделать.
+    production_line = _task_production_item_line(task_ctx.get('production_brief')) if event_norm == 'promoted' else None
+    if production_line:
+        lines.insert(3, production_line)
 
     if event_norm in ('edited', 'planned'):
         labels = {
@@ -26560,6 +26576,9 @@ def handle_tasks():
                     ]
                     if due_label:
                         lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
+                    production_line = _task_production_item_line(task_ctx.get('production_brief'))
+                    if production_line:
+                        lines.insert(3, production_line)
                     for assignee_chat_id in assignee_chat_ids:
                         _send_telegram_text_message(
                             assignee_chat_id,
@@ -26875,11 +26894,9 @@ def handle_tasks():
                 ]
                 if due_label:
                     message_lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-                production_item = task_production.item_label(created.get('production_brief'))
-                if production_item:
-                    # Что именно сделать — сразу под типом: «Продакшн» без
-                    # наименования ничего не говорит, а весь бриф в карточке.
-                    message_lines.insert(3, f"<b>Что:</b> {_escape_telegram_html(production_item, 120)}")
+                production_line = _task_production_item_line(created.get('production_brief'))
+                if production_line:
+                    message_lines.insert(3, production_line)
                 message = "\n".join(message_lines)
                 reply_markup = _build_task_notification_reply_markup(task_link)
                 failures = []

@@ -40,6 +40,7 @@ import {
   briefFromTask,
   briefToPayload,
   emptyProductionBrief,
+  productionAllowedFor,
   productionAvailableFor,
   productionBriefIssues,
 } from './productionBrief';
@@ -993,6 +994,9 @@ styleTag.textContent = `
   .tv-badge-rose    { background: #ffe4e6; color: #9f1239;       border-color: #fecdd3; }
   .tv-badge-teal    { background: #ccfbf1; color: #0f766e;       border-color: #99f6e4; }
   .tv-badge-violet  { background: #ede9fe; color: #5b21b6;       border-color: #ddd6fe; }
+  /* Продакшн (задача #354). Без предка .tv-root, как у остальных бейджей: окно
+     закреплённой задачи живёт вне раздела, и бейдж там остался бы бесцветным. */
+  .tv-badge-fuchsia { background: #fae8ff; color: #86198f;       border-color: #f5d0fe; }
 
   /* ── Skeleton loading ── */
   .tv-skeleton {
@@ -6398,7 +6402,11 @@ export const PinnedTaskWidget = React.memo(({
             disabled={quickFormLoading}
             onChange={(event) => updateQuickFormField('tag', event.target.value)}
           >
-            {TAG_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            {/* Брифа в быстрой форме нет, поэтому продакшн здесь не ставится — только
+                показывается, если закреплённая задача уже этого типа. */}
+            {(quickForm.tag === PRODUCTION_TAG ? TAG_OPTIONS : BASIC_TAG_OPTIONS).map((item) => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
           </select>
         </div>
         <div className="tv-form-field">
@@ -7847,15 +7855,19 @@ const TasksView = ({
   }, [outgoingGroups]);
 
   /* ── Бриф продакшна: чего не хватает (задача #354) ── */
-  const formIssues = useCallback((values) => (
+  const formIssues = useCallback((values, modal = null) => (
     values.tag === PRODUCTION_TAG
       ? productionBriefIssues(values.productionBrief, values.description, {
-        productionAllowed: productionAvailableFor(values.assigneeIds, recipients),
+        productionAllowed: productionAllowedFor(
+          values.assigneeIds,
+          recipients,
+          modal ? { tag: modal.initialTag, assigneeIds: modal.initialAssigneeIds } : null
+        ),
       })
       : []
   ), [recipients]);
   const createIssues = useMemo(() => formIssues(form), [formIssues, form]);
-  const editIssues = useMemo(() => formIssues(editForm), [formIssues, editForm]);
+  const editIssues = useMemo(() => formIssues(editForm, editModal), [formIssues, editForm, editModal]);
   const createIssueNav = useBriefIssueNav(createBodyRef, createIssues.map((issue) => issue.key));
   const editIssueNav = useBriefIssueNav(editBodyRef, editIssues.map((issue) => issue.key));
   const createIssueFor = useCallback(
@@ -7906,7 +7918,11 @@ const TasksView = ({
     setEditModal({
       open: true,
       taskId: task.id,
-      taskSubject: task.subject || ''
+      taskSubject: task.subject || '',
+      // С чем задача пришла в правку: продакшн с прежним составом сервер
+      // правит без сверки отдела (маркетолог мог с тех пор сменить отдел).
+      initialTag: task.tag || 'task',
+      initialAssigneeIds: taskAssigneeIds(task).map(String),
     });
   }, []);
 

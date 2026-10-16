@@ -193,13 +193,16 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
           style={{
             position: 'fixed',
             left: pos.left,
-            top: pos.top,
+            // Раскрытый вверх пузырь прижат нижним краем, а не сдвинут через
+            // translateY(-100%): анимация появления сама задаёт transform и на
+            // свои 0,2 с перекрывала сдвиг — пузырь мелькал вниз от кнопки.
+            top: pos.flipUp ? undefined : pos.top,
+            bottom: pos.flipUp ? Math.max(MARGIN, window.innerHeight - pos.top) : undefined,
             width: 'max-content',
             maxWidth: `min(${MAX_WIDTH}px, calc(100vw - 16px))`,
             maxHeight: pos.maxHeight,
             overflowY: pos.maxHeight ? 'auto' : undefined,
             overscrollBehavior: pos.maxHeight ? 'contain' : undefined,
-            transform: pos.flipUp ? 'translateY(-100%)' : undefined,
           }}
           className="z-[200] rounded-2xl border border-slate-200/80 bg-white/95 p-3.5 text-left text-xs leading-5 text-slate-600 shadow-xl ring-1 ring-black/5 backdrop-blur motion-safe:animate-popover-in"
         >

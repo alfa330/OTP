@@ -144,13 +144,11 @@ const SIZE_BY_CODE = new Map(PRODUCTION_SIZE_PRESETS.map((item) => [item.code, i
 const UNIT_BY_CODE = new Map(PRODUCTION_SIZE_UNITS.map((item) => [item.code, item]));
 const COLOR_BY_CODE = new Map(PRODUCTION_COLOR_MODES.map((item) => [item.code, item]));
 
-/* Пункты для CustomSelect: заголовок группы — у первого пункта группы. */
+/* Пункты для CustomSelect. Группа — у КАЖДОГО пункта: список рисует заголовок
+   при смене группы, и только так он верен и в найденном поиском («ан» —
+   баннеры под «Digital», 2D/3D-креативы под «Видео и анимацией»). */
 export const PRODUCTION_ITEM_OPTIONS = PRODUCTION_ITEM_GROUPS.flatMap((group) => (
-  group.items.map((item, index) => ({
-    value: item.code,
-    label: item.label,
-    ...(index === 0 ? { groupLabel: group.label } : {}),
-  }))
+  group.items.map((item) => ({ value: item.code, label: item.label, groupLabel: group.label }))
 ));
 
 let customSizeSeq = 0;
@@ -238,6 +236,24 @@ export const productionAvailableFor = (assigneeIds, recipients) => {
   const ids = new Set((assigneeIds || []).map((id) => String(id)));
   if (!ids.size) return false;
   return (recipients || []).some((person) => ids.has(String(person?.id)) && isProductionPerson(person));
+};
+
+/* Один и тот же состав без учёта порядка: смена порядка показа — не смена состава. */
+const sameIdSet = (left, right) => {
+  const a = new Set((left || []).map(String));
+  const b = new Set((right || []).map(String));
+  return a.size === b.size && [...a].every((id) => b.has(id));
+};
+
+/* Можно ли оставить тип «Продакшн» при таком составе — то же правило, что у
+   сервера: маркетолог нужен, когда продакшн появляется или меняется состав.
+   Старый продакшн с прежним составом правится и тогда, когда маркетолог успел
+   перейти в другой отдел. `initial` — { tag, assigneeIds } задачи до правки. */
+export const productionAllowedFor = (assigneeIds, recipients, initial = null) => {
+  const sameTeam = Boolean(initial)
+    && initial.tag === PRODUCTION_TAG
+    && sameIdSet(initial.assigneeIds, assigneeIds);
+  return sameTeam || productionAvailableFor(assigneeIds, recipients);
 };
 
 /* Чего не хватает, по порядку полей на экране. Ключ — якорь поля
