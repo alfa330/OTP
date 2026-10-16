@@ -47,6 +47,10 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     ({'dialed_at': 0, 'ended_at': 32.0, 'cause': 18, 'originate_reason': 0}, ('no_link', '')),
     ({'dialed_at': 0, 'ended_at': 32.0, 'ringing_at': 4, 'cause': 18}, ('no_answer', '')),   # гудки были
     ({'dialed_at': 0, 'ended_at': 20, 'cause': 18}, ('no_answer', '')),                       # не таймер B
+    # 15:46 того же дня: Binotel 32 с не достучался до оператора связи и вернул «занято»/«сброшен».
+    ({'dialed_at': 0, 'ended_at': 33.1, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 33.0, 'cause': 17}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 33.0, 'ringing_at': 5, 'cause': 21}, ('rejected', '')),   # гудки были — сбросил
 ])
 def test_classify(call, expected):
     assert informer.classify(call) == expected

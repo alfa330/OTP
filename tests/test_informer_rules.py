@@ -48,11 +48,11 @@ def test_after_result():
     state, at, attempts = rules.after_result(rules.RESULT_NO_ANSWER, 1, 2, 45, NOW)
     assert (state, at, attempts) == (rules.STATE_PENDING, NOW + timedelta(minutes=45), 1)
     assert rules.after_result(rules.RESULT_BUSY, 2, 2, 45, NOW)[0] == rules.STATE_GIVEN_UP
-    # «Нет связи с Binotel» — водителю не звонили: попытка цела даже на последней, повтор через 5 минут.
+    # «Сеть не пропустила» — водителю не звонили: попытка цела даже на последней, повтор через 5 минут.
     assert rules.after_result(rules.RESULT_NO_LINK, 2, 2, 45, NOW) == (
         rules.STATE_PENDING, NOW + timedelta(seconds=rules.NO_LINK_RETRY_SECONDS), 1)
     assert rules.RESULT_NO_LINK in rules.RESULTS and rules.RESULT_NO_LINK in rules.NOT_ATTEMPTS
-    assert rules.RESULT_LABELS[rules.RESULT_NO_LINK] == 'Нет связи с Binotel'
+    assert rules.RESULT_LABELS[rules.RESULT_NO_LINK] == 'Сеть не пропустила'
 
 
 def test_window_by_almaty_time():

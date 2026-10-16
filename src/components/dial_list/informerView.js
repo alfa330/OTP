@@ -65,7 +65,7 @@ export const RESULT_LABEL = {
     unavailable: 'Недоступен',
     rejected: 'Сбросил',
     line_busy: 'Линия занята',
-    no_link: 'Нет связи с Binotel',
+    no_link: 'Сеть не пропустила',
     failed: 'Ошибка АТС',
     lost: 'Итог не пришёл',
     '': 'Звоним',

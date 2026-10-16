@@ -64,8 +64,8 @@ STUCK_MARGIN_S = 90              # звонок дольше «вызов + за
                                  # чтобы не висела ёмкость линии (срок свой у каждой записи)
 NO_ANSWER_AFTER_S = 15           # отказ после стольких секунд вызова — недозвон, даже без 180 «звонит»
 DIAL_GAP_MS = 1000               # пауза между наборами по умолчанию (INFORMER_DIAL_GAP_MS)
-# Таймер B SIP — 32 с: на INVITE ни одного ответа (ни 100, ни 180), Asterisk сам ставит 408 → причина 18.
-# Значит, вызов до Binotel не дошёл — «нет связи», а не «водитель не ответил» (16.10.2026: 230 таких звонков).
+# Таймер B SIP — 32 с: на INVITE ни одного ответа (ни 100, ни 180), Asterisk сам ставит 408 → причина 18;
+# тот же срок у Binotel к оператору связи. Отказ в это окно без гудков — сеть не пропустила, а не водитель.
 INVITE_TIMEOUT_S = (30.0, 34.0)
 LINK_TRIP = 3                    # столько вызовов подряд без связи — пауза набора
 LINK_BACKOFF_S = (120, 300, 900) # пауза растёт, пока связь не вернётся; после паузы — один пробный звонок
@@ -91,14 +91,18 @@ def classify(call):
     reason = call.get('originate_reason')
     elapsed = (call.get('ended_at') or 0) - (call.get('dialed_at') or 0)
     ringing = bool(call.get('ringing_at'))
+    # Отказ ровно через ~32 с и без гудков — это не водитель, а сеть: либо до Binotel не дошло ни одного
+    # ответа (таймер B, 408 → 18), либо сам Binotel 32 с не достучался до оператора связи и вернул «занято»
+    # или «сброшен» (16.10.2026, 15:46: после ~4 минут темпа 46/мин у Binotel BUSY и CHANUNAVAIL на каждый
+    # звонок, во всём кабинете ни одного дозвона). Живое «занято»/«сброс» приходит за секунды или после гудков.
+    if cause in (17, 18, 21) and not ringing and INVITE_TIMEOUT_S[0] <= elapsed <= INVITE_TIMEOUT_S[1]:
+        return 'no_link', ''
     if cause in CAUSE_BUSY or reason == 5:
         return 'busy', ''
     if cause in CAUSE_REJECTED:
         return 'rejected', ''
     if cause in CAUSE_UNAVAILABLE:
         return 'unavailable', ''
-    if cause == 18 and not ringing and INVITE_TIMEOUT_S[0] <= elapsed <= INVITE_TIMEOUT_S[1]:
-        return 'no_link', ''
     if cause in CAUSE_NO_ANSWER or reason == 3:
         if not ringing and 0 <= elapsed < LINE_BUSY_WINDOW_S:
             return 'line_busy', ''
@@ -324,8 +328,8 @@ class Dispatcher:
             return ''
         left = until - self.clock()
         if left > 0:
-            return 'Binotel не отвечает на вызовы — набор на паузе, проверка через %d мин' % max(1, round(left / 60))
-        return 'Binotel не отвечал — проверяем связь одним звонком'
+            return 'Сеть не пропускает звонки робота — набор на паузе, проверка через %d мин' % max(1, round(left / 60))
+        return 'Сеть не пропускала звонки — проверяем одним звонком'
 
     def _note_link(self, result):
         """Связь с Binotel по итогу звонка; вызывается под self.lock. Любой ответ Binotel (дозвон,
@@ -340,10 +344,10 @@ class Dispatcher:
                 self.link_level += 1
                 self.link_fails = 0
                 self.link_down_until = now + pause
-                log.warning('Автоинформатор: Binotel не отвечает на вызовы — набор на паузе %d с', pause)
+                log.warning('Автоинформатор: сеть не пропускает звонки — набор на паузе %d с', pause)
         elif result != 'failed':
             if self.link_level:
-                log.info('Автоинформатор: связь с Binotel вернулась — звоним полным ходом')
+                log.info('Автоинформатор: звонки снова проходят — звоним полным ходом')
             self.link_fails = 0
             self.link_level = 0
             self.link_down_until = 0.0

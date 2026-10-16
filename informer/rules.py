@@ -39,8 +39,9 @@ RESULT_REJECTED = 'rejected'        # сбросил вызов
 RESULT_LINE_BUSY = 'line_busy'      # Binotel не дал линию (480 сразу, без вызова)
 RESULT_FAILED = 'failed'            # робот или АТС не смогли позвонить
 RESULT_LOST = 'lost'                # итог не пришёл (перезапуск, обрыв)
-# До Binotel вызов не дошёл: на INVITE ни одного ответа за 32 с (16.10.2026: офисная сеть отрезала VM от
-# Binotel после залпа вызовов — 230 звонков «не ответил», хотя водителям никто не звонил).
+# Сеть не пропустила вызов: до Binotel не дошёл ни один ответ за 32 с (16.10.2026: офисная сеть отрезала VM
+# от Binotel после залпа вызовов) или Binotel 32 с не достучался до оператора связи (в тот же день после ~4
+# минут темпа 46/мин) — водителю не звонили, хотя записалось бы «не ответил»/«занято»/«сбросил».
 RESULT_NO_LINK = 'no_link'
 RESULTS = (RESULT_ANSWERED, RESULT_NO_ANSWER, RESULT_BUSY, RESULT_UNAVAILABLE, RESULT_REJECTED,
            RESULT_LINE_BUSY, RESULT_NO_LINK, RESULT_FAILED, RESULT_LOST)
@@ -54,7 +55,7 @@ RESULT_LABELS = {
     RESULT_UNAVAILABLE: 'Недоступен',
     RESULT_REJECTED: 'Сбросил',
     RESULT_LINE_BUSY: 'Линия занята',
-    RESULT_NO_LINK: 'Нет связи с Binotel',
+    RESULT_NO_LINK: 'Сеть не пропустила',
     RESULT_FAILED: 'Ошибка АТС',
     RESULT_LOST: 'Итог не пришёл',
     '': 'Звоним',
@@ -142,7 +143,7 @@ def stage_label(stage):
 def after_result(result, attempts, max_attempts, retry_after_minutes, now):
     """(состояние водителя, когда звонить снова | None, попыток после учёта) по итогу звонка.
 
-    «Линия занята» и «Нет связи с Binotel» попыткой не считаются: водителю не звонили вовсе."""
+    «Линия занята» и «Сеть не пропустила» попыткой не считаются: водителю не звонили вовсе."""
     attempts = max(0, int(attempts))
     if result == RESULT_ANSWERED:
         return STATE_DONE, None, attempts

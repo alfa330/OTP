@@ -476,7 +476,7 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }
                         <div className="space-y-1.5">
                             <div className="flex items-center gap-1.5 px-0.5 text-[12px] font-medium text-slate-500">
                                 Попыток на водителя
-                                <IosHint text="Сколько раз звонить, если не ответил или занято. «Линия занята» и «Нет связи с Binotel» попыткой не считаются." />
+                                <IosHint text="Сколько раз звонить, если не ответил или занято. «Линия занята» и «Сеть не пропустила» попыткой не считаются." />
                             </div>
                             <IosSegmented value={form.attempts} onChange={(v) => set({ attempts: v })} options={ATTEMPT_OPTIONS}
                                 stretch size="xs" ariaLabel="Попыток на водителя" />
@@ -638,7 +638,7 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                     <div className="text-[12px] text-slate-500">
                         Не дозвонились {states.given_up || 0}
                         {a?.calls?.line_busy ? ` · повторов из-за занятой линии ${a.calls.line_busy}` : ''}
-                        {a?.calls?.no_link ? ` · не дошли до Binotel ${a.calls.no_link}` : ''}
+                        {a?.calls?.no_link ? ` · сеть не пропустила ${a.calls.no_link}` : ''}
                         {states.stopped ? ` · не звонили ${states.stopped}` : ''}
                         {' · '}{campaign.window_start}–{campaign.window_end}, до {campaign.max_per_minute} в минуту
                         {' · '}{partsLabel(campaign.parts)}

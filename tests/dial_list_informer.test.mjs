@@ -105,14 +105,14 @@ test('WAV — PCM 16 бит, моно, 24 кГц: оригинал, которы
     assert.match(server, /BITS = 16/);
 });
 
-test('итоги звонков подписаны так же, как на сервере (и «Нет связи с Binotel»)', () => {
+test('итоги звонков подписаны так же, как на сервере (и «Сеть не пропустила»)', () => {
     const rules = read('../informer/rules.py');
     const server = Object.fromEntries([...rules.matchAll(/RESULT_([A-Z_]+) = '([a-z_]+)'/g)].map((m) => [m[1], m[2]]));
     for (const [name, code] of Object.entries(server)) {
         const label = rules.match(new RegExp(`RESULT_${name}: '([^']+)'`));
         if (label) assert.equal(RESULT_LABEL[code], label[1], `подпись итога ${code}`);
     }
-    assert.equal(RESULT_LABEL.no_link, 'Нет связи с Binotel');
+    assert.equal(RESULT_LABEL.no_link, 'Сеть не пропустила');
 });
 
 test('«где положил трубку» — как на сервере', () => {
