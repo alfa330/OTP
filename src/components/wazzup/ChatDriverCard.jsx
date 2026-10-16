@@ -3,13 +3,21 @@ import { createPortal } from 'react-dom';
 import { AlertCircle, Check, History, IdCard, Loader2 } from 'lucide-react';
 import { IosHint, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { amoStatus, changedFields, fmtCardTime, normalizeDriverId, sameCardValues } from './driverCards';
-import { loadDriverCardOptions } from './useDriverCard';
+import {
+    amoStatus, autoFilledText, changedFields, fmtCardTime, normalizeDriverId, ordersLabel, pickSuggested,
+    sameCardValues,
+} from './driverCards';
+import { loadDriverCardOptions, lookupDriver, useDriverInfo } from './useDriverCard';
 
 /* Карточка водителя сверху у чата: ID водителя, таксопарк и город привлечения
  * (постановка владельца 16.10.2026). Свёрнута — одна строка значений и итог
  * записи в сделку amoCRM; «Изменить» раскрывает форму тут же, над перепиской;
  * «История» — все сохранения карточки этого чата.
+ *
+ * Под значениями — водитель из CRM по ID карточки: кто это, статус, машина,
+ * заказы; «Подробнее» — все данные CRM. В форме по вставленному ID таксопарк и
+ * город подставляются сами (тоже просьба владельца 16.10.2026); в amoCRM уходят
+ * по-прежнему только три поля.
  *
  * Данные и сохранение — useDriverCard.js; чем заполнять поле «Таксопарк» и
  * «Город» — справочники самой amoCRM (loadDriverCardOptions). */
@@ -90,6 +98,146 @@ export function missingChoice(list, value, label) {
     return `${label} больше нет в списке amoCRM — выберите другой`;
 }
 
+const toneText = { ok: 'text-emerald-700', bad: 'text-rose-600', muted: 'text-slate-500' };
+
+/* Кто это — одной строкой, как подпись под значениями карточки. */
+function DriverFacts({ info }) {
+    const facts = [
+        info.phone && <span key="phone" className="shrink-0 text-slate-600">{info.phone}</span>,
+        info.status && <span key="status" className={`shrink-0 ${toneText[info.status.tone] || toneText.muted}`}>{info.status.label}</span>,
+        info.car && <span key="car" className="min-w-0 truncate text-slate-600" title={info.car}>{info.car}</span>,
+        info.ordersTotal != null && <span key="orders" className="shrink-0 text-slate-500">{ordersLabel(info.ordersTotal)}</span>,
+    ].filter(Boolean);
+    return (
+        <>
+            {info.name && <span className="min-w-0 truncate font-semibold text-slate-900" title={info.name}>{info.name}</span>}
+            {facts}
+        </>
+    );
+}
+
+/* Все данные CRM блоками: что CRM не знает, того и нет — пустых строк «—» не рисуем. */
+export function DriverDetails({ data }) {
+    const info = data?.info;
+    if (!info?.sections?.length) return null;
+    return (
+        <div className="mt-2 pb-1 pl-[27px]" data-testid="wazzup-driver-info">
+            <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 xl:grid-cols-3">
+                {info.sections.map((section) => (
+                    <div key={section.title} className="min-w-0">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">{section.title}</div>
+                        <dl className="grid gap-0.5 text-[12.5px]">
+                            {section.rows.map((row, index) => (
+                                <div key={`${row.label}:${index}`} className="flex min-w-0 items-baseline gap-1.5">
+                                    <dt className="shrink-0 text-slate-400">{row.label}</dt>
+                                    <dd className="min-w-0 break-words text-slate-800">{row.value}</dd>
+                                </div>
+                            ))}
+                        </dl>
+                    </div>
+                ))}
+            </div>
+            {data.fetchedAt && (
+                <p className="mt-2 text-[11px] text-slate-400">
+                    {data.stale ? 'CRM сейчас не отвечает — показаны данные на ' : 'Данные CRM на '}{fmtCardTime(data.fetchedAt)}
+                </p>
+            )}
+        </div>
+    );
+}
+
+const OPEN_KEY = 'wz.driverInfo.open';
+const readOpen = () => {
+    try { return globalThis.localStorage?.getItem(OPEN_KEY) === '1'; } catch { return false; }
+};
+const writeOpen = (value) => {
+    try { globalThis.localStorage?.setItem(OPEN_KEY, value ? '1' : '0'); } catch { /* приватное окно */ }
+};
+
+/* Строка водителя под значениями карточки и «Подробнее». Раскрытость помнится
+   в браузере: кому данные нужны всегда, тот не раскрывает их в каждом чате. */
+export function DriverInfoRow({ driver, open, onToggle }) {
+    const { data, error, hidden, loading, reload } = driver;
+    if (hidden) return null;
+    let body;
+    if (data?.state === 'found' && data.info) {
+        body = <DriverFacts info={data.info} />;
+    } else if (data?.state === 'not_found') {
+        body = <span className="text-slate-500">В CRM нет водителя с этим ID</span>;
+    } else if (loading) {
+        body = <span className="text-slate-400">Данные водителя из CRM…</span>;
+    } else {
+        body = (
+            <span className="text-slate-500">
+                {data?.error || error || 'Данные водителя из CRM не загрузились'}{' '}
+                <button type="button" onClick={reload} className="font-semibold text-blue-600 hover:underline">Повторить</button>
+            </span>
+        );
+    }
+    const found = data?.state === 'found' && data.info;
+    return (
+        <>
+            <div className="mt-1 flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-[27px] text-[12.5px]"
+                data-testid="wazzup-driver-info-row">
+                {body}
+                {found && (
+                    <span className="ml-auto flex shrink-0 items-center gap-2">
+                        {data.info.fleetUrl && (
+                            <a href={data.info.fleetUrl} target="_blank" rel="noopener noreferrer"
+                                title="Открыть профиль водителя во Fleet"
+                                className="text-[12px] font-semibold text-blue-600 hover:underline">Fleet</a>
+                        )}
+                        <button type="button" onClick={onToggle} aria-expanded={open} className={pill}>
+                            {open ? 'Свернуть' : 'Подробнее'}
+                        </button>
+                    </span>
+                )}
+            </div>
+            {found && open && <DriverDetails data={data} />}
+        </>
+    );
+}
+
+/* Что нашли по вставленному ID — под полями формы. */
+export function LookupNote({ lookup, auto, onRetry }) {
+    if (!lookup.id) return null;
+    const line = 'px-1 text-[12px] sm:col-span-4';
+    if (lookup.loading) {
+        return (
+            <p className={`${line} flex items-center gap-1.5 text-slate-500`}>
+                <Loader2 size={12} className="animate-spin" aria-hidden="true" /> Ищем водителя в CRM…
+            </p>
+        );
+    }
+    const data = lookup.data;
+    if (!data || data.state === 'unavailable') {
+        return (
+            <p className={`${line} text-slate-500`}>
+                {data?.error || lookup.error || 'CRM не ответила'} — таксопарк и город выберите сами.{' '}
+                <button type="button" onClick={onRetry} className="font-semibold text-blue-600 hover:underline">Повторить</button>
+            </p>
+        );
+    }
+    if (data.state === 'not_found') {
+        return <p className={`${line} text-slate-500`}>В CRM нет водителя с таким ID — проверьте ID или выберите таксопарк и город сами.</p>;
+    }
+    const info = data.info || {};
+    const hint = data.suggestion || {};
+    const misses = [
+        !hint.park && `таксопарка «${hint.crmPark || 'без названия'}» нет в списке amoCRM`,
+        !hint.city && (hint.crmCity ? `города «${hint.crmCity}» нет в списке amoCRM` : 'город парка CRM не знает'),
+    ].filter(Boolean);
+    const filled = autoFilledText(auto);
+    return (
+        <p className={`${line} flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5`} data-testid="wazzup-driver-lookup">
+            <DriverFacts info={info} />
+            {hint.crmPark && <span className="shrink-0 text-slate-500">{hint.crmPark}{hint.crmCity && !hint.crmPark.includes(hint.crmCity) ? `, ${hint.crmCity}` : ''}</span>}
+            {filled && <span className="shrink-0 text-slate-500">· {filled} из CRM</span>}
+            {misses.length > 0 && <span className="text-amber-700">· {misses.join(', ')} — выберите сами</span>}
+        </p>
+    );
+}
+
 /* Escape закрывает форму — но не тот, что закрывает раскрытый список: поиск
    списка живёт в портале (событие React всё равно всплывает до формы), а у
    кнопки раскрытого списка aria-expanded. Тот Escape — дело CustomSelect. */
@@ -97,7 +245,7 @@ export const cancelsForm = (event) => event.key === 'Escape'
     && Boolean(event.currentTarget?.contains?.(event.target))
     && event.target?.getAttribute?.('aria-expanded') !== 'true';
 
-function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
+function CardEditor({ card, chat, apiBaseUrl, headers, onSave, onCancel }) {
     const [driver, setDriver] = useState(card?.driverId || '');
     const [parkId, setParkId] = useState(card?.park?.id ?? null);
     const [cityId, setCityId] = useState(card?.city?.id ?? null);
@@ -106,10 +254,19 @@ function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [fieldError, setFieldError] = useState('');
+    const [lookup, setLookup] = useState({ id: null, loading: false, data: null, error: '', attempt: 0 });
+    const [auto, setAuto] = useState({ park: false, city: false });
     const inputRef = useRef(null);
     const mounted = useRef(true);
     // Человек уже правил форму — пришедшую версию карточки поверх не подставляем.
     const touched = useRef(false);
+    /* Подстановка из CRM. ID вставили в этой форме — парк и город берутся из CRM,
+       даже если были выбраны; форма открыта с прежним ID — заполняются только
+       пустые. Выбранное руками после вставки ID не перебивается. */
+    const idEdited = useRef(false);
+    const manual = useRef({ park: false, city: false });
+    const values = useRef({ parkId, cityId });
+    values.current = { parkId, cityId };
 
     useEffect(() => {
         mounted.current = true;
@@ -146,7 +303,45 @@ function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
     const cityMissing = missingChoice(options?.cities, cityId, 'Этого города');
     const blocked = busy || Boolean(idError) || Boolean(parkMissing) || Boolean(cityMissing)
         || empty || unchanged || !options;
-    const edit = (apply) => (value) => { touched.current = true; apply(value); setError(''); };
+    const edit = (apply, field) => (value) => {
+        touched.current = true;
+        manual.current = { ...manual.current, [field]: true };
+        setAuto((old) => ({ ...old, [field]: false }));
+        apply(value);
+        setError('');
+    };
+
+    const lookupId = parsed.value;
+    useEffect(() => {
+        if (!lookupId) {
+            setLookup((old) => ({ ...old, id: null, loading: false, data: null, error: '' }));
+            return undefined;
+        }
+        const controller = new AbortController();
+        setLookup((old) => ({ ...old, id: lookupId, loading: true, data: null, error: '' }));
+        // Пауза — на набор руками: вставка ссылки целиком ждёт её же, а не каждой буквы.
+        const timer = setTimeout(() => {
+            lookupDriver({ apiBaseUrl, headers, chat, driverId: lookupId, signal: controller.signal }).then((data) => {
+                if (controller.signal.aborted || !mounted.current) return;
+                setLookup((old) => ({ ...old, id: lookupId, loading: false, data, error: '' }));
+                const hint = data.state === 'found' ? data.suggestion : null;
+                if (!hint) return;
+                const pick = pickSuggested({ hint, fresh: idEdited.current, manual: manual.current,
+                    parkId: values.current.parkId, cityId: values.current.cityId });
+                if (pick.park !== undefined) setParkId(pick.park);
+                if (pick.city !== undefined) setCityId(pick.city);
+                if (pick.park !== undefined || pick.city !== undefined) {
+                    touched.current = true;
+                    setAuto({ park: pick.park !== undefined, city: pick.city !== undefined });
+                }
+            }).catch((failure) => {
+                if (controller.signal.aborted || !mounted.current) return;
+                setLookup((old) => ({ ...old, id: lookupId, loading: false, data: null, error: failure.message }));
+            });
+        }, 300);
+        return () => { clearTimeout(timer); controller.abort(); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [lookupId, lookup.attempt, apiBaseUrl]);
 
     const submit = async (event) => {
         event?.preventDefault();
@@ -189,7 +384,14 @@ function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
                     <IosHint label="Что вставить в ID" text="ID профиля водителя в Яндекс Fleet — 32 символа. Можно вставить ссылку на профиль целиком: ID возьмём из неё." />
                 </span>
                 <input ref={inputRef} value={driver} disabled={busy} spellCheck={false} autoComplete="off"
-                    onChange={(event) => { touched.current = true; setDriver(event.target.value); setFieldError(''); setError(''); }}
+                    onChange={(event) => {
+                        touched.current = true;
+                        idEdited.current = true;
+                        manual.current = { park: false, city: false };
+                        setDriver(event.target.value);
+                        setFieldError('');
+                        setError('');
+                    }}
                     onBlur={() => { if (parsed.value && parsed.value !== driver) setDriver(parsed.value); }}
                     placeholder="32 символа или ссылка из Fleet"
                     aria-invalid={Boolean(idError) || undefined}
@@ -197,14 +399,14 @@ function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
             </label>
             <div className="min-w-0">
                 <span className={fieldLabel}>Таксопарк привлечения</span>
-                <CustomSelect variant="ios" searchable value={parkId} onChange={edit(setParkId)}
+                <CustomSelect variant="ios" searchable value={parkId} onChange={edit(setParkId, 'park')}
                     options={parkOptions} disabled={busy || !options} invalid={Boolean(parkMissing)}
                     placeholder={options ? 'Выберите' : 'Загрузка…'} searchPlaceholder="Найти парк…"
                     ariaLabel="Таксопарк привлечения" textClassName={selectText} />
             </div>
             <div className="min-w-0">
                 <span className={fieldLabel}>Город привлечения</span>
-                <CustomSelect variant="ios" searchable value={cityId} onChange={edit(setCityId)}
+                <CustomSelect variant="ios" searchable value={cityId} onChange={edit(setCityId, 'city')}
                     options={cityOptions} disabled={busy || !options} invalid={Boolean(cityMissing)}
                     placeholder={options ? 'Выберите' : 'Загрузка…'} searchPlaceholder="Найти город…"
                     ariaLabel="Город привлечения" textClassName={selectText} />
@@ -220,6 +422,10 @@ function CardEditor({ card, apiBaseUrl, headers, onSave, onCancel }) {
                     {busy ? 'Сохраняем…' : 'Сохранить'}
                 </button>
             </div>
+            {!idError && (
+                <LookupNote lookup={lookup} auto={auto}
+                    onRetry={() => setLookup((old) => ({ ...old, attempt: old.attempt + 1 }))} />
+            )}
             {(idError || parkMissing || cityMissing || error || optionsError) && (
                 <p role="alert" className="px-1 text-xs text-rose-600 sm:col-span-4">
                     {idError || parkMissing || cityMissing || error || optionsError}
@@ -275,6 +481,13 @@ export default function ChatDriverCard({ chat, card: driverCard, apiBaseUrl, hea
     const [editing, setEditing] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [retrying, setRetrying] = useState(false);
+    const [detailsOpen, setDetailsOpen] = useState(readOpen);
+    const driver = useDriverInfo({ chat, driverId: driverCard.unavailable ? null : current?.driverId,
+        apiBaseUrl, headers });
+    const toggleDetails = () => {
+        writeOpen(!detailsOpen);
+        setDetailsOpen(!detailsOpen);
+    };
 
     const onSave = async (values) => {
         await save(values);
@@ -299,9 +512,10 @@ export default function ChatDriverCard({ chat, card: driverCard, apiBaseUrl, hea
         <section aria-label="Карточка водителя" data-testid="wazzup-driver-card"
             className="shrink-0 border-b border-slate-200/70 bg-white/85 px-4 py-2 backdrop-blur-xl">
             {editing && canEdit ? (
-                <CardEditor card={current} apiBaseUrl={apiBaseUrl} headers={headers}
+                <CardEditor card={current} chat={chat} apiBaseUrl={apiBaseUrl} headers={headers}
                     onSave={onSave} onCancel={() => setEditing(false)} />
             ) : (
+                <>
                 <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1.5">
                     <IdCard size={15} className="shrink-0 text-slate-400" aria-hidden="true" />
                     {current ? (
@@ -332,6 +546,8 @@ export default function ChatDriverCard({ chat, card: driverCard, apiBaseUrl, hea
                         </button>
                     )}
                 </div>
+                <DriverInfoRow driver={driver} open={detailsOpen} onToggle={toggleDetails} />
+                </>
             )}
             {history}
         </section>

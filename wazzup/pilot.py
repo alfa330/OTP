@@ -145,8 +145,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     monolith's _wazzup_chat_access). It is the single rule shared with the
     section guard and the shift routes; None keeps the standalone rule above.
 
-    driver_card_sync — {'wake', 'options'} for the driver card routes; tests pass
-    stubs, the monolith leaves the defaults of wazzup/driver_cards_sync.py."""
+    driver_card_sync — {'wake', 'options', 'driver_info'} for the driver card routes;
+    tests pass stubs, the monolith leaves the defaults (wazzup/driver_cards_sync.py,
+    wazzup/driver_info.py)."""
     bp = Blueprint('wazzup_pilot', __name__, url_prefix='/api/wazzup/pilot')
     driver_card_sync = driver_card_sync or {}
     transport = transport or wazzup_transport
@@ -191,7 +192,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         may_edit=lambda user_id: may_process(db.get_user(id=user_id)),
         excluded_channels=EXCLUDED_CHANNELS,
         on_saved=driver_card_sync.get('wake', driver_cards_sync.wake),
-        options_provider=driver_card_sync.get('options', lambda: driver_cards_sync.current_options(db)))
+        options_provider=driver_card_sync.get('options', lambda: driver_cards_sync.current_options(db)),
+        driver_info_provider=driver_card_sync.get('driver_info'))
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .send_check import register_send_check_route

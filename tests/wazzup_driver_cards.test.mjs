@@ -438,3 +438,181 @@ test('the chat card has a key of its own: the composer beside it uses the chat k
     for (const taken of ['selectedKey', 'pilotChatKey(account, selected)']) assert.notEqual(cardKey, taken);
     assert.equal(cardKey, '`driver-card:${selectedKey}`');
 });
+
+// ── Данные водителя из CRM (просьба владельца 16.10.2026) ───────────────────
+
+const { ordersLabel, autoFilledText, pickSuggested } = await import('../src/components/wazzup/driverCards.js');
+const { DriverInfoRow, DriverDetails, LookupNote } = await bundle('src/components/wazzup/ChatDriverCard.jsx', 'card-info');
+
+const driverInfo = (overrides = {}) => ({
+    name: 'Тестов Тест Тестович', phone: '+77000000000', status: { label: 'Работает', tone: 'ok' },
+    park: 'Jana Taxi Алматы', city: 'Алматы', car: 'LADA (ВАЗ) Priora, 2013, белый', ordersTotal: 3,
+    fleetUrl: `https://fleet.yandex.kz/contractors/${DRIVER}/details?park_id=${PARK}`,
+    sections: [{ title: 'Водитель', rows: [{ label: 'ФИО', value: 'Тестов Тест Тестович' }] },
+        { title: 'Машина', rows: [{ label: 'Тарифы', value: 'Эконом, Курьер' }] }],
+    ...overrides,
+});
+const foundAnswer = (overrides = {}) => ({ driverId: DRIVER, state: 'found', stale: false, error: null,
+    fetchedAt: '2026-10-16T09:40:00+00:00', info: driverInfo(),
+    suggestion: { park: { id: 1667515, name: 'Jana Taxi' }, city: { id: 1610837, name: 'Алматы' },
+        crmPark: 'Jana Taxi Алматы', crmCity: 'Алматы' }, ...overrides });
+
+test('orders are declined like Russian and auto-filled fields are named', () => {
+    assert.deepEqual([0, 1, 2, 4, 5, 11, 21, 22, 111].map(ordersLabel), ['0 заказов', '1 заказ', '2 заказа',
+        '4 заказа', '5 заказов', '11 заказов', '21 заказ', '22 заказа', '111 заказов']);
+    assert.match(ordersLabel(1234), /^1\s234 заказа$/u);
+    assert.equal(ordersLabel(null), '0 заказов');
+    assert.equal(autoFilledText({ park: true, city: true }), 'таксопарк и город');
+    assert.equal(autoFilledText({ park: true }), 'таксопарк');
+    assert.equal(autoFilledText({ city: true }), 'город');
+    assert.equal(autoFilledText({}), '');
+});
+
+test('a pasted ID fills park and city from CRM; reopening fills only what is empty; hand picks stay', () => {
+    const hint = { park: { id: 1 }, city: { id: 2 } };
+    const none = { park: false, city: false };
+    assert.deepEqual(pickSuggested({ hint, fresh: true, manual: none, parkId: 9, cityId: null }), { park: 1, city: 2 },
+        'вставили ID — подставляется и поверх выбранного');
+    assert.deepEqual(pickSuggested({ hint, fresh: false, manual: none, parkId: 9, cityId: null }),
+        { park: undefined, city: 2 }, 'форма с прежним ID — только пустое');
+    assert.deepEqual(pickSuggested({ hint, fresh: true, manual: { park: true, city: false }, parkId: 9, cityId: 5 }),
+        { park: undefined, city: 2 }, 'выбранное руками после вставки не перебивается');
+    assert.deepEqual(pickSuggested({ hint: { park: null, city: { id: 2 } }, fresh: true, manual: none, parkId: 9, cityId: 2 }),
+        { park: undefined, city: undefined }, 'нет подсказки или то же значение — поле не трогаем');
+    assert.deepEqual(pickSuggested({ hint: null, fresh: true }), { park: undefined, city: undefined });
+});
+
+const renderRow = (driver, open = false) => renderToStaticMarkup(React.createElement(DriverInfoRow, {
+    driver: { data: null, error: '', hidden: false, loading: false, reload() {}, ...driver }, open, onToggle() {} }));
+
+test('under the card: who the driver is, a Fleet link and «more»; the details open with every block', () => {
+    const html = renderRow({ data: foundAnswer() });
+    for (const text of ['Тестов Тест Тестович', '+77000000000', 'Работает', 'LADA (ВАЗ) Priora, 2013, белый',
+        '3 заказа', '>Fleet</a>', '>Подробнее</button>']) {
+        assert.ok(html.includes(text), text);
+    }
+    assert.match(html, /class="[^"]*text-emerald-700[^"]*">Работает/);
+    assert.match(html, /href="https:\/\/fleet\.yandex\.kz\/contractors\/a1b2c3d4e5f60718293a4b5c6d7e8f90\/details\?park_id=/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /wazzup-driver-info"/, 'подробности свёрнуты');
+    const open = renderRow({ data: foundAnswer() }, true);
+    assert.match(open, />Свернуть<\/button>/);
+    assert.match(open, /data-testid="wazzup-driver-info"/);
+    for (const text of ['>Водитель<', '>Машина<', '>Тарифы</dt>', '>Эконом, Курьер</dd>', 'Данные CRM на ']) {
+        assert.ok(open.includes(text), text);
+    }
+    const stale = renderToStaticMarkup(React.createElement(DriverDetails, { data: foundAnswer({ stale: true }) }));
+    assert.match(stale, /CRM сейчас не отвечает — показаны данные на /);
+    const fired = renderRow({ data: foundAnswer({ info: driverInfo({ status: { label: 'Уволен', tone: 'bad' } }) }) });
+    assert.match(fired, /class="[^"]*text-rose-600[^"]*">Уволен/);
+});
+
+test('under the card while loading, unknown to CRM, CRM down, or no ID at all', () => {
+    assert.match(renderRow({ loading: true }), /Данные водителя из CRM…/);
+    assert.match(renderRow({ data: { state: 'not_found' } }), /В CRM нет водителя с этим ID/);
+    const down = renderRow({ data: { state: 'unavailable', error: 'CRM не ответила — попробуйте ещё раз' } });
+    assert.match(down, /CRM не ответила — попробуйте ещё раз/);
+    assert.match(down, />Повторить<\/button>/);
+    assert.doesNotMatch(down, /Подробнее|Fleet/);
+    assert.match(renderRow({ error: 'Данные водителя из CRM не загрузились' }), /не загрузились/);
+    assert.equal(renderRow({ hidden: true }), '');
+});
+
+const renderNote = (lookup, auto = {}) => renderToStaticMarkup(React.createElement(LookupNote, {
+    lookup: { id: DRIVER, loading: false, data: null, error: '', ...lookup }, auto, onRetry() {} }));
+
+test('in the form: the pasted ID is searched, the find is shown and what came from CRM is said', () => {
+    assert.match(renderNote({ loading: true }), /Ищем водителя в CRM…/);
+    const filled = renderNote({ data: foundAnswer() }, { park: true, city: true });
+    assert.match(filled, /Тестов Тест Тестович/);
+    assert.match(filled, /Jana Taxi Алматы/);
+    assert.doesNotMatch(filled, /Jana Taxi Алматы, Алматы/, 'город уже в названии парка');
+    assert.match(filled, /· таксопарк и город из CRM/);
+    const missing = renderNote({ data: foundAnswer({ suggestion: { park: null, city: { id: 1, name: 'Алматы' },
+        crmPark: 'Самозанятый Партнер Алматы', crmCity: 'Алматы' } }) });
+    assert.match(missing, /таксопарка «Самозанятый Партнер Алматы» нет в списке amoCRM — выберите сами/);
+    assert.match(missing, /text-amber-700/);
+    assert.match(renderNote({ data: { state: 'not_found' } }), /В CRM нет водителя с таким ID — проверьте ID/);
+    const down = renderNote({ data: null, error: 'CRM не ответила' });
+    assert.match(down, /CRM не ответила — таксопарк и город выберите сами/);
+    assert.match(down, />Повторить<\/button>/);
+    assert.equal(renderNote({ id: null }), '');
+});
+
+const { useDriverInfo, lookupDriver } = await import(pathToFileURL(hookFile).href);
+
+function infoFixture(get) {
+    const h = fixture({ get });
+    const props = { apiBaseUrl: '/fixture', headers: () => ({ Authorization: 'fixture' }),
+        chat: { channelId: 'c', chatId: '77000000101' }, driverId: DRIVER };
+    let effects = [];
+    const slots = [];
+    let index = 0;
+    Object.assign(h, {
+        useState(initial) { const i = index++; slots[i] ??= { value: typeof initial === 'function' ? initial() : initial };
+            return [slots[i].value, (value) => { slots[i].value = typeof value === 'function' ? value(slots[i].value) : value; }]; },
+        useRef(initial) { const i = index++; slots[i] ??= { current: initial }; return slots[i]; },
+        useEffect(fn, deps) { const i = index++, old = slots[i];
+            if (old && deps?.every((v, k) => Object.is(v, old.deps[k]))) return;
+            slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = fn(); }); },
+        renderInfo(next = {}) { Object.assign(props, next); index = 0; const result = useDriverInfo(props);
+            const pending = effects; effects = []; pending.forEach((fn) => fn()); return result; },
+        unmountInfo() { slots.forEach((slot) => slot?.cleanup?.()); },
+    });
+    return h;
+}
+
+test('hook: the driver of the chat card is read once per chat and ID; reload asks again', async () => {
+    const h = infoFixture(() => Promise.resolve({ data: foundAnswer() }));
+    let state = h.renderInfo();
+    assert.equal(state.loading, true);
+    await tick();
+    state = h.renderInfo();
+    assert.equal(state.data.info.name, 'Тестов Тест Тестович');
+    assert.equal(h.gets.length, 1);
+    assert.equal(h.gets[0][0], '/fixture/api/wazzup/pilot/driver-card/driver');
+    assert.deepEqual(h.gets[0][1].params, { account: 'op', channelId: 'c', chatId: '77000000101' });
+    h.renderInfo();
+    assert.equal(h.gets.length, 1, 'та же карточка — без нового запроса');
+    state.reload();
+    h.renderInfo(); await tick();
+    assert.equal(h.gets.length, 2);
+    h.renderInfo({ driverId: PARK }); await tick();
+    assert.equal(h.gets.length, 3, 'новый ID в карточке — новые данные');
+    state = h.renderInfo({ driverId: null });
+    assert.equal(state.hidden, true);
+    assert.equal(h.gets.length, 3);
+    h.unmountInfo();
+});
+
+test('hook: no ID in the card or no route on the server hides the row; a failure shows a message', async () => {
+    const answers = [
+        { status: 404, data: { error: 'В карточке чата нет ID водителя', code: 'NO_DRIVER_ID' } },
+        { status: 404, data: '<html>Not Found</html>' },
+        { status: 500, data: { error: 'boom' } },
+        { status: 502, data: {} },
+    ];
+    const expected = [{ hidden: true, error: '' }, { hidden: true, error: '' }, { hidden: false, error: 'boom' },
+        { hidden: false, error: 'Данные водителя из CRM не загрузились' }];
+    for (const [index, response] of answers.entries()) {
+        const h = infoFixture(() => Promise.reject(Object.assign(new Error('x'), { response })));
+        h.renderInfo(); await tick();
+        const state = h.renderInfo();
+        assert.deepEqual({ hidden: state.hidden, error: state.error }, expected[index], String(index));
+        assert.equal(state.loading, false);
+        h.unmountInfo();
+    }
+});
+
+test('lookup: posts the pasted ID with the chat and turns failures into a message', async () => {
+    const h = fixture({ post: () => Promise.resolve({ data: foundAnswer() }) });
+    const data = await lookupDriver({ apiBaseUrl: '/fixture', headers: () => ({ Authorization: 'x' }),
+        chat: { channelId: 'c', chatId: '77000000101' }, driverId: DRIVER });
+    assert.equal(data.state, 'found');
+    assert.equal(h.posts[0][0], '/fixture/api/wazzup/pilot/driver-card/lookup');
+    assert.deepEqual(h.posts[0][1], { account: 'op', channelId: 'c', chatId: '77000000101', driverId: DRIVER });
+    fixture({ post: () => Promise.reject(Object.assign(new Error('x'), { response: { status: 403, data: { error: 'Нет права' } } })) });
+    await assert.rejects(lookupDriver({ apiBaseUrl: '', headers: {}, chat: {}, driverId: DRIVER }), { message: 'Нет права', status: 403 });
+    fixture({ post: () => Promise.reject(new Error('Network Error')) });
+    await assert.rejects(lookupDriver({ apiBaseUrl: '', headers: {}, chat: {}, driverId: DRIVER }), { message: 'CRM не ответила' });
+});

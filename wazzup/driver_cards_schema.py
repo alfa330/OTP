@@ -68,6 +68,24 @@ def init_schema(cursor):
             fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
 
+        -- Данные водителя из CRM yataxi по ID (wazzup/driver_info.py): кэш
+        -- ответа, общий для всех процессов. payload NULL — «водитель не найден».
+        -- Хранится 30 дней (в нём ФИО, телефон и ИИН) — чистит driver_info.
+        CREATE TABLE IF NOT EXISTS wazzup_driver_info (
+            driver_id TEXT PRIMARY KEY CHECK (driver_id ~ '^[0-9a-f]{32}$'),
+            payload JSONB,
+            found BOOLEAN NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CHECK (found = (payload IS NOT NULL))
+        );
+        -- Справочник регистрации CRM: город и бренд каждого парка Яндекса,
+        -- подписи тарифов. Последний удачный снимок.
+        CREATE TABLE IF NOT EXISTS wazzup_crm_dictionaries (
+            key TEXT PRIMARY KEY CHECK (key = 'registration'),
+            payload JSONB NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
         CREATE OR REPLACE FUNCTION wazzup_notify_driver_card() RETURNS TRIGGER LANGUAGE plpgsql AS $$
         BEGIN
             -- Как у заметок: в NOTIFY только адрес строки. Содержимое читает

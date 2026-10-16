@@ -107,6 +107,36 @@ export function changedFields(card, previous) {
     return changed;
 }
 
+/* «0 заказов», «1 заказ», «3 заказа», «11 заказов». */
+export function ordersLabel(count) {
+    const value = Math.abs(Math.trunc(Number(count) || 0));
+    const tail = value % 100;
+    const last = value % 10;
+    const word = tail >= 11 && tail <= 14 ? 'заказов' : last === 1 ? 'заказ' : last >= 2 && last <= 4 ? 'заказа' : 'заказов';
+    return `${value.toLocaleString('ru-RU')} ${word}`;
+}
+
+/* Что подставить в форму из подсказки CRM (hint: { park, city } — значения
+   списков amoCRM или null). ID вставлен в этой форме (fresh) — берётся и поверх
+   выбранного; форма открыта с прежним ID — только в пустое поле. Выбранное
+   руками после вставки ID (manual) не перебивается. undefined — поле не трогать. */
+export function pickSuggested({ hint, fresh, manual, parkId, cityId }) {
+    const take = (field, current, suggested) => Boolean(suggested?.id) && !manual?.[field]
+        && (fresh || current == null) && current !== suggested.id;
+    return {
+        park: take('park', parkId ?? null, hint?.park) ? hint.park.id : undefined,
+        city: take('city', cityId ?? null, hint?.city) ? hint.city.id : undefined,
+    };
+}
+
+/* Что форма подставила из CRM сама: «таксопарк и город», «таксопарк», «город». */
+export function autoFilledText(auto) {
+    if (auto?.park && auto?.city) return 'таксопарк и город';
+    if (auto?.park) return 'таксопарк';
+    if (auto?.city) return 'город';
+    return '';
+}
+
 export function fmtCardTime(iso) {
     const date = new Date(iso);
     if (!Number.isFinite(date.getTime())) return '';

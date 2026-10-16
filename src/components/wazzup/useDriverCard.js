@@ -165,6 +165,76 @@ export default function useDriverCard({ enabled, chat, apiBaseUrl, headers, live
     };
 }
 
+/* Данные водителя из CRM (wazzup/driver_info.py, просьба владельца 16.10.2026).
+ *
+ * lookupDriver — по ID, который заполняющий только что вставил в форму: кто
+ * это и что подставить в «Таксопарк» и «Город». useDriverInfo — по ID текущей
+ * карточки чата, для всех, кому открыта переписка: сервер берёт ID из самой
+ * карточки. Ответ: { state: found | not_found | unavailable, info, suggestion,
+ * fetchedAt, stale, error }. */
+const authOf = (headers) => (typeof headers === 'function' ? headers() : headers);
+
+export async function lookupDriver({ apiBaseUrl, headers, chat, driverId, signal }) {
+    try {
+        const { data } = await axios.post(`${apiBaseUrl}/api/wazzup/pilot/driver-card/lookup`, {
+            account: 'op', channelId: chat?.channelId, chatId: chat?.chatId, driverId,
+        }, { headers: authOf(headers), signal, timeout: 15000 });
+        if (typeof data?.state !== 'string') throw new Error('Invalid driver lookup response');
+        return data;
+    } catch (error) {
+        if (signal?.aborted) throw error;
+        // Сервер без этой ручки (сайт выкатился раньше) — как «CRM недоступна».
+        const failure = new Error(typeof error.response?.data?.error === 'string'
+            ? error.response.data.error : 'CRM не ответила');
+        failure.status = error.response?.status || 0;
+        throw failure;
+    }
+}
+
+export function useDriverInfo({ chat, driverId, apiBaseUrl, headers }) {
+    const key = chat?.channelId && chat?.chatId && driverId
+        ? JSON.stringify([chat.channelId, chat.chatId, driverId]) : '';
+    const headersRef = useRef(headers);
+    headersRef.current = headers;
+    const [state, setState] = useState({ key: '', data: null, error: '', hidden: false, loading: false });
+    const [attempt, setAttempt] = useState(0);
+
+    useEffect(() => {
+        if (!key) return undefined;
+        const controller = new AbortController();
+        setState((old) => (old.key === key ? { ...old, loading: true, error: '' }
+            : { key, data: null, error: '', hidden: false, loading: true }));
+        axios.get(`${apiBaseUrl}/api/wazzup/pilot/driver-card/driver`, {
+            params: { account: 'op', channelId: chat.channelId, chatId: chat.chatId },
+            headers: authOf(headersRef.current), signal: controller.signal, timeout: 15000,
+        }).then(({ data }) => {
+            if (controller.signal.aborted) return;
+            if (typeof data?.state !== 'string') throw new Error('Invalid driver info response');
+            setState({ key, data, error: '', hidden: false, loading: false });
+        }).catch((error) => {
+            if (controller.signal.aborted) return;
+            // Ручки ещё нет (HTML 404 старого сервера) или в карточке уже нет ID —
+            // строки данных просто нет, как до этой доработки.
+            const response = error.response;
+            const hidden = response?.status === 404
+                && (typeof response.data?.error !== 'string' || response.data?.code === 'NO_DRIVER_ID');
+            setState({ key, data: null, hidden, loading: false,
+                error: hidden ? '' : response?.data?.error || 'Данные водителя из CRM не загрузились' });
+        });
+        return () => controller.abort();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [key, apiBaseUrl, attempt]);
+
+    const own = state.key === key;
+    return {
+        data: own ? state.data : null,
+        error: own ? state.error : '',
+        hidden: !key || (own && state.hidden),
+        loading: Boolean(key) && (!own || state.loading),
+        reload: () => setAttempt((value) => value + 1),
+    };
+}
+
 /* Справочники amoCRM для формы — один запрос на вкладку и адрес API, не на
  * каждый чат: списки меняются раз в несколько недель. Неудача не кешируется. */
 const optionsCache = new Map();

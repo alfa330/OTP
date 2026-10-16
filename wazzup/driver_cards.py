@@ -14,6 +14,7 @@ wazzup/driver_cards_amo.py).
 
 Global, как и у заметок, вне карточек: его чаты обрабатываются отдельно.
 """
+import logging
 import re
 import uuid
 from datetime import date, datetime, time as dt_time, timedelta
@@ -22,6 +23,7 @@ from zoneinfo import ZoneInfo
 from flask import jsonify, request
 
 from . import driver_cards_amo as amo
+from . import driver_info
 
 TZ = ZoneInfo('Asia/Almaty')
 HISTORY_LIMIT = 50
@@ -166,16 +168,22 @@ def _period(values):
 
 
 def register_driver_card_routes(bp, *, guard, actor, may_edit, require_api_key, preflight, db,
-                                excluded_channels=(), on_saved=None, options_provider=None):
+                                excluded_channels=(), on_saved=None, options_provider=None,
+                                driver_info_provider=None):
     """guard() — читатель переписки; actor() — тот, кто обрабатывает чаты.
 
     on_saved() будит очередь записи в amoCRM после коммита. options_provider()
     отдаёт справочники (снимок из базы, а без него — из amoCRM, своими
-    транзакциями и с паузой после неудачи: wazzup/driver_cards_sync.py) или None."""
+    транзакциями и с паузой после неудачи: wazzup/driver_cards_sync.py) или None.
+    driver_info_provider(driver_id, options) — данные водителя из CRM
+    (wazzup/driver_info.py: describe)."""
     if options_provider is None:
         def options_provider():
             with db._get_cursor() as cursor:
                 return load_options(cursor)
+    if driver_info_provider is None:
+        def driver_info_provider(driver_id, options):
+            return driver_info.describe(db, driver_id, options)
 
     def scope(values):
         if values.get('account') != 'op':
@@ -359,6 +367,62 @@ def register_driver_card_routes(bp, *, guard, actor, may_edit, require_api_key, 
             except Exception:
                 pass
         return _json(200, item=item)
+
+    def describe_driver(driver_id):
+        try:
+            return _json(**driver_info_provider(driver_id, options_now()))
+        except Exception:
+            # Карточка без данных CRM всё равно работает: парк и город — руками.
+            logging.getLogger(__name__).exception('Карточка водителя: данные из CRM не собрались')
+            return _json(driverId=driver_id, state='unavailable', stale=False,
+                         error='Данные водителя из CRM сейчас недоступны', fetchedAt=None)
+
+    @bp.route('/driver-card/driver', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    def driver_card_driver():
+        """Данные водителя текущей карточки чата — всем, кому открыта переписка.
+
+        ID берётся из самой карточки, а не из запроса: читатель видит данные
+        водителя своего чата, а не любого по подобранному ID."""
+        if request.method == 'OPTIONS':
+            return preflight()
+        _user_id, error = guard()
+        if error:
+            return error
+        context, error = scope(request.args)
+        if error:
+            return error
+        channel, chat = context
+        with db._get_cursor() as cursor:
+            latest, _ = history(cursor, channel, chat, limit=1)
+        driver_id = latest[0]['driverId'] if latest else None
+        if not driver_id:
+            return _json(404, error='В карточке чата нет ID водителя', code='NO_DRIVER_ID')
+        return describe_driver(driver_id)
+
+    @bp.route('/driver-card/lookup', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def driver_card_lookup():
+        """Водитель по ID, который заполняющий только что вставил в форму: его
+        данные и что подставить в «Таксопарк» и «Город» (просьба владельца 16.10.2026)."""
+        if request.method == 'OPTIONS':
+            return preflight()
+        _user, error = actor()
+        if error:
+            return error
+        values = request.get_json(silent=True)
+        if not isinstance(values, dict):
+            return _json(400, error='Некорректный запрос')
+        context, error = scope(values)
+        if error:
+            return error
+        try:
+            driver_id = normalize_driver_id(values.get('driverId'))
+        except ValueError as exc:
+            return _json(400, error=str(exc), field='driverId')
+        if driver_id is None:
+            return _json(400, error='Укажите ID водителя', field='driverId')
+        return describe_driver(driver_id)
 
     @bp.route('/driver-card/options', methods=['GET', 'OPTIONS'])
     @require_api_key
