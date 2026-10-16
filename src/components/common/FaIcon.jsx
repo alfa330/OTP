@@ -34,6 +34,7 @@ import {
     Cloud,
     CloudDownload,
     CloudUpload,
+    Clapperboard,
     Code2,
     Banknote,
     Coins,
@@ -254,6 +255,7 @@ const TOKEN_TO_ICON = {
     'fa-code': 'Code2',
     'fa-coins': 'Coins',
     'fa-file-invoice': 'Banknote',
+    'fa-clapperboard': 'Clapperboard',
     'fa-coffee': 'Coffee',
     'fa-cog': 'Settings',
     'fa-comment': 'MessageCircle',
@@ -649,7 +651,8 @@ const ICON_COMPONENTS = {
     PhoneOff,
     Unlink,
     Landmark,
-    Zap
+    Zap,
+    Clapperboard,
 };
 
 const FA_META_TOKENS = new Set([

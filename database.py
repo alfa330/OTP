@@ -36,6 +36,8 @@ from typing import List, Dict, Any, Tuple, Optional
 import supervisor_hours
 from supervisor_hours import SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
 import task_production
+from task_production import queries as task_production_queries
+from task_production import schema as task_production_schema
 
 logging.basicConfig(level=logging.INFO)
 
@@ -4840,6 +4842,11 @@ class Database:
                     END IF;
                 END $$;
             """)
+
+            # Материалы продакшна (задача #316): ролики, баннеры и макеты по
+            # версиям, загрузка прямо в хранилище. Схема — task_production/schema.py.
+            for statement in task_production_schema.STATEMENTS:
+                cursor.execute(statement)
 
             # ──────────────────────────────────────────────────────────────
             # СОСТАВ ИСПОЛНИТЕЛЕЙ. У задачи их может быть несколько, и права у
@@ -60278,6 +60285,10 @@ class Database:
             """, (task_id,))
             attachment_rows = cursor.fetchall()
 
+            # Материалы раздела «Продакшн» строки уйдут каскадом, а объекты в
+            # хранилище убирает маршрут — как и вложения выше.
+            production_blobs = task_production_queries.blobs_of_task(cursor, task_id)
+
             cursor.execute("""
                 DELETE FROM tasks
                 WHERE id = %s
@@ -60304,7 +60315,8 @@ class Database:
         return {
             "task_id": task_id,
             "deleted": True,
-            "attachments": attachments
+            "attachments": attachments,
+            "production_blobs": production_blobs
         }
 
     def _normalize_task_note_priority(self, priority):
@@ -61552,11 +61564,16 @@ class Database:
         spent_minutes_norm = self._normalize_task_spent_minutes(spent_minutes)
 
         with self._get_cursor() as cursor:
+            # FOR UPDATE: переход проверяется под замком строки задачи. Без него две
+            # одновременные сдачи (два исполнителя, двойной клик, две вкладки) обе
+            # проходили проверку «в работе» и писали в историю два 'completed' — а по
+            # числу сдач раздел «Продакшн» нумерует версии материалов (задача #316).
             cursor.execute("""
                 SELECT
                     t.id, t.created_by, t.assigned_to, t.status, t.requested_by_id
                 FROM tasks t
                 WHERE t.id = %s
+                FOR UPDATE
             """, (task_id,))
             row = cursor.fetchone()
             if not row:

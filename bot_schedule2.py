@@ -1330,6 +1330,12 @@ def _get_user_payload(user):
         'headed_department_ids': headed_department_ids, 'headed_department_codes': headed_department_codes,
     }) if user_id is not None else False
 
+    # Открыт ли раздел «Продакшн» (задача #316): маркетинг, админ со всеми
+    # задачами и тот, у кого есть своя задача продакшна. Пункт меню экран рисует
+    # по этому флагу (canAccessProductionForUser), границу держат роуты раздела.
+    production_access = _production_section_open_for(
+        user_id, role, department_code=department_code, headed_codes=headed_department_codes)
+
     return {
         "role": role,
         "id": user_id,
@@ -1341,6 +1347,7 @@ def _get_user_payload(user):
         "department_code": department_code,
         "dial_list_line_member": dial_list_line_member,
         "baiga_access": baiga_access,
+        "production_access": production_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
@@ -27169,6 +27176,7 @@ def handle_single_task(task_id):
 
         warnings = []
         warnings.extend(_delete_task_attachment_blobs_from_gcs(delete_result.get('attachments') or []))
+        _delete_production_material_blobs(delete_result.get('production_blobs') or [])
 
         try:
             if task_ctx_before_delete:
@@ -66883,6 +66891,114 @@ try:
     logging.info("Раздел «Оплата счетов»: Blueprint подключён на /api/payments")
 except Exception:
     logging.exception("Раздел «Оплата счетов»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Продакшн» (задача #316): материалы задач продакшна (#354) ──
+# Доска задач типа «Продакшн», ролики и макеты по версиям, «Готовое». Статусы
+# двигает обычный маршрут /api/tasks/<id>/status — раздел только показывает
+# задачи в своём охвате и хранит материалы. Материалы едут из браузера прямо в
+# хранилище (task_production/storage.py), поэтому большой ролик не проходит
+# через этот сервер. Бакет — свой env или общий бакет вложений задач.
+def _production_bucket_name():
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_PRODUCTION') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+def _production_full_scope(role, user_id):
+    """Видит ли человек все задачи продакшна — так же, как все задачи в «Задачах»."""
+    role = _normalize_user_role(role)
+    return _is_global_admin_requester(role, user_id) or _has_full_task_access(role, user_id)
+
+
+def _production_section_open_for(user_id, role=None, department_code=None, headed_codes=None):
+    """Открыт ли раздел «Продакшн» — то же правило, что у его ручек.
+
+    Маркетинг (сотрудник или глава отдела), админ со всеми задачами и тот, у
+    кого есть своя задача продакшна: постановщик, поручитель, исполнитель.
+    Здесь решается только пункт меню; обязательную границу держит каждый роут.
+
+    Профиль строится на каждом входе и обновлении токена, поэтому отдел и
+    возглавляемые отделы берём у него, когда он их передал, а не спрашиваем
+    базу заново. В базу — только за тем, чего профиль не знает.
+    """
+    if user_id is None:
+        return False
+    try:
+        import task_production
+        from task_production import queries as production_queries
+
+        code = task_production.PRODUCTION_DEPARTMENT_CODE
+        role = _normalize_user_role(role)
+        known_heads = None if headed_codes is None else [str(c or '').lower() for c in headed_codes]
+        if str(department_code or '').strip().lower() == code or (known_heads and code in known_heads):
+            # Маркетингу «Задачи» выданы картой отдела — второй проверки не нужно.
+            return True
+        if not _can_access_tasks(role, user_id):
+            return False
+        if _production_full_scope(role, user_id):
+            return True
+        if known_heads is None and code in [str(c or '').lower() for c in (_headed_department_codes(user_id) or [])]:
+            return True
+        with db._get_cursor() as cursor:
+            if department_code is None and production_queries.is_marketing_member(cursor, user_id):
+                return True
+            return bool(production_queries.has_production_relation(cursor, user_id))
+    except Exception:
+        logging.exception("Продакшн: не удалось определить доступ к разделу для %s", user_id)
+        return False
+
+
+try:
+    from task_production.routes import build_production_blueprint  # noqa: E402
+
+    app.register_blueprint(build_production_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        task_guard=_task_route_guard,
+        full_task_access=_production_full_scope,
+        headed_department_codes=_headed_department_codes,
+        is_super_admin=_is_super_admin_role,
+        allowed_origin=_is_allowed_origin,
+        gcs={'bucket_name': _production_bucket_name, 'client': get_gcs_client},
+        avatar_url=_build_avatar_signed_url,
+        blob_prefix=(os.getenv('PRODUCTION_BLOB_PREFIX') or '').strip() or None,
+    ))
+    logging.info("Раздел «Продакшн»: Blueprint подключён на /api/production")
+except Exception:
+    logging.exception("Раздел «Продакшн»: Blueprint НЕ подключён")
+
+
+def _delete_production_material_blobs(blobs):
+    """Объекты материалов удалённой задачи. Осечка — в журнал, не человеку.
+
+    Незаконченные загрузки сначала отменяются: иначе браузер догрузил бы файл
+    уже после удаления задачи, и объект остался бы в бакете без хозяина.
+    """
+    if not blobs:
+        return
+    from task_production import storage as production_storage
+
+    for blob in blobs:
+        if blob.get('upload_session'):
+            production_storage.cancel_session(blob['upload_session'], origin=blob.get('upload_origin'))
+    try:
+        client = get_gcs_client()
+    except Exception:
+        logging.exception("Продакшн: нет клиента хранилища для уборки материалов")
+        return
+    for blob in blobs:
+        bucket_name, blob_path = blob.get('bucket'), blob.get('blob_path')
+        if not bucket_name or not blob_path:
+            continue
+        try:
+            client.bucket(bucket_name).blob(blob_path).delete()
+        except Exception as delete_error:
+            if delete_error.__class__.__name__ != 'NotFound':
+                logging.warning("Продакшн: не удалось удалить %s: %s", blob_path, delete_error)
 
 
 def _payments_section_open_for(user_id):

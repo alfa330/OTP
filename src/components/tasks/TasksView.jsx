@@ -5462,7 +5462,7 @@ const TaskDrawer = React.memo(({
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
-  onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false, loadTaskPhotos,
+  onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false, loadTaskPhotos, onOpenProduction = null,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -5717,6 +5717,22 @@ const TaskDrawer = React.memo(({
               <hr className="tv-divider" />
               <ProductionBriefView brief={task.production_brief} />
             </>
+          )}
+
+          {/* Ролики и макеты продакшна живут в разделе «Продакшн» (задача #316):
+              там их загружают по версиям и там же смотрят перед приёмкой. */}
+          {task.tag === PRODUCTION_TAG && typeof onOpenProduction === 'function' && (
+            /* Обёртка — чтобы кнопка была по тексту, как «+ Дополнить задачу»,
+               а не растягивалась колонкой карточки во всю ширину. */
+            <div>
+              <button
+                type="button"
+                className="tv-btn tv-btn-ghost"
+                onClick={() => onOpenProduction(task.id)}
+              >
+                Материалы — в «Продакшне» →
+              </button>
+            </div>
           )}
 
           {task.description && (
@@ -7155,6 +7171,7 @@ const TasksView = ({
   focusTaskRequest,
   externalRefreshToken = 0,
   onActionNeedsChange,
+  onOpenProduction = null,
 }) => {
   const currentUserRole = normalizeRole(user?.role);
   /* Гейт раздела. Кроме управленческих ролей сюда попадает тот, кому раздел
@@ -8833,6 +8850,7 @@ const TasksView = ({
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
           loadTaskPhotos={loadTaskPhotos}
+          onOpenProduction={onOpenProduction}
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
@@ -9137,6 +9155,7 @@ const areEqual = (prev, next) =>
   prev.withAccessTokenHeader === next.withAccessTokenHeader &&
   prev.pinnedTaskId === next.pinnedTaskId &&
   prev.focusTaskRequest === next.focusTaskRequest &&
-  prev.externalRefreshToken === next.externalRefreshToken;
+  prev.externalRefreshToken === next.externalRefreshToken &&
+  prev.onOpenProduction === next.onOpenProduction;
 
 export default React.memo(TasksView, areEqual);

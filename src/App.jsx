@@ -270,6 +270,7 @@ const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const DriverMailingsView = lazyWithRetry(() => import('./components/driver_mailings/DriverMailingsView'));
 const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsView'));
+const ProductionView = lazyWithRetry(() => import('./components/production/ProductionView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
 const OpWallboardView = lazyWithRetry(() => import('./components/monitoring/OpWallboardView'));
@@ -876,6 +877,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
     payments: 'Invoice approval',
+    production: 'Production',
     olx_leads: 'OLX leads',
     olx_ads: 'OLX adverts',
     touches: 'Sales touches',
@@ -2509,6 +2511,12 @@ const canAccessDriverMailingsForUser = (userLike) => (
 const canAccessPaymentsForUser = (userLike) => (
     PAYMENTS_ALLOWED_USER_IDS.has(Number(userLike?.id))
 );
+
+/* «Продакшн» (задача #316): маркетинг, админ со всеми задачами и тот, у кого есть
+   своя задача продакшна. Круг считает сервер (bot_schedule2.py:
+   _production_section_open_for) и отдаёт флагом в профиле; здесь — только пункт
+   меню. Строго true: профиль без поля (старый кэш) — не доступ. */
+const canAccessProductionForUser = (userLike) => userLike?.production_access === true;
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
@@ -43396,6 +43404,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // «Рассылки»: супер-админы и поимённый список (см. canAccessDriverMailingsForUser).
             const canAccessDriverMailings = canAccessDriverMailingsForUser(user);
             const canAccessPaymentsSection = canAccessPaymentsForUser(user);
+            // «Продакшн»: флаг сервера; личный набор разделов прячет его, как «Вики».
+            const canAccessProductionSection = canAccessProductionForUser(user) && personalViewsAllow(user, 'production');
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             // Личный набор разделов прячет его так же, как «Библиотеку».
@@ -43464,6 +43474,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             // Клик по уведомлению «Оплаты счетов»: раздел открывает заявку из уведомления.
             const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
+            // «Продакшн»: какую карточку открыть при входе (переход из «Задач»).
+            const [productionFocusRequest, setProductionFocusRequest] = useState(null);
             // Клик по уведомлению о заявке на изменение смены: раздел один,
             // а открывать его надо по-разному оператору и руководителю.
             const [shiftRequestFocus, setShiftRequestFocus] = useState(null);
@@ -47015,6 +47027,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
+                    (requestedViewFromUrl !== 'production' || canAccessProductionSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
                     (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
@@ -47036,7 +47049,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -53063,6 +53076,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view === 'driver_mailings' && canAccessDriverMailings) return;
                 // «Оплата счетов» — периметр именной (payments/access.py), вне allowlist отдела.
                 if (view === 'payments' && canAccessPaymentsSection) return;
+                // «Продакшн» — свой круг (маркетинг и постановщики), а у «Маркетинга»
+                // есть allowlist: без этой строки проверка ниже выбросила бы их из раздела.
+                if (view === 'production' && canAccessProductionSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -53122,7 +53138,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -53331,6 +53347,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             useEffect(() => {
                 if (view !== 'tasks') setTaskFocusRequest(null);
                 if (view !== 'payments') setPaymentsFocusRequest(null);
+                if (view !== 'production') setProductionFocusRequest(null);
             }, [view]);
 
             useEffect(() => {
@@ -53569,6 +53586,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         requestId: Number(prev?.requestId || 0) + 1,
                     }));
                 }
+                // «Продакшн»: target — номер задачи, карточку открывает сам раздел.
+                if (nextView === 'production' && Number(target)) {
+                    setProductionFocusRequest((prev) => ({
+                        taskId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
                 // «Оплата счетов»: target — номер заявки (notifications/sources.py: payments).
                 if (nextView === 'payments' && Number(target)) {
                     setPaymentsFocusRequest((prev) => ({
@@ -53597,6 +53621,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
                 sidebarLatestRef.current.navigateToView?.(nextView);
             }, []);
+            /* Переходы между «Задачами» и «Продакшном» (задача #316) — тем же путём,
+               что из колокола: раздел открывается, карточка задачи — по номеру. */
+            const openProductionFromTasks = useCallback(
+                (taskId) => stableNotificationsNavigate('production', taskId),
+                [stableNotificationsNavigate],
+            );
+            const openTasksFromProduction = useCallback(
+                (taskId) => stableNotificationsNavigate('tasks', taskId || null),
+                [stableNotificationsNavigate],
+            );
             /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
                считались водяным знаком last_seen_at и раньше приезжали двумя
                отдельными запросами; сервер считает их тем же условием — сверено
@@ -53777,6 +53811,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 const menuDailyBlockHasItems = Boolean(
                     wikiSectionEnabled
                     || canAccessLibrarySection
+                    || canAccessProductionSection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
                     || isAdminLikeRole
                     || isPlainTrainer
@@ -54443,6 +54478,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                         </>
+                                    )}
+                                    {/* «Продакшн» (задача #316) — объявлен один раз на все роли:
+                                        круг разнородный (маркетинг, админы, постановщики задач
+                                        продакшна), и по ролевым ветвям пункт легко потерять в одной
+                                        из них. Стоит рядом с «Задачами», из которых приходят его задачи. */}
+                                    {canAccessProductionSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'production')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'production' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-clapperboard"></FaIcon> <span className="sidebar-text">Продакшн</span>
+                                        </button>
+                                    </li>
                                     )}
 
                                     {isAdminLikeRole && (
@@ -58088,6 +58138,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         focusTaskRequest={taskFocusRequest}
                                         externalRefreshToken={taskRefreshToken}
                                         onActionNeedsChange={handleTasksActionNeedsChange}
+                                        onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
@@ -58267,6 +58318,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     focusRequest={paymentsFocusRequest}
                                     userId={user?.id}
+                                />
+                            </Suspense>
+                        ))}
+                        {( view === "production" && canAccessProductionSection && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500 motion-safe:animate-fade-in-soft motion-safe:![animation-delay:300ms]">Загрузка раздела...</div>}>
+                                <ProductionView
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    focusRequest={productionFocusRequest}
+                                    onOpenTasks={openTasksFromProduction}
                                 />
                             </Suspense>
                         ))}
@@ -59143,6 +59205,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         focusTaskRequest={taskFocusRequest}
                                         externalRefreshToken={taskRefreshToken}
                                         onActionNeedsChange={handleTasksActionNeedsChange}
+                                        onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
@@ -59202,6 +59265,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         focusTaskRequest={taskFocusRequest}
                                         externalRefreshToken={taskRefreshToken}
                                         onActionNeedsChange={handleTasksActionNeedsChange}
+                                        onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
