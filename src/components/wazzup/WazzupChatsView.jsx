@@ -2071,8 +2071,12 @@ function ChatsWorkspace(props) {
                                     )}
                                 </div>
                             </div>
+                            {/* Свой ключ, не selectedKey: в этом же списке поле ввода
+                                (ChatPilotComposer) стоит на ключе чата, а два одинаковых
+                                ключа рядом React путает — старая полоса не снималась и
+                                копилась при каждом новом чате (16.10.2026). */}
                             {driverCardEnabled && (
-                                <ChatDriverCard key={selectedKey} chat={selected} card={driverCard}
+                                <ChatDriverCard key={`driver-card:${selectedKey}`} chat={selected} card={driverCard}
                                     apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
                             )}
                             <div className="relative min-h-0 flex-1">

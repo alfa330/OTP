@@ -420,3 +420,21 @@ test('options: one request per address, a failure is not cached', async () => {
     assert.equal(h.gets.length, 2);
     resetDriverCardOptions();
 });
+
+/* 16.10.2026, сразу после выкладки: полоса карточки стояла на ключе чата
+   (selectedKey), а поле ввода в том же списке — на pilotChatKey(account, selected),
+   то есть на том же ключе. Два одинаковых ключа среди соседей React путает:
+   старая полоса не снималась и копилась при каждом новом чате. На стенде поля
+   ввода не было (отправка там закрыта) — ошибка видна только с ним рядом. */
+test('the chat card has a key of its own: the composer beside it uses the chat key', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../src/components/wazzup/WazzupChatsView.jsx', import.meta.url), 'utf8');
+    const keyOf = (name) => source.match(new RegExp(`<${name} key=\\{(.+?)\\} chat=`))?.[1];
+    const cardKey = keyOf('ChatDriverCard');
+    assert.ok(cardKey, 'ChatDriverCard is rendered with a key');
+    assert.equal(keyOf('ChatPilotComposer'), 'pilotChatKey(account, selected)');
+    assert.equal(keyOf('ChatInternalNoteComposer'), 'selectedKey');
+    assert.match(source, /const selectedKey = pilotChatKey\(account, selected\);/);
+    for (const taken of ['selectedKey', 'pilotChatKey(account, selected)']) assert.notEqual(cardKey, taken);
+    assert.equal(cardKey, '`driver-card:${selectedKey}`');
+});
