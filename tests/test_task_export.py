@@ -197,7 +197,7 @@ class TaskExcelExportTests(unittest.TestCase):
         brief = {
             "item": "static_banner", "channels": ["social", "outdoor"], "sizes": ["9x16"],
             "custom_sizes": [{"width": 728, "height": 90, "unit": "px"}],
-            "color": "custom", "color_notes": "жёлтый #FFD400",
+            "color": "custom", "colors": ["#FFD400", "#1A1916"],
         }
         _db, _sent, book = self._export([
             _task(id=1, status='assigned', tag='production', production_brief=brief),
@@ -211,7 +211,7 @@ class TaskExcelExportTests(unittest.TestCase):
             "Наименование: Статичный баннер",
             "Адаптация: Социальные сети и мессенджеры; Наружная реклама",
             "Размеры: 9:16 — 1080×1920 px; 728×90 px",
-            "Цветность: Свои тона: жёлтый #FFD400",
+            "Цветность: Свои тона: #FFD400, #1A1916",
         ]))
         self.assertNotIn('Бриф', self._headers(book['В работе']))
 

@@ -3,18 +3,21 @@ import assert from 'node:assert/strict';
 
 import {
   PRODUCTION_ITEM_OPTIONS,
+  PRODUCTION_MAX_COLORS,
   PRODUCTION_MAX_SIDE,
+  addPaletteColor,
   briefFromTask,
   briefToPayload,
   emptyProductionBrief,
   frameSize,
-  hexColorsIn,
   isProductionPerson,
   newCustomSize,
   productionAllowedFor,
-  productionAvailableFor,
   productionBriefIssues,
   productionBriefRows,
+  productionPersonIds,
+  productionTeamFor,
+  replacePaletteColor,
   sizeDimensions,
 } from '../src/components/tasks/productionBrief.js';
 
@@ -29,16 +32,19 @@ const filled = (patch = {}) => ({
 
 const keys = (issues) => issues.map((issue) => issue.key);
 
-test('продакшн доступен, только когда среди исполнителей есть маркетинг', () => {
+test('у продакшна все исполнители — из маркетинга (уточнение владельца 16.10.2026)', () => {
   const recipients = [
     { id: 7, name: 'Дизайнер', department_code: 'marketing' },
+    { id: 6, name: 'Видеограф', department_code: 'marketing' },
     { id: 8, name: 'Оператор', department_code: 'szov' },
     { id: 9, name: 'Без отдела', department_code: null },
   ];
-  assert.equal(productionAvailableFor(['7'], recipients), true);
-  assert.equal(productionAvailableFor([8, 7], recipients), true);
-  assert.equal(productionAvailableFor(['8', '9'], recipients), false);
-  assert.equal(productionAvailableFor([], recipients), false);
+  assert.deepEqual([...productionPersonIds(recipients)].sort(), ['6', '7']);
+  assert.equal(productionTeamFor(['7'], recipients), true);
+  assert.equal(productionTeamFor([6, 7, '7'], recipients), true);
+  assert.equal(productionTeamFor([8, 7], recipients), false, 'один посторонний — уже нельзя');
+  assert.equal(productionTeamFor(['9'], recipients), false);
+  assert.equal(productionTeamFor([], recipients), false);
   assert.equal(isProductionPerson({ department_code: 'marketing' }), true);
   assert.equal(isProductionPerson({}), false);
 });
@@ -69,11 +75,29 @@ test('правка: старый продакшн с прежним состав
   assert.equal(productionAllowedFor(['7'], recipients, { tag: 'task', assigneeIds: ['7'] }), false, 'тип только появляется');
   assert.equal(productionAllowedFor(['7'], recipients), false, 'новая задача');
   assert.equal(productionAllowedFor(['7'], [{ id: 7, department_code: 'marketing' }]), true);
+  assert.equal(productionAllowedFor(['7', '8'], [{ id: 7, department_code: 'marketing' }, { id: 8 }]), false);
 });
 
-test('«Свои тона» требуют написать, какие', () => {
-  assert.deepEqual(keys(productionBriefIssues(filled({ color: 'custom', colorNotes: '  ' }), 'т')), ['colorNotes']);
-  assert.deepEqual(productionBriefIssues(filled({ color: 'custom', colorNotes: 'жёлтый' }), 'т'), []);
+test('«Свои тона» требуют хотя бы один цвет палитры', () => {
+  assert.deepEqual(keys(productionBriefIssues(filled({ color: 'custom', colors: [] }), 'т')), ['colors']);
+  assert.deepEqual(productionBriefIssues(filled({ color: 'custom', colors: ['#FFD400'] }), 'т'), []);
+});
+
+test('палитра: без повторов, по порядку добавления, не больше двадцати', () => {
+  let colors = [];
+  colors = addPaletteColor(colors, '#ffd400');
+  colors = addPaletteColor(colors, '1A1916');
+  colors = addPaletteColor(colors, '#FFD400');
+  assert.deepEqual(colors, ['#FFD400', '#1A1916']);
+  assert.deepEqual(addPaletteColor(colors, 'не цвет'), colors);
+  assert.deepEqual(replacePaletteColor(colors, 0, '#00aaff'), ['#00AAFF', '#1A1916']);
+  // Заменили на уже выбранный — повтор схлопывается.
+  assert.deepEqual(replacePaletteColor(colors, 0, '#1A1916'), ['#1A1916']);
+  let full = [];
+  for (let index = 1; index <= PRODUCTION_MAX_COLORS + 3; index += 1) {
+    full = addPaletteColor(full, `#${(index * 0x0a0a0a).toString(16).padStart(6, '0')}`);
+  }
+  assert.equal(full.length, PRODUCTION_MAX_COLORS);
 });
 
 test('свой размер: пустая строка не мешает, половина или мусор — пункт', () => {
@@ -89,7 +113,7 @@ test('свой размер: пустая строка не мешает, пол
   assert.deepEqual(productionBriefIssues(filled({ sizes: [], customSizes: [ok] }), 'т'), []);
 });
 
-test('тело запроса: порядок справочника, свои размеры числами, тона только у «Своих тонов»', () => {
+test('тело запроса: порядок справочника, свои размеры числами, палитра только у «Своих тонов»', () => {
   const payload = briefToPayload(filled({
     channels: ['outdoor', 'social'],
     sizes: ['9x16', '1x1'],
@@ -98,7 +122,7 @@ test('тело запроса: порядок справочника, свои �
       newCustomSize(),
     ],
     color: 'designer',
-    colorNotes: 'останется в форме, но не уйдёт',
+    colors: ['#FFD400'],
   }));
   assert.deepEqual(payload, {
     item: 'static_banner',
@@ -106,8 +130,10 @@ test('тело запроса: порядок справочника, свои �
     sizes: ['1x1', '9x16'],
     custom_sizes: [{ width: 728, height: 90, unit: 'px' }],
     color: 'designer',
-    color_notes: '',
+    colors: [],
   });
+  assert.deepEqual(briefToPayload(filled({ color: 'custom', colors: ['#ffd400', '#FFD400', '#1a1916'] })).colors,
+    ['#FFD400', '#1A1916']);
 });
 
 test('бриф из ответа сервера возвращается в форму без потерь', () => {
@@ -117,7 +143,7 @@ test('бриф из ответа сервера возвращается в фо
     sizes: ['16x9'],
     custom_sizes: [{ width: 1200, height: 628, unit: 'px' }],
     color: 'custom',
-    color_notes: 'жёлтый #FFD400',
+    colors: ['#FFD400', '#1A1916'],
   };
   const form = briefFromTask(server);
   assert.equal(form.item, 'promo_video');
@@ -153,11 +179,9 @@ test('рамка плитки сохраняет пропорцию и не пр
   assert.deepEqual(frameSize(850, 2000), { width: 12, height: 28 });
 });
 
-test('размер и цвета для показа', () => {
+test('размер для показа', () => {
   assert.equal(sizeDimensions(1080, 1920, 'px'), '1080×1920 px');
   assert.equal(sizeDimensions(210, 297, 'mm'), '210×297 мм');
-  assert.deepEqual(hexColorsIn('жёлтый #FFD400, чёрный #000 и снова #ffd400'), ['#ffd400', '#000']);
-  assert.deepEqual(hexColorsIn(''), []);
 });
 
 test('строки карточки: подписи вместо кодов, свои размеры после готовых', () => {
@@ -167,12 +191,12 @@ test('строки карточки: подписи вместо кодов, с�
     sizes: ['a4'],
     custom_sizes: [{ width: 728, height: 90, unit: 'px' }],
     color: 'custom',
-    color_notes: 'жёлтый',
+    colors: ['#ffd400', 'не цвет'],
   });
   assert.deepEqual(rows.map((row) => row.key), ['item', 'channels', 'sizes', 'color']);
   assert.equal(rows[0].text, 'Статичный баннер');
   assert.deepEqual(rows[1].items, ['Социальные сети и мессенджеры', 'gone']);
   assert.deepEqual(rows[2].sizes.map((size) => size.label), ['A4', '']);
-  assert.equal(rows[3].notes, 'жёлтый');
+  assert.deepEqual(rows[3].colors, ['#FFD400']);
   assert.deepEqual(productionBriefRows(null), []);
 });

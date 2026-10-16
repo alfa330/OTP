@@ -1,10 +1,11 @@
 /*
  * Бриф задачи «Продакшн» (задача #354): справочник вариантов и проверка формы.
  *
- * Тип «Продакшн» появляется в форме задачи, когда среди исполнителей есть
- * сотрудник отдела маркетинга, — так в ТЗ: «при выборе сотрудника из отдела
- * маркетинга». Бриф — обязательные поля ТЗ: наименование, адаптация, размеры,
- * цветность; описание задания — обычное описание задачи, при этом типе тоже
+ * Тип «Продакшн» в форме задачи виден всегда, но исполнители у него — только
+ * сотрудники отдела маркетинга (уточнение владельца 16.10.2026: «при выборе
+ * данного типа в исполнителях будет только маркетинг»). Бриф — обязательные поля
+ * ТЗ: наименование, адаптация, размеры, цветность (при «Своих тонах» — палитра
+ * до 20 цветов); описание задания — обычное описание задачи, при этом типе тоже
  * обязательное.
  *
  * ТОТ ЖЕ справочник — в task_production/__init__.py: форма показывает варианты
@@ -102,10 +103,10 @@ export const PRODUCTION_SIZE_GROUPS = [
   { code: 'print', label: 'Печать' },
 ];
 
-/* Потолки — те же, что у сервера (MAX_CUSTOM_SIZES, MAX_SIDE, MAX_COLOR_NOTES). */
+/* Потолки — те же, что у сервера (MAX_CUSTOM_SIZES, MAX_SIDE, MAX_COLORS). */
 export const PRODUCTION_MAX_CUSTOM_SIZES = 6;
 export const PRODUCTION_MAX_SIDE = 100000;
-export const PRODUCTION_MAX_COLOR_NOTES = 300;
+export const PRODUCTION_MAX_COLORS = 20;
 
 /* Пояснения под «i» у полей. Текст нужен один раз — когда человек не понял
    поле, — поэтому он не стоит строкой под полем (решение владельца 27.08.2026).
@@ -117,11 +118,12 @@ export const PRODUCTION_HINTS = {
   color: {
     intro: 'В каких цветах делать.',
     options: [
-      ['Свои тона', 'напишите, какие цвета использовать'],
+      ['Свои тона', 'подберите цвета в палитре — до 20 оттенков'],
       ['Брендбук', 'цвета из фирменного стиля'],
       ['На усмотрение дизайнера', 'цвета подберёт дизайнер'],
     ],
   },
+  colors: 'Цвета, которые нужно использовать. В «Сетке» — готовые оттенки, в «Спектре» тот же цвет доводят до своего, код из брендбука можно вписать. Первый цвет — главный; до 20 цветов.',
   description: {
     intro: 'Основное поле ТЗ. Чтобы не было правок по кругу, закройте эти пункты:',
     points: [
@@ -166,8 +168,33 @@ export const emptyProductionBrief = () => ({
   sizes: [],
   customSizes: [],
   color: null,
-  colorNotes: '',
+  colors: [],
 });
+
+/* '#ffd400', 'FFD400', '#fd4' → '#FFD400'; не цвет → ''. Тот же разбор, что у
+   сервера (task_production._clean_colors). */
+const normalizeColor = (value) => {
+  let text = String(value || '').trim().replace(/^#/, '').toUpperCase();
+  if (/^[0-9A-F]{3}$/.test(text)) text = text.split('').map((char) => char + char).join('');
+  return /^[0-9A-F]{6}$/.test(text) ? `#${text}` : '';
+};
+
+const cleanColors = (values) => {
+  const result = [];
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const color = normalizeColor(value);
+    if (color && !result.includes(color)) result.push(color);
+  });
+  return result.slice(0, PRODUCTION_MAX_COLORS);
+};
+
+/* Добавить цвет в палитру: без повторов и не больше двадцати. */
+export const addPaletteColor = (colors, color) => cleanColors([...(colors || []), color]);
+
+/* Заменить цвет на месте (правка образца); совпал с другим — повтор схлопнется. */
+export const replacePaletteColor = (colors, index, color) => cleanColors(
+  (colors || []).map((item, position) => (position === index ? color : item)),
+);
 
 const codesIn = (values, byCode) => (Array.isArray(values) ? values : [])
   .map((value) => String(value || '').trim())
@@ -186,7 +213,7 @@ export const briefFromTask = (raw) => {
     .filter((size) => size && UNIT_BY_CODE.has(size.unit))
     .map((size) => ({ ...newCustomSize(size.unit), width: String(size.width ?? ''), height: String(size.height ?? '') }));
   brief.color = COLOR_BY_CODE.has(raw.color) ? raw.color : null;
-  brief.colorNotes = typeof raw.color_notes === 'string' ? raw.color_notes : '';
+  brief.colors = cleanColors(raw.colors);
   return brief;
 };
 
@@ -223,7 +250,7 @@ export const briefToPayload = (brief) => {
       .filter((size) => customSizeState(size) === 'ok')
       .map((size) => ({ width: sideValue(size.width), height: sideValue(size.height), unit: size.unit })),
     color,
-    color_notes: color === 'custom' ? String(value.colorNotes || '').trim().slice(0, PRODUCTION_MAX_COLOR_NOTES) : '',
+    colors: color === 'custom' ? cleanColors(value.colors) : [],
   };
 };
 
@@ -231,11 +258,17 @@ export const isProductionPerson = (person) => (
   String(person?.department_code || '') === PRODUCTION_DEPARTMENT_CODE
 );
 
-/* Есть ли среди выбранных исполнителей сотрудник маркетинга. */
-export const productionAvailableFor = (assigneeIds, recipients) => {
-  const ids = new Set((assigneeIds || []).map((id) => String(id)));
-  if (!ids.size) return false;
-  return (recipients || []).some((person) => ids.has(String(person?.id)) && isProductionPerson(person));
+/* id сотрудников маркетинга среди тех, кому можно поручить задачу. */
+export const productionPersonIds = (recipients) => new Set(
+  (recipients || []).filter(isProductionPerson).map((person) => String(person.id)),
+);
+
+/* Все ли выбранные исполнители — из маркетинга (и выбран хоть кто-то). */
+export const productionTeamFor = (assigneeIds, recipients) => {
+  const ids = [...new Set((assigneeIds || []).map((id) => String(id)))];
+  if (!ids.length) return false;
+  const marketing = productionPersonIds(recipients);
+  return ids.every((id) => marketing.has(id));
 };
 
 /* Один и тот же состав без учёта порядка: смена порядка показа — не смена состава. */
@@ -253,7 +286,7 @@ export const productionAllowedFor = (assigneeIds, recipients, initial = null) =>
   const sameTeam = Boolean(initial)
     && initial.tag === PRODUCTION_TAG
     && sameIdSet(initial.assigneeIds, assigneeIds);
-  return sameTeam || productionAvailableFor(assigneeIds, recipients);
+  return sameTeam || productionTeamFor(assigneeIds, recipients);
 };
 
 /* Чего не хватает, по порядку полей на экране. Ключ — якорь поля
@@ -264,7 +297,7 @@ export const productionBriefIssues = (brief, description, { productionAllowed = 
   if (!productionAllowed) {
     issues.push({
       key: 'tag',
-      text: 'Продакшн ставится сотруднику отдела маркетинга — добавьте его в исполнители или выберите другой тип',
+      text: 'Продакшн ставится только сотрудникам отдела маркетинга — оставьте в исполнителях только их',
     });
   }
   if (!ITEM_BY_CODE.has(value.item)) issues.push({ key: 'item', text: 'Выберите, что нужно сделать' });
@@ -281,8 +314,8 @@ export const productionBriefIssues = (brief, description, { productionAllowed = 
   }
   if (!COLOR_BY_CODE.has(value.color)) {
     issues.push({ key: 'color', text: 'Выберите цветность' });
-  } else if (value.color === 'custom' && !String(value.colorNotes || '').trim()) {
-    issues.push({ key: 'colorNotes', text: 'Напишите, какие тона использовать' });
+  } else if (value.color === 'custom' && !cleanColors(value.colors).length) {
+    issues.push({ key: 'colors', text: 'Добавьте хотя бы один цвет' });
   }
   if (!String(description || '').trim()) issues.push({ key: 'description', text: 'Опишите задание' });
   return issues;
@@ -307,12 +340,6 @@ export const frameSize = (width, height, box = 28) => {
 };
 
 export const productionItemLabel = (brief) => ITEM_BY_CODE.get(brief?.item)?.label || brief?.item || '';
-
-/* Цвета, записанные кодом (#FFD400), — кружками рядом с текстом тонов. */
-export const hexColorsIn = (text) => {
-  const found = String(text || '').match(/#(?:[0-9a-f]{6}|[0-9a-f]{3})\b/gi) || [];
-  return [...new Set(found.map((value) => value.toLowerCase()))].slice(0, 8);
-};
 
 /* Бриф из ответа API → строки для карточки задачи. Неизвестный код показываем
    как есть: лучше код, чем молча потерянное «что заказывали». */
@@ -343,7 +370,7 @@ export const productionBriefRows = (raw) => {
       key: 'color',
       label: 'Цветность',
       text: color?.label || raw.color,
-      notes: raw.color === 'custom' ? String(raw.color_notes || '') : '',
+      colors: raw.color === 'custom' ? cleanColors(raw.colors) : [],
     });
   }
   return rows;

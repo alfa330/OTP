@@ -65307,20 +65307,22 @@ class Database:
         return brief_new is not None and (tag_new != current_tag or bool(added) or bool(removed))
 
     def _require_task_production_assignee_tx(self, cursor, assignee_ids):
-        """Продакшн — только если среди исполнителей есть сотрудник маркетинга.
+        """Продакшн — только если ВСЕ исполнители из отдела маркетинга.
 
-        Отдел — тот, где человек числится (`users.department_id`): так ТЗ и
-        сказано, «при выборе сотрудника из отдела маркетинга». Форма прячет тип
-        у остальных, но правило обязано жить и здесь — иначе его обходит любой
+        Уточнение владельца 16.10.2026: «при выборе данного типа в исполнителях
+        будет только маркетинг». Отдел — тот, где человек числится
+        (`users.department_id`). Форма и так предлагает при этом типе одних
+        маркетологов, но правило обязано жить и здесь — иначе его обходит любой
         запрос мимо формы.
         """
-        ids = [int(person_id) for person_id in (assignee_ids or []) if person_id]
+        ids = sorted({int(person_id) for person_id in (assignee_ids or []) if person_id})
         cursor.execute(
-            "SELECT 1 FROM users u JOIN departments d ON d.id = u.department_id"
-            " WHERE u.id = ANY(%s) AND d.code = %s LIMIT 1",
+            "SELECT COUNT(*) FROM users u JOIN departments d ON d.id = u.department_id"
+            " WHERE u.id = ANY(%s) AND d.code = %s",
             (ids, task_production.PRODUCTION_DEPARTMENT_CODE),
         )
-        if not cursor.fetchone():
+        row = cursor.fetchone()
+        if not ids or int((row or [0])[0] or 0) != len(ids):
             raise ValueError(task_production.NEEDS_MARKETING_ASSIGNEE)
 
 

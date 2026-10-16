@@ -8,32 +8,21 @@
  * и у ошибки (красная кайма): остальное нейтрально.
  */
 
-/* ── Тип задачи прямо под исполнителем ─────────────────────────────────────
-   Пока исполнитель не из маркетинга, тип живёт за кнопкой «+ Тип», как раньше.
-   С исполнителем из маркетинга он стоит на виду: ТЗ просит «отображать»
-   Продакшн при выборе такого сотрудника, а за свёрнутой кнопкой его не видно. */
-.tv-root .tv-composer-type {
-  display: flex; flex-direction: column; gap: 6px;
-  margin-top: 12px;
-}
-.tv-root .tv-composer-type-row {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-}
-.tv-root .tv-composer-type-label {
-  font-size: 12px; font-weight: 500; color: var(--ink-2);
-  white-space: nowrap;
-}
-.tv-root .tv-composer-type.is-invalid .tv-composer-segmented {
+/* ── «Тип» в раскрытой панели формы ──────────────────────────────────────── */
+.tv-root .tv-composer-type-row.is-invalid .tv-composer-segmented {
   box-shadow: 0 0 0 2px #fda4af;
 }
 
-/* ── Блок брифа в форме ─────────────────────────────────────────────────── */
+/* ── Блок брифа в форме ─────────────────────────────────────────────────────
+   Стоит в серой панели раздела сразу под «Типом» и сам белый — как
+   сгруппированные строки iOS на сером фоне. */
 .tv-root .tv-brief {
   display: flex; flex-direction: column; gap: 18px;
-  margin-top: 14px; padding: 16px 16px 18px;
-  background: var(--surface-2);
+  padding: 16px 16px 18px;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(26, 25, 22, .04);
   animation: tvBriefIn .2s cubic-bezier(.22, 1, .36, 1);
 }
 @keyframes tvBriefIn {
@@ -88,20 +77,26 @@
 /* ── Наименование ── */
 .tv-root .tv-brief-select { width: 100%; }
 
-/* ── Адаптация: метки-переключатели ── */
+/* ── Адаптация: метки-переключатели ─────────────────────────────────────────
+   Выбранное — мягкой голубой заливкой с галочкой, как выбор на остальном сайте
+   (синяя таблетка дня в календаре, синяя кайма открытого списка). Чёрная
+   заливка на нажатии и на наведении выглядела грубо (замечание владельца
+   16.10.2026); наведение теперь только чуть подсвечивает фон. */
 .tv-root .tv-brief-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .tv-root .tv-brief-chip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 6px 12px; border-radius: 99px;
   border: 1px solid var(--border); background: var(--surface);
   font-size: 12.5px; font-weight: 500; color: var(--ink-2);
-  cursor: pointer; transition: background .15s, border-color .15s, color .15s, transform .1s;
+  cursor: pointer; outline: none;
+  transition: background-color .15s, border-color .15s, color .15s, box-shadow .15s, transform .1s;
 }
-.tv-root .tv-brief-chip:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+.tv-root .tv-brief-chip:hover:not(:disabled) { background: #f6f6f4; border-color: var(--border-strong); }
 .tv-root .tv-brief-chip:active:not(:disabled) { transform: scale(.97); }
-/* Выбранное — парой --accent / --accent-fg: в тёмной теме раздел меняет её местами,
-   а связка var(--ink) + #fff дала бы там белый текст на светлой плашке. */
-.tv-root .tv-brief-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.tv-root .tv-brief-chip:focus-visible { box-shadow: 0 0 0 3px rgba(59, 130, 246, .28); }
+.tv-root .tv-brief-chip.is-active { background: #eef4ff; border-color: #bfd4fb; color: #1d4ed8; }
+.tv-root .tv-brief-chip.is-active:hover:not(:disabled) { background: #e5eeff; border-color: #a9c5f8; }
+.tv-root .tv-brief-chip.is-active svg { color: #2563eb; }
 .tv-root .tv-brief-chip:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── Размеры: плитки с рамкой формата, как в Canva ── */
@@ -126,7 +121,9 @@
 .tv-root .tv-brief-tile:hover:not(:disabled) { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
 .tv-root .tv-brief-tile:active:not(:disabled) { transform: scale(.97); }
 .tv-root .tv-brief-tile:disabled { opacity: .5; cursor: not-allowed; }
-.tv-root .tv-brief-tile.is-active { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.tv-root .tv-brief-tile:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(59, 130, 246, .28); }
+/* Выбранный формат — той же голубой парой, что метки адаптации. */
+.tv-root .tv-brief-tile.is-active { border-color: #60a5fa; background: #f5f9ff; box-shadow: 0 0 0 1px #60a5fa; }
 .tv-root .tv-brief-frame {
   display: inline-grid; place-items: center; flex: none;
 }
@@ -137,7 +134,7 @@
   background: var(--bg);
   transition: border-color .15s, background .15s;
 }
-.tv-root .tv-brief-tile.is-active .tv-brief-frame i { border-color: var(--ink); background: #e9e7e1; }
+.tv-root .tv-brief-tile.is-active .tv-brief-frame i { border-color: #3b82f6; background: #dbeafe; }
 .tv-root .tv-brief-tile-label {
   font-size: 12.5px; font-weight: 600; color: var(--ink); white-space: nowrap;
 }
@@ -149,7 +146,7 @@
   position: absolute; top: 6px; right: 6px;
   width: 16px; height: 16px; border-radius: 50%;
   display: grid; place-items: center;
-  background: var(--accent); color: var(--accent-fg);
+  background: #2563eb; color: #fff;
   animation: tvBriefCheck .18s cubic-bezier(.22, 1, .36, 1);
 }
 @keyframes tvBriefCheck { from { transform: scale(.4); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -184,14 +181,41 @@
 /* ── Цветность ── */
 .tv-root .tv-brief-segmented { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
 .tv-root .tv-brief-segmented button { padding: 6px 13px; font-size: 12.5px; }
-.tv-root .tv-brief-notes { display: flex; align-items: center; gap: 10px; }
-.tv-root .tv-brief-notes .tv-input { flex: 1; min-width: 0; }
-.tv-root .tv-brief-swatches { display: inline-flex; gap: 4px; flex: none; }
-.tv-root .tv-brief-swatches i,
-.tv-root .tv-brief-view-swatch {
-  display: inline-block; width: 16px; height: 16px; border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .14);
+/* Палитра своих тонов: образец + код, крестик убирает цвет. */
+.tv-root .tv-brief-palette { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tv-root .tv-brief-swatch {
+  display: inline-flex; align-items: center;
+  padding: 2px; border-radius: 99px;
+  border: 1px solid var(--border); background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
 }
+.tv-root .tv-brief-swatch:hover { border-color: var(--border-strong); }
+.tv-root .tv-brief-swatch.is-editing { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(59, 130, 246, .2); }
+.tv-root .tv-brief-swatch-main {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 2px 6px 2px 2px; border: 0; border-radius: 99px; background: none;
+  font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .02em; color: var(--ink-2); cursor: pointer;
+}
+.tv-root .tv-brief-swatch-main i,
+.tv-root .tv-brief-view-swatch {
+  display: inline-block; flex: none; width: 22px; height: 22px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12);
+}
+.tv-root .tv-brief-view-swatch { width: 14px; height: 14px; }
+.tv-root .tv-brief-swatch-remove {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  border: 0; background: transparent; color: var(--ink-3);
+  cursor: pointer; transition: background-color .15s, color .15s;
+}
+.tv-root .tv-brief-swatch-remove:hover:not(:disabled) { background: #f1f0ed; color: var(--ink); }
+.tv-root .tv-brief-add-color { padding: 6px 12px; border-radius: 99px; }
+.tv-root .tv-brief-add-color.is-open { border-style: solid; border-color: #60a5fa; color: #1d4ed8; background: #f5f9ff; }
+.tv-root .tv-brief-palette-count {
+  font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
+.tv-root .tv-brief-view-chip.is-color .tv-brief-view-dims { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 
 /* ── Описание задания ── */
 .tv-root .tv-brief-description.tv-textarea { min-height: 150px; font-size: 13.5px; line-height: 1.55; }
@@ -269,10 +293,12 @@ body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented {
   display: grid; grid-template-columns: minmax(0, 1fr); width: 100%;
 }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented button { min-height: 36px; font-size: 14px; }
-body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type .tv-composer-segmented {
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type-row .tv-composer-segmented {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%;
 }
-body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type .tv-composer-segmented button { min-height: 34px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type-row .tv-composer-segmented button { min-height: 34px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-swatch-main { font-size: 13px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-swatch-remove { width: 30px; height: 30px; }
 /* Своя строка размера — в одну линию: поля сжимаются, «px/мм» и крестик рядом. */
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-custom { align-items: stretch; }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-custom-row { flex-wrap: nowrap; gap: 6px; }

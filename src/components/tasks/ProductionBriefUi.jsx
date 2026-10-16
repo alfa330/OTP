@@ -1,21 +1,23 @@
-import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronUp, Plus, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
+import IosColorPopover from '../ui/ColorPicker';
 import InfoHint from '../common/InfoHint';
 import {
   PRODUCTION_CHANNELS,
   PRODUCTION_COLOR_MODES,
   PRODUCTION_HINTS,
   PRODUCTION_ITEM_OPTIONS,
-  PRODUCTION_MAX_COLOR_NOTES,
+  PRODUCTION_MAX_COLORS,
   PRODUCTION_MAX_CUSTOM_SIZES,
   PRODUCTION_SIZE_GROUPS,
   PRODUCTION_SIZE_PRESETS,
   PRODUCTION_SIZE_UNITS,
+  addPaletteColor,
   frameSize,
-  hexColorsIn,
   newCustomSize,
   productionBriefRows,
+  replacePaletteColor,
   sizeDimensions,
 } from './productionBrief';
 import './production-brief.css';
@@ -83,6 +85,100 @@ const SizeFrame = ({ width, height, box = 28 }) => {
    читалки, в карточке задачи и в выгрузке. */
 const TILE_LABELS = { a4_landscape: 'A4' };
 
+/* Палитра своих тонов: образцы с кодом, «+ Добавить цвет», до двадцати.
+   Образец открывает тот же пикер для правки, крестик убирает цвет. Новый цвет
+   начинается с последнего выбранного — так проще добавить оттенки одного тона. */
+const PaletteField = ({ colors, onChange, disabled, issue }) => {
+  const [editing, setEditing] = useState(null);
+  const addRef = useRef(null);
+  const full = colors.length >= PRODUCTION_MAX_COLORS;
+
+  /* Выбрали «Свои тона», а цветов ещё нет — сразу открываем палитру: иначе
+     человек видел бы одну кнопку и не понимал, что выбор не закончен. Сперва
+     подводим к полю, чтобы палитра встала рядом с ним, а не поверх размеров. */
+  useEffect(() => {
+    const button = addRef.current;
+    if (colors.length || disabled || !button) return undefined;
+    button.scrollIntoView?.({ block: 'nearest' });
+    const frame = requestAnimationFrame(() => setEditing({ index: null, anchor: button }));
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const close = useCallback(() => setEditing(null), []);
+  const lastColor = colors[colors.length - 1] || '';
+
+  return (
+    <BriefField anchor="colors" label="Цвета" hint={PRODUCTION_HINTS.colors} issue={issue}>
+      <div className="tv-brief-palette tv-brief-control">
+        {colors.map((color, index) => (
+          <span key={color} className={`tv-brief-swatch${editing?.index === index ? ' is-editing' : ''}`}>
+            <button
+              type="button"
+              className="tv-brief-swatch-main"
+              disabled={disabled}
+              aria-label={`Цвет ${color}: изменить`}
+              onClick={(event) => setEditing({ index, anchor: event.currentTarget })}
+            >
+              <i style={{ backgroundColor: color }} aria-hidden="true" />
+              <span>{color}</span>
+            </button>
+            <button
+              type="button"
+              className="tv-brief-swatch-remove"
+              disabled={disabled}
+              aria-label={`Убрать цвет ${color}`}
+              title="Убрать"
+              onClick={() => onChange(colors.filter((_, position) => position !== index))}
+            >
+              <X size={12} strokeWidth={2.5} />
+            </button>
+          </span>
+        ))}
+        {!full && (
+          <button
+            ref={addRef}
+            type="button"
+            className={`tv-brief-add tv-brief-add-color${editing && editing.index === null ? ' is-open' : ''}`}
+            disabled={disabled}
+            onClick={(event) => {
+              // Элемент берём сразу: в функции-обновлении React уже обнулил
+              // currentTarget, и палитре было бы не к чему прижаться.
+              const anchor = event.currentTarget;
+              setEditing((prev) => (prev && prev.index === null ? null : { index: null, anchor }));
+            }}
+          >
+            <Plus size={13} strokeWidth={2.5} aria-hidden="true" />
+            {colors.length ? 'Ещё цвет' : 'Добавить цвет'}
+          </button>
+        )}
+        {colors.length >= PRODUCTION_MAX_COLORS - 4 && (
+          <span className="tv-brief-palette-count">{colors.length} из {PRODUCTION_MAX_COLORS}</span>
+        )}
+      </div>
+      {editing && (
+        <IosColorPopover
+          key={editing.index === null ? 'new' : `edit-${editing.index}`}
+          anchor={editing.anchor}
+          value={editing.index === null ? lastColor : colors[editing.index]}
+          applyLabel={editing.index === null ? 'Добавить' : 'Готово'}
+          onApply={(hex) => {
+            onChange(editing.index === null
+              ? addPaletteColor(colors, hex)
+              : replacePaletteColor(colors, editing.index, hex));
+            setEditing(null);
+          }}
+          onRemove={editing.index === null ? null : () => {
+            onChange(colors.filter((_, position) => position !== editing.index));
+            setEditing(null);
+          }}
+          onClose={close}
+        />
+      )}
+    </BriefField>
+  );
+};
+
 const toggleCode = (list, code) => (
   (list || []).includes(code) ? list.filter((item) => item !== code) : [...(list || []), code]
 );
@@ -96,10 +192,8 @@ export const ProductionBriefFields = ({
   issueFor = () => '',
 }) => {
   const descriptionId = React.useId();
-  const notesId = React.useId();
   const customSizes = brief.customSizes || [];
   const customOpen = customSizes.length > 0;
-  const swatches = hexColorsIn(brief.colorNotes);
 
   const patch = (next) => onChange({ ...brief, ...next });
   const patchCustom = (key, next) => patch({
@@ -287,24 +381,12 @@ export const ProductionBriefFields = ({
       </BriefField>
 
       {brief.color === 'custom' && (
-        <BriefField anchor="colorNotes" label="Какие тона" issue={issueFor('colorNotes')} labelFor={notesId}>
-          <div className="tv-brief-notes">
-            <input
-              id={notesId}
-              className="tv-input"
-              placeholder="Например: жёлтый #FFD400 и чёрный, без синего"
-              maxLength={PRODUCTION_MAX_COLOR_NOTES}
-              value={brief.colorNotes}
-              disabled={disabled}
-              onChange={(event) => patch({ colorNotes: event.target.value })}
-            />
-            {swatches.length > 0 && (
-              <span className="tv-brief-swatches" aria-hidden="true">
-                {swatches.map((color) => <i key={color} style={{ background: color }} title={color} />)}
-              </span>
-            )}
-          </div>
-        </BriefField>
+        <PaletteField
+          colors={brief.colors || []}
+          onChange={(next) => patch({ colors: next })}
+          disabled={disabled}
+          issue={issueFor('colors')}
+        />
       )}
 
       <BriefField
@@ -340,11 +422,13 @@ export const ProductionBriefView = ({ brief }) => {
             <dt>{row.label}</dt>
             <dd>
               {row.text && <span>{row.text}</span>}
-              {row.notes && (
-                <span className="tv-brief-view-notes">
-                  {row.notes}
-                  {hexColorsIn(row.notes).map((color) => (
-                    <i key={color} className="tv-brief-view-swatch" style={{ background: color }} title={color} />
+              {row.colors?.length > 0 && (
+                <span className="tv-brief-view-chips">
+                  {row.colors.map((color) => (
+                    <span key={color} className="tv-brief-view-chip is-color">
+                      <i className="tv-brief-view-swatch" style={{ backgroundColor: color }} aria-hidden="true" />
+                      <span className="tv-brief-view-dims">{color}</span>
+                    </span>
                   ))}
                 </span>
               )}

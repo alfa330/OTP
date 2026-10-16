@@ -50,7 +50,7 @@ def _valid_brief(**overrides):
         "sizes": ["9x16", "1x1"],
         "custom_sizes": [{"width": 728, "height": 90, "unit": "px"}],
         "color": "brandbook",
-        "color_notes": None,
+        "colors": [],
     }
     brief.update(overrides)
     return brief
@@ -114,7 +114,7 @@ class CatalogSyncTests(unittest.TestCase):
         for js_name, value in (
             ("PRODUCTION_MAX_CUSTOM_SIZES", task_production.MAX_CUSTOM_SIZES),
             ("PRODUCTION_MAX_SIDE", task_production.MAX_SIDE),
-            ("PRODUCTION_MAX_COLOR_NOTES", task_production.MAX_COLOR_NOTES),
+            ("PRODUCTION_MAX_COLORS", task_production.MAX_COLORS),
         ):
             self.assertIn(f"export const {js_name} = {value};", source)
         self.assertIn("export const PRODUCTION_TAG = 'production';", source)
@@ -140,7 +140,7 @@ class NormalizeBriefTests(unittest.TestCase):
         self.assertEqual(brief["channels"], ["social", "outdoor"])
         self.assertEqual(brief["sizes"], ["1x1", "9x16"])
         self.assertEqual(brief["custom_sizes"], [{"width": 728, "height": 90, "unit": "px"}])
-        self.assertIsNone(brief["color_notes"])
+        self.assertEqual(brief["colors"], [])
 
     def test_same_choice_gives_same_brief(self):
         first = task_production.normalize_brief(_valid_brief(channels=["social", "outdoor"]))
@@ -159,7 +159,7 @@ class NormalizeBriefTests(unittest.TestCase):
             task_production.normalize_brief({"color": "custom"})
         self.assertEqual(
             str(caught.exception),
-            "PRODUCTION_BRIEF_INCOMPLETE:item,channels,sizes,color_notes",
+            "PRODUCTION_BRIEF_INCOMPLETE:item,channels,sizes,colors",
         )
 
     def test_empty_brief_is_incomplete_not_invalid(self):
@@ -214,32 +214,41 @@ class NormalizeBriefTests(unittest.TestCase):
                     task_production.normalize_brief(raw)
                 self.assertEqual(str(caught.exception), task_production.INVALID_BRIEF)
 
-    def test_custom_colors_need_notes_and_keep_them(self):
+    def test_custom_tones_need_at_least_one_color(self):
         with self.assertRaises(ValueError) as caught:
-            task_production.normalize_brief(_valid_brief(color="custom", color_notes="  "))
-        self.assertEqual(str(caught.exception), "PRODUCTION_BRIEF_INCOMPLETE:color_notes")
-        brief = task_production.normalize_brief(_valid_brief(color="custom", color_notes=" жёлтый #FFD400 "))
-        self.assertEqual(brief["color_notes"], "жёлтый #FFD400")
+            task_production.normalize_brief(_valid_brief(color="custom", colors=[]))
+        self.assertEqual(str(caught.exception), "PRODUCTION_BRIEF_INCOMPLETE:colors")
 
-    def test_notes_are_dropped_when_colors_are_not_custom(self):
-        brief = task_production.normalize_brief(_valid_brief(color="designer", color_notes="красный"))
-        self.assertIsNone(brief["color_notes"])
+    def test_palette_is_normalized_in_order_without_repeats(self):
+        brief = task_production.normalize_brief(_valid_brief(
+            color="custom", colors=["#ffd400", "#1a1916", "#FFD400", "#fd4", " #0aF "]))
+        # #fd4 — краткая запись, разворачивается в #FFDD44; порядок — как добавляли.
+        self.assertEqual(brief["colors"], ["#FFD400", "#1A1916", "#FFDD44", "#00AAFF"])
 
-    def test_notes_are_capped(self):
-        brief = task_production.normalize_brief(
-            _valid_brief(color="custom", color_notes="ж" * (task_production.MAX_COLOR_NOTES + 50)))
-        self.assertEqual(len(brief["color_notes"]), task_production.MAX_COLOR_NOTES)
+    def test_palette_is_dropped_when_tones_are_not_custom(self):
+        brief = task_production.normalize_brief(_valid_brief(color="designer", colors=["#FF0000"]))
+        self.assertEqual(brief["colors"], [])
+
+    def test_palette_holds_up_to_twenty_colors(self):
+        twenty = ["#%06X" % (index * 0x0A0A0A) for index in range(1, 21)]
+        brief = task_production.normalize_brief(_valid_brief(color="custom", colors=twenty))
+        self.assertEqual(len(brief["colors"]), task_production.MAX_COLORS)
+        for broken in (twenty + ["#ABCDEF"], ["red"], ["#12345"], [123], "#FFD400"):
+            with self.subTest(colors=broken):
+                with self.assertRaises(ValueError) as caught:
+                    task_production.normalize_brief(_valid_brief(color="custom", colors=broken))
+                self.assertEqual(str(caught.exception), task_production.INVALID_BRIEF)
 
 
 class BriefTextTests(unittest.TestCase):
     def test_describe_lists_fields_in_order(self):
         rows = task_production.describe(task_production.normalize_brief(_valid_brief(
-            color="custom", color_notes="жёлтый #FFD400")))
+            color="custom", colors=["#FFD400", "#1A1916"])))
         self.assertEqual(rows, [
             ("Наименование", "Статичный баннер"),
             ("Адаптация", "Социальные сети и мессенджеры; Наружная реклама"),
             ("Размеры", "1:1 — 1080×1080 px; 9:16 — 1080×1920 px; 728×90 px"),
-            ("Цветность", "Свои тона: жёлтый #FFD400"),
+            ("Цветность", "Свои тона: #FFD400, #1A1916"),
         ])
 
     def test_unknown_codes_are_shown_as_is(self):
@@ -343,17 +352,20 @@ class TaskRulesTests(unittest.TestCase):
         brief = self.DB._normalize_task_production_brief("production", _valid_brief(), "Баннер к акции")
         self.assertEqual(brief, task_production.normalize_brief(_valid_brief()))
 
-    def test_marketing_assignee_is_checked_by_department_code(self):
-        cursor = _Cursor(row=(1,))
-        self.DB._require_task_production_assignee_tx(cursor, [7, "12"])
+    def test_all_assignees_must_be_from_marketing(self):
+        """Уточнение владельца 16.10.2026: у продакшна в исполнителях только маркетинг."""
+        cursor = _Cursor(row=(2,))
+        self.DB._require_task_production_assignee_tx(cursor, [7, "12", 7])
         query, params = cursor.executed[0]
-        self.assertIn("JOIN departments d ON d.id = u.department_id", query)
+        self.assertIn("SELECT COUNT(*) FROM users u JOIN departments d ON d.id = u.department_id", query)
         self.assertEqual(params, ([7, 12], "marketing"))
 
-    def test_no_marketing_assignee_is_refused(self):
-        with self.assertRaises(ValueError) as caught:
-            self.DB._require_task_production_assignee_tx(_Cursor(row=None), [7])
-        self.assertEqual(str(caught.exception), task_production.NEEDS_MARKETING_ASSIGNEE)
+    def test_one_outsider_in_the_team_is_refused(self):
+        for row, ids in (((1,), [7, 12]), ((0,), [7]), (None, [7]), ((0,), [])):
+            with self.subTest(row=row, ids=ids):
+                with self.assertRaises(ValueError) as caught:
+                    self.DB._require_task_production_assignee_tx(_Cursor(row=row), ids)
+                self.assertEqual(str(caught.exception), task_production.NEEDS_MARKETING_ASSIGNEE)
 
 
 class EditRulesTests(unittest.TestCase):
@@ -577,11 +589,19 @@ class RouteWiringTests(unittest.TestCase):
 
 
 class FrontWiringTests(unittest.TestCase):
-    def test_tasks_view_offers_production_only_with_marketing(self):
+    def test_production_type_always_offered_with_marketing_only_team(self):
+        """Тип виден всегда; при нём в исполнителях только маркетинг, остальных
+        выбор «Продакшна» снимает (уточнение владельца 16.10.2026)."""
         source = _read(TASKS_VIEW_PATH)
-        self.assertIn("const productionAvailable = productionAvailableFor(assigneeIds, recipients);", source)
-        self.assertIn("const typeInline = productionAvailable || isProduction;", source)
-        self.assertIn("{BASIC_TAG_OPTIONS.map((option) => (", source)
+        composer = source[source.index("const TaskComposerForm = ("):source.index("const TASK_MESSAGE_KIND_LABEL")]
+        self.assertIn("onClick={() => pickTag(option.value)}", composer)
+        self.assertIn("{ tag, assigneeIds: assigneeIds.filter((id) => marketingIds.has(String(id))) }", composer)
+        self.assertIn("? recipientOptions.filter((option) => marketingIds.has(option.value)", composer)
+        self.assertIn("options={assigneeOptions}", composer)
+        self.assertIn("&& (!isProduction || marketingIds.has(String(currentUserId)));", composer)
+        self.assertNotIn("typeInline", composer)
+        # Бриф — сразу под «Типом» в раскрытой панели.
+        self.assertLess(composer.index('data-issue-anchor="tag"'), composer.index("<ProductionBriefFields"))
         self.assertIn("[PRODUCTION_TAG]: { label: 'Продакшн', badge: 'tv-badge-fuchsia' },", source)
         self.assertIn("production_brief: values.tag === PRODUCTION_TAG ? briefToPayload(values.productionBrief) : null,",
                       source)

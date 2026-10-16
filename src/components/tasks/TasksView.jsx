@@ -41,8 +41,8 @@ import {
   briefToPayload,
   emptyProductionBrief,
   productionAllowedFor,
-  productionAvailableFor,
   productionBriefIssues,
+  productionPersonIds,
 } from './productionBrief';
 // Телефонный слой раздела: всё в нём заперто на body.mobile-shell.
 import './tasks-mobile.css';
@@ -2777,9 +2777,9 @@ const syncTaskDeepLink = (taskId) => {
 };
 
 /* ─── Constants ─── */
-/* «Продакшн» (задача #354) в форме предлагается не всегда — только когда среди
-   исполнителей есть сотрудник маркетинга (productionAvailableFor). В фильтре
-   списка и на бейджах он есть всегда: задачи этого типа видны любому, кто их видит. */
+/* «Продакшн» (задача #354) — четвёртый тип. В «Типе» основной формы он есть
+   всегда, а исполнители у него — только маркетинг (TaskComposerForm). В быстрой
+   форме закреплённой задачи полей брифа нет, поэтому там BASIC_TAG_OPTIONS. */
 const TAG_OPTIONS = [
   { value: 'task',       label: 'Задача' },
   { value: 'problem',    label: 'Проблема' },
@@ -3726,6 +3726,7 @@ const AssigneeField = ({
   disabled = false,
   isLoading = false,
   ariaLabel = 'Исполнители',
+  placeholder = 'Выберите сотрудника',
 }) => {
   const byId = useMemo(() => {
     const map = new Map();
@@ -3779,7 +3780,7 @@ const AssigneeField = ({
       options={options}
       onChange={(next) => onChange(Array.isArray(next) ? next : [])}
       disabled={disabled || isLoading}
-      placeholder={isLoading ? 'Загрузка...' : 'Выберите сотрудника'}
+      placeholder={isLoading ? 'Загрузка...' : placeholder}
       renderValue={renderValue}
       searchable
       searchPlaceholder="Поиск по имени…"
@@ -4573,19 +4574,15 @@ const TaskComposerForm = ({
   issueFor = NO_COMPOSER_ISSUE,
 }) => {
   const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
-  /* Продакшн (задача #354): с исполнителем из маркетинга тип стоит на виду под
-     исполнителем, а не за кнопкой «+ Тип» — ТЗ просит «отображать» Продакшн при
-     выборе такого сотрудника. Выбранный продакшн остаётся на виду и тогда, когда
-     маркетолога из состава убрали: иначе тип молча пропал бы вместе с брифом. */
-  const productionAvailable = productionAvailableFor(assigneeIds, recipients);
+  /* Продакшн (задача #354) виден в «Типе» всегда, а исполнители у него — только
+     сотрудники маркетинга (уточнение владельца 16.10.2026): при этом типе в
+     выборе исполнителя остаются одни маркетологи. */
   const isProduction = values.tag === PRODUCTION_TAG;
-  const typeInline = productionAvailable || isProduction;
+  const marketingIds = useMemo(() => productionPersonIds(recipients), [recipients]);
   const supportsFiles = typeof onFilesChange === 'function';
   const sections = useMemo(
-    () => COMPOSER_SECTIONS.filter((section) => (
-      (!section.requiresFiles || supportsFiles) && !(typeInline && section.id === 'tag')
-    )),
-    [supportsFiles, typeInline]
+    () => COMPOSER_SECTIONS.filter((section) => !section.requiresFiles || supportsFiles),
+    [supportsFiles]
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
@@ -4605,9 +4602,26 @@ const TaskComposerForm = ({
     () => recipients.map((person) => ({ value: String(person.id), label: person.name })),
     [recipients]
   );
+  /* У продакшна в списке — маркетинг и те, кто уже выбран (их можно снять: у
+     старой задачи маркетолог мог с тех пор сменить отдел). */
+  const assigneeOptions = useMemo(
+    () => (isProduction
+      ? recipientOptions.filter((option) => marketingIds.has(option.value)
+        || assigneeIds.some((id) => String(id) === option.value))
+      : recipientOptions),
+    [isProduction, recipientOptions, marketingIds, assigneeIds]
+  );
   const canAssignSelf = Number(currentUserId) > 0
-    && recipients.some((person) => Number(person.id) === Number(currentUserId));
+    && recipients.some((person) => Number(person.id) === Number(currentUserId))
+    && (!isProduction || marketingIds.has(String(currentUserId)));
   const isSelfAssigned = assigneeIds.some((id) => String(id) === String(currentUserId || ''));
+
+  /* Выбрали «Продакшн» — из исполнителей уходят все, кто не из маркетинга:
+     поставить им этот тип нельзя, и оставлять их в поле значило бы отказ при
+     сохранении. */
+  const pickTag = (tag) => onChange(tag === PRODUCTION_TAG
+    ? { tag, assigneeIds: assigneeIds.filter((id) => marketingIds.has(String(id))) }
+    : { tag });
 
   // Раскрываем то, что уже заполнено: при правке задачи форма сразу показывает суть.
   const [openIds, setOpenIds] = useState(() => new Set(
@@ -4636,8 +4650,6 @@ const TaskComposerForm = ({
   });
 
   const isOpen = (id) => openIds.has(id);
-  // Раскрытый «Тип» уехал под исполнителя — пустую серую панель не рисуем.
-  const detailsOpen = [...openIds].some((id) => !(typeInline && id === 'tag'));
   const tagIssue = issueFor('tag');
 
   return (
@@ -4670,11 +4682,12 @@ const TaskComposerForm = ({
         <AssigneeField
           id={assigneeSelectId}
           value={assigneeIds}
-          options={recipientOptions}
+          options={assigneeOptions}
           people={recipients}
           onChange={(next) => onChange({ assigneeIds: next })}
           disabled={disabled}
           isLoading={isRecipientsLoading}
+          placeholder={isProduction ? 'Сотрудник маркетинга' : 'Выберите сотрудника'}
         />
         {canAssignSelf && (
           <button
@@ -4701,40 +4714,6 @@ const TaskComposerForm = ({
           </button>
         )}
       </div>
-
-      {typeInline && (
-        <div className={`tv-composer-type${tagIssue ? ' is-invalid' : ''}`} data-issue-anchor="tag">
-          <div className="tv-composer-type-row">
-            <span className="tv-composer-type-label">Тип</span>
-            <div className="tv-composer-segmented" role="group" aria-label="Тип задачи">
-              {TAG_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={values.tag === option.value ? 'is-active' : ''}
-                  aria-pressed={values.tag === option.value}
-                  disabled={disabled}
-                  onClick={() => onChange({ tag: option.value })}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {tagIssue && <p className="tv-brief-issue">{tagIssue}</p>}
-        </div>
-      )}
-
-      {isProduction && (
-        <ProductionBriefFields
-          brief={values.productionBrief || emptyProductionBrief()}
-          onChange={(next) => onChange({ productionBrief: next })}
-          description={values.description}
-          onDescriptionChange={(next) => onChange({ description: next })}
-          disabled={disabled}
-          issueFor={issueFor}
-        />
-      )}
 
       <div className="tv-composer-chips">
         {sections.map((section) => {
@@ -4770,7 +4749,7 @@ const TaskComposerForm = ({
         )}
       </div>
 
-      {detailsOpen && (
+      {openIds.size > 0 && (
         <div className="tv-composer-details">
           {isOpen('priority') && (
             <div className="tv-composer-row">
@@ -4791,23 +4770,43 @@ const TaskComposerForm = ({
             </div>
           )}
 
-          {!typeInline && isOpen('tag') && (
-            <div className="tv-composer-row">
+          {isOpen('tag') && (
+            <div
+              className={`tv-composer-row tv-composer-type-row${tagIssue ? ' is-invalid' : ''}`}
+              data-issue-anchor="tag"
+            >
               <span className="tv-composer-row-label">Тип</span>
-              <div className="tv-composer-segmented">
-                {BASIC_TAG_OPTIONS.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={values.tag === option.value ? 'is-active' : ''}
-                    disabled={disabled}
-                    onClick={() => onChange({ tag: option.value })}
-                  >
-                    {option.label}
-                  </button>
-                ))}
+              <div className="tv-composer-row-body">
+                <div className="tv-composer-segmented" role="group" aria-label="Тип задачи">
+                  {TAG_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={values.tag === option.value ? 'is-active' : ''}
+                      aria-pressed={values.tag === option.value}
+                      disabled={disabled}
+                      onClick={() => pickTag(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {tagIssue && <p className="tv-brief-issue">{tagIssue}</p>}
               </div>
             </div>
+          )}
+
+          {/* Бриф — сразу под выбранным типом: белой карточкой на сером поле
+              панели, как сгруппированные строки iOS. */}
+          {isOpen('tag') && isProduction && (
+            <ProductionBriefFields
+              brief={values.productionBrief || emptyProductionBrief()}
+              onChange={(next) => onChange({ productionBrief: next })}
+              description={values.description}
+              onDescriptionChange={(next) => onChange({ description: next })}
+              disabled={disabled}
+              issueFor={issueFor}
+            />
           )}
 
           {isOpen('deadline') && (

@@ -8,10 +8,11 @@
 наименование, адаптация, размеры, цветность. Описание задания — обычное
 описание задачи; при этом типе оно тоже обязательно.
 
-КОМУ. Тип доступен, только когда среди исполнителей есть сотрудник отдела
-маркетинга (`users.department_id` → `departments.code = 'marketing'`). Ровно
-так сказано в ТЗ: «при выборе сотрудника из отдела маркетинга». Проверяет это
-database.py (там состав исполнителей), здесь — только сам бриф.
+КОМУ. Тип виден в форме всегда, но исполнители у продакшна — только сотрудники
+отдела маркетинга (`users.department_id` → `departments.code = 'marketing'`):
+так владелец уточнил ТЗ 16.10.2026 — «при выборе данного типа в исполнителях
+будет только маркетинг». Проверяет это database.py (там состав исполнителей),
+здесь — только сам бриф.
 
 ГДЕ ХРАНИТСЯ. Колонкой `tasks.production_brief` (JSONB), а не отдельной
 таблицей: бриф живёт и умирает вместе с задачей, читается всегда целиком, а
@@ -102,7 +103,9 @@ SIZE_PRESETS = (
 )
 SIZE_UNITS = (('px', 'px'), ('mm', 'мм'))
 
-# Цветность: одно из трёх. «Свои тона» требуют написать, какие.
+# Цветность: одно из трёх. «Свои тона» — это палитра: цвета кодами #RRGGBB,
+# от одного до двадцати (просьба владельца 16.10.2026: «добавляет несколько
+# по желанию до 20 разных оттенков»).
 COLOR_MODES = (
     ('custom', 'Свои тона'),
     ('brandbook', 'Брендбук'),
@@ -112,7 +115,7 @@ COLOR_MODES = (
 # Потолки — защита от мусора в запросе мимо формы, а не правило ТЗ.
 MAX_CUSTOM_SIZES = 6
 MAX_SIDE = 100000
-MAX_COLOR_NOTES = 300
+MAX_COLORS = 20
 
 ITEM_LABELS = {code: label for _group, _title, items in ITEM_GROUPS for code, label in items}
 CHANNEL_LABELS = dict(CHANNELS)
@@ -126,7 +129,7 @@ FIELD_LABELS = (
     ('channels', 'адаптация'),
     ('sizes', 'размеры'),
     ('color', 'цветность'),
-    ('color_notes', 'какие тона'),
+    ('colors', 'цвета палитры'),
     ('description', 'описание задания'),
 )
 
@@ -157,7 +160,7 @@ def error_message(code):
     if code == INVALID_BRIEF:
         return 'В брифе указан вариант, которого нет в списке'
     if code == NEEDS_MARKETING_ASSIGNEE:
-        return 'Тип «Продакшн» — только для задачи сотруднику отдела маркетинга'
+        return 'Тип «Продакшн» ставится только сотрудникам отдела маркетинга'
     return None
 
 
@@ -203,6 +206,27 @@ def _clean_side(value):
     if number < 1 or number > MAX_SIDE:
         raise ValueError(INVALID_BRIEF)
     return number
+
+
+def _clean_colors(values):
+    """Палитра своих тонов: коды #RRGGBB в верхнем регистре, без повторов,
+    в порядке, в каком их добавили (первый — главный цвет)."""
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(INVALID_BRIEF)
+    result = []
+    for value in values:
+        text = str(value or '').strip().upper() if isinstance(value, str) else ''
+        if len(text) == 4 and text.startswith('#'):
+            text = '#' + ''.join(char * 2 for char in text[1:])
+        if len(text) != 7 or not text.startswith('#') or any(char not in '0123456789ABCDEF' for char in text[1:]):
+            raise ValueError(INVALID_BRIEF)
+        if text not in result:
+            result.append(text)
+    if len(result) > MAX_COLORS:
+        raise ValueError(INVALID_BRIEF)
+    return result
 
 
 def _clean_custom_sizes(values):
@@ -254,8 +278,7 @@ def normalize_brief(raw):
     color = _clean_code(raw.get('color'))
     if color and color not in COLOR_LABELS:
         raise ValueError(INVALID_BRIEF)
-    color_notes = raw.get('color_notes')
-    color_notes = str(color_notes).strip()[:MAX_COLOR_NOTES] if isinstance(color_notes, str) else ''
+    colors = _clean_colors(raw.get('colors')) if color == 'custom' else []
 
     missing = []
     if not item:
@@ -266,8 +289,8 @@ def normalize_brief(raw):
         missing.append('sizes')
     if not color:
         missing.append('color')
-    elif color == 'custom' and not color_notes:
-        missing.append('color_notes')
+    elif color == 'custom' and not colors:
+        missing.append('colors')
     if missing:
         raise ValueError(incomplete(missing))
 
@@ -277,9 +300,9 @@ def normalize_brief(raw):
         'sizes': sizes,
         'custom_sizes': custom_sizes,
         'color': color,
-        # Тона нужны только при «Свои тона»: при «Брендбуке» строка, оставшаяся
-        # от передуманного выбора, читалась бы как указание дизайнеру.
-        'color_notes': color_notes if color == 'custom' else None,
+        # Палитра — только при «Свои тона»: при «Брендбуке» цвета, оставшиеся
+        # от передуманного выбора, читались бы как указание дизайнеру.
+        'colors': colors,
     }
 
 
@@ -329,8 +352,9 @@ def describe(brief):
             continue
     color = brief.get('color')
     color_text = COLOR_LABELS.get(color, color or '')
-    if color == 'custom' and brief.get('color_notes'):
-        color_text = '%s: %s' % (color_text, brief['color_notes'])
+    palette = [code for code in (brief.get('colors') or []) if isinstance(code, str)]
+    if color == 'custom' and palette:
+        color_text = '%s: %s' % (color_text, ', '.join(palette))
     rows = [
         ('Наименование', item_label(brief)),
         ('Адаптация', '; '.join(channels)),
