@@ -50,18 +50,6 @@ def is_marketing_member(cursor, user_id):
     return cursor.fetchone() is not None
 
 
-def has_production_relation(cursor, user_id):
-    """Есть ли у человека своя задача продакшна — тогда раздел ему открыт."""
-    uid = int(user_id)
-    cursor.execute("""
-        SELECT 1 FROM tasks t
-         WHERE t.tag = %s AND (t.created_by = %s OR t.requested_by_id = %s
-               OR EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = %s))
-         LIMIT 1
-    """, (TAG, uid, uid, uid))
-    return cursor.fetchone() is not None
-
-
 def _people(cursor, task_ids):
     """Исполнители задач: {task_id: [{id, name, avatar_bucket, avatar_blob_path}]} по порядку."""
     if not task_ids:

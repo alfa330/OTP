@@ -1330,9 +1330,9 @@ def _get_user_payload(user):
         'headed_department_ids': headed_department_ids, 'headed_department_codes': headed_department_codes,
     }) if user_id is not None else False
 
-    # Открыт ли раздел «Продакшн» (задача #316): маркетинг, админ со всеми
-    # задачами и тот, у кого есть своя задача продакшна. Пункт меню экран рисует
-    # по этому флагу (canAccessProductionForUser), границу держат роуты раздела.
+    # Открыт ли раздел «Продакшн» (задача #316): супер-админу и маркетингу.
+    # Пункт меню экран рисует по этому флагу (canAccessProductionForUser),
+    # границу держат роуты раздела.
     production_access = _production_section_open_for(
         user_id, role, department_code=department_code, headed_codes=headed_department_codes)
 
@@ -66907,17 +66907,13 @@ def _production_bucket_name():
     )
 
 
-def _production_full_scope(role, user_id):
-    """Видит ли человек все задачи продакшна — так же, как все задачи в «Задачах»."""
-    role = _normalize_user_role(role)
-    return _is_global_admin_requester(role, user_id) or _has_full_task_access(role, user_id)
-
-
 def _production_section_open_for(user_id, role=None, department_code=None, headed_codes=None):
     """Открыт ли раздел «Продакшн» — то же правило, что у его ручек.
 
-    Маркетинг (сотрудник или глава отдела), админ со всеми задачами и тот, у
-    кого есть своя задача продакшна: постановщик, поручитель, исполнитель.
+    Супер-админу и маркетингу: сотруднику отдела или его главе. Решение
+    владельца 16.10.2026 перед выкладкой: «можно раздел открыть для
+    суперадминов и для маркетинга». Постановщик из другого отдела свою задачу
+    продакшна ведёт в «Задачах», как и раньше.
     Здесь решается только пункт меню; обязательную границу держит каждый роут.
 
     Профиль строится на каждом входе и обновлении токена, поэтому отдел и
@@ -66930,22 +66926,18 @@ def _production_section_open_for(user_id, role=None, department_code=None, heade
         import task_production
         from task_production import queries as production_queries
 
+        if _is_super_admin_role(_normalize_user_role(role)):
+            return True
         code = task_production.PRODUCTION_DEPARTMENT_CODE
-        role = _normalize_user_role(role)
-        known_heads = None if headed_codes is None else [str(c or '').lower() for c in headed_codes]
-        if str(department_code or '').strip().lower() == code or (known_heads and code in known_heads):
-            # Маркетингу «Задачи» выданы картой отдела — второй проверки не нужно.
+        if str(department_code or '').strip().lower() == code:
             return True
-        if not _can_access_tasks(role, user_id):
+        heads = headed_codes if headed_codes is not None else (_headed_department_codes(user_id) or [])
+        if code in [str(c or '').strip().lower() for c in heads]:
+            return True
+        if department_code is not None:
             return False
-        if _production_full_scope(role, user_id):
-            return True
-        if known_heads is None and code in [str(c or '').lower() for c in (_headed_department_codes(user_id) or [])]:
-            return True
         with db._get_cursor() as cursor:
-            if department_code is None and production_queries.is_marketing_member(cursor, user_id):
-                return True
-            return bool(production_queries.has_production_relation(cursor, user_id))
+            return bool(production_queries.is_marketing_member(cursor, user_id))
     except Exception:
         logging.exception("Продакшн: не удалось определить доступ к разделу для %s", user_id)
         return False
@@ -66959,7 +66951,6 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         task_guard=_task_route_guard,
-        full_task_access=_production_full_scope,
         headed_department_codes=_headed_department_codes,
         is_super_admin=_is_super_admin_role,
         allowed_origin=_is_allowed_origin,

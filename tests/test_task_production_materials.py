@@ -449,7 +449,7 @@ class RouteTests(unittest.TestCase):
             'history': {35: []},
             'events': [],
         }
-        self.user = {'id': self.VIDEO, 'role': 'marketing_manager', 'marketing': True, 'relation': True}
+        self.user = {'id': self.VIDEO, 'role': 'marketing_manager', 'marketing': True}
         self.fake_db = _FakeDb(self.store)
         self.gcs_calls = []
         self.client = mock.MagicMock()
@@ -464,7 +464,6 @@ class RouteTests(unittest.TestCase):
 
         patches = {
             'is_marketing_member': lambda cursor, uid: self.user['marketing'],
-            'has_production_relation': lambda cursor, uid: self.user['relation'],
             'task': lambda cursor, task_id: dict(store['tasks'][int(task_id)]) if int(task_id) in store['tasks'] else None,
             'history': lambda cursor, task_id: store['history'].get(int(task_id), []),
             'materials_of': lambda cursor, task_id: [dict(m) for m in store['materials'].values()
@@ -512,8 +511,6 @@ class RouteTests(unittest.TestCase):
         self._gcs = {'client': lambda: self.client, 'bucket_name': lambda: 'bucket'}
 
         def task_guard():
-            if self.user['id'] == self.OUTSIDER and not self.user['relation']:
-                pass
             g.effective_task_role = self.user['role']
             return self.user['id'], (self.user['id'], None, 'Имя', self.user['role']), None, None
 
@@ -522,7 +519,6 @@ class RouteTests(unittest.TestCase):
             require_api_key=lambda fn: fn,
             build_cors_preflight_response=lambda: ('', 204),
             task_guard=task_guard,
-            full_task_access=lambda role, uid: role == 'super_admin',
             headed_department_codes=lambda uid: self._headed_codes(uid),
             is_super_admin=lambda role: role == 'super_admin',
             allowed_origin=lambda origin: origin in ('https://alfa330.github.io',),
@@ -594,10 +590,38 @@ class RouteTests(unittest.TestCase):
         return self.http.post('/api/production/tasks/35/uploads', json={'name': name, 'size': size}, headers=headers)
 
     def test_closed_section_for_outsider(self):
-        self.user.update(id=self.OUTSIDER, role='trainer', marketing=False, relation=False)
+        self.user.update(id=self.OUTSIDER, role='trainer', marketing=False)
         response = self.http.get('/api/production/board')
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()['code'], 'PRODUCTION_CLOSED')
+
+    def test_section_is_for_super_admins_and_marketing(self):
+        # Решение владельца 16.10.2026: «можно раздел открыть для суперадминов и для маркетинга».
+        mid = self._ready()
+        lib = self._library_ready('рилс.mp4', 'reels')
+        # Админ вне маркетинга — даже со всеми задачами в «Задачах» — в раздел не попадает.
+        self.user.update(id=50, role='admin', marketing=False)
+        for method, url in (('get', '/api/production/access'), ('get', '/api/production/board'),
+                            ('get', '/api/production/done'), ('get', '/api/production/tasks/35'),
+                            ('get', '/api/production/library'), ('get', '/api/production/library/history'),
+                            ('get', '/api/production/materials/%s/download' % mid),
+                            ('delete', '/api/production/materials/%s' % lib)):
+            with self.subTest(url=url):
+                response = getattr(self.http, method)(url)
+                self.assertEqual((response.status_code, response.get_json()['code']), (403, 'PRODUCTION_CLOSED'))
+        self.assertIn(lib, self.store['materials'])
+        # Супер-админ вне маркетинга видит всё и управляет «Медиатекой».
+        self.user.update(id=60, role='super_admin', marketing=False)
+        access = self.http.get('/api/production/access').get_json()
+        self.assertEqual((access['scope'], access['marketing'], access['library']), ('all', False, True))
+        self.assertEqual(self.http.get('/api/production/tasks/35').status_code, 200)
+        body = self.http.get('/api/production/library').get_json()
+        self.assertTrue(body['items'][0]['can_delete'])
+        self.assertEqual(self.http.patch('/api/production/library/%s' % lib, json={'category': 'ad'}).status_code, 200)
+        # Глава маркетинга не из отдела — тоже маркетинг.
+        with mock.patch.object(self, '_headed_codes', lambda uid: ['marketing']):
+            self.user.update(id=70, role='admin', marketing=False)
+            self.assertEqual(self.http.get('/api/production/access').get_json()['marketing'], True)
 
     def test_start_upload_happy_path(self):
         response = self._start()
@@ -734,20 +758,19 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertFalse([c for c in self.gcs_calls if c[0] == 'open'])
 
-    def test_outsider_with_own_task_cannot_reach_foreign_task(self):
+    def test_requester_outside_marketing_is_closed_out(self):
         mid = self._ready()
-        # Постановщик другой задачи продакшна: раздел открыт, а задача 35 — чужая.
-        self.user.update(id=50, role='operator', marketing=False, relation=True)
-        self.assertEqual(self.http.get('/api/production/tasks/35').status_code, 404)
-        self.assertEqual(self.http.get('/api/production/materials/%s/download' % mid).status_code, 404)
-        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 404)
+        # Постановщик из другого отдела ведёт свою задачу в «Задачах»; раздел и файлы ему закрыты.
+        self.user.update(id=50, role='operator', marketing=False)
+        self.assertEqual(self.http.get('/api/production/tasks/35').status_code, 403)
+        self.assertEqual(self.http.get('/api/production/materials/%s/download' % mid).status_code, 403)
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 403)
         self.assertIn(mid, self.store['materials'])
 
-    def test_assignee_outside_marketing_sees_own_task(self):
-        self.user.update(marketing=False, relation=True)  # VIDEO — исполнитель задачи 35
+    def test_assignee_outside_marketing_is_closed_out(self):
+        self.user.update(marketing=False)  # VIDEO — исполнитель задачи 35, но не маркетинг
         response = self.http.get('/api/production/tasks/35')
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.get_json()['is_assignee'])
+        self.assertEqual((response.status_code, response.get_json()['code']), (403, 'PRODUCTION_CLOSED'))
 
     def test_review_needs_task_visibility(self):
         self.store['tasks'][35].update(status='completed', completed_count=1)
@@ -1029,10 +1052,11 @@ class RouteTests(unittest.TestCase):
         pending = self._library_start(category='ad').get_json()['material_id']
         self.assertEqual(self.http.patch('/api/production/library/%s' % pending, json={'category': 'reels'}).status_code, 404)
         self.assertEqual(self.http.patch('/api/production/library/not-a-uuid', json={'category': 'reels'}).status_code, 404)
-        # Свой охват — «Медиатека» закрыта целиком.
-        self.user.update(id=50, role='admin', marketing=False, relation=True)
+        # Не маркетинг и не супер-админ — раздел закрыт целиком.
+        self.user.update(id=50, role='admin', marketing=False)
         closed = self.http.patch('/api/production/library/%s' % mid, json={'category': 'animation'})
-        self.assertEqual(closed.get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+        self.assertEqual(closed.get_json()['code'], 'PRODUCTION_CLOSED')
+        self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
 
     def test_library_delete_and_cancel_in_history(self):
         mid = self._library_ready(category='reels')
@@ -1063,8 +1087,8 @@ class RouteTests(unittest.TestCase):
         reels = self.http.get('/api/production/library/history?category=reels').get_json()
         self.assertEqual([e['action'] for e in reels['events']], ['moved', 'added'])
         self.assertEqual(self.http.get('/api/production/library/history?category=x').status_code, 400)
-        self.user.update(id=50, role='admin', marketing=False, relation=True)
-        self.assertEqual(self.http.get('/api/production/library/history').get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+        self.user.update(id=50, role='admin', marketing=False)
+        self.assertEqual(self.http.get('/api/production/library/history').get_json()['code'], 'PRODUCTION_CLOSED')
 
     def test_library_resume_takes_latest_category(self):
         mid = self._library_start(category='ad').get_json()['material_id']
@@ -1076,16 +1100,15 @@ class RouteTests(unittest.TestCase):
         self.assertTrue(response.get_json()['resumed'])
         self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
 
-    def test_library_closed_for_own_scope(self):
+    def test_library_closed_outside_marketing(self):
         mid = self._library_ready()
-        self.user.update(id=50, role='admin', marketing=False, relation=True)  # постановщик своей задачи
-        self.assertEqual(self.http.get('/api/production/library').get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
-        self.assertEqual(self._library_start().get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
-        self.assertEqual(self.http.get('/api/production/materials/%s/download' % mid).status_code, 404)
-        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 404)
+        self.user.update(id=50, role='admin', marketing=False)  # постановщик своей задачи
+        self.assertEqual(self.http.get('/api/production/library').get_json()['code'], 'PRODUCTION_CLOSED')
+        self.assertEqual(self._library_start().get_json()['code'], 'PRODUCTION_CLOSED')
+        self.assertEqual(self.http.get('/api/production/materials/%s/download' % mid).status_code, 403)
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 403)
         self.assertIn(mid, self.store['materials'])
-        access = self.http.get('/api/production/access').get_json()
-        self.assertFalse(access['library'])
+        self.assertEqual(self.http.get('/api/production/access').status_code, 403)
 
     def test_library_delete_rules(self):
         mid = self._library_ready()
@@ -1180,25 +1203,25 @@ class WiringTests(unittest.TestCase):
         window = self.app[max(0, at - 400):at]
         self.assertIn('{canAccessProductionSection && (', window)
 
-    def test_profile_flag_follows_tasks_access(self):
+    def test_profile_flag_is_super_admins_and_marketing(self):
         """_production_section_open_for исполняется по-настоящему, имена сверены с модулем."""
         import ast
         tree = ast.parse(self.bot)
         top = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
         funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)
-                 and n.name in ('_production_section_open_for', '_production_full_scope')}
-        self.assertEqual(set(funcs), {'_production_section_open_for', '_production_full_scope'})
+                 and n.name == '_production_section_open_for'}
+        self.assertEqual(set(funcs), {'_production_section_open_for'})
         called = {n.func.id for f in funcs.values() for n in ast.walk(f)
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        stubs = {'_normalize_user_role', '_can_access_tasks', '_is_global_admin_requester',
-                 '_has_full_task_access', '_headed_department_codes'}
+        stubs = {'_normalize_user_role', '_is_super_admin_role', '_headed_department_codes'}
         self.assertTrue(stubs <= top, stubs - top)
         self.assertTrue(called - {'bool', 'int', 'str'} <= stubs | set(funcs), called)
 
-        state = {'tasks': True, 'full': False, 'heads': [], 'member': False, 'relation': False}
+        state = {'heads': [], 'member': False, 'db_calls': 0}
 
         class _Cur:
             def __enter__(self):
+                state['db_calls'] += 1
                 return self
 
             def __exit__(self, *exc):
@@ -1208,37 +1231,30 @@ class WiringTests(unittest.TestCase):
         namespace = {
             'logging': mock.MagicMock(),
             '_normalize_user_role': lambda role: role,
-            '_can_access_tasks': lambda role, uid: state['tasks'],
-            '_is_global_admin_requester': lambda role, uid: False,
-            '_has_full_task_access': lambda role, uid: state['full'],
+            '_is_super_admin_role': lambda role: role == 'super_admin',
             '_headed_department_codes': lambda uid: state['heads'],
             'db': types.SimpleNamespace(_get_cursor=lambda: _Cur()),
         }
         module = ast.Module(body=list(funcs.values()), type_ignores=[])
         exec(compile(module, str(BOT), 'exec'), namespace)
         open_for = namespace['_production_section_open_for']
-        with mock.patch.object(production_queries, 'is_marketing_member', lambda c, u: state['member']), \
-                mock.patch.object(production_queries, 'has_production_relation', lambda c, u: state['relation']):
-            self.assertFalse(open_for(None, 'admin'))
+        with mock.patch.object(production_queries, 'is_marketing_member', lambda c, u: state['member']):
+            self.assertFalse(open_for(None, 'super_admin'))
+            self.assertTrue(open_for(5, 'super_admin'))
+            self.assertFalse(open_for(5, 'admin'))  # админ со всеми задачами — не маркетинг
             self.assertFalse(open_for(5, 'operator'))
-            state['relation'] = True
-            self.assertTrue(open_for(5, 'operator'))
-            state.update(relation=False, member=True)
+            state['member'] = True
             self.assertTrue(open_for(5, 'marketing_manager'))
-            state.update(member=False, heads=['marketing'])
+            state.update(member=False, heads=['Marketing'])
             self.assertTrue(open_for(5, 'admin'))
-            # Нет «Задач» — нет и раздела, даже админу со всеми задачами.
-            state.update(tasks=False, full=True)
-            self.assertFalse(open_for(5, 'admin'))
-            # Отдел из профиля: маркетингу — сразу да, без базы и без второй проверки.
-            state.update(tasks=False, full=False, heads=[], member=False, relation=False)
+            # Отдел из профиля: маркетингу — сразу да, без базы.
+            state.update(heads=[], db_calls=0)
             self.assertTrue(open_for(5, 'marketing_manager', department_code='marketing', headed_codes=[]))
             self.assertTrue(open_for(5, 'admin', department_code='szov', headed_codes=['MARKETING']))
-            # Профиль сказал «не маркетинг» — в базу за этим не ходим, только за своими задачами.
-            state.update(tasks=True, member=True)
+            # Профиль сказал «не маркетинг» — в базу за этим не ходим.
+            state['member'] = True
             self.assertFalse(open_for(5, 'admin', department_code='szov', headed_codes=[]))
-            state['relation'] = True
-            self.assertTrue(open_for(5, 'admin', department_code='szov', headed_codes=[]))
+            self.assertEqual(state['db_calls'], 0)
 
 
 if __name__ == '__main__':

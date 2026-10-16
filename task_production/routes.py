@@ -63,7 +63,7 @@ def _int(value, default=None):
 
 
 def build_production_blueprint(*, db, require_api_key, build_cors_preflight_response, task_guard,
-                               full_task_access, headed_department_codes, is_super_admin,
+                               headed_department_codes, is_super_admin,
                                allowed_origin, gcs=None, avatar_url=None, blob_prefix=None):
     """Собирает Blueprint раздела.
 
@@ -71,8 +71,6 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
     действующая роль в g.effective_task_role — ровно те права, с которыми этот
     человек двигает статусы задачи, поэтому кнопки здесь совпадут с тем, что
     сервер позволит.
-    full_task_access(role, id) — видит ли человек ВСЕ задачи (админ без отдела,
-    супер-админ, поимённый список).
     headed_department_codes(id) — коды отделов, которые человек возглавляет.
     allowed_origin(origin) — пускает ли портал этот сайт (тот же список, что у CORS).
     gcs — {'bucket_name': () -> str, 'client': () -> Client}.
@@ -108,19 +106,22 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
                         'base_role': base_role,
                         'super_admin': bool(is_super_admin(base_role)),
                     }
-                    # Обе проверки сами ходят в базу своим соединением — звать их ДО того,
+                    # Проверка главы сама ходит в базу своим соединением — звать её ДО того,
                     # как этот запрос займёт своё: пул общий на портал, и запрос, который
                     # держит одно соединение и ждёт второе, при занятом пуле ждал бы 30 с.
                     heads_marketing = (task_production.PRODUCTION_DEPARTMENT_CODE
                                        in [str(c).lower() for c in (headed_department_codes(requester_id) or [])])
-                    full = bool(full_task_access(base_role, requester_id))
                     with db._get_cursor() as cursor:
                         marketing = heads_marketing or queries.is_marketing_member(cursor, requester_id)
-                        ctx['marketing'] = bool(marketing)
-                        ctx['heads_marketing'] = bool(heads_marketing)
-                        ctx['scope_all'] = bool(full or marketing)
-                        if not ctx['scope_all'] and not queries.has_production_relation(cursor, requester_id):
-                            raise ApiError('Раздел «Продакшн» вам не открыт', 403, 'PRODUCTION_CLOSED')
+                    # Раздел открыт супер-админу и маркетингу (решение владельца 16.10.2026:
+                    # «можно раздел открыть для суперадминов и для маркетинга»). Оба видят
+                    # всё — охват «свои задачи» в запросах остаётся на случай, если раздел
+                    # откроют и постановщикам из других отделов.
+                    if not (ctx['super_admin'] or marketing):
+                        raise ApiError('Раздел «Продакшн» открыт маркетингу и супер-админам', 403, 'PRODUCTION_CLOSED')
+                    ctx['marketing'] = bool(marketing)
+                    ctx['heads_marketing'] = bool(heads_marketing)
+                    ctx['scope_all'] = True
                     return handler(*args, ctx=ctx, **kwargs)
                 except ApiError as exc:
                     return _json({'error': str(exc), 'code': exc.code}, exc.status)

@@ -160,8 +160,6 @@ def test_board_scope_and_filters(db):
         assert {t['subject'] for t in queries.board(cur, scope_all=False, user_id=REQUESTER)} == {'Заказ чужого отдела'}
         assert queries.board(cur, scope_all=False, user_id=OUTSIDER) == []
 
-        assert queries.has_production_relation(cur, REQUESTER)
-        assert not queries.has_production_relation(cur, OUTSIDER)
         assert queries.is_marketing_member(cur, SMM)
         assert not queries.is_marketing_member(cur, REQUESTER)
         card = next(t for t in queries.board(cur, scope_all=True, user_id=VIDEO) if t['id'] == smm)
@@ -270,7 +268,6 @@ def test_requester_sees_ordered_task(db):
     with db.cursor() as cur:
         ordered = _task(cur, 'Поручено', creator=HEAD, requested_by=REQUESTER)
         assert [t['id'] for t in queries.board(cur, scope_all=False, user_id=REQUESTER)] == [ordered]
-        assert queries.has_production_relation(cur, REQUESTER)
         _task(cur, 'Принято поручителю', status='accepted', creator=HEAD, requested_by=REQUESTER)
         assert queries.done(cur, scope_all=False, user_id=REQUESTER)[1] == 1
 
