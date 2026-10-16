@@ -244,6 +244,24 @@ def test_line_busy_is_not_an_attempt(env):
     assert len(again) == 1 and again[0]['call_id'] != call['call_id']
 
 
+def test_no_link_is_not_an_attempt_and_kept_apart(env):
+    """16.10.2026: вызов не дошёл до Binotel — водителю не звонили; попытка цела, повтор через 5 минут,
+    в долях итогов «нет связи» не участвует (иначе «не ответил» врёт про водителей)."""
+    svc, clock, _ = env
+    campaign = make_campaign(svc, phones(1), max_attempts=1)
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    call = poll(svc)['calls'][0]
+    fail(svc, call, rules.RESULT_NO_LINK)
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['targets'][0]['state'] == 'pending' and detail['targets'][0]['attempts'] == 0
+    calls = detail['analytics']['calls']
+    assert calls['no_link'] == 1 and calls['results'] == {}
+    clock.tick(seconds=299)
+    assert poll(svc)['calls'] == []                       # повтор не раньше пяти минут
+    clock.tick(seconds=2)
+    assert len(poll(svc)['calls']) == 1
+
+
 def test_retry_then_give_up(env):
     svc, clock, _ = env
     campaign = make_campaign(svc, phones(1), max_attempts=2, retry_after_min=30)

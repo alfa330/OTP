@@ -22,7 +22,8 @@ import {
     speechLevelDb, trimSilence,
 } from '../src/components/dial_list/informerAudio.js';
 import {
-    CALLS_PER_LINE, CALL_OVERHEAD_S, DEFAULT_AUDIO_S, EXPECTED_RING_S, MAX_PER_MINUTE, campaignActions, lineCapacity,
+    CALLS_PER_LINE, CALL_OVERHEAD_S, DEFAULT_AUDIO_S, EXPECTED_RING_S, MAX_PER_MINUTE, RESULT_LABEL, campaignActions,
+    lineCapacity,
     lineRate, partsLabel, plural, robotSummary, seconds, speechEstimate, stageLabel, stageShares, trackEstimateMs,
 } from '../src/components/dial_list/informerView.js';
 
@@ -102,6 +103,16 @@ test('WAV — PCM 16 бит, моно, 24 кГц: оригинал, которы
     assert.match(server, /PHONE_RATE = 8000/);
     assert.match(server, /CHANNELS = 1/);
     assert.match(server, /BITS = 16/);
+});
+
+test('итоги звонков подписаны так же, как на сервере (и «Нет связи с Binotel»)', () => {
+    const rules = read('../informer/rules.py');
+    const server = Object.fromEntries([...rules.matchAll(/RESULT_([A-Z_]+) = '([a-z_]+)'/g)].map((m) => [m[1], m[2]]));
+    for (const [name, code] of Object.entries(server)) {
+        const label = rules.match(new RegExp(`RESULT_${name}: '([^']+)'`));
+        if (label) assert.equal(RESULT_LABEL[code], label[1], `подпись итога ${code}`);
+    }
+    assert.equal(RESULT_LABEL.no_link, 'Нет связи с Binotel');
 });
 
 test('«где положил трубку» — как на сервере', () => {

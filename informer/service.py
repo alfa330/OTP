@@ -252,15 +252,16 @@ class InformerService:
             cur.execute("""
                 SELECT COUNT(*), COUNT(*) FILTER (WHERE result = 'answered'),
                        COUNT(*) FILTER (WHERE result = 'line_busy'),
+                       COUNT(*) FILTER (WHERE result = 'no_link'),
                        COUNT(*) FILTER (WHERE NOT finished)
                 FROM informer_calls WHERE campaign_id = %s
             """, (int(campaign_id),))
-            calls_total, calls_answered, calls_line_busy, calls_open = cur.fetchone()
+            calls_total, calls_answered, calls_line_busy, calls_no_link, calls_open = cur.fetchone()
             cur.execute("""
                 SELECT result, COUNT(*) FROM informer_calls
-                WHERE campaign_id = %s AND finished AND result <> 'line_busy'
+                WHERE campaign_id = %s AND finished AND NOT (result = ANY(%s))
                 GROUP BY result
-            """, (int(campaign_id),))
+            """, (int(campaign_id), list(rules.NOT_ATTEMPTS)))
             results = {res: int(n) for res, n in cur.fetchall()}
             targets = []
             if targets_limit:
@@ -297,8 +298,8 @@ class InformerService:
                 rules.STAGE_FULL: int(full or 0),
             },
             "calls": {"total": int(calls_total or 0), "answered": int(calls_answered or 0),
-                      "line_busy": int(calls_line_busy or 0), "open": int(calls_open or 0),
-                      "results": results},
+                      "line_busy": int(calls_line_busy or 0), "no_link": int(calls_no_link or 0),
+                      "open": int(calls_open or 0), "results": results},
         }
         campaign["targets"] = targets
         return campaign

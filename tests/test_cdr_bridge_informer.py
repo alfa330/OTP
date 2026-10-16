@@ -43,6 +43,10 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     # 16.10.2026: вызов шёл весь срок, причина 0 и ответа на набор не пришло (Binotel: CANCEL) — недозвон.
     ({'dialed_at': 0, 'ended_at': 35, 'cause': 0, 'originate_reason': None}, ('no_answer', '')),
     ({'dialed_at': 0, 'ended_at': 6.3, 'cause': 34}, ('failed', '')),     # 503 сети через 6 с — сбой
+    # 16.10.2026: на INVITE ни одного ответа — таймер B SIP (32 с), 408 от самого Asterisk: до Binotel не дошло.
+    ({'dialed_at': 0, 'ended_at': 32.0, 'cause': 18, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 32.0, 'ringing_at': 4, 'cause': 18}, ('no_answer', '')),   # гудки были
+    ({'dialed_at': 0, 'ended_at': 20, 'cause': 18}, ('no_answer', '')),                       # не таймер B
 ])
 def test_classify(call, expected):
     assert informer.classify(call) == expected
@@ -116,14 +120,14 @@ class Clock:
         return self.now
 
 
-def make(tmp_path, polls, audio=None, lines=('939',), max_per_minute=0):
+def make(tmp_path, polls, audio=None, lines=('939',), max_per_minute=0, dial_gap_ms=0):
     clock = Clock()
     portal = FakePortal(polls, audio)
     ami = FakeAmi()
     config = {'portal': 'https://portal.test', 'proxy': '', 'ca_bundle': '', 'key_file': '', 'private_key': '',
               'lines': list(lines), 'per_line': 2, 'sounds_dir': str(tmp_path), 'heartbeat_file': '',
               'ami_host': '127.0.0.1', 'ami_port': 5038, 'ami_user': 'dispatcher', 'ami_secret': 's',
-              'max_per_minute': max_per_minute}
+              'max_per_minute': max_per_minute, 'dial_gap_ms': dial_gap_ms}
     d = informer.Dispatcher(config, session=portal, ami=ami, clock=clock)
     d.signer = Signer()
     return d, portal, ami, clock
@@ -207,6 +211,59 @@ def test_minute_guard_when_configured(tmp_path):
     assert d.rate_room() == 10
 
 
+def _no_link(clock, call_id, line='902'):
+    return {'call_id': call_id, 'line': line, 'dialed_at': clock.now - 32, 'ended_at': clock.now, 'cause': 18}
+
+
+def test_link_breaker_pauses_dialing_then_probes_with_one_call(tmp_path):
+    """16.10.2026: офисная сеть отрезала VM от Binotel — робот 6 минут слал вызовы в пустоту. Теперь после
+    трёх «нет связи» подряд он не берёт звонков, ждёт 2, 5, 15 минут и проверяет связь одним звонком."""
+    d, portal, ami, clock = make(tmp_path, [], lines=('902', '903'))
+    d.finish(_no_link(clock, 1))
+    d.finish(_no_link(clock, 2))
+    assert d.lines_state()['902']['capacity'] == 2 and d.link_error() == ''   # два подряд — ещё не пауза
+    d.finish(_no_link(clock, 3))
+    assert all(info['capacity'] == info['active'] for info in d.lines_state().values())   # мест нет
+    assert 'на паузе' in d.link_error()
+    d.finish(_no_link(clock, 4))                                  # хвост набранных до паузы — не продлевает
+    clock.now += 121
+    state = d.lines_state()
+    assert (state['902']['capacity'], state['903']['capacity']) == (1, 0)   # одно место — пробный звонок
+    assert 'одним звонком' in d.link_error()
+    d.finish(_no_link(clock, 5))                                  # пробный не дошёл — пауза 5 минут
+    clock.now += 121
+    assert d.lines_state()['902']['capacity'] == 0
+    clock.now += 180
+    assert d.lines_state()['902']['capacity'] == 1
+    d.finish({'call_id': 6, 'line': '902', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
+              'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
+    assert d.lines_state()['902']['capacity'] == 2 and d.link_error() == ''   # дошёл — полный ход
+    assert [r['result'] for r in portal.results] == []            # итоги ушли в очередь портала, не потеряны
+    assert len(d.pending) == 6
+
+
+def test_jobs_during_link_pause_go_back_to_queue(tmp_path):
+    d, portal, ami, clock = make(tmp_path, [{'calls': [job(81), job(82)], 'next_poll_sec': 2}], audio={3: WAV})
+    for call_id in (1, 2, 3):
+        d.finish(_no_link(clock, call_id, line='939'))
+    d.tick()
+    assert ami.sent == []                                         # в паузе не звоним
+    back = {r['call_id']: r['result'] for r in portal.results if r['call_id'] in (81, 82)}
+    assert back == {81: 'line_busy', 82: 'line_busy'}             # водители — обратно в очередь, без попытки
+    assert d.link_level == 1                                      # свой отказ связь «починенной» не делает
+    assert 'на паузе' in portal.last_poll['error']                # портал и карточка робота знают почему
+
+
+def test_dials_one_by_one_with_gap(tmp_path):
+    jobs = [job(70 + i, line=str(900 + i)) for i in range(3)]
+    d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV},
+                                 lines=tuple(str(900 + i) for i in range(3)), dial_gap_ms=1000)
+    slept = []
+    d.sleep = slept.append
+    d.tick()
+    assert len(ami.sent) == 3 and slept == [1.0, 1.0]             # не залпом: пауза между наборами
+
+
 def test_config_reads_lines_and_minute_guard(monkeypatch):
     monkeypatch.setenv('INFORMER_LINES', '902, 907,939')
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '')
@@ -214,6 +271,9 @@ def test_config_reads_lines_and_minute_guard(monkeypatch):
     assert config['lines'] == ['902', '907', '939'] and config['max_per_minute'] == 0
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '25')
     assert informer.load_config()['max_per_minute'] == 25
+    assert informer.load_config()['dial_gap_ms'] == informer.DIAL_GAP_MS == 1000
+    monkeypatch.setenv('INFORMER_DIAL_GAP_MS', '0')
+    assert informer.load_config()['dial_gap_ms'] == 0
 
 
 def test_bad_audio_and_unknown_line_do_not_call(tmp_path):

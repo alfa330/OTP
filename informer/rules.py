@@ -39,8 +39,14 @@ RESULT_REJECTED = 'rejected'        # сбросил вызов
 RESULT_LINE_BUSY = 'line_busy'      # Binotel не дал линию (480 сразу, без вызова)
 RESULT_FAILED = 'failed'            # робот или АТС не смогли позвонить
 RESULT_LOST = 'lost'                # итог не пришёл (перезапуск, обрыв)
+# До Binotel вызов не дошёл: на INVITE ни одного ответа за 32 с (16.10.2026: офисная сеть отрезала VM от
+# Binotel после залпа вызовов — 230 звонков «не ответил», хотя водителям никто не звонил).
+RESULT_NO_LINK = 'no_link'
 RESULTS = (RESULT_ANSWERED, RESULT_NO_ANSWER, RESULT_BUSY, RESULT_UNAVAILABLE, RESULT_REJECTED,
-           RESULT_LINE_BUSY, RESULT_FAILED, RESULT_LOST)
+           RESULT_LINE_BUSY, RESULT_NO_LINK, RESULT_FAILED, RESULT_LOST)
+# Водителю не звонили вовсе — попыткой не считается, в доли итогов не входит.
+NOT_ATTEMPTS = (RESULT_LINE_BUSY, RESULT_NO_LINK)
+NO_LINK_RETRY_SECONDS = 300         # связь пропала — повтор не раньше, чем через 5 минут
 RESULT_LABELS = {
     RESULT_ANSWERED: 'Дозвонились',
     RESULT_NO_ANSWER: 'Не ответил',
@@ -48,6 +54,7 @@ RESULT_LABELS = {
     RESULT_UNAVAILABLE: 'Недоступен',
     RESULT_REJECTED: 'Сбросил',
     RESULT_LINE_BUSY: 'Линия занята',
+    RESULT_NO_LINK: 'Нет связи с Binotel',
     RESULT_FAILED: 'Ошибка АТС',
     RESULT_LOST: 'Итог не пришёл',
     '': 'Звоним',
@@ -135,12 +142,14 @@ def stage_label(stage):
 def after_result(result, attempts, max_attempts, retry_after_minutes, now):
     """(состояние водителя, когда звонить снова | None, попыток после учёта) по итогу звонка.
 
-    «Линия занята» попыткой не считается: Binotel водителю не звонил вовсе."""
+    «Линия занята» и «Нет связи с Binotel» попыткой не считаются: водителю не звонили вовсе."""
     attempts = max(0, int(attempts))
     if result == RESULT_ANSWERED:
         return STATE_DONE, None, attempts
     if result == RESULT_LINE_BUSY:
         return STATE_PENDING, now + timedelta(seconds=LINE_BUSY_RETRY_SECONDS), max(0, attempts - 1)
+    if result == RESULT_NO_LINK:
+        return STATE_PENDING, now + timedelta(seconds=NO_LINK_RETRY_SECONDS), max(0, attempts - 1)
     if attempts >= int(max_attempts):
         return STATE_GIVEN_UP, None, attempts
     return STATE_PENDING, now + timedelta(minutes=int(retry_after_minutes)), attempts
