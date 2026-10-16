@@ -205,19 +205,19 @@ def test_played_to_end_and_originate_failure_without_channel(tmp_path):
     assert by_id[32]['result'] == 'busy'
 
 
-def test_at_most_ten_calls_at_once(tmp_path):
+def test_at_most_fifteen_calls_at_once(tmp_path):
     """Владелец, 16.10.2026, после того как залп 46 в минуту уронил исходящие всему кабинету: «жёстких залпов
-    делать не надо вообще, по 3 максимум»; вечером поднял до 10. Портал видит ровно столько мест, лишнее от
-    него — «линия занята», в очередь."""
-    lines = tuple(str(900 + i) for i in range(12))
+    делать не надо вообще, по 3 максимум»; вечером поднял до 10, затем до 15. Портал видит ровно столько мест,
+    лишнее от него — «линия занята», в очередь."""
+    lines = tuple(str(900 + i) for i in range(20))
     jobs = [job(100 + i, line=line) for i, line in enumerate(lines)]
     d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV}, lines=lines)
     state = d.lines_state()
-    assert sum(info['capacity'] for info in state.values()) == 10          # всего десять мест…
-    assert [line for line, info in state.items() if info['capacity']] == [str(900 + i) for i in range(10)]   # …по одному
+    assert sum(info['capacity'] for info in state.values()) == 15          # всего пятнадцать мест…
+    assert [line for line, info in state.items() if info['capacity']] == [str(900 + i) for i in range(15)]   # …по одному
     d.tick()
-    assert len(ami.sent) == 10
-    assert len([r for r in portal.results if r['result'] == 'line_busy']) == 2
+    assert len(ami.sent) == 15
+    assert len([r for r in portal.results if r['result'] == 'line_busy']) == 5
     assert d.rate_room() == float('inf') and d.active_room() == 0
     assert all(info['capacity'] == info['active'] for info in d.lines_state().values())   # мест нет
     d.finish({'call_id': 101, 'line': '901', 'dialed_at': clock.now - 30, 'answered_at': clock.now - 26,
@@ -334,7 +334,7 @@ def test_config_reads_lines_and_minute_guard(monkeypatch):
     assert config['lines'] == ['902', '907', '939'] and config['max_per_minute'] == 0
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '25')
     assert informer.load_config()['max_per_minute'] == 25
-    assert config['max_active'] == informer.MAX_ACTIVE_CALLS == 10       # по умолчанию — не больше десяти разом
+    assert config['max_active'] == informer.MAX_ACTIVE_CALLS == 15       # по умолчанию — не больше пятнадцати разом
     monkeypatch.setenv('INFORMER_MAX_ACTIVE', '0')
     assert informer.load_config()['max_active'] == 0
     assert informer.load_config()['dial_gap_ms'] == informer.DIAL_GAP_MS == 1000

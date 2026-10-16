@@ -138,19 +138,19 @@ test('подписи: секунды, части, оценка длительн�
     assert.deepEqual(campaignActions('done'), { start: false, pause: false, finish: false });
 });
 
-test('темп в форме — сколько тянет робот при десяти звонках разом, как на сервере', () => {
+test('темп в форме — сколько тянет робот при пятнадцати звонках разом, как на сервере', () => {
     const nine = Object.fromEntries([902, 907, 919, 923, 925, 928, 939, 942, 944]
         .map((n) => [String(n), { capacity: 2, active: 0 }]));
     assert.equal(lineCapacity(nine), 18);
     assert.equal(lineCapacity({ 939: { capacity: 'x' }, 940: null, 941: { capacity: 2 } }), 2);
-    assert.equal(MAX_ACTIVE_CALLS, 10);
-    // Те же числа, что в tests/test_informer_rules.py: test_line_rate_is_what_robot_fits_with_ten_at_once.
-    assert.equal(lineRate(18, 25520), 15);
-    assert.equal(lineRate(18, 8120), 27);
-    assert.equal(lineRate(18, 0), 15);
+    assert.equal(MAX_ACTIVE_CALLS, 15);
+    // Те же числа, что в tests/test_informer_rules.py: test_line_rate_is_what_robot_fits_with_fifteen_at_once.
+    assert.equal(lineRate(18, 25520), 22);
+    assert.equal(lineRate(18, 8120), 40);
+    assert.equal(lineRate(18, 0), 22);
     assert.equal(lineRate(0, 25520), 3);
     assert.equal(lineRate(2, 300000), 1);
-    assert.equal(lineRate(10000, 1000), 40);
+    assert.equal(lineRate(10000, 1000), 60);
     // Длина записи по текстам: склейка 2,9 с (пауза 2 с в начале) + ~13 знаков в секунду; без текста — обычная.
     assert.equal(trackEstimateMs({ kz: 'x'.repeat(130), ru: 'y'.repeat(130) }), 22900);
     assert.equal(trackEstimateMs({ kz: '  ', ru: '' }), 0);
