@@ -35,6 +35,7 @@ from typing import List, Dict, Any, Tuple, Optional
 
 import supervisor_hours
 from supervisor_hours import SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
+import task_production
 
 logging.basicConfig(level=logging.INFO)
 
@@ -575,6 +576,12 @@ TASK_RECIPIENT_ROLES = ('super_admin', 'admin', 'sv', *sorted(BACK_OFFICE_EMPLOY
 # как литералы, отдельными плейсхолдерами их не сделать (список ролей меняет
 # длину, а параметры этого запроса считаются по позициям).
 _TASK_RECIPIENT_ROLES_SQL = ", ".join(f"'{role}'" for role in TASK_RECIPIENT_ROLES)
+
+# Типы задачи («Тип» в форме). Один список на CHECK, создание, правку и фильтр
+# списка: до «Продакшна» он был переписан литералом в четырёх местах, и новый
+# тип пришлось бы не забыть ни в одном. Продакшн — задача #354, бриф к нему
+# проверяет task_production.
+TASK_TAG_CODES = ('task', 'problem', 'suggestion', task_production.PRODUCTION_TAG)
 
 CALCULATION_MODEL_OPERATOR = 'operator'
 CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
@@ -4575,7 +4582,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     subject VARCHAR(255) NOT NULL,
                     description TEXT,
-                    tag VARCHAR(32) NOT NULL DEFAULT 'task' CHECK (tag IN ('task', 'problem', 'suggestion')),
+                    tag VARCHAR(32) NOT NULL DEFAULT 'task' CHECK (tag IN ('task', 'problem', 'suggestion', 'production')),
                     priority VARCHAR(16) NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal', 'urgent', 'critical')),
                     status VARCHAR(32) NOT NULL DEFAULT 'assigned' CHECK (status IN ('assigned', 'in_progress', 'completed', 'accepted', 'returned')),
                     assigned_to INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -4807,6 +4814,32 @@ class Database:
             # не картинка, картинка загружена до предпросмотра или кадр меньше
             # миниатюры: плитка тогда показывает сам файл.
             cursor.execute("ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS thumb_blob_path TEXT;")
+
+            # ──────────────────────────────────────────────────────────────
+            # ПРОДАКШН (задача #354): тип задачи для отдела маркетинга и бриф
+            # к нему — что сделать, где разместят, размеры, цветность. Бриф —
+            # колонкой, а не таблицей: он читается всегда целиком вместе с
+            # задачей, и список задач остаётся одним запросом. NULL у всех
+            # задач, кроме продакшна; коды вариантов проверяет task_production.
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS production_brief JSONB;")
+            # Новый тип в CHECK. Меняем ограничение, только если в нём ещё нет
+            # 'production': иначе каждый старт приложения брал бы на tasks
+            # эксклюзивную блокировку и заново проверял все строки.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                         WHERE conrelid = 'tasks'::regclass
+                           AND conname = 'tasks_tag_check'
+                           AND position('production' IN pg_get_constraintdef(oid)) > 0
+                    ) THEN
+                        ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_tag_check;
+                        ALTER TABLE tasks ADD CONSTRAINT tasks_tag_check
+                            CHECK (tag IN ('task', 'problem', 'suggestion', 'production'));
+                    END IF;
+                END $$;
+            """)
 
             # ──────────────────────────────────────────────────────────────
             # СОСТАВ ИСПОЛНИТЕЛЕЙ. У задачи их может быть несколько, и права у
@@ -58510,8 +58543,10 @@ class Database:
                 # иначе роли вне списка получателей (например trainer) не могут ничего себе записать.
                 params.append(requester_id)
                 cursor.execute(f"""
-                    SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
+                    SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working'),
+                           d.code
                     FROM users u
+                    LEFT JOIN departments d ON d.id = u.department_id
                     WHERE COALESCE(u.status, 'working') <> 'fired'
                       AND (
                           (u.role IN ({_TASK_RECIPIENT_ROLES_SQL}) {scope_filter})
@@ -58530,7 +58565,10 @@ class Database:
                 "name": row[1],
                 "role": row[2],
                 "supervisor_id": row[3],
-                "status": row[4]
+                "status": row[4],
+                # Отдел — чтобы форма знала, когда предлагать тип «Продакшн»
+                # (исполнитель из маркетинга, задача #354).
+                "department_code": row[5]
             }
             for row in rows
         ]
@@ -58987,7 +59025,8 @@ class Database:
             requested_by_id=None,
             requested_by_name=None,
             reminder_minutes_before=None,
-            assignee_ids=None
+            assignee_ids=None,
+            production_brief=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
@@ -59025,10 +59064,17 @@ class Database:
 
         if not subject_norm:
             raise ValueError("SUBJECT_REQUIRED")
-        if tag_norm not in ('task', 'problem', 'suggestion'):
+        if tag_norm not in TASK_TAG_CODES:
             raise ValueError("INVALID_TAG")
+        # Бриф — только у продакшна. У задачи другого типа он молча
+        # отбрасывается: это остаток формы, где тип передумали.
+        production_brief_norm = self._normalize_task_production_brief(
+            tag_norm, production_brief, description_norm
+        )
 
         with self._get_cursor() as cursor:
+            if production_brief_norm is not None:
+                self._require_task_production_assignee_tx(cursor, assignee_ids_norm)
             # Новые элементы бэклога встают в конец очереди приоритезации.
             backlog_rank = None
             if is_backlog_norm:
@@ -59042,9 +59088,9 @@ class Database:
                     recurrence_interval, recurrence_next_at, regulation_iteration,
                     is_backlog, backlog_rank, estimate_minutes, planned_start_at,
                     requested_by_id, requested_by_name, reminder_minutes_before,
-                    created_at, updated_at
+                    production_brief, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at, updated_at
             """, (
                 subject_norm,
@@ -59066,6 +59112,7 @@ class Database:
                 requested_by_id_norm,
                 requested_by_name_norm,
                 reminder_minutes_norm if due_at else None,
+                Json(production_brief_norm) if production_brief_norm is not None else None,
                 now,
                 now
             ))
@@ -59116,6 +59163,7 @@ class Database:
             "requested_by_id": requested_by_id_norm,
             "requested_by_name": requested_by_name_norm,
             "reminder_minutes_before": reminder_minutes_norm if due_at else None,
+            "production_brief": production_brief_norm,
             # Кого фактически записали: по этому списку роут рассылает Telegram.
             "assignee_ids": list(assignee_ids_norm)
         }
@@ -59141,7 +59189,8 @@ class Database:
             requested_by_id=_UNSET,
             requested_by_name=_UNSET,
             reminder_minutes_before=_UNSET,
-            assignee_ids=_UNSET
+            assignee_ids=_UNSET,
+            production_brief=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -59166,12 +59215,16 @@ class Database:
         has_planned_start = planned_start_at is not _UNSET
         has_origin = requested_by_id is not _UNSET or requested_by_name is not _UNSET
         has_reminder = reminder_minutes_before is not _UNSET
+        # Ключа нет — бриф не трогаем (так шлёт вкладка, открытая до выхода
+        # «Продакшна»); None — убрать бриф; словарь — заменить целиком.
+        has_production_brief = production_brief is not _UNSET
 
         if not any([
             has_subject, has_description, has_tag, has_assigned_to,
             has_priority, has_deadline, has_due_at, has_is_regulation,
             has_recurrence_type, has_recurrence_interval, has_checklist,
-            has_estimate, has_planned_start, has_origin, has_reminder
+            has_estimate, has_planned_start, has_origin, has_reminder,
+            has_production_brief
         ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
@@ -59186,7 +59239,8 @@ class Database:
                     t.requested_by_id, t.requested_by_name, t.reminder_minutes_before,
                     -- Автор открытого запроса информации: по нему решается,
                     -- снимать ли запрос при смене состава исполнителей.
-                    (SELECT m.author_id FROM task_messages m WHERE m.id = t.info_request_id)
+                    (SELECT m.author_id FROM task_messages m WHERE m.id = t.info_request_id),
+                    t.production_brief
                 FROM tasks t
                 WHERE t.id = %s
             """, (task_id,))
@@ -59213,6 +59267,7 @@ class Database:
             current_requested_by_name = row[17]
             current_reminder = row[18]
             info_request_author_id = row[19]
+            current_production_brief = task_production.stored_brief(row[20])
             current_assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
             current_assignee_ids = [person_id for person_id, _role, _sv in current_assignee_scope]
 
@@ -59246,8 +59301,24 @@ class Database:
                 tag_new = (str(tag or '').strip().lower() or 'task')
             else:
                 tag_new = current_tag
-            if tag_new not in ('task', 'problem', 'suggestion'):
+            if tag_new not in TASK_TAG_CODES:
                 raise ValueError("INVALID_TAG")
+
+            if tag_new != task_production.PRODUCTION_TAG:
+                # Тип сменили с продакшна — бриф уходит вместе с типом: висеть
+                # невидимым в задаче другого типа ему незачем.
+                production_brief_new = None
+            elif has_production_brief or current_production_brief is None:
+                production_brief_new = self._normalize_task_production_brief(
+                    tag_new, production_brief if has_production_brief else None, description_new
+                )
+            else:
+                # Бриф не прислали — остаётся прежний. Заново его не проверяем:
+                # пункт, позже убранный из справочника, не должен запрещать
+                # поправить в старой задаче тему. Описание обязательно всегда.
+                production_brief_new = current_production_brief
+                if not str(description_new or '').strip():
+                    raise ValueError(task_production.incomplete(['description']))
 
             priority_new = current_priority if not has_priority else self._normalize_task_priority(priority)
 
@@ -59328,6 +59399,14 @@ class Database:
             removed_assignees = [pid for pid in current_assignee_ids if pid not in set(assignee_ids_new)]
             if added_assignees or removed_assignees:
                 changed_fields.append("assigned_to")
+            # Маркетинг в составе сверяем, когда продакшн только появляется или
+            # меняется состав. На правке одной темы — нет: сотрудник мог с тех
+            # пор перейти в другой отдел, и задача стала бы неправимой.
+            if production_brief_new is not None and (
+                    tag_new != current_tag or added_assignees or removed_assignees):
+                self._require_task_production_assignee_tx(cursor, assignee_ids_new)
+            if production_brief_new != current_production_brief:
+                changed_fields.append("production_brief")
             if deadline_minutes_new != current_deadline_minutes or due_at_new != current_due_at:
                 changed_fields.append("deadline")
             if recurrence_schedule_changed:
@@ -59367,7 +59446,8 @@ class Database:
                     "recurrence_interval": current_recurrence_interval,
                     "recurrence_next_at": self._task_dt_to_iso(current_recurrence_next_at),
                     "estimate_minutes": current_estimate_minutes,
-                    "planned_start_at": self._task_dt_to_iso(current_planned_start_at)
+                    "planned_start_at": self._task_dt_to_iso(current_planned_start_at),
+                    "production_brief": current_production_brief
                 }
 
             cursor.execute("""
@@ -59389,6 +59469,7 @@ class Database:
                     requested_by_id = %s,
                     requested_by_name = %s,
                     reminder_minutes_before = %s,
+                    production_brief = %s,
                     {reset_reminder_sql}
                     {reset_info_request_sql}
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
@@ -59427,6 +59508,7 @@ class Database:
                 requested_by_id_new,
                 requested_by_name_new,
                 reminder_new,
+                Json(production_brief_new) if production_brief_new is not None else None,
                 task_id
             ))
             updated_row = cursor.fetchone()
@@ -59471,7 +59553,8 @@ class Database:
                 "recurrence_next_at": self._task_dt_to_iso(recurrence_next_at_new),
                 "estimate_minutes": estimate_minutes_new,
                 "planned_start_at": self._task_dt_to_iso(planned_start_at_new),
-                "reminder_minutes_before": reminder_new
+                "reminder_minutes_before": reminder_new,
+                "production_brief": production_brief_new
             }
 
     def _normalize_task_report_kind(self, kind):
@@ -60469,7 +60552,7 @@ class Database:
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.priority, t.assigned_to, t.created_by,
                     t.deadline_duration_minutes, t.recurrence_type, t.recurrence_interval,
-                    t.recurrence_next_at, t.estimate_minutes
+                    t.recurrence_next_at, t.estimate_minutes, t.production_brief
                 FROM tasks t
                 WHERE t.is_regulation = TRUE
                   AND t.regulation_parent_id IS NULL
@@ -60487,8 +60570,11 @@ class Database:
                 (
                     root_id, subject, description, tag, priority, assigned_to, created_by,
                     deadline_minutes, recurrence_type, recurrence_interval, next_at,
-                    template_estimate_minutes
+                    template_estimate_minutes, template_production_brief
                 ) = template
+                # Бриф продакшна копируется в итерацию как есть, вместе с типом:
+                # иначе регламентный продакшн каждый раз рождался бы без ТЗ.
+                template_production_brief = task_production.stored_brief(template_production_brief)
 
                 cursor.execute("""
                     SELECT title, position, is_required
@@ -60529,13 +60615,14 @@ class Database:
                             deadline_duration_minutes, due_at, is_regulation,
                             recurrence_type, recurrence_interval, recurrence_next_at,
                             regulation_parent_id, regulation_iteration, estimate_minutes,
-                            created_at, updated_at
+                            production_brief, created_at, updated_at
                         )
                         VALUES (
                             %s, %s, %s, %s, 'assigned', %s, %s,
                             %s, %s, TRUE,
                             NULL, NULL, NULL,
                             %s, %s, %s,
+                            %s,
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                         )
@@ -60551,7 +60638,8 @@ class Database:
                         due_at,
                         root_id,
                         next_iteration,
-                        template_estimate_minutes
+                        template_estimate_minutes,
+                        Json(template_production_brief) if template_production_brief is not None else None
                     ))
                     created_id = cursor.fetchone()[0]
                     created_task_ids.append(created_id)
@@ -60893,7 +60981,7 @@ class Database:
         for status_value in status_values:
             if status_value not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
                 raise ValueError("INVALID_TASK_STATUS_FILTER")
-        if tag_norm and tag_norm not in {'task', 'problem', 'suggestion'}:
+        if tag_norm and tag_norm not in TASK_TAG_CODES:
             raise ValueError("INVALID_TASK_TAG_FILTER")
         if priority_norm and priority_norm not in {'normal', 'urgent', 'critical'}:
             raise ValueError("INVALID_TASK_PRIORITY_FILTER")
@@ -61112,7 +61200,7 @@ class Database:
                     t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name),
                     t.reminder_minutes_before, t.reminder_sent_at,
                     action_read.kind, action_read.seen_at,
-                    t.info_request_id
+                    t.info_request_id, t.production_brief
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -61359,7 +61447,9 @@ class Database:
                 # Уточнения по постановке + открытый запрос информации отдельно:
                 # по нему рисуется чип на карточке и считается «ждут вас».
                 "messages": message_map.get(task_id, []),
-                "info_request": message_by_id.get(row[42]) if row[42] else None
+                "info_request": message_by_id.get(row[42]) if row[42] else None,
+                # Бриф продакшна (задача #354): коды вариантов, подписи — во фронте.
+                "production_brief": task_production.stored_brief(row[43])
             })
 
         return {
@@ -61420,7 +61510,8 @@ class Database:
                        JOIN users au ON au.id = ta_x.user_id
                       WHERE ta_x.task_id = t.id),
                     creator.name,
-                    COALESCE(origin_user.name, t.requested_by_name, creator.name)
+                    COALESCE(origin_user.name, t.requested_by_name, creator.name),
+                    t.production_brief
                 FROM tasks t
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
@@ -61461,6 +61552,7 @@ class Database:
             # «Поручил» — источник задачи, а если его нет, то постановщик: пустая
             # клетка тут читалась бы как «спросить не у кого».
             "requested_by_name": row[17],
+            "production_brief": task_production.stored_brief(row[18]),
         } for row in rows]
 
     def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None,
@@ -65169,6 +65261,52 @@ class Database:
                 VALUES (%s, %s, %s, %s, %s)
             """, (operator_id, actor_id_norm, 'blacklist', 'Да', 'Нет'))
             return [self._serialize_schedule_status_period(row) for row in rows]
+
+    # ── Продакшн (задача #354) ───────────────────────────────────────────────
+    # Тип задачи для отдела маркетинга с брифом из ТЗ. Сам бриф проверяет
+    # task_production; здесь — то, для чего нужна задача целиком: описание
+    # задания и состав исполнителей.
+
+    def _normalize_task_production_brief(self, tag, production_brief, description):
+        """Бриф для записи в базу; у любого типа, кроме продакшна, — None.
+
+        У продакшна обязательны и бриф, и описание задания. Пропуски в обоих
+        собираются в ОДНУ ошибку: иначе тот, кто прошёл мимо формы, узнавал бы
+        о них по одному на каждый отказ.
+        """
+        if tag != task_production.PRODUCTION_TAG:
+            return None
+        missing = []
+        brief = None
+        try:
+            brief = task_production.normalize_brief(production_brief)
+        except ValueError as error:
+            code = str(error)
+            if not code.startswith(task_production.INCOMPLETE_PREFIX):
+                raise
+            missing.extend(key for key in code[len(task_production.INCOMPLETE_PREFIX):].split(',') if key)
+        if not str(description or '').strip():
+            missing.append('description')
+        if missing:
+            raise ValueError(task_production.incomplete(missing))
+        return brief
+
+    def _require_task_production_assignee_tx(self, cursor, assignee_ids):
+        """Продакшн — только если среди исполнителей есть сотрудник маркетинга.
+
+        Отдел — тот, где человек числится (`users.department_id`): так ТЗ и
+        сказано, «при выборе сотрудника из отдела маркетинга». Форма прячет тип
+        у остальных, но правило обязано жить и здесь — иначе его обходит любой
+        запрос мимо формы.
+        """
+        ids = [int(person_id) for person_id in (assignee_ids or []) if person_id]
+        cursor.execute(
+            "SELECT 1 FROM users u JOIN departments d ON d.id = u.department_id"
+            " WHERE u.id = ANY(%s) AND d.code = %s LIMIT 1",
+            (ids, task_production.PRODUCTION_DEPARTMENT_CODE),
+        )
+        if not cursor.fetchone():
+            raise ValueError(task_production.NEEDS_MARKETING_ASSIGNEE)
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

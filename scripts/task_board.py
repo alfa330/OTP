@@ -73,7 +73,7 @@ STATUS_LABELS = {
     'created': 'создана',
 }
 
-TAG_LABELS = {'task': 'задача', 'problem': 'проблема', 'suggestion': 'предложение'}
+TAG_LABELS = {'task': 'задача', 'problem': 'проблема', 'suggestion': 'предложение', 'production': 'продакшн'}
 
 PRIORITY_LABELS = {'normal': 'обычная', 'urgent': 'срочная', 'critical': 'критичная'}
 
@@ -957,6 +957,19 @@ def _print_attachments(task, indent='  '):
     print(f'{indent}  читать: python -X utf8 scripts/task_board.py files {task["id"]} --text')
 
 
+def _print_production_brief(task, indent='  '):
+    """Бриф продакшна (задача #354) — подписи из того же справочника, что у сервера."""
+    brief = task.get('production_brief')
+    if not brief:
+        return
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    import task_production
+    print(f'{indent}бриф:')
+    for label, value in task_production.describe(brief):
+        print(f'{indent}    {label.lower():<13} {value}')
+
+
 def cmd_show(client, args):
     task = client.get_task(args.task_id)
     if not task:
@@ -1024,6 +1037,7 @@ def cmd_show(client, args):
     else:
         print('  описание      —')
 
+    _print_production_brief(task)
     _print_attachments(task)
     _print_messages(task)
     _print_checklist(task)

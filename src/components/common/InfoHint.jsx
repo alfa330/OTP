@@ -95,13 +95,18 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
       close();
     };
     // capture: подсказка должна закрыться при скролле ЛЮБОГО контейнера,
-    // а не только окна — внутри модалки скроллится её тело.
-    window.addEventListener('scroll', close, true);
+    // а не только окна — внутри модалки скроллится её тело. Кроме самого
+    // пузыря: длинную подсказку, ограниченную по высоте, листают внутри.
+    const onScroll = (event) => {
+      if (popRef.current?.contains(event.target)) return;
+      close();
+    };
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', close);
     document.addEventListener('keydown', onKey);
     document.addEventListener('pointerdown', onPressOutside, true);
     return () => {
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', close);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onPressOutside, true);
@@ -110,20 +115,42 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
 
   useEffect(() => cancelClose, [cancelClose]);
 
-  /* Ширину пузырь берёт по содержимому, а знаем мы её только после отрисовки.
-     Поэтому позиция уточняется один раз: прижать к правому краю кнопки и не
-     дать вылезти за экран можно только по фактическому размеру. */
+  /* Ширину и высоту пузырь берёт по содержимому, а знаем мы их только после
+     отрисовки. Поэтому позиция уточняется один раз: прижать к правому краю
+     кнопки и не дать вылезти за экран можно только по фактическому размеру.
+
+     По высоте — то же. Прикидка в place() («снизу меньше 180 px — вверх»)
+     верна для коротких подсказок, а длинная (перечень пунктов ТЗ у брифа
+     продакшна) уходила за нижний край окна, и прочитать хвост было нельзя:
+     прокрутка закрывает подсказку. Не влезает в выбранную сторону, а в другую
+     влезает или там места больше — раскрываем туда; не влезает нигде —
+     ограничиваем высотой, и пузырь листается сам. */
   useLayoutEffect(() => {
     if (!pos || pos.measured) return;
     const pop = popRef.current;
     const btn = btnRef.current;
     if (!pop || !btn) return;
-    const width = pop.getBoundingClientRect().width;
+    const box = pop.getBoundingClientRect();
     const rect = btn.getBoundingClientRect();
-    const raw = side === 'left' ? rect.left : rect.right - width;
-    const left = Math.max(MARGIN, Math.min(raw, window.innerWidth - width - MARGIN));
-    if (Math.abs(left - pos.left) > 1) setPos({ ...pos, left, measured: true });
-    else setPos({ ...pos, measured: true });
+    const raw = side === 'left' ? rect.left : rect.right - box.width;
+    const left = Math.max(MARGIN, Math.min(raw, window.innerWidth - box.width - MARGIN));
+    const below = window.innerHeight - rect.bottom - MARGIN * 2;
+    const above = rect.top - MARGIN * 2;
+    const roomFor = (up) => (up ? above : below);
+    let flipUp = pos.flipUp;
+    if (box.height > roomFor(flipUp)
+        && (box.height <= roomFor(!flipUp) || roomFor(!flipUp) > roomFor(flipUp))) {
+      flipUp = !flipUp;
+    }
+    const room = roomFor(flipUp);
+    setPos({
+      ...pos,
+      left: Math.abs(left - pos.left) > 1 ? left : pos.left,
+      top: flipUp ? rect.top - MARGIN : rect.bottom + MARGIN,
+      flipUp,
+      maxHeight: box.height > room ? Math.max(120, Math.floor(room)) : undefined,
+      measured: true,
+    });
   }, [pos, side]);
 
   const body = text || children;
@@ -169,6 +196,9 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
             top: pos.top,
             width: 'max-content',
             maxWidth: `min(${MAX_WIDTH}px, calc(100vw - 16px))`,
+            maxHeight: pos.maxHeight,
+            overflowY: pos.maxHeight ? 'auto' : undefined,
+            overscrollBehavior: pos.maxHeight ? 'contain' : undefined,
             transform: pos.flipUp ? 'translateY(-100%)' : undefined,
           }}
           className="z-[200] rounded-2xl border border-slate-200/80 bg-white/95 p-3.5 text-left text-xs leading-5 text-slate-600 shadow-xl ring-1 ring-black/5 backdrop-blur motion-safe:animate-popover-in"

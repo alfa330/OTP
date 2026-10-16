@@ -45,7 +45,7 @@ export const BOARD_SORT_OPTIONS = [
   { value: 'importance', label: 'По важности' },
 ];
 
-const TAG_LABEL = { task: 'Задача', problem: 'Проблема', suggestion: 'Предложение' };
+const TAG_LABEL = { task: 'Задача', problem: 'Проблема', suggestion: 'Предложение', production: 'Продакшн' };
 
 const ESTIMATE_PRESETS = [
   { label: '30 м', minutes: 30 },

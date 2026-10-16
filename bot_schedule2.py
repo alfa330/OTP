@@ -3298,7 +3298,8 @@ def _build_signed_audio_url(audio_path):
         return None
 
 
-TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion'}
+# 'production' — тип для отдела маркетинга с брифом (задача #354, task_production).
+TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion', 'production'}
 TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
 TASK_ALLOWED_PRIORITIES = {'normal', 'urgent', 'critical'}
 TASK_ALLOWED_RECURRENCE_TYPES = {'daily', 'weekly', 'monthly'}
@@ -3382,7 +3383,8 @@ TASKS_MAX_PAGE_SIZE = int(os.getenv('TASKS_MAX_PAGE_SIZE', '200'))
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
-    'suggestion': 'Предложение'
+    'suggestion': 'Предложение',
+    'production': 'Продакшн'
 }
 TASK_PRIORITY_LABELS = {
     'normal': 'Обычная',
@@ -4249,7 +4251,8 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
             'is_backlog': 'бэклог',
             'backlog_rank': 'приоритет в бэклоге',
             'requested_by': 'кто поручил',
-            'reminder': 'напоминание'
+            'reminder': 'напоминание',
+            'production_brief': 'бриф'
         }
         changed_items = []
         for item in (changed_fields or []):
@@ -26328,21 +26331,22 @@ TASK_EXPORT_COLUMNS = {
     'spent':       ('Факт, ч', 10),
     'completed':   ('Завершена', 17),
     'summary':     ('Итог', 60),
+    'brief':       ('Бриф', 48),
     'description': ('Описание', 60),
 }
 _TASK_EXPORT_BASE = ('id', 'subject', 'tag', 'priority', 'assignee', 'requester', 'created')
 # Лист на колонку доски, в том же порядке, что колонки в разделе.
 TASK_EXPORT_SHEETS = (
     ('backlog',  'Бэклог',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'description')),
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'brief', 'description')),
     ('todo',     'К выполнению',
-     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'description')),
+     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'brief', 'description')),
     ('progress', 'В работе',
-     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'description')),
+     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'brief', 'description')),
     ('review',   'На проверке',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'description')),
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'brief', 'description')),
     ('done',     'Готово',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'description')),
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'brief', 'description')),
 )
 TASK_EXPORT_DATE_KEYS = frozenset({'created', 'planned', 'due', 'started', 'completed'})
 TASK_EXPORT_HOUR_KEYS = frozenset({'estimate', 'spent'})
@@ -26380,6 +26384,7 @@ def _task_export_hours(minutes):
 
 
 def _task_export_value(key, task):
+    import task_production
     if key == 'id':
         return task.get('id')
     if key == 'subject':
@@ -26398,6 +26403,10 @@ def _task_export_value(key, task):
         return _task_export_hours(task.get('spent_minutes'))
     if key == 'summary':
         return task.get('completion_summary') or ''
+    if key == 'brief':
+        # Бриф продакшна строками «Поле: значение». У остальных задач клетка
+        # пустая, и лист без единого продакшна колонку не покажет вовсе.
+        return task_production.describe_text(task.get('production_brief'))
     if key == 'description':
         return task.get('description') or ''
     return task.get(TASK_EXPORT_FIELD_BY_DATE_KEY[key])
@@ -26743,6 +26752,10 @@ def handle_tasks():
         requested_by_id_raw = (request.form.get('requested_by_id') or '').strip() or None
         requested_by_name_raw = (request.form.get('requested_by_name') or '').strip() or None
         reminder_raw = (request.form.get('reminder_minutes_before') or '').strip() or None
+        # Бриф продакшна — JSON-строкой: форма multipart, вложенный объект в
+        # ней иначе не передать. Разбирает и проверяет его task_production.
+        import task_production
+        production_brief_raw = (request.form.get('production_brief') or '').strip() or None
         assigned_to_raw = request.form.get('assigned_to')
         # Состав приезжает строкой «12,15,7»: multipart-поле одно, а порядок в
         # нём значим — первый становится tasks.assigned_to.
@@ -26801,11 +26814,15 @@ def handle_tasks():
                 due_at=due_at_raw,
                 requested_by_id=requested_by_id_raw,
                 requested_by_name=requested_by_name_raw,
-                reminder_minutes_before=reminder_raw
+                reminder_minutes_before=reminder_raw,
+                production_brief=production_brief_raw
             )
         except ValueError as create_error:
             _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
             code = str(create_error)
+            production_error = task_production.error_message(code)
+            if production_error:
+                return jsonify({"error": production_error, "code": code}), 400
             error_map = {
                 "SUBJECT_REQUIRED": "subject is required",
                 "INVALID_TAG": "Invalid tag",
@@ -26858,6 +26875,11 @@ def handle_tasks():
                 ]
                 if due_label:
                     message_lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
+                production_item = task_production.item_label(created.get('production_brief'))
+                if production_item:
+                    # Что именно сделать — сразу под типом: «Продакшн» без
+                    # наименования ничего не говорит, а весь бриф в карточке.
+                    message_lines.insert(3, f"<b>Что:</b> {_escape_telegram_html(production_item, 120)}")
                 message = "\n".join(message_lines)
                 reply_markup = _build_task_notification_reply_markup(task_link)
                 failures = []
@@ -26910,6 +26932,7 @@ def handle_single_task(task_id):
         requester_role_norm = _normalize_user_role(requester_role)
 
         if request.method == 'PATCH':
+            import task_production
             data = request.get_json() or {}
             has_subject = 'subject' in data
             has_description = 'description' in data
@@ -26926,12 +26949,14 @@ def handle_single_task(task_id):
             has_planned_start = 'planned_start_at' in data
             has_origin = 'requested_by_id' in data or 'requested_by_name' in data
             has_reminder = 'reminder_minutes_before' in data
+            has_production_brief = 'production_brief' in data
 
             if not any([
                 has_subject, has_description, has_tag, has_assigned_to,
                 has_priority, has_deadline, has_due_at, has_is_regulation,
                 has_recurrence_type, has_recurrence_interval, has_checklist,
-                has_estimate, has_planned_start, has_origin, has_reminder
+                has_estimate, has_planned_start, has_origin, has_reminder,
+                has_production_brief
             ]):
                 return jsonify({"error": "No fields to update"}), 400
 
@@ -27008,10 +27033,15 @@ def handle_single_task(task_id):
                     edit_kwargs["requested_by_name"] = data.get('requested_by_name')
                 if has_reminder:
                     edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
+                if has_production_brief:
+                    edit_kwargs["production_brief"] = data.get('production_brief')
 
                 result = db.edit_task(**edit_kwargs)
             except ValueError as value_error:
                 code = str(value_error)
+                production_error = task_production.error_message(code)
+                if production_error:
+                    return jsonify({"error": production_error, "code": code}), 400
                 if code == 'TASK_NOT_FOUND':
                     return jsonify({"error": "Task not found"}), 404
                 if code == 'NOTHING_TO_UPDATE':

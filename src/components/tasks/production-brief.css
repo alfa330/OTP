@@ -1,0 +1,307 @@
+/*
+ * Бриф задачи «Продакшн» (задача #354): поля в форме задачи и бриф в карточке.
+ *
+ * Палитра и шрифт — раздела «Задачи» (переменные .tv-root: --ink, --border…),
+ * поэтому блок не выглядит вставкой из другой программы. Все правила под
+ * .tv-root: так они весомее общих правил формы и не задевают другие разделы.
+ * Цвет — только у выбранного (тёмная заливка, как у выбранных пресетов формы)
+ * и у ошибки (красная кайма): остальное нейтрально.
+ */
+
+/* ── Тип задачи прямо под исполнителем ─────────────────────────────────────
+   Пока исполнитель не из маркетинга, тип живёт за кнопкой «+ Тип», как раньше.
+   С исполнителем из маркетинга он стоит на виду: ТЗ просит «отображать»
+   Продакшн при выборе такого сотрудника, а за свёрнутой кнопкой его не видно. */
+.tv-root .tv-composer-type {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 12px;
+}
+.tv-root .tv-composer-type-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.tv-root .tv-composer-type-label {
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  white-space: nowrap;
+}
+.tv-root .tv-composer-type.is-invalid .tv-composer-segmented {
+  box-shadow: 0 0 0 2px #fda4af;
+}
+
+/* ── Блок брифа в форме ─────────────────────────────────────────────────── */
+.tv-root .tv-brief {
+  display: flex; flex-direction: column; gap: 18px;
+  margin-top: 14px; padding: 16px 16px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  animation: tvBriefIn .2s cubic-bezier(.22, 1, .36, 1);
+}
+@keyframes tvBriefIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.tv-root .tv-brief-head { display: flex; align-items: baseline; gap: 8px; }
+.tv-root .tv-brief-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 14px; font-weight: 600; color: var(--ink);
+}
+
+.tv-root .tv-brief-field {
+  display: flex; flex-direction: column; gap: 8px;
+  border-radius: 12px;
+}
+.tv-root .tv-brief-label {
+  display: flex; align-items: center; gap: 6px; min-height: 20px;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+}
+.tv-root .tv-brief-label label { cursor: pointer; }
+.tv-root .tv-brief-issue {
+  margin: 0; font-size: 12px; line-height: 1.4; color: #e11d48;
+  animation: tvBriefIn .18s ease;
+}
+
+/* Красная кайма — у содержимого поля, а не у подписи: глаз ищет пустое место. */
+.tv-root .tv-brief-control {
+  margin: -4px; padding: 4px;
+  border-radius: 12px;
+  transition: box-shadow .15s;
+}
+.tv-root .tv-brief-field.is-invalid .tv-brief-control,
+.tv-root .tv-brief-field.is-invalid .tv-brief-segmented { box-shadow: 0 0 0 2px #fda4af; }
+.tv-root .tv-brief-field.is-invalid .tv-input,
+.tv-root .tv-brief-field.is-invalid .tv-textarea {
+  border-color: #fda4af; box-shadow: 0 0 0 2px #ffe4e6;
+}
+.tv-root .tv-brief .tv-input,
+.tv-root .tv-brief .tv-textarea,
+.tv-root .tv-brief .tv-person-select > button { background: var(--surface); }
+/* У выбора из списка кайму рисует сам CustomSelect, но кнопку раздела стиль
+   .tv-person-select лишает тени — кайму возвращаем тем же цветом, что у полей. */
+.tv-root .tv-brief-field.is-invalid .tv-person-select > button:not([aria-expanded="true"]) {
+  border-color: #fda4af; box-shadow: 0 0 0 2px #ffe4e6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tv-root .tv-brief, .tv-root .tv-brief-issue { animation: none; }
+}
+
+/* ── Наименование ── */
+.tv-root .tv-brief-select { width: 100%; }
+
+/* ── Адаптация: метки-переключатели ── */
+.tv-root .tv-brief-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tv-root .tv-brief-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 12px; border-radius: 99px;
+  border: 1px solid var(--border); background: var(--surface);
+  font-size: 12.5px; font-weight: 500; color: var(--ink-2);
+  cursor: pointer; transition: background .15s, border-color .15s, color .15s, transform .1s;
+}
+.tv-root .tv-brief-chip:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+.tv-root .tv-brief-chip:active:not(:disabled) { transform: scale(.97); }
+.tv-root .tv-brief-chip.is-active { background: var(--ink); border-color: var(--ink); color: #fff; }
+.tv-root .tv-brief-chip:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Размеры: плитки с рамкой формата, как в Canva ── */
+.tv-root .tv-brief-sizes { display: flex; flex-direction: column; gap: 10px; }
+.tv-root .tv-brief-size-group { display: flex; align-items: flex-start; gap: 12px; }
+.tv-root .tv-brief-size-caption {
+  flex: 0 0 52px; padding-top: 10px;
+  display: flex; flex-direction: column; gap: 1px;
+  font-size: 11.5px; font-weight: 500; color: var(--ink-2); line-height: 1.25;
+}
+.tv-root .tv-brief-size-caption small { font-size: 10.5px; font-weight: 400; color: var(--ink-3); }
+.tv-root .tv-brief-tiles { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.tv-root .tv-brief-tile {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 92px; padding: 10px 6px 8px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, transform .1s;
+}
+.tv-root .tv-brief-tile:hover:not(:disabled) { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.tv-root .tv-brief-tile:active:not(:disabled) { transform: scale(.97); }
+.tv-root .tv-brief-tile:disabled { opacity: .5; cursor: not-allowed; }
+.tv-root .tv-brief-tile.is-active { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.tv-root .tv-brief-frame {
+  display: inline-grid; place-items: center; flex: none;
+}
+.tv-root .tv-brief-tile .tv-brief-frame { margin-bottom: 4px; }
+.tv-root .tv-brief-frame i {
+  display: block; box-sizing: border-box;
+  border: 1.5px solid var(--ink-3); border-radius: 3px;
+  background: var(--bg);
+  transition: border-color .15s, background .15s;
+}
+.tv-root .tv-brief-tile.is-active .tv-brief-frame i { border-color: var(--ink); background: #e9e7e1; }
+.tv-root .tv-brief-tile-label {
+  font-size: 12.5px; font-weight: 600; color: var(--ink); white-space: nowrap;
+}
+.tv-root .tv-brief-tile-dims {
+  font-size: 10.5px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.tv-root .tv-brief-tile-check {
+  position: absolute; top: 6px; right: 6px;
+  width: 16px; height: 16px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--ink); color: #fff;
+  animation: tvBriefCheck .18s cubic-bezier(.22, 1, .36, 1);
+}
+@keyframes tvBriefCheck { from { transform: scale(.4); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Свои размеры — строками под плитками, с тем же отступом, что у плиток. */
+.tv-root .tv-brief-custom,
+.tv-root .tv-brief-sizes > .tv-brief-add { margin-left: 64px; }
+.tv-root .tv-brief-custom { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.tv-root .tv-brief-custom-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tv-root .tv-brief-side.tv-input {
+  width: 96px; text-align: center; font-variant-numeric: tabular-nums;
+}
+.tv-root .tv-brief-times { color: var(--ink-3); font-size: 13px; }
+.tv-root .tv-brief-units button { min-width: 38px; }
+.tv-root .tv-brief-remove {
+  width: 30px; height: 30px; border-radius: 9px;
+  display: grid; place-items: center;
+  border: 0; background: transparent; color: var(--ink-3);
+  cursor: pointer; transition: background .15s, color .15s;
+}
+.tv-root .tv-brief-remove:hover:not(:disabled) { background: #f0efeb; color: var(--ink); }
+.tv-root .tv-brief-add {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 11px; border-radius: 9px;
+  border: 1px dashed var(--border-strong); background: transparent;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.tv-root .tv-brief-add:hover:not(:disabled) { border-color: var(--ink-3); color: var(--ink); background: var(--surface); }
+
+/* ── Цветность ── */
+.tv-root .tv-brief-segmented { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
+.tv-root .tv-brief-segmented button { padding: 6px 13px; font-size: 12.5px; }
+.tv-root .tv-brief-notes { display: flex; align-items: center; gap: 10px; }
+.tv-root .tv-brief-notes .tv-input { flex: 1; min-width: 0; }
+.tv-root .tv-brief-swatches { display: inline-flex; gap: 4px; flex: none; }
+.tv-root .tv-brief-swatches i,
+.tv-root .tv-brief-view-swatch {
+  display: inline-block; width: 16px; height: 16px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .14);
+}
+
+/* ── Описание задания ── */
+.tv-root .tv-brief-description.tv-textarea { min-height: 150px; font-size: 13.5px; line-height: 1.55; }
+@media (min-width: 1500px) {
+  .tv-root .tv-brief-description.tv-textarea { min-height: 190px; }
+}
+
+/* ── «Не хватает: N ⌃ ⌄» в нижней панели окна ── */
+.tv-root .tv-brief-issue-nav {
+  margin-right: auto;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 2px 2px 12px; border-radius: 10px;
+  background: #fff1f2; border: 1px solid #fecdd3;
+  font-size: 12.5px; font-weight: 500; color: #be123c;
+  font-variant-numeric: tabular-nums;
+  animation: tvBriefIn .18s ease;
+}
+.tv-root .tv-brief-issue-nav span { margin-right: 4px; }
+.tv-root .tv-brief-issue-nav button {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: grid; place-items: center;
+  border: 0; background: transparent; color: #e11d48; cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+.tv-root .tv-brief-issue-nav button:hover { background: #ffe4e6; }
+.tv-root .tv-brief-issue-nav button:active { transform: scale(.94); }
+
+/* ── Бриф в карточке задачи ── */
+.tv-root .tv-brief-view-grid {
+  display: grid; grid-template-columns: 112px minmax(0, 1fr);
+  gap: 10px 16px; margin: 0;
+}
+.tv-root .tv-brief-view-grid dt { font-size: 12px; color: var(--ink-3); padding-top: 3px; }
+.tv-root .tv-brief-view-grid dd {
+  margin: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 13.5px; color: var(--ink); line-height: 1.5;
+}
+.tv-root .tv-brief-view-notes {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  color: var(--ink-2); word-break: break-word;
+}
+.tv-root .tv-brief-view-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tv-root .tv-brief-view-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 8px;
+  background: #f1f0ed; border: 1px solid var(--border);
+  font-size: 12.5px; color: var(--ink-2);
+}
+.tv-root .tv-brief-view-chip b { color: var(--ink); font-weight: 600; }
+.tv-root .tv-brief-view-dims { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tv-root .tv-brief-view-chip .tv-brief-frame i { border-width: 1.25px; border-radius: 2px; }
+
+/* Тип в списке и в карточке: свой цвет, как у остальных типов задачи. */
+.tv-root .tv-badge-fuchsia { background: #fae8ff; color: #86198f; border-color: #f5d0fe; }
+
+/* ── Телефон ───────────────────────────────────────────────────────────────
+   Подписи групп встают над плитками, плитки — по три в ряд во всю ширину,
+   поля и кнопки ростом под палец (как остальная форма на телефоне). */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief { padding: 14px 14px 16px; gap: 18px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-label { font-size: 14px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-size-group { flex-direction: column; gap: 6px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-size-caption {
+  flex: none; padding-top: 0; flex-direction: row; align-items: baseline; gap: 6px; font-size: 13px;
+}
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-tiles {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%;
+}
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-tile { width: auto; padding: 12px 4px 10px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-tile-label { font-size: 13.5px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-tile-dims { font-size: 11.5px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-custom,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-sizes > .tv-brief-add { margin-left: 0; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-chip { min-height: 36px; padding: 0 14px; font-size: 14px; }
+/* Сегменты на телефоне не переносятся «как получится»: четыре типа — сеткой
+   2×2, три варианта цветности — столбиком, все ячейки одной ширины. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented {
+  display: grid; grid-template-columns: minmax(0, 1fr); width: 100%;
+}
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented button { min-height: 36px; font-size: 14px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type .tv-composer-segmented {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%;
+}
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type .tv-composer-segmented button { min-height: 34px; }
+/* Своя строка размера — в одну линию: поля сжимаются, «px/мм» и крестик рядом. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-custom { align-items: stretch; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-custom-row { flex-wrap: nowrap; gap: 6px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-side.tv-input { flex: 1 1 0; width: auto; min-width: 0; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-units { flex: none; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-description.tv-textarea { min-height: 170px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-add { min-height: 36px; font-size: 14px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-remove { width: 36px; height: 36px; }
+body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay .tv-modal-footer { flex-wrap: wrap; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-issue-nav {
+  order: -1; width: 100%; margin-right: 0; justify-content: space-between;
+}
+@media (max-width: 640px) {
+  .tv-root .tv-brief-view-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .tv-root .tv-brief-view-grid dd { margin-bottom: 8px; }
+}
+/* Карточка задачи на телефоне — строками на белой подложке, как «Создано» и
+   «Статус» над ней: подпись сверху, значение под ней, строки через волосок. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-brief-view-grid {
+  display: flex; flex-direction: column; gap: 0;
+  border-radius: 12px; background: var(--surface); overflow: hidden;
+}
+body.mobile-shell .tv-root .tv-drawer-screen .tv-brief-view-grid dt {
+  padding: 11px 14px 0; font-size: 13px; color: var(--ink-2);
+}
+body.mobile-shell .tv-root .tv-drawer-screen .tv-brief-view-grid dd {
+  margin: 0; padding: 4px 14px 11px;
+  font-size: 15px;
+  box-shadow: inset 0 -0.5px 0 var(--border);
+}
+body.mobile-shell .tv-root .tv-drawer-screen .tv-brief-view-grid dd:last-of-type { box-shadow: none; }

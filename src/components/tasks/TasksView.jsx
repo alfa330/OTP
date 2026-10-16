@@ -34,6 +34,15 @@ import MobileActionSheet from '../common/MobileActionSheet';
 import useOverlayDismiss from '../common/useOverlayDismiss';
 import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
+import { BriefIssueNav, ProductionBriefFields, ProductionBriefView, useBriefIssueNav } from './ProductionBriefUi';
+import {
+  PRODUCTION_TAG,
+  briefFromTask,
+  briefToPayload,
+  emptyProductionBrief,
+  productionAvailableFor,
+  productionBriefIssues,
+} from './productionBrief';
 // Телефонный слой раздела: всё в нём заперто на body.mobile-shell.
 import './tasks-mobile.css';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
@@ -2764,16 +2773,22 @@ const syncTaskDeepLink = (taskId) => {
 };
 
 /* ─── Constants ─── */
+/* «Продакшн» (задача #354) в форме предлагается не всегда — только когда среди
+   исполнителей есть сотрудник маркетинга (productionAvailableFor). В фильтре
+   списка и на бейджах он есть всегда: задачи этого типа видны любому, кто их видит. */
 const TAG_OPTIONS = [
   { value: 'task',       label: 'Задача' },
   { value: 'problem',    label: 'Проблема' },
   { value: 'suggestion', label: 'Предложение' },
+  { value: PRODUCTION_TAG, label: 'Продакшн' },
 ];
+const BASIC_TAG_OPTIONS = TAG_OPTIONS.filter((option) => option.value !== PRODUCTION_TAG);
 
 const TAG_META = {
   task:       { label: 'Задача',      badge: 'tv-badge-blue' },
   problem:    { label: 'Проблема',    badge: 'tv-badge-rose' },
   suggestion: { label: 'Предложение', badge: 'tv-badge-teal' },
+  [PRODUCTION_TAG]: { label: 'Продакшн', badge: 'tv-badge-fuchsia' },
 };
 
 const PRIORITY_OPTIONS = [
@@ -3302,6 +3317,9 @@ const formAssigneeIds = (task, fallbackAssignedTo = '') => {
 const buildEmptyTaskForm = (overrides = {}) => ({
   ...EMPTY_TASK_FORM,
   checklistItems: [createEmptyChecklistDraftItem()],
+  // Бриф продакшна держим и у задач других типов: передумали тип и вернулись —
+  // заполненное на месте. Уходит он только у продакшна (buildTaskJsonPayload).
+  productionBrief: emptyProductionBrief(),
   ...overrides,
 });
 
@@ -3325,6 +3343,7 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     requestedById: task?.requested_by?.id ? String(task.requested_by.id) : '',
     requestedByName: task?.requested_by?.id ? '' : (task?.requested_by?.name || ''),
     reminderMinutes: task?.reminder_minutes_before ? String(task.reminder_minutes_before) : '',
+    productionBrief: briefFromTask(task?.production_brief),
   });
 };
 
@@ -3358,6 +3377,8 @@ const buildTaskJsonPayload = (values) => ({
   reminder_minutes_before: deadlineMinutesOfForm(values) > 0
     ? (normalizeReminderMinutes(values.reminderMinutes) || 0)
     : 0,
+  // null у задачи другого типа — сервер уберёт бриф, если тип сменили с продакшна.
+  production_brief: values.tag === PRODUCTION_TAG ? briefToPayload(values.productionBrief) : null,
 });
 
 const appendTaskFormData = (body, values) => {
@@ -3380,6 +3401,8 @@ const appendTaskFormData = (body, values) => {
   body.append('requested_by_id', payload.requested_by_id);
   body.append('requested_by_name', payload.requested_by_name);
   body.append('reminder_minutes_before', String(payload.reminder_minutes_before));
+  // Форма multipart, вложенный объект в ней иначе не передать — JSON-строкой.
+  if (payload.production_brief) body.append('production_brief', JSON.stringify(payload.production_brief));
 };
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
@@ -4530,6 +4553,8 @@ const COMPOSER_SECTIONS = [
   },
 ];
 
+const NO_COMPOSER_ISSUE = () => '';
+
 const TaskComposerForm = ({
   values,
   onChange,
@@ -4540,11 +4565,23 @@ const TaskComposerForm = ({
   onFilesChange = null,
   showBacklogToggle = false,
   currentUserId = 0,
+  // Чего не хватает в брифе продакшна: ключ поля → текст под полем ('' — всё в порядке).
+  issueFor = NO_COMPOSER_ISSUE,
 }) => {
+  const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
+  /* Продакшн (задача #354): с исполнителем из маркетинга тип стоит на виду под
+     исполнителем, а не за кнопкой «+ Тип» — ТЗ просит «отображать» Продакшн при
+     выборе такого сотрудника. Выбранный продакшн остаётся на виду и тогда, когда
+     маркетолога из состава убрали: иначе тип молча пропал бы вместе с брифом. */
+  const productionAvailable = productionAvailableFor(assigneeIds, recipients);
+  const isProduction = values.tag === PRODUCTION_TAG;
+  const typeInline = productionAvailable || isProduction;
   const supportsFiles = typeof onFilesChange === 'function';
   const sections = useMemo(
-    () => COMPOSER_SECTIONS.filter((section) => !section.requiresFiles || supportsFiles),
-    [supportsFiles]
+    () => COMPOSER_SECTIONS.filter((section) => (
+      (!section.requiresFiles || supportsFiles) && !(typeInline && section.id === 'tag')
+    )),
+    [supportsFiles, typeInline]
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
@@ -4566,7 +4603,6 @@ const TaskComposerForm = ({
   );
   const canAssignSelf = Number(currentUserId) > 0
     && recipients.some((person) => Number(person.id) === Number(currentUserId));
-  const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
   const isSelfAssigned = assigneeIds.some((id) => String(id) === String(currentUserId || ''));
 
   // Раскрываем то, что уже заполнено: при правке задачи форма сразу показывает суть.
@@ -4596,6 +4632,9 @@ const TaskComposerForm = ({
   });
 
   const isOpen = (id) => openIds.has(id);
+  // Раскрытый «Тип» уехал под исполнителя — пустую серую панель не рисуем.
+  const detailsOpen = [...openIds].some((id) => !(typeInline && id === 'tag'));
+  const tagIssue = issueFor('tag');
 
   return (
     <div className="tv-composer">
@@ -4608,13 +4647,17 @@ const TaskComposerForm = ({
         autoFocus
         onChange={(event) => onChange({ subject: event.target.value })}
       />
-      <textarea
-        className="tv-composer-description"
-        value={values.description}
-        disabled={disabled}
-        placeholder="Описание, контекст, ссылки — необязательно"
-        onChange={(event) => onChange({ description: event.target.value })}
-      />
+      {/* У продакшна описание — поле брифа «Описание задания» (то же значение),
+          второй раз то же поле наверху было бы дублем. */}
+      {!isProduction && (
+        <textarea
+          className="tv-composer-description"
+          value={values.description}
+          disabled={disabled}
+          placeholder="Описание, контекст, ссылки — необязательно"
+          onChange={(event) => onChange({ description: event.target.value })}
+        />
+      )}
 
       <div className="tv-composer-assignee">
         <label htmlFor={assigneeSelectId}>
@@ -4655,6 +4698,40 @@ const TaskComposerForm = ({
         )}
       </div>
 
+      {typeInline && (
+        <div className={`tv-composer-type${tagIssue ? ' is-invalid' : ''}`} data-issue-anchor="tag">
+          <div className="tv-composer-type-row">
+            <span className="tv-composer-type-label">Тип</span>
+            <div className="tv-composer-segmented" role="group" aria-label="Тип задачи">
+              {TAG_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={values.tag === option.value ? 'is-active' : ''}
+                  aria-pressed={values.tag === option.value}
+                  disabled={disabled}
+                  onClick={() => onChange({ tag: option.value })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {tagIssue && <p className="tv-brief-issue">{tagIssue}</p>}
+        </div>
+      )}
+
+      {isProduction && (
+        <ProductionBriefFields
+          brief={values.productionBrief || emptyProductionBrief()}
+          onChange={(next) => onChange({ productionBrief: next })}
+          description={values.description}
+          onDescriptionChange={(next) => onChange({ description: next })}
+          disabled={disabled}
+          issueFor={issueFor}
+        />
+      )}
+
       <div className="tv-composer-chips">
         {sections.map((section) => {
           const active = isOpen(section.id);
@@ -4689,7 +4766,7 @@ const TaskComposerForm = ({
         )}
       </div>
 
-      {openIds.size > 0 && (
+      {detailsOpen && (
         <div className="tv-composer-details">
           {isOpen('priority') && (
             <div className="tv-composer-row">
@@ -4710,11 +4787,11 @@ const TaskComposerForm = ({
             </div>
           )}
 
-          {isOpen('tag') && (
+          {!typeInline && isOpen('tag') && (
             <div className="tv-composer-row">
               <span className="tv-composer-row-label">Тип</span>
               <div className="tv-composer-segmented">
-                {TAG_OPTIONS.map((option) => (
+                {BASIC_TAG_OPTIONS.map((option) => (
                   <button
                     key={option.value}
                     type="button"
@@ -5628,11 +5705,19 @@ const TaskDrawer = React.memo(({
             <div className="tv-info-item"><label>Повторение</label><span>{task?.recurrence_type ? `${RECURRENCE_OPTIONS.find(item => item.value === task.recurrence_type)?.label || task.recurrence_type}${Number(task?.recurrence_interval || 1) > 1 ? ` · раз в ${task.recurrence_interval}` : ''}` : (task?.is_regulation ? 'Разовый регламент' : '—')}</span></div>
           </div>
 
+          {task.tag === PRODUCTION_TAG && task.production_brief && (
+            <>
+              <hr className="tv-divider" />
+              <ProductionBriefView brief={task.production_brief} />
+            </>
+          )}
+
           {task.description && (
             <>
               <hr className="tv-divider" />
               <div>
-                <p className="tv-block-label">Описание</p>
+                {/* У продакшна описание — «Описание задания» из брифа. */}
+                <p className="tv-block-label">{task.tag === PRODUCTION_TAG ? 'Описание задания' : 'Описание'}</p>
                 <p className="tv-description">{task.description}</p>
               </div>
             </>
@@ -7133,6 +7218,13 @@ const TasksView = ({
   const fetchedFocusRequestRef = useRef(0);
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
+  /* Бриф продакшна: пока «Поставить задачу» не нажимали, ничего не краснеет —
+     пустая форма не ошибка. После попытки поля с пунктами обведены красным,
+     а заполнили — рамка снимается сразу (пункты считаются заново). */
+  const [createIssuesShown, setCreateIssuesShown] = useState(false);
+  const [editIssuesShown, setEditIssuesShown] = useState(false);
+  const createBodyRef = useRef(null);
+  const editBodyRef = useRef(null);
   const [notesOpen, setNotesOpen] = useState(false);
   // Карточка, к которой ведёт клик по уведомлению: доска подсветит её и подскроллит.
   const [boardFocus, setBoardFocus] = useState(null);
@@ -7754,11 +7846,39 @@ const TasksView = ({
     );
   }, [outgoingGroups]);
 
+  /* ── Бриф продакшна: чего не хватает (задача #354) ── */
+  const formIssues = useCallback((values) => (
+    values.tag === PRODUCTION_TAG
+      ? productionBriefIssues(values.productionBrief, values.description, {
+        productionAllowed: productionAvailableFor(values.assigneeIds, recipients),
+      })
+      : []
+  ), [recipients]);
+  const createIssues = useMemo(() => formIssues(form), [formIssues, form]);
+  const editIssues = useMemo(() => formIssues(editForm), [formIssues, editForm]);
+  const createIssueNav = useBriefIssueNav(createBodyRef, createIssues.map((issue) => issue.key));
+  const editIssueNav = useBriefIssueNav(editBodyRef, editIssues.map((issue) => issue.key));
+  const createIssueFor = useCallback(
+    (key) => (createIssuesShown ? createIssues.find((issue) => issue.key === key)?.text || '' : ''),
+    [createIssuesShown, createIssues]
+  );
+  const editIssueFor = useCallback(
+    (key) => (editIssuesShown ? editIssues.find((issue) => issue.key === key)?.text || '' : ''),
+    [editIssuesShown, editIssues]
+  );
+  useEffect(() => { if (!createOpen) setCreateIssuesShown(false); }, [createOpen]);
+  useEffect(() => { if (!editModal.open) setEditIssuesShown(false); }, [editModal.open]);
+
   /* ── Create ── */
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!form.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
     if (!(form.assigneeIds || []).length) { notify('Выберите сотрудника', 'error'); return; }
+    if (createIssues.length) {
+      setCreateIssuesShown(true);
+      createIssueNav.first();
+      return;
+    }
 
     const body = new FormData();
     appendTaskFormData(body, form);
@@ -7800,6 +7920,11 @@ const TasksView = ({
     if (!editModal.taskId) return;
     if (!editForm.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
     if (!(editForm.assigneeIds || []).length) { notify('Выберите исполнителя', 'error'); return; }
+    if (editIssues.length) {
+      setEditIssuesShown(true);
+      editIssueNav.first();
+      return;
+    }
 
     const key = `${editModal.taskId}:edit`;
     setActionLoadingKey(key);
@@ -7819,7 +7944,7 @@ const TasksView = ({
     } finally {
       setActionLoadingKey('');
     }
-  }, [editModal, editForm, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
+  }, [editModal, editForm, editIssues, editIssueNav, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
 
   const openDeleteModal = useCallback((task) => {
     if (!task?.id) return;
@@ -8722,7 +8847,7 @@ const TasksView = ({
               <ModalCloseButton isMobileShell={isMobileShell} onClick={() => setCreateOpen(false)} />
             </div>
             <form onSubmit={handleCreate}>
-              <div className="tv-modal-body">
+              <div className="tv-modal-body" ref={createBodyRef}>
                 <TaskComposerForm
                   values={form}
                   onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
@@ -8733,9 +8858,11 @@ const TasksView = ({
                   onFilesChange={setSelectedFiles}
                   showBacklogToggle
                   currentUserId={currentUserId}
+                  issueFor={createIssueFor}
                 />
               </div>
               <div className="tv-modal-footer">
+                <BriefIssueNav count={createIssuesShown ? createIssues.length : 0} onStep={createIssueNav.step} />
                 <button type="button" className="tv-btn tv-btn-ghost tv-modal-cancel" disabled={isCreateLoading}
                   onClick={() => setCreateOpen(false)}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-primary"
@@ -8757,7 +8884,7 @@ const TasksView = ({
               <ModalCloseButton isMobileShell={isMobileShell} onClick={closeEditModal} />
             </div>
             <form onSubmit={submitEditTask}>
-              <div className="tv-modal-body">
+              <div className="tv-modal-body" ref={editBodyRef}>
                 {editModal.taskSubject && (
                   <p className="tv-composer-context">{editModal.taskSubject}</p>
                 )}
@@ -8768,9 +8895,11 @@ const TasksView = ({
                   isRecipientsLoading={isRecipientsLoading}
                   disabled={!!actionLoadingKey}
                   currentUserId={currentUserId}
+                  issueFor={editIssueFor}
                 />
               </div>
               <div className="tv-modal-footer">
+                <BriefIssueNav count={editIssuesShown ? editIssues.length : 0} onStep={editIssueNav.step} />
                 <button
                   type="button"
                   className="tv-btn tv-btn-ghost tv-modal-cancel"
