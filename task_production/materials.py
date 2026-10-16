@@ -101,6 +101,8 @@ WORKING_STATUSES = frozenset({'in_progress', 'returned'})
 SUBMITTED_STATUSES = frozenset({'completed', 'accepted'})
 
 UNSUPPORTED_TYPE = 'PRODUCTION_UNSUPPORTED_TYPE'
+LIBRARY_ONLY_VIDEO = 'PRODUCTION_LIBRARY_ONLY_VIDEO'
+LIBRARY_FOLDER = 'library'
 TOO_LARGE = 'PRODUCTION_FILE_TOO_LARGE'
 EMPTY_FILE = 'PRODUCTION_FILE_EMPTY'
 BAD_NAME = 'PRODUCTION_BAD_NAME'
@@ -153,6 +155,18 @@ def classify(name, size):
     return clean, ext, kind, content_type
 
 
+def classify_library(name, size):
+    """Для вкладки «Ролики»: то же, что classify, но только ролики — о них и просили."""
+    found = classify(name, size)
+    if found[2] != KIND_VIDEO:
+        raise ValueError(LIBRARY_ONLY_VIDEO)
+    return found
+
+
+def video_extensions():
+    return sorted(ext for ext, (kind, _ctype) in TYPES.items() if kind == KIND_VIDEO)
+
+
 def accepted_extensions():
     """Для атрибута accept у выбора файлов и для текста ошибки."""
     return sorted(TYPES)
@@ -165,6 +179,23 @@ def blob_path(task_id, material_id, ext, prefix=BLOB_PREFIX):
     if not prefix.endswith('/'):
         prefix += '/'
     return '%s%d/%s.%s' % (prefix, int(task_id), str(material_id), ext)
+
+
+def library_blob_path(material_id, ext, prefix=BLOB_PREFIX):
+    """Ролик без задачи — в своей папке, рядом с папками задач."""
+    prefix = str(prefix or BLOB_PREFIX)
+    if not prefix.endswith('/'):
+        prefix += '/'
+    return '%s%s/%s.%s' % (prefix, LIBRARY_FOLDER, str(material_id), ext)
+
+
+def is_library(material):
+    return material.get('task_id') is None
+
+
+def can_delete_library(material, *, user_id, is_super_admin, heads_marketing):
+    """Ролик «Роликов» удаляют загрузивший, глава маркетинга и супер-админ."""
+    return bool(is_super_admin or heads_marketing or material.get('uploaded_by') == user_id)
 
 
 def poster_path(material_blob_path):
@@ -357,6 +388,7 @@ def content_matches(ext, head):
 def error_message(code):
     """Текст для человека по коду ошибки."""
     return {
+        LIBRARY_ONLY_VIDEO: 'Во вкладку «Ролики» загружаются только ролики: MP4, MOV, WebM, MKV или AVI',
         UNSUPPORTED_TYPE: 'Такой файл не принимается. Подходят ролики (MP4, MOV, WebM), '
                           'картинки (JPG, PNG, WebP, GIF, SVG, HEIC, TIFF), PDF, PSD, AI, EPS, '
                           'архивы ZIP, RAR, 7z и звук (MP3, WAV, M4A, AAC).',

@@ -367,13 +367,14 @@ def pending_for(cursor, *, task_id, user_id, name, size, fingerprint=None):
         SELECT {columns}
           FROM task_production_materials m
           LEFT JOIN users u ON u.id = m.uploaded_by
-         WHERE m.task_id = %s AND m.uploaded_by = %s AND m.status = 'uploading'
+         WHERE m.task_id IS NOT DISTINCT FROM %s AND m.uploaded_by = %s AND m.status = 'uploading'
            AND m.original_name = %s AND m.file_size = %s
            AND COALESCE(m.client_fingerprint, '') = COALESCE(%s, '')
            AND m.created_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') - INTERVAL '6 days'
          ORDER BY m.created_at DESC
          LIMIT 1
-    """.format(columns=_MATERIAL_COLUMNS), (int(task_id), int(user_id), name, int(size), fingerprint or None))
+    """.format(columns=_MATERIAL_COLUMNS), (None if task_id is None else int(task_id), int(user_id), name,
+                                          int(size), fingerprint or None))
     row = cursor.fetchone()
     return _material_from_row(row) if row else None
 
@@ -385,8 +386,9 @@ def insert_material(cursor, *, material_id, task_id, version, kind, name, extens
             id, task_id, version, status, kind, original_name, extension, content_type,
             file_size, bucket, blob_path, upload_session, upload_origin, uploaded_by, client_fingerprint
         ) VALUES (%s, %s, %s, 'uploading', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (str(material_id), int(task_id), int(version), kind, name, extension, content_type,
-          int(size), bucket, blob_path, upload_session, upload_origin, int(uploaded_by), fingerprint or None))
+    """, (str(material_id), None if task_id is None else int(task_id), int(version), kind, name, extension,
+          content_type, int(size), bucket, blob_path, upload_session, upload_origin, int(uploaded_by),
+          fingerprint or None))
 
 
 def mark_ready(cursor, material_id, *, version, duration, width, height):
@@ -407,6 +409,33 @@ def set_poster(cursor, material_id, poster_blob_path):
 
 def delete_material(cursor, material_id):
     cursor.execute("DELETE FROM task_production_materials WHERE id = %s", (str(material_id),))
+
+
+def library(cursor, *, query='', limit=30, offset=0):
+    """Ролики вкладки «Ролики» (без задачи), свежие сверху; (ролики, всего).
+
+    Поиск — по имени файла. Недогруженные сюда не попадают: их видит только
+    тот, кто грузит, — в своей строке загрузки.
+    """
+    filters = ["m.task_id IS NULL", "m.status = 'ready'"]
+    values = []
+    text = str(query or '').strip()
+    if text:
+        filters.append("m.original_name ILIKE %s")
+        values.append('%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+    where = ' AND '.join(filters)
+    cursor.execute("SELECT COUNT(*) FROM task_production_materials m WHERE " + where, tuple(values))
+    total = int(cursor.fetchone()[0] or 0)
+    cursor.execute("""
+        SELECT {columns}
+          FROM task_production_materials m
+          LEFT JOIN users u ON u.id = m.uploaded_by
+         WHERE {where}
+         ORDER BY m.created_at DESC, m.id
+         LIMIT %s OFFSET %s
+    """.format(columns=_MATERIAL_COLUMNS, where=where),
+        tuple(values) + (max(1, min(int(limit), 60)), max(0, int(offset))))
+    return [_material_from_row(row) for row in cursor.fetchall()], total
 
 
 def stale_uploads(cursor, *, limit=20):

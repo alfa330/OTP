@@ -15,7 +15,8 @@ STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS task_production_materials (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        -- NULL — ролик вкладки «Ролики»: загружен просто так, без задачи.
+        task_id          INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
         version          INTEGER NOT NULL CHECK (version >= 1),
         -- uploading: сессия докачки открыта, файла в хранилище ещё нет целиком.
         -- ready: объект собран и сверен (размер, CRC32C, подпись формата).
@@ -47,6 +48,12 @@ STATEMENTS = (
     );
     """,
     "ALTER TABLE task_production_materials ADD COLUMN IF NOT EXISTS client_fingerprint VARCHAR(64);",
+    # «Ролики» без задачи (просьба владельца 16.10.2026: «как можно просто загружать
+    # ролики — данная возможность тоже должна быть на сайте»). Снятие NOT NULL
+    # идемпотентно: на уже снятом ограничении оператор ничего не делает.
+    "ALTER TABLE task_production_materials ALTER COLUMN task_id DROP NOT NULL;",
+    "CREATE INDEX IF NOT EXISTS idx_task_production_materials_library "
+    "ON task_production_materials (created_at DESC) WHERE task_id IS NULL;",
     "CREATE INDEX IF NOT EXISTS idx_task_production_materials_task "
     "ON task_production_materials (task_id, version, created_at);",
     # Недогруженные — для уборки брошенных сессий (живут неделю).

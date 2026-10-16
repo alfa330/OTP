@@ -322,3 +322,49 @@ def test_uploads_of_others_in_version(db):
         assert others == [{'name': 'коллеги.mp4', 'uploaded_by_name': 'Сммова Сауле'}]
         assert queries.uploading_by_others(cur, task_id, 2, VIDEO) == []
 
+
+def _library_video(cur, name, *, status='ready', uploader=VIDEO, size=100, fingerprint=None):
+    material_id = uuid.uuid4()
+    queries.insert_material(cur, material_id=material_id, task_id=None, version=1, kind='video', name=name,
+                            extension='mp4', content_type='video/mp4', size=size, bucket='b',
+                            blob_path='Production/library/%s.mp4' % material_id,
+                            upload_session='https://s/%s' % material_id, upload_origin='https://o',
+                            uploaded_by=uploader, fingerprint=fingerprint)
+    if status == 'ready':
+        queries.mark_ready(cur, material_id, version=1, duration=12.0, width=1080, height=1920)
+    return str(material_id)
+
+
+def test_library_lists_task_less_videos(db):
+    with db.cursor() as cur:
+        task_id = _task(cur, 'Задача с файлом', status='in_progress')
+        _material(cur, task_id, 1, 'в задаче.mp4')
+        first = _library_video(cur, 'Промо 50%_осень.mp4')
+        second = _library_video(cur, 'Интервью.mp4', uploader=SMM)
+        _library_video(cur, 'недогруз.mp4', status='uploading')
+
+        items, total = queries.library(cur)
+        assert total == 2 and {item['id'] for item in items} == {first, second}
+        assert all(item['task_id'] is None for item in items)
+        assert {item['uploaded_by_name'] for item in items} == {'Видеографов Вадим', 'Сммова Сауле'}
+        found, total = queries.library(cur, query='интервью')
+        assert total == 1 and found[0]['id'] == second
+        found, total = queries.library(cur, query='50%_')
+        assert total == 1 and found[0]['id'] == first
+        page, total = queries.library(cur, limit=1, offset=1)
+        assert total == 2 and len(page) == 1
+        # Ролики без задачи не попадают ни в задачи, ни в уборку задачи.
+        assert {m['name'] for m in queries.materials_of(cur, task_id)} == {'в задаче.mp4'}
+        assert len(queries.blobs_of_task(cur, task_id)) == 2
+
+
+def test_library_resume_matches_task_less_upload(db):
+    with db.cursor() as cur:
+        pending = _library_video(cur, 'большой.mov', status='uploading', size=5000, fingerprint='42')
+        found = queries.pending_for(cur, task_id=None, user_id=VIDEO, name='большой.mov', size=5000, fingerprint='42')
+        assert found['id'] == pending and found['task_id'] is None
+        task_id = _task(cur, 'Та же картинка в задаче', status='in_progress')
+        # Незаконченная загрузка «Роликов» не подхватывается загрузкой в задачу — и наоборот.
+        assert queries.pending_for(cur, task_id=task_id, user_id=VIDEO, name='большой.mov', size=5000,
+                                   fingerprint='42') is None
+

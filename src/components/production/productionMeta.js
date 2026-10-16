@@ -64,6 +64,12 @@ export const fileExtension = (name) => {
 
 export const ACCEPT_ATTRIBUTE = Object.keys(PRODUCTION_FILE_TYPES).map((ext) => `.${ext}`).join(',');
 
+/* Вкладка «Ролики» — только ролики: о них владелец и просил («просто загружать ролики»). */
+export const VIDEO_ACCEPT_ATTRIBUTE = Object.entries(PRODUCTION_FILE_TYPES)
+    .filter(([, [kind]]) => kind === 'video')
+    .map(([ext]) => `.${ext}`)
+    .join(',');
+
 /** Годится ли файл, и если нет — почему (тем же текстом, что вернул бы сервер). */
 export const classifyFile = (file) => {
     const ext = fileExtension(file?.name);
@@ -76,6 +82,15 @@ export const classifyFile = (file) => {
     if (size > MAX_MATERIAL_BYTES) return { ok: false, error: 'Файл больше 2 ГБ' };
     const [kind, contentType] = known;
     return { ok: true, ext, kind, contentType, size };
+};
+
+/** То же для «Роликов»: не ролик — отказ сразу, до загрузки. */
+export const classifyLibraryFile = (file) => {
+    const check = classifyFile(file);
+    if (check.ok && check.kind !== 'video') {
+        return { ok: false, error: 'Во вкладку «Ролики» загружаются только ролики: MP4, MOV, WebM, MKV или AVI' };
+    }
+    return check;
 };
 
 export const canCapturePoster = (kind, contentType) => (

@@ -7,8 +7,10 @@ import {
   BOARD_COLUMNS,
   DONE_GROUPS,
   MAX_MATERIAL_BYTES,
+  VIDEO_ACCEPT_ATTRIBUTE,
   canCapturePoster,
   classifyFile,
+  classifyLibraryFile,
   columnOf,
   dueInfo,
   fileExtension,
@@ -131,3 +133,12 @@ test('загрузка: 408 от хранилища — повторить, а �
   assert.equal(sessionOutcome(408), 'retry');
   assert.equal(sessionOutcome(400), 'fail');
 });
+
+test('«Ролики» принимают только ролики — отказ ещё до загрузки', () => {
+  assert.equal(classifyLibraryFile({ name: 'монтаж.mov', size: 10 }).ok, true);
+  assert.equal(classifyLibraryFile({ name: 'баннер.png', size: 10 }).ok, false);
+  assert.match(classifyLibraryFile({ name: 'баннер.png', size: 10 }).error, /только ролики/);
+  assert.equal(classifyLibraryFile({ name: 'virus.exe', size: 10 }).ok, false);
+  assert.deepEqual(VIDEO_ACCEPT_ATTRIBUTE.split(',').sort(), ['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.webm']);
+});
+

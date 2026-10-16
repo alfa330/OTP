@@ -25,7 +25,7 @@
 
 import axios from 'axios';
 import { createCrc32c } from './crc32c';
-import { canCapturePoster, classifyFile, retryDelayMs, sessionOutcome, speedOf } from './productionMeta';
+import { canCapturePoster, classifyFile, classifyLibraryFile, retryDelayMs, sessionOutcome, speedOf } from './productionMeta';
 
 const READ_SLICE = 8 * 1024 * 1024;
 const MAX_RETRIES = 12;
@@ -93,13 +93,15 @@ export const uploadStore = {
     snapshot() {
         return items;
     },
-    /** Поставить файлы в очередь. Неподходящие сразу отмечаются ошибкой. */
-    add({ taskId, files, apiBaseUrl, headers, onDone }) {
+    /** Поставить файлы в очередь. Неподходящие сразу отмечаются ошибкой.
+        library — ролик вкладки «Ролики» (без задачи): taskId тогда не нужен. */
+    add({ taskId = null, library = false, files, apiBaseUrl, headers, onDone }) {
         Array.from(files || []).forEach((file) => {
-            const check = classifyFile(file);
+            const check = library ? classifyLibraryFile(file) : classifyFile(file);
             items.push({
                 key: nextKey++,
-                taskId: Number(taskId),
+                taskId: library ? null : Number(taskId),
+                library: Boolean(library),
                 file,
                 name: file?.name || 'файл',
                 size: Number(file?.size || 0),
@@ -107,6 +109,8 @@ export const uploadStore = {
                 contentType: check.ok ? check.contentType : '',
                 state: check.ok ? 'queued' : 'failed',
                 error: check.ok ? '' : check.error,
+                // Неподходящий файл повтором не исправить — у строки будет только «Убрать».
+                retryable: Boolean(check.ok),
                 loaded: 0,
                 eta: null,
                 materialId: null,
@@ -133,7 +137,8 @@ export const uploadStore = {
     },
     retry(key) {
         const item = items.find((entry) => entry.key === key);
-        if (!item || item.state !== 'failed' || !classifyFile(item.file).ok) return;
+        if (!item || item.state !== 'failed') return;
+        if (!(item.library ? classifyLibraryFile(item.file) : classifyFile(item.file)).ok) return;
         forget(key);
         patch(key, { state: 'queued', error: '', loaded: 0, eta: null });
         pump();
@@ -379,7 +384,9 @@ const uploadOne = async (item) => {
     let started;
     try {
         const response = await axios.post(
-            `${apiBaseUrl}/api/production/tasks/${item.taskId}/uploads`,
+            item.library
+                ? `${apiBaseUrl}/api/production/library/uploads`
+                : `${apiBaseUrl}/api/production/tasks/${item.taskId}/uploads`,
             // Отпечаток (дата изменения файла): докачка подхватит только тот же файл.
             { name: item.name, size: item.size, fingerprint: String(item.file?.lastModified || '') },
             { headers: headers() },

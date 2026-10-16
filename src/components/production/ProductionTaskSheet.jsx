@@ -28,7 +28,7 @@ const errorText = (error, fallback) => error?.response?.data?.error || error?.me
 
 const KIND_ICON = { video: Film, image: ImageIcon, file: FileText };
 
-const Avatar = ({ person, size = 22 }) => (
+export const Avatar = ({ person, size = 22 }) => (
     person?.avatar_url ? (
         <img src={person.avatar_url} alt="" className="shrink-0 rounded-full object-cover ring-2 ring-slate-100"
             style={{ width: size, height: size }} />
@@ -96,7 +96,7 @@ const BriefBlock = ({ brief, description }) => {
     );
 };
 
-const Thumb = ({ material }) => {
+export const Thumb = ({ material }) => {
     const Icon = KIND_ICON[material.kind] || FileText;
     // Сломанной считается конкретная ссылка: истёкшую подпись сменит свежая, и кадр вернётся.
     const [brokenUrl, setBrokenUrl] = useState(null);
@@ -131,7 +131,7 @@ const Thumb = ({ material }) => {
     );
 };
 
-const MaterialTile = ({ material, onOpen, onDownload, onDelete }) => {
+export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = '' }) => {
     /* Удаление подтверждается на самой плитке, а не вторым окном поверх карточки:
        окно на окне — двойное затемнение, а на телефоне целый экран ради одной строки. */
     const [confirming, setConfirming] = useState(false);
@@ -140,7 +140,9 @@ const MaterialTile = ({ material, onOpen, onDownload, onDelete }) => {
         <button type="button" onClick={() => onOpen(material)} className="block w-full text-left transition active:scale-[0.98]">
             <Thumb material={material} />
             <span className="mt-1.5 block truncate px-0.5 text-[12.5px] font-medium text-slate-800" title={material.name}>{material.name}</span>
-            <span className="block px-0.5 text-[11.5px] tabular-nums text-slate-400">{formatBytes(material.size)}</span>
+            <span className="block truncate px-0.5 text-[11.5px] tabular-nums text-slate-400">
+                {[formatBytes(material.size), meta].filter(Boolean).join(' · ')}
+            </span>
         </button>
         {confirming && (
             <div className="absolute inset-x-0 top-0 flex aspect-[16/10] flex-col items-center justify-center gap-2 rounded-xl bg-slate-900/75 px-2 text-center backdrop-blur-sm">
@@ -185,7 +187,7 @@ const UPLOAD_STATE_TEXT = {
     done: 'Загружено',
 };
 
-const UploadRow = ({ item }) => {
+export const UploadRow = ({ item }) => {
     const percent = item.size > 0 ? Math.min(100, Math.floor((item.loaded / item.size) * 100)) : 0;
     const failed = item.state === 'failed';
     const status = failed ? item.error : (item.state === 'uploading'
@@ -215,9 +217,11 @@ const UploadRow = ({ item }) => {
             </span>
             {failed ? (
                 <span className="flex shrink-0 items-center gap-1">
-                    <button type="button" className={`${iosBtnGhost} px-2`} onClick={() => uploadStore.retry(item.key)} title="Повторить">
-                        <RotateCcw size={15} />
-                    </button>
+                    {item.retryable !== false && (
+                        <button type="button" className={`${iosBtnGhost} px-2`} onClick={() => uploadStore.retry(item.key)} title="Повторить">
+                            <RotateCcw size={15} />
+                        </button>
+                    )}
                     <button type="button" className={`${iosBtnGhost} px-2`} onClick={() => uploadStore.dismiss(item.key)} title="Убрать">
                         <X size={15} />
                     </button>

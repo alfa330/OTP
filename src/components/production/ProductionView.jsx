@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Film, Image as ImageIcon, Loader2, MonitorSmartphone, Package, Printer, Search, Upload, X } from 'lucide-react';
 import { APPLE_FONT, iosBtnSecondary, iosInput, IosHint, IosSegmented } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
+import ProductionLibrary from './ProductionLibrary';
 import ProductionTaskSheet from './ProductionTaskSheet';
 import { uploadStore } from './productionUpload';
 import {
@@ -14,9 +15,10 @@ import {
  * Раздел «Продакшн» (задача #316): рабочее место маркетинга поверх задач типа
  * «Продакшн» (#354).
  *
- * «В работе» — доска этих задач по статусам: «К выполнению», «В работе», «На
- * проверке». «Готовое» — принятые задачи с их итоговыми материалами: поиск по
- * названию, отбор по виду (видео, digital, полиграфия, бренд).
+ * «Доска» — задачи по статусам: «К выполнению», «В работе», «На проверке».
+ * «Готовое» — принятые задачи с их итоговыми материалами: поиск по названию,
+ * отбор по виду (видео, digital, полиграфия, бренд). «Ролики» — просто загрузить
+ * ролик, без задачи (видна маркетингу и админам со всеми задачами).
  *
  * Задачу ставят в «Задачах» (там форма с брифом), а работают с ней здесь: в
  * карточке исполнитель загружает ролики и макеты и отправляет на проверку,
@@ -132,6 +134,8 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     const headers = useCallback(() => (withAccessTokenHeader ? withAccessTokenHeader() : {}), [withAccessTokenHeader]);
     const isNarrow = useIsMobileShell();
     const [tab, setTab] = useState('board');
+    // Есть ли у человека вкладка «Ролики» — решает сервер (охват «всё»).
+    const [libraryOpen, setLibraryOpen] = useState(false);
     const [board, setBoard] = useState(null);
     const [boardError, setBoardError] = useState('');
     const [mobileColumn, setMobileColumn] = useState('progress');
@@ -193,6 +197,14 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
 
     useEffect(() => { loadBoard(); }, [loadBoard]);
 
+    useEffect(() => {
+        let alive = true;
+        axios.get(`${apiBaseUrl}/api/production/access`, { headers: headers() })
+            .then((response) => { if (alive) setLibraryOpen(Boolean(response.data?.library)); })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, [apiBaseUrl, headers]);
+
     // Поиск и отбор «Готового» — с паузой на набор, чтобы не слать запрос на каждую букву.
     const loadDoneRef = useRef(loadDone);
     loadDoneRef.current = loadDone;
@@ -226,7 +238,8 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     const tabs = [
         { value: 'board', label: 'Доска' },
         { value: 'done', label: 'Готовое' },
-    ];
+        libraryOpen && { value: 'videos', label: 'Ролики' },
+    ].filter(Boolean);
 
     const renderColumn = (column, { single = false } = {}) => {
         const items = grouped[column.id] || [];
@@ -385,6 +398,12 @@ const ProductionView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
                             )}
                         </>
                     )}
+                </div>
+            )}
+
+            {tab === 'videos' && libraryOpen && (
+                <div className="mt-4">
+                    <ProductionLibrary apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
                 </div>
             )}
 

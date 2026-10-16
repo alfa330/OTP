@@ -106,6 +106,24 @@ class ClassifyTests(unittest.TestCase):
                          'Production-stand/35/%s.mp4' % mid)
         self.assertEqual(materials.poster_path('Production/35/a.mp4'), 'Production/35/a.mp4.poster.jpg')
 
+    def test_library_takes_only_videos(self):
+        self.assertEqual(materials.classify_library('Монтаж.MOV', 10)[2], 'video')
+        for name in ('баннер.png', 'макет.pdf', 'архив.zip'):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError) as caught:
+                    materials.classify_library(name, 10)
+                self.assertEqual(str(caught.exception), materials.LIBRARY_ONLY_VIDEO)
+        self.assertEqual(materials.video_extensions(), ['avi', 'm4v', 'mkv', 'mov', 'mp4', 'webm'])
+        mid = uuid.UUID('12345678-1234-5678-1234-567812345678')
+        self.assertEqual(materials.library_blob_path(mid, 'mp4'), 'Production/library/%s.mp4' % mid)
+        self.assertTrue(materials.is_library({'task_id': None}))
+        self.assertFalse(materials.is_library({'task_id': 5}))
+        own = {'uploaded_by': 7}
+        self.assertTrue(materials.can_delete_library(own, user_id=7, is_super_admin=False, heads_marketing=False))
+        self.assertFalse(materials.can_delete_library(own, user_id=8, is_super_admin=False, heads_marketing=False))
+        self.assertTrue(materials.can_delete_library(own, user_id=8, is_super_admin=False, heads_marketing=True))
+        self.assertTrue(materials.can_delete_library(own, user_id=8, is_super_admin=True, heads_marketing=False))
+
     def test_preview_rules(self):
         self.assertTrue(materials.can_preview('video', 'video/mp4'))
         self.assertFalse(materials.can_preview('video', 'video/x-matroska'))
@@ -417,14 +435,19 @@ class RouteTests(unittest.TestCase):
             'has_production_relation': lambda cursor, uid: self.user['relation'],
             'task': lambda cursor, task_id: dict(store['tasks'][int(task_id)]) if int(task_id) in store['tasks'] else None,
             'history': lambda cursor, task_id: store['history'].get(int(task_id), []),
-            'materials_of': lambda cursor, task_id: [dict(m) for m in store['materials'].values() if m['task_id'] == task_id],
+            'materials_of': lambda cursor, task_id: [dict(m) for m in store['materials'].values()
+                                                     if m['task_id'] is not None and m['task_id'] == task_id],
             'material': lambda cursor, mid, lock=False: material_from(mid),
-            'count_in_version': lambda cursor, task_id, version: sum(1 for m in store['materials'].values() if m['version'] == version),
+            'count_in_version': lambda cursor, task_id, version: sum(1 for m in store['materials'].values()
+                                                                 if m['task_id'] == task_id and m['version'] == version),
             'pending_for': lambda cursor, **kw: None,
             'insert_material': self._insert,
             'mark_ready': self._mark_ready,
             'delete_material': lambda cursor, mid: store['materials'].pop(str(mid), None),
             'stale_uploads': lambda cursor, **kw: [],
+            'library': lambda cursor, **kw: (
+                [dict(m) for m in store['materials'].values() if m['task_id'] is None and m['status'] == 'ready'],
+                sum(1 for m in store['materials'].values() if m['task_id'] is None and m['status'] == 'ready')),
             'uploading_by_others': lambda cursor, task_id, version, user_id: [
                 {'name': m['name'], 'uploaded_by_name': 'Коллега'} for m in store['materials'].values()
                 if m['task_id'] == task_id and m['version'] == version and m['status'] == 'uploading'
@@ -462,7 +485,7 @@ class RouteTests(unittest.TestCase):
             build_cors_preflight_response=lambda: ('', 204),
             task_guard=task_guard,
             full_task_access=lambda role, uid: role == 'super_admin',
-            headed_department_codes=self._headed_codes,
+            headed_department_codes=lambda uid: self._headed_codes(uid),
             is_super_admin=lambda role: role == 'super_admin',
             allowed_origin=lambda origin: origin in ('https://alfa330.github.io',),
             gcs=self._gcs,
@@ -821,6 +844,72 @@ class RouteTests(unittest.TestCase):
         material = self.store['materials'][response.get_json()['material_id']]
         self.assertEqual(material['fingerprint'], '1729000000000')
 
+
+
+    # ── «Ролики»: просто загрузить ролик, без задачи ─────────────────────────
+
+    def _library_start(self, name='ролик.mp4', size=100):
+        return self.http.post('/api/production/library/uploads', json={'name': name, 'size': size},
+                              headers={'Origin': 'https://alfa330.github.io'})
+
+    def _library_ready(self, name='ролик.mp4'):
+        mid = self._library_start(name=name).get_json()['material_id']
+        self.assertEqual(self.http.post('/api/production/uploads/%s/complete' % mid, json={}).status_code, 200)
+        return mid
+
+    def test_library_upload_is_videos_only_and_lands_in_its_folder(self):
+        response = self._library_start(name='баннер.png')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'PRODUCTION_LIBRARY_ONLY_VIDEO')
+        response = self._library_start()
+        self.assertEqual(response.status_code, 201, response.get_json())
+        material = self.store['materials'][response.get_json()['material_id']]
+        self.assertIsNone(material['task_id'])
+        self.assertEqual(material['version'], 1)
+        kind, path, kwargs = [c for c in self.gcs_calls if c[0] == 'open'][-1]
+        self.assertTrue(path.startswith('Production/library/') and path.endswith('.mp4'))
+        self.assertEqual(kwargs['origin'], 'https://alfa330.github.io')
+
+    def test_library_complete_and_list(self):
+        mid = self._library_ready()
+        self.assertEqual(self.store['materials'][mid]['status'], 'ready')
+        body = self.http.get('/api/production/library').get_json()
+        self.assertEqual([item['id'] for item in body['items']], [mid])
+        self.assertTrue(body['items'][0]['can_delete'])  # свой ролик
+        self.assertNotIn(mid, [m['id'] for v in self.http.get('/api/production/tasks/35').get_json()['versions']
+                               for m in v['materials']])
+
+    def test_library_closed_for_own_scope(self):
+        mid = self._library_ready()
+        self.user.update(id=50, role='admin', marketing=False, relation=True)  # постановщик своей задачи
+        self.assertEqual(self.http.get('/api/production/library').get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+        self.assertEqual(self._library_start().get_json()['code'], 'PRODUCTION_LIBRARY_CLOSED')
+        self.assertEqual(self.http.get('/api/production/materials/%s/download' % mid).status_code, 404)
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 404)
+        self.assertIn(mid, self.store['materials'])
+        access = self.http.get('/api/production/access').get_json()
+        self.assertFalse(access['library'])
+
+    def test_library_delete_rules(self):
+        mid = self._library_ready()
+        self.user['id'] = 8  # другой сотрудник маркетинга
+        self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 403)
+        self.assertIn(mid, self.store['materials'])
+        body = self.http.get('/api/production/library').get_json()
+        self.assertFalse(body['items'][0]['can_delete'])
+        # Глава маркетинга может.
+        with mock.patch.object(self, '_headed_codes', lambda uid: ['marketing']):
+            self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 200)
+        self.assertNotIn(mid, self.store['materials'])
+
+    def test_library_poster_allowed_for_own_video(self):
+        import io
+        mid = self._library_start().get_json()['material_id']
+        response = self.http.post('/api/production/uploads/%s/poster' % mid,
+                                  data={'file': (io.BytesIO(b'\xff\xd8\xff\xe0' + b'\x00' * 32), 'p.jpg', 'image/jpeg')},
+                                  content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.store['materials'][mid]['poster_blob_path'].endswith('.poster.jpg'))
 
     def test_download_link_is_attachment(self):
         mid = self._start(name='Промо.mp4').get_json()['material_id']

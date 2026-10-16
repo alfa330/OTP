@@ -117,6 +117,7 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
                     with db._get_cursor() as cursor:
                         marketing = heads_marketing or queries.is_marketing_member(cursor, requester_id)
                         ctx['marketing'] = bool(marketing)
+                        ctx['heads_marketing'] = bool(heads_marketing)
                         ctx['scope_all'] = bool(full or marketing)
                         if not ctx['scope_all'] and not queries.has_production_relation(cursor, requester_id):
                             raise ApiError('Раздел «Продакшн» вам не открыт', 403, 'PRODUCTION_CLOSED')
@@ -242,6 +243,8 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             'open': True,
             'scope': 'all' if ctx['scope_all'] else 'own',
             'marketing': ctx['marketing'],
+            # «Ролики» (без задачи) — рабочая полка маркетинга: видит и грузит тот, кто видит всё.
+            'library': ctx['scope_all'],
             'max_file_bytes': materials.MAX_MATERIAL_BYTES,
             'chunk_bytes': materials.CHUNK_BYTES,
             'extensions': materials.accepted_extensions(),
@@ -465,10 +468,21 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if material is None or material['uploaded_by'] != ctx['user_id']:
             raise ApiError('Загрузка не найдена', 404, 'PRODUCTION_UPLOAD_NOT_FOUND')
         try:
-            task_row = _load_task(cursor, material['task_id'], ctx)
+            task_row = _material_access(cursor, material, ctx)
         except ApiError:
             raise ApiError('Загрузка не найдена', 404, 'PRODUCTION_UPLOAD_NOT_FOUND')
         return material, task_row
+
+    def _material_access(cursor, material, ctx):
+        """Охват материала: задачи — как у задачи; ролика «Роликов» — у того, кто видит всё.
+
+        Возвращает строку задачи или None для ролика без задачи.
+        """
+        if materials.is_library(material):
+            if not ctx['scope_all']:
+                raise ApiError('Файл не найден', 404, 'PRODUCTION_MATERIAL_NOT_FOUND')
+            return None
+        return _load_task(cursor, material['task_id'], ctx)
 
     @route('/uploads/<material_id>')
     def upload_state(material_id, ctx):
@@ -524,6 +538,14 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
         duration = _positive_float(data.get('duration'), 24 * 3600)
         width = _positive_int(data.get('width'), 100000)
         height = _positive_int(data.get('height'), 100000)
+        if materials.is_library(material):
+            with db._get_cursor() as cursor:
+                locked = queries.material(cursor, material['id'], lock=True)
+                if locked is None:
+                    raise ApiError('Загрузка отменена', 404, 'PRODUCTION_UPLOAD_NOT_FOUND')
+                queries.mark_ready(cursor, locked['id'], version=1, duration=duration, width=width, height=height)
+            return _json({'material': {'id': material['id'], 'status': 'ready', 'version': 1}})
+
         with db._get_cursor() as cursor:
             locked = queries.material(cursor, material['id'], lock=True)
             if locked is None:
@@ -566,9 +588,9 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             raise ApiError('Кадр нужен только роликам и картинкам', 400, 'PRODUCTION_POSTER_KIND')
         # Обложку меняют, пока файл грузится или его версия ещё у исполнителя. У
         # отправленной и принятой версии её не подменить — её уже видели.
-        working = materials.working_version(task_row['status'], task_row['completed_count'])
-        if not (material['status'] == 'uploading' or material['version'] == working
-                or materials.is_draft(material, task_row['completed_count'])):
+        working = materials.working_version(task_row['status'], task_row['completed_count']) if task_row else None
+        if task_row is not None and not (material['status'] == 'uploading' or material['version'] == working
+                                         or materials.is_draft(material, task_row['completed_count'])):
             raise ApiError('Эта версия уже отправлена — обложку не поменять', 409, 'PRODUCTION_POSTER_CLOSED')
         path = materials.poster_path(material['blob_path'])
         client = storage.client_of(gcs)
@@ -577,6 +599,78 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
         with db._get_cursor() as cursor:
             queries.set_poster(cursor, material['id'], path)
         return _json({'ok': True})
+
+    # ── «Ролики»: просто загрузить ролик, без задачи ─────────────────────────
+    # Просьба владельца 16.10.2026: «как можно просто загружать ролики — данная
+    # возможность тоже должна быть на сайте». Полка маркетинга: видит и грузит тот,
+    # у кого в разделе охват «всё» (маркетинг, админ со всеми задачами). Путь
+    # файла тот же, что у материалов задач: сессия докачки, сверка, обложка.
+
+    def _require_library(ctx):
+        if not ctx['scope_all']:
+            raise ApiError('Вкладка «Ролики» открыта маркетингу', 403, 'PRODUCTION_LIBRARY_CLOSED')
+
+    @route('/library')
+    def library_list(ctx):
+        _require_library(ctx)
+        limit = max(1, min(_int(request.args.get('limit'), 30) or 30, 60))
+        offset = max(0, _int(request.args.get('offset'), 0) or 0)
+        query = (request.args.get('q') or '').strip()[:200]
+        with db._get_cursor() as cursor:
+            rows, total = queries.library(cursor, query=query, limit=limit, offset=offset)
+        client, bucket = _client_or_none() if rows else (None, None)
+        items = []
+        for row in rows:
+            deletable = materials.can_delete_library(row, user_id=ctx['user_id'], is_super_admin=ctx['super_admin'],
+                                                     heads_marketing=ctx['heads_marketing'])
+            items.append(_material_out(row, client, bucket, can_delete=deletable))
+        return _json({'items': items, 'total': total, 'offset': offset, 'limit': limit,
+                      'extensions': materials.video_extensions()})
+
+    @route('/library/uploads', methods=('POST',))
+    def start_library_upload(ctx):
+        _require_library(ctx)
+        data = _body()
+        try:
+            name, ext, kind, content_type = materials.classify_library(data.get('name'), data.get('size'))
+        except ValueError as exc:
+            code = str(exc)
+            status = 413 if code == materials.TOO_LARGE else 400
+            raise ApiError(materials.error_message(code), status, code)
+        size = int(data.get('size'))
+        fingerprint = str(data.get('fingerprint') or '').strip()[:64] or None
+        origin = (request.headers.get('Origin') or '').strip().rstrip('/') or None
+        if origin and not allowed_origin(origin):
+            raise ApiError('Загрузка с этого сайта не разрешена', 403, 'PRODUCTION_ORIGIN')
+
+        with db._get_cursor() as cursor:
+            pending = queries.pending_for(cursor, task_id=None, user_id=ctx['user_id'], name=name, size=size,
+                                          fingerprint=fingerprint)
+        client = storage.client_of(gcs)
+        bucket = storage.bucket_of(gcs)
+        if pending is not None and pending.get('upload_session'):
+            state = storage.session_offset(pending['upload_session'], pending['size'],
+                                           origin=pending.get('upload_origin'))
+            if state is not None:
+                offset, finished = state
+                return _json({'material_id': pending['id'], 'session_url': pending['upload_session'],
+                              'offset': offset, 'finished': finished, 'size': pending['size'],
+                              'chunk_bytes': materials.CHUNK_BYTES, 'resumed': True})
+            with db._get_cursor() as cursor:
+                queries.delete_material(cursor, pending['id'])
+
+        _sweep_stale()
+        material_id = uuid.uuid4()
+        path = materials.library_blob_path(material_id, ext, prefix=blob_prefix or materials.BLOB_PREFIX)
+        session_url = storage.open_session(client, bucket, path, content_type=content_type, size=size, origin=origin)
+        with db._get_cursor() as cursor:
+            queries.insert_material(
+                cursor, material_id=material_id, task_id=None, version=1, kind=kind, name=name, extension=ext,
+                content_type=content_type, size=size, bucket=bucket, blob_path=path, upload_session=session_url,
+                upload_origin=origin, uploaded_by=ctx['user_id'], fingerprint=fingerprint)
+        return _json({'material_id': str(material_id), 'session_url': session_url, 'offset': 0,
+                      'finished': False, 'size': size, 'chunk_bytes': materials.CHUNK_BYTES,
+                      'resumed': False}, 201)
 
     # ── Удаление и скачивание ────────────────────────────────────────────────
 
@@ -591,16 +685,22 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             material = queries.material(cursor, material_id, lock=True)
             if material is None:
                 raise ApiError('Файл не найден', 404, 'PRODUCTION_MATERIAL_NOT_FOUND')
-            task_row = _load_task(cursor, material['task_id'], ctx)
-            is_assignee = _is_assignee(task_row, ctx['user_id'])
+            task_row = _material_access(cursor, material, ctx)
+            is_assignee = bool(task_row) and _is_assignee(task_row, ctx['user_id'])
             if material['status'] == 'uploading':
                 allowed = material['uploaded_by'] == ctx['user_id'] or ctx['super_admin']
+            elif task_row is None:
+                allowed = materials.can_delete_library(
+                    material, user_id=ctx['user_id'], is_super_admin=ctx['super_admin'],
+                    heads_marketing=ctx['heads_marketing'])
             else:
                 allowed = materials.can_delete(
                     material, status=task_row['status'], completed_count=task_row['completed_count'],
                     user_id=ctx['user_id'], is_assignee=is_assignee, is_super_admin=ctx['super_admin'])
             if not allowed:
-                raise ApiError('Этот файл уже отправлен на проверку — удалить его нельзя',
+                raise ApiError('Удалить ролик могут загрузивший, глава маркетинга и супер-админ'
+                               if task_row is None else
+                               'Этот файл уже отправлен на проверку — удалить его нельзя',
                                403, 'PRODUCTION_DELETE_FORBIDDEN')
             queries.delete_material(cursor, material['id'])
         if material['status'] == 'uploading' and material.get('upload_session'):
@@ -616,7 +716,7 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
             material = queries.material(cursor, material_id)
             if material is None or material['status'] != 'ready':
                 raise ApiError('Файл не найден', 404, 'PRODUCTION_MATERIAL_NOT_FOUND')
-            _load_task(cursor, material['task_id'], ctx)
+            _material_access(cursor, material, ctx)
         client = storage.client_of(gcs)
         try:
             url = storage.sign(client, material['bucket'], material['blob_path'],
