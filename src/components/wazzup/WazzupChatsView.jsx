@@ -45,7 +45,7 @@ import useThreadEnd from './useThreadEnd';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
-import ChatDriverCard from './ChatDriverCard';
+import { DriverCardButton, DriverCardPanel } from './ChatDriverCard';
 import DriverCardsTab from './DriverCardsTab';
 import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
@@ -1021,6 +1021,10 @@ function ChatsWorkspace(props) {
     const [replySelection, setReplySelection] = useState(null);
     const [attachmentSelection, setAttachmentSelection] = useState(null);
     const [noteComposerKey, setNoteComposerKey] = useState(null);
+    /* Панель карточки водителя справа. Остаётся открытой при переходе к другому
+       чату — верификатор идёт по чатам подряд, и каждый раз открывать её заново
+       незачем; у чата без карточки в ней «не заполнена» и «Заполнить». */
+    const [cardPanelOpen, setCardPanelOpen] = useState(false);
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     /* Переход по ссылке: пока номер разрешается в чат, лента не имеет права
@@ -1702,6 +1706,8 @@ function ChatsWorkspace(props) {
             contactName: card.contactName, contactPhone: card.contactPhone };
         setMainTab('chats');
         openChat(chat);
+        // Пришли из «Карточек» смотреть карточку — она сразу и открыта.
+        setCardPanelOpen(true);
         axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), params: { account: 'op', channel_id: card.channelId, chat_id: card.chatId, limit: 1 },
         }).then(({ data }) => {
@@ -1846,7 +1852,7 @@ function ChatsWorkspace(props) {
 
             {/* Колонки занимают весь остаток после шапки, в том числе когда
                 кнопки переносятся на вторую строку или окно меняет высоту. */}
-            <div className="wz-columns flex min-h-0 flex-1 overflow-hidden border-t border-slate-200/70 bg-white"
+            <div className="wz-columns relative flex min-h-0 flex-1 overflow-hidden border-t border-slate-200/70 bg-white"
                  style={{ display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Список чатов */}
                 <div className="wz-contact-list flex w-80 shrink-0 flex-col border-r border-slate-200">
@@ -2020,7 +2026,9 @@ function ChatsWorkspace(props) {
                     )}
                     {selected && (
                         <>
-                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 bg-white/85 px-4 py-2.5 backdrop-blur-xl">
+                            {/* relative z-20: окно карточки водителя из кнопки шапки ложится
+                                поверх переписки, а не под неё. */}
+                            <div className="relative z-20 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 bg-white/85 px-4 py-2.5 backdrop-blur-xl">
                                 <div className="flex min-w-0 items-center gap-2.5">
                                     <Avatar name={selected.contactName || selected.contactPhone || selected.chatId} />
                                     <div className="min-w-0">
@@ -2032,6 +2040,15 @@ function ChatsWorkspace(props) {
                                             {channelName[selected.channelId] || selected.channelId}
                                         </div>
                                     </div>
+                                    {/* Карточка водителя — рядом с номером (владелец 16.10.2026):
+                                        пустая — окно для ID, заполненная — панель справа. */}
+                                    {driverCardEnabled && (
+                                        <div className="ml-1 shrink-0">
+                                            <DriverCardButton key={`card-button:${selectedKey}`} card={driverCard} chat={selected}
+                                                apiBaseUrl={apiBaseUrl} headers={headers} panelOpen={cardPanelOpen}
+                                                onTogglePanel={() => setCardPanelOpen((open) => !open)} />
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
                                     {notesEnabled && <button type="button"
@@ -2071,14 +2088,6 @@ function ChatsWorkspace(props) {
                                     )}
                                 </div>
                             </div>
-                            {/* Свой ключ, не selectedKey: в этом же списке поле ввода
-                                (ChatPilotComposer) стоит на ключе чата, а два одинаковых
-                                ключа рядом React путает — старая полоса не снималась и
-                                копилась при каждом новом чате (16.10.2026). */}
-                            {driverCardEnabled && (
-                                <ChatDriverCard key={`driver-card:${selectedKey}`} chat={selected} card={driverCard}
-                                    apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
-                            )}
                             <div className="relative min-h-0 flex-1">
                             <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
@@ -2170,6 +2179,13 @@ function ChatsWorkspace(props) {
                         </>
                     )}
                 </div>
+                {/* Карточка водителя справа: на широком экране — третьей колонкой
+                    рядом с перепиской, на узком — поверх её правого края. */}
+                {driverCardEnabled && cardPanelOpen && (
+                    <DriverCardPanel key={`card-panel:${selectedKey}`} card={driverCard} chat={selected}
+                        apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                        onClose={() => setCardPanelOpen(false)} />
+                )}
             </div>
             {attachmentAllowed &&
                 <Suspense fallback={<AttachmentViewerFallback message={attachmentSelection.message} onClose={() => setAttachmentSelection(null)} />}>

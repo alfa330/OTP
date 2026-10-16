@@ -267,12 +267,18 @@ def _full_name(driver):
     return ' '.join(part for part in parts if part) or _text(driver.get('full_name'))
 
 
-def _rows(*pairs):
-    return [{'label': label, 'value': value} for label, value in pairs if value not in (None, '', [])]
+def _row(key, label, value, **extra):
+    """Строка блока. key — что это (экран не повторяет в блоке то, что уже стоит в
+    шапке панели), mono — коды и номера, tone — цвет статуса, chips — метки."""
+    return dict({'key': key, 'label': label, 'value': value}, **{name: item for name, item in extra.items() if item})
+
+
+def _rows(*rows):
+    return [row for row in rows if row['value'] not in (None, '', [])]
 
 
 def present(data, dictionary=None):
-    """Карточка водителя для экрана: сводка в одну строку и все блоки CRM."""
+    """Карточка водителя для экрана: сводка для шапки и все блоки CRM."""
     data = data if isinstance(data, dict) else {}
     driver = data.get('driver') or {}
     park = data.get('park') or {}
@@ -290,7 +296,7 @@ def present(data, dictionary=None):
         label, tone = 'Заблокирован', 'bad'
     car_title = ', '.join(part for part in (
         _text(car.get('model')), _text(car.get('year')), (_text(car.get('color')) or '').lower() or None) if part)
-    tariffs = ', '.join(labels.get(value, value) for value in car.get('tariffs') or [] if value)
+    tariffs = [labels.get(value, value) for value in car.get('tariffs') or [] if value]
     rule = (job.get('work_rule') or {}) if isinstance(job.get('work_rule'), dict) else {}
     photo = dispatcher.get('photo_control') if isinstance(dispatcher.get('photo_control'), dict) else {}
     photo_text = ', '.join(part for part in (_text(photo.get('status')), _text(photo.get('reason')),
@@ -298,52 +304,61 @@ def present(data, dictionary=None):
 
     sections = [
         {'title': 'Водитель', 'rows': _rows(
-            ('ФИО', _full_name(driver)), ('Телефон', _text(driver.get('phone'))), ('ИИН', _text(driver.get('iin'))),
-            ('Водительское удостоверение', _text(driver.get('driver_license'))), ('Email', _text(driver.get('email'))))},
+            _row('name', 'ФИО', _full_name(driver)), _row('phone', 'Телефон', _text(driver.get('phone'))),
+            _row('iin', 'ИИН', _text(driver.get('iin')), mono=True),
+            _row('license', 'Водительское удостоверение', _text(driver.get('driver_license')), mono=True),
+            _row('email', 'Email', _text(driver.get('email'))))},
         {'title': 'Работа', 'rows': _rows(
-            ('Парк', _text(park.get('name')) or _text((entry or {}).get('name'))),
-            ('Город парка', _text((entry or {}).get('city'))),
-            ('Статус', label), ('Занятость', EMPLOYMENT.get(job.get('employment_type'), _text(job.get('employment_type')))),
-            ('Условия работы', _text(rule.get('name'))), ('Зарегистрирован', _when(job.get('created_date'))),
-            ('Принят', _when(job.get('hire_date'))), ('Уволен', _when(job.get('fire_date'))),
-            ('В архиве', 'да' if job.get('is_archive') else None))},
+            _row('park', 'Парк', _text(park.get('name')) or _text((entry or {}).get('name'))),
+            _row('parkCity', 'Город парка', _text((entry or {}).get('city'))),
+            _row('status', 'Статус', label, tone=tone),
+            _row('employment', 'Занятость', EMPLOYMENT.get(job.get('employment_type'), _text(job.get('employment_type')))),
+            _row('rule', 'Условия работы', _text(rule.get('name'))),
+            _row('registered', 'Зарегистрирован', _when(job.get('created_date'))),
+            _row('hired', 'Принят', _when(job.get('hire_date'))), _row('fired', 'Уволен', _when(job.get('fire_date'))),
+            _row('archive', 'В архиве', 'да' if job.get('is_archive') else None))},
         {'title': 'Машина', 'rows': _rows(
-            ('Машина', car_title or None), ('Госномер', _text(car.get('license_plate'))),
-            ('Позывной', _text(car.get('callsign'))), ('Тарифы', tariffs or None))},
+            _row('car', 'Машина', car_title or None), _row('plate', 'Госномер', _text(car.get('license_plate')), mono=True),
+            _row('callsign', 'Позывной', _text(car.get('callsign'))),
+            _row('tariffs', 'Тарифы', ', '.join(tariffs) or None, chips=tariffs))},
     ]
     latest = []
     if isinstance(orders, dict):
-        sections.append({'title': 'Заказы', 'rows': _rows(
-            ('Сегодня', _number(orders.get('today'))), ('За 7 дней', _number(orders.get('week'))),
-            ('За 30 дней', _number(orders.get('month'))), ('Всего', _number(orders.get('total'))),
-            ('Первый заказ', _when(orders.get('first_order_at'))), ('Последний заказ', _when(orders.get('last_order_at'))))})
+        stats = [{'label': title, 'value': _number(orders.get(name))} for name, title in (
+            ('today', 'Сегодня'), ('week', '7 дней'), ('month', '30 дней'), ('total', 'Всего'))]
+        sections.append({'title': 'Заказы', 'stats': [item for item in stats if item['value'] is not None],
+                         'rows': _rows(_row('firstOrder', 'Первый заказ', _when(orders.get('first_order_at'))),
+                                       _row('lastOrder', 'Последний заказ', _when(orders.get('last_order_at'))))})
         # Последние три заказа — без адресов: их CRM не отдаёт.
         for order in orders.get('latest_orders') or []:
             if not isinstance(order, dict):
                 continue
             mileage = order.get('mileage')
             km = _number(round(float(mileage) / 1000, 1)) if isinstance(mileage, (int, float)) else None
-            latest.append((_when(order.get('booked_at')) or 'Заказ', ' · '.join(part for part in (
+            latest.append(_row('order', _when(order.get('booked_at')) or 'Заказ', ' · '.join(part for part in (
                 labels.get(order.get('category'), _text(order.get('category'))), _money(order.get('price')),
                 km and km + ' км', PAYMENT.get(order.get('payment_method'), _text(order.get('payment_method'))))
                 if part) or None))
     elif 'orders' in data:
         # null у CRM — «база заказов недоступна», а не «заказов нет».
-        sections.append({'title': 'Заказы', 'rows': _rows(('Заказы', 'база заказов CRM сейчас недоступна'))})
+        sections.append({'title': 'Заказы', 'rows': _rows(
+            _row('orders', 'Заказы', 'база заказов CRM сейчас недоступна'))})
     if latest:
         sections.append({'title': 'Последние заказы', 'rows': _rows(*latest)})
     sections.append({'title': 'Баланс', 'rows': _rows(
-        ('Баланс', _money(balance.get('current'))), ('Лимит', _money(balance.get('limit'))),
-        ('Заморожено', _money(balance.get('frozen')) if balance.get('frozen') else None),
-        ('Заблокировано', _money(balance.get('blocked')) if balance.get('blocked') else None),
-        ('Последняя операция', _when(balance.get('last_transaction_date'))))})
+        _row('balance', 'Баланс', _money(balance.get('current'))), _row('limit', 'Лимит', _money(balance.get('limit'))),
+        _row('frozen', 'Заморожено', _money(balance.get('frozen')) if balance.get('frozen') else None),
+        _row('blocked', 'Заблокировано', _money(balance.get('blocked')) if balance.get('blocked') else None),
+        _row('lastOperation', 'Последняя операция', _when(balance.get('last_transaction_date'))))})
     sections.append({'title': 'Диспетчерская', 'rows': _rows(
-        ('Статус', _text(dispatcher.get('current_status'))),
-        ('Рейтинг', _number(dispatcher.get('rating')) or _text(dispatcher.get('rating'))),
-        ('Диагностика', _text(dispatcher.get('diagnostics_status'))), ('Приоритет', _text(dispatcher.get('priority'))),
-        ('Термосумка', {True: 'есть', False: 'нет'}.get(dispatcher.get('has_thermobag'))),
-        ('Фотоконтроль', photo_text or None), ('Статус изменён', _when(dispatcher.get('status_changed_at'))),
-        ('Обновлено', _when(dispatcher.get('synced_at') or dispatcher.get('web_synced_at'))))})
+        _row('dispatcherStatus', 'Статус', _text(dispatcher.get('current_status'))),
+        _row('rating', 'Рейтинг', _number(dispatcher.get('rating')) or _text(dispatcher.get('rating'))),
+        _row('diagnostics', 'Диагностика', _text(dispatcher.get('diagnostics_status'))),
+        _row('priority', 'Приоритет', _text(dispatcher.get('priority'))),
+        _row('thermobag', 'Термосумка', {True: 'есть', False: 'нет'}.get(dispatcher.get('has_thermobag'))),
+        _row('photo', 'Фотоконтроль', photo_text or None),
+        _row('statusChanged', 'Статус изменён', _when(dispatcher.get('status_changed_at'))),
+        _row('synced', 'Обновлено', _when(dispatcher.get('synced_at') or dispatcher.get('web_synced_at'))))})
 
     yandex_park = str(park.get('yandex_id') or '').lower()
     account = str(data.get('account_id') or '').lower()
@@ -354,7 +369,7 @@ def present(data, dictionary=None):
         'car': car_title or None, 'ordersTotal': orders.get('total') if isinstance(orders, dict) else None,
         'fleetUrl': FLEET_DRIVER_URL % (account, yandex_park)
         if _HEX32.match(account) and _HEX32.match(yandex_park) else None,
-        'sections': [section for section in sections if section['rows']],
+        'sections': [section for section in sections if section['rows'] or section.get('stats')],
     }
 
 

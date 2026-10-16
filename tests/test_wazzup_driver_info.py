@@ -142,11 +142,25 @@ def test_the_crm_card_is_laid_out_in_russian_and_empty_values_are_not_shown():
     assert work['Занятость'] == 'Сотрудник парка' and work['Зарегистрирован'] == '16.10.2026 14:33'
     assert 'Уволен' not in work and 'В архиве' not in work
     assert section(view, 'Машина')['Тарифы'] == 'Курьер, Эконом, premium'
-    assert section(view, 'Заказы')['За 7 дней'] == '1 234'
+    orders = next(s for s in view['sections'] if s['title'] == 'Заказы')
+    assert orders['stats'] == [{'label': 'Сегодня', 'value': '1'}, {'label': '7 дней', 'value': '1 234'},
+                               {'label': '30 дней', 'value': '0'}, {'label': 'Всего', 'value': '1 234'}]
+    assert section(view, 'Заказы') == {'Первый заказ': '16.10.2026 15:00'}
     assert section(view, 'Последние заказы') == {
         '16.10.2026 15:00': 'Эконом · 3 510 ₸ · 11,3 км · наличные'}
     assert section(view, 'Баланс') == {'Баланс': '12 500,5 ₸', 'Лимит': '−50 ₸'}
     assert 'Диспетчерская' not in [s['title'] for s in view['sections']]
+
+
+def test_rows_say_what_they_are_so_the_screen_can_style_them():
+    view = info.present(DRIVER_DATA, DICTIONARY)
+    rows = {row['key']: row for s in view['sections'] for row in s['rows']}
+    assert rows['status'] == {'key': 'status', 'label': 'Статус', 'value': 'Работает', 'tone': 'ok'}
+    assert rows['plate']['mono'] is True and rows['license']['mono'] is True and 'mono' not in rows['car']
+    assert rows['tariffs']['chips'] == ['Курьер', 'Эконом', 'premium']
+    assert {'name', 'phone', 'park', 'parkCity', 'registered', 'balance', 'limit', 'order'} <= set(rows)
+    no_tariffs = info.present(dict(DRIVER_DATA, car={'model': 'X'}), None)
+    assert 'tariffs' not in {row['key'] for s in no_tariffs['sections'] for row in s['rows']}
 
 
 def test_blocked_fired_and_unknown_statuses_and_unavailable_orders():
