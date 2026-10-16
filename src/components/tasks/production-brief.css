@@ -293,10 +293,13 @@ body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented {
   display: grid; grid-template-columns: minmax(0, 1fr); width: 100%;
 }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-segmented button { min-height: 36px; font-size: 14px; }
-body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type-row .tv-composer-segmented {
+/* Класс строки удвоен: общее правило сегментов на телефоне (tasks-mobile.css) того
+   же веса и в сборке стоит позже — без лишнего класса «Тип» вытянулся бы в одну
+   строку из четырёх кнопок. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row.tv-composer-type-row .tv-composer-segmented {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%;
 }
-body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-type-row .tv-composer-segmented button { min-height: 34px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row.tv-composer-type-row .tv-composer-segmented button { min-height: 34px; }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-swatch-main { font-size: 13px; }
 body.mobile-shell .tv-root .tv-modal-overlay .tv-brief-swatch-remove { width: 30px; height: 30px; }
 /* Своя строка размера — в одну линию: поля сжимаются, «px/мм» и крестик рядом. */

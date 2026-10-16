@@ -616,6 +616,19 @@ class FrontWiringTests(unittest.TestCase):
         self.assertEqual(source.count("{TAG_OPTIONS.map((option) => ("), 1)
         self.assertIn("productionAllowedFor(\n          values.assigneeIds,", source)
 
+    def test_segmented_backdrop_hugs_its_buttons(self):
+        """Сегменты в колонке строки («Тип», «Кто поручил») не тянут серую подложку
+        на всю ширину (замечание владельца 16.10.2026); на телефоне — равными частями
+        во всю ширину, «Тип» — сеткой 2×2 и весом выше общего правила."""
+        view = _read(TASKS_VIEW_PATH)
+        self.assertIn(".tv-composer-row-body > .tv-composer-segmented { align-self: flex-start; }", view)
+        mobile_css = _read(ROOT / "src" / "components" / "tasks" / "tasks-mobile.css")
+        self.assertIn("body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row .tv-composer-segmented button {\n"
+                      "    flex: 1 1 0;", mobile_css)
+        brief_css = _read(ROOT / "src" / "components" / "tasks" / "production-brief.css")
+        self.assertIn(".tv-composer-row.tv-composer-type-row .tv-composer-segmented {\n"
+                      "  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));", brief_css)
+
     def test_board_and_cli_name_the_type(self):
         self.assertIn("production: 'Продакшн'", _read(WORKSPACE_PATH))
         self.assertIn("'production': 'продакшн'", _read(CLI_PATH))

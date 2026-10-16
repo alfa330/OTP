@@ -509,6 +509,10 @@ styleTag.textContent = `
     display: inline-flex; gap: 2px; padding: 2px;
     border-radius: 9px; background: #ecebe7;
   }
+  /* В колонке строки (под сегментами — поле или строка ошибки) элемент по
+     умолчанию тянется на всю ширину, и серая подложка уходила далеко за
+     последнюю кнопку («Тип», «Кто поручил»). Подложка — по кнопкам. */
+  .tv-composer-row-body > .tv-composer-segmented { align-self: flex-start; }
   .tv-composer-segmented button {
     border: 0; background: transparent; cursor: pointer;
     padding: 5px 11px; border-radius: 7px;

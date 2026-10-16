@@ -864,6 +864,20 @@ body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-presets button {
     font-size: 13px;
 }
 
+/* Сегменты строки формы на телефоне — во всю ширину равными частями, как в
+   iOS. Иначе подпись встаёт над полем, строка тянет подложку на весь экран, а
+   кнопки жмутся влево с пустым серым хвостом справа («Срочность», «Кто
+   поручил»). «Тип» с четырьмя вариантами — сеткой 2×2 (production-brief.css). */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row .tv-composer-segmented {
+    display: flex;
+    width: 100%;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row .tv-composer-segmented button {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
 /* Подпись слева шириной 96 px и три сегмента справа в экран не помещаются —
    подпись встаёт над полем. */
 body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row {
