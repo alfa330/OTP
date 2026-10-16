@@ -64,6 +64,7 @@ STUCK_MARGIN_S = 90              # звонок дольше «вызов + за
                                  # чтобы не висела ёмкость линии (срок свой у каждой записи)
 NO_ANSWER_AFTER_S = 15           # отказ после стольких секунд вызова — недозвон, даже без 180 «звонит»
 DIAL_GAP_MS = 1000               # пауза между наборами по умолчанию (INFORMER_DIAL_GAP_MS)
+MAX_DIAL_GAP_MS = 30000          # шаг от портала больше этого не берём: круг не должен стоять минутами
 # Таймер B SIP — 32 с: на INVITE ни одного ответа (ни 100, ни 180), Asterisk сам ставит 408 → причина 18;
 # тот же срок у Binotel к оператору связи. Отказ в это окно без гудков — сеть не пропустила, а не водитель.
 INVITE_TIMEOUT_S = (30.0, 34.0)
@@ -525,7 +526,12 @@ class Dispatcher:
         answer = self._post('poll', {'agent_id': self.agent_id, 'version': VERSION, 'ami_ok': self.ami.connected,
                                      'error': self.error or self.link_error(), 'lines': self.lines_state()})
         self.error = ''
-        gap = (self.config.get('dial_gap_ms') or 0) / 1000
+        # Шаг набора: свой нижний предел или шаг по темпу рассылки от портала (15 в минуту — 4 с), что больше.
+        try:
+            portal_gap = max(0, int(answer.get('dial_gap_ms') or 0))
+        except (TypeError, ValueError):
+            portal_gap = 0
+        gap = min(MAX_DIAL_GAP_MS, max(self.config.get('dial_gap_ms') or 0, portal_gap)) / 1000
         dialed = 0
         for job in answer.get('calls') or []:
             paused = self.link_level and self.clock() < self.link_down_until

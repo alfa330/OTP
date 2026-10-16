@@ -268,6 +268,22 @@ def test_dials_one_by_one_with_gap(tmp_path):
     assert len(ami.sent) == 3 and slept == [1.0, 1.0]             # не залпом: пауза между наборами
 
 
+def test_portal_pace_spreads_dials_over_the_minute(tmp_path):
+    """15 в минуту — раз в 4 с (шаг присылает портал); свой шаг меньше — берём портальный, бред — не дольше 30 с."""
+    jobs = [job(90 + i, line=str(900 + i)) for i in range(3)]
+    d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2, 'dial_gap_ms': 4000},
+                                            {'calls': [job(95), job(96)], 'next_poll_sec': 2, 'dial_gap_ms': 900000}],
+                                 audio={3: WAV}, lines=tuple(str(900 + i) for i in range(3)), dial_gap_ms=1000)
+    slept = []
+    d.sleep = slept.append
+    d.tick()
+    assert slept == [4.0, 4.0]
+    for call in list(d.calls.values()):
+        d.finish({**call, 'ended_at': clock.now, 'cause': 16, 'answered_at': clock.now - 1, 'played_to_end': True})
+    d.tick()
+    assert slept[-1] == 30.0
+
+
 def test_config_reads_lines_and_minute_guard(monkeypatch):
     monkeypatch.setenv('INFORMER_LINES', '902, 907,939')
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '')

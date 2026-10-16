@@ -401,6 +401,7 @@ class InformerService:
             campaigns = cur.fetchall()
             issued = []
             more_due = False
+            pace_ms = 0
             for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute in campaigns:
                 if not rules.in_window(now, w_start, w_end):
                     continue
@@ -433,10 +434,15 @@ class InformerService:
                     call_id = cur.fetchone()[0]
                     issued.append({"call_id": call_id, "campaign_id": cid, "phone": phone, "line": line,
                                    "audio_sha256": sha, "audio_ms": audio_ms})
+                if due:
+                    # Шаг набора — ровно по темпу рассылки: 15 в минуту — раз в 4 с, а не пачкой за 15 с в начале
+                    # минуты (16.10.2026: всплески режут и офисная сеть, и операторы связи).
+                    pace_ms = max(pace_ms, 60000 // max(1, int(per_minute)))
                 if sum(free.values()) <= 0:
                     more_due = True
                     break
-        return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC}
+        return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC,
+                "dial_gap_ms": pace_ms if issued else 0}
 
     @staticmethod
     def _agent_lines(raw):

@@ -202,9 +202,12 @@ def test_campaign_rate_and_window(env):
     campaign = make_campaign(svc, phones(10), max_per_minute=3, window_start='10:00', window_end='11:00')
     svc.campaign_action(DEPT, campaign['id'], 'start')
     big = {'939': {'capacity': 4, 'active': 0}, '940': {'capacity': 4, 'active': 0}}
-    issued = poll(svc, big)['calls']
+    answer = poll(svc, big)
+    issued = answer['calls']
     assert len(issued) == 3                               # темп рассылки — 3 в минуту
     assert {c['line'] for c in issued} == {'939', '940'}  # раскладываем по линиям
+    assert answer['dial_gap_ms'] == 20000                 # и ровно по минуте: раз в 20 с, а не пачкой
+    assert poll(svc, big)['dial_gap_ms'] == 0             # нечего набирать — и шага нет
     clock.tick(hours=1)                                   # 11:30 — окно 10–11 кончилось
     assert poll(svc, big)['calls'] == []
 
