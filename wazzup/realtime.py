@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 
 from .chat_list import last_message_columns
+from .driver_cards import CARD_COLUMNS, card_item
 from .notes import note_item
 from .typing import normalize_event as normalize_typing_event
 
@@ -54,6 +55,9 @@ _HYDRATE_NOTES_SQL = """
       FROM wazzup_chat_notes WHERE account='op' AND id=ANY(%s::uuid[])
 """
 
+_HYDRATE_CARDS_SQL = ("SELECT " + CARD_COLUMNS + " FROM wazzup_driver_cards c "
+                      "WHERE c.account='op' AND c.id=ANY(%s::uuid[])")
+
 
 def _change_key(event):
     if event.get('kind') == 'typing':
@@ -77,7 +81,7 @@ def merge_changes(previous, current):
     merged['statusOnly'] = previous.get('statusOnly') is True and current.get('statusOnly') is True
     if current.get('statusOnly') is not True:
         # A missing hydrated record is a refresh fallback, never a stale edit.
-        for key in ('message', 'chat', 'note'):
+        for key in ('message', 'chat', 'note', 'card'):
             if key not in current:
                 merged.pop(key, None)
     previous_status, current_status = previous.get('status'), current.get('status')
@@ -115,16 +119,21 @@ def broadcast_changes(cursor, changes, event_broker):
         with event_broker.condition:
             subscribed = event_broker.streams > 0
         full = [e for e in events if e.get('statusOnly') is not True
-                and e.get('kind') not in ('note', 'typing')]
+                and e.get('kind') not in ('note', 'typing', 'card')]
         notes = [e for e in events if e.get('kind') == 'note' and e.get('noteId')]
+        cards = [e for e in events if e.get('kind') == 'card' and e.get('cardId')]
         rows = {}
         note_rows = {}
+        card_rows = {}
         if subscribed and full:
             cursor.execute(_HYDRATE_SQL, ([e['messageId'] for e in full],))
             rows = {row[0]: row for row in cursor.fetchall()}
         if subscribed and notes:
             cursor.execute(_HYDRATE_NOTES_SQL, ([e['noteId'] for e in notes],))
             note_rows = {(str(row[0]), row[5], row[6]): row for row in cursor.fetchall()}
+        if subscribed and cards:
+            cursor.execute(_HYDRATE_CARDS_SQL, ([e['cardId'] for e in cards],))
+            card_rows = {(str(row[0]), row[1], row[2]): row for row in cursor.fetchall()}
         for event in events:
             if event.get('kind') == 'typing':
                 event_broker.publish(event)
@@ -133,6 +142,12 @@ def broadcast_changes(cursor, changes, event_broker):
                 row = note_rows.get((event.get('noteId'), event.get('channelId'), event.get('chatId')))
                 if row is not None:
                     event = dict(event, note=note_item(row[:5]))
+                event_broker.publish(event)
+                continue
+            if event.get('kind') == 'card':
+                row = card_rows.get((event.get('cardId'), event.get('channelId'), event.get('chatId')))
+                if row is not None:
+                    event = dict(event, card=card_item(row))
                 event_broker.publish(event)
                 continue
             row = rows.get(event['messageId'])
@@ -197,7 +212,7 @@ class EventBroker:
         if size > min(MAX_EVENT_BYTES, self.max_bytes):
             # Fall back to the existing reconciliation endpoint for exceptional
             # messages. Do not truncate text, media URLs, or attachment data.
-            event = {key: value for key, value in event.items() if key not in ('message', 'chat', 'note')}
+            event = {key: value for key, value in event.items() if key not in ('message', 'chat', 'note', 'card')}
             size = len(json.dumps(event, ensure_ascii=False).encode('utf-8'))
         with self.condition:
             self.seq += 1

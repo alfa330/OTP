@@ -159,6 +159,36 @@ test('typing frames share the stream without refreshing any pane or entering mes
     await h.close();
 });
 
+test('driver card frames reach only the card and reconcile it after a reconnect', async () => {
+    const cards = [], messages = [];
+    let cardReads = 0;
+    const h = harness({ onCards: (events) => cards.push(...events), refreshCards: async () => { cardReads++; },
+        onChanges: (events) => { messages.push(...events); return { list: false, thread: false }; } });
+    await h.flush(); await h.emit('connected', { ready: true, epoch: 'e1', seq: 0 }); await h.tick(1000);
+    assert.equal(cardReads, 1, 'карточка сверяется при подключении, как заметки');
+    const baseline = { ...h.calls };
+    const card = { kind: 'card', channelId: 'c', chatId: 'one', cardId: 'k1', card: { id: 'k1' } };
+    await h.emit('card', { cards: [card] }, 1);
+    await h.tick(2000);
+    assert.deepEqual(cards, [card]);
+    assert.equal(messages.length, 0);
+    assert.deepEqual(h.calls, baseline, 'кадр карточки не перечитывает ни ленту, ни список');
+    assert.equal(cardReads, 1);
+    // Кадр карточки двигает точку возобновления, как любой другой.
+    await h.tick(5000); await h.end(); await h.tick(1);
+    assert.match(h.streams.at(-1).url, /epoch=e1&after=1$/);
+    await h.close();
+});
+
+test('a tab without the card handler skips card frames silently', async () => {
+    const h = harness();
+    await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);
+    const baseline = { ...h.calls };
+    await h.emit('card', { cards: [{ kind: 'card', channelId: 'c', chatId: 'one', cardId: 'k1' }] });
+    await h.tick(2000); assert.deepEqual(h.calls, baseline);
+    await h.close();
+});
+
 test('typing never triggers fallback reloads when message handlers are absent', async () => {
     const h = harness();
     await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);

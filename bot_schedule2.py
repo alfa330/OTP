@@ -9117,6 +9117,10 @@ app.register_blueprint(build_pilot_blueprint(
     stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+# Карточка водителя в чатах Верификаторов: свой поток пишет её поля в сделку
+# amoCRM этого чата (wazzup/driver_cards_sync.py), не занимая общий пул бота.
+from wazzup import driver_cards_sync as wazzup_driver_cards_sync  # noqa: E402
+wazzup_driver_cards_sync.start_worker(db)
 
 # Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (обычный QR портала;
 # прежний код чатов с кодом главы для СВ — wazzup/workspace_routes.py) и статусы смены.

@@ -140,11 +140,15 @@ MESSAGE_SELECT = """
 
 def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                           listen_connect=None, transport=None, event_broker=None, gcs=None,
-                          access=None, stream_limit=STREAM_LIMIT):
+                          access=None, stream_limit=STREAM_LIMIT, driver_card_sync=None):
     """access() -> {'mode', 'can_process', ...} for the requesting user (the
     monolith's _wazzup_chat_access). It is the single rule shared with the
-    section guard and the shift routes; None keeps the standalone rule above."""
+    section guard and the shift routes; None keeps the standalone rule above.
+
+    driver_card_sync — {'wake', 'options'} for the driver card routes; tests pass
+    stubs, the monolith leaves the defaults of wazzup/driver_cards_sync.py."""
     bp = Blueprint('wazzup_pilot', __name__, url_prefix='/api/wazzup/pilot')
+    driver_card_sync = driver_card_sync or {}
     transport = transport or wazzup_transport
     broker = event_broker or realtime.broker
 
@@ -180,6 +184,14 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_attachment_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .notes import register_note_routes
     register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .driver_cards import register_driver_card_routes
+    from . import driver_cards_sync
+    register_driver_card_routes(
+        bp, guard=guard, actor=actor, require_api_key=require_api_key, preflight=preflight, db=db,
+        may_edit=lambda user_id: may_process(db.get_user(id=user_id)),
+        excluded_channels=EXCLUDED_CHANNELS,
+        on_saved=driver_card_sync.get('wake', driver_cards_sync.wake),
+        options_provider=driver_card_sync.get('options', lambda: driver_cards_sync.current_options(db)))
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
     from .send_check import register_send_check_route
@@ -240,9 +252,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 elif events:
                     # Presence goes in its own frame: tabs opened before it existed
                     # skip unknown events, but would re-read the list and the
-                    # thread for every typing pulse found among `changes`.
-                    changes = [e for e in events if e.get('kind') != 'typing']
+                    # thread for every typing pulse found among `changes`. Driver
+                    # cards do the same for the same reason.
+                    changes = [e for e in events if e.get('kind') not in ('typing', 'card')]
                     typing = [e for e in events if e.get('kind') == 'typing']
+                    cards = [e for e in events if e.get('kind') == 'card']
                     # Raw UTF-8: Cyrillic as \uXXXX made frames ~2.5 times larger.
                     if changes:
                         yield (f'id: {cursor}\nevent: change\ndata: '
@@ -251,6 +265,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                         yield (f'id: {cursor}\nevent: typing\ndata: '
                                + json.dumps({'typing': typing, 'serverTime': int(time.time() * 1000)},
                                             ensure_ascii=False) + '\n\n')
+                    if cards:
+                        yield (f'id: {cursor}\nevent: card\ndata: '
+                               + json.dumps({'cards': cards}, ensure_ascii=False) + '\n\n')
                 else:
                     yield ': heartbeat\n\n'
 

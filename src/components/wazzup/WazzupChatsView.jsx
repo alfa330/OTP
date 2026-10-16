@@ -5,6 +5,7 @@ import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
+    IdCard,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -21,7 +22,7 @@ import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import ChatTypingIndicator from './ChatTypingIndicator';
 import { createChatTypingStore } from './chatTypingPresence';
-import { mergePilotMessages, outboxMessages, pilotChatKey } from './chatPilot';
+import { GLOBAL_CHANNEL_IDS, mergePilotMessages, outboxMessages, pilotChatKey } from './chatPilot';
 import {
     chatKeyOf, configureSendQueue, discardMessage, enqueueMessage, outboxProblems, retryMessage, settleOutbox,
     takeBackMessage, useChatOutbox, useOutbox,
@@ -44,6 +45,9 @@ import useThreadEnd from './useThreadEnd';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
+import ChatDriverCard from './ChatDriverCard';
+import DriverCardsTab from './DriverCardsTab';
+import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
 import ShiftStartScreen from './ShiftStartScreen';
 import ShiftStatusMenu from './ShiftStatusMenu';
@@ -1357,7 +1361,9 @@ function ChatsWorkspace(props) {
     const pilot = useChatPilot({ apiBaseUrl, mayProcess, account, active: mainTab === 'chats', headers,
         selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
         onChanges: applyPilotChanges, refreshUnread: unread.refresh, refreshNotes: () => notes.refresh(),
-        onTyping: typing.apply, clearTyping: typing.hide });
+        onTyping: typing.apply, clearTyping: typing.hide,
+        onCards: (events) => events.forEach((event) => driverCard.apply(event)),
+        refreshCards: () => driverCard.refresh() });
     /* Принятое сервером сообщение приходит строкой архива по живому потоку за
        доли секунды, поэтому после отправки лента и список больше не
        перечитываются. Страховка — только если строки нет: без потока сразу,
@@ -1434,6 +1440,13 @@ function ChatsWorkspace(props) {
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
+    /* Карточка водителя (ChatDriverCard.jsx) — у каждого чата Верификаторов,
+       кроме Global: его чаты обрабатываются отдельно. Видят её все, кому открыта
+       переписка; заполнять может тот, кто обрабатывает (решает сервер, canEdit). */
+    const driverCardEnabled = account === 'op' && Boolean(selected?.channelId && selected?.chatId)
+        && !GLOBAL_CHANNEL_IDS.has(selected.channelId);
+    const driverCard = useDriverCard({ enabled: driverCardEnabled, chat: selected, apiBaseUrl, headers,
+        live: pilot.enabled && pilot.connection === 'live' });
     // Ждущие ответа — вверху списка (chatListOrder.js); счётчик ведётся только у «op».
     const waiting = useMemo(() => (account === 'op' ? { items: unread.items, ready: unread.ready } : null),
         [account, unread.items, unread.ready]);
@@ -1469,6 +1482,8 @@ function ChatsWorkspace(props) {
         accountRef.current = key;
         setAccount(key);
         setUnreadOnly(false);
+        // Карточки водителя есть только у Верификаторов.
+        if (key !== 'op') setMainTab((tab) => (tab === 'cards' ? 'chats' : tab));
         chatsRequest.current.controller?.abort();
         threadRequest.current.controller?.abort();
         setSearch(''); setAppliedSearch('');
@@ -1677,6 +1692,22 @@ function ChatsWorkspace(props) {
         loadChats();
         if (selected) loadThread(selected);
         notes.refresh().catch(() => {});
+        driverCard.refresh();
+    };
+
+    /* Строка «Карточек» открывает свой чат — как переход по ссылке на точную
+       пару: переписка сразу, строка списка (счётчики, транспорт) догружается. */
+    const openCardChat = (card) => {
+        const chat = { channelId: card.channelId, chatId: card.chatId, chatType: card.chatType || undefined,
+            contactName: card.contactName, contactPhone: card.contactPhone };
+        setMainTab('chats');
+        openChat(chat);
+        axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
+            headers: headers(), params: { account: 'op', channel_id: card.channelId, chat_id: card.chatId, limit: 1 },
+        }).then(({ data }) => {
+            const row = findWazzupChatExact(data.items || [], chat);
+            if (row) setSelected((prev) => (prev && prev.channelId === row.channelId && prev.chatId === row.chatId ? row : prev));
+        }).catch(() => {});
     };
 
     // Группировка ленты по дням для разделителей — по местному дню (messageTime.js)
@@ -1770,6 +1801,7 @@ function ChatsWorkspace(props) {
                     </div>
                     <div className="flex rounded-xl bg-slate-100 p-1">
                         {segBtn('chats', MessageSquare, 'Чаты')}
+                        {account === 'op' && segBtn('cards', IdCard, 'Карточки')}
                         {segBtn('authors', Users, 'Операторы')}
                     </div>
                     <a href={workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
@@ -1777,6 +1809,13 @@ function ChatsWorkspace(props) {
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
                     </>}
+                    {/* Верификатору — только переписка и «только карточки». */}
+                    {operator && (
+                        <div className="flex rounded-xl bg-slate-100 p-1">
+                            {segBtn('chats', MessageSquare, 'Чаты')}
+                            {segBtn('cards', IdCard, 'Карточки')}
+                        </div>
+                    )}
                     {toolbar}
                     {mainTab === 'chats' && !portalDark &&
                         <ChatThemeMenu selected={chatTheme.selected} themes={chatTheme.themes} onChoose={chatTheme.choose} />}
@@ -1792,6 +1831,16 @@ function ChatsWorkspace(props) {
                 <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                     <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
                                   account={account} />
+                </div>
+            )}
+
+            {/* «Только карточки». Скрывается, а не размонтируется: поиск и период
+                переживают переход в чат и обратно; список свежий при каждом открытии. */}
+            {account === 'op' && (
+                <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"
+                     style={{ display: mainTab === 'cards' ? undefined : 'none' }}>
+                    <DriverCardsTab apiBaseUrl={apiBaseUrl} headers={headers} active={mainTab === 'cards'}
+                        onOpenChat={openCardChat} />
                 </div>
             )}
 
@@ -2022,6 +2071,10 @@ function ChatsWorkspace(props) {
                                     )}
                                 </div>
                             </div>
+                            {driverCardEnabled && (
+                                <ChatDriverCard key={selectedKey} chat={selected} card={driverCard}
+                                    apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                            )}
                             <div className="relative min-h-0 flex-1">
                             <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">

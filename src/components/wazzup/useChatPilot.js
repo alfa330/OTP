@@ -5,12 +5,14 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
 export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, headers,
-    selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping }) {
+    selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping,
+    onCards, refreshCards }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
     const latest = useRef({});
-    latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping };
+    latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping,
+        clearTyping, onCards, refreshCards };
     /* Где оборвался прошлый поток: эпоха процесса сервера и номер последнего
        кадра. Переподключение продолжает с этого места — сервер досылает всё,
        что вышло за разрыв, и перечитывать ленту, список, счётчик и заметки не
@@ -48,6 +50,7 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
             list: { dirty: false, running: false, timer: null, delay: 1000 },
             unread: { dirty: false, running: false, timer: null, delay: 200 },
             notes: { dirty: false, running: false, timer: null, delay: 350 },
+            cards: { dirty: false, running: false, timer: null, delay: 350 },
         };
         const enqueue = (name) => {
             const lane = lanes[name];
@@ -59,7 +62,8 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                 lane.dirty = false;
                 lane.running = true;
                 try {
-                    const result = await latest.current[{ thread: 'refreshThread', list: 'refreshList', unread: 'refreshUnread', notes: 'refreshNotes' }[name]]?.();
+                    const result = await latest.current[{ thread: 'refreshThread', list: 'refreshList', unread: 'refreshUnread',
+                        notes: 'refreshNotes', cards: 'refreshCards' }[name]]?.();
                     if (result === false) lane.dirty = true; // History/page request still in flight.
                 } catch (error) {
                     if (stopped) return;
@@ -80,7 +84,7 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                 }
             }, lane.delay);
         };
-        const reconcile = () => { enqueue('thread'); enqueue('list'); enqueue('unread'); enqueue('notes'); };
+        const reconcile = () => { enqueue('thread'); enqueue('list'); enqueue('unread'); enqueue('notes'); enqueue('cards'); };
         const connect = async (planned = false) => {
             if (stopped) return;
             controller = new AbortController();
@@ -145,6 +149,9 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                             } else if (frame.event === 'typing') {
                                 // Presence has its own frame and never reaches message handling.
                                 latest.current.onTyping?.(payload.typing || [], payload.serverTime);
+                            } else if (frame.event === 'card') {
+                                // Driver cards too: they never re-read the thread or the list.
+                                latest.current.onCards?.(payload.cards || []);
                             } else if (frame.event === 'change') {
                                 setConnection('live');
                                 const fallback = latest.current.onChanges?.(payload.changes || []);
