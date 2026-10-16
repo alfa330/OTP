@@ -57,6 +57,13 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     ({'dialed_at': 0, 'ended_at': 29.0, 'cause': 19, 'originate_reason': 0}, ('no_answer', '')),
     # Свой отбой по сроку вызова (40 с, причина 0, Reason 3) — недозвон: гудки были ранним звуком.
     ({'dialed_at': 0, 'ended_at': 40.1, 'cause': 0, 'originate_reason': 3}, ('no_answer', '')),
+    # 19:05 того же дня: «сброшен» через секунду без гудков — сеть (12 подряд, у Binotel CHANUNAVAIL wait 0–1);
+    # после гудков или позже трёх секунд — водитель.
+    ({'dialed_at': 0, 'ended_at': 1.1, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 2.9, 'cause': 21}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 1.2, 'ringing_at': 0.8, 'cause': 21}, ('rejected', '')),
+    ({'dialed_at': 0, 'ended_at': 5.0, 'cause': 21}, ('rejected', '')),
+    ({'dialed_at': 0, 'ended_at': 1.1, 'cause': 17}, ('busy', '')),              # «занято» сразу — бывает и у людей
 ])
 def test_classify(call, expected):
     assert informer.classify(call) == expected

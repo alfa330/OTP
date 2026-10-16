@@ -79,6 +79,11 @@ MAX_DIAL_GAP_MS = 30000          # шаг от портала больше эт�
 # с waitsec 32–33). Отказ в это окно без гудков — сеть не пропустила, а не водитель.
 INVITE_TIMEOUT_S = (31.0, 38.0)
 CAUSE_NO_LINK = {17, 18, 19, 21}
+# Второй вид отказа сети (16.10.2026, 19:05–19:09, сразу после возобновления рассылки): 12 вызовов подряд — 603
+# через ~1 с от INVITE, без 183 и гудков; в журнале Binotel CHANUNAVAIL с waitsec 0–1; потом всё прошло. Человек не
+# успевает сбросить вызов до гудков — «сброшен» быстрее этого срока без гудков значит сеть.
+QUICK_REJECT_S = 3.0
+CAUSE_QUICK_REJECT = {21}
 # Одновременно — не больше стольких звонков, какой бы темп ни раздал портал (владелец, 16.10.2026: «жёстких
 # залпов делать не надо вообще, по 3 максимум»). INFORMER_MAX_ACTIVE; 0 — без предела.
 MAX_ACTIVE_CALLS = 3
@@ -111,6 +116,8 @@ def classify(call):
     # или «сброшен» (16.10.2026, 15:46: после ~4 минут темпа 46/мин у Binotel BUSY и CHANUNAVAIL на каждый
     # звонок, во всём кабинете ни одного дозвона). Живое «занято»/«сброс» приходит за секунды или после гудков.
     if cause in CAUSE_NO_LINK and not ringing and INVITE_TIMEOUT_S[0] <= elapsed <= INVITE_TIMEOUT_S[1]:
+        return 'no_link', ''
+    if cause in CAUSE_QUICK_REJECT and not ringing and 0 <= elapsed < QUICK_REJECT_S:
         return 'no_link', ''
     if cause in CAUSE_BUSY or reason == 5:
         return 'busy', ''
