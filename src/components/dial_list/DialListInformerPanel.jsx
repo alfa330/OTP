@@ -7,7 +7,8 @@ import {
 } from '../ui/ios';
 import { prepareInformerTrack } from './informerAudio';
 import {
-    MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds, campaignActions, lineCapacity,
+    MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds, campaignActions,
+    lineCapacity,
     lineRate, partsLabel, percent, plural, robotSummary, seconds, shortDateTime, speechEstimate, stageLabel,
     stageShares, trackEstimateMs,
 } from './informerView';
@@ -259,18 +260,20 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }
     const ready = form.name.trim() && form.recipients
         && (form.source === 'tts' ? (form.texts.kz.trim() && form.texts.ru.trim()) : (form.files.kz && form.files.ru));
 
-    // Темп — сколько тянут линии робота (владелец, 16.10.2026: «сразу максимальное кол-во, без предела»):
-    // запись собрана — по её длине, есть текст — по оценке, иначе — по обычной длине записи.
+    // Темп — сколько тянет робот при не больше чем MAX_ACTIVE_CALLS звонках разом (владелец, 16.10.2026: «жёстких
+    // залпов не надо, по 3 максимум»): запись собрана — по её длине, есть текст — по оценке, иначе — по обычной длине.
     const lineCount = Object.keys(robot?.lines || {}).length;
     const channels = lineCapacity(robot?.lines);
+    const atOnce = Math.min(channels || CALLS_PER_LINE, MAX_ACTIVE_CALLS);
     const audioMs = (trackInfo?.key === trackKey() && trackInfo.durationMs)
         || (form.source === 'tts' ? trackEstimateMs(form.texts) : 0);
     const fitsPerMinute = lineRate(channels, audioMs);
     const perMinuteValue = form.perMinuteEdited ? form.perMinute : String(fitsPerMinute);
     const perMinuteHint = (lineCount
-        ? `Столько звонков в минуту тянут линии робота: ${lineCount} ${plural(lineCount, 'линия', 'линии', 'линий')}, `
-          + `до ${channels} ${plural(channels, 'звонка', 'звонков', 'звонков')} одновременно`
-        : 'Робот ещё не сообщил свои линии — посчитано как для одной линии (2 звонка одновременно)')
+        ? `Столько звонков в минуту тянет робот: ${lineCount} ${plural(lineCount, 'линия', 'линии', 'линий')}, `
+          + `не больше ${atOnce} ${plural(atOnce, 'звонка', 'звонков', 'звонков')} одновременно — залпы с общего `
+          + 'номера кабинета оператор связи блокирует, и исходящие встают у всех операторов'
+        : `Робот ещё не сообщил свои линии — посчитано как для одной линии (${atOnce} звонка одновременно)`)
         + `, звонок с записью ≈ ${Math.round(callSeconds(audioMs))} с. Поставьте меньше, если рассылку нужно растянуть. `
         + 'Закон РК «О связи» (с 20.08.2026): больше 10 автозвонков с записью в минуту оператор вправе не пропускать '
         + 'без договора.';

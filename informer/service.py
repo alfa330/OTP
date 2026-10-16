@@ -386,10 +386,11 @@ class InformerService:
             if not ami_ok or not lines:
                 return {"calls": [], "next_poll_sec": POLL_AMI_DOWN_SEC}
             free = {line: max(0, info["capacity"] - info["active"]) for line, info in lines.items()}
-            if sum(free.values()) <= 0:
+            # Не больше MAX_ACTIVE_CALLS звонков разом (владелец, 16.10.2026: «залпов не надо, по 3 максимум»),
+            # даже если диспетчер старый и сообщил все места линий. Минутного потолка нет: темп — поле рассылки.
+            room_total = min(sum(free.values()), rules.MAX_ACTIVE_CALLS - sum(info["active"] for info in lines.values()))
+            if room_total <= 0:
                 return {"calls": [], "next_poll_sec": POLL_SOON_SEC}
-            # Общего минутного потолка нет (владелец, 16.10.2026: «сколько тянут линии, без предела»):
-            # предел — свободные места на линиях и темп каждой рассылки.
             window_start = now - timedelta(seconds=60)
             cur.execute("""
                 SELECT c.id, c.window_start, c.window_end, c.max_per_minute, c.audio_sha256, c.audio_ms,
@@ -405,7 +406,7 @@ class InformerService:
             for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute in campaigns:
                 if not rules.in_window(now, w_start, w_end):
                     continue
-                room = min(sum(free.values()), int(per_minute) - int(issued_last_minute))
+                room = min(room_total - len(issued), int(per_minute) - int(issued_last_minute))
                 if room <= 0:
                     more_due = True
                     continue
@@ -438,7 +439,7 @@ class InformerService:
                     # Шаг набора — ровно по темпу рассылки: 15 в минуту — раз в 4 с, а не пачкой за 15 с в начале
                     # минуты (16.10.2026: всплески режут и офисная сеть, и операторы связи).
                     pace_ms = max(pace_ms, 60000 // max(1, int(per_minute)))
-                if sum(free.values()) <= 0:
+                if room_total - len(issued) <= 0:
                     more_due = True
                     break
         return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC,

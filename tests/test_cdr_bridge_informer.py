@@ -51,6 +51,12 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     ({'dialed_at': 0, 'ended_at': 33.1, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
     ({'dialed_at': 0, 'ended_at': 33.0, 'cause': 17}, ('no_link', '')),
     ({'dialed_at': 0, 'ended_at': 33.0, 'ringing_at': 5, 'cause': 21}, ('rejected', '')),   # гудки были — сбросил
+    # Его же «недоступен» (480 → 19) и ответ на 35–36-й секунде — тоже сеть, а не водитель; раньше 31 с — нет.
+    ({'dialed_at': 0, 'ended_at': 35.2, 'cause': 19, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 36.0, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 29.0, 'cause': 19, 'originate_reason': 0}, ('no_answer', '')),
+    # Свой отбой по сроку вызова (40 с, причина 0, Reason 3) — недозвон: гудки были ранним звуком.
+    ({'dialed_at': 0, 'ended_at': 40.1, 'cause': 0, 'originate_reason': 3}, ('no_answer', '')),
 ])
 def test_classify(call, expected):
     assert informer.classify(call) == expected
@@ -124,14 +130,15 @@ class Clock:
         return self.now
 
 
-def make(tmp_path, polls, audio=None, lines=('939',), max_per_minute=0, dial_gap_ms=0):
+def make(tmp_path, polls, audio=None, lines=('939',), max_per_minute=0, dial_gap_ms=0,
+         max_active=informer.MAX_ACTIVE_CALLS):
     clock = Clock()
     portal = FakePortal(polls, audio)
     ami = FakeAmi()
     config = {'portal': 'https://portal.test', 'proxy': '', 'ca_bundle': '', 'key_file': '', 'private_key': '',
               'lines': list(lines), 'per_line': 2, 'sounds_dir': str(tmp_path), 'heartbeat_file': '',
               'ami_host': '127.0.0.1', 'ami_port': 5038, 'ami_user': 'dispatcher', 'ami_secret': 's',
-              'max_per_minute': max_per_minute, 'dial_gap_ms': dial_gap_ms}
+              'max_per_minute': max_per_minute, 'dial_gap_ms': dial_gap_ms, 'max_active': max_active}
     d = informer.Dispatcher(config, session=portal, ami=ami, clock=clock)
     d.signer = Signer()
     return d, portal, ami, clock
@@ -191,22 +198,49 @@ def test_played_to_end_and_originate_failure_without_channel(tmp_path):
     assert by_id[32]['result'] == 'busy'
 
 
-def test_no_minute_cap_by_default(tmp_path):
-    """Владелец, 16.10.2026: «сколько тянут линии, без предела» — диспетчер набирает всё, что раздал портал."""
+def test_at_most_three_calls_at_once(tmp_path):
+    """Владелец, 16.10.2026, после того как залп 46 в минуту уронил исходящие всему кабинету: «жёстких залпов
+    делать не надо вообще, по 3 максимум». Портал видит три места, лишнее от него — «линия занята», в очередь."""
+    lines = tuple(str(900 + i) for i in range(12))
+    jobs = [job(100 + i, line=line) for i, line in enumerate(lines)]
+    d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV}, lines=lines)
+    state = d.lines_state()
+    assert sum(info['capacity'] for info in state.values()) == 3           # всего три места…
+    assert [line for line, info in state.items() if info['capacity']] == ['900', '901', '902']   # …по одному на линию
+    d.tick()
+    assert len(ami.sent) == 3
+    assert len([r for r in portal.results if r['result'] == 'line_busy']) == 9
+    assert d.rate_room() == float('inf') and d.active_room() == 0
+    assert all(info['capacity'] == info['active'] for info in d.lines_state().values())   # мест нет
+    d.finish({'call_id': 101, 'line': '901', 'dialed_at': clock.now - 30, 'answered_at': clock.now - 26,
+              'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
+    state = d.lines_state()
+    assert d.active_room() == 1 and sum(info['capacity'] - info['active'] for info in state.values()) == 1
+    assert state['901'] == {'capacity': 1, 'active': 0}                    # место — на самой свободной линии
+    # Та же линия занята двумя — два места на одной линии только когда других нет.
+    d2, _, _, _ = make(tmp_path, [], lines=('939', '940'))
+    assert d2.lines_state() == {'939': {'capacity': 2, 'active': 0}, '940': {'capacity': 1, 'active': 0}}
+    d3, _, _, _ = make(tmp_path, [], lines=('939',))
+    assert d3.lines_state() == {'939': {'capacity': 2, 'active': 0}}      # линия держит два — больше не дадим
+
+
+def test_no_active_cap_when_disabled(tmp_path):
+    """INFORMER_MAX_ACTIVE=0 — без предела: диспетчер набирает всё, что раздал портал."""
     jobs = [job(100 + i, line=str(900 + i)) for i in range(12)]
     d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV},
-                                 lines=tuple(str(900 + i) for i in range(12)))
+                                 lines=tuple(str(900 + i) for i in range(12)), max_active=0)
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 24
     d.tick()
     assert len(ami.sent) == 12
     assert not [r for r in portal.results if r['result'] == 'line_busy']
-    assert d.rate_room() == float('inf')
+    assert d.rate_room() == float('inf') and d.active_room() == float('inf')
 
 
 def test_minute_guard_when_configured(tmp_path):
     """INFORMER_MAX_PER_MINUTE — страховка, если её вернут: сверх неё «линия занята», водитель в очереди."""
     jobs = [job(100 + i, line=str(900 + i)) for i in range(12)]
     d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV},
-                                 lines=tuple(str(900 + i) for i in range(12)), max_per_minute=10)
+                                 lines=tuple(str(900 + i) for i in range(12)), max_per_minute=10, max_active=0)
     d.tick()
     assert len(ami.sent) == 10
     refused = [r for r in portal.results if r['result'] == 'line_busy']
@@ -291,6 +325,9 @@ def test_config_reads_lines_and_minute_guard(monkeypatch):
     assert config['lines'] == ['902', '907', '939'] and config['max_per_minute'] == 0
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '25')
     assert informer.load_config()['max_per_minute'] == 25
+    assert config['max_active'] == informer.MAX_ACTIVE_CALLS == 3        # по умолчанию — не больше трёх разом
+    monkeypatch.setenv('INFORMER_MAX_ACTIVE', '0')
+    assert informer.load_config()['max_active'] == 0
     assert informer.load_config()['dial_gap_ms'] == informer.DIAL_GAP_MS == 1000
     monkeypatch.setenv('INFORMER_DIAL_GAP_MS', '0')
     assert informer.load_config()['dial_gap_ms'] == 0
@@ -308,7 +345,7 @@ def test_stuck_call_deadline_follows_audio_length(tmp_path):
     long_job = {**job(52), 'audio_ms': 280000}              # почти пять минут записи
     d, portal, ami, clock = make(tmp_path, [{'calls': [job(51), long_job], 'next_poll_sec': 2}], audio={3: WAV})
     d.tick()
-    clock.now += 35 + 25.52 + informer.STUCK_MARGIN_S + 1    # короткая запись: вызов + запись + запас
+    clock.now += informer.RING_TIMEOUT_MS / 1000 + 25.52 + informer.STUCK_MARGIN_S + 1   # вызов + запись + запас
     d.close_stuck()
     d.flush_results()
     assert [r['call_id'] for r in portal.results] == [51]   # длинную не трогаем: она ещё играет

@@ -87,18 +87,20 @@ def test_wav_inspect():
         wav.inspect(_wav(rate=24000, seconds=301), rates=both)
 
 
-def test_line_rate_is_what_robot_lines_fit():
-    """Владелец, 16.10.2026: в поле темпа сразу максимум — сколько тянут линии робота, без предела закона."""
+def test_line_rate_is_what_robot_fits_with_three_at_once():
+    """Владелец, 16.10.2026: в поле темпа сразу максимум — сколько тянет робот; с того же дня — не больше трёх
+    звонков разом («жёстких залпов делать не надо вообще, по 3 максимум»), сколько бы линий ни было."""
     nine = {str(n): {'capacity': 2, 'active': 0} for n in (902, 907, 919, 923, 925, 928, 939, 942, 944)}
     assert rules.line_capacity(nine) == 18
     assert rules.line_capacity({'939': {'capacity': 'x'}, '940': None, '941': {'capacity': 2}}) == 2
-    # Звонок держит место на линии: ~12 с до ответа + запись + ~2 с на отбой.
-    assert rules.line_rate(18, 25520) == 27                 # 18 × 60 / 39,52 с
-    assert rules.line_rate(18, 8120) == 48                  # запись короче — звонков больше: 1080 / 22,12 с
-    assert rules.line_rate(18) == 27                        # записи ещё нет — обычные 25 с
-    assert rules.line_rate(0, 25520) == 3                   # линий не видно — как одна линия
+    assert rules.MAX_ACTIVE_CALLS == 3
+    # Звонок держит место: ~12 с до ответа + запись + ~2 с на отбой; мест — не больше трёх.
+    assert rules.line_rate(18, 25520) == 4                  # 3 × 60 / 39,52 с
+    assert rules.line_rate(18, 8120) == 8                   # запись короче — звонков больше: 180 / 22,12 с
+    assert rules.line_rate(18) == 4                         # записи ещё нет — обычные 25 с
+    assert rules.line_rate(0, 25520) == 3                   # линий не видно — как одна линия (2 звонка)
     assert rules.line_rate(2, 300000) == 1                  # даже на пятиминутной записи не ноль
-    assert rules.line_rate(10000, 1000) == rules.MAX_PER_MINUTE
+    assert rules.line_rate(10000, 1000) == 12               # и тысяча линий — три звонка разом
 
 
 def test_wav_encode_round_trip():

@@ -7,9 +7,13 @@
 звонок роботу через AMI Asterisk на 127.0.0.1 и ловит события звонка: вызов пошёл, водитель снял
 трубку, запись доиграла, нажатия, отбой. Итог — с точными секундами — уходит в портал
 (/api/informer/agent/result). Темп, окно времени, повторы и очередь решает портал; диспетчер
-держит только то, что видит сам: ёмкость линий (2 звонка на линию Binotel). Минутного потолка нет
-(владелец, 16.10.2026: «сколько тянут линии, без предела»); страховку можно вернуть числом
-INFORMER_MAX_PER_MINUTE — тогда больше него в минуту диспетчер не наберёт, даже если портал раздал.
+держит только то, что видит сам: ёмкость линий (2 звонка на линию Binotel) и предел одновременных
+звонков — не больше INFORMER_MAX_ACTIVE (3) разом, набор по одному с паузой. Это решение владельца
+16.10.2026 после первого боевого запуска: 46 в минуту с общего номера кабинета за 4 минуты уронили
+исходящие всем операторам (оператор связи ~33 с держит вызов и отвечает «занято»), а каждый новый
+залп продлевал блок — «жёстких залпов делать не надо вообще, по 3 максимум». Минутного потолка нет;
+страховку можно вернуть числом INFORMER_MAX_PER_MINUTE — тогда больше него в минуту диспетчер не
+наберёт, даже если портал раздал.
 
 Робот — контейнер otp-informer (приватный репозиторий otp-gateway): Asterisk звонит с линии
 удалённого КЦ без регистрации на ней (15.10.2026: Binotel пропускает исходящий по паролю линии и
@@ -30,6 +34,7 @@ INFORMER_MAX_PER_MINUTE — тогда больше него в минуту д�
     INFORMER_AMI_USER / _SECRET        dispatcher / секрет из /etc/otp-gateway/informer-ami.env
     INFORMER_LINES                     линии робота через запятую: 902,907,919,923,925,928,939,942,944
     INFORMER_CALLS_PER_LINE            2 (замер 15.10.2026: третий звонок Binotel отклоняет 480)
+    INFORMER_MAX_ACTIVE                одновременных звонков не больше этого (3); 0 — без предела
     INFORMER_MAX_PER_MINUTE            наборов в минуту не больше этого; пусто или 0 — без предела
     INFORMER_DIAL_GAP_MS               пауза между наборами, мс (1000): залпом не звоним — 16.10.2026 залп из
                                        32 вызовов разом офисная сеть приняла за атаку и отрезала VM от Binotel
@@ -53,12 +58,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'informer/1.2.0'
+VERSION = 'informer/1.3.0'
 log = logging.getLogger('cdr_bridge.informer')
 
 PORTAL_TIMEOUT = (10, 60)
 AMI_TIMEOUT = 10
-RING_TIMEOUT_MS = 35000          # сколько звонить водителю, прежде чем бросить
+# Сколько звонить водителю, прежде чем бросить. Дольше ~33 с, за которые Binotel сам отвечает «занято»/«недоступен»,
+# когда оператор связи не пропустил вызов: при 35 с (16.10.2026) свой отбой приходил раньше его ответа, блок сети
+# записывался «не ответил», пробный звонок после паузы считался удачным — и робот снова набирал пачку.
+RING_TIMEOUT_MS = 40000
 LINE_BUSY_WINDOW_S = 2.5         # 480 быстрее этого и без гудков — Binotel не дал линию
 STUCK_MARGIN_S = 90              # звонок дольше «вызов + запись + запас» без отбоя — закрываем сами,
                                  # чтобы не висела ёмкость линии (срок свой у каждой записи)
@@ -66,8 +74,14 @@ NO_ANSWER_AFTER_S = 15           # отказ после стольких сек
 DIAL_GAP_MS = 1000               # пауза между наборами по умолчанию (INFORMER_DIAL_GAP_MS)
 MAX_DIAL_GAP_MS = 30000          # шаг от портала больше этого не берём: круг не должен стоять минутами
 # Таймер B SIP — 32 с: на INVITE ни одного ответа (ни 100, ни 180), Asterisk сам ставит 408 → причина 18;
-# тот же срок у Binotel к оператору связи. Отказ в это окно без гудков — сеть не пропустила, а не водитель.
-INVITE_TIMEOUT_S = (30.0, 34.0)
+# тот же срок у Binotel к оператору связи: его «занято» (603 → 21), «недоступен» (480 → 19) и «сброшен» (18)
+# приходят через 32–36 с от набора (сверка 16.10.2026 с журналом Binotel: все 347 блок-звонков — BUSY/CHANUNAVAIL
+# с waitsec 32–33). Отказ в это окно без гудков — сеть не пропустила, а не водитель.
+INVITE_TIMEOUT_S = (31.0, 38.0)
+CAUSE_NO_LINK = {17, 18, 19, 21}
+# Одновременно — не больше стольких звонков, какой бы темп ни раздал портал (владелец, 16.10.2026: «жёстких
+# залпов делать не надо вообще, по 3 максимум»). INFORMER_MAX_ACTIVE; 0 — без предела.
+MAX_ACTIVE_CALLS = 3
 LINK_TRIP = 3                    # столько вызовов подряд без связи — пауза набора
 LINK_BACKOFF_S = (120, 300, 900) # пауза растёт, пока связь не вернётся; после паузы — один пробный звонок
 RESULT_RETRY_S = 10
@@ -96,7 +110,7 @@ def classify(call):
     # ответа (таймер B, 408 → 18), либо сам Binotel 32 с не достучался до оператора связи и вернул «занято»
     # или «сброшен» (16.10.2026, 15:46: после ~4 минут темпа 46/мин у Binotel BUSY и CHANUNAVAIL на каждый
     # звонок, во всём кабинете ни одного дозвона). Живое «занято»/«сброс» приходит за секунды или после гудков.
-    if cause in (17, 18, 21) and not ringing and INVITE_TIMEOUT_S[0] <= elapsed <= INVITE_TIMEOUT_S[1]:
+    if cause in CAUSE_NO_LINK and not ringing and INVITE_TIMEOUT_S[0] <= elapsed <= INVITE_TIMEOUT_S[1]:
         return 'no_link', ''
     if cause in CAUSE_BUSY or reason == 5:
         return 'busy', ''
@@ -264,6 +278,7 @@ def load_config():
         'lines': lines,
         'per_line': max(1, int(value('INFORMER_CALLS_PER_LINE', '2') or 2)),
         'max_per_minute': max(0, int(value('INFORMER_MAX_PER_MINUTE', '0') or 0)),
+        'max_active': max(0, int(value('INFORMER_MAX_ACTIVE', str(MAX_ACTIVE_CALLS)) or 0)),
         'dial_gap_ms': max(0, int(value('INFORMER_DIAL_GAP_MS', str(DIAL_GAP_MS)) or 0)),
         'sounds_dir': value('INFORMER_SOUNDS_DIR', '/var/lib/informer/sounds'),
         'heartbeat_file': value('INFORMER_HEARTBEAT_FILE'),
@@ -319,7 +334,38 @@ class Dispatcher:
             probe = self.clock() >= until and not any(active.values())
             for index, info in enumerate(state.values()):
                 info['capacity'] = info['active'] + (1 if probe and index == 0 else 0)
+            return state
+        limit = self.max_active()
+        if limit:
+            # Не больше limit звонков разом: свободные места раздаём по одному, начиная с самых свободных линий,
+            # остальным — «занято всё». Портал видит ровно столько мест, сколько робот готов набрать.
+            room = max(0, limit - sum(active.values()))
+            for info in state.values():
+                info['capacity'] = info['active']
+            while room:
+                takers = [info for info in sorted(state.values(), key=lambda info: info['capacity'])
+                          if info['capacity'] < self.config['per_line']]
+                if not takers:
+                    break
+                for info in takers[:room]:
+                    info['capacity'] += 1
+                room -= min(room, len(takers))
         return state
+
+    def max_active(self):
+        """Предел одновременных звонков (INFORMER_MAX_ACTIVE); 0 — без предела."""
+        try:
+            return max(0, int(self.config.get('max_active', MAX_ACTIVE_CALLS) or 0))
+        except (TypeError, ValueError):
+            return MAX_ACTIVE_CALLS
+
+    def active_room(self):
+        """Сколько звонков ещё можно начать разом; без предела — сколько угодно."""
+        limit = self.max_active()
+        if not limit:
+            return float('inf')
+        with self.lock:
+            return limit - len(self.calls)
 
     def link_error(self):
         """Что показать руководителю в карточке робота, пока связи с Binotel нет."""
@@ -348,7 +394,7 @@ class Dispatcher:
                 log.warning('Автоинформатор: сеть не пропускает звонки — набор на паузе %d с', pause)
         elif result != 'failed':
             if self.link_level:
-                log.info('Автоинформатор: звонки снова проходят — звоним полным ходом')
+                log.info('Автоинформатор: звонки снова проходят — звоним дальше')
             self.link_fails = 0
             self.link_level = 0
             self.link_down_until = 0.0
@@ -535,9 +581,10 @@ class Dispatcher:
         dialed = 0
         for job in answer.get('calls') or []:
             paused = self.link_level and self.clock() < self.link_down_until
-            if paused or self.rate_room() <= 0:
-                # Сверх страховки INFORMER_MAX_PER_MINUTE или в паузе без связи не звоним: «линия занята» вернёт
-                # водителя в очередь. Отказ свой, не Binotel, — о связи он ничего не говорит.
+            if paused or self.rate_room() <= 0 or self.active_room() <= 0:
+                # Сверх предела одновременных (INFORMER_MAX_ACTIVE), страховки INFORMER_MAX_PER_MINUTE или в паузе
+                # без связи не звоним: «линия занята» вернёт водителя в очередь. Отказ свой, не Binotel, — о связи
+                # он ничего не говорит.
                 self.finish({'call_id': int(job['call_id']), 'line': str(job.get('line')), 'dialed_at': self.clock(),
                              'ended_at': self.clock(), 'cause': 19, 'originate_reason': None, 'local': True})
                 continue
@@ -565,8 +612,10 @@ class Dispatcher:
 
     def run(self):
         cap = self.config.get('max_per_minute') or 0
-        log.info('Автоинформатор %s: линии %s по %d звонка, %s, пауза между наборами %d мс, портал %s', VERSION,
+        limit = self.max_active()
+        log.info('Автоинформатор %s: линии %s по %d звонка, %s, %s, пауза между наборами %d мс, портал %s', VERSION,
                  ','.join(self.config['lines']), self.config['per_line'],
+                 'не больше %d разом' % limit if limit else 'без предела одновременных',
                  'не больше %d в минуту' % cap if cap > 0 else 'без минутного предела',
                  self.config.get('dial_gap_ms') or 0, self.portal)
         backoff = RESULT_RETRY_S

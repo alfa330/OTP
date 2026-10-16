@@ -4,10 +4,12 @@
  */
 import { GAP_S, LEAD_IN_S, TAIL_S } from './informerAudio.js';
 
-/* Сколько звонков в минуту вытянут линии робота — двойник informer/rules.py (line_capacity, line_rate).
-   Владелец, 16.10.2026: «в поле с кол-вом звонков сразу максимальное кол-во — сколько тянут линии, без
-   предела». Место на линии звонок держит на время вызова (~12 с до ответа), записи и отбоя (~2 с). */
+/* Сколько звонков в минуту вытянет робот — двойник informer/rules.py (line_capacity, line_rate).
+   Одновременно — не больше MAX_ACTIVE_CALLS звонков (владелец, 16.10.2026, после того как залп 46 в минуту с общего
+   номера кабинета уронил исходящие всем операторам: «жёстких залпов делать не надо вообще, по 3 максимум»).
+   Место звонок держит на время вызова (~12 с до ответа), записи и отбоя (~2 с). */
 export const CALLS_PER_LINE = 2;
+export const MAX_ACTIVE_CALLS = 3;
 export const EXPECTED_RING_S = 12;
 export const CALL_OVERHEAD_S = 2;
 export const DEFAULT_AUDIO_S = 25;
@@ -30,7 +32,7 @@ export const callSeconds = (audioMs) => EXPECTED_RING_S + (audioMs > 0 ? audioMs
     + CALL_OVERHEAD_S;
 
 export const lineRate = (channels, audioMs) => {
-    const ch = count(channels) || CALLS_PER_LINE;   // линий ещё не видно — как одна линия
+    const ch = Math.min(count(channels) || CALLS_PER_LINE, MAX_ACTIVE_CALLS);   // линий ещё не видно — как одна линия
     return Math.max(1, Math.min(MAX_PER_MINUTE, Math.floor((ch * 60) / callSeconds(audioMs))));
 };
 
