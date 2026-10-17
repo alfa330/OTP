@@ -96,6 +96,9 @@ DDL = [
         last_seen_at TIMESTAMPTZ
     )
     """,
+    # Прогрев темпа (17.10.2026): от запуска рассылки и от последней паузы робота из-за отказов сети.
+    "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS warmup_since TIMESTAMPTZ",
+    "ALTER TABLE informer_agent_state ADD COLUMN IF NOT EXISTS warmup_since TIMESTAMPTZ",
 ]
 
 _ready = False

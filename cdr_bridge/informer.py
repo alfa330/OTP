@@ -89,7 +89,16 @@ CAUSE_QUICK_REJECT = {21}
 # увеличим», затем «ещё до 15» и «до 20» — 20 разом при темпе 20 в минуту, набор по одному раз в 3 с). INFORMER_MAX_ACTIVE; 0 — без предела.
 MAX_ACTIVE_CALLS = 20
 LINK_TRIP = 3                    # столько вызовов подряд без связи — пауза набора
-LINK_BACKOFF_S = (120, 300, 900) # пауза растёт, пока связь не вернётся; после паузы — один пробный звонок
+# Пауза растёт, пока связь не вернётся; после паузы — один пробный звонок. 17.10.2026: с паузами 2/5/15 мин и
+# полным темпом сразу после пробного звонка робот четыре часа ходил по кругу «пауза → пробный прошёл → 20 в
+# минуту → через минуту снова блок» и держал номер заблокированным и операторам.
+LINK_BACKOFF_S = (300, 900, 1800)
+# После восстановления связи — разгон по ступеням владельца («прогрев — сначала 3, 7, 10, 15, 20», 17.10.2026):
+# столько звонков разом на каждой ступени RAMP_STEP_S, пока не дойдём до предела. Темп в минуту теми же ступенями
+# ведёт портал (rules.WARMUP_STAGES) — он видит паузу робота по ёмкости ≤ 1. Новый отказ сети на разгоне —
+# снова пауза, следующая по длине.
+RAMP_STAGES = (3, 7, 10, 15, 20)
+RAMP_STEP_S = 300
 RESULT_RETRY_S = 10
 IDLE_POLL_S = 10
 MAX_POLL_S = 60
@@ -305,6 +314,8 @@ class Dispatcher:
         self.link_fails = 0             # «нет связи» подряд
         self.link_level = 0             # 0 — связь есть; N — N-я пауза подряд
         self.link_down_until = 0.0      # до этого момента не звоним
+        self.ramp_since = 0.0           # связь вернулась в этот момент — разгон от RAMP_START (0 — разгона нет)
+        self.ramp_level = 0             # сколько пауз было перед этим разгоном: новый отказ — следующая пауза
         self.calls = {}                 # call_id → состояние звонка
         self.pending = deque()          # итоги, которые ещё не принял портал
         self.originated = deque()       # моменты наборов — для страховки INFORMER_MAX_PER_MINUTE
@@ -344,6 +355,9 @@ class Dispatcher:
                 info['capacity'] = info['active'] + (1 if probe and index == 0 else 0)
             return state
         limit = self.max_active()
+        ramp = self.ramp_limit()
+        if ramp:
+            limit = min(limit, ramp) if limit else ramp
         if limit:
             # Не больше limit звонков разом: свободные места раздаём по одному, начиная с самых свободных линий,
             # остальным — «занято всё». Портал видит ровно столько мест, сколько робот готов набрать.
@@ -367,9 +381,27 @@ class Dispatcher:
         except (TypeError, ValueError):
             return MAX_ACTIVE_CALLS
 
+    def ramp_limit(self):
+        """Сколько звонков разом разрешает разгон после восстановления связи; 0 — разгон кончился или не было."""
+        with self.lock:
+            since = self.ramp_since
+        if not since:
+            return 0
+        steps = int(max(0.0, self.clock() - since) // RAMP_STEP_S)
+        cap = self.max_active()
+        if steps >= len(RAMP_STAGES) or (cap and RAMP_STAGES[steps] >= cap):
+            with self.lock:
+                self.ramp_since = 0.0        # разогнались до предела — дальше обычный режим, блок позади
+                self.ramp_level = 0
+            return 0
+        return RAMP_STAGES[steps]
+
     def active_room(self):
         """Сколько звонков ещё можно начать разом; без предела — сколько угодно."""
         limit = self.max_active()
+        ramp = self.ramp_limit()
+        if ramp:
+            limit = min(limit, ramp) if limit else ramp
         if not limit:
             return float('inf')
         with self.lock:
@@ -394,15 +426,21 @@ class Dispatcher:
             if self.link_level and now < self.link_down_until:
                 return                  # хвост звонков, набранных до паузы, — паузу не продлевает
             self.link_fails += 1
-            if self.link_level or self.link_fails >= LINK_TRIP:
-                pause = LINK_BACKOFF_S[min(self.link_level, len(LINK_BACKOFF_S) - 1)]
-                self.link_level += 1
+            # На разгоне после паузы один отказ — уже сигнал: блок не снят, следующая пауза длиннее.
+            if self.link_level or self.ramp_since or self.link_fails >= LINK_TRIP:
+                level = self.link_level or self.ramp_level
+                pause = LINK_BACKOFF_S[min(level, len(LINK_BACKOFF_S) - 1)]
+                self.link_level = level + 1
                 self.link_fails = 0
                 self.link_down_until = now + pause
+                self.ramp_since = 0.0
                 log.warning('Автоинформатор: сеть не пропускает звонки — набор на паузе %d с', pause)
         elif result != 'failed':
             if self.link_level:
-                log.info('Автоинформатор: звонки снова проходят — звоним дальше')
+                log.info('Автоинформатор: звонки снова проходят — разгон по ступеням %s, по %d с каждая',
+                         RAMP_STAGES, RAMP_STEP_S)
+                self.ramp_since = now
+                self.ramp_level = self.link_level
             self.link_fails = 0
             self.link_level = 0
             self.link_down_until = 0.0

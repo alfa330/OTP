@@ -87,6 +87,14 @@ def test_wav_inspect():
         wav.inspect(_wav(rate=24000, seconds=301), rates=both)
 
 
+def test_warmup_stages():
+    """Владелец, 17.10.2026: «каждое автоинформирование начинать через прогрев — сначала 3, 7, 10, 15, 20»."""
+    assert rules.WARMUP_STAGES == (3, 7, 10, 15, 20) and rules.WARMUP_STEP_MINUTES == 5
+    assert [rules.warmup_rate(m) for m in (0, 4.9, 5, 12, 15, 19.9, 20, 24.9)] == [3, 3, 7, 10, 15, 15, 20, 20]
+    assert rules.warmup_rate(25) is None and rules.warmup_rate(None) is None    # прогрев кончился / не было
+    assert rules.warmup_rate(-1) == 3
+
+
 def test_line_rate_is_what_robot_fits_with_twenty_at_once():
     """Владелец, 16.10.2026: в поле темпа сразу максимум — сколько тянет робот; с того же дня — предел звонков
     разом («жёстких залпов делать не надо вообще, по 3 максимум», вечером — «на 10», «ещё до 15», «до 20»)."""

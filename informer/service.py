@@ -151,7 +151,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script
+                       c.script, c.warmup_since
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.department_id = %s
@@ -160,12 +160,25 @@ class InformerService:
                 LIMIT 100
             """, (int(department_id),))
             rows = cur.fetchall()
-        return [self._campaign_row(r) for r in rows]
+            agent_warm = self._agent_warmup(cur)
+        now = self.clock()
+        return [self._campaign_row(r, agent_warm, now) for r in rows]
 
     @staticmethod
-    def _campaign_row(r):
+    def _agent_warmup(cur):
+        cur.execute("SELECT warmup_since FROM informer_agent_state WHERE id = 1")
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    @classmethod
+    def _campaign_row(cls, r, agent_warm=None, now=None):
         done, given_up, left = int(r[15] or 0), int(r[16] or 0), int(r[17] or 0)
+        warmup_rate = None
+        if r[2] == rules.CAMPAIGN_ACTIVE and now is not None and len(r) > 20:
+            effective = cls._effective_rate(r[7], r[20], agent_warm, now)
+            warmup_rate = effective if effective < int(r[7]) else None
         return {
+            "warmup_rate": warmup_rate,
             "id": r[0], "name": r[1], "status": r[2], "audio_ms": r[3], "parts": r[4] or [],
             "window_start": r[5].strftime('%H:%M') if r[5] else None,
             "window_end": r[6].strftime('%H:%M') if r[6] else None,
@@ -199,9 +212,10 @@ class InformerService:
                 UPDATE informer_campaigns
                 SET status = %s,
                     started_at = CASE WHEN %s = 'active' THEN COALESCE(started_at, %s) ELSE started_at END,
+                    warmup_since = CASE WHEN %s = 'active' THEN %s ELSE warmup_since END,
                     finished_at = CASE WHEN %s = 'done' THEN %s ELSE finished_at END
                 WHERE id = %s
-            """, (target, target, now, target, now, int(campaign_id)))
+            """, (target, target, now, target, now, target, now, int(campaign_id)))
             if target == rules.CAMPAIGN_DONE:
                 # Кому не успели позвонить — «рассылку завершили», а не «не дозвонились».
                 cur.execute("""
@@ -222,7 +236,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script
+                       c.script, c.warmup_since
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.id = %s AND c.department_id = %s
@@ -231,7 +245,7 @@ class InformerService:
             row = cur.fetchone()
             if not row:
                 raise InformerError('Рассылка не найдена', 404)
-            campaign = self._campaign_row(row)
+            campaign = self._campaign_row(row, self._agent_warmup(cur), self.clock())
             parts = campaign["parts"]
             first_end = int(parts[0]["end_ms"]) if parts else 0
             last_end = int(parts[-1]["end_ms"]) if parts else 0
@@ -372,16 +386,24 @@ class InformerService:
         lines = self._agent_lines(payload.get('lines'))
         ami_ok = payload.get('ami_ok') is True
         now = self.clock()
+        # Робот в паузе из-за отказов сети или проверяет связь одним звонком — мест ≤ 1: с этого момента
+        # прогрев темпа начинается заново (rules.WARMUP_STAGES).
+        robot_paused = bool(lines) and sum(info["capacity"] for info in lines.values()) <= 1
         with self.db._get_cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (POLL_LOCK_KEY,))
             cur.execute("""
-                INSERT INTO informer_agent_state (id, agent_id, version, key_id, lines, ami_ok, error, last_seen_at)
-                VALUES (1, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                INSERT INTO informer_agent_state (id, agent_id, version, key_id, lines, ami_ok, error, last_seen_at,
+                                                  warmup_since)
+                VALUES (1, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET agent_id = EXCLUDED.agent_id, version = EXCLUDED.version,
                     key_id = EXCLUDED.key_id, lines = EXCLUDED.lines, ami_ok = EXCLUDED.ami_ok,
-                    error = EXCLUDED.error, last_seen_at = EXCLUDED.last_seen_at
+                    error = EXCLUDED.error, last_seen_at = EXCLUDED.last_seen_at,
+                    warmup_since = CASE WHEN %s THEN EXCLUDED.last_seen_at ELSE informer_agent_state.warmup_since END
+                RETURNING warmup_since
             """, (str(payload.get('agent_id') or '')[:128], str(payload.get('version') or '')[:64],
-                  str(key_id or '')[:32], json.dumps(lines), ami_ok, str(payload.get('error') or '')[:500], now))
+                  str(key_id or '')[:32], json.dumps(lines), ami_ok, str(payload.get('error') or '')[:500], now,
+                  now if robot_paused else None, robot_paused))
+            agent_warm = cur.fetchone()[0]
             self._reclaim_stale(cur, now)
             if not ami_ok or not lines:
                 return {"calls": [], "next_poll_sec": POLL_AMI_DOWN_SEC}
@@ -394,7 +416,8 @@ class InformerService:
             window_start = now - timedelta(seconds=60)
             cur.execute("""
                 SELECT c.id, c.window_start, c.window_end, c.max_per_minute, c.audio_sha256, c.audio_ms,
-                       (SELECT COUNT(*) FROM informer_calls x WHERE x.campaign_id = c.id AND x.issued_at > %s)
+                       (SELECT COUNT(*) FROM informer_calls x WHERE x.campaign_id = c.id AND x.issued_at > %s),
+                       c.warmup_since
                 FROM informer_campaigns c
                 WHERE c.status = 'active'
                 ORDER BY c.started_at, c.id
@@ -403,10 +426,12 @@ class InformerService:
             issued = []
             more_due = False
             pace_ms = 0
-            for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute in campaigns:
+            for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm in campaigns:
                 if not rules.in_window(now, w_start, w_end):
                     continue
-                room = min(room_total - len(issued), int(per_minute) - int(issued_last_minute))
+                # Прогрев: 3, 7, 10, 15, 20 в минуту от запуска рассылки или от паузы робота — что позже.
+                per_minute = self._effective_rate(per_minute, campaign_warm, agent_warm, now)
+                room = min(room_total - len(issued), per_minute - int(issued_last_minute))
                 if room <= 0:
                     more_due = True
                     continue
@@ -444,6 +469,14 @@ class InformerService:
                     break
         return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC,
                 "dial_gap_ms": pace_ms if issued else 0}
+
+    @staticmethod
+    def _effective_rate(per_minute, campaign_warm, agent_warm, now):
+        """Темп рассылки с учётом прогрева: ступень по времени от запуска или от паузы робота (что позже)."""
+        since = max((stamp for stamp in (campaign_warm, agent_warm) if stamp), default=None)
+        stage = rules.warmup_rate((now - since).total_seconds() / 60 if since else None)
+        rate = int(per_minute)
+        return min(rate, stage) if stage else rate
 
     @staticmethod
     def _agent_lines(raw):

@@ -264,7 +264,7 @@ def _no_link(clock, call_id, line='902'):
 
 def test_link_breaker_pauses_dialing_then_probes_with_one_call(tmp_path):
     """16.10.2026: офисная сеть отрезала VM от Binotel — робот 6 минут слал вызовы в пустоту. Теперь после
-    трёх «нет связи» подряд он не берёт звонков, ждёт 2, 5, 15 минут и проверяет связь одним звонком."""
+    трёх «нет связи» подряд он не берёт звонков, ждёт 5, 15, 30 минут и проверяет связь одним звонком."""
     d, portal, ami, clock = make(tmp_path, [], lines=('902', '903'))
     d.finish(_no_link(clock, 1))
     d.finish(_no_link(clock, 2))
@@ -273,20 +273,54 @@ def test_link_breaker_pauses_dialing_then_probes_with_one_call(tmp_path):
     assert all(info['capacity'] == info['active'] for info in d.lines_state().values())   # мест нет
     assert 'на паузе' in d.link_error()
     d.finish(_no_link(clock, 4))                                  # хвост набранных до паузы — не продлевает
-    clock.now += 121
+    clock.now += 301
     state = d.lines_state()
     assert (state['902']['capacity'], state['903']['capacity']) == (1, 0)   # одно место — пробный звонок
     assert 'одним звонком' in d.link_error()
-    d.finish(_no_link(clock, 5))                                  # пробный не дошёл — пауза 5 минут
-    clock.now += 121
+    d.finish(_no_link(clock, 5))                                  # пробный не дошёл — пауза 15 минут
+    clock.now += 301
     assert d.lines_state()['902']['capacity'] == 0
-    clock.now += 180
+    clock.now += 600
     assert d.lines_state()['902']['capacity'] == 1
     d.finish({'call_id': 6, 'line': '902', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
               'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
-    assert d.lines_state()['902']['capacity'] == 2 and d.link_error() == ''   # дошёл — полный ход
+    assert d.lines_state()['902']['capacity'] == 2 and d.link_error() == ''   # дошёл — звоним дальше
     assert [r['result'] for r in portal.results] == []            # итоги ушли в очередь портала, не потеряны
     assert len(d.pending) == 6
+
+
+def test_ramp_after_link_recovery(tmp_path):
+    """17.10.2026: после пробного звонка робот сразу шёл полным темпом — и номер блокировали снова через минуту.
+    Теперь разгон по ступеням владельца 3, 7, 10, 15, 20 разом по 5 минут; отказ сети на разгоне — пауза длиннее."""
+    lines = tuple(str(900 + i) for i in range(12))
+    d, portal, ami, clock = make(tmp_path, [], lines=lines)
+    for call_id in (1, 2, 3):
+        d.finish(_no_link(clock, call_id, line='900'))
+    clock.now += 301                                              # пауза 5 минут кончилась — пробный звонок
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 1
+    d.finish({'call_id': 4, 'line': '900', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
+              'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 3    # разгон: первая ступень
+    assert d.active_room() == 3
+    clock.now += 300
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 7
+    clock.now += 300
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 10
+    clock.now += 600
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 20   # ступень 20 = предел — разгон кончился
+    assert d.ramp_since == 0.0
+    # Новый отказ сети на разгоне — пауза сразу (не ждём трёх) и длиннее прошлой: 15 минут.
+    d.finish({'call_id': 5, 'line': '901', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
+              'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
+    for call_id in (6, 7, 8):
+        d.finish(_no_link(clock, call_id, line='900'))
+    clock.now += 301
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 1
+    d.finish({'call_id': 9, 'line': '900', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
+              'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 3
+    d.finish(_no_link(clock, 10, line='901'))
+    assert d.link_down_until - clock.now == 900 and sum(info['capacity'] for info in d.lines_state().values()) == 0
 
 
 def test_jobs_during_link_pause_go_back_to_queue(tmp_path):

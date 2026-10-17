@@ -180,6 +180,7 @@ def test_at_most_twenty_calls_at_once_no_minute_cap(env):
     b = make_campaign(svc, phones(8, start=100), max_per_minute=600)
     svc.campaign_action(DEPT, a['id'], 'start')
     svc.campaign_action(DEPT, b['id'], 'start')
+    clock.tick(minutes=25)                                # прогрев кончился — полный темп
     issued = poll(svc, twelve)['calls']
     assert len(issued) == 20                              # двадцать мест, а не все 24 места двенадцати линий
     assert len({call['line'] for call in issued}) == 12   # раскладываем по всем линиям
@@ -191,6 +192,45 @@ def test_at_most_twenty_calls_at_once_no_minute_cap(env):
     one = dict(busy, **{issued[0]['line']: {'capacity': 2, 'active': active[issued[0]['line']] - 1}})
     assert len(poll(svc, one)['calls']) == 1              # один кончился — одно место
     assert len(poll(svc, twelve)['calls']) == 20          # все кончились — снова двадцать, без минутного потолка
+
+
+def test_warmup_from_start_and_after_robot_pause(env):
+    """Владелец, 17.10.2026: «каждое автоинформирование начинать через прогрев — сначала 3, 7, 10, 15, 20».
+    Ступени по 5 минут от запуска; пауза робота из-за отказов сети (мест ≤ 1) начинает прогрев заново."""
+    svc, clock, _ = env
+    twelve = {str(n): {'capacity': 2, 'active': 0} for n in range(902, 914)}
+    campaign = make_campaign(svc, phones(60), max_per_minute=20)
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    first = poll(svc, twelve)
+    assert len(first['calls']) == 3 and first['dial_gap_ms'] == 20000       # ступень 3 в минуту — раз в 20 с
+    assert svc.campaign_detail(DEPT, campaign['id'])['warmup_rate'] == 3
+    assert poll(svc, twelve)['calls'] == []                                   # в эту минуту больше не даём
+    clock.tick(minutes=5)
+    assert len(poll(svc, twelve)['calls']) == 7                               # ступень 7
+    clock.tick(minutes=5)
+    assert len(poll(svc, twelve)['calls']) == 10
+    clock.tick(minutes=5)
+    assert len(poll(svc, twelve)['calls']) == 15
+    clock.tick(minutes=5)
+    assert len(poll(svc, twelve)['calls']) == 20                              # ступень 20 = темп рассылки
+    assert svc.campaign_detail(DEPT, campaign['id'])['warmup_rate'] is None   # прогрев дошёл до темпа
+    # Робот ушёл в паузу (мест нет), потом проверяет связь одним звонком — прогрев с начала.
+    clock.tick(minutes=5)
+    paused = {line: {'capacity': 0, 'active': 0} for line in twelve}
+    assert poll(svc, paused)['calls'] == []
+    clock.tick(minutes=5)
+    probe = dict(paused, **{'902': {'capacity': 1, 'active': 0}})
+    assert len(poll(svc, probe)['calls']) == 1                                # пробный звонок
+    clock.tick(seconds=30)
+    assert len(poll(svc, twelve)['calls']) == 2                               # связь вернулась: 3 в минуту, 1 уже был
+    assert svc.campaign_detail(DEPT, campaign['id'])['warmup_rate'] == 3
+    # Рассылка с темпом ниже ступени — прогрев её не трогает.
+    small = make_campaign(svc, phones(5, start=500), max_per_minute=2)
+    svc.campaign_action(DEPT, campaign['id'], 'pause')
+    svc.campaign_action(DEPT, small['id'], 'start')
+    clock.tick(minutes=1)
+    assert len(poll(svc, twelve)['calls']) == 2
+    assert svc.campaign_detail(DEPT, small['id'])['warmup_rate'] is None
 
 
 def test_default_rate_is_what_robot_fits(env):

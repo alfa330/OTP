@@ -644,6 +644,7 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                         {a?.calls?.no_link ? ` · сеть не пропустила ${a.calls.no_link}` : ''}
                         {states.stopped ? ` · не звонили ${states.stopped}` : ''}
                         {' · '}{campaign.window_start}–{campaign.window_end}, до {campaign.max_per_minute} в минуту
+                        {campaign.warmup_rate ? ` · прогрев: сейчас ${campaign.warmup_rate} в минуту` : ''}
                         {' · '}{partsLabel(campaign.parts)}
                     </div>
 

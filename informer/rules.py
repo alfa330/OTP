@@ -55,6 +55,12 @@ RESULTS = (RESULT_ANSWERED, RESULT_NO_ANSWER, RESULT_BUSY, RESULT_UNAVAILABLE, R
 # Водителю не звонили вовсе — попыткой не считается, в доли итогов не входит.
 NOT_ATTEMPTS = (RESULT_LINE_BUSY, RESULT_NO_LINK)
 NO_LINK_RETRY_SECONDS = 300         # связь пропала — повтор не раньше, чем через 5 минут
+# Прогрев темпа (владелец, 17.10.2026, после того как 20 в минуту с утра за 15 минут снова уронили номер:
+# «каждое автоинформирование начинать через прогрев — сначала 3, 7, 10, 15, 20»). Ступени — звонков в минуту,
+# по WARMUP_STEP_MINUTES каждая, от запуска рассылки и заново после каждой паузы робота из-за отказов сети;
+# темп самой рассылки — потолок. После последней ступени прогрев кончается.
+WARMUP_STAGES = (3, 7, 10, 15, 20)
+WARMUP_STEP_MINUTES = 5
 RESULT_LABELS = {
     RESULT_ANSWERED: 'Дозвонились',
     RESULT_NO_ANSWER: 'Не ответил',
@@ -217,6 +223,17 @@ def line_rate(channels, audio_ms=None):
     audio_s = audio_ms / 1000 if audio_ms and audio_ms > 0 else DEFAULT_AUDIO_SECONDS
     per_call = EXPECTED_RING_SECONDS + audio_s + CALL_OVERHEAD_SECONDS
     return max(1, min(MAX_PER_MINUTE, int(channels * 60 // per_call)))
+
+
+def warmup_rate(minutes_since):
+    """Разрешённый темп в минуту через minutes_since минут после старта или паузы; None — прогрев кончился
+    (или не начинался: minutes_since is None у рассылок, запущенных до прогрева)."""
+    if minutes_since is None:
+        return None
+    step = int(max(0.0, float(minutes_since)) // WARMUP_STEP_MINUTES)
+    if step >= len(WARMUP_STAGES):
+        return None
+    return WARMUP_STAGES[step]
 
 
 def now_utc():
