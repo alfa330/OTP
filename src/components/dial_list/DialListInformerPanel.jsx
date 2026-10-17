@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Languages, Loader2, PenLine, Sparkles } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { FileSpreadsheet, Languages, Loader2, PenLine, Sparkles, Square } from 'lucide-react';
 import FaIcon from '../common/FaIcon';
+import FullscreenSheet from '../common/FullscreenSheet';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
     IosBadge, IosHint, IosMenu, IosModal, IosSegmented,
@@ -497,17 +499,43 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }
 };
 
 /* ── карточка рассылки ────────────────────────────────────────────────────── */
-const Tile = ({ label, value, sub }) => (
+const Tile = ({ label, value, sub, hint }) => (
     <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+        <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+            <span className="truncate">{label}</span>
+            {hint ? <IosHint text={hint} /> : null}
+        </div>
         <div className="mt-0.5 text-[18px] font-semibold tabular-nums text-slate-800">{value}</div>
-        {sub && <div className="text-[11.5px] text-slate-500">{sub}</div>}
+        {sub && <div className="truncate text-[11.5px] text-slate-500">{sub}</div>}
     </div>
 );
 
-const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, canEdit }) => {
+const Legend = ({ tone, label, value }) => (
+    <span className="inline-flex items-center gap-1.5">
+        <span className={`h-2 w-2 rounded-full ${tone}`} />
+        {label} <span className="tabular-nums text-slate-700">{value}</span>
+    </span>
+);
+
+const CardTitle = ({ children, hint, right = null }) => (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[13.5px] font-semibold text-slate-800">
+            {children}
+            {hint ? <IosHint text={hint} /> : null}
+        </div>
+        {right}
+    </div>
+);
+
+/* ── окно рассылки ─────────────────────────────────────────────────────────
+   Владелец, 17.10.2026: «окно конкретного прогона надо бы сделать на всё окно, а данные внутри удобными,
+   аккуратными, интуитивно понятными, с понятным текстом, лишние данные убрать под i». Поэтому — общий
+   FullscreenSheet на весь экран, одна полоса хода рассылки, плитки с одним числом и пояснением под «i»,
+   бары «где положили трубку» (их владелец назвал удобными), запись и тексты — за кнопкой, список водителей. */
+const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, canEdit }) => {
     const [campaign, setCampaign] = useState(null);
     const [busy, setBusy] = useState('');
+    const [showTexts, setShowTexts] = useState(false);
     const load = useCallback(async () => {
         if (!campaignId) return;
         try {
@@ -516,7 +544,7 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
         } catch { /* следующий опрос */ }
     }, [api, campaignId]);
 
-    useEffect(() => { setCampaign(null); load(); }, [load]);
+    useEffect(() => { setCampaign(null); setShowTexts(false); load(); }, [load]);
     useEffect(() => {
         if (!campaignId || campaign?.status !== 'active') return undefined;
         const timer = setInterval(load, POLL_ACTIVE_MS);
@@ -572,147 +600,201 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
     const shares = stageShares(a?.stages);
     const states = a?.targets || {};
     const script = campaign?.script || {};
+    const signing = a?.signing;
+    const total = campaign?.targets_total || 0;
+    const answered = a?.answered ?? 0;
+    const givenUp = states.given_up || 0;
+    const stopped = states.stopped || 0;
+    const queue = (states.pending || 0) + (states.calling || 0);
+    const processed = answered + givenUp;
+    const progress = total ? Math.round((processed / total) * 100) : 0;
+    const width = (n) => `${total ? (n / total) * 100 : 0}%`;
+    const rateNow = campaign?.warmup_rate || campaign?.max_per_minute;
 
-    return (
-        <IosModal open={!!campaignId} onClose={onClose} title={campaign?.name || 'Рассылка'} maxWidth="max-w-3xl"
-            subtitle={campaign ? `${status.label} · создана ${shortDateTime(campaign.created_at)}` : ''}>
-            {!campaign ? (
-                <div className="py-10 text-center text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>
-            ) : (
-                <div className="space-y-5">
-                    <div className="flex flex-wrap items-center gap-2">
-                        {actions.start && (
-                            <button type="button" className={iosBtnPrimary} disabled={!!busy} onClick={() => act('start')}>
-                                <FaIcon className={`fas ${busy === 'start' ? 'fa-spinner fa-spin' : 'fa-play'}`} />
-                                {campaign.status === 'paused' ? 'Продолжить' : 'Запустить'}
-                            </button>
-                        )}
-                        {actions.pause && (
-                            <button type="button" className={iosBtnSecondary} disabled={!!busy} onClick={() => act('pause')}>
-                                <FaIcon className={`fas ${busy === 'pause' ? 'fa-spinner fa-spin' : 'fa-pause'}`} /> Пауза
-                            </button>
-                        )}
-                        <PlayButton label="Запись" getUrl={getAudio} onError={(t) => showToast?.(t, 'error')} />
-                        <button type="button" className={iosBtnGhost} disabled={!!busy} onClick={download}>
-                            <FaIcon className={`fas ${busy === 'export' ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} /> Excel
-                        </button>
-                        {actions.finish && (
-                            <button type="button" className={`${iosBtnGhost} text-rose-500`} disabled={!!busy} onClick={() => act('finish')}>
-                                Завершить
-                            </button>
-                        )}
+    const headerActions = campaign ? (
+        <>
+            {actions.start && (
+                <button type="button" className={`${iosBtnPrimary} py-2`} disabled={!!busy} onClick={() => act('start')}>
+                    <FaIcon className={`fas ${busy === 'start' ? 'fa-spinner fa-spin' : 'fa-play'}`} />
+                    {campaign.status === 'paused' ? 'Продолжить' : 'Запустить'}
+                </button>
+            )}
+            {actions.pause && (
+                <button type="button" className={`${iosBtnSecondary} py-2`} disabled={!!busy} onClick={() => act('pause')}>
+                    <FaIcon className={`fas ${busy === 'pause' ? 'fa-spinner fa-spin' : 'fa-pause'}`} /> Пауза
+                </button>
+            )}
+            <IosMenu label="Ещё" disabled={!!busy} items={[
+                { key: 'excel', label: 'Выгрузить в Excel', icon: FileSpreadsheet, onSelect: download },
+                actions.finish && { key: 'finish', label: 'Завершить рассылку', icon: Square, onSelect: () => act('finish') },
+            ]} />
+        </>
+    ) : null;
+
+    const progressHint = `Обработанные — те, кому дозвонились, и те, у кого попытки кончились (до ${campaign?.max_attempts} `
+        + `${plural(campaign?.max_attempts || 0, 'попытки', 'попыток', 'попыток')}, повтор через ${campaign?.retry_after_min} мин). `
+        + `Остальные ждут своей очереди в окне ${campaign?.window_start}–${campaign?.window_end} по Алматы.`
+        + (a?.calls?.line_busy || a?.calls?.no_link
+            ? ` Повторов, которые попыткой не считаются: линия занята — ${a.calls.line_busy || 0}, сеть не пропустила — ${a.calls.no_link || 0}.`
+            : '')
+        + ' Темп — сколько звонков в минуту робот набирает сейчас: каждый запуск и возобновление начинается с прогрева '
+        + `3 → 7 → 10 → 15 → 20 в минуту по 5 минут, не выше темпа рассылки ${campaign?.max_per_minute}.`;
+
+    const body = !campaign ? (
+        <div className="py-10 text-center text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>
+    ) : (
+        <div className="space-y-4">
+            {campaign.status === 'active' && !robot?.online && (
+                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
+                    Робот не на связи — рассылка ждёт и начнёт звонить, как только он подключится.
+                </div>
+            )}
+
+            <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>
+                <CardTitle hint={progressHint}
+                    right={<div className="text-[12.5px] tabular-nums text-slate-500">{processed} из {total} · {progress}%</div>}>
+                    Ход рассылки
+                </CardTitle>
+                <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-100">
+                    {answered > 0 && <div className="bg-emerald-500" style={{ width: width(answered) }} title={`Дозвонились: ${answered}`} />}
+                    {givenUp > 0 && <div className="bg-slate-400" style={{ width: width(givenUp) }} title={`Не дозвонились: ${givenUp}`} />}
+                    {stopped > 0 && <div className="bg-slate-300" style={{ width: width(stopped) }} title={`Не звонили: ${stopped}`} />}
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                    <Legend tone="bg-emerald-500" label="Дозвонились" value={answered} />
+                    <Legend tone="bg-slate-400" label="Не дозвонились" value={givenUp} />
+                    {stopped > 0 && <Legend tone="bg-slate-300" label="Не звонили" value={stopped} />}
+                    <Legend tone="bg-slate-100 ring-1 ring-slate-300" label="В очереди" value={queue} />
+                </div>
+                <div className="text-[12px] text-slate-500">
+                    Сейчас <span className="tabular-nums text-slate-700">{rateNow} в минуту</span>
+                    {campaign.warmup_rate ? ` · прогрев до ${campaign.max_per_minute}` : ''}
+                    {' · '}окно {campaign.window_start}–{campaign.window_end}
+                </div>
+            </div>
+
+            <div className={`grid grid-cols-2 gap-2 ${signing ? 'sm:grid-cols-4' : 'sm:grid-cols-3'}`}>
+                <Tile label="Дозвонились" value={answered}
+                    sub={a?.answer_rate != null ? `${Math.round(a.answer_rate * 100)}% от обработанных` : '—'}
+                    hint="Водители, которые сняли трубку хотя бы раз. Процент — от обработанных: дозвонились и не дозвонились вместе." />
+                <Tile label="Дослушали" value={shares.parts[2].count}
+                    sub={shares.total ? `${percent(shares.parts[2].count, shares.total)}% дозвонившихся` : '—'}
+                    hint="Запись доиграла до конца — водитель не положил трубку раньше." />
+                <Tile label="Слушали в среднем" value={seconds(a?.avg_listened_ms)}
+                    sub={a?.median_listened_ms != null ? `медиана ${seconds(a.median_listened_ms)}` : ''}
+                    hint="От ответа водителя до отбоя, по лучшему звонку каждого. Запись играет с момента ответа, так что это и есть «сколько слушал»." />
+                {signing && (
+                    <Tile label="Подписали" value={signing.after_call}
+                        sub={`после звонка · ${signing.after_call_self} сами`}
+                        hint={'Подписали документы уже после того, как ответили роботу (по данным Sapar из базы «Обзвона», '
+                            + 'проверка раз в три часа). «Сами» — до подписи с водителем не разговаривал оператор. '
+                            + `Ещё ${signing.before_call} подписали до звонка. В базе «Обзвона» найдено ${signing.matched} из ${total} водителей`
+                            + (signing.checked_at ? `; проверка Sapar на ${shortDateTime(signing.checked_at)}.` : '.')} />
+                )}
+            </div>
+
+            {shares.total > 0 && (
+                <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>
+                    <CardTitle hint="Среди дозвонившихся: на какой части записи водитель положил трубку. Сначала звучит казахская часть, потом русская.">
+                        Где положили трубку
+                    </CardTitle>
+                    <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-100">
+                        {shares.parts.map((p) => p.count > 0 && (
+                            <div key={p.key} className={p.tone} style={{ width: `${p.share * 100}%` }} title={`${p.label}: ${p.count}`} />
+                        ))}
                     </div>
-
-                    {campaign.status === 'active' && !robot?.online && (
-                        <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
-                            Робот не на связи — рассылка ждёт и начнёт звонить, как только он подключится.
-                        </div>
-                    )}
-
-                    <div className={`grid grid-cols-2 gap-2 ${a?.signing ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
-                        <Tile label="Водителей" value={campaign.targets_total}
-                            sub={`в очереди ${(states.pending || 0) + (states.calling || 0)}`} />
-                        <Tile label="Дозвонились" value={a?.answered ?? 0}
-                            sub={a?.answer_rate != null ? `${Math.round(a.answer_rate * 100)}% от обработанных` : '—'} />
-                        <Tile label="Слушали в среднем" value={seconds(a?.avg_listened_ms)}
-                            sub={a?.median_listened_ms != null ? `медиана ${seconds(a.median_listened_ms)}` : ''} />
-                        <Tile label="Дослушали" value={shares.parts[2].count}
-                            sub={shares.total ? `${percent(shares.parts[2].count, shares.total)}% дозвонившихся` : '—'} />
-                        {a?.signing && (
-                            /* Подписание — из базы «Обзвона» (Sapar проверяет раз в 3 часа): подпись позже первого
-                               ответа роботу; «сами» — без разговора с оператором перед подписью. */
-                            <Tile label="Подписали после звонка" value={a.signing.after_call}
-                                sub={`${a.signing.after_call_self} сами`
-                                    + (a.signing.before_call ? ` · ${a.signing.before_call} подписали до звонка` : '')
-                                    + (a.signing.checked_at ? ` · Sapar на ${shortDateTime(a.signing.checked_at)}` : '')} />
-                        )}
-                    </div>
-
-                    {shares.total > 0 && (
-                        <div className="space-y-2">
-                            <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-100">
-                                {shares.parts.map((p) => p.count > 0 && (
-                                    <div key={p.key} className={p.tone} style={{ width: `${p.share * 100}%` }} title={`${p.label}: ${p.count}`} />
-                                ))}
-                            </div>
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
-                                {shares.parts.map((p) => (
-                                    <span key={p.key} className="inline-flex items-center gap-1.5">
-                                        <span className={`h-2 w-2 rounded-full ${p.tone}`} />
-                                        {p.label} <span className="tabular-nums text-slate-700">{p.count}</span>
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="text-[12px] text-slate-500">
-                        Не дозвонились {states.given_up || 0}
-                        {a?.calls?.line_busy ? ` · повторов из-за занятой линии ${a.calls.line_busy}` : ''}
-                        {a?.calls?.no_link ? ` · сеть не пропустила ${a.calls.no_link}` : ''}
-                        {states.stopped ? ` · не звонили ${states.stopped}` : ''}
-                        {' · '}{campaign.window_start}–{campaign.window_end}, до {campaign.max_per_minute} в минуту
-                        {campaign.warmup_rate ? ` · прогрев: сейчас ${campaign.warmup_rate} в минуту` : ''}
-                        {' · '}{partsLabel(campaign.parts)}
-                    </div>
-
-                    {script.source === 'tts' && (
-                        <div className="grid gap-2 sm:grid-cols-2">
-                            {['kz', 'ru'].map((lang) => (
-                                <div key={lang} className="rounded-xl bg-slate-50 px-3 py-2.5">
-                                    <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                                        {PART_META[lang].title}
-                                    </div>
-                                    <div className="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed text-slate-700">
-                                        {script.texts?.[lang] || '—'}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* На телефоне четыре колонки не помещаются (имя и итог резались до «Ахметов Е…»,
-                        «дослу…»): там две — водитель с номером и итогом под именем, и секунды. */}
-                    <div className={`${iosCard} overflow-hidden`}>
-                        <div className="hidden grid-cols-[minmax(0,1.6fr)_7.5rem_minmax(0,1fr)_4.5rem] gap-2 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:grid">
-                            <div>Водитель</div><div>Номер</div><div>Итог</div><div className="text-right">Слушал</div>
-                        </div>
-                        <div className="max-h-[22rem] divide-y divide-slate-100 overflow-y-auto">
-                            {campaign.targets.length === 0 ? (
-                                <div className="px-4 py-6 text-center text-[12.5px] text-slate-500">Звонков ещё не было</div>
-                            ) : campaign.targets.map((t) => {
-                                const outcome = t.state === 'done' ? stageLabel(t.stage) : (STATE_LABEL[t.state] || t.state);
-                                let reason = t.state !== 'done' && t.last_result && t.state !== 'stopped'
-                                    ? (RESULT_LABEL[t.last_result] || t.last_result) : '';
-                                if (t.signed_at) {
-                                    const signed = t.signed_after_call ? `подписал ${shortDateTime(t.signed_at)}` : 'подписал до звонка';
-                                    reason = reason ? `${reason} · ${signed}` : signed;
-                                }
-                                return (
-                                    <div key={t.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem] items-center gap-2 px-4 py-2 text-[12.5px] sm:grid-cols-[minmax(0,1.6fr)_7.5rem_minmax(0,1fr)_4.5rem]">
-                                        <div className="min-w-0">
-                                            <div className="truncate text-slate-800">{t.full_name || 'Без имени'}</div>
-                                            <div className="truncate text-[11px] text-slate-400">
-                                                {shortDateTime(t.last_call_at)}{t.attempts > 1 ? ` · попыток ${t.attempts}` : ''}
-                                                <span className="sm:hidden"> · {t.phone}</span>
-                                            </div>
-                                            <div className="truncate text-[11.5px] text-slate-600 sm:hidden">
-                                                {outcome}{reason ? <span className="text-slate-400"> · {reason}</span> : null}
-                                            </div>
-                                        </div>
-                                        <div className="hidden tabular-nums text-slate-500 sm:block">{t.phone}</div>
-                                        <div className="hidden min-w-0 truncate text-slate-600 sm:block">
-                                            {outcome}{reason ? <span className="text-slate-400"> · {reason}</span> : null}
-                                        </div>
-                                        <div className="text-right tabular-nums text-slate-700">{t.state === 'done' ? seconds(t.listened_ms) : '—'}</div>
-                                    </div>
-                                );
-                            })}
-                        </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                        {shares.parts.map((p) => <Legend key={p.key} tone={p.tone} label={p.label} value={p.count} />)}
                     </div>
                 </div>
             )}
-        </IosModal>
+
+            <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>
+                <CardTitle right={(
+                    <div className="flex items-center gap-2">
+                        <PlayButton label="Прослушать" getUrl={getAudio} className={`${iosBtnSecondary} py-1.5`} onError={(t) => showToast?.(t, 'error')} />
+                        {script.source === 'tts' && (
+                            <button type="button" className={`${iosBtnGhost} py-1.5`} onClick={() => setShowTexts((v) => !v)}>
+                                {showTexts ? 'Скрыть тексты' : 'Тексты'}
+                            </button>
+                        )}
+                    </div>
+                )}>
+                    Запись <span className="font-normal text-slate-500">· {partsLabel(campaign.parts)}</span>
+                </CardTitle>
+                {showTexts && script.source === 'tts' && (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                        {['kz', 'ru'].map((lang) => (
+                            <div key={lang} className="rounded-xl bg-slate-50 px-3 py-2.5">
+                                <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                                    {PART_META[lang].title}
+                                </div>
+                                <div className="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed text-slate-700">
+                                    {script.texts?.[lang] || '—'}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* На телефоне четыре колонки не помещаются: там две — водитель с номером и итогом под именем, и секунды. */}
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5">
+                    <div className="flex items-center gap-1.5 text-[13.5px] font-semibold text-slate-800">
+                        Водители
+                        <IosHint text="Последние звонки сверху, номер — маской. Весь список с итогами каждого звонка — в Excel (меню «Ещё»)." />
+                    </div>
+                    <div className="text-[12px] tabular-nums text-slate-500">{campaign.targets.length ? `последние ${campaign.targets.length}` : ''}</div>
+                </div>
+                <div className="hidden grid-cols-[minmax(0,1.6fr)_7.5rem_minmax(0,1fr)_4.5rem] gap-2 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:grid">
+                    <div>Водитель</div><div>Номер</div><div>Итог</div><div className="text-right">Слушал</div>
+                </div>
+                <div className="divide-y divide-slate-100">
+                    {campaign.targets.length === 0 ? (
+                        <div className="px-4 py-6 text-center text-[12.5px] text-slate-500">Звонков ещё не было</div>
+                    ) : campaign.targets.map((t) => {
+                        const outcome = t.state === 'done' ? stageLabel(t.stage) : (STATE_LABEL[t.state] || t.state);
+                        let reason = t.state !== 'done' && t.last_result && t.state !== 'stopped'
+                            ? (RESULT_LABEL[t.last_result] || t.last_result) : '';
+                        if (t.signed_at) {
+                            const signed = t.signed_after_call ? `подписал ${shortDateTime(t.signed_at)}` : 'подписал до звонка';
+                            reason = reason ? `${reason} · ${signed}` : signed;
+                        }
+                        return (
+                            <div key={t.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem] items-center gap-2 px-4 py-2 text-[12.5px] sm:grid-cols-[minmax(0,1.6fr)_7.5rem_minmax(0,1fr)_4.5rem]">
+                                <div className="min-w-0">
+                                    <div className="truncate text-slate-800">{t.full_name || 'Без имени'}</div>
+                                    <div className="truncate text-[11px] text-slate-400">
+                                        {shortDateTime(t.last_call_at)}{t.attempts > 1 ? ` · попыток ${t.attempts}` : ''}
+                                        <span className="sm:hidden"> · {t.phone}</span>
+                                    </div>
+                                    <div className="truncate text-[11.5px] text-slate-600 sm:hidden">
+                                        {outcome}{reason ? <span className="text-slate-400"> · {reason}</span> : null}
+                                    </div>
+                                </div>
+                                <div className="hidden tabular-nums text-slate-500 sm:block">{t.phone}</div>
+                                <div className="hidden min-w-0 truncate text-slate-600 sm:block">
+                                    {outcome}{reason ? <span className="text-slate-400"> · {reason}</span> : null}
+                                </div>
+                                <div className="text-right tabular-nums text-slate-700">{t.state === 'done' ? seconds(t.listened_ms) : '—'}</div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    );
+
+    if (typeof document === 'undefined') return null;
+    return createPortal(
+        <FullscreenSheet open={!!campaignId} onClose={onClose} icon="fa-phone-volume" z={160}
+            title={campaign?.name || 'Рассылка'}
+            subtitle={campaign ? `${status.label} · создана ${shortDateTime(campaign.created_at)}` : ''}
+            actions={headerActions}>
+            {body}
+        </FullscreenSheet>,
+        document.body,
     );
 };
 
@@ -785,7 +867,7 @@ const DialListInformerPanel = ({ apiBaseUrl, authHeaders, departmentId, showToas
 
             <CreateCampaignModal open={creating} onClose={() => setCreating(false)} api={api} showToast={showToast}
                 robot={overview?.robot} onCreated={(campaign) => { setCreating(false); load(); setOpenId(campaign.id); }} />
-            <CampaignModal campaignId={openId} onClose={() => setOpenId(null)} api={api} robot={overview?.robot}
+            <CampaignSheet campaignId={openId} onClose={() => setOpenId(null)} api={api} robot={overview?.robot}
                 showToast={showToast} onChanged={load} canEdit={canEdit} />
         </section>
     );
