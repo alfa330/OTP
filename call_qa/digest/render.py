@@ -39,7 +39,9 @@ ALLOWED_TAGS = {
     "h1", "h2", "h5", "h6",
 }
 ALLOWED_ATTRIBUTES = {
-    "div": set(wiki_markup.BLOCK_ATTRS),
+    # data-kind — вид графика (блок «chart», см. adopt_charts): модели он
+    # разрешён только в этом блоке, у остальных div его срезает normalize.
+    "div": set(wiki_markup.BLOCK_ATTRS) | {"data-kind"},
     "ul": set(wiki_markup.LIST_ATTRS),
     "ol": set(wiki_markup.LIST_ATTRS),
     "td": {"colspan", "rowspan"},
@@ -134,11 +136,81 @@ def clean_html(raw: str) -> str:
         tag.name = "h3"
     for tag in soup.find_all(("h5", "h6")):
         tag.name = "h4"
+    # До ремонта блоков: для normalize «chart» — незнакомый вид, он развернул бы
+    # его в голую таблицу.
+    adopt_charts(soup)
     wiki_markup.normalize(soup)
     for tag in soup.find_all("p"):
         if not tag.get_text(strip=True) and not tag.find("br"):
             tag.decompose()
     return str(soup).strip()
+
+
+# ── графики ───────────────────────────────────────────────────────────────────
+
+CHART_KINDS = ("line", "bar", "hbar")
+CHART_MAX_ROWS = 40
+CHART_MAX_SERIES = 4
+_NUMBER_RE = re.compile(r"^[−-]?\d+(?:[.,]\d+)?\s*%?$")
+
+
+def _chart_table_ok(table) -> bool:
+    """Таблица годится в график: от двух колонок, 2–40 строк, в колонках со
+    второй — числа (пустая ячейка допустима). Иначе это просто таблица."""
+    rows = table.find_all("tr")
+    head = rows[0] if rows else None
+    if head is None:
+        return False
+    header_cells = head.find_all(("th", "td"))
+    body = [r for r in rows[1:] if r.find_all(("td", "th"))]
+    if len(header_cells) < 2 or len(header_cells) > CHART_MAX_SERIES + 1:
+        return False
+    if not 2 <= len(body) <= CHART_MAX_ROWS:
+        return False
+    numeric = 0
+    for row in body:
+        cells = row.find_all(("td", "th"))
+        if len(cells) < 2:
+            return False
+        for cell in cells[1:]:
+            text = cell.get_text(" ", strip=True).replace("\u00a0", "").replace(" ", "")
+            if not text:
+                continue
+            if not _NUMBER_RE.match(text):
+                return False
+            numeric += 1
+    return numeric > 0
+
+
+def adopt_charts(soup) -> None:
+    """Блок графика модели (div[data-wiki-block=chart] с таблицей) → свой блок
+    div[data-qa-chart=вид], который normalize не трогает, а витрина рисует
+    графиком. Негодный блок разворачивается — остаётся таблица с теми же
+    числами. Вложенный в другой блок график поднимается на верхний уровень:
+    витрина ищет графики среди верхних узлов, а блок в блоке и так запрещён."""
+    for tag in list(soup.find_all("div", attrs={"data-wiki-block": "chart"})):
+        if tag.parent is None:
+            continue
+        table = tag.find("table")
+        kind = str(tag.get("data-kind") or "").strip().lower()
+        if table is None or not _chart_table_ok(table):
+            tag.unwrap()
+            continue
+        title = tag.find("h4")
+        tag.attrs = {"data-qa-chart": kind if kind in CHART_KINDS else "bar"}
+        for child in list(tag.children):
+            if child is title or child is table:
+                continue
+            if getattr(child, "name", None) is None and not str(child).strip():
+                child.extract()
+                continue
+            # Текст рядом с таблицей внутри блока — наружу, за график.
+            tag.insert_after(child.extract())
+        outer = tag
+        while outer.parent is not None and getattr(outer.parent, "name", None) not in (None, "[document]"):
+            outer = outer.parent
+        if outer is not tag:
+            outer.insert_after(tag.extract())
 
 
 # ── ссылки на разговоры ───────────────────────────────────────────────────────
@@ -165,8 +237,8 @@ def _ref_title(entry) -> str:
             else "Чат" if entry.get("family") == "chats" else "Звонок")
     parts = [f"{kind} #{entry['id']}" if entry.get("id") is not None else kind,
              entry.get("operator") or "—"]
-    if entry.get("time"):
-        parts.append(entry["time"])
+    if entry.get("date") or entry.get("time"):
+        parts.append(" ".join(p for p in (entry.get("date"), entry.get("time")) if p))
     if entry.get("ai_score") is not None:
         parts.append(f"балл ИИ {round(entry['ai_score'])}")
     return " · ".join(parts)
@@ -248,8 +320,11 @@ def _ref_label(entry, before: str, *, after: str = "", people=(),
     named = bool(operator) and (named_before == {operator}
                                 or (not named_before and named_after == {operator}))
     # У заявки Chat2Desk времени нет (только день) — тогда номер, как в списке
-    # («Заявка #3741»): одинаковые «[чат], [чат]» рядом не различить.
+    # («Заявка #3741»): одинаковые «[чат], [чат]» рядом не различить. У ссылки
+    # за период перед временем стоит дата («03.10 14:09»): дни разные.
     stamp = entry.get("time") or (f"#{entry['id']}" if entry.get("id") is not None else "")
+    if entry.get("date"):
+        stamp = f"{entry['date']} {stamp}".strip()
     if named or same_as_previous:
         return stamp or ("чат" if entry.get("family") == "chats" else "звонок")
     return f"{short_name(entry.get('operator'))} · {stamp}" if stamp else short_name(entry.get("operator"))

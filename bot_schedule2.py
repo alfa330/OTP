@@ -7813,6 +7813,12 @@ def ai_qa_daily_sample_job(day=None, triggered_by='scheduler'):
         # сводка без его разговоров была бы неполной. Повтор с тем же набором
         # оценок модель не зовёт (digest.service.generate → «fresh»).
         _ai_qa_queue_digest(result.get('day'), None, f"after-sample:{triggered_by}")
+        # Сводка за прошлый месяц — в том же пуле, после сводок дня: первого
+        # числа утром оценён последний день месяца, и сводке пора.
+        try:
+            _ai_qa_queue_month_due(f"after-sample:{triggered_by}")
+        except Exception:
+            logging.exception("ai-qa сводка месяца: не удалось поставить проверку")
     return result
 
 
@@ -7854,6 +7860,13 @@ def ai_qa_digest_job(day, department=None, triggered_by='manual', force=False):
             finally:
                 with AI_QA_DIGEST_QUEUED_LOCK:
                     AI_QA_DIGEST_QUEUED.discard((code, day_iso))
+            # Слепок дня для периода и месяца — тут же, по свежим оценкам: иначе
+            # первый, кто откроет период утром, ждал бы его пересчёта.
+            try:
+                from call_qa.digest import facts as qa_facts
+                qa_facts.refresh_day(code, day)
+            except Exception:
+                logging.exception("ai-qa факты %s (%s): пересчёт после сводки упал", day_iso, code)
         return results.get(department) if department else results
     finally:
         with AI_QA_DIGEST_QUEUED_LOCK:
@@ -7880,6 +7893,90 @@ def _ai_qa_queue_digest(day, department, triggered_by, force=False):
             AI_QA_DIGEST_QUEUED.update((code, day_iso) for code in _ai_qa_digest_departments())
     ai_qa_digest_pool.submit(ai_qa_digest_job, day, department, triggered_by, force)
     return True
+
+
+# Сводки за месяц в очереди пула или в работе: {(отдел, 'ГГГГ-ММ')} — по той же
+# причине, что AI_QA_DIGEST_QUEUED: база знает только о начатой генерации.
+AI_QA_MONTH_QUEUED_LOCK = threading.Lock()
+AI_QA_MONTH_QUEUED = set()
+
+
+def _ai_qa_month_queued(department, month_key):
+    with AI_QA_MONTH_QUEUED_LOCK:
+        return (department, month_key) in AI_QA_MONTH_QUEUED
+
+
+def ai_qa_month_digest_job(month, department=None, triggered_by='manual', force=False):
+    """Написать сводку за месяц (call_qa.digest.monthly): одного отдела или всех по
+    очереди — в том же пуле, что сводки дня: вызовы модели идут друг за другом."""
+    from call_qa.digest import monthly as qa_monthly, period as qa_period
+    month_key = qa_period.month_key(month)
+    results = {}
+    try:
+        for code in ([department] if department else _ai_qa_digest_departments()):
+            try:
+                results[code] = qa_monthly.generate(code, month, triggered_by=triggered_by, force=force)
+            except Exception:
+                logging.exception("ai-qa сводка месяца %s (%s): задача упала", month_key, code)
+                results[code] = {'status': 'failed'}
+            finally:
+                with AI_QA_MONTH_QUEUED_LOCK:
+                    AI_QA_MONTH_QUEUED.discard((code, month_key))
+        return results.get(department) if department else results
+    finally:
+        with AI_QA_MONTH_QUEUED_LOCK:
+            AI_QA_MONTH_QUEUED.discard((department, month_key))
+
+
+def _ai_qa_queue_month(month, department, triggered_by, force=False):
+    """Поставить сводку за месяц в пул сводок. False — уже стоит или пишется."""
+    from call_qa.digest import period as qa_period
+    month = month.replace(day=1)
+    month_key = qa_period.month_key(month)
+    key = (department, month_key)
+    with AI_QA_MONTH_QUEUED_LOCK:
+        if key in AI_QA_MONTH_QUEUED:
+            return False
+        AI_QA_MONTH_QUEUED.add(key)
+        if department is None:
+            AI_QA_MONTH_QUEUED.update((code, month_key) for code in _ai_qa_digest_departments())
+    ai_qa_digest_pool.submit(ai_qa_month_digest_job, month, department, triggered_by, force)
+    return True
+
+
+def ai_qa_month_due_job(triggered_by='after-sample'):
+    """После ночной выборки: сводка за прошлый месяц по каждому отделу, если ей
+    пора (monthly.generate_due решает сам: нет, не дописана, в первые дни месяца
+    — изменились оценки). Идёт в пуле после сводок дня."""
+    from call_qa.digest import monthly as qa_monthly, period as qa_period
+    month = qa_monthly.previous_month(qa_monthly.today_almaty())
+    month_key = qa_period.month_key(month)
+    results = {}
+    for code in _ai_qa_digest_departments():
+        try:
+            results[code] = qa_monthly.generate_due(code, triggered_by=triggered_by)
+        except Exception:
+            logging.exception("ai-qa сводка месяца %s (%s): ночная проверка упала", month_key, code)
+        finally:
+            with AI_QA_MONTH_QUEUED_LOCK:
+                AI_QA_MONTH_QUEUED.discard((code, month_key))
+    return results
+
+
+def _ai_qa_queue_month_due(triggered_by):
+    from call_qa.digest import monthly as qa_monthly, period as qa_period
+    month_key = qa_period.month_key(qa_monthly.previous_month(qa_monthly.today_almaty()))
+    with AI_QA_MONTH_QUEUED_LOCK:
+        AI_QA_MONTH_QUEUED.update((code, month_key) for code in _ai_qa_digest_departments())
+    ai_qa_digest_pool.submit(ai_qa_month_due_job, triggered_by)
+
+
+def ai_qa_facts_backfill_job():
+    """Догон слепков дней (call_qa.digest.facts) за последние недели — при старте и
+    раз в сутки перед ночной выборкой. Сама работа идёт в пуле слепков; здесь —
+    только постановка (по запросу отпечатков на отдел)."""
+    from call_qa.digest import facts as qa_facts
+    qa_facts._POOL.submit(qa_facts.backfill)
 
 
 def _ai_qa_pull_response_code(response):
@@ -8399,7 +8496,15 @@ def api_ai_qa_digests():
             # Сводка есть, но все разделы с людьми зрителя — общие с чужими
             # направлениями и ему не показываются.
             day["digest_hidden"] = bool(info.get("hidden"))
-        return jsonify({"status": "success", "days": days, "department": department}), 200
+        # Сводки за месяцы, в которых есть оценённые дни: карточка месяца над
+        # списком и ссылка у заголовка месяца.
+        from call_qa.digest import monthly as qa_monthly
+        months = qa_monthly.known(department, sorted({d["day"][:7] for d in days}), scope)
+        for key, info in months.items():
+            info["running"] = bool(info.get("running")) or _ai_qa_month_queued(department, key)
+            info["generated_at"] = _ai_qa_iso(info.get("generated_at"))
+        return jsonify({"status": "success", "days": days, "department": department,
+                        "months": months}), 200
     except Exception as error:
         logging.exception("ai-qa digests failed")
         return jsonify({"error": str(error)}), 500
@@ -8529,6 +8634,189 @@ def api_ai_qa_digest_chat():
             return jsonify({"error": "ИИ сейчас не отвечает — попробуйте через минуту"}), 503
         return jsonify({"error": "не удалось получить ответ ИИ"}), 500
 
+
+# ── Период и месяц в «Сводке» (call_qa.digest.period / monthly) ──────────────
+#
+# Период — до 31 дня: цифры (из слепков дней, facts), ряд по дням для графиков,
+# разрезы по направлениям, критериям и людям; чат о периоде. Целый прошедший
+# месяц — ещё и сводка ИИ за месяц (раздел на шкалу и «Главное»), которую пишет
+# ночной пул после выборки первого числа. Права — те же, что у сводки дня.
+
+def _ai_qa_period_bounds(source):
+    """Границы периода из запроса (?from=&to= или ?month=ГГГГ-ММ)."""
+    from call_qa.digest import period as qa_period
+    today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+    if source.get('month'):
+        month = qa_period.parse_month(source.get('month'))
+        first, last = qa_period.month_bounds(month)
+        if first > today:
+            raise qa_period.PeriodError("Этот месяц ещё не начался")
+        return first, min(last, today)
+    return qa_period.parse_period(source.get('from'), source.get('to'), today)
+
+
+def _ai_qa_month_view(department, first, scope, requester_id, role, is_super, inputs_hash=None):
+    from call_qa.digest import monthly as qa_monthly, period as qa_period
+    month = qa_monthly.read(department, first, scope, inputs_hash=inputs_hash)
+    month["running"] = bool(month.get("running")) or _ai_qa_month_queued(department, qa_period.month_key(first))
+    month["generated_at"] = _ai_qa_iso(month.get("generated_at"))
+    month["can_generate"] = ((requester_id is not None
+                              and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS)
+                             or not _is_marketing_observer(requester_id, role))
+    month["can_force"] = is_super
+    return month
+
+
+@app.route('/api/ai-qa/period', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_period():
+    """GET ?from=&to= (или ?month=) — период для зрителя: цифры, ряд по дням,
+    разрезы, прошлый период; у целого прошедшего месяца — и сводка ИИ (`month`).
+    ?light=1 — только готовность слепков и состояние сводки месяца (опрос)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    from call_qa.digest import period as qa_period
+    try:
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Период собирается по одному отделу — выберите отдел"}), 400
+        first, last = _ai_qa_period_bounds(request.args)
+    except qa_period.PeriodError as error:
+        return jsonify({"error": str(error)}), 400
+    scope = _ai_qa_direction_scope(requester_id)
+    user = db.get_user(id=requester_id) if requester_id else None
+    role = user[3] if user else None
+    is_super = _is_super_admin_role(_normalize_user_role(role) if user else None)
+    today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+    whole_month = qa_period.is_whole_month(first, last) and qa_period.month_complete(first, today)
+    if request.args.get('light'):
+        try:
+            state = qa_period.status(department, first, last)
+            if whole_month:
+                from call_qa.digest import monthly as qa_monthly
+                month_state = qa_monthly.status(department, first)
+                month_state["running"] = (bool(month_state.get("running"))
+                                          or _ai_qa_month_queued(department, qa_period.month_key(first)))
+                month_state["generated_at"] = _ai_qa_iso(month_state.get("generated_at"))
+                state["month"] = month_state
+        except Exception:
+            logging.exception("ai-qa period status failed")
+            return jsonify({"error": "не удалось узнать состояние периода"}), 500
+        return jsonify({"status": "success", **state}), 200
+    try:
+        view = qa_period.read(department, first, last, scope)
+    except Exception:
+        logging.exception("ai-qa period read failed")
+        return jsonify({"error": "не удалось собрать период"}), 500
+    if whole_month:
+        try:
+            view["month"] = _ai_qa_month_view(department, first, scope, requester_id, role, is_super,
+                                              inputs_hash=view.get("inputs_hash"))
+        except Exception:
+            logging.exception("ai-qa month digest read failed")
+            view["month"] = {"status": "error", "error": "не удалось загрузить сводку за месяц"}
+    return jsonify({"status": "success", **view}), 200
+
+
+@app.route('/api/ai-qa/period/digest', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_month_digest():
+    """POST {month: 'ГГГГ-ММ', department, force} — написать или дописать сводку за
+    прошедший месяц. Ответ 202 сразу; экран опрашивает период ?light=1."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    from call_qa.digest import monthly as qa_monthly, period as qa_period
+    body = request.get_json(silent=True) or {}
+    try:
+        department, dept_err = _ai_qa_requested_department(requester_id, body.get('department'))
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Сводка пишется по одному отделу — выберите отдел"}), 400
+        month = qa_period.parse_month(body.get('month'))
+    except qa_period.PeriodError as error:
+        return jsonify({"error": str(error)}), 400
+    today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+    if not qa_period.month_complete(month, today):
+        return jsonify({"error": "Сводка за месяц пишется, когда месяц прошёл"}), 409
+    user = db.get_user(id=requester_id) if requester_id else None
+    role = user[3] if user else None
+    is_super = _is_super_admin_role(_normalize_user_role(role) if user else None)
+    force = bool(body.get('force')) and is_super
+    first, last = qa_period.month_bounds(month)
+    if _ai_qa_month_queued(department, qa_period.month_key(month)):
+        return jsonify({"status": "running"}), 202
+    try:
+        current = qa_period.read(department, first, last, None)
+        digest = qa_monthly.read(department, month, None, inputs_hash=current.get("inputs_hash"))
+    except Exception:
+        logging.exception("ai-qa month digest pre-check failed")
+        return jsonify({"error": "не удалось проверить сводку"}), 500
+    if digest.get("running"):
+        return jsonify({"status": "running"}), 202
+    if not current.get("evaluated") and not current.get("pending"):
+        return jsonify({"error": "За этот месяц нет оценённых разговоров — сводку писать не из чего"}), 409
+    if (digest.get("status") == "ready" and not digest.get("stale")
+            and not digest.get("incomplete") and not force):
+        return jsonify({"status": "fresh", "message": "Сводка уже учитывает все оценки месяца"}), 200
+    _ai_qa_queue_month(month, department, f"manual:{requester_id}", force=force)
+    return jsonify({"status": "queued"}), 202
+
+
+@app.route('/api/ai-qa/period/chat', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_period_chat():
+    """Переписка с ИИ о периоде: GET ?from=&to= — своя история, POST {from, to,
+    question} — вопрос (ответ ждём синхронно), DELETE — начать заново. Данные
+    периода — в скоупе зрителя, как у чата дня."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_chat_guard()
+    if err:
+        return err
+    from call_qa.digest import period as qa_period
+    body = (request.get_json(silent=True) or {}) if request.method == 'POST' else {}
+    source = body if request.method == 'POST' else request.args
+    try:
+        department, dept_err = _ai_qa_requested_department(
+            requester_id, body.get('department') if request.method == 'POST' else None)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Чат о периоде — по одному отделу, выберите отдел"}), 400
+        first, last = _ai_qa_period_bounds(source)
+    except qa_period.PeriodError as error:
+        return jsonify({"error": str(error)}), 400
+    try:
+        if request.method == 'GET':
+            messages = qa_period.thread(department, first, last, int(requester_id))
+            return jsonify({"status": "success",
+                            "messages": [_ai_qa_digest_message(m) for m in messages]}), 200
+        if request.method == 'DELETE':
+            removed = qa_period.clear(department, first, last, int(requester_id))
+            return jsonify({"status": "success", "removed": removed}), 200
+        result = qa_period.ask(department, first, last, body.get('question'),
+                               user_id=int(requester_id),
+                               allowed_direction_ids=_ai_qa_direction_scope(requester_id))
+        return jsonify({"status": "success", "question": _ai_qa_digest_message(result["question"]),
+                        "answer": _ai_qa_digest_message(result["answer"]),
+                        "elapsed_s": result.get("elapsed_s")}), 200
+    except qa_period.PeriodError as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        logging.exception("ai-qa period chat failed")
+        name = type(error).__name__
+        if name == 'ProviderError':
+            return jsonify({"error": "ИИ сейчас не отвечает — попробуйте через минуту"}), 503
+        return jsonify({"error": "не удалось получить ответ ИИ"}), 500
 
 # ── «Моя оценка» в карточке ИИ-оценки ─────────────────────────────────────────
 #
@@ -71258,6 +71546,18 @@ if __name__ == '__main__':
         misfire_grace_time=3600,
         max_instances=2,
         coalesce=True
+    )
+    # Слепки дней для периода «Сводки»: при старте (через минуту, чтобы не
+    # толкаться с миграциями) и раз в сутки перед ночной выборкой. Сама задача
+    # только ставит догон в пул слепков — цикл не держит.
+    scheduler.add_job(
+        ai_qa_facts_backfill_job,
+        CronTrigger(hour=4, minute=40, timezone=ZoneInfo('Asia/Almaty')),
+        id='ai_qa_facts_backfill',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(seconds=60),
     )
     scheduler.add_job(
         run_chatapp_retention_async,

@@ -23,6 +23,7 @@ import QueueDays from './QueueDays';
 import DigestView from './DigestView';
 import useDayList from './useDayList';
 import useDigest from './useDigest';
+import usePeriod from './usePeriod';
 import { applyReviewed, dayPageRequest, itemKey, mergeDayPage, NO_DAY } from './queueDayRules';
 import QaFilters from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
@@ -204,6 +205,9 @@ export default function CallQaView(props) {
     const chatsList = useDayList({ apiBaseUrl, headers, department, filters,
                                    subject: chatSubjectOf(department), enabled: tab === 'chats' });
     const digest = useDigest({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast });
+    // Экран «Период» вкладки «Сводка» (цифры за несколько дней, сводка за месяц,
+    // чат о периоде) — здесь же: из него открывают карточку разговора.
+    const period = usePeriod({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast });
 
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
@@ -311,7 +315,7 @@ export default function CallQaView(props) {
         setReviewInteraction({ dirty: false, busy: false });
         setExcludeOpen(false);
         resetQueue();
-        callsList.reset(); chatsList.reset(); digest.reset();
+        callsList.reset(); chatsList.reset(); digest.reset(); period.reset();
         // Отбор принадлежит ОТДЕЛУ: сотрудники, группы и направления у отделов
         // разные, и сохранённый выбор после переключения ссылался бы на чужого
         // человека — список молча оказался бы пустым при живых оценках.
@@ -519,7 +523,7 @@ export default function CallQaView(props) {
         if (!code || code === departmentRef.current) return;
         if (!(departments || []).some((item) => item.code === code)) return;
         resetQueue();
-        callsList.reset(); chatsList.reset(); digest.reset();
+        callsList.reset(); chatsList.reset(); digest.reset(); period.reset();
         setFilters(EMPTY_FILTERS);
         setDepartment(code);
     };
@@ -739,7 +743,8 @@ export default function CallQaView(props) {
             message: message?.getAttribute('data-qa-message') || null,
             index: holder && button ? [...holder.querySelectorAll(`[data-qa-ref="${key}"]`)].indexOf(button) : 0,
         };
-        setDigestChatRestore(log ? { day: digest.openDay, scrollTop: log.scrollTop } : null);
+        // Ключ ленты: день — у чата дня, границы периода — у чата периода.
+        setDigestChatRestore(log ? { key: period.range ? period.key : digest.openDay, scrollTop: log.scrollTop } : null);
         openCall({ id: ref.id, subject: ref.subject });
     };
 
@@ -1181,8 +1186,8 @@ export default function CallQaView(props) {
                            onFind={() => setFindOpen(true)} list={chatsDays}
                            onOpenDigest={openDigestDay} />
             ) : tab === 'digest' ? (
-                <DigestView digest={digestDays} scoped={isScopedSupervisor} chatRestore={digestChatRestore}
-                            onOpenRef={openFromDigest} />
+                <DigestView digest={digestDays} period={period} scoped={isScopedSupervisor}
+                            chatRestore={digestChatRestore} onOpenRef={openFromDigest} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department}

@@ -3,20 +3,25 @@ import DOMPurify from 'dompurify';
 import '../wiki/wiki-theme.css';
 import '../wiki/wiki-blocks.css';
 import './ai-markup.css';
+import QaChart, { parseChartTable } from './QaChart';
 
-/* Разметка ответа ИИ в «ИИ-оценке» — сводка дня и ответы чата.
+/* Разметка ответа ИИ в «ИИ-оценке» — сводка дня и месяца, ответы чата.
  *
  * Модель пишет HTML с теми же блоками, что статьи вики (вводка, плашка,
  * карточки, показатели, шаги, чипы, галочки — wiki/ai/markup.py), сервер
- * чистит его и чинит блоки (call_qa/digest/render.py), а метки [[#12]]
- * превращает в span[data-qa-ref="вид:id"]. Здесь — второй рубеж санитайзера
- * (ответ внешней модели — наименее доверенный текст в системе, даже после
- * сервера) и превращение меток в кнопки, открывающие разговор.
+ * чистит его и чинит блоки (call_qa/digest/render.py), метки [[#12]]
+ * превращает в span[data-qa-ref="вид:id"], а блок графика — в
+ * div[data-qa-chart="line|bar|hbar"] с таблицей внутри. Здесь — второй рубеж
+ * санитайзера (ответ внешней модели — наименее доверенный текст в системе,
+ * даже после сервера), превращение меток в кнопки, открывающие разговор, и
+ * графиков — в настоящие графики (QaChart); без графика на экране осталась бы
+ * та же таблица.
  *
  * Список атрибутов — ровно те, что пишет сервер: data-* блоков вики (тот же
- * набор, что SANITIZE_OPTIONS витрины вики) и две метки ссылки. Разойдись он с
- * сервером — блок дойдёт до экрана безымянным div'ом: без фона и без колонок,
- * и ни одной ошибки нигде. Паритет сторожит tests/test_ai_qa_digest.py.
+ * набор, что SANITIZE_OPTIONS витрины вики), две метки ссылки и метка графика.
+ * Разойдись он с сервером — блок дойдёт до экрана безымянным div'ом: без фона и
+ * без колонок, и ни одной ошибки нигде. Паритет сторожат tests/test_ai_qa_digest.py
+ * и tests/test_ai_qa_period.py.
  */
 
 export const MARKUP_TAGS = [
@@ -26,7 +31,7 @@ export const MARKUP_TAGS = [
 
 export const MARKUP_ATTRS = [
     'data-wiki-block', 'data-tone', 'data-cols', 'data-numbered', 'data-variant',
-    'data-qa-ref', 'data-qa-kind', 'title', 'colspan', 'rowspan',
+    'data-qa-ref', 'data-qa-kind', 'data-qa-chart', 'title', 'colspan', 'rowspan',
 ];
 
 // Вид субъекта — как его пишет сервер (config.SUBJECT_*): буквы, цифры и «_».
@@ -72,9 +77,33 @@ export const prepareMarkup = (html) => {
     return parsed.body.innerHTML;
 };
 
+/* Готовый HTML → куски: строки HTML и графики между ними. График — верхний узел
+   div[data-qa-chart] (сервер поднимает вложенные наверх); его таблица
+   разбирается в спецификацию, а негодная остаётся таблицей в HTML. */
+export const splitMarkup = (html) => {
+    if (!html || html.indexOf('data-qa-chart') === -1 || typeof DOMParser === 'undefined') {
+        return html ? [{ html }] : [];
+    }
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    const parts = [];
+    let buffer = '';
+    const flush = () => { if (buffer.trim()) parts.push({ html: buffer }); buffer = ''; };
+    [...parsed.body.childNodes].forEach((node) => {
+        if (node.nodeType === 1 && node.matches('div[data-qa-chart]')) {
+            const spec = parseChartTable(node.querySelector('table'), node.getAttribute('data-qa-chart'),
+                                         node.querySelector('h4')?.textContent?.trim() || '');
+            if (spec) { flush(); parts.push({ chart: spec }); return; }
+            node.removeAttribute('data-qa-chart');
+        }
+        buffer += node.nodeType === 1 ? node.outerHTML : (node.textContent || '');
+    });
+    flush();
+    return parts;
+};
+
 export default function AiMarkup({ html, onOpenRef, variant = 'page', className = '' }) {
-    const safe = useMemo(() => prepareMarkup(html), [html]);
-    if (!safe) return null;
+    const parts = useMemo(() => splitMarkup(prepareMarkup(html)), [html]);
+    if (!parts.length) return null;
     const onClick = (event) => {
         const target = event.target?.closest?.('[data-qa-ref]');
         if (!target || !onOpenRef) return;
@@ -83,19 +112,32 @@ export default function AiMarkup({ html, onOpenRef, variant = 'page', className 
         event.preventDefault();
         onOpenRef(ref, target);
     };
+    const prose = `wiki-prose qa-markup ${variant === 'chat' ? 'qa-markup--chat' : ''}`;
     return (
         /* wiki-scope — палитра и тёмный слой вики; qa-scope — метка для
            ai-markup.css: на телефоне слой вики (wiki-mobile.css) красит корень
            .wiki-scope серым полотном и ставит тексту кегль статьи, а у сводки
            свой масштаб раздела. */
         <div className={`wiki-scope qa-scope ${className}`}>
-            <div
-                className={`wiki-prose qa-markup ${variant === 'chat' ? 'qa-markup--chat' : ''}`}
-                onClick={onClick}
-                /* Строка прошла DOMPurify выше (prepareMarkup), а до того —
+            {parts.length === 1 && parts[0].html ? (
+                /* Без графиков — прежняя разметка: один узел, правила вида
+                   с дочерним комбинатором (> h4, > :first-child) остаются в силе.
+                   Строка прошла DOMPurify выше (prepareMarkup), а до того —
                    серверный санитайзер: вставлять её иначе нельзя. */
-                dangerouslySetInnerHTML={{ __html: safe }}
-            />
+                <div className={prose} onClick={onClick} dangerouslySetInnerHTML={{ __html: parts[0].html }} />
+            ) : (
+                <div className={prose} onClick={onClick}>
+                    {parts.map((part, index) => (part.chart ? (
+                        <QaChart key={`chart-${index}`} spec={part.chart} className="qa-markup__chart" compact={variant === 'chat'} />
+                    ) : (
+                        /* Кусок HTML между графиками — обёртка display: contents
+                           (qa-markup__part), чтобы блоки вики лежали в потоке
+                           прозы, как без неё. */
+                        // eslint-disable-next-line react/no-array-index-key
+                        <div key={`html-${index}`} className="qa-markup__part" dangerouslySetInnerHTML={{ __html: part.html }} />
+                    )))}
+                </div>
+            )}
         </div>
     );
 }

@@ -214,3 +214,185 @@ def clear_thread(department: str, day, user_id: int) -> int:
             return int(cur.rowcount or 0)
     finally:
         conn.close()
+
+
+# ── сводка за месяц ───────────────────────────────────────────────────────────
+#
+# Та же форма, что у сводки дня, только строка — на отдел и месяц
+# (digest_month — первое число). Функции повторяют дневные нарочно отдельными
+# именами: подставь таблицу параметром — и опечатка в имени молча писала бы
+# месяц в дни.
+
+def month_claim(department: str, month, triggered_by: str) -> bool:
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO ai_qa_month_digests (department_code, digest_month, running_since,
+                                                    triggered_by)
+                   VALUES (%s, %s, now(), %s)
+                   ON CONFLICT (department_code, digest_month) DO UPDATE
+                      SET running_since = now(), triggered_by = EXCLUDED.triggered_by
+                    WHERE ai_qa_month_digests.running_since IS NULL
+                       OR ai_qa_month_digests.running_since
+                          < now() - make_interval(mins => %s)
+                RETURNING id""",
+                (department, month, triggered_by, STALE_RUN_MINUTES))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def month_release(department: str, month, *, error: str | None = None,
+                  forget_pending: bool = False) -> None:
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            if forget_pending:
+                cur.execute("""DELETE FROM ai_qa_month_digests
+                                WHERE department_code = %s AND digest_month = %s
+                                  AND status = 'pending'""",
+                            (department, month))
+            cur.execute(
+                """UPDATE ai_qa_month_digests
+                      SET running_since = NULL,
+                          last_error = %s,
+                          status = CASE WHEN %s IS NOT NULL AND status = 'pending'
+                                        THEN 'failed' ELSE status END
+                    WHERE department_code = %s AND digest_month = %s""",
+                (error[:1000] if error else None, error, department, month))
+    finally:
+        conn.close()
+
+
+def month_save(department: str, month, *, headline, overview_html, sections, stats, inputs_hash,
+               inputs_count, model, usage, elapsed_s, error=None) -> None:
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE ai_qa_month_digests
+                      SET status = 'ready', headline = %s, overview_html = %s,
+                          sections = %s, stats = %s, inputs_hash = %s, inputs_count = %s,
+                          model = %s, usage = %s, elapsed_s = %s, last_error = %s,
+                          running_since = NULL, generated_at = now()
+                    WHERE department_code = %s AND digest_month = %s""",
+                (headline, overview_html, Json(sections), Json(stats), inputs_hash,
+                 int(inputs_count), model, Json(usage or {}), elapsed_s,
+                 error[:1000] if error else None, department, month))
+    finally:
+        conn.close()
+
+
+_MONTH_COLUMNS = """department_code, digest_month, status, headline, overview_html, sections,
+                    stats, inputs_hash, inputs_count, model, usage, elapsed_s, last_error,
+                    triggered_by, running_since, generated_at,
+                    (running_since IS NOT NULL
+                     AND running_since >= now() - make_interval(mins => %s)) AS running"""
+
+
+def month_get(cur, department: str, month) -> dict | None:
+    try:
+        cur.execute(f"SELECT {_MONTH_COLUMNS} FROM ai_qa_month_digests "
+                    "WHERE department_code = %s AND digest_month = %s",
+                    (STALE_RUN_MINUTES, department, month))
+    except Exception as error:
+        if _schema_missing(error):
+            return None
+        raise
+    return _row_dict(cur, cur.fetchone())
+
+
+def months(cur, department: str, months_list) -> dict:
+    """{ГГГГ-ММ: краткое о сводке} — для списка дней и карточки месяца."""
+    months_list = sorted(set(months_list or []))
+    if not months_list:
+        return {}
+    try:
+        cur.execute(
+            """SELECT digest_month, status, headline, sections, inputs_hash, generated_at, stats,
+                      (running_since IS NOT NULL
+                       AND running_since >= now() - make_interval(mins => %s))
+                 FROM ai_qa_month_digests
+                WHERE department_code = %s AND digest_month = ANY(%s::date[])""",
+            (STALE_RUN_MINUTES, department, months_list))
+    except Exception as error:
+        if _schema_missing(error):
+            return {}
+        raise
+    out = {}
+    for month, status, headline, sections, inputs_hash, generated_at, stats, running in cur.fetchall():
+        out[f"{month.year:04d}-{month.month:02d}"] = {
+            "status": status, "headline": headline, "inputs_hash": inputs_hash,
+            "generated_at": generated_at, "running": bool(running), "stats": stats or {},
+            "sections": [{"key": s.get("key"), "headline": s.get("headline"),
+                          "subject_directions": s.get("subject_directions") or []}
+                         for s in (sections or []) if isinstance(s, dict)],
+        }
+    return out
+
+
+# ── переписка о периоде ───────────────────────────────────────────────────────
+
+def period_thread(department: str, first, last, user_id: int, limit: int = THREAD_LIMIT) -> list[dict]:
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        try:
+            cur.execute(
+                """SELECT id, role, body, model, created_at
+                     FROM (SELECT id, role, body, model, created_at
+                             FROM ai_qa_period_messages
+                            WHERE department_code = %s AND period_from = %s AND period_to = %s
+                              AND user_id = %s
+                            ORDER BY id DESC LIMIT %s) t
+                    ORDER BY id""",
+                (department, first, last, int(user_id), int(limit)))
+        except Exception as error:
+            if _schema_missing(error):
+                return []
+            raise
+        return [{"id": int(i), "role": role, "body": body, "model": model, "created_at": created}
+                for i, role, body, model, created in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def period_append_pair(department: str, first, last, user_id: int, question: str, answer_html: str, *,
+                       model=None, usage=None, elapsed_s=None) -> tuple[dict, dict]:
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO ai_qa_period_messages
+                       (department_code, period_from, period_to, user_id, role, body)
+                   VALUES (%s, %s, %s, %s, 'user', %s) RETURNING id, created_at""",
+                (department, first, last, int(user_id), question))
+            q_id, q_at = cur.fetchone()
+            cur.execute(
+                """INSERT INTO ai_qa_period_messages
+                       (department_code, period_from, period_to, user_id, role, body, model, usage,
+                        elapsed_s)
+                   VALUES (%s, %s, %s, %s, 'assistant', %s, %s, %s, %s) RETURNING id, created_at""",
+                (department, first, last, int(user_id), answer_html, model, Json(usage or {}),
+                 elapsed_s))
+            a_id, a_at = cur.fetchone()
+    finally:
+        conn.close()
+    return ({"id": int(q_id), "role": "user", "body": question, "model": None, "created_at": q_at},
+            {"id": int(a_id), "role": "assistant", "body": answer_html, "model": model,
+             "created_at": a_at})
+
+
+def period_clear_thread(department: str, first, last, user_id: int) -> int:
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("""DELETE FROM ai_qa_period_messages
+                            WHERE department_code = %s AND period_from = %s AND period_to = %s
+                              AND user_id = %s""",
+                        (department, first, last, int(user_id)))
+            return int(cur.rowcount or 0)
+    finally:
+        conn.close()

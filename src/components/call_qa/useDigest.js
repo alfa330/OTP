@@ -47,6 +47,9 @@ export const syncDayRow = (days, day, data) => (days ? days.map((d) => (d.day ==
 export default function useDigest({ apiBaseUrl, headers, department, enabled, showToast }) {
     const [days, setDays] = useState(null);
     const [daysError, setDaysError] = useState(false);
+    // Сводки за месяцы списка ({ 'ГГГГ-ММ': { status, headline, running, hidden, complete } })
+    // — карточка месяца над днями и ссылки у заголовков месяцев.
+    const [months, setMonths] = useState({});
     const [openDay, setOpenDay] = useState(null);
     // { day, data, loading, error, stalled } — stalled: опрос генерации потерял связь.
     const [view, setView] = useState(null);
@@ -98,7 +101,11 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
         const gen = generation.current;
         if (!background) setDaysError(false);
         axios.get(`${apiBaseUrl}/api/ai-qa/digests`, { params: params(), ...cfg() })
-            .then((r) => { if (gen === generation.current) setDays(r.data?.days || []); })
+            .then((r) => {
+                if (gen !== generation.current) return;
+                setDays(r.data?.days || []);
+                setMonths(r.data?.months || {});
+            })
             .catch(() => {
                 if (gen !== generation.current) return;
                 if (background && daysRef.current !== null) return;
@@ -216,7 +223,7 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
         generation.current += 1;
         askingRef.current = new Set();
         generatingRef.current = false;
-        setDays(null); setDaysError(false); setOpenDay(null); openDayRef.current = null;
+        setDays(null); setDaysError(false); setMonths({}); setOpenDay(null); openDayRef.current = null;
         setView(null); setSection(null); setChat({ day: null, messages: [], loading: false, error: '' });
         setAskingDays([]); setDraft(''); setDraftFocus(null); setGenerating(false);
     }, []);
@@ -237,13 +244,15 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
     // возврате на «Сводку» поле само забирало бы фокус и прокручивало страницу.
     useEffect(() => { if (!enabled) setDraftFocus(null); }, [enabled]);
 
-    // Список дней на экране, а в нём «ИИ пишет сводку…» — перечитывать его, пока
-    // не допишется: опрашивать открытый день уже некому.
+    // Список дней на экране, а в нём «ИИ пишет сводку…» (или пишется сводка за
+    // месяц) — перечитывать его, пока не допишется: опрашивать открытый день уже
+    // некому.
     useEffect(() => {
-        if (!enabled || openDay || !days?.some((d) => d.running)) return undefined;
+        const busy = days?.some((d) => d.running) || Object.values(months || {}).some((m) => m?.running);
+        if (!enabled || openDay || !busy) return undefined;
         const timer = window.setTimeout(() => loadDays({ background: true }), DAYS_POLL_MS);
         return () => window.clearTimeout(timer);
-    }, [enabled, openDay, days, loadDays]);
+    }, [enabled, openDay, days, months, loadDays]);
 
     /* «Составить» / «Обновить» сводку. force — переписать с тем же набором
        оценок; сервер разрешает это только супер-админу. */
@@ -339,7 +348,7 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
     }, []);
 
     return {
-        days, daysError, openDay, view, section, setSection, pane, setPane, chat,
+        days, months, daysError, openDay, view, section, setSection, pane, setPane, chat,
         asking: askingFor(askingDays, chat.day),
         draft, setDraft, draftFocus,
         generating, open, close, reset, reloadDays: () => loadDays(),

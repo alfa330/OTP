@@ -1403,6 +1403,79 @@ CREATE INDEX IF NOT EXISTS idx_ai_qa_digest_messages_thread
     ON ai_qa_digest_messages (department_code, digest_day, user_id, id);
 
 -- ---------------------------------------------------------------------------
+-- Период и месяц в «Сводке» (call_qa.digest.facts / period / monthly)
+-- ---------------------------------------------------------------------------
+-- Факты дня — сжатый слепок оценённых разговоров дня отдела: кто, какая шкала,
+-- балл, что не так по критериям (с комментарием и цитатой оценщика), проверка
+-- человека, итог оценщика. Из них собираются цифры и контекст за период: месяц
+-- ОП — это две тысячи карточек по 15–60 КБ, и читать их из ai_review_cache при
+-- каждом открытии периода значило бы 5–20 с на запрос (замер 17.10.2026);
+-- слепок дня весит ~100 КБ и читается за доли секунды. inputs_hash — тот же
+-- отпечаток оценок дня, что у сводки (digest.data.inputs_hash), reviews_mark —
+-- сколько разговоров проверили и поправили люди: по ним слепок считается
+-- устаревшим и переписывается. version — формат слепка: сменился — все дни
+-- пересчитываются при первом же обращении.
+CREATE TABLE IF NOT EXISTS ai_qa_day_facts (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    facts_day       date NOT NULL,
+    version         integer NOT NULL DEFAULT 1,
+    inputs_hash     text NOT NULL,
+    reviews_mark    text NOT NULL DEFAULT '',
+    talks_count     integer NOT NULL DEFAULT 0,
+    facts           jsonb NOT NULL DEFAULT '{}'::jsonb,
+    computed_at     timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (department_code, facts_day)
+);
+
+-- Сводка за месяц — строка на отдел и месяц (digest_month — первое число),
+-- устроена как сводка дня: разделы по шкалам и «Главное», генерацию берёт
+-- условный UPDATE по running_since. Пишется после того, как месяц прошёл и
+-- ночная выборка оценила его последний день; inputs_hash — отпечаток всех дней
+-- месяца (digest.facts), по нему экран говорит «оценки изменились — обновить».
+CREATE TABLE IF NOT EXISTS ai_qa_month_digests (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    digest_month    date NOT NULL,
+    status          text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'ready', 'failed')),
+    headline        text,
+    overview_html   text,
+    sections        jsonb NOT NULL DEFAULT '[]'::jsonb,
+    stats           jsonb NOT NULL DEFAULT '{}'::jsonb,
+    inputs_hash     text,
+    inputs_count    integer NOT NULL DEFAULT 0,
+    model           text,
+    usage           jsonb NOT NULL DEFAULT '{}'::jsonb,
+    elapsed_s       real,
+    last_error      text,
+    triggered_by    text,
+    running_since   timestamptz,
+    generated_at    timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (department_code, digest_month)
+);
+
+-- Переписка с ИИ о периоде — своя у человека, отдела и границ периода. Та же
+-- форма, что у переписки о дне; таблица своя, чтобы вопросы о дне и о периоде
+-- не смешивались в одной ленте и не ломали чтение дня.
+CREATE TABLE IF NOT EXISTS ai_qa_period_messages (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    period_from     date NOT NULL,
+    period_to       date NOT NULL,
+    user_id         integer NOT NULL,
+    role            text NOT NULL CHECK (role IN ('user', 'assistant')),
+    body            text NOT NULL,
+    model           text,
+    usage           jsonb,
+    elapsed_s       real,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_qa_period_messages_thread
+    ON ai_qa_period_messages (department_code, period_from, period_to, user_id, id);
+
+-- ---------------------------------------------------------------------------
 -- Исключённые оценки («Исключить оценку» в карточке ИИ-оценки)
 -- ---------------------------------------------------------------------------
 -- Разговор, оценивать который незачем (нецелевой звонок, ошибся номером,

@@ -1,19 +1,22 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React from 'react';
 import {
-    AlertCircle, Eraser, Loader2, MessageSquare, PhoneCall, RotateCcw, ScrollText, Sparkles,
+    AlertCircle, Calendar, ChevronRight, Loader2, MessageSquare, PhoneCall, RotateCcw, ScrollText, Sparkles,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, IosHint, IosMenu, IosSegmented, scoreTone,
 } from '../ui/ios';
-import { ChatBubble, ChatComposer, useThreadScroll } from '../ui/chat';
 import AiMarkup from './AiMarkup';
+import AiChatPanel from './AiChatPanel';
+import PeriodView from './PeriodView';
+import { useStickyHeight, useWide } from './chatLayout';
 import {
     DAY_ROW_CLASS, DateLeaf, DayHeader, DayStat, MonthSection, RowChevron, Score, ShareBar, dayTitle, monthGroups,
 } from './dayKit';
 import { dayNeighbours, plural } from './queueDayRules';
+import { isoOf } from './usePeriod';
 
 /* Вкладка «Сводка»: что ИИ увидел в разговорах дня — по направлениям, и чат о
- * том же дне.
+ * том же дне; сверху — сводка за прошедший месяц и вход в произвольный период.
  *
  * Два экрана, как у очереди: дни по месяцам (строка — заголовок сводки и цифры
  * дня), по нажатию — экран дня. На экране дня слева сводка: «Главное» по отделу
@@ -22,11 +25,22 @@ import { dayNeighbours, plural } from './queueDayRules';
  * сводка и чат — две вкладки одного экрана: колонка в 380 px на телефоне не
  * помещается, а лист поверх сводки закрывал бы то, о чём спрашивают.
  *
+ * Над списком дней — карточка последнего прошедшего месяца (сводка за месяц
+ * пишется первого числа, по просьбе владельца она на видном месте) и кнопка «За
+ * период»: экран периода (PeriodView) — цифры и графики за несколько дней, до
+ * месяца, и чат о них. У заголовка каждого прошедшего месяца — ссылка на его
+ * сводку.
+ *
  * Ссылки в тексте ([[#12]] у модели) — кнопки разговоров: открывают карточку,
- * а «Назад» возвращает сюда же (состояние — в CallQaView, useDigest).
+ * а «Назад» возвращает сюда же (состояние — в CallQaView, useDigest/usePeriod).
  */
 
 const DAY_COLUMNS = 'sm:grid sm:grid-cols-[minmax(0,1fr)_4rem_4.5rem_5.5rem_1rem] sm:items-center sm:gap-4';
+const MONTHS_TITLE = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь',
+                      'Октябрь', 'Ноябрь', 'Декабрь'];
+const MONTHS_ACC = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь',
+                    'октябрь', 'ноябрь', 'декабрь'];
+const DEFAULT_PERIOD_DAYS = 30;
 
 const SUGGESTIONS = [
     'Кому из сотрудников нужна помощь в первую очередь и почему?',
@@ -53,6 +67,27 @@ const fmtStamp = (iso) => {
     const sameDay = date.toDateString() === new Date().toDateString();
     return sameDay ? `сегодня в ${fmtTime(iso)}`
         : `${date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })} в ${fmtTime(iso)}`;
+};
+
+/** Период по умолчанию для кнопки «За период»: последние 30 дней. */
+export const defaultPeriod = (now = new Date()) => {
+    const from = new Date(now);
+    from.setDate(from.getDate() - (DEFAULT_PERIOD_DAYS - 1));
+    return { from: isoOf(from), to: isoOf(now) };
+};
+
+/** Последний прошедший месяц из тех, по которым есть дни, — для карточки сверху. */
+export const latestCompleteMonth = (months) => Object.keys(months || {})
+    .filter((key) => months[key]?.complete).sort().pop() || null;
+
+/** Что писать о сводке месяца в карточке и у заголовка месяца. */
+export const monthStatusText = (info) => {
+    if (!info) return 'Сводка ещё не составлена';
+    if (info.running) return 'ИИ пишет сводку за месяц…';
+    if (info.status === 'ready' && info.headline) return info.headline;
+    if (info.hidden) return 'Сводка — в общих разделах, их видит глава отдела';
+    if (info.status === 'failed') return 'Сводку составить не удалось — откройте месяц, чтобы повторить';
+    return 'Сводка ещё не составлена';
 };
 
 /* ── список дней ─────────────────────────────────────────────────────────── */
@@ -107,7 +142,44 @@ function DigestDayRow({ day, onOpen }) {
     );
 }
 
-function DigestDays({ digest, onOpenDay }) {
+/* Карточка последнего прошедшего месяца над списком: заголовок сводки ИИ (или
+   её состояние) и итоги месяца по дням списка. Нажатие открывает месяц. */
+function MonthCard({ monthKey, info, days, onOpen }) {
+    const [year, month] = monthKey.split('-').map(Number);
+    const own = (days || []).filter((d) => String(d.day).startsWith(`${monthKey}-`));
+    const evaluated = own.reduce((sum, d) => sum + (d.evaluated || 0), 0);
+    const critical = own.reduce((sum, d) => sum + (d.critical || 0), 0);
+    const weighted = own.reduce((acc, d) => (d.ai_avg == null ? acc
+        : { sum: acc.sum + d.ai_avg * (d.evaluated || 0), n: acc.n + (d.evaluated || 0) }), { sum: 0, n: 0 });
+    const avg = weighted.n ? Math.round(weighted.sum / weighted.n) : null;
+    const ready = info?.status === 'ready' && info.headline;
+    const title = `Сводка за ${MONTHS_ACC[month - 1]}${year === new Date().getFullYear() ? '' : ` ${year}`}`;
+    return (
+        <button type="button" onClick={() => onOpen(monthKey)} data-qa-month-card={monthKey}
+                aria-label={`${title}: ${monthStatusText(info)}`}
+                className={`${iosCard} group flex w-full items-center gap-4 px-4 py-3.5 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:bg-slate-100 sm:px-5`}>
+            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-[10px] bg-blue-500/10 text-blue-600" aria-hidden="true">
+                <ScrollText size={21} />
+            </div>
+            <div className="min-w-0 flex-1">
+                <div className="text-[15px] font-semibold text-slate-900">{title}</div>
+                <div className={`mt-0.5 line-clamp-2 text-[13.5px] leading-snug ${
+                    info?.running ? 'text-blue-600' : ready ? 'text-slate-700' : 'text-slate-400'}`}>
+                    {info?.running && <Loader2 size={13} className="mr-1.5 inline animate-spin align-[-2px]" aria-hidden="true" />}
+                    {monthStatusText(info)}
+                </div>
+                <div className="mt-1 truncate text-[12px] text-slate-500">
+                    {talksText(evaluated)}
+                    {critical > 0 && <> · <span className="font-medium text-rose-600">{criticalText(critical)}</span></>}
+                    {avg != null && <> · средний балл ИИ <Score value={avg} className="text-[12px]" /></>}
+                </div>
+            </div>
+            <RowChevron />
+        </button>
+    );
+}
+
+function DigestDays({ digest, period, onOpenDay }) {
     const days = digest.days;
     if (days === null) {
         return (
@@ -136,28 +208,50 @@ function DigestDays({ digest, onOpenDay }) {
             </div>
         );
     }
+    const months = digest.months || {};
+    const cardMonth = latestCompleteMonth(months);
     const groups = monthGroups(days).map((group) => ({
         ...group,
         ready: group.days.filter((d) => d.headline).length,
+        monthInfo: months[group.key] || null,
     }));
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between gap-3 px-1">
-                <p className="flex min-w-0 grow basis-0 items-center gap-1.5 text-[13px] text-slate-500">
-                    Сводку пишет ИИ после ночной выборки
-                    <IosHint label="Как пишется сводка"
-                             text="Сводку пишет та же модель, что статьи вики, по всем оценённым разговорам дня: что случилось острого, какие ошибки повторяются, где сотрудникам не хватает знаний, что беспокоит клиентов и кому нужна помощь. Цифры над текстом считает сервер, а не модель. ИИ может ошибаться — сверяйтесь с разговорами по ссылкам." />
-                </p>
-                <button type="button" onClick={digest.reloadDays} title="Обновить" aria-label="Обновить список"
-                        className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
-                    <RotateCcw size={16} />
-                </button>
+            <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3 px-1">
+                    <p className="flex min-w-0 grow basis-0 items-center gap-1.5 text-[13px] text-slate-500">
+                        Сводку пишет ИИ после ночной выборки
+                        <IosHint label="Как пишется сводка"
+                                 text="Сводку пишет та же модель, что статьи вики, по всем оценённым разговорам дня: что случилось острого, какие ошибки повторяются, где сотрудникам не хватает знаний, что беспокоит клиентов и кому нужна помощь. Первого числа она же пишет сводку за прошедший месяц. Цифры над текстом считает сервер, а не модель. ИИ может ошибаться — сверяйтесь с разговорами по ссылкам." />
+                    </p>
+                    <div className="flex shrink-0 items-center gap-2">
+                        <button type="button" onClick={() => period.open(defaultPeriod())} className={iosBtnSecondary}
+                                title="Цифры, графики и вопросы ИИ за несколько дней — до месяца">
+                            <Calendar size={14} aria-hidden="true" />За период
+                        </button>
+                        <button type="button" onClick={digest.reloadDays} title="Обновить" aria-label="Обновить список"
+                                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+                            <RotateCcw size={16} />
+                        </button>
+                    </div>
+                </div>
+                {cardMonth && (
+                    <MonthCard monthKey={cardMonth} info={months[cardMonth]} days={days} onOpen={period.openMonth} />
+                )}
             </div>
             {groups.map((group) => (
                 <MonthSection key={group.key} group={group} columns={DAY_COLUMNS}
-                              aside={group.ready > 0 && (
-                                  <span className="text-[12.5px] text-slate-500">
-                                      {group.ready} {plural(group.ready, 'сводка', 'сводки', 'сводок')}
+                              aside={(
+                                  <span className="flex items-center gap-2 text-[12.5px] text-slate-500">
+                                      {group.ready > 0 && (
+                                          <span>{group.ready} {plural(group.ready, 'сводка', 'сводки', 'сводок')}</span>
+                                      )}
+                                      {group.monthInfo?.complete && group.key !== cardMonth && (
+                                          <button type="button" onClick={() => period.openMonth(group.key)}
+                                                  className="inline-flex items-center gap-0.5 rounded-lg px-1.5 py-0.5 font-medium text-blue-600 transition hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+                                              Сводка за месяц<ChevronRight size={13} aria-hidden="true" />
+                                          </button>
+                                      )}
                                   </span>
                               )}
                               head={(
@@ -408,208 +502,6 @@ function DigestStatus({ digest, data, trouble }) {
     return menu;
 }
 
-/* ── чат ─────────────────────────────────────────────────────────────────── */
-
-function ChatPanel({ digest, scoped, visible, restore, onOpenRef, className = '', style }) {
-    const { chat, asking } = digest;
-    const messages = chat.messages || [];
-    const { boxRef, onScroll, scrollToEnd, scrollToStart } = useThreadScroll();
-    const lastSeen = useRef({ count: 0, day: null });
-
-    /* К последнему ответу — к его НАЧАЛУ: ответ длинный, и прыжок в конец
-       оставил бы человека дочитывать его снизу вверх. */
-    const toLatest = () => {
-        const box = boxRef.current;
-        const last = [...messages].reverse().find((m) => m.role === 'assistant');
-        const node = last && box?.querySelector(`[data-qa-message="${last.id}"]`);
-        if (node && messages[messages.length - 1]?.role === 'assistant') scrollToStart(node);
-        else scrollToEnd();
-    };
-
-    /* Свой вопрос — к концу ленты, пришёл ответ — к его началу. Пока колонка
-       скрыта (узкий экран, вкладка «Сводка»), у ленты нет размеров и прокрутка
-       не действует: она делается, когда колонку показали. Вернулись из
-       карточки — лента там же, где была (restore), а не в конце. */
-    const pendingRestore = useRef(null);
-    useLayoutEffect(() => {
-        const box = boxRef.current;
-        if (!box || !visible) return;
-        const seen = lastSeen.current;
-        const count = messages.length;
-        if (seen.day !== chat.day || seen.hidden) {
-            lastSeen.current = { count, day: chat.day };
-            if (restore && restore.day === chat.day && Number.isFinite(restore.scrollTop)) {
-                pendingRestore.current = restore.scrollTop;
-            } else {
-                pendingRestore.current = null;
-                toLatest();
-            }
-            return;
-        }
-        if (count > seen.count) {
-            pendingRestore.current = null;
-            const last = messages[count - 1];
-            if (last?.role === 'assistant') {
-                scrollToStart(box.querySelector(`[data-qa-message="${last.id}"]`));
-            } else {
-                scrollToEnd();
-            }
-        }
-        lastSeen.current = { count, day: chat.day };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [messages, chat.day, visible, boxRef, scrollToEnd, scrollToStart]);
-
-    /* Прокрутку ленты, сохранённую до карточки, ставим, когда у ленты появилась
-       высота: на широком экране её задаёт useStickyHeight уже после первой
-       отрисовки, и раньше scrollTop упирался бы в ноль. */
-    useLayoutEffect(() => {
-        const box = boxRef.current;
-        if (pendingRestore.current == null || !box || !visible) return;
-        if (box.scrollHeight <= box.clientHeight) return;
-        box.scrollTop = pendingRestore.current;
-        pendingRestore.current = null;
-    });
-
-    useEffect(() => {
-        if (!visible) lastSeen.current = { ...lastSeen.current, hidden: true };
-    }, [visible]);
-
-    // К концу ленты — когда вопрос только что задан, а не при каждом монтировании:
-    // вернулись из карточки, пока ИИ думает, — лента остаётся там, где была.
-    const wasAsking = useRef(asking);
-    useEffect(() => {
-        if (asking && !wasAsking.current && visible) scrollToEnd();
-        wasAsking.current = asking;
-    }, [asking, visible, scrollToEnd]);
-
-    return (
-        <section aria-label="Чат с ИИ о дне" style={style}
-                 className={`${iosCard} flex min-h-[420px] flex-col overflow-hidden ${className}`}>
-            <header className="flex items-center gap-2.5 border-b border-slate-100 px-4 py-3">
-                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm">
-                    <Sparkles size={15} aria-hidden="true" />
-                </div>
-                <div className="min-w-0 flex-1">
-                    <div className="text-[14px] font-semibold text-slate-900">Спросить ИИ</div>
-                    <div className="truncate text-[11.5px] text-slate-400">
-                        о разговорах дня{scoped ? ' · ваши направления' : ''}
-                    </div>
-                </div>
-                {messages.length > 0 && (
-                    /* Пока ИИ отвечает, начать заново нельзя (ответ лёг бы в
-                       стёртую переписку) — меню недоступно, а не молчит. */
-                    <IosMenu label="Действия с перепиской" disabled={asking}
-                             items={[{ key: 'clear', label: 'Начать заново', icon: Eraser, onSelect: digest.clearChat }]} />
-                )}
-            </header>
-            <div ref={boxRef} onScroll={onScroll} role="log" aria-live="polite"
-                 className="thin-scroll flex-1 space-y-2.5 overflow-y-auto bg-slate-50/60 py-3">
-                {chat.loading ? (
-                    <div className="flex h-full items-center justify-center gap-2 text-[13px] text-slate-400">
-                        <Loader2 size={15} className="animate-spin" aria-hidden="true" />Загружаю переписку…
-                    </div>
-                ) : chat.error ? (
-                    <div className="px-4 py-6 text-center text-[13px] text-rose-600">{chat.error}</div>
-                ) : messages.length === 0 && !asking ? (
-                    <div className="flex flex-col gap-3 px-4 py-4">
-                        <p className="text-[13px] leading-relaxed text-slate-500">
-                            ИИ видит все оценённые разговоры дня: оценки, цитаты и транскрипты (у длинных
-                            середина пропущена). Спросите о чём угодно — по каждому ответу можно открыть
-                            разговор.
-                        </p>
-                        <div className="flex flex-col items-start gap-1.5">
-                            {SUGGESTIONS.map((text) => (
-                                <button key={text} type="button" onClick={() => digest.suggest(text)}
-                                        className="rounded-2xl bg-white px-3 py-2 text-left text-[12.5px] leading-snug text-slate-700 ring-1 ring-slate-200/80 transition hover:bg-blue-50 hover:text-blue-700 hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.99]">
-                                    {text}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                ) : (
-                    messages.map((message) => (
-                        <div key={message.id} data-qa-message={message.id}>
-                            {message.role === 'user' ? (
-                                <ChatBubble out meta={message.pending ? 'отправляю…' : fmtTime(message.created_at)}>
-                                    {message.body}
-                                </ChatBubble>
-                            ) : (
-                                <ChatBubble plain={false} meta={fmtTime(message.created_at)}>
-                                    <AiMarkup html={message.body} onOpenRef={onOpenRef} variant="chat" />
-                                </ChatBubble>
-                            )}
-                        </div>
-                    ))
-                )}
-                {asking && (
-                    <ChatBubble tone="muted">
-                        <span className="inline-flex items-center gap-2">
-                            <Loader2 size={14} className="animate-spin" aria-hidden="true" />Читаю разговоры дня…
-                        </span>
-                    </ChatBubble>
-                )}
-            </div>
-            <ChatComposer value={digest.draft} onChange={digest.setDraft} onSubmit={digest.ask}
-                          busy={asking} disabled={chat.loading}
-                          placeholder="Спросите о разговорах дня…" focusKey={digest.draftFocus}
-                          submitLabel="Спросить" busyLabel="Думаю…" />
-        </section>
-    );
-}
-
-/* Высота чата на широком экране — от текущего верха колонки до низа видимой
-   области прокрутчика портала: поле ввода видно сразу, пока колонка ещё под
-   шапкой раздела, а когда она прилипла к верху, чат вырастает на всю высоту и
-   прокручивает только свою ленту. */
-function useStickyHeight(enabled) {
-    const ref = useRef(null);
-    const [height, setHeight] = useState(null);
-    useEffect(() => {
-        if (!enabled || typeof window === 'undefined') { setHeight(null); return undefined; }
-        const wide = window.matchMedia('(min-width: 1280px)');
-        const node = ref.current;
-        const scroller = node?.closest('.main-content') || null;
-        let frame = 0;
-        const recompute = () => {
-            frame = 0;
-            const column = ref.current;
-            if (!wide.matches || !column) { setHeight(null); return; }
-            const bounds = scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
-            const top = Math.max(column.getBoundingClientRect().top, bounds.top + 16);
-            const next = Math.max(420, Math.round(bounds.bottom - top - 16));
-            setHeight((prev) => (prev === next ? prev : next));
-        };
-        const schedule = () => { if (!frame) frame = window.requestAnimationFrame(recompute); };
-        recompute();
-        window.addEventListener('resize', schedule);
-        (scroller || window).addEventListener('scroll', schedule, { passive: true });
-        wide.addEventListener?.('change', schedule);
-        return () => {
-            if (frame) window.cancelAnimationFrame(frame);
-            window.removeEventListener('resize', schedule);
-            (scroller || window).removeEventListener('scroll', schedule);
-            wide.removeEventListener?.('change', schedule);
-        };
-    }, [enabled]);
-    return [ref, height];
-}
-
-/* Колонка чата видна: на широком экране всегда, на узком — на вкладке «Спросить
-   ИИ». Нужна ленте: у скрытой (display:none) прокрутка не действует. */
-function useWide() {
-    const query = '(min-width: 1280px)';
-    const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia?.(query).matches);
-    useEffect(() => {
-        if (typeof window === 'undefined' || !window.matchMedia) return undefined;
-        const media = window.matchMedia(query);
-        const update = () => setWide(media.matches);
-        update();
-        media.addEventListener?.('change', update);
-        return () => media.removeEventListener?.('change', update);
-    }, []);
-    return wide;
-}
-
 function DigestDay({ digest, scoped, chatRestore, onOpenRef }) {
     const day = digest.openDay;
     const data = digest.view?.day === day ? digest.view.data : null;
@@ -658,22 +550,33 @@ function DigestDay({ digest, scoped, chatRestore, onOpenRef }) {
                 </div>
                 <div ref={chatRef} data-qa-pane="chat"
                      className={`${pane === 'summary' ? 'hidden xl:block' : ''} xl:sticky xl:top-4`}>
-                    <ChatPanel digest={digest} scoped={scoped} onOpenRef={onOpenRef}
-                               visible={wide || pane === 'chat'} restore={chatRestore}
-                               className="h-[min(72vh,720px)] xl:h-auto"
-                               style={chatHeight ? { height: chatHeight } : undefined} />
+                    <AiChatPanel
+                        title="Спросить ИИ" subtitle={`о разговорах дня${scoped ? ' · ваши направления' : ''}`}
+                        intro="ИИ видит все оценённые разговоры дня: оценки, цитаты и транскрипты (у длинных середина пропущена). Спросите о чём угодно — по каждому ответу можно открыть разговор."
+                        suggestions={SUGGESTIONS} thread={{ ...digest.chat, key: digest.chat.day }} asking={digest.asking}
+                        draft={digest.draft} setDraft={digest.setDraft} draftFocus={digest.draftFocus}
+                        onAsk={digest.ask} onClear={digest.clearChat} onSuggest={digest.suggest} onOpenRef={onOpenRef}
+                        visible={wide || pane === 'chat'} restore={chatRestore}
+                        placeholder="Спросите о разговорах дня…" busyText="Читаю разговоры дня…"
+                        className="h-[min(72vh,720px)] xl:h-auto"
+                        style={chatHeight ? { height: chatHeight } : undefined} />
                 </div>
             </div>
         </div>
     );
 }
 
-export default function DigestView({ digest, scoped = false, chatRestore = null, onOpenRef }) {
+// Без экрана периода (стенд, старый вызов) — кнопки периода просто не действуют.
+const NO_PERIOD = { range: null, open: () => {}, openMonth: () => {} };
+
+export default function DigestView({ digest, period = NO_PERIOD, scoped = false, chatRestore = null, onOpenRef }) {
     return (
         <div style={{ fontFamily: APPLE_FONT }}>
-            {digest.openDay
-                ? <DigestDay digest={digest} scoped={scoped} chatRestore={chatRestore} onOpenRef={onOpenRef} />
-                : <DigestDays digest={digest} onOpenDay={(day) => digest.open(day, { fromList: true })} />}
+            {period?.range
+                ? <PeriodView period={period} scoped={scoped} chatRestore={chatRestore} onOpenRef={onOpenRef} />
+                : digest.openDay
+                    ? <DigestDay digest={digest} scoped={scoped} chatRestore={chatRestore} onOpenRef={onOpenRef} />
+                    : <DigestDays digest={digest} period={period} onOpenDay={(day) => digest.open(day, { fromList: true })} />}
         </div>
     );
 }

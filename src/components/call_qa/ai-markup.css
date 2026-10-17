@@ -297,3 +297,37 @@ body.mobile-shell .wiki-scope.qa-scope .qa-markup--chat.wiki-prose h3 { margin: 
 .qa-markup.qa-markup.wiki-prose > :last-child { margin-bottom: 0; }
 body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose > :first-child { margin-top: 0; }
 body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose > :last-child { margin-bottom: 0; }
+
+/* ── Графики в ответе ИИ ───────────────────────────────────────────────────
+   Блок data-qa-chart сервера витрина рисует настоящим графиком (QaChart.jsx),
+   а куски HTML между графиками кладёт в обёртки display: contents — для
+   потока прозы их нет, и правила с дочерним комбинатором (> h4,
+   > :first-child) повторены для первого куска. Карточка графика — как
+   показатели вики: та же рамка и подложка, без своего цвета. */
+.qa-markup__part { display: contents; }
+
+.qa-markup.wiki-prose > .qa-markup__part > h4 {
+    margin: 12px 0 4px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.qa-markup.qa-markup.wiki-prose > .qa-markup__part:first-child > :first-child { margin-top: 0; }
+.qa-markup.qa-markup.wiki-prose > .qa-markup__part:last-child > :last-child { margin-bottom: 0; }
+
+.qa-markup.wiki-prose .qa-markup__chart {
+    margin: 12px 0;
+    padding: 12px 14px;
+    border: 1px solid var(--wiki-line);
+    border-radius: 12px;
+    background: var(--wiki-surface);
+}
+
+.qa-markup.wiki-prose .qa-markup__chart:first-child { margin-top: 0; }
+.qa-markup.wiki-prose .qa-markup__chart:last-child { margin-bottom: 0; }
+.qa-markup.wiki-prose .qa-markup__chart table { margin: 0; }
+.qa-markup--chat.wiki-prose .qa-markup__chart { padding: 10px 10px 8px; }
+
+/* Текст осей и подсказок — цвет текста, не ряда; в тёмном слое — его ink. */
+html[data-otp-theme="dark"] .qa-chart .recharts-cartesian-axis-tick-value { fill: #a8b1bf !important; }
+html[data-otp-theme="dark"] .qa-chart .recharts-cartesian-grid line { stroke: #2e333c !important; }

@@ -208,9 +208,27 @@ _SLIM_CRITERIA = """(CASE WHEN jsonb_typeof(payload->'criteria') = 'array'
                                                   'source', c->'source', 'conf', c->'conf'))
                 FROM jsonb_array_elements(payload->'criteria') c) END)"""
 
+# Для фактов дня (facts.py — цифры и чат за период): к урезанным критериям —
+# комментарий и цитата оценщика, но только у критериев с замечанием: у «Верно»
+# обоснование подтверждает норму и периоду ни к чему, а их в разговоре 10–15 из
+# 15. Обрезка — в SQL: месяц ОП — две тысячи карточек, и длинные обоснования
+# ехали бы по сети зря.
+_NOTED_CRITERIA = """(CASE WHEN jsonb_typeof(payload->'criteria') = 'array'
+        THEN (SELECT jsonb_agg(jsonb_build_object('idx', c->'idx', 'name', c->'name',
+                   'ai', c->'ai', 'is_critical', c->'is_critical',
+                   'source', c->'source', 'conf', c->'conf',
+                   'comment', CASE WHEN c->>'ai' IN ('Correct', 'N/A', 'Pending') THEN NULL
+                                   ELSE left(c->>'comment', 240) END,
+                   'evidence', CASE WHEN c->>'ai' IN ('Correct', 'N/A', 'Pending') THEN NULL
+                                    ELSE left(c->>'evidence', 200) END))
+                FROM jsonb_array_elements(payload->'criteria') c) END)"""
 
-def attach_details(cur, talks, *, with_transcripts=True) -> None:
-    """Дочитать из карточки критерии, балл и транскрипт — пачками (см. шапку)."""
+
+def attach_details(cur, talks, *, with_transcripts=True, with_notes=False) -> None:
+    """Дочитать из карточки критерии, балл и транскрипт — пачками (см. шапку).
+
+    with_notes — без транскриптов, но с комментарием и цитатой оценщика у
+    критериев с замечанием и с итогом оценщика (слепок дня для периода)."""
     by_key = defaultdict(list)
     for talk in talks:
         by_key[(talk["kind"], talk["model"])].append(talk)
@@ -220,8 +238,10 @@ def attach_details(cur, talks, *, with_transcripts=True) -> None:
     # Итог оценщика — тоже только для модели: в нём он пишет то, чего нет в
     # вердиктах («звонил пассажир, перенаправлен в поддержку Яндекс Go»).
     transcript_col = (", payload->'transcript', payload->>'overall_comment'" if with_transcripts
+                      else ", NULL::jsonb, left(payload->>'overall_comment', 300)" if with_notes
                       else ", NULL::jsonb, NULL::text")
-    criteria_col = "payload->'criteria'" if with_transcripts else _SLIM_CRITERIA
+    criteria_col = ("payload->'criteria'" if with_transcripts
+                    else _NOTED_CRITERIA if with_notes else _SLIM_CRITERIA)
     for (kind, model), group in by_key.items():
         index = {t["id"]: t for t in group}
         ids = sorted(index)
@@ -417,12 +437,12 @@ def attach_direction_names(cur, talks) -> dict:
 
 
 def collect_day(cur, day, department, allowed_direction_ids=None, *,
-                with_transcripts=True) -> list[dict] | None:
+                with_transcripts=True, with_notes=False) -> list[dict] | None:
     """Разговоры дня целиком: что выбрано, что сказал ИИ, что поправил человек."""
     talks = day_subjects(cur, day, department, allowed_direction_ids)
     if not talks:
         return talks
-    attach_details(cur, talks, with_transcripts=with_transcripts)
+    attach_details(cur, talks, with_transcripts=with_transcripts, with_notes=with_notes)
     attach_human_reviews(cur, talks)
     attach_direction_names(cur, talks)
     for number, talk in enumerate(talks, start=1):
