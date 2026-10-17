@@ -609,7 +609,7 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                         </div>
                     )}
 
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <div className={`grid grid-cols-2 gap-2 ${a?.signing ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
                         <Tile label="Водителей" value={campaign.targets_total}
                             sub={`в очереди ${(states.pending || 0) + (states.calling || 0)}`} />
                         <Tile label="Дозвонились" value={a?.answered ?? 0}
@@ -618,6 +618,14 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                             sub={a?.median_listened_ms != null ? `медиана ${seconds(a.median_listened_ms)}` : ''} />
                         <Tile label="Дослушали" value={shares.parts[2].count}
                             sub={shares.total ? `${percent(shares.parts[2].count, shares.total)}% дозвонившихся` : '—'} />
+                        {a?.signing && (
+                            /* Подписание — из базы «Обзвона» (Sapar проверяет раз в 3 часа): подпись позже первого
+                               ответа роботу; «сами» — без разговора с оператором перед подписью. */
+                            <Tile label="Подписали после звонка" value={a.signing.after_call}
+                                sub={`${a.signing.after_call_self} сами`
+                                    + (a.signing.before_call ? ` · ${a.signing.before_call} подписали до звонка` : '')
+                                    + (a.signing.checked_at ? ` · Sapar на ${shortDateTime(a.signing.checked_at)}` : '')} />
+                        )}
                     </div>
 
                     {shares.total > 0 && (
@@ -674,8 +682,12 @@ const CampaignModal = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                                 <div className="px-4 py-6 text-center text-[12.5px] text-slate-500">Звонков ещё не было</div>
                             ) : campaign.targets.map((t) => {
                                 const outcome = t.state === 'done' ? stageLabel(t.stage) : (STATE_LABEL[t.state] || t.state);
-                                const reason = t.state !== 'done' && t.last_result && t.state !== 'stopped'
+                                let reason = t.state !== 'done' && t.last_result && t.state !== 'stopped'
                                     ? (RESULT_LABEL[t.last_result] || t.last_result) : '';
+                                if (t.signed_at) {
+                                    const signed = t.signed_after_call ? `подписал ${shortDateTime(t.signed_at)}` : 'подписал до звонка';
+                                    reason = reason ? `${reason} · ${signed}` : signed;
+                                }
                                 return (
                                     <div key={t.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem] items-center gap-2 px-4 py-2 text-[12.5px] sm:grid-cols-[minmax(0,1.6fr)_7.5rem_minmax(0,1fr)_4.5rem]">
                                         <div className="min-w-0">

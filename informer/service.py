@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import psycopg2.errors
 from psycopg2.extras import execute_values
 
 from dial_list.service import mask_phone
@@ -277,6 +278,7 @@ class InformerService:
                 GROUP BY result
             """, (int(campaign_id), list(rules.NOT_ATTEMPTS)))
             results = {res: int(n) for res, n in cur.fetchall()}
+            signing, signed_map = self._signing(cur, campaign_id, department_id)
             targets = []
             if targets_limit:
                 cur.execute("""
@@ -290,11 +292,14 @@ class InformerService:
                 for t in cur.fetchall():
                     stage = (rules.listen_stage(t[7], parts, bool(t[8])) if t[3] == rules.STATE_DONE
                              else rules.STAGE_NONE)
+                    signed_at, signed_after = signed_map.get(t[0], (None, False))
                     targets.append({
                         "id": t[0], "full_name": t[1], "phone": mask_phone(t[2]), "state": t[3],
                         "attempts": int(t[4] or 0), "last_result": t[5] or '',
                         "last_call_at": t[6].isoformat() if t[6] else None,
                         "listened_ms": t[7], "stage": stage,
+                        "signed_at": signed_at.isoformat() if signed_at else None,
+                        "signed_after_call": signed_after,
                     })
         answered = int(states.get(rules.STATE_DONE, 0))
         processed = answered + int(states.get(rules.STATE_GIVEN_UP, 0))
@@ -314,9 +319,60 @@ class InformerService:
             "calls": {"total": int(calls_total or 0), "answered": int(calls_answered or 0),
                       "line_busy": int(calls_line_busy or 0), "no_link": int(calls_no_link or 0),
                       "open": int(calls_open or 0), "results": results},
+            "signing": signing,
         }
         campaign["targets"] = targets
         return campaign
+
+    # Подписание — из базы «Обзвона» того же отдела (dial_list_leads): Sapar раз в три часа и перед выдачей
+    # строки сообщает, подписал ли водитель документы; signed_at — время подписи по Sapar. Водитель рассылки
+    # находится по номеру. «После звонка» — подпись позже первого ответа водителя роботу; «сам» — успешка
+    # «Обзвона» ни одному оператору не засчитана (success_attempt_id пуст), то есть разговора с оператором
+    # перед подписью не было. Владелец, 17.10.2026: «отображать, сколько человек подписали именно после
+    # звонка автоинформатора».
+    def _signing(self, cur, campaign_id, department_id):
+        """(сводка подписаний | None — базы «Обзвона» нет, {id цели: (signed_at, после звонка)})."""
+        cur.execute("SAVEPOINT informer_signing")
+        try:
+            cur.execute("""
+                WITH first_answer AS (
+                    SELECT target_id, MIN(answered_at) AS answered_at FROM informer_calls
+                    WHERE campaign_id = %s AND result = 'answered' AND answered_at IS NOT NULL
+                    GROUP BY target_id
+                )
+                SELECT COUNT(l.id),
+                       COUNT(*) FILTER (WHERE l.signed_at > fa.answered_at),
+                       COUNT(*) FILTER (WHERE l.signed_at > fa.answered_at AND l.success_attempt_id IS NULL),
+                       COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL AND l.signed_at <= fa.answered_at),
+                       MAX(l.sign_checked_at)
+                FROM informer_targets t
+                JOIN dial_list_leads l ON l.phone_norm = t.phone AND l.department_id = %s
+                LEFT JOIN first_answer fa ON fa.target_id = t.id
+                WHERE t.campaign_id = %s
+            """, (int(campaign_id), int(department_id), int(campaign_id)))
+            matched, after_call, after_self, before_call, checked_at = cur.fetchone()
+            cur.execute("""
+                WITH first_answer AS (
+                    SELECT target_id, MIN(answered_at) AS answered_at FROM informer_calls
+                    WHERE campaign_id = %s AND result = 'answered' AND answered_at IS NOT NULL
+                    GROUP BY target_id
+                )
+                SELECT t.id, l.signed_at, fa.answered_at
+                FROM informer_targets t
+                JOIN dial_list_leads l ON l.phone_norm = t.phone AND l.department_id = %s
+                LEFT JOIN first_answer fa ON fa.target_id = t.id
+                WHERE t.campaign_id = %s AND l.signed_at IS NOT NULL
+            """, (int(campaign_id), int(department_id), int(campaign_id)))
+            signed_map = {tid: (signed_at, bool(answered_at and signed_at > answered_at))
+                          for tid, signed_at, answered_at in cur.fetchall()}
+        except psycopg2.errors.UndefinedTable:
+            cur.execute("ROLLBACK TO SAVEPOINT informer_signing")
+            return None, {}
+        cur.execute("RELEASE SAVEPOINT informer_signing")
+        return {
+            "matched": int(matched or 0), "after_call": int(after_call or 0), "after_call_self": int(after_self or 0),
+            "before_call": int(before_call or 0), "checked_at": checked_at.isoformat() if checked_at else None,
+        }, signed_map
 
     def campaign_audio(self, department_id, campaign_id):
         """Запись для руководителя: оригинал, а у рассылок прежней страницы — телефонная версия."""
@@ -348,12 +404,15 @@ class InformerService:
                 WHERE c.campaign_id = %s ORDER BY c.issued_at, c.id
             """, (int(campaign_id),))
             calls = cur.fetchall()
+            _signing, signed_map = self._signing(cur, campaign_id, department_id)
         target_rows = [{
             "row_number": t[1], "full_name": t[2], "phone": mask_phone(t[3]), "state": t[4],
             "attempts": int(t[5] or 0), "last_result": t[6] or '', "last_call_at": t[7],
             "listened_ms": t[8],
             "stage": (rules.listen_stage(t[8], parts, bool(t[9])) if t[4] == rules.STATE_DONE
                       else rules.STAGE_NONE),
+            "signed_at": signed_map.get(t[0], (None, False))[0],
+            "signed_after_call": signed_map.get(t[0], (None, False))[1],
         } for t in targets]
         call_rows = [{
             "issued_at": c[0], "answered_at": c[1], "ended_at": c[2], "full_name": c[3],

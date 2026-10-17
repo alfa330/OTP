@@ -72,13 +72,16 @@ def build(detail, targets, calls):
     parts = detail.get("parts") or []
 
     ws = _sheet(wb, 'Водители', ['Строка файла', 'ФИО', 'Номер', 'Итог', 'Попыток', 'Последний звонок',
-                                  'Слушал, с', 'Где положил трубку'],
-                [12, 32, 18, 26, 10, 20, 11, 30])
+                                  'Слушал, с', 'Где положил трубку', 'Подписал (Sapar)', 'Подпись после звонка'],
+                [12, 32, 18, 26, 10, 20, 11, 30, 20, 20])
     for t in targets:
+        signed_at = t.get("signed_at")
         ws.append([t["row_number"], _text(t["full_name"]), t["phone"], STATE_LABELS.get(t["state"], t["state"]),
                    t["attempts"], _datetime_cell(ws, t["last_call_at"]),
                    _seconds(t["listened_ms"]) if t["state"] == rules.STATE_DONE else None,
-                   rules.stage_label(t["stage"]) if t["state"] == rules.STATE_DONE else ''])
+                   rules.stage_label(t["stage"]) if t["state"] == rules.STATE_DONE else '',
+                   _datetime_cell(ws, signed_at) if signed_at else None,
+                   ('да' if t.get("signed_after_call") else 'подписал до звонка') if signed_at else ''])
 
     ws = _sheet(wb, 'Звонки', ['Время звонка', 'ФИО', 'Номер', 'Попытка', 'Линия', 'Итог',
                                 'Звонило до ответа, с', 'Слушал, с', 'Где положил трубку', 'Кто положил',
@@ -111,6 +114,18 @@ def build(detail, targets, calls):
         ('Положили на казахской части', stages.get('kz')),
         ('Положили на русской части', stages.get('ru')),
         ('Дослушали до конца', stages.get(rules.STAGE_FULL)),
+    ]
+    signing = analytics.get("signing")
+    if signing:
+        rows += [
+            ('Подписали после звонка робота', signing.get("after_call")),
+            ('…из них без разговора с оператором', signing.get("after_call_self")),
+            ('Подписали ещё до звонка', signing.get("before_call")),
+            ('Водителей найдено в базе «Обзвона»', signing.get("matched")),
+            ('Подписание проверено (Sapar)',
+             _local(datetime.fromisoformat(signing["checked_at"])) if signing.get("checked_at") else '—'),
+        ]
+    rows += [
         ('Выгружено', datetime.now(rules.ALMATY).strftime('%d.%m.%Y %H:%M')),
         ('Как читать', '«Слушал» — секунды от ответа водителя до отбоя; запись играет с момента ответа. '
                        '«Где положил трубку» — часть записи, которая звучала в момент отбоя. '

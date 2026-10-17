@@ -41,6 +41,9 @@ BASE_DDL = '''
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL);
     INSERT INTO departments VALUES (1954, 'Удаленный КЦ'), (560, 'Тез КЦ');
     INSERT INTO users VALUES (2, 'Владелец');
+    -- База «Обзвона» того же отдела: по ней считается «подписал после звонка» (колонки — как в dial_list).
+    CREATE TABLE dial_list_leads (id serial PRIMARY KEY, department_id integer NOT NULL, phone_norm text NOT NULL,
+                                  signed_at timestamptz, success_attempt_id integer, sign_checked_at timestamptz);
 '''
 
 
@@ -393,6 +396,54 @@ def test_export_workbook(env):
     assert all('7701' not in str(cell) for row in drivers for cell in row)        # полного номера нет
     call_sheet = list(wb['Звонки'].iter_rows(min_row=2, values_only=True))
     assert {row[5] for row in call_sheet} == {'Дозвонились', 'Недоступен'}
+
+
+def test_signed_after_robot_call(env):
+    """Владелец, 17.10.2026: «отображать, сколько человек подписали именно после звонка автоинформатора».
+    Подписи — из базы «Обзвона» того же отдела по номеру: позже первого ответа роботу — «после звонка»,
+    без успешки оператора — «сам»; подпись раньше звонка — «подписал до звонка»."""
+    svc, clock, db = env
+    campaign = make_campaign(svc, phones(4), max_per_minute=10)
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    clock.tick(minutes=25)                                         # прогрев позади — все четыре разом
+    calls = poll(svc, {'939': {'capacity': 4, 'active': 0}})['calls']
+    assert len(calls) == 4
+    for call in calls[:3]:
+        answer(svc, call, 20000)                                   # ответили в NOON+7 с
+    fail(svc, calls[3], rules.RESULT_NO_ANSWER)
+    by_call = {c['call_id']: c['phone'] for c in calls}
+    signed_after, signed_self, signed_before, not_called = (by_call[calls[0]['call_id']], by_call[calls[1]['call_id']],
+                                                            by_call[calls[2]['call_id']], by_call[calls[3]['call_id']])
+    with db._get_cursor() as cur:
+        cur.execute("""INSERT INTO dial_list_leads (department_id, phone_norm, signed_at, success_attempt_id, sign_checked_at)
+                       VALUES (1954, %s, %s, 77, %s), (1954, %s, %s, NULL, %s), (1954, %s, %s, NULL, %s),
+                              (1954, %s, %s, NULL, %s), (560, %s, %s, NULL, %s)""",
+                    (signed_after, NOON + timedelta(hours=1), NOON + timedelta(hours=3),      # после звонка, успешка оператора
+                     signed_self, NOON + timedelta(minutes=30), NOON + timedelta(hours=3),    # после звонка, сам
+                     signed_before, NOON - timedelta(days=1), NOON + timedelta(hours=3),      # подписал до звонка
+                     not_called, NOON + timedelta(hours=2), NOON + timedelta(hours=3),        # подписал, робот не дозвонился
+                     signed_self, NOON + timedelta(hours=1), NOON + timedelta(hours=3)))      # другой отдел — не наш
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    signing = detail['analytics']['signing']
+    assert datetime.fromisoformat(signing.pop('checked_at')) == NOON + timedelta(hours=3)
+    assert signing == {'matched': 4, 'after_call': 2, 'after_call_self': 1, 'before_call': 1}
+    rows = {t['phone']: t for t in detail['targets']}
+    marks = {phone: (t['signed_after_call'], bool(t['signed_at'])) for phone, t in rows.items()}
+    assert sorted(marks.values()) == [(False, True), (False, True), (True, True), (True, True)]
+    _, targets, _ = svc.export_rows(DEPT, campaign['id'])
+    assert sorted(t['signed_after_call'] for t in targets) == [False, False, True, True]
+    wb = load_workbook(io.BytesIO(informer_export.build(detail, targets, []).getvalue()))
+    drivers = list(wb['Водители'].iter_rows(min_row=1, values_only=True))
+    assert drivers[0][8:10] == ('Подписал (Sapar)', 'Подпись после звонка')
+    assert sorted(row[9] for row in drivers[1:]) == ['да', 'да', 'подписал до звонка', 'подписал до звонка']
+    context = {row[0]: row[1] for row in wb['Контекст'].iter_rows(min_row=2, values_only=True)}
+    assert context['Подписали после звонка робота'] == '2' and context['…из них без разговора с оператором'] == '1'
+    # Базы «Обзвона» нет (другой стенд) — сводки нет, остальное работает.
+    with db._get_cursor() as cur:
+        cur.execute("DROP TABLE dial_list_leads")
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['analytics']['signing'] is None and detail['analytics']['answered'] == 3
+    assert all(t['signed_at'] is None for t in detail['targets'])
 
 
 def test_robot_status(env):
