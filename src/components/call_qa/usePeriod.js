@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { pollDelay, pollGivesUp } from './useDigest';
+import { plural } from './queueDayRules';
 
 /* Состояние экрана «Период» в «Сводке»: границы, цифры и ряды для графиков,
  * сводка за месяц (если период — целый прошедший месяц), переписка с ИИ о
@@ -204,7 +205,9 @@ export default function usePeriod({ apiBaseUrl, headers, department, enabled, sh
     const open = useCallback((next) => {
         const clamped = clampRange(next);
         if (!clamped?.from || !clamped?.to) return;
-        if (clamped.clamped) toastRef.current?.(`Период — не больше ${PERIOD_MAX_DAYS} дней: обрезан до ${clamped.to}`, 'error');
+        if (clamped.clamped) {
+            toastRef.current?.(`Период — не больше ${PERIOD_MAX_DAYS} ${plural(PERIOD_MAX_DAYS, 'дня', 'дней', 'дней')}: обрезан до ${clamped.to}`, 'error');
+        }
         const value = { from: clamped.from, to: clamped.to };
         const changed = periodKey(value) !== periodKey(rangeRef.current);
         setRangeState(value);

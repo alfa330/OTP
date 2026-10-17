@@ -86,8 +86,15 @@ def parse_period(from_value, to_value, today: date) -> tuple[date, date]:
     if last > today:
         raise PeriodError("Период бывает только за прошедшие дни и сегодняшний")
     if (last - first).days + 1 > PERIOD_MAX_DAYS:
-        raise PeriodError(f"Период — не больше {PERIOD_MAX_DAYS} дней: выберите месяц или короче")
+        raise PeriodError(f"Период — не больше {days_text(PERIOD_MAX_DAYS)}: выберите месяц или короче")
     return first, last
+
+
+def days_text(n: int) -> str:
+    """«1 день», «3 дня», «31 день», «35 дней»."""
+    tail, last = n % 100, n % 10
+    word = "дней" if 11 <= tail <= 14 else "день" if last == 1 else "дня" if 2 <= last <= 4 else "дней"
+    return f"{n} {word}"
 
 
 def parse_month(value) -> date:
