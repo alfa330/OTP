@@ -403,6 +403,17 @@ class ChartRenderTests(unittest.TestCase):
         self.assertIn("Балл по дням", text)
         self.assertIn("01.10", text)
 
+    def test_grouped_markers_become_separate_buttons(self):
+        # «[[#2, #9, #10]]» — так модель пишет в сводке за месяц; сырой метке в тексте не место.
+        refs = {n: period.ref_entry({"kind": "imported_call", "id": 100 + n, "family": "calls",
+                                     "operator": "Бердаков Дамир", "time": "17:47", "day": "2026-09-30",
+                                     "ai_score": 50, "direction": "Поток"}) for n in (2, 9, 10)}
+        html, used = render.link_refs("<p>Чаще всего ошибается Бердаков Дамир [[#2, #9, #10]].</p>", refs)
+        self.assertEqual(used, ["imported_call:102", "imported_call:109", "imported_call:110"])
+        self.assertNotIn("[[", html)
+        self.assertEqual(html.count("data-qa-ref"), 3)
+        self.assertEqual(render.split_ref_groups("[[#1;#2]] и [[#3]]"), "[[#1]], [[#2]] и [[#3]]")
+
     def test_period_reference_label_has_a_date(self):
         talk = {"kind": "imported_call", "id": 5, "family": "calls", "operator": "Иванова Айгерим",
                 "time": "14:09", "day": "2026-10-03", "ai_score": 41, "direction": "Поток"}

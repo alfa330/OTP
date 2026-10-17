@@ -49,6 +49,19 @@ ALLOWED_ATTRIBUTES = {
 }
 
 REF_RE = re.compile(r"\[\[\s*#\s*(\d{1,4})\s*\]\]")
+# Несколько номеров в одних скобках — «[[#2, #9, #10]]»: так модель пишет, когда ссылок
+# много (сводка за месяц). Промпт просит отдельные метки, но подстраховка дешевле
+# утечки сырой метки в текст: группа раскладывается на отдельные метки до разбора.
+_REF_GROUP_RE = re.compile(r"\[\[\s*((?:#\s*\d{1,4}\s*[,;]\s*)+#\s*\d{1,4})\s*\]\]")
+_REF_NUMBER_RE = re.compile(r"#\s*(\d{1,4})")
+
+
+def split_ref_groups(text: str) -> str:
+    """«[[#2, #9, #10]]» → «[[#2]], [[#9]], [[#10]]»."""
+    if not text or "[[" not in text:
+        return text or ""
+    return _REF_GROUP_RE.sub(
+        lambda match: ", ".join(f"[[#{n}]]" for n in _REF_NUMBER_RE.findall(match.group(1))), text)
 _FENCE_RE = re.compile(r"```[a-zA-Z]*\s*")
 _HEADLINE_RE = re.compile(r"^\s*\**\s*КРАТКО\s*\**\s*:\s*(.+?)\s*$", re.M | re.I)
 _BODY_RE = re.compile(r"^\s*\**\s*СВОДКА\s*\**\s*:\s*", re.M | re.I)
@@ -391,7 +404,7 @@ def link_refs(html: str, refs: dict) -> tuple[str, list[str]]:
     if not html or "[[" not in html:
         return html or "", []
     from bs4 import BeautifulSoup, NavigableString
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(split_ref_groups(html), "html.parser")
     used: list[str] = []
     people = {e.get("operator") for e in refs.values()
               if e.get("operator") and e.get("operator") != "—"}
