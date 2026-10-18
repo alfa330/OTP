@@ -649,6 +649,11 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                     Робот не на связи — рассылка ждёт и начнёт звонить, как только он подключится.
                 </div>
             )}
+            {campaign.status === 'active' && campaign.cooldown_until && (
+                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700">
+                    Сеть не пропускала звонки — рассылка молчит до {shortDateTime(campaign.cooldown_until)}, потом продолжит сама с прогревом.
+                </div>
+            )}
 
             <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>
                 <CardTitle hint={progressHint}

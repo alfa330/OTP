@@ -99,6 +99,9 @@ DDL = [
     # Прогрев темпа (17.10.2026): от запуска рассылки и от последней паузы робота из-за отказов сети.
     "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS warmup_since TIMESTAMPTZ",
     "ALTER TABLE informer_agent_state ADD COLUMN IF NOT EXISTS warmup_since TIMESTAMPTZ",
+    # Остывание после отказов сети (18.10.2026): до какого момента рассылка молчит и какое это остывание подряд.
+    "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ",
+    "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS cooldown_count SMALLINT NOT NULL DEFAULT 0",
 ]
 
 _ready = False

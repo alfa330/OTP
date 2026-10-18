@@ -245,6 +245,43 @@ def test_warmup_from_start_and_after_robot_pause(env):
     assert svc.campaign_detail(DEPT, small['id'])['warmup_rate'] is None
 
 
+def test_cooldown_after_network_rejections(env):
+    """Владелец, 18.10.2026: «чтобы мне не приходилось писать каждый раз; даже если упирался в сбои, сам начинал
+    правильно». Три «сеть не пропустила» среди последних пяти — рассылка молчит 45 минут (потом 60, 90), после
+    срока продолжает сама с прогревом 3 в минуту; «Запустить» руками снимает остывание."""
+    svc, clock, _ = env
+    twelve = {str(n): {'capacity': 2, 'active': 0} for n in range(902, 914)}
+    campaign = make_campaign(svc, phones(80), max_per_minute=18)
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    calls = poll(svc, twelve)['calls']
+    assert len(calls) == 3
+    answer(svc, calls[0], 20000)
+    fail(svc, calls[1], rules.RESULT_NO_LINK)
+    fail(svc, calls[2], rules.RESULT_NO_LINK)
+    clock.tick(minutes=1)
+    more = poll(svc, twelve)['calls']                              # два отказа — ещё не остывание
+    assert len(more) == 3
+    fail(svc, more[0], rules.RESULT_NO_LINK)
+    clock.tick(seconds=10)
+    assert poll(svc, twelve)['calls'] == []                        # три из последних пяти — молчим
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['status'] == 'active' and detail['cooldown_until']
+    clock.tick(minutes=44)
+    assert poll(svc, twelve)['calls'] == []
+    clock.tick(minutes=2)
+    again = poll(svc, twelve)['calls']                             # срок вышел: продолжаем, прогрев заново
+    assert len(again) == 3 and svc.campaign_detail(DEPT, campaign['id'])['cooldown_until'] is None
+    for call in again:
+        fail(svc, call, rules.RESULT_NO_LINK)                      # снова отбивают — второе остывание, 60 минут
+    clock.tick(seconds=10)
+    assert poll(svc, twelve)['calls'] == []
+    clock.tick(minutes=50)
+    assert poll(svc, twelve)['calls'] == []
+    svc.campaign_action(DEPT, campaign['id'], 'pause')
+    svc.campaign_action(DEPT, campaign['id'], 'start')             # руками — остывание снято
+    assert len(poll(svc, twelve)['calls']) == 3
+
+
 def test_default_rate_is_what_robot_fits(env):
     svc, _, _ = env
     assert make_campaign(svc, phones(1))['max_per_minute'] == 3              # линий робота не видно — как одна

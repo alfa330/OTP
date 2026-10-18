@@ -152,7 +152,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script, c.warmup_since
+                       c.script, c.warmup_since, c.cooldown_until
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.department_id = %s
@@ -180,6 +180,8 @@ class InformerService:
             warmup_rate = effective if effective < int(r[7]) else None
         return {
             "warmup_rate": warmup_rate,
+            # Остывание после отказов сети: до какого момента рассылка молчит сама (None — не молчит).
+            "cooldown_until": (r[21].isoformat() if len(r) > 21 and r[21] and now is not None and r[21] > now else None),
             "id": r[0], "name": r[1], "status": r[2], "audio_ms": r[3], "parts": r[4] or [],
             "window_start": r[5].strftime('%H:%M') if r[5] else None,
             "window_end": r[6].strftime('%H:%M') if r[6] else None,
@@ -214,9 +216,11 @@ class InformerService:
                 SET status = %s,
                     started_at = CASE WHEN %s = 'active' THEN COALESCE(started_at, %s) ELSE started_at END,
                     warmup_since = CASE WHEN %s = 'active' THEN %s ELSE warmup_since END,
+                    cooldown_until = CASE WHEN %s = 'active' THEN NULL ELSE cooldown_until END,
+                    cooldown_count = CASE WHEN %s = 'active' THEN 0 ELSE cooldown_count END,
                     finished_at = CASE WHEN %s = 'done' THEN %s ELSE finished_at END
                 WHERE id = %s
-            """, (target, target, now, target, now, target, now, int(campaign_id)))
+            """, (target, target, now, target, now, target, target, target, now, int(campaign_id)))
             if target == rules.CAMPAIGN_DONE:
                 # Кому не успели позвонить — «рассылку завершили», а не «не дозвонились».
                 cur.execute("""
@@ -237,7 +241,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script, c.warmup_since
+                       c.script, c.warmup_since, c.cooldown_until
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.id = %s AND c.department_id = %s
@@ -477,7 +481,8 @@ class InformerService:
                 SELECT c.id, c.window_start, c.window_end, c.max_per_minute, c.audio_sha256, c.audio_ms,
                        (SELECT COUNT(*) FROM informer_calls x WHERE x.campaign_id = c.id AND x.issued_at > %s),
                        c.warmup_since,
-                       (SELECT MAX(x.issued_at) FROM informer_calls x WHERE x.campaign_id = c.id)
+                       (SELECT MAX(x.issued_at) FROM informer_calls x WHERE x.campaign_id = c.id),
+                       c.cooldown_until, c.cooldown_count
                 FROM informer_campaigns c
                 WHERE c.status = 'active'
                 ORDER BY c.started_at, c.id
@@ -486,8 +491,30 @@ class InformerService:
             issued = []
             more_due = False
             pace_ms = 0
-            for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm, last_issued in campaigns:
+            for (cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm, last_issued,
+                 cooldown_until, cooldown_count) in campaigns:
                 if not rules.in_window(now, w_start, w_end):
+                    continue
+                # Остывание после отказов сети: молчим до срока, потом продолжаем сами (прогрев заново — по простою).
+                if cooldown_until and now < cooldown_until:
+                    continue
+                # Считаются только итоги после последнего запуска руками или прошлого остывания: старые отказы
+                # не должны включать остывание заново.
+                boundary = max((stamp for stamp in (cooldown_until, campaign_warm) if stamp), default=None)
+                cur.execute("""
+                    SELECT result FROM informer_calls
+                    WHERE campaign_id = %s AND finished AND result <> 'line_busy'
+                      AND finished_at >= COALESCE(%s, '-infinity'::timestamptz)
+                    ORDER BY finished_at DESC NULLS LAST, id DESC LIMIT %s
+                """, (cid, boundary, rules.COOLDOWN_TRIP_WINDOW))
+                recent = [r[0] for r in cur.fetchall()]
+                if rules.network_tripped(recent):
+                    count = int(cooldown_count or 0) + 1
+                    until = now + timedelta(minutes=rules.cooldown_minutes(count))
+                    cur.execute("UPDATE informer_campaigns SET cooldown_until = %s, cooldown_count = %s WHERE id = %s",
+                                (until, count, cid))
+                    log.warning("Автоинформатор: рассылка %s — сеть не пропускает звонки, остывание до %s (№%s)",
+                                cid, until.isoformat(), count)
                     continue
                 # Простой дольше WARMUP_IDLE_MINUTES (открылось окно дня, долгая пауза) — прогрев заново.
                 idle_since = last_issued or campaign_warm

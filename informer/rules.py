@@ -64,6 +64,26 @@ WARMUP_STEP_MINUTES = 5
 # Простой дольше этого (новое окно дня, долгая пауза, робот молчал) — прогрев заново: 18.10.2026 рассылка,
 # оставшаяся «идёт» с вечера, в 10:00 стартовала сразу на 18 в минуту, и через 10 минут номер снова заблокировали.
 WARMUP_IDLE_MINUTES = 30
+# Остывание после отказов сети (владелец, 18.10.2026: «сделай так, чтобы мне не приходилось писать каждый раз;
+# даже если упирался в сбои, сам начинал правильно»). Оператор связи отбивает номер на десятки минут, а пробные
+# звонки каждые 2–15 минут только продлевали блок (16–18.10). Поэтому: среди последних COOLDOWN_TRIP_WINDOW
+# итогов COOLDOWN_TRIP_NO_LINK и больше «сеть не пропустила», и последний — тоже → рассылка молчит
+# COOLDOWN_MINUTES (растут при повторе), потом продолжает сама с прогревом с первой ступени.
+COOLDOWN_TRIP_WINDOW = 5
+COOLDOWN_TRIP_NO_LINK = 3
+COOLDOWN_MINUTES = (45, 60, 90)
+
+
+def cooldown_minutes(count):
+    """Сколько молчать после count-го остывания подряд (1 — первое)."""
+    return COOLDOWN_MINUTES[min(max(int(count or 1), 1), len(COOLDOWN_MINUTES)) - 1]
+
+
+def network_tripped(results):
+    """results — итоги последних звонков, новые первыми. Сеть отбивает: последний — «сеть не пропустила»,
+    и таких среди окна не меньше COOLDOWN_TRIP_NO_LINK."""
+    window = [r for r in list(results)[:COOLDOWN_TRIP_WINDOW]]
+    return bool(window) and window[0] == RESULT_NO_LINK and window.count(RESULT_NO_LINK) >= COOLDOWN_TRIP_NO_LINK
 RESULT_LABELS = {
     RESULT_ANSWERED: 'Дозвонились',
     RESULT_NO_ANSWER: 'Не ответил',
