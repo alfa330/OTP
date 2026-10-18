@@ -194,6 +194,7 @@ def test_at_most_twenty_calls_at_once_no_minute_cap(env):
     assert poll(svc, busy)['calls'] == []                 # двадцать идут — новых не даём, хоть места у линий есть
     one = dict(busy, **{issued[0]['line']: {'capacity': 2, 'active': active[issued[0]['line']] - 1}})
     assert len(poll(svc, one)['calls']) == 1              # один кончился — одно место
+    clock.tick(minutes=1)                                 # новая минута: ступень прогрева 25 уже не держит
     assert len(poll(svc, twelve)['calls']) == 20          # все кончились — снова двадцать, без минутного потолка
 
 

@@ -638,7 +638,7 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
             ? ` Повторов, которые попыткой не считаются: линия занята — ${a.calls.line_busy || 0}, сеть не пропустила — ${a.calls.no_link || 0}.`
             : '')
         + ' Темп — сколько звонков в минуту робот набирает сейчас: каждый запуск и возобновление начинается с прогрева '
-        + `3 → 7 → 10 → 15 → 20 в минуту по 5 минут, не выше темпа рассылки ${campaign?.max_per_minute}.`;
+        + `3 → 7 → 10 → 15 → 20 → 25 в минуту по 5 минут, не выше темпа рассылки ${campaign?.max_per_minute}.`;
 
     const body = !campaign ? (
         <div className="py-10 text-center text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>

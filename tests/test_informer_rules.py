@@ -89,9 +89,9 @@ def test_wav_inspect():
 
 def test_warmup_stages():
     """Владелец, 17.10.2026: «каждое автоинформирование начинать через прогрев — сначала 3, 7, 10, 15, 20»."""
-    assert rules.WARMUP_STAGES == (3, 7, 10, 15, 20) and rules.WARMUP_STEP_MINUTES == 5
-    assert [rules.warmup_rate(m) for m in (0, 4.9, 5, 12, 15, 19.9, 20, 24.9)] == [3, 3, 7, 10, 15, 15, 20, 20]
-    assert rules.warmup_rate(25) is None and rules.warmup_rate(None) is None    # прогрев кончился / не было
+    assert rules.WARMUP_STAGES == (3, 7, 10, 15, 20, 25) and rules.WARMUP_STEP_MINUTES == 5    # 25 — 18.10, «потолок 25»
+    assert [rules.warmup_rate(m) for m in (0, 4.9, 5, 12, 15, 19.9, 20, 24.9, 25)] == [3, 3, 7, 10, 15, 15, 20, 20, 25]
+    assert rules.warmup_rate(30) is None and rules.warmup_rate(None) is None    # прогрев кончился / не было
     assert rules.warmup_rate(-1) == 3
 
 
