@@ -296,8 +296,13 @@ class SectionRenameTests(unittest.TestCase):
     def test_sidebar_item_renamed_in_every_branch(self):
         app = APP_PATH.read_text(encoding="utf-8-sig")
         # пункт живёт в трёх ветках сайдбара (СВ, главы отделов, админ) —
-        # переименовать надо во всех, иначе раздел называется по-разному
-        self.assertEqual(app.count('<span className="sidebar-text">Чаты ОП</span>'), 3)
+        # переименовать надо во всех, иначе раздел называется по-разному.
+        # С 18.10.2026 подпись (со счётчиком ждущих) рисует один помощник.
+        helper = app[app.index("const renderWazzupChatsSidebarInner = "):
+                     app.index("const renderEventsSidebarItemInner = ")]
+        self.assertEqual(helper.count("<span>Чаты ОП</span>"), 1)
+        self.assertEqual(app.count("{renderWazzupChatsSidebarInner()}"), 3)
+        self.assertEqual(app.count("handleSidebarViewNavigation(e, 'wazzup_chats')"), 3)
         self.assertNotIn("Чаты Верификаторов", app)
 
     def test_view_header_renamed(self):

@@ -356,3 +356,31 @@ test('stalled stream is aborted and reconnected after heartbeat deadline', async
     assert.equal(h.streams[0].signal.aborted, true); assert.equal(h.streams.length, 2);
     await h.close(); assert.equal(h.timers.size, 0);
 });
+
+test('счётчик боковой панели (only=unread): поток только событий счётчика, кадр cursor двигает точку возобновления', async () => {
+    const applied = [], unreadRefreshes = [];
+    const h = harness({ only: 'unread', selected: null, refreshUnread: async () => { unreadRefreshes.push(1); },
+        onChanges: (changes) => { applied.push(...changes); return { thread: false, list: false, notes: false }; } });
+    await h.flush();
+    assert.match(h.streams[0].url, /\/api\/wazzup\/pilot\/stream\?account=op&only=unread$/);
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 5, resumed: false });
+    await h.tick(1000);
+    assert.equal(unreadRefreshes.length, 1, 'первое подключение снимает снимок счётчика');
+    const counter = { kind: 'unread', channelId: 'c', chatId: 'one', messageId: 'unread:c:one', unreadCount: 2,
+        unreadVersion: 3, statusOnly: true, affectsList: false };
+    await h.emit('change', { changes: [counter] }, 7);
+    // Сообщения сервер этому потоку не шлёт — только их номер.
+    await h.emit('cursor', {}, 11);
+    assert.deepEqual(applied, [counter]);
+    const panes = { thread: h.calls.thread, list: h.calls.list };
+    for (let beat = 0; beat < 6; beat += 1) { await h.tick(19000); h.streams.at(-1).emit(': heartbeat\n\n'); await h.flush(); }
+    await h.end();
+    await h.tick(0);
+    assert.equal(h.streams.length, 2);
+    assert.match(h.streams[1].url, /only=unread&epoch=process-1&after=11$/, 'продолжение — после кадра cursor');
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 11, resumed: true });
+    await h.tick(1500);
+    assert.equal(unreadRefreshes.length, 1, 'продолженный поток снимок не перечитывает');
+    assert.deepEqual({ thread: h.calls.thread, list: h.calls.list }, panes);
+    await h.close(); assert.equal(h.timers.size, 0);
+});

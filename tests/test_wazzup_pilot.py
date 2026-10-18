@@ -402,6 +402,31 @@ class PilotRoutesTests(unittest.TestCase):
         fields = dict(line.split(': ', 1) for line in lines if not line.startswith(':'))
         return fields.get('id'), fields.get('event'), json.loads(fields.get('data', 'null'))
 
+    def test_sidebar_badge_stream_carries_only_the_waiting_counter(self):
+        """?only=unread (WazzupWaitingKeeper.jsx): only `kind: unread` changes; a
+        batch without them is an empty `cursor` frame, whose id still moves resume."""
+        response = self.client.get('/api/wazzup/pilot/stream?account=op&only=unread', buffered=False)
+        frames = iter(response.response)
+        self.assertEqual('connected', self.frame_parts(next(frames))[1])
+        message = dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='m1', status='read')
+        unread = dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='unread:c:77000000000',
+                      kind='unread', statusOnly=True, affectsList=False, unreadCount=2, unreadVersion=5,
+                      lastInboundId='m0')
+        typing = dict(account='op', channelId=CHANNEL, chatId='77000000000', kind='typing', userId=7,
+                      clientId='a' * 32, typing=True, expiresAt=2 ** 52)
+        card = dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='card:1', kind='card', cardId='1')
+        self.broker.publish(message)
+        self.assertEqual((str(self.broker.current_seq()), 'cursor', {}), self.frame_parts(next(frames)))
+        for event in (message, typing, unread, card):
+            self.broker.publish(event)
+        frame_id, name, payload = self.frame_parts(next(frames))
+        self.assertEqual((str(self.broker.current_seq()), 'change', {'changes': [unread]}), (frame_id, name, payload))
+        # Every frame of this stream is one of the two: no messages, presence or cards.
+        self.broker.publish(typing)
+        self.assertEqual('cursor', self.frame_parts(next(frames))[1])
+        response.close()
+        self.assertEqual(0, self.broker.streams)
+
     def test_reconnect_resumes_after_the_last_seen_frame_and_loses_nothing(self):
         response = self.client.get('/api/wazzup/pilot/stream', buffered=False)
         frames = iter(response.response)

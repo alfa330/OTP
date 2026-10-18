@@ -238,6 +238,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         # A reconnect continues after the last frame its client saw (`id:`), so
         # nothing published during the gap is lost and no reconciliation is needed.
         epoch, after = request.args.get('epoch'), request.args.get('after')
+        # The portal sidebar badge (WazzupWaitingKeeper.jsx) needs the waiting
+        # counter only: no messages, presence or cards. A skipped batch still
+        # sends its `id:` (an empty `cursor` frame the client ignores), so a
+        # reconnect resumes instead of reconciling.
+        only_unread = request.args.get('only') == 'unread'
 
         def generate():
             cursor, resumed = broker.resume_from(epoch, after)
@@ -251,6 +256,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                     yield f'id: {cursor}\nevent: unavailable\ndata: {{}}\n\n'
                 elif any(e.get('reload') for e in events):
                     yield f'id: {cursor}\nevent: reload\ndata: ' + json.dumps({'ready': broker.ready}) + '\n\n'
+                elif events and only_unread:
+                    unread = [e for e in events if e.get('kind') == 'unread']
+                    yield ((f'id: {cursor}\nevent: change\ndata: '
+                            + json.dumps({'changes': unread}, ensure_ascii=False) + '\n\n')
+                           if unread else f'id: {cursor}\nevent: cursor\ndata: {{}}\n\n')
                 elif events:
                     # Presence goes in its own frame: tabs opened before it existed
                     # skip unknown events, but would re-read the list and the

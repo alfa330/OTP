@@ -148,6 +148,7 @@ import {
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
+import { useChatWaitingCount, waitingBadgeLabel } from './components/wazzup/chatWaitingBadge';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 // Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
 import { stripPaymentsParams } from './components/payments/paymentsLink';
@@ -249,6 +250,9 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 // Сторож смены верификатора в «Чатах ОП» — отдельным куском: он нужен полутора
 // десяткам людей и не должен ехать в общем бандле всему порталу.
 const WazzupShiftKeeper = lazyWithRetry(() => import('./components/wazzup/WazzupShiftKeeper'));
+// Счётчик «Ожидают ответа» «Чатов ОП» для боковой панели, пока раздел не открыт —
+// тоже отдельным куском: он нужен только тем, кто обрабатывает чаты.
+const WazzupWaitingKeeper = lazyWithRetry(() => import('./components/wazzup/WazzupWaitingKeeper'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
@@ -43541,6 +43545,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                колокола); requestId нужен, чтобы повторный клик по тому же
                уведомлению снова открывал карточку. */
             const [crmUnreadCount, setCrmUnreadCount] = useState(0);
+            /* «Чаты ОП»: сообщения клиентов, ждущие ответа команды, — тот же
+               счётчик, что «Ожидают ответа» в разделе. Ведут его раздел и
+               WazzupWaitingKeeper (chatWaitingBadge.js); у кого обработки
+               чатов нет, здесь всегда ноль. */
+            const wazzupWaitingCount = useChatWaitingCount();
             const [crmRealtimePulse, setCrmRealtimePulse] = useState(0);
             const [crmFocusRequest, setCrmFocusRequest] = useState(null);
             /* «Жалобы» — тот же механизм, что у «Обращений». Бейдж — ответы и
@@ -53769,6 +53778,30 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         </span>
                     );
                 };
+                /* «Чаты ОП» (orange — цвет «Ожидают ответа» в самом разделе):
+                   сколько сообщений клиентов ждут ответа команды. Одна цифра,
+                   дальше «9+» — и в подписи, и в свёрнутой панели (просьба
+                   владельца 18.10.2026); точное число — в подсказке пункта. */
+                const renderWazzupChatsSidebarInner = () => (
+                    <>
+                        <FaIcon className="fas fa-comments"></FaIcon>
+                        {wazzupWaitingCount > 0 && (
+                            <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-semibold leading-none">
+                                {waitingBadgeLabel(wazzupWaitingCount)}
+                            </span>
+                        )}
+                        <span className="sidebar-text inline-flex items-center gap-2">
+                            <span>Чаты ОП</span>
+                            {wazzupWaitingCount > 0 && (
+                                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-semibold leading-none">
+                                    {waitingBadgeLabel(wazzupWaitingCount)}
+                                </span>
+                            )}
+                        </span>
+                    </>
+                );
+                const wazzupChatsSidebarTitle = wazzupWaitingCount > 0
+                    ? `Ждут ответа: ${wazzupWaitingCount}` : undefined;
                 const renderEventsSidebarItemInner = () => (
                     <li>
                         <button
@@ -54661,9 +54694,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <li>
                                                         <button
                                                             onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                            title={wazzupChatsSidebarTitle}
+                                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
+                                                            {renderWazzupChatsSidebarInner()}
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -54935,9 +54969,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                    title={wazzupChatsSidebarTitle}
+                                                    className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                                 >
-                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
+                                                    {renderWazzupChatsSidebarInner()}
                                                 </button>
                                             </li>
                                             )}
@@ -55230,9 +55265,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <button
                                                 type="button"
                                                 onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                title={wazzupChatsSidebarTitle}
                                                 className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
+                                                {renderWazzupChatsSidebarInner()}
                                             </button>
                                         </li>
                                     )}
@@ -56054,6 +56090,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 eventsUnreadCount,
                 fourYouUnreadCount,
                 crmUnreadCount,
+                wazzupWaitingCount,
                 canAccessCrmSection,
                 complaintsBadgeCount,
                 canAccessComplaintsSection,
@@ -63310,6 +63347,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 userId={user.id}
                                 apiBaseUrl={API_BASE_URL}
                                 withAccessTokenHeader={withAccessTokenHeader}
+                            />
+                        </Suspense>
+                    )}
+                    {/* Счётчик «Ожидают ответа» в пункте «Чаты ОП», пока раздел не
+                        открыт. Только у тех, кто обрабатывает чаты (верификатор,
+                        супер-админ): у остальных счётчика нет и в самом разделе. */}
+                    {user && (isWazzupChatOperator(user) || normalizeRole(user.role) === 'super_admin')
+                        && canAccessVerifierChatsForUser(user) && (
+                        <Suspense fallback={null}>
+                            <WazzupWaitingKeeper
+                                key={user.id}
+                                apiBaseUrl={API_BASE_URL}
+                                withAccessTokenHeader={withAccessTokenHeader}
+                                mayProcess
                             />
                         </Suspense>
                     )}

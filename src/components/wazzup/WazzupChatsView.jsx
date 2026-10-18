@@ -44,6 +44,7 @@ import useInternalNotes from './useInternalNotes';
 import useThreadEnd, { centerMessageRow, messageRow } from './useThreadEnd';
 import useMessageSearch from './useMessageSearch';
 import ChatMessageHits from './ChatMessageHits';
+import { claimSectionWaiting, publishWaiting } from './chatWaitingBadge';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
@@ -1475,6 +1476,14 @@ function ChatsWorkspace(props) {
     // Ждущие ответа — вверху списка (chatListOrder.js); счётчик ведётся только у «op».
     const waiting = useMemo(() => (account === 'op' ? { items: unread.items, ready: unread.ready } : null),
         [account, unread.items, unread.ready]);
+    /* Тот же счётчик — в боковой панели портала (chatWaitingBadge.js). Пока
+       раздел открыт на «Чатах», число ведёт он своим потоком, а сторож портала
+       молчит: второй поток вкладке не нужен. */
+    const countsWaiting = account === 'op' && pilot.enabled && mainTab === 'chats';
+    useEffect(() => (countsWaiting ? claimSectionWaiting() : undefined), [countsWaiting]);
+    useEffect(() => {
+        if (countsWaiting && unread.ready) publishWaiting(unread.total);
+    }, [countsWaiting, unread.ready, unread.total]);
     const visibleChats = useMemo(() => orderChatList(chats, waiting, {
         unreadOnly: unreadOnly && pilot.enabled, search: appliedSearch,
     }), [chats, waiting, unreadOnly, pilot.enabled, appliedSearch]);

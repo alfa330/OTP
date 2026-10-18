@@ -4,9 +4,11 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
+// only — подмножество событий потока: 'unread' — один счётчик ждущих ответа
+// (боковая панель портала, WazzupWaitingKeeper.jsx); по умолчанию — все.
 export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, headers,
     selected, refreshThread, refreshList, onChanges, refreshUnread, refreshNotes, onTyping, clearTyping,
-    onCards, refreshCards }) {
+    onCards, refreshCards, only = '' }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
@@ -104,7 +106,8 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                 if (!data.enabled) { denied = true; setCapability(data); return; }
                 const { epoch, seq } = resume.current;
                 const from = epoch && Number.isInteger(seq) ? `&epoch=${encodeURIComponent(epoch)}&after=${seq}` : '';
-                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op${from}`, {
+                const subset = only ? `&only=${encodeURIComponent(only)}` : '';
+                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op${subset}${from}`, {
                     headers: { ...latest.current.headers(), Accept: 'text/event-stream' },
                     credentials: 'include', signal: controller.signal, cache: 'no-store',
                 });
@@ -200,6 +203,6 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
             }
             Object.values(lanes).forEach((lane) => clearTimeout(lane.timer));
         };
-    }, [enabled, active, visible, apiBaseUrl]);
+    }, [enabled, active, visible, apiBaseUrl, only]);
     return { enabled, capability, connection: !active || !visible ? 'paused' : connection };
 }
