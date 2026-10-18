@@ -97,6 +97,9 @@ def init_schema(cursor):
             fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             CHECK (found OR profession_id IS NULL)
         );
+        -- Откуда ответ: 'list' — список исполнителей. Строки без него — из карточки
+        -- исполнителя первой выкладки (у таксистов профессии там нет), они устарели.
+        ALTER TABLE wazzup_driver_professions ADD COLUMN IF NOT EXISTS source TEXT;
         -- Справочник профессий парка из кабинета: подписи по-русски, последний снимок.
         CREATE TABLE IF NOT EXISTS wazzup_fleet_professions (
             park_id TEXT PRIMARY KEY CHECK (park_id ~ '^[0-9a-f]{32}$'),

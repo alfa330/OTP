@@ -12,7 +12,7 @@ from flask import Flask
 from driver_mailings.client import PATH_PROFESSIONS
 from driver_mailings.schema import init_driver_mailings_schema
 from fleet_edm import client as fleet
-from fleet_edm.client import PATH_CARD, FleetAccessDenied, FleetError, FleetSessionExpired
+from fleet_edm.client import PATH_LIST, FleetAccessDenied, FleetError, FleetSessionExpired
 from fleet_edm.schema import init_fleet_edm_schema
 from tests.test_wazzup_driver_cards_persistence import (  # noqa: F401  (pg — фикстура)
     CARD_PATH, CHAT, DRIVER, OPTIONS, OTHER_DRIVER, PORT, Database, card_body, pg)
@@ -29,6 +29,7 @@ PARK = park_id(1)
 OTHER_PARK = park_id(2)
 MOTO = 'cargo/courier/on-motorcycle'
 NAMES = {'taxi/driver': 'Водитель такси', MOTO: 'Мотокурьер', 'cargo/courier/on-foot': 'Пеший курьер'}
+ABSENT = 'нет в этом сегменте списка'
 
 
 class Seq(list):
@@ -36,27 +37,38 @@ class Seq(list):
 
 
 class Cabinet:
-    """Заглушка кабинета с журналом вызовов. card — профессия, словарь ответа,
-    исключение или Seq из них; names — справочник парка, исключение или Seq."""
+    """Заглушка кабинета с журналом вызовов. active и archived — что список исполнителей
+    отвечает про водителя среди действующих и в архиве: код профессии, None (водитель
+    есть, профессии нет), ABSENT, готовый ответ словарём, исключение или Seq из них;
+    names — справочник парка, исключение или Seq."""
 
-    def __init__(self, card=MOTO, names=None):
-        self.card = card
+    def __init__(self, active=MOTO, archived=ABSENT, names=None):
+        self.active = active
+        self.archived = archived
         self.names = NAMES if names is None else names
         self.calls = []
 
     def _request(self, method, path, *, park_id, body=None, attempts=7, **_):
-        self.calls.append((path, park_id, (body or {}).get('driver_id'), attempts))
-        answer = self.card if path == PATH_CARD else self.names
+        query = (body or {}).get('filter') or {}
+        archive = 'archive' in (query.get('groups') or [])
+        driver = (query.get('contractor_ids') or [None])[0]
+        self.calls.append((path, park_id, driver, archive, attempts))
+        answer = (self.archived if archive else self.active) if path == PATH_LIST else self.names
         if isinstance(answer, Seq):
             answer = answer.pop(0)
         if isinstance(answer, Exception):
             raise answer
-        if path == PATH_CARD:
-            return answer if isinstance(answer, dict) else {'driver': {'driver_profile': {'profession_id': answer}}}
-        return [{'id': code, 'name': name} for code, name in answer.items()]
+        if path != PATH_LIST:
+            return [{'id': code, 'name': name} for code, name in answer.items()]
+        if isinstance(answer, dict):
+            return answer
+        if answer == ABSENT:
+            return {'contractors': [], 'cursor': None}
+        return {'contractors': [dict({'id': driver}, **({} if answer is None else {'profession_id': answer}))],
+                'cursor': None}
 
-    def cards(self):
-        return [call for call in self.calls if call[0] == PATH_CARD]
+    def lists(self):
+        return [call for call in self.calls if call[0] == PATH_LIST]
 
     def dictionaries(self):
         return [call for call in self.calls if call[0] == PATH_PROFESSIONS]
@@ -96,7 +108,7 @@ def age(connection, driver_id, seconds):
 
 def stored(connection):
     with connection.cursor() as cursor:
-        cursor.execute('SELECT driver_id, park_id, found, profession_id, profession_name '
+        cursor.execute('SELECT driver_id, park_id, found, profession_id, profession_name, source '
                        'FROM wazzup_driver_professions ORDER BY driver_id')
         rows = cursor.fetchall()
     connection.commit()
@@ -104,19 +116,38 @@ def stored(connection):
 
 
 @needs_pg
-def test_the_cabinet_is_asked_once_per_driver_and_the_card_then_reads_the_base(pg):
+def test_the_cabinet_list_is_asked_once_per_driver_and_the_card_then_reads_the_base(pg):
     connection, _ = pg
     database = Database(connection)
     cabinet = Cabinet()
     assert ask(database, cabinet) == {'id': MOTO, 'name': 'Мотокурьер'}, 'подпись — из справочника кабинета'
-    assert cabinet.calls == [(PATH_CARD, PARK, DRIVER, 1), (PATH_PROFESSIONS, PARK, None, 1)], 'без повторов'
+    assert cabinet.calls == [(PATH_LIST, PARK, DRIVER, False, 1), (PATH_PROFESSIONS, PARK, None, False, 1)], \
+        'один запрос списка по ID водителя и справочник, без повторов'
     assert ask(database, cabinet) == {'id': MOTO, 'name': 'Мотокурьер'} and len(cabinet.calls) == 2
     age(connection, DRIVER, profession.FOUND_TTL - 60)
     assert ask(database, cabinet)['name'] == 'Мотокурьер' and len(cabinet.calls) == 2, 'неделю — из базы'
     age(connection, DRIVER, profession.FOUND_TTL + 1)
     assert ask(database, cabinet)['name'] == 'Мотокурьер'
-    assert len(cabinet.cards()) == 2 and len(cabinet.dictionaries()) == 1, 'справочник уже есть — подпись из него'
-    assert stored(connection) == [(DRIVER, PARK, True, MOTO, 'Мотокурьер')]
+    assert len(cabinet.lists()) == 2 and len(cabinet.dictionaries()) == 1, 'справочник уже есть — подпись из него'
+    assert stored(connection) == [(DRIVER, PARK, True, MOTO, 'Мотокурьер', 'list')]
+
+
+@needs_pg
+def test_rows_of_the_first_release_from_the_driver_card_are_asked_again_at_once(pg):
+    connection, _ = pg
+    database = Database(connection)
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO wazzup_driver_professions(driver_id, park_id, found, profession_id, "
+                       "profession_name) VALUES (%s, %s, TRUE, NULL, NULL), (%s, %s, TRUE, 'taxi/driver', "
+                       "'Водитель такси')", (DRIVER, PARK, OTHER_DRIVER, PARK))
+    connection.commit()
+    cabinet = Cabinet(active='taxi/driver')
+    assert ask(database, cabinet) == {'id': 'taxi/driver', 'name': 'Водитель такси'}
+    assert cabinet.lists() == [(PATH_LIST, PARK, DRIVER, False, 1)], 'свежая, но из карточки — спрашиваем'
+    down = Cabinet(active=outage(502))
+    assert ask(database, down, driver=OTHER_DRIVER) == {'id': 'taxi/driver', 'name': 'Водитель такси'}, \
+        'кабинет молчит — прежняя профессия того же парка'
+    assert (DRIVER, PARK, True, 'taxi/driver', 'Водитель такси', 'list') in stored(connection)
 
 
 @needs_pg
@@ -127,7 +158,7 @@ def test_a_label_from_any_saved_dictionary_serves_every_park_and_the_fallback_co
     cabinet = Cabinet()
     assert ask(database, cabinet) == {'id': MOTO, 'name': 'Мотокурьер'}
     assert cabinet.dictionaries() == [], 'подпись уже есть в справочнике другого парка'
-    down = Cabinet(card='cargo/courier/on-car', names=outage(502))
+    down = Cabinet(active='cargo/courier/on-car', names=outage(502))
     assert ask(database, down, driver=OTHER_DRIVER, park=park_id(3)) == {'id': 'cargo/courier/on-car',
                                                                          'name': 'Курьер на автомобиле'}
     assert len(down.dictionaries()) == 2, 'такой профессии нет ни в одном справочнике — спросили дважды, не вышло'
@@ -137,38 +168,46 @@ def test_a_label_from_any_saved_dictionary_serves_every_park_and_the_fallback_co
 def test_an_unknown_profession_is_not_shown_as_a_code_and_is_asked_again_sooner(pg):
     connection, _ = pg
     database = Database(connection)
-    cabinet = Cabinet(card='scouts/worker', names={})
+    cabinet = Cabinet(active='scouts/worker', names={})
     assert ask(database, cabinet) is None
-    assert stored(connection) == [(DRIVER, PARK, True, 'scouts/worker', None)]
+    assert stored(connection) == [(DRIVER, PARK, True, 'scouts/worker', None, 'list')]
     age(connection, DRIVER, profession.MISSING_TTL + 1)
-    assert ask(database, cabinet) is None and len(cabinet.cards()) == 2
+    assert ask(database, cabinet) is None and len(cabinet.lists()) == 2
     assert len(cabinet.dictionaries()) == 1, 'пустой справочник парка не спрашивается снова неделю'
 
 
 @needs_pg
-def test_a_card_without_a_profession_is_settled_and_costs_no_dictionary(pg):
+def test_a_driver_without_a_profession_costs_no_dictionary_and_is_asked_again_sooner(pg):
     connection, _ = pg
     database = Database(connection)
-    cabinet = Cabinet(card={'driver': {'driver_profile': {'first_name': 'Тест'}}})
+    cabinet = Cabinet(active=None)
     assert ask(database, cabinet) is None and cabinet.dictionaries() == []
-    age(connection, DRIVER, 86400)
+    assert stored(connection) == [(DRIVER, PARK, True, None, None, 'list')]
+    age(connection, DRIVER, profession.MISSING_TTL - 60)
     assert ask(database, cabinet) is None and len(cabinet.calls) == 1
+    age(connection, DRIVER, profession.MISSING_TTL + 1)
+    cabinet.active = 'taxi/driver'
+    assert ask(database, cabinet) == {'id': 'taxi/driver', 'name': 'Водитель такси'} and len(cabinet.lists()) == 2
 
 
 @needs_pg
-def test_not_in_the_park_is_remembered_briefly_and_a_park_change_asks_again(pg):
+def test_an_archived_driver_is_found_in_the_archive_and_nobody_is_remembered_briefly(pg):
     connection, _ = pg
     database = Database(connection)
-    cabinet = Cabinet(card=FleetError("Fleet вернул 404: {'code': 'not_found'}"))
-    assert ask(database, cabinet) is None
-    assert stored(connection) == [(DRIVER, PARK, False, None, None)]
-    assert ask(database, cabinet) is None and len(cabinet.calls) == 1
-    age(connection, DRIVER, profession.MISSING_TTL + 1)
-    cabinet.card = MOTO
-    assert ask(database, cabinet)['name'] == 'Мотокурьер'
-    moved = Cabinet(card='cargo/courier/on-foot')
-    assert ask(database, moved, park=OTHER_PARK) == {'id': 'cargo/courier/on-foot', 'name': 'Пеший курьер'}
-    assert moved.cards() == [(PATH_CARD, OTHER_PARK, DRIVER, 1)], 'водитель в другом парке — его карточка там'
+    archived = Cabinet(active=ABSENT, archived='taxi/driver')
+    assert ask(database, archived) == {'id': 'taxi/driver', 'name': 'Водитель такси'}
+    assert archived.lists() == [(PATH_LIST, PARK, DRIVER, False, 1), (PATH_LIST, PARK, DRIVER, True, 1)]
+    nobody = Cabinet(active=ABSENT)
+    assert ask(database, nobody, driver=OTHER_DRIVER) is None and len(nobody.lists()) == 2
+    assert stored(connection)[0] == (OTHER_DRIVER, PARK, False, None, None, 'list')
+    assert ask(database, nobody, driver=OTHER_DRIVER) is None and len(nobody.lists()) == 2
+    age(connection, OTHER_DRIVER, profession.MISSING_TTL + 1)
+    nobody.active = MOTO
+    assert ask(database, nobody, driver=OTHER_DRIVER)['name'] == 'Мотокурьер'
+    moved = Cabinet(active='cargo/courier/on-foot')
+    assert ask(database, moved, driver=OTHER_DRIVER, park=OTHER_PARK) == {'id': 'cargo/courier/on-foot',
+                                                                          'name': 'Пеший курьер'}
+    assert moved.lists() == [(PATH_LIST, OTHER_PARK, OTHER_DRIVER, False, 1)], 'водитель в другом парке — спросим там'
 
 
 @needs_pg
@@ -176,18 +215,18 @@ def test_a_refused_session_hands_over_to_the_mailings_account_and_rests(pg):
     connection, _ = pg
     database = Database(connection)
     clock = Clock()
-    edm = Cabinet(card=FleetSessionExpired('401'))
+    edm = Cabinet(active=FleetSessionExpired('401'))
     mailings = Cabinet()
     accounts = {'ЭДО': edm, 'Рассылки': mailings}
     assert ask(database, accounts, clock=clock)['name'] == 'Мотокурьер'
-    assert len(edm.calls) == 1 and len(mailings.cards()) == 1 and mailings.dictionaries(), \
+    assert len(edm.calls) == 1 and len(mailings.lists()) == 1 and mailings.dictionaries(), \
         'справочник — той учёткой, что ответила'
     assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock)['name'] == 'Мотокурьер'
-    assert len(edm.calls) == 1 and len(mailings.cards()) == 2, 'непринятую сессию не дёргаем'
+    assert len(edm.calls) == 1 and len(mailings.lists()) == 2, 'непринятую сессию не дёргаем'
     clock.value += profession.SESSION_PAUSE + 1
-    edm.card = MOTO
+    edm.active = MOTO
     assert ask(database, accounts, driver='e' * 32, clock=clock)['name'] == 'Мотокурьер'
-    assert len(edm.cards()) == 2 and len(mailings.cards()) == 2
+    assert len(edm.lists()) == 2 and len(mailings.lists()) == 2
 
 
 @needs_pg
@@ -199,17 +238,17 @@ def test_no_rights_on_a_park_skips_that_account_for_that_park_only(pg):
     class Picky(Cabinet):
         def _request(self, method, path, *, park_id, **kwargs):
             if park_id == PARK:
-                self.calls.append((path, park_id, None, kwargs.get('attempts')))
+                self.calls.append((path, park_id, None, False, kwargs.get('attempts')))
                 raise FleetAccessDenied('Кабинет отказал (403)')
             return super()._request(method, path, park_id=park_id, **kwargs)
 
     edm, mailings = Picky(), Cabinet()
     accounts = {'ЭДО': edm, 'Рассылки': mailings}
-    assert ask(database, accounts, clock=clock)['name'] == 'Мотокурьер' and len(mailings.cards()) == 1
+    assert ask(database, accounts, clock=clock)['name'] == 'Мотокурьер' and len(mailings.lists()) == 1
     assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock) and len(edm.calls) == 1
     assert ask(database, accounts, driver='e' * 32, park=OTHER_PARK, clock=clock)
-    assert edm.cards()[-1] == (PATH_CARD, OTHER_PARK, 'e' * 32, 1) and len(mailings.cards()) == 2
-    plain = Cabinet(card=FleetError('Fleet вернул 403 без JSON (тело 0 байт)'))
+    assert edm.lists()[-1] == (PATH_LIST, OTHER_PARK, 'e' * 32, False, 1) and len(mailings.lists()) == 2
+    plain = Cabinet(active=FleetError('Fleet вернул 403 без JSON (тело 0 байт)'))
     assert ask(database, {'ЭДО': plain, 'Рассылки': Cabinet()}, driver='d' * 32, park=park_id(5), clock=clock)
     assert profession._blocks[('ЭДО', park_id(5))] == clock.value + profession.DENIED_PAUSE, \
         '403 и без JSON — «нет прав», а не разовый отказ'
@@ -222,7 +261,7 @@ def test_a_cabinet_outage_shows_the_last_profession_and_pauses_every_account(pg)
     clock = Clock()
     assert ask(database, Cabinet(), clock=clock)['name'] == 'Мотокурьер'
     age(connection, DRIVER, profession.FOUND_TTL + 1)
-    edm = Cabinet(card=FleetError('Fleet не ответил после 1 попыток: ReadTimeout'))
+    edm = Cabinet(active=FleetError('Fleet не ответил после 1 попыток: ReadTimeout'))
     mailings = Cabinet()
     accounts = {'ЭДО': edm, 'Рассылки': mailings}
     assert ask(database, accounts, clock=clock) == {'id': MOTO, 'name': 'Мотокурьер'}, 'прежняя профессия'
@@ -232,7 +271,7 @@ def test_a_cabinet_outage_shows_the_last_profession_and_pauses_every_account(pg)
     assert len(edm.calls) == 1 and mailings.calls == [], 'пауза: следующая карточка не ждёт кабинет'
     assert sessions.call_count == 0, 'и сессии из базы во время паузы не читаются'
     clock.value += profession.FAILURE_PAUSE + 1
-    edm.card = MOTO
+    edm.active = MOTO
     assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock)['name'] == 'Мотокурьер'
 
 
@@ -241,16 +280,16 @@ def test_a_one_off_cabinet_failure_is_asked_again_at_once_and_a_timeout_is_not(p
     connection, _ = pg
     database = Database(connection)
     for failure in (outage(502), FleetError('Fleet не ответил после 1 попыток: 429 Too Many Requests')):
-        cabinet = Cabinet(card=Seq([failure, MOTO]))
+        cabinet = Cabinet(active=Seq([failure, MOTO]))
         driver = '%032x' % (len(stored(connection)) + 100)
         assert ask(database, cabinet, driver=driver)['name'] == 'Мотокурьер'
-        assert len(cabinet.cards()) == 2 and profession._blocks == {}, 'повтор удался — паузы нет'
-    twice = Cabinet(card=Seq([outage(503), outage(503)]))
-    assert ask(database, twice, driver=OTHER_DRIVER) is None and len(twice.cards()) == 2
+        assert len(cabinet.lists()) == 2 and profession._blocks == {}, 'повтор удался — паузы нет'
+    twice = Cabinet(active=Seq([outage(503), outage(503)]))
+    assert ask(database, twice, driver=OTHER_DRIVER) is None and len(twice.lists()) == 2
     assert ('*', None) in profession._blocks, 'второй сбой подряд — пауза всем учёткам'
     profession._blocks.clear()
-    slow = Cabinet(card=FleetError('Fleet не ответил после 1 попыток: HTTPSConnectionPool: Read timed out.'))
-    assert ask(database, slow, driver=OTHER_DRIVER) is None and len(slow.cards()) == 1, 'таймаут не повторяем'
+    slow = Cabinet(active=FleetError('Fleet не ответил после 1 попыток: HTTPSConnectionPool: Read timed out.'))
+    assert ask(database, slow, driver=OTHER_DRIVER) is None and len(slow.lists()) == 1, 'таймаут не повторяем'
 
 
 @needs_pg
@@ -258,17 +297,18 @@ def test_another_refusal_of_one_account_hands_the_park_over_to_the_other(pg):
     connection, _ = pg
     database = Database(connection)
     clock = Clock()
-    edm = Cabinet(card=FleetError("Fleet вернул 400: {'code': 'bad_request'}"))
+    edm = Cabinet(active=FleetError("Fleet вернул 400: {'code': 'bad_request'}"))
     mailings = Cabinet()
     accounts = {'ЭДО': edm, 'Рассылки': mailings}
     assert ask(database, accounts, clock=clock)['name'] == 'Мотокурьер' and len(edm.calls) == 1
     assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock) and len(edm.calls) == 1, \
         'этой учётке этот парк не отвечает — пока не спрашиваем'
-    edm.card = MOTO
+    edm.active = MOTO
     assert ask(database, accounts, driver='e' * 32, park=OTHER_PARK, clock=clock)
-    assert edm.cards()[-1][1] == OTHER_PARK, 'другой парк той же учётки — спрашиваем'
+    assert edm.lists()[-1][1] == OTHER_PARK, 'другой парк той же учётки — спрашиваем'
     clock.value += profession.REFUSED_PAUSE + 1
-    assert ask(database, accounts, driver='d' * 32, clock=clock) and edm.cards()[-1] == (PATH_CARD, PARK, 'd' * 32, 1)
+    assert ask(database, accounts, driver='d' * 32, clock=clock)
+    assert edm.lists()[-1] == (PATH_LIST, PARK, 'd' * 32, False, 1)
 
 
 @needs_pg
@@ -276,32 +316,34 @@ def test_a_silent_dictionary_does_not_hide_a_new_profession_for_hours(pg):
     connection, _ = pg
     database = Database(connection)
     clock = Clock()
-    cabinet = Cabinet(card='scouts/worker', names=Seq([outage(500), outage(500), {'scouts/worker': 'Скаут'}]))
+    cabinet = Cabinet(active='scouts/worker', names=Seq([outage(500), outage(500), {'scouts/worker': 'Скаут'}]))
     assert ask(database, cabinet, clock=clock) is None
     assert stored(connection) == [], 'подписи нет, потому что справочник молчал, — не запоминаем'
     clock.value += profession.FAILURE_PAUSE + 1
     assert ask(database, cabinet, clock=clock) == {'id': 'scouts/worker', 'name': 'Скаут'}
-    assert stored(connection) == [(DRIVER, PARK, True, 'scouts/worker', 'Скаут')]
+    assert stored(connection) == [(DRIVER, PARK, True, 'scouts/worker', 'Скаут', 'list')]
 
 
 @needs_pg
-def test_every_refusal_is_logged_with_the_request_the_account_and_the_answer(pg, caplog):
+def test_every_refusal_and_answer_is_logged_with_the_request_the_account_and_the_answer(pg, caplog):
     connection, _ = pg
     database = Database(connection)
     caplog.set_level('INFO', logger='wazzup.driver_profession')
-    edm = Cabinet(card=FleetError("Fleet вернул 400: {'driver_id': '%s', 'code': 'bad'}" % DRIVER))
+    edm = Cabinet(active=FleetError("Fleet вернул 400: {'driver_id': '%s', 'code': 'bad'}" % DRIVER))
     accounts = {'ЭДО': edm, 'Рассылки': Cabinet(names=outage(500))}
     assert ask(database, accounts)['name'] == 'Курьер на мотоцикле', 'справочник молчит — запасная подпись'
     text = '\n'.join(record.getMessage() for record in caplog.records)
-    assert ('кабинет Fleet не спрашиваем 600 с — карточка исполнителя, учётка «ЭДО»: FleetError: '
+    assert ('кабинет Fleet не спрашиваем 600 с — список исполнителей, учётка «ЭДО»: FleetError: '
             "Fleet вернул 400: {'driver_id': '%s…', 'code': 'bad'}" % DRIVER[:8]) in text
     assert DRIVER not in text, 'ID водителя в логе — обрезанный'
     assert 'справочник профессий, учётка «Рассылки»: FleetError: Fleet не ответил после 1 попыток: HTTP 500' in text
     assert 'кабинет ответил (учётка «Рассылки») — %s, подпись: Курьер на мотоцикле' % MOTO in text
     caplog.clear()
     profession._blocks.clear()      # пауза после молчания справочника — к этой проверке не относится
-    assert ask(database, Cabinet(card={'driver': {'driver_profile': {}}}), driver=OTHER_DRIVER) is None
-    assert 'кабинет ответил (учётка «ЭДО») — профессии в карточке нет' in caplog.text
+    assert ask(database, Cabinet(active=None), driver=OTHER_DRIVER) is None
+    assert 'кабинет ответил (учётка «ЭДО») — профессии в ответе нет, поля: id' in caplog.text
+    assert ask(database, Cabinet(active=ABSENT), driver='e' * 32) is None
+    assert 'кабинет ответил (учётка «ЭДО») — в этом парке водителя нет' in caplog.text
 
 
 @needs_pg
@@ -391,16 +433,19 @@ def test_the_cabinet_client_answers_at_once_without_sleeps_retries_or_a_wider_po
     monkeypatch.setattr(fleet.time, 'sleep', sleeps.append)
     monkeypatch.setattr(profession, 'RETRY_DELAY', 0.3)
     client = profession.CabinetClient([{'name': 'Session_id', 'value': 'test'}], 'test-agent')
-    client._shared_session = Transport(requests.ConnectionError('нет сети'), response(429), response(503),
-                                       response(200, {'driver': {'driver_profile': {'profession_id': MOTO}}}))
+    client._shared_session = Transport(
+        requests.ConnectionError('нет сети'), response(429), response(503),
+        response(200, {'contractors': [{'id': DRIVER, 'profession_id': MOTO}], 'cursor': None}))
     for _ in range(2):
         with pytest.raises(FleetError):
             profession._fetch_profession(client, PARK, DRIVER)
-    assert profession._fetch_profession(client, PARK, DRIVER) == (True, MOTO)
+    assert profession._fetch_profession(client, PARK, DRIVER) == (True, MOTO, ('id', 'profession_id'))
     assert [pause for pause in sleeps if pause > 0] == [0.3], 'пауза — только перед повтором 429, у транспорта своих нет'
     calls = client._shared_session.calls
     assert len(calls) == 4 and calls[-1][2]['timeout'] == profession.REQUEST_TIMEOUT
-    assert json.loads(calls[-1][2]['data']) == {'driver_id': DRIVER}
+    assert calls[-1][0] == 'POST' and calls[-1][1].endswith(PATH_LIST)
+    assert json.loads(calls[-1][2]['data']) == {'filter': {'contractor_ids': [DRIVER]},
+                                               'projection': ['id', 'profession_id'], 'limit': 1}
     assert calls[-1][2]['headers']['x-park-id'] == PARK
     for _ in range(200):
         client._note_success()
@@ -408,13 +453,19 @@ def test_the_cabinet_client_answers_at_once_without_sleeps_retries_or_a_wider_po
     assert client.concurrency == profession.CONCURRENCY, 'ширина не растёт до потолка «Рассылок»'
 
 
-def test_the_card_reads_the_profession_where_the_cabinet_itself_does():
-    cabinet = Cabinet(card={'driver': {'driver_profile': {'profession_id': ' taxi/driver '}}})
-    assert profession._fetch_profession(cabinet, PARK, DRIVER) == (True, 'taxi/driver')
-    for empty in ({}, {'driver': None}, {'driver': {'driver_profile': None}}, None):
-        assert profession._fetch_profession(Cabinet(card=empty or {}), PARK, DRIVER) == (True, None)
+def test_the_profession_is_read_from_the_list_like_the_cabinet_column():
+    assert profession._fetch_profession(Cabinet(active=' taxi/driver '), PARK, DRIVER) == (
+        True, 'taxi/driver', ('id', 'profession_id'))
+    for payload, fields in (({'contractors': [{'id': DRIVER}]}, ('id',)),
+                            ({'contractors': [{'id': DRIVER.upper(), 'profession_id': ''}]}, ('id', 'profession_id'))):
+        assert profession._fetch_profession(Cabinet(active=payload), PARK, DRIVER) == (True, None, fields)
+    for nobody in ({'contractors': []}, {}, {'contractors': None}, {'contractors': ['x', None]},
+                   {'contractors': [{'id': OTHER_DRIVER, 'profession_id': MOTO}]}):
+        cabinet = Cabinet(active=nobody, archived=nobody)
+        assert profession._fetch_profession(cabinet, PARK, DRIVER) == (False, None, ()), nobody
+        assert [call[3] for call in cabinet.lists()] == [False, True], 'и в архиве'
     with pytest.raises(FleetError):
-        profession._fetch_profession(Cabinet(card=FleetError("Fleet вернул 400: {'id': 404}")), PARK, DRIVER)
+        profession._fetch_profession(Cabinet(active=FleetError("Fleet вернул 400: {'id': 404}")), PARK, DRIVER)
     wrapped = Cabinet(names={})
     wrapped._request = lambda *args, **kwargs: {'professions': [{'id': MOTO, 'name': ' Курьер на\nмотоцикле '},
                                                                 {'id': '', 'name': 'x'}, {'id': 'y'}, 'z']}

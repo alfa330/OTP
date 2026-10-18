@@ -3,16 +3,19 @@
 Просьба владельца 18.10.2026: «чтобы в карточках водителей отображалось, кто
 водитель по профессии: мото курьер, авто курьер и т.д.». В CRM yataxi профессии
 нет (в схеме driver-info её нет ни в каком виде, проверено 18.10.2026), а кабинет
-хранит её у исполнителя:
-  * карточка исполнителя POST /api/fleet/router/v1/cards/driver/details →
-    driver.driver_profile.profession_id («taxi/driver», «cargo/courier/on-car»,
-    «cargo/courier/on-motorcycle», «cargo/courier/on-foot», …). Это та же ручка,
-    которой «Провайдер ЭДО» читает карточки (fleet_edm/client.py), и то же поле,
-    по которому сам кабинет решает, как показать профиль исполнителя;
+показывает её колонкой «Профессия» в списке исполнителей:
+  * список исполнителей парка POST …/contractor-profiles-manager/v2/contractors/list
+    с фильтром по ID и полем profession_id в projection («taxi/driver»,
+    «cargo/courier/on-car», «cargo/courier/on-motorcycle», «cargo/courier/on-foot», …)
+    — так эту колонку собирает сам кабинет; тот же список, которым «Провайдер ЭДО»
+    обходит парки (fleet_edm/client.py). Архив — отдельный сегмент списка;
   * подписи по-русски — справочник профессий парка GET …/existing-professions
-    ([{id, name}]), по нему «Рассылки» строят фильтр.
+    ([{id, name}]): по нему кабинет подписывает ту же колонку, а «Рассылки» строят фильтр.
+Карточка исполнителя (router/v1/cards/driver/details) профессию таксистов не
+отдаёт: первая выкладка 18.10.2026 брала её оттуда, и у всех шести водителей,
+чьи карточки открыли в первый час, driver_profile.profession_id не было.
 
-Учётка. Сперва общая сессия «Провайдера ЭДО»: ею карточки исполнителей читаются
+Учётка. Сперва общая сессия «Провайдера ЭДО»: ею список исполнителей читается
 каждый день. Не приняли её, у неё нет прав на этот парк или кабинет отказал ей
 иначе (4xx) — служебный аккаунт «Рассылок», если он подключён. Обе сессии здесь
 только читаются.
@@ -20,18 +23,18 @@
 Цена. Профессия с подписью живёт в базе неделю (кэш общий для всех процессов):
 повторное открытие карточки — один SELECT, а кабинет спрашивается один раз на
 водителя — при первом открытии его карточки, одним запросом (медиана ручек
-кабинета 0,35 с). Справочник подписей нужен, только когда такой профессии нет ни
-в одном уже сохранённом справочнике, — то есть почти никогда. Запрос не дольше
-REQUEST_TIMEOUT; разовый 5xx или 429 повторяется сразу один раз (так кабинет и
-отвечает — поштучно), таймаут — нет. Кабинет не ответил — в карточке просто нет
-профессии (или прежняя, если была), а сам кабинет какое-то время не спрашивается
-(FAILURE_PAUSE, у непринятой сессии SESSION_PAUSE): один сбой не превращается в
-задержку каждой следующей карточки.
+кабинета 0,35 с; водитель в архиве — второй). Справочник подписей нужен, только
+когда такой профессии нет ни в одном уже сохранённом справочнике, — то есть
+почти никогда. Запрос не дольше REQUEST_TIMEOUT; разовый 5xx или 429 повторяется
+сразу один раз (так кабинет и отвечает — поштучно), таймаут — нет. Кабинет не
+ответил — в карточке просто нет профессии (или прежняя, если была), а сам кабинет
+какое-то время не спрашивается (FAILURE_PAUSE, у непринятой сессии SESSION_PAUSE):
+один сбой не превращается в задержку каждой следующей карточки.
 
 Лог. Каждый отказ — с тем, какой это был запрос, какой учёткой и что ответил
-кабинет (ID в тексте обрезаны), каждый ответ — одной строкой INFO. 18.10.2026
-первая же проба на проде упала с голым «FleetError», и по логу было не понять,
-что случилось.
+кабинет (ID в тексте обрезаны), каждый ответ — одной строкой INFO, а ответ без
+профессии — с именами полей, что пришли. 18.10.2026 первая же проба на проде
+упала с голым «FleetError», и по логу было не понять, что случилось.
 """
 import hashlib
 import json
@@ -43,14 +46,14 @@ import time
 from driver_mailings import queries as mailing_session
 from driver_mailings.client import PATH_PROFESSIONS, MailingsClient
 from fleet_edm import queries as edm_session
-from fleet_edm.client import PATH_CARD, FleetAccessDenied, FleetError, FleetSessionExpired
+from fleet_edm.client import PATH_LIST, FleetAccessDenied, FleetError, FleetSessionExpired
 
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 3
 CONCURRENCY = 2
 FOUND_TTL = 7 * 86400
-# Водителя нет в этом парке или подписи профессии не нашлось — спросим раньше.
+# Водителя нет в парке, профессии нет в ответе или подписи не нашлось — спросим раньше.
 MISSING_TTL = 6 * 3600
 NAMES_TTL = 7 * 86400              # справочник одного парка — не чаще раза в неделю
 RETRY_DELAY = 0.3                  # перед повтором разового 5xx или 429
@@ -58,6 +61,10 @@ FAILURE_PAUSE = 60                 # сеть, 429, 5xx: кабинет сейч
 SESSION_PAUSE = 600                # сессию не приняли — новые куки приносит человек
 REFUSED_PAUSE = 600                # иной отказ 4xx этой учётке на этот парк
 DENIED_PAUSE = 3600                # нет прав на парк — сами они не появятся
+# Откуда строка кэша. Строки прежнего источника (карточки исполнителя, у таксистов
+# профессии там нет) считаются устаревшими сразу.
+SOURCE = 'list'
+LIST_PROJECTION = ['id', 'profession_id']
 
 _HEX32 = re.compile(r'^[0-9a-f]{32}$')
 _IDS = re.compile(r'[0-9a-f]{32}')
@@ -165,15 +172,21 @@ def _call(client, method, path, park_id, body=None):
 
 
 def _fetch_profession(client, park_id, driver_id):
-    """(found, profession_id); 404 — водителя в этом парке нет."""
-    try:
-        payload = _call(client, 'POST', PATH_CARD, park_id, body={'driver_id': driver_id})
-    except FleetError as error:
-        if str(error).startswith('Fleet вернул 404'):
-            return False, None
-        raise
-    profile = (((payload or {}).get('driver') or {}).get('driver_profile')) or {}
-    return True, str(profile.get('profession_id') or '').strip() or None
+    """(found, profession_id, поля ответа) из списка исполнителей парка — как колонку
+    «Профессия» собирает сам кабинет. Архив — отдельный сегмент: среди действующих
+    водителя нет — спрашиваем там. Строка с чужим ID не в счёт: неизвестный ключ
+    фильтра кабинет молча пропускает и отдаёт первую страницу (fleet_edm/client.py)."""
+    for archive in (False, True):
+        query = {'contractor_ids': [driver_id]}
+        if archive:
+            query['groups'] = ['archive']
+        payload = _call(client, 'POST', PATH_LIST, park_id,
+                        body={'filter': query, 'projection': LIST_PROJECTION, 'limit': 1})
+        items = payload.get('contractors') if isinstance(payload, dict) else None
+        for item in items or []:
+            if isinstance(item, dict) and str(item.get('id') or '').strip().lower() == driver_id:
+                return True, str(item.get('profession_id') or '').strip() or None, tuple(sorted(item))
+    return False, None, ()
 
 
 def _fetch_names(client, park_id):
@@ -226,13 +239,14 @@ def _ask(db, clients, park_id, driver_id, moment):
         if _blocked(name, park_id, moment):
             continue
         try:
-            found, profession_id = _fetch_profession(client, park_id, driver_id)
+            found, profession_id, fields = _fetch_profession(client, park_id, driver_id)
         except Exception as error:  # noqa: BLE001 — отказ учётки: спросим другую; сбой кабинета: пауза всем
-            _note_failure(error, name, park_id, moment, 'карточка исполнителя')
+            _note_failure(error, name, park_id, moment, 'список исполнителей')
             continue
         if not profession_id:
             log.info('Карточка водителя: кабинет ответил (учётка «%s») — %s', name,
-                     'профессии в карточке нет' if found else 'в этом парке водителя нет')
+                     'профессии в ответе нет, поля: %s' % ', '.join(fields) if found
+                     else 'в этом парке водителя нет')
             return found, None, None
         label, failed = _label(db, client, name, park_id, profession_id, moment)
         log.info('Карточка водителя: кабинет ответил (учётка «%s») — %s, подпись: %s', name, profession_id,
@@ -257,12 +271,12 @@ def lookup(db, driver_id, park_id, clients=None, now=time.monotonic):
     try:
         with db._get_cursor() as cursor:
             cursor.execute('SELECT park_id, found, profession_id, profession_name, '
-                           'EXTRACT(EPOCH FROM now() - fetched_at) FROM wazzup_driver_professions '
+                           'EXTRACT(EPOCH FROM now() - fetched_at), source FROM wazzup_driver_professions '
                            'WHERE driver_id = %s', (driver_id,))
             row = cursor.fetchone()
         known = _shown(*row[1:4]) if row and row[0] == park_id else None
-        if row and row[0] == park_id:
-            settled = row[1] and (row[2] is None or row[3])
+        if row and row[0] == park_id and row[5] == SOURCE:
+            settled = bool(row[1] and row[2] and row[3])
             if float(row[4]) < (FOUND_TTL if settled else MISSING_TTL):
                 return known
         answer = _ask(db, clients or (lambda: cabinet_clients(db)), park_id, driver_id, now())
@@ -271,12 +285,12 @@ def lookup(db, driver_id, park_id, clients=None, now=time.monotonic):
         with db._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO wazzup_driver_professions(driver_id, park_id, found, profession_id, profession_name,
-                                                      fetched_at)
-                VALUES (%s, %s, %s, %s, %s, now())
+                                                      source, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (driver_id) DO UPDATE SET park_id = EXCLUDED.park_id, found = EXCLUDED.found,
                     profession_id = EXCLUDED.profession_id, profession_name = EXCLUDED.profession_name,
-                    fetched_at = EXCLUDED.fetched_at
-            """, (driver_id, park_id) + answer)
+                    source = EXCLUDED.source, fetched_at = EXCLUDED.fetched_at
+            """, (driver_id, park_id) + answer + (SOURCE,))
         return _shown(*answer)
     except Exception:  # noqa: BLE001 — профессия не стоит падения карточки
         log.exception('Карточка водителя: профессия из кабинета не собралась')
