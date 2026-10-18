@@ -476,7 +476,8 @@ class InformerService:
             cur.execute("""
                 SELECT c.id, c.window_start, c.window_end, c.max_per_minute, c.audio_sha256, c.audio_ms,
                        (SELECT COUNT(*) FROM informer_calls x WHERE x.campaign_id = c.id AND x.issued_at > %s),
-                       c.warmup_since
+                       c.warmup_since,
+                       (SELECT MAX(x.issued_at) FROM informer_calls x WHERE x.campaign_id = c.id)
                 FROM informer_campaigns c
                 WHERE c.status = 'active'
                 ORDER BY c.started_at, c.id
@@ -485,9 +486,15 @@ class InformerService:
             issued = []
             more_due = False
             pace_ms = 0
-            for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm in campaigns:
+            for cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm, last_issued in campaigns:
                 if not rules.in_window(now, w_start, w_end):
                     continue
+                # Простой дольше WARMUP_IDLE_MINUTES (открылось окно дня, долгая пауза) — прогрев заново.
+                idle_since = last_issued or campaign_warm
+                if idle_since and (now - idle_since) >= timedelta(minutes=rules.WARMUP_IDLE_MINUTES) \
+                        and (not campaign_warm or campaign_warm <= idle_since):
+                    cur.execute("UPDATE informer_campaigns SET warmup_since = %s WHERE id = %s", (now, cid))
+                    campaign_warm = now
                 # Прогрев: 3, 7, 10, 15, 20 в минуту от запуска рассылки или от паузы робота — что позже.
                 per_minute = self._effective_rate(per_minute, campaign_warm, agent_warm, now)
                 room = min(room_total - len(issued), per_minute - int(issued_last_minute))

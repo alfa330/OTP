@@ -202,7 +202,7 @@ def test_warmup_from_start_and_after_robot_pause(env):
     Ступени по 5 минут от запуска; пауза робота из-за отказов сети (мест ≤ 1) начинает прогрев заново."""
     svc, clock, _ = env
     twelve = {str(n): {'capacity': 2, 'active': 0} for n in range(902, 914)}
-    campaign = make_campaign(svc, phones(60), max_per_minute=20)
+    campaign = make_campaign(svc, phones(120), max_per_minute=20)
     svc.campaign_action(DEPT, campaign['id'], 'start')
     first = poll(svc, twelve)
     assert len(first['calls']) == 3 and first['dial_gap_ms'] == 20000       # ступень 3 в минуту — раз в 20 с
@@ -227,6 +227,14 @@ def test_warmup_from_start_and_after_robot_pause(env):
     clock.tick(seconds=30)
     assert len(poll(svc, twelve)['calls']) == 2                               # связь вернулась: 3 в минуту, 1 уже был
     assert svc.campaign_detail(DEPT, campaign['id'])['warmup_rate'] == 3
+    # Простой дольше 30 минут (ночь между окнами, долгая пауза) — прогрев заново с 3 в минуту.
+    clock.tick(minutes=25)
+    assert len(poll(svc, twelve)['calls']) == 20                              # прогрев после паузы робота прошёл
+    clock.tick(minutes=31)
+    assert len(poll(svc, twelve)['calls']) == 3
+    assert svc.campaign_detail(DEPT, campaign['id'])['warmup_rate'] == 3
+    clock.tick(minutes=5)
+    assert len(poll(svc, twelve)['calls']) == 7
     # Рассылка с темпом ниже ступени — прогрев её не трогает.
     small = make_campaign(svc, phones(5, start=500), max_per_minute=2)
     svc.campaign_action(DEPT, campaign['id'], 'pause')
