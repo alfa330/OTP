@@ -389,9 +389,72 @@ test('чат закрыт — подписки сняты; новая лента
     } finally { bare.close(); }
 });
 
+// Лента с сообщениями-строками для открытия на найденном (поиск по тексту): у строки
+// своё место в ленте, getBoundingClientRect считает его относительно окна, как браузер.
+function threadWithRows(ids, { rowHeight = 100, client = 600 } = {}) {
+    const box = threadBox({ content: ids.length * rowHeight, client });
+    const rows = ids.map((messageId, index) => ({
+        dataset: { messageId }, offset: box.padding / 2 + index * rowHeight,
+        getBoundingClientRect() { return { top: this.offset - box.top, height: rowHeight }; },
+    }));
+    box.querySelectorAll = (selector) => { assert.equal(selector, '[data-message-id]'); return rows; };
+    box.getBoundingClientRect = () => ({ top: 0, height: box.clientHeight });
+    return box;
+}
+
+test('чат из поиска открывается на найденном: строка посередине, к концу лента не прилипает', () => {
+    const h = threadEnd();
+    try {
+        const ids = Array.from({ length: 50 }, (_, index) => `m${index}`);
+        const box = threadWithRows(ids);
+        const found = [];
+        const focus = { current: { key: 'A', messageId: 'm20', done: (row) => found.push(row?.dataset.messageId ?? null) } };
+        h.render({ chatKey: 'A', loaded: false, focus }, box);
+        h.render({ chatKey: 'A', loaded: true, focus });
+        // Строка 20: верх 2012, посередине окна 600 → прокрутка 2012 − (600 − 100) / 2.
+        assert.equal(box.top, 12 + 2000 - 250);
+        assert.deepEqual(found, ['m20']);
+        assert.equal(focus.current, null);
+        // Поздняя заметка или поле ввода не уводят от найденного к концу.
+        box.resize({ content: 5200 }); h.observed(box.content);
+        box.resize({ client: 520 }); h.observed(box);
+        assert.equal(box.top, 1762);
+        // Повторное открытие того же чата — снова с конца: цель израсходована.
+        openThread(h, box, 'A', 5200);
+        assert.equal(box.gap(), 0);
+    } finally { h.close(); }
+});
+
+test('найденное у самого конца ленты — лента держится у конца; нет в ленте — конец и сообщение', () => {
+    const h = threadEnd();
+    try {
+        const box = threadWithRows(Array.from({ length: 10 }, (_, index) => `m${index}`));
+        const focus = { current: { key: 'A', messageId: 'm9', done() {} } };
+        h.render({ chatKey: 'A', loaded: false, focus }, box);
+        h.render({ chatKey: 'A', loaded: true, focus });
+        assert.equal(box.gap(), 0);
+        box.resize({ content: 1100 }); h.observed(box.content);
+        assert.equal(box.gap(), 0);
+        const missing = [];
+        const other = threadWithRows(['m1', 'm2'], { client: 100 });
+        const gone = { current: { key: 'B', messageId: 'deleted', done: (row) => missing.push(row) } };
+        h.render({ chatKey: 'B', loaded: false, focus: gone }, other);
+        h.render({ chatKey: 'B', loaded: true, focus: gone });
+        assert.deepEqual(missing, [null]);
+        assert.equal(other.gap(), 0);
+        // Цель другого чата чужую ленту не трогает.
+        const third = threadWithRows(['m1', 'm2', 'm3'], { client: 100 });
+        const elsewhere = { current: { key: 'X', messageId: 'm1', done() { throw new Error('не тот чат'); } } };
+        h.render({ chatKey: 'C', loaded: false, focus: elsewhere }, third);
+        h.render({ chatKey: 'C', loaded: true, focus: elsewhere });
+        assert.equal(third.gap(), 0);
+        assert.equal(elsewhere.current.key, 'X');
+    } finally { h.close(); }
+});
+
 test('раздел: лента подключена к useThreadEnd, загрузка переписки не крутит её по кадру', () => {
     const view = readFileSync('src/components/wazzup/WazzupChatsView.jsx', 'utf8').replace(/\r\n/g, '\n');
-    assert.match(view, /\n {4}useThreadEnd\(threadBox, \{ chatKey: selectedKey, loaded: thread !== null \}\);\n/);
+    assert.match(view, /\n {4}useThreadEnd\(threadBox, \{ chatKey: selectedKey, loaded: thread !== null, focus: threadFocus \}\);\n/);
     assert.match(view, /<div ref=\{threadBox\} className="[^"]*overflow-y-auto[^"]*">\n\s*<div className="mx-auto w-full/);
     const start = view.indexOf('    const loadThread = ');
     const loadThread = view.slice(start, view.indexOf('    const refreshPilotThread = ', start));

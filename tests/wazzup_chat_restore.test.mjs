@@ -44,13 +44,17 @@ await build({ stdin: { contents: `
         const pilotRefresh=useRef({id:0,controller:null}), liveChatSummaries=useRef({seq:0,items:new Map()}), threadBox=useRef(null);
         const accounts=[], headers=()=>({}), showToast=(...args)=>h().toasts.push(args);
         const loadChannels=()=>h().channels.push(accountRef.current);
+        // Поиск по тексту сообщений (useMessageSearch) и открытие ленты на найденном.
+        const [searchFocusId,setSearchFocusId]=useState(null), threadFocus=useRef(null);
+        const messageSearch={search:(value)=>h().messageSearch.push(['search',value]),reset:()=>h().messageSearch.push(['reset'])};
+        const flashMessage=(...args)=>h().flashes.push(args), messageRow=()=>null, centerMessageRow=()=>{};
         const onInitialChatConsumed=()=>h().consume();
         ${cleanup}
         ${loaders}
         ${navigation}
         return {account, search, appliedSearch, selected, thread, chats, chatsTotal, deepLinkResolving, deepLinkMiss,
             deepLinkMany, deepLinkChatUrl, pending:deepLinkPending.current, loadChats, openChat, onSearchInput, switchAccount,
-            lookup:deepLinkRequest.current};
+            lookup:deepLinkRequest.current, openSearchHit, searchFocusId, focus:threadFocus.current};
     }
 `, resolveDir: join(process.cwd(), 'src/components/wazzup'), loader: 'jsx' }, outfile: output,
     bundle: true, format: 'esm', platform: 'node' });
@@ -66,7 +70,7 @@ function fixture(initialChat, { autoConsume = false, operator = false } = {}) {
     let cursor = 0, effects = [], dirty = false, unmounted = false, lateWrites = 0;
     const props = { initialChat, operator };
     const h = {
-        requests, toasts: [], channels: [], consumed: 0,
+        requests, toasts: [], channels: [], consumed: 0, messageSearch: [], flashes: [],
         get(url, config) {
             let resolve, reject;
             const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -253,5 +257,48 @@ test('a newer exact target supersedes an older lookup, and unmount aborts pendin
         assert.equal(pending.signal.aborted, true);
         pending.resolve({ items: [a] }); await flush();
         assert.equal(h.lateWrites, 0);
+    } finally { h.restore(); }
+});
+
+test('поиск по тексту: ввод запускает его вместе со списком; смена аккаунта и ссылка по номеру его гасят', async () => {
+    const h = fixture(null);
+    try {
+        let out = h.render();
+        out.onSearchInput('удостоверение');
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        out = h.render();
+        assert.equal(h.list().params.q, 'удостоверение');
+        assert.deepEqual(h.messageSearch, [['search', 'удостоверение']]);
+        out.switchAccount('potok');
+        assert.deepEqual(h.messageSearch.at(-1), ['reset']);
+    } finally { h.restore(); }
+    const linked = fixture({ phone: a.chatId });
+    try {
+        linked.render();
+        assert.deepEqual(linked.messageSearch, [['reset']], 'номер из ссылки ищет чат, а не сообщения');
+    } finally { linked.restore(); }
+});
+
+test('строка «Сообщений» открывает чат на найденном; обычное открытие эту цель гасит', async () => {
+    const h = fixture(null);
+    try {
+        let out = h.render();
+        out.openSearchHit({ messageId: 'found-7', chat: b });
+        out = h.render();
+        assert.equal(out.selected, b);
+        assert.equal(h.thread().params.focus, 'found-7');
+        assert.deepEqual([h.thread().params.channel_id, h.thread().params.chat_id], [b.channelId, b.chatId]);
+        assert.equal(out.searchFocusId, 'found-7');
+        assert.deepEqual([out.focus.key, out.focus.messageId], [JSON.stringify(['op', b.channelId, b.chatId]), 'found-7']);
+        out.openChat(a);
+        out = h.render();
+        assert.equal(h.thread().params.focus, undefined);
+        assert.equal(out.searchFocusId, null);
+        assert.equal(out.focus, null, 'прежняя цель не должна открыть чат на старом найденном');
+        // «Более ранние» цель не ставит и в запрос не идёт.
+        out.openSearchHit({ messageId: 'found-8', chat: a });
+        h.thread().resolve({ items: [{ messageId: 'found-8', dt: '2026-10-12T10:00:00Z' }], hasMore: true });
+        await flush(); out = h.render();
+        assert.equal(h.thread().params.focus, 'found-8');
     } finally { h.restore(); }
 });

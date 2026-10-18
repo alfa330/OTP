@@ -37,6 +37,25 @@ def escape_like(value):
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
+def _row_select(account):
+    """(SELECT строки списка вместе с FROM, выражение счётчика ждущих) — одно на
+    страницу списка и на чаты найденных сообщений (wazzup/chat_search.py):
+    открытый из поиска чат несёт ту же строку, что и из списка."""
+    if account == 'op':
+        waiting = 'COALESCE(s.unread_count, 0)'
+        join = (' LEFT JOIN wazzup_chat_read_state s ON s.account = c.account'
+                ' AND s.channel_id = c.channel_id AND s.chat_id = c.chat_id')
+    else:
+        waiting, join = '0', ''
+    select = f"""
+        SELECT c.channel_id, c.chat_id, c.chat_type, c.contact_name, c.contact_phone,
+               c.last_message_at, c.last_message_text, c.last_message_is_echo,
+               c.messages_count, c.inbound_count, c.outbound_count, {waiting},
+               {last_message_columns('c')}
+          FROM wazzup_chats c{join}"""
+    return select, waiting
+
+
 def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0, chat_id=None):
     """((SQL, параметры) счёта, (SQL, параметры) страницы).
 
@@ -54,24 +73,27 @@ def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0, chat_i
         like = f'%{escape_like(q)}%'
         params.extend([like, like, like])
     condition = ' AND '.join(where)
-    if account == 'op':
-        waiting = 'COALESCE(s.unread_count, 0)'
-        join = (' LEFT JOIN wazzup_chat_read_state s ON s.account = c.account'
-                ' AND s.channel_id = c.channel_id AND s.chat_id = c.chat_id')
-        order = f'({waiting} > 0) DESC, c.last_message_at DESC NULLS LAST'
-    else:
-        waiting, join, order = '0', '', 'c.last_message_at DESC NULLS LAST'
+    select, waiting = _row_select(account)
+    order = (f'({waiting} > 0) DESC, c.last_message_at DESC NULLS LAST' if account == 'op'
+             else 'c.last_message_at DESC NULLS LAST')
     count = (f'SELECT COUNT(*) FROM wazzup_chats c WHERE {condition}', list(params))
-    page = (f"""
-        SELECT c.channel_id, c.chat_id, c.chat_type, c.contact_name, c.contact_phone,
-               c.last_message_at, c.last_message_text, c.last_message_is_echo,
-               c.messages_count, c.inbound_count, c.outbound_count, {waiting},
-               {last_message_columns('c')}
-          FROM wazzup_chats c{join}
+    page = (f"""{select}
          WHERE {condition}
          ORDER BY {order}
          LIMIT %s OFFSET %s""", params + [limit, offset])
     return count, page
+
+
+def chat_rows_query(account, pairs):
+    """(SQL, параметры) строк списка для чатов pairs = [(канал, номер), …] —
+    чаты страницы найденных сообщений. Строк ровно столько, сколько чатов нашлось."""
+    channels = [channel for channel, _ in pairs]
+    numbers = [number for _, number in pairs]
+    select, _ = _row_select(account)
+    return (f"""{select}
+          JOIN unnest(%s::text[], %s::text[]) AS p(channel_id, chat_id)
+            ON p.channel_id = c.channel_id AND p.chat_id = c.chat_id
+         WHERE c.account = %s""", [channels, numbers, account])
 
 
 CHANNEL_COUNTS_SQL = ('SELECT chat_id, COUNT(*) FROM wazzup_chats'

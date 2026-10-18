@@ -41,7 +41,9 @@ import ChatMessageVideo from './ChatMessageVideo';
 import ChatAudioPlayer from './ChatAudioPlayer';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import useInternalNotes from './useInternalNotes';
-import useThreadEnd from './useThreadEnd';
+import useThreadEnd, { centerMessageRow, messageRow } from './useThreadEnd';
+import useMessageSearch from './useMessageSearch';
+import ChatMessageHits from './ChatMessageHits';
 import ChatInternalNote from './ChatInternalNote';
 import ChatMessageText from './ChatMessageText';
 import ChatInternalNoteComposer from './ChatInternalNoteComposer';
@@ -1015,6 +1017,12 @@ function ChatsWorkspace(props) {
     const [chatsError, setChatsError] = useState(null);
     const [search, setSearch] = useState('');
     const [appliedSearch, setAppliedSearch] = useState('');
+    // Поиск по тексту сообщений — блок «Сообщения» под найденными чатами.
+    const messageSearch = useMessageSearch({ apiBaseUrl, headers, account });
+    // Строка «Сообщений», с которой открыт чат: она отмечена в списке.
+    const [searchFocusId, setSearchFocusId] = useState(null);
+    // Сообщение, на котором откроется грузящаяся лента (useThreadEnd).
+    const threadFocus = useRef(null);
     const [selected, setSelected] = useState(null);       // {channelId, chatId, ...}
     const [thread, setThread] = useState(null);
     const [inboundTime, setInboundTime] = useState(null);
@@ -1078,22 +1086,25 @@ function ChatsWorkspace(props) {
         setReplySelection((current) => current?.key === selectedKey
             && (!messageId || current.message.messageId === messageId) ? null : current);
     }, [selectedKey]);
+    // Короткая обводка пузыря: сюда привела цитата или поиск.
+    const flashMessage = useCallback((row, ms = 1400) => {
+        clearTimeout(quoteHighlight.current.timer);
+        quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
+        row.dataset.quoteHighlight = 'true';
+        quoteHighlight.current = { node: row, timer: setTimeout(() => {
+            row.removeAttribute('data-quote-highlight');
+        }, ms) };
+    }, []);
     const jumpToQuote = useCallback((messageId) => {
-        const row = [...(threadBox.current?.querySelectorAll('[data-message-id]') || [])]
-            .find((node) => node.dataset.messageId === messageId);
+        const row = messageRow(threadBox.current, messageId);
         if (!row) {
             showToast?.(operator ? 'Исходное сообщение не загружено. Нажмите «Более ранние».'
                 : 'Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
             return;
         }
-        clearTimeout(quoteHighlight.current.timer);
-        quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
         row.scrollIntoView({ block: 'center', behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-        row.dataset.quoteHighlight = 'true';
-        quoteHighlight.current = { node: row, timer: setTimeout(() => {
-            row.removeAttribute('data-quote-highlight');
-        }, 1400) };
-    }, [showToast, operator]);
+        flashMessage(row);
+    }, [showToast, operator, flashMessage]);
     useEffect(() => {
         setReplySelection(null);
         // A floating attachment keeps the original conversation snapshot.
@@ -1231,7 +1242,9 @@ function ChatsWorkspace(props) {
         });
     };
 
-    const loadThread = (chat, { before = null } = {}) => {
+    /* focus — сообщение из поиска: сервер отдаёт ленту от него до конца, и
+       useThreadEnd ставит его посередине окна вместо конца ленты. */
+    const loadThread = (chat, { before = null, focus = null } = {}) => {
         pilotRefresh.current.controller?.abort();
         pilotRefresh.current.id += 1;
         threadRequest.current.controller?.abort();
@@ -1239,11 +1252,18 @@ function ChatsWorkspace(props) {
         const requestId = threadRequest.current.id + 1;
         const requestAccount = accountRef.current;
         threadRequest.current = { id: requestId, controller };
-        if (!before) { setThread(null); setThreadLoadingMore(false); } else setThreadLoadingMore(true);
+        if (!before) {
+            setThread(null); setThreadLoadingMore(false);
+            threadFocus.current = focus ? { key: pilotChatKey(requestAccount, chat), messageId: focus,
+                done: (row) => {
+                    if (row) flashMessage(row, 2200);
+                    else showToast?.('Сообщение не найдено в переписке — возможно, его удалили', 'info');
+                } } : null;
+        } else setThreadLoadingMore(true);
         axios.get(`${apiBaseUrl}/api/wazzup/chat-messages`, {
             headers: headers(), signal: controller.signal,
             params: { channel_id: chat.channelId, chat_id: chat.chatId,
-                      before: before || undefined, limit: THREAD_PAGE,
+                      before: before || undefined, focus: (!before && focus) || undefined, limit: THREAD_PAGE,
                       account: accountRef.current },
         }).then((r) => {
             if (requestId !== threadRequest.current.id || requestAccount !== accountRef.current) return;
@@ -1269,7 +1289,8 @@ function ChatsWorkspace(props) {
             if (axios.isCancel?.(e) || e.name === 'CanceledError') return;
             if (requestId !== threadRequest.current.id) return;
             setThreadLoadingMore(false);
-            if (!before) setThread([]);
+            // Ленты нет вовсе — искать в ней найденное сообщение незачем.
+            if (!before) { threadFocus.current = null; setThread([]); }
             showToast?.('Не удалось загрузить переписку', 'error');
         });
     };
@@ -1432,7 +1453,7 @@ function ChatsWorkspace(props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [localSignature]);
     // Открытый чат — с последних сообщений, и лента держится на них, пока человек внизу.
-    useThreadEnd(threadBox, { chatKey: selectedKey, loaded: thread !== null });
+    useThreadEnd(threadBox, { chatKey: selectedKey, loaded: thread !== null, focus: threadFocus });
     const attachmentAllowed = Boolean(attachmentSelection
         && attachmentSelection.account === account && attachmentSelection.ownerId === user?.id
         && attachmentSelection.apiBaseUrl === apiBaseUrl
@@ -1457,6 +1478,8 @@ function ChatsWorkspace(props) {
     const visibleChats = useMemo(() => orderChatList(chats, waiting, {
         unreadOnly: unreadOnly && pilot.enabled, search: appliedSearch,
     }), [chats, waiting, unreadOnly, pilot.enabled, appliedSearch]);
+    // «Ожидают ответа» — про чаты, а не про сообщения с текстом.
+    const searchHitsShown = !(unreadOnly && pilot.enabled) && Boolean(appliedSearch) && Boolean(messageSearch.query);
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
     const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
@@ -1491,6 +1514,7 @@ function ChatsWorkspace(props) {
         chatsRequest.current.controller?.abort();
         threadRequest.current.controller?.abort();
         setSearch(''); setAppliedSearch('');
+        messageSearch.reset(); setSearchFocusId(null);
         setSelected(null); setThread(null); setThreadHasMore(false);
         setDeepLinkResolving(false);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
@@ -1510,18 +1534,35 @@ function ChatsWorkspace(props) {
         clearTimeout(searchDebounce.current);
         searchDebounce.current = setTimeout(() => {
             setAppliedSearch(value.trim());
+            // Чаты по имени и номеру и сообщения по тексту — двумя запросами разом.
             loadChats({ q: value.trim() });
+            messageSearch.search(value);
         }, 350);
     };
 
-    const openChat = (chat) => {
+    const openChat = (chat, { focus = null } = {}) => {
         deepLinkRequest.current?.abort();
         setDeepLinkResolving(false);
         setSelected(chat);
         setThreadHasMore(false);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
         deepLinkPending.current = false;
-        loadThread(chat);
+        if (!focus) setSearchFocusId(null);
+        loadThread(chat, { focus });
+    };
+
+    /* Строка «Сообщений»: чат открывается сразу на найденном. Уже открытый чат,
+       где это сообщение загружено, не перечитывается — лента лишь встаёт на него. */
+    const openSearchHit = (hit) => {
+        setSearchFocusId(hit.messageId);
+        const loadedRow = pilotChatKey(accountRef.current, hit.chat) === pilotChatKey(accountRef.current, selected)
+            && thread !== null ? messageRow(threadBox.current, hit.messageId) : null;
+        if (loadedRow) {
+            centerMessageRow(threadBox.current, loadedRow);
+            flashMessage(loadedRow, 2200);
+            return;
+        }
+        openChat(hit.chat, { focus: hit.messageId });
     };
 
     /* Переход по ссылке на чат (?view=wazzup_chats&chat=…).
@@ -1571,6 +1612,8 @@ function ChatsWorkspace(props) {
         const q = target.channelId ? '' : target.phone;
         setSearch(q);
         setAppliedSearch(q);
+        // Номер из ссылки ищет чат, а не сообщения с этими цифрами.
+        messageSearch.reset();
         if (target.channelId) openChat({ channelId: target.channelId, chatId: target.chatId });
         else setDeepLinkResolving(true);
         const controller = new AbortController();
@@ -1860,7 +1903,7 @@ function ChatsWorkspace(props) {
                         <div className="relative">
                             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                             <input value={search} onChange={(e) => onSearchInput(e.target.value)}
-                                   placeholder="Имя или телефон…"
+                                   placeholder="Имя, телефон или текст…"
                                    className={`${iosInput} py-2 pl-9 text-[13px]`} />
                         </div>
                         {pilot.enabled && <div className="mt-2 flex items-center gap-2 text-xs">
@@ -1884,7 +1927,8 @@ function ChatsWorkspace(props) {
                                 <AlertCircle size={15} /> {chatsError}
                             </div>
                         )}
-                        {visibleChats !== null && visibleChats.length === 0 && !chatsError && (
+                        {visibleChats !== null && visibleChats.length === 0 && !chatsError
+                            && !(searchHitsShown && (messageSearch.items.length || messageSearch.loading || messageSearch.error)) && (
                             <div className="px-4 py-8 text-center text-sm text-slate-400">
                                 {/* «База пуста» и «фильтр ничего не нашёл» — разные вещи.
                                     Раньше в эту строку попадали только руками через
@@ -1969,6 +2013,12 @@ function ChatsWorkspace(props) {
                                     className="block w-full py-2.5 text-center text-[12px] font-semibold text-blue-600 hover:bg-slate-50">
                                 Показать ещё ({chats.length} из {chatsTotal})
                             </button>
+                        )}
+                        {searchHitsShown && (
+                            <ChatMessageHits search={messageSearch} formatTime={fmtListDate}
+                                currentId={selected && searchFocusId ? searchFocusId : null}
+                                onOpen={openSearchHit} onMore={messageSearch.more}
+                                onRetry={() => messageSearch.search(appliedSearch)} />
                         )}
                     </div>
                 </div>

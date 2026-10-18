@@ -9347,6 +9347,7 @@ def api_wazzup_chats():
         offset = 0
     # Ждущие ответа — первыми (wazzup/chat_list.py).
     count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset, chat_id)
+    started = time.perf_counter()
     try:
         with db._get_cursor() as cursor:
             cursor.execute(*count)
@@ -9354,10 +9355,51 @@ def api_wazzup_chats():
             cursor.execute(*page)
             items = [wazzup_chat_list.chat_list_item(r) for r in cursor.fetchall()]
             wazzup_chat_list.attach_channel_counts(cursor, account, items)
+        _record_elapsed_server_timing('chats', started)
         return jsonify({"status": "success", "items": items, "total": total}), 200
     except Exception as error:
         logging.exception("wazzup chats failed")
         return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/wazzup/chat-search', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_chat_search():
+    """Блок «Сообщения» поиска раздела: сообщения, в тексте которых есть запрос,
+    свежие сверху (wazzup/chat_search.py). Аудитория та же, что у списка чатов и
+    ленты: кто видит переписку, тот и ищет по ней."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _wazzup_chat_reader_guard()
+    if err:
+        return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
+    query = wazzup_chat_search.searchable_query(request.args.get('q'))
+    if not query:
+        return jsonify({"status": "success", "items": [], "next": None}), 200
+    try:
+        limit = min(max(int(request.args.get('limit', wazzup_chat_search.PAGE_SIZE)), 1),
+                    wazzup_chat_search.MAX_PAGE_SIZE)
+    except (TypeError, ValueError):
+        limit = wazzup_chat_search.PAGE_SIZE
+    try:
+        before = wazzup_chat_search.decode_cursor((request.args.get('before') or '').strip())
+    except ValueError:
+        return jsonify({"error": "Некорректный указатель страницы"}), 400
+    started = time.perf_counter()
+    try:
+        with db._get_cursor() as cursor:
+            items, next_cursor = wazzup_chat_search.search_messages(cursor, account, query, limit, before)
+        _record_elapsed_server_timing('search', started)
+        return jsonify({"status": "success", "items": items, "next": next_cursor}), 200
+    except psycopg2.errors.QueryCanceled:
+        logging.warning("wazzup chat search timed out: %d chars", len(query))
+        return jsonify({"error": "Поиск по тексту занял слишком долго — уточните запрос"}), 503
+    except Exception:
+        logging.exception("wazzup chat search failed")
+        return jsonify({"error": "Не удалось выполнить поиск по сообщениям"}), 500
 
 
 @app.route('/api/wazzup/chat-messages', methods=['GET', 'OPTIONS'])
@@ -9376,6 +9418,8 @@ def api_wazzup_chat_messages():
     if not channel_id or not chat_id:
         return jsonify({"error": "channel_id and chat_id are required"}), 400
     before = (request.args.get('before') or '').strip() or None  # ISO-курсор вверх
+    # Сообщение из поиска: лента открывается на нём (wazzup/chat_search.py).
+    focus = (request.args.get('focus') or '').strip()[:200] or None
     try:
         limit = min(max(int(request.args.get('limit', 50)), 1), 200)
     except (TypeError, ValueError):
@@ -9389,12 +9433,19 @@ def api_wazzup_chat_messages():
         with db._get_cursor() as cursor:
             from wazzup.pilot import MESSAGE_SELECT, message_item
             from wazzup.window import last_inbound_at
-            cursor.execute(MESSAGE_SELECT + " WHERE " + ' AND '.join(where)
-                           + " ORDER BY m.dt DESC, m.message_id DESC LIMIT %s", params + [limit + 1])
-            rows = cursor.fetchall()
+            window = None
+            if focus and not before:
+                window = wazzup_chat_search.focus_window(cursor, MESSAGE_SELECT, account,
+                                                         channel_id, chat_id, focus)
+            if window is None:
+                cursor.execute(MESSAGE_SELECT + " WHERE " + ' AND '.join(where)
+                               + " ORDER BY m.dt DESC, m.message_id DESC LIMIT %s", params + [limit + 1])
+                rows = cursor.fetchall()
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+            else:
+                rows, has_more = window
             last_inbound = last_inbound_at(cursor, account, channel_id, chat_id)
-        has_more = len(rows) > limit
-        rows = rows[:limit]
         # wazzupDt — время отправки по WhatsApp у входящего, которое Wazzup
         # доставил с опозданием (dt у такого — минута доставки).
         items = [message_item(row) for row in reversed(rows)]
@@ -9412,6 +9463,7 @@ from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
 from wazzup import access as wazzup_access  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
 from wazzup import chat_list as wazzup_chat_list  # noqa: E402
+from wazzup import chat_search as wazzup_chat_search  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
@@ -72184,7 +72236,15 @@ if __name__ == '__main__':
     _legacy_task_photos_timer = threading.Timer(60, _convert_legacy_task_photos)
     _legacy_task_photos_timer.daemon = True
     _legacy_task_photos_timer.start()
-    
+
+    # Индексы поиска «Чатов ОП» по тексту сообщений (wazzup/chat_search.py) —
+    # CONCURRENTLY своим соединением: запись вебхуков Wazzup не встаёт. Тоже не
+    # в момент старта; когда индексы уже есть, это лишь сверка с каталогом.
+    _chat_search_index_timer = threading.Timer(90, wazzup_chat_search.ensure_search_indexes,
+                                               args=(lambda: psycopg2.connect(**_build_postgres_connection_params()),))
+    _chat_search_index_timer.daemon = True
+    _chat_search_index_timer.start()
+
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")
     
