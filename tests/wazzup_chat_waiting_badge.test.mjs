@@ -59,7 +59,7 @@ await build({
     entryPoints: ['src/components/wazzup/WazzupWaitingKeeper.jsx'], outfile: output,
     bundle: true, format: 'esm', platform: 'node', jsx: 'automatic',
     plugins: [{ name: 'waiting-keeper', setup(builder) {
-        builder.onResolve({ filter: /^(react|\.\/useChatPilot|\.\/useSharedChatUnread|\.\/sendQueue|\.\/chatWaitingBadge)$/ },
+        builder.onResolve({ filter: /^(react|\.\/useChatPilot|\.\/useSharedChatUnread|\.\/sendQueue|\.\/chatWaitingBadge|\.\/workspaceStore)$/ },
             ({ path }) => ({ path, namespace: 'keeper' }));
         builder.onLoad({ filter: /.*/, namespace: 'keeper' }, ({ path }) => ({ loader: 'js', contents: {
             react: 'const h=()=>globalThis.__keeper; export const useEffect=(...v)=>h().useEffect(...v), useRef=(...v)=>h().useRef(...v);',
@@ -68,6 +68,7 @@ await build({
             './sendQueue': 'export const useOutbox=()=>globalThis.__keeper.outbox;',
             './chatWaitingBadge': `export const publishWaiting=(...v)=>globalThis.__keeper.published.push(v);
                 export const useSectionCountsWaiting=()=>globalThis.__keeper.sectionCounts;`,
+            './workspaceStore': 'export const useWorkspace=(owner)=>globalThis.__keeper.workspace(owner);',
         }[path] }));
     } }],
 });
@@ -79,8 +80,11 @@ function keeper(props = {}) {
     const h = {
         published: [], outbox: [{ clientMessageId: 'x' }], sectionCounts: false, pilotProps: null, unreadProps: null,
         pilotState: { enabled: false, capability: null, connection: 'connecting' },
-        unreadState: { ready: false, total: 0, items: {}, apply(changes) { h.applied.push(...changes); }, refresh: async () => {} },
+        unreadState: { ready: false, total: 0, chats: 0, items: {}, apply(changes) { h.applied.push(...changes); }, refresh: async () => {} },
         applied: [],
+        // Хранилище смены верификатора (workspaceStore.js): пока не загрузилось — «закрыто».
+        workspaceState: { ready: false, locked: true }, workspaceOwners: [],
+        workspace(owner) { h.workspaceOwners.push(owner); return h.workspaceState; },
         useRef(initial) { const i = cursor++; return slots[i] ??= { current: initial }; },
         useEffect(effect, deps) {
             const i = cursor++, old = slots[i];
@@ -123,17 +127,21 @@ test('сторож: поток только счётчика у тех, кто �
     h.pilotState = { enabled: true, capability: { enabled: true }, connection: 'live' };
     h.render();
     assert.deepEqual(h.published, []);
-    h.unreadState = { ...h.unreadState, ready: true, total: 12 };
+    // В бейдже — чаты, а не сообщения (владелец, 18.10.2026): 30 сообщений в 12 чатах — это 12.
+    h.unreadState = { ...h.unreadState, ready: true, total: 30, chats: 12 };
     h.render();
     assert.deepEqual(h.published, [[12, 'keeper']]);
-    h.unreadState = { ...h.unreadState, total: 3 };
+    h.unreadState = { ...h.unreadState, total: 31, chats: 12 };
+    h.render();
+    assert.deepEqual(h.published, [[12, 'keeper']], 'ещё одно сообщение в том же чате — число чатов то же');
+    h.unreadState = { ...h.unreadState, total: 4, chats: 3 };
     h.render();
     assert.deepEqual(h.published.at(-1), [3, 'keeper']);
     // Раздел открыт на «Чатах» — сторож без потока и без записей.
     h.sectionCounts = true;
     h.render();
     assert.deepEqual([h.pilotProps.active, h.unreadProps.enabled], [false, false]);
-    h.unreadState = { ...h.unreadState, total: 9 };
+    h.unreadState = { ...h.unreadState, total: 9, chats: 9 };
     h.render();
     assert.deepEqual(h.published.at(-1), [3, 'keeper']);
     h.unmount();
@@ -147,21 +155,54 @@ test('сторож: обработка не открыта или закрыта
     assert.deepEqual(denied.published, [[null, 'keeper']]);
     const revoked = keeper();
     revoked.pilotState = { enabled: true, capability: { enabled: true }, connection: 'live' };
-    revoked.unreadState = { ...revoked.unreadState, ready: true, total: 5 };
+    revoked.unreadState = { ...revoked.unreadState, ready: true, total: 7, chats: 5 };
     revoked.render();
     revoked.pilotState = { enabled: false, capability: null, connection: 'unavailable' };
     revoked.render();
     assert.deepEqual(revoked.published, [[5, 'keeper'], [null, 'keeper']]);
     const viewer = keeper({ mayProcess: false });
     viewer.render();
-    assert.deepEqual([viewer.pilotProps.active, viewer.unreadProps.enabled], [false, false]);
+    assert.deepEqual([viewer.pilotProps.active, viewer.pilotProps.mayProcess, viewer.unreadProps.enabled], [false, false, false]);
+    assert.deepEqual(viewer.published, [[null, 'keeper']]);
+});
+
+test('сторож верификатора: до QR числа нет, после скана — без перезагрузки страницы, закрыли доступ — снова нет', () => {
+    // Портал открыли до подтверждения доступа: раньше ответ сервера «закрыто»,
+    // спрошенный один раз при входе, оставался навсегда, и вне раздела число застывало.
+    const h = keeper({ operator: true, userId: 7 });
+    h.render();
+    assert.equal(h.workspaceOwners.at(-1), 7, 'замок — из хранилища смены этого человека');
+    assert.deepEqual([h.pilotProps.mayProcess, h.pilotProps.active, h.unreadProps.enabled], [false, false, false]);
+    assert.deepEqual(h.published, [[null, 'keeper']]);
+    h.workspaceState = { ready: true, locked: true };            // загрузилось: доступ не подтверждён
+    h.render();
+    assert.deepEqual([h.pilotProps.mayProcess, h.pilotProps.active], [false, false]);
+    h.workspaceState = { ready: true, locked: false };           // супервайзер отсканировал QR
+    h.render();
+    assert.deepEqual([h.pilotProps.mayProcess, h.pilotProps.active, h.unreadProps.enabled], [true, true, true],
+        'useChatPilot заново спросит сервер: изменилась подсказка mayProcess');
+    h.pilotState = { enabled: true, capability: { enabled: true }, connection: 'live' };
+    h.unreadState = { ...h.unreadState, ready: true, total: 6, chats: 4 };
+    h.render();
+    assert.deepEqual(h.published.at(-1), [4, 'keeper']);
+    h.workspaceState = { ready: true, locked: true };            // доступ закрыли (сессию прервали)
+    h.render();
+    assert.deepEqual(h.published.at(-1), [null, 'keeper']);
+    assert.equal(h.pilotProps.mayProcess, false);
+    // У супер-админа замка нет: хранилище смены не спрашивается для него вовсе.
+    const admin = keeper({ operator: false, userId: 1 });
+    admin.render();
+    assert.equal(admin.workspaceOwners.at(-1), undefined);
+    assert.equal(admin.pilotProps.mayProcess, true);
 });
 
 test('раздел: на «Чатах» аккаунта «Верификаторы» держит счётчик сам и отдаёт его боковой панели', () => {
     const view = readFileSync('src/components/wazzup/WazzupChatsView.jsx', 'utf8').replace(/\r\n/g, '\n');
     assert.match(view, /import \{ claimSectionWaiting, publishWaiting \} from '\.\/chatWaitingBadge';/);
     assert.match(view, /const countsWaiting = account === 'op' && pilot\.enabled && mainTab === 'chats';\n\s*useEffect\(\(\) => \(countsWaiting \? claimSectionWaiting\(\) : undefined\), \[countsWaiting\]\);/);
-    assert.match(view, /if \(countsWaiting && unread\.ready\) publishWaiting\(unread\.total\);\n\s*\}, \[countsWaiting, unread\.ready, unread\.total\]\);/);
+    // Чаты, а не сообщения: «Ожидают ответа · N» в разделе остаётся числом сообщений.
+    assert.match(view, /if \(countsWaiting && unread\.ready\) publishWaiting\(unread\.chats\);\n\s*\}, \[countsWaiting, unread\.ready, unread\.chats\]\);/);
+    assert.match(view, /Ожидают ответа · \{unread\.total\}/);
 });
 
 test('боковая панель: бейдж во всех трёх ветках меню, перерисовка по числу, сторож — только у обрабатывающих', () => {
@@ -180,10 +221,12 @@ test('боковая панель: бейдж во всех трёх ветка�
     const helper = app.slice(app.indexOf('const renderWazzupChatsSidebarInner = '), app.indexOf('const renderEventsSidebarItemInner = '));
     assert.equal(helper.split('waitingBadgeLabel(wazzupWaitingCount)').length - 1, 2, 'и в подписи, и в свёрнутой панели — «9+»');
     assert.match(helper, /sidebar-surveys-collapsed-badge/);
-    assert.match(helper, /wazzupWaitingCount > 0\n\s*\? `Ждут ответа: \$\{wazzupWaitingCount\}` : undefined;/);
+    assert.match(helper, /wazzupWaitingCount > 0\n\s*\? `Чаты, ждущие ответа: \$\{wazzupWaitingCount\}` : undefined;/);
     assert.ok(app.includes('crmUnreadCount,\n                wazzupWaitingCount,\n                canAccessCrmSection,'),
         'число — в зависимостях меню');
     assert.match(app, /const wazzupWaitingCount = useChatWaitingCount\(\);/);
     assert.match(app, /\{user && \(isWazzupChatOperator\(user\) \|\| normalizeRole\(user\.role\) === 'super_admin'\)\n\s*&& canAccessVerifierChatsForUser\(user\) && \(\n\s*<Suspense fallback=\{null\}>\n\s*<WazzupWaitingKeeper\n\s*key=\{user\.id\}/);
+    // Верификатору — замок из хранилища смены (иначе после QR число застывало вне раздела).
+    assert.match(app, /mayProcess\n\s*operator=\{isWazzupChatOperator\(user\)\}\n\s*userId=\{user\.id\}\n\s*\/>/);
     assert.match(app, /const WazzupWaitingKeeper = lazyWithRetry\(\(\) => import\('\.\/components\/wazzup\/WazzupWaitingKeeper'\)\);/);
 });

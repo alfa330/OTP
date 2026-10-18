@@ -261,5 +261,15 @@ export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, hea
         : presentUnread(items, state.current.replies, Date.now());
     state.current.shown = { items, tick: replyTick, value: shown };
     return { items: shown, ready, apply, refresh, markRead, error,
-        total: Object.values(shown).reduce((sum, row) => sum + row.unreadCount, 0) };
+        total: Object.values(shown).reduce((sum, row) => sum + row.unreadCount, 0),
+        chats: waitingChatCount(shown) };
+}
+
+/* Сколько чатов ждут ответа — бейдж «Чатов ОП» в боковой панели (chatWaitingBadge.js)
+   считает чаты, а не сообщения (владелец, 18.10.2026); «Ожидают ответа · N» в
+   разделе — по-прежнему сообщения. */
+export function waitingChatCount(items) {
+    let count = 0;
+    for (const row of Object.values(items || {})) if (row?.unreadCount > 0) count += 1;
+    return count;
 }

@@ -43545,10 +43545,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                колокола); requestId нужен, чтобы повторный клик по тому же
                уведомлению снова открывал карточку. */
             const [crmUnreadCount, setCrmUnreadCount] = useState(0);
-            /* «Чаты ОП»: сообщения клиентов, ждущие ответа команды, — тот же
-               счётчик, что «Ожидают ответа» в разделе. Ведут его раздел и
-               WazzupWaitingKeeper (chatWaitingBadge.js); у кого обработки
-               чатов нет, здесь всегда ноль. */
+            /* «Чаты ОП»: сколько чатов ждут ответа команды (по тому же общему
+               счётчику, что «Ожидают ответа» в разделе, но чаты, а не
+               сообщения). Ведут его раздел и WazzupWaitingKeeper
+               (chatWaitingBadge.js); у кого обработки чатов нет — всегда ноль. */
             const wazzupWaitingCount = useChatWaitingCount();
             const [crmRealtimePulse, setCrmRealtimePulse] = useState(0);
             const [crmFocusRequest, setCrmFocusRequest] = useState(null);
@@ -53779,9 +53779,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     );
                 };
                 /* «Чаты ОП» (orange — цвет «Ожидают ответа» в самом разделе):
-                   сколько сообщений клиентов ждут ответа команды. Одна цифра,
-                   дальше «9+» — и в подписи, и в свёрнутой панели (просьба
-                   владельца 18.10.2026); точное число — в подсказке пункта. */
+                   сколько ЧАТОВ ждут ответа команды — не сообщений (владелец,
+                   18.10.2026). Одна цифра, дальше «9+» — и в подписи, и в
+                   свёрнутой панели; точное число — в подсказке пункта. */
                 const renderWazzupChatsSidebarInner = () => (
                     <>
                         <FaIcon className="fas fa-comments"></FaIcon>
@@ -53801,7 +53801,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     </>
                 );
                 const wazzupChatsSidebarTitle = wazzupWaitingCount > 0
-                    ? `Ждут ответа: ${wazzupWaitingCount}` : undefined;
+                    ? `Чаты, ждущие ответа: ${wazzupWaitingCount}` : undefined;
                 const renderEventsSidebarItemInner = () => (
                     <li>
                         <button
@@ -63361,6 +63361,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 apiBaseUrl={API_BASE_URL}
                                 withAccessTokenHeader={withAccessTokenHeader}
                                 mayProcess
+                                operator={isWazzupChatOperator(user)}
+                                userId={user.id}
                             />
                         </Suspense>
                     )}

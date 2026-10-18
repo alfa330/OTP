@@ -6,11 +6,17 @@ import { pilotChatKey } from '../src/components/wazzup/chatPilot.js';
 const source = readFileSync(new URL('../src/components/wazzup/useSharedChatUnread.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replaceAll('export function', 'function').replace('export default function', 'function');
 const make = new Function('useEffect','useRef','useState','axios','pilotChatKey','document','window','setTimeout','clearTimeout',
-    source + '\nreturn { hook: useSharedChatUnread, mergeUnread, reconcileUnreadSnapshot, presentUnread, holdReply, replySignals, outboxSignals };');
+    source + '\nreturn { hook: useSharedChatUnread, mergeUnread, reconcileUnreadSnapshot, presentUnread, holdReply, replySignals, outboxSignals, waitingChatCount };');
 const chat = { channelId: 'channel', chatId: 'chat' };
 const key = pilotChatKey('op', chat);
 const row = (version, count = 1, id = 'm1') => ({ ...chat, unreadVersion: version, unreadCount: count, lastInboundId: id });
 const helpers = make(null,null,null,null,pilotChatKey);
+
+test('чаты, ждущие ответа, считаются по чатам, а не по сообщениям', () => {
+    assert.equal(helpers.waitingChatCount({}), 0);
+    assert.equal(helpers.waitingChatCount(undefined), 0);
+    assert.equal(helpers.waitingChatCount({ a: { unreadCount: 3 }, b: { unreadCount: 0 }, c: { unreadCount: 1 }, d: null }), 2);
+});
 
 test('a newer snapshot beats delayed SSE, but a newer clear ACK beats a stale snapshot', () => {
     assert.equal(helpers.reconcileUnreadSnapshot([row(3)], { [key]: row(2) }, { [key]: 2 }, 1)[key].unreadVersion, 3);
@@ -136,8 +142,10 @@ test('«Ответ не нужен» goes out on send for the sender and the tea
     const h = harness(); h.options.outbox = []; await h.flush();
     h.output.apply([row(5, 2)]); await h.flush();
     assert.equal(h.output.items[key].unreadCount, 2); assert.equal(h.output.total, 2);
+    assert.equal(h.output.chats, 1, 'бейдж боковой панели считает чаты, а не сообщения');
     h.options.outbox = [queued()]; await h.rerender();
     assert.equal(h.output.items[key].unreadCount, 0); assert.equal(h.output.total, 0);
+    assert.equal(h.output.chats, 0, 'ответ в полёте гасит и чат в бейдже');
     const shown = h.output.items; await h.rerender();
     assert.equal(h.output.items, shown, 'the same object while nothing changed');
     h.options.outbox = [queued('failed')]; await h.rerender();

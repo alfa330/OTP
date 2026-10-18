@@ -1482,8 +1482,8 @@ function ChatsWorkspace(props) {
     const countsWaiting = account === 'op' && pilot.enabled && mainTab === 'chats';
     useEffect(() => (countsWaiting ? claimSectionWaiting() : undefined), [countsWaiting]);
     useEffect(() => {
-        if (countsWaiting && unread.ready) publishWaiting(unread.total);
-    }, [countsWaiting, unread.ready, unread.total]);
+        if (countsWaiting && unread.ready) publishWaiting(unread.chats);
+    }, [countsWaiting, unread.ready, unread.chats]);
     const visibleChats = useMemo(() => orderChatList(chats, waiting, {
         unreadOnly: unreadOnly && pilot.enabled, search: appliedSearch,
     }), [chats, waiting, unreadOnly, pilot.enabled, appliedSearch]);
