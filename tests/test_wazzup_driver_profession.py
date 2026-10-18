@@ -31,9 +31,13 @@ MOTO = 'cargo/courier/on-motorcycle'
 NAMES = {'taxi/driver': 'Водитель такси', MOTO: 'Мотокурьер', 'cargo/courier/on-foot': 'Пеший курьер'}
 
 
+class Seq(list):
+    """Ответы кабинета по очереди: первый вызов — первый ответ."""
+
+
 class Cabinet:
-    """Заглушка кабинета с журналом вызовов. card — профессия, словарь ответа или
-    исключение; names — справочник парка или исключение."""
+    """Заглушка кабинета с журналом вызовов. card — профессия, словарь ответа,
+    исключение или Seq из них; names — справочник парка, исключение или Seq."""
 
     def __init__(self, card=MOTO, names=None):
         self.card = card
@@ -43,6 +47,8 @@ class Cabinet:
     def _request(self, method, path, *, park_id, body=None, attempts=7, **_):
         self.calls.append((path, park_id, (body or {}).get('driver_id'), attempts))
         answer = self.card if path == PATH_CARD else self.names
+        if isinstance(answer, Seq):
+            answer = answer.pop(0)
         if isinstance(answer, Exception):
             raise answer
         if path == PATH_CARD:
@@ -66,9 +72,14 @@ class Clock:
 
 @pytest.fixture(autouse=True)
 def fresh_process(monkeypatch):
-    """Клиенты и паузы живут в процессе — у каждого теста свои."""
+    """Клиенты и паузы живут в процессе — у каждого теста свои; повтор — без ожидания."""
     monkeypatch.setattr(profession, '_clients', {})
     monkeypatch.setattr(profession, '_blocks', {})
+    monkeypatch.setattr(profession, 'RETRY_DELAY', 0)
+
+
+def outage(code=500):
+    return FleetError('Fleet не ответил после 1 попыток: HTTP %d' % code)
 
 
 def ask(database, cabinets, driver=DRIVER, park=PARK, clock=None):
@@ -116,10 +127,10 @@ def test_a_label_from_any_saved_dictionary_serves_every_park_and_the_fallback_co
     cabinet = Cabinet()
     assert ask(database, cabinet) == {'id': MOTO, 'name': 'Мотокурьер'}
     assert cabinet.dictionaries() == [], 'подпись уже есть в справочнике другого парка'
-    down = Cabinet(card='cargo/courier/on-car', names=FleetError('Fleet вернул 500'))
+    down = Cabinet(card='cargo/courier/on-car', names=outage(502))
     assert ask(database, down, driver=OTHER_DRIVER, park=park_id(3)) == {'id': 'cargo/courier/on-car',
                                                                          'name': 'Курьер на автомобиле'}
-    assert len(down.dictionaries()) == 1, 'такой профессии нет ни в одном справочнике — спросили, не вышло'
+    assert len(down.dictionaries()) == 2, 'такой профессии нет ни в одном справочнике — спросили дважды, не вышло'
 
 
 @needs_pg
@@ -200,6 +211,8 @@ def test_no_rights_on_a_park_skips_that_account_for_that_park_only(pg):
     assert edm.cards()[-1] == (PATH_CARD, OTHER_PARK, 'e' * 32, 1) and len(mailings.cards()) == 2
     plain = Cabinet(card=FleetError('Fleet вернул 403 без JSON (тело 0 байт)'))
     assert ask(database, {'ЭДО': plain, 'Рассылки': Cabinet()}, driver='d' * 32, park=park_id(5), clock=clock)
+    assert profession._blocks[('ЭДО', park_id(5))] == clock.value + profession.DENIED_PAUSE, \
+        '403 и без JSON — «нет прав», а не разовый отказ'
 
 
 @needs_pg
@@ -221,6 +234,74 @@ def test_a_cabinet_outage_shows_the_last_profession_and_pauses_every_account(pg)
     clock.value += profession.FAILURE_PAUSE + 1
     edm.card = MOTO
     assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock)['name'] == 'Мотокурьер'
+
+
+@needs_pg
+def test_a_one_off_cabinet_failure_is_asked_again_at_once_and_a_timeout_is_not(pg):
+    connection, _ = pg
+    database = Database(connection)
+    for failure in (outage(502), FleetError('Fleet не ответил после 1 попыток: 429 Too Many Requests')):
+        cabinet = Cabinet(card=Seq([failure, MOTO]))
+        driver = '%032x' % (len(stored(connection)) + 100)
+        assert ask(database, cabinet, driver=driver)['name'] == 'Мотокурьер'
+        assert len(cabinet.cards()) == 2 and profession._blocks == {}, 'повтор удался — паузы нет'
+    twice = Cabinet(card=Seq([outage(503), outage(503)]))
+    assert ask(database, twice, driver=OTHER_DRIVER) is None and len(twice.cards()) == 2
+    assert ('*', None) in profession._blocks, 'второй сбой подряд — пауза всем учёткам'
+    profession._blocks.clear()
+    slow = Cabinet(card=FleetError('Fleet не ответил после 1 попыток: HTTPSConnectionPool: Read timed out.'))
+    assert ask(database, slow, driver=OTHER_DRIVER) is None and len(slow.cards()) == 1, 'таймаут не повторяем'
+
+
+@needs_pg
+def test_another_refusal_of_one_account_hands_the_park_over_to_the_other(pg):
+    connection, _ = pg
+    database = Database(connection)
+    clock = Clock()
+    edm = Cabinet(card=FleetError("Fleet вернул 400: {'code': 'bad_request'}"))
+    mailings = Cabinet()
+    accounts = {'ЭДО': edm, 'Рассылки': mailings}
+    assert ask(database, accounts, clock=clock)['name'] == 'Мотокурьер' and len(edm.calls) == 1
+    assert ask(database, accounts, driver=OTHER_DRIVER, clock=clock) and len(edm.calls) == 1, \
+        'этой учётке этот парк не отвечает — пока не спрашиваем'
+    edm.card = MOTO
+    assert ask(database, accounts, driver='e' * 32, park=OTHER_PARK, clock=clock)
+    assert edm.cards()[-1][1] == OTHER_PARK, 'другой парк той же учётки — спрашиваем'
+    clock.value += profession.REFUSED_PAUSE + 1
+    assert ask(database, accounts, driver='d' * 32, clock=clock) and edm.cards()[-1] == (PATH_CARD, PARK, 'd' * 32, 1)
+
+
+@needs_pg
+def test_a_silent_dictionary_does_not_hide_a_new_profession_for_hours(pg):
+    connection, _ = pg
+    database = Database(connection)
+    clock = Clock()
+    cabinet = Cabinet(card='scouts/worker', names=Seq([outage(500), outage(500), {'scouts/worker': 'Скаут'}]))
+    assert ask(database, cabinet, clock=clock) is None
+    assert stored(connection) == [], 'подписи нет, потому что справочник молчал, — не запоминаем'
+    clock.value += profession.FAILURE_PAUSE + 1
+    assert ask(database, cabinet, clock=clock) == {'id': 'scouts/worker', 'name': 'Скаут'}
+    assert stored(connection) == [(DRIVER, PARK, True, 'scouts/worker', 'Скаут')]
+
+
+@needs_pg
+def test_every_refusal_is_logged_with_the_request_the_account_and_the_answer(pg, caplog):
+    connection, _ = pg
+    database = Database(connection)
+    caplog.set_level('INFO', logger='wazzup.driver_profession')
+    edm = Cabinet(card=FleetError("Fleet вернул 400: {'driver_id': '%s', 'code': 'bad'}" % DRIVER))
+    accounts = {'ЭДО': edm, 'Рассылки': Cabinet(names=outage(500))}
+    assert ask(database, accounts)['name'] == 'Курьер на мотоцикле', 'справочник молчит — запасная подпись'
+    text = '\n'.join(record.getMessage() for record in caplog.records)
+    assert ('кабинет Fleet не спрашиваем 600 с — карточка исполнителя, учётка «ЭДО»: FleetError: '
+            "Fleet вернул 400: {'driver_id': '%s…', 'code': 'bad'}" % DRIVER[:8]) in text
+    assert DRIVER not in text, 'ID водителя в логе — обрезанный'
+    assert 'справочник профессий, учётка «Рассылки»: FleetError: Fleet не ответил после 1 попыток: HTTP 500' in text
+    assert 'кабинет ответил (учётка «Рассылки») — %s, подпись: Курьер на мотоцикле' % MOTO in text
+    caplog.clear()
+    profession._blocks.clear()      # пауза после молчания справочника — к этой проверке не относится
+    assert ask(database, Cabinet(card={'driver': {'driver_profile': {}}}), driver=OTHER_DRIVER) is None
+    assert 'кабинет ответил (учётка «ЭДО») — профессии в карточке нет' in caplog.text
 
 
 @needs_pg
@@ -308,14 +389,15 @@ def response(status, payload=None):
 def test_the_cabinet_client_answers_at_once_without_sleeps_retries_or_a_wider_pool(monkeypatch):
     sleeps = []
     monkeypatch.setattr(fleet.time, 'sleep', sleeps.append)
+    monkeypatch.setattr(profession, 'RETRY_DELAY', 0.3)
     client = profession.CabinetClient([{'name': 'Session_id', 'value': 'test'}], 'test-agent')
     client._shared_session = Transport(requests.ConnectionError('нет сети'), response(429), response(503),
                                        response(200, {'driver': {'driver_profile': {'profession_id': MOTO}}}))
-    for _ in range(3):
+    for _ in range(2):
         with pytest.raises(FleetError):
             profession._fetch_profession(client, PARK, DRIVER)
     assert profession._fetch_profession(client, PARK, DRIVER) == (True, MOTO)
-    assert all(pause <= 0 for pause in sleeps), sleeps
+    assert [pause for pause in sleeps if pause > 0] == [0.3], 'пауза — только перед повтором 429, у транспорта своих нет'
     calls = client._shared_session.calls
     assert len(calls) == 4 and calls[-1][2]['timeout'] == profession.REQUEST_TIMEOUT
     assert json.loads(calls[-1][2]['data']) == {'driver_id': DRIVER}

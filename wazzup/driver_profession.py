@@ -13,18 +13,25 @@
     ([{id, name}]), по нему «Рассылки» строят фильтр.
 
 Учётка. Сперва общая сессия «Провайдера ЭДО»: ею карточки исполнителей читаются
-каждый день. Не приняли её или у неё нет прав на этот парк — служебный аккаунт
-«Рассылок», если он подключён. Обе сессии здесь только читаются.
+каждый день. Не приняли её, у неё нет прав на этот парк или кабинет отказал ей
+иначе (4xx) — служебный аккаунт «Рассылок», если он подключён. Обе сессии здесь
+только читаются.
 
 Цена. Профессия с подписью живёт в базе неделю (кэш общий для всех процессов):
 повторное открытие карточки — один SELECT, а кабинет спрашивается один раз на
 водителя — при первом открытии его карточки, одним запросом (медиана ручек
 кабинета 0,35 с). Справочник подписей нужен, только когда такой профессии нет ни
-в одном уже сохранённом справочнике, — то есть почти никогда. Запросы — без
-повторов и не дольше REQUEST_TIMEOUT. Кабинет не ответил — в карточке просто нет
+в одном уже сохранённом справочнике, — то есть почти никогда. Запрос не дольше
+REQUEST_TIMEOUT; разовый 5xx или 429 повторяется сразу один раз (так кабинет и
+отвечает — поштучно), таймаут — нет. Кабинет не ответил — в карточке просто нет
 профессии (или прежняя, если была), а сам кабинет какое-то время не спрашивается
 (FAILURE_PAUSE, у непринятой сессии SESSION_PAUSE): один сбой не превращается в
 задержку каждой следующей карточки.
+
+Лог. Каждый отказ — с тем, какой это был запрос, какой учёткой и что ответил
+кабинет (ID в тексте обрезаны), каждый ответ — одной строкой INFO. 18.10.2026
+первая же проба на проде упала с голым «FleetError», и по логу было не понять,
+что случилось.
 """
 import hashlib
 import json
@@ -46,11 +53,17 @@ FOUND_TTL = 7 * 86400
 # Водителя нет в этом парке или подписи профессии не нашлось — спросим раньше.
 MISSING_TTL = 6 * 3600
 NAMES_TTL = 7 * 86400              # справочник одного парка — не чаще раза в неделю
+RETRY_DELAY = 0.3                  # перед повтором разового 5xx или 429
 FAILURE_PAUSE = 60                 # сеть, 429, 5xx: кабинет сейчас не в духе
 SESSION_PAUSE = 600                # сессию не приняли — новые куки приносит человек
+REFUSED_PAUSE = 600                # иной отказ 4xx этой учётке на этот парк
 DENIED_PAUSE = 3600                # нет прав на парк — сами они не появятся
 
 _HEX32 = re.compile(r'^[0-9a-f]{32}$')
+_IDS = re.compile(r'[0-9a-f]{32}')
+# Так транспорт (fleet_edm.client) называет разовый 5xx и 429 после попыток.
+_TRANSIENT = re.compile(r'попыток: (?:HTTP 5\d\d|429\b)')
+_CLIENT_ERROR = re.compile(r'^Fleet вернул 4\d\d\b')
 
 # Подписи, если справочника кабинета нет под рукой, — слова самого кабинета
 # (раздел тренажёров «Fleet» сверял их с живым кабинетом).
@@ -117,21 +130,44 @@ def _block(key, seconds, moment, reason):
     log.warning('Карточка водителя: кабинет Fleet не спрашиваем %d с — %s', seconds, reason)
 
 
-def _note_failure(error, name, park_id, moment):
-    """Отказ учётки закрывает её (или её парк), и можно спросить другую; сбой
-    самого кабинета (сеть, 429, 5xx) — пауза для всех учёток сразу."""
+def _kind(error):
+    """Чей отказ: 'session', 'denied' (403 — на этот парк) и 'refused' (иной 4xx на этот
+    парк) — учётки, можно спросить другую; 'down' — самого кабинета (сеть, 5xx, 429)."""
+    text = str(error)
     if isinstance(error, FleetSessionExpired):
-        _block((name, None), SESSION_PAUSE, moment, 'сессию «%s» не приняли' % name)
-    elif isinstance(error, FleetAccessDenied) or str(error).startswith('Fleet вернул 403'):
-        _block((name, park_id), DENIED_PAUSE, moment, 'у «%s» нет прав на парк' % name)
-    else:
-        _block(('*', None), FAILURE_PAUSE, moment, type(error).__name__)
+        return 'session'
+    if isinstance(error, FleetAccessDenied) or text.startswith('Fleet вернул 403'):
+        return 'denied'
+    if _CLIENT_ERROR.match(text):
+        return 'refused'
+    return 'down'
+
+
+def _note_failure(error, name, park_id, moment, what):
+    """Закрыть на время учётку, её парк или весь кабинет — по тому, чей это отказ."""
+    kind = _kind(error)
+    key, seconds = {'session': ((name, None), SESSION_PAUSE), 'denied': ((name, park_id), DENIED_PAUSE),
+                    'refused': ((name, park_id), REFUSED_PAUSE)}.get(kind, (('*', None), FAILURE_PAUSE))
+    answer = _IDS.sub(lambda match: match.group(0)[:8] + '…', str(error))[:200]
+    _block(key, seconds, moment, '%s, учётка «%s»: %s: %s' % (what, name, type(error).__name__, answer))
+
+
+def _call(client, method, path, park_id, body=None):
+    """Запрос в кабинет; разовый 5xx или 429 — ещё раз через RETRY_DELAY. Сеть не
+    повторяем: второй таймаут человек ждал бы ещё REQUEST_TIMEOUT."""
+    try:
+        return client._request(method, path, park_id=park_id, body=body, attempts=1)
+    except FleetError as error:
+        if not _TRANSIENT.search(str(error)):
+            raise
+    time.sleep(RETRY_DELAY)
+    return client._request(method, path, park_id=park_id, body=body, attempts=1)
 
 
 def _fetch_profession(client, park_id, driver_id):
     """(found, profession_id); 404 — водителя в этом парке нет."""
     try:
-        payload = client._request('POST', PATH_CARD, park_id=park_id, body={'driver_id': driver_id}, attempts=1)
+        payload = _call(client, 'POST', PATH_CARD, park_id, body={'driver_id': driver_id})
     except FleetError as error:
         if str(error).startswith('Fleet вернул 404'):
             return False, None
@@ -141,7 +177,7 @@ def _fetch_profession(client, park_id, driver_id):
 
 
 def _fetch_names(client, park_id):
-    payload = client._request('GET', PATH_PROFESSIONS, park_id=park_id, attempts=1)
+    payload = _call(client, 'GET', PATH_PROFESSIONS, park_id)
     items = payload if isinstance(payload, list) else ((payload or {}).get('professions') or [])
     names = {}
     for item in items:
@@ -153,14 +189,15 @@ def _fetch_names(client, park_id):
 
 
 def _label(db, client, name, park_id, profession_id, moment):
-    """Подпись профессии: из сохранённого справочника любого парка, где она есть;
-    нет нигде — справочник этого парка (не чаще раза в NAMES_TTL), иначе запасная."""
+    """(подпись, справочник не ответил): подпись из сохранённого справочника любого
+    парка, где она есть; нет нигде — справочник этого парка (не чаще раза в
+    NAMES_TTL), иначе запасная."""
     with db._get_cursor() as cursor:
         cursor.execute('SELECT names ->> %s FROM wazzup_fleet_professions WHERE names ? %s '
                        'ORDER BY fetched_at DESC LIMIT 1', (profession_id, profession_id))
         row = cursor.fetchone()
         if row and row[0]:
-            return row[0]
+            return row[0], False
         cursor.execute('SELECT 1 FROM wazzup_fleet_professions WHERE park_id = %s '
                        'AND fetched_at > now() - make_interval(secs => %s)', (park_id, NAMES_TTL))
         asked = cursor.fetchone() is not None
@@ -168,17 +205,17 @@ def _label(db, client, name, park_id, profession_id, moment):
         try:
             names = _fetch_names(client, park_id)
         except Exception as error:  # noqa: BLE001 — без справочника есть запасные подписи
-            _note_failure(error, name, park_id, moment)
-        else:
-            from psycopg2.extras import Json
-            with db._get_cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO wazzup_fleet_professions(park_id, names, fetched_at) VALUES (%s, %s, now())
-                    ON CONFLICT (park_id) DO UPDATE SET names = EXCLUDED.names, fetched_at = EXCLUDED.fetched_at
-                """, (park_id, Json(names)))
-            if names.get(profession_id):
-                return names[profession_id]
-    return FALLBACK_NAMES.get(profession_id)
+            _note_failure(error, name, park_id, moment, 'справочник профессий')
+            return FALLBACK_NAMES.get(profession_id), True
+        from psycopg2.extras import Json
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO wazzup_fleet_professions(park_id, names, fetched_at) VALUES (%s, %s, now())
+                ON CONFLICT (park_id) DO UPDATE SET names = EXCLUDED.names, fetched_at = EXCLUDED.fetched_at
+            """, (park_id, Json(names)))
+        if names.get(profession_id):
+            return names[profession_id], False
+    return FALLBACK_NAMES.get(profession_id), False
 
 
 def _ask(db, clients, park_id, driver_id, moment):
@@ -190,10 +227,18 @@ def _ask(db, clients, park_id, driver_id, moment):
             continue
         try:
             found, profession_id = _fetch_profession(client, park_id, driver_id)
-        except Exception as error:  # noqa: BLE001 — после сбоя кабинета пауза закроет и остальные учётки
-            _note_failure(error, name, park_id, moment)
+        except Exception as error:  # noqa: BLE001 — отказ учётки: спросим другую; сбой кабинета: пауза всем
+            _note_failure(error, name, park_id, moment, 'карточка исполнителя')
             continue
-        label = _label(db, client, name, park_id, profession_id, moment) if profession_id else None
+        if not profession_id:
+            log.info('Карточка водителя: кабинет ответил (учётка «%s») — %s', name,
+                     'профессии в карточке нет' if found else 'в этом парке водителя нет')
+            return found, None, None
+        label, failed = _label(db, client, name, park_id, profession_id, moment)
+        log.info('Карточка водителя: кабинет ответил (учётка «%s») — %s, подпись: %s', name, profession_id,
+                 label or 'не нашлась')
+        if label is None and failed:
+            return None          # справочник не ответил — спросим при следующем открытии, а не через 6 часов
         return found, profession_id, label
     return None
 
