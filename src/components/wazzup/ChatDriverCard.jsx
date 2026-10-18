@@ -18,7 +18,8 @@ import { loadDriverCardOptions, lookupDriver, useDriverInfo } from './useDriverC
  *
  * Данные и сохранение — useDriverCard.js; списки «Таксопарк» и «Город» —
  * справочники самой amoCRM (loadDriverCardOptions); водитель — CRM yataxi
- * (lookupDriver, useDriverInfo; сервер — wazzup/driver_info.py). */
+ * (lookupDriver, useDriverInfo; сервер — wazzup/driver_info.py), а его
+ * профессия — кабинет Fleet (wazzup/driver_profession.py). */
 
 const fieldLabel = 'mb-1 flex h-4 items-center gap-1.5 px-1 text-[11px] font-medium text-slate-500';
 const idInput = 'h-9 w-full rounded-xl bg-slate-100 px-3 font-mono text-[13px] leading-5 text-slate-900 placeholder:font-sans placeholder:text-slate-400 transition-all focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/60 disabled:opacity-50';
@@ -129,7 +130,7 @@ export function LookupNote({ lookup, onRetry }) {
         !hint.park && `таксопарка «${hint.crmPark || 'без названия'}» нет в списке amoCRM`,
         !hint.city && (hint.crmCity ? `города «${hint.crmCity}» нет в списке amoCRM` : 'город парка CRM не знает'),
     ].filter(Boolean);
-    const facts = [info.phone, info.car, hint.crmPark].filter(Boolean).join(' · ');
+    const facts = [info.profession?.name, info.phone, info.car, hint.crmPark].filter(Boolean).join(' · ');
     return (
         <div className={`${note} bg-slate-50 ring-1 ring-slate-200/70`} data-testid="wazzup-driver-lookup">
             <div className="flex min-w-0 items-center gap-2">
@@ -577,6 +578,7 @@ export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, s
     const [retrying, setRetrying] = useState(false);
     const crm = driver.data?.state === 'found' ? driver.data.info : null;
     const title = crm?.name || chat?.contactName || chat?.contactPhone || chat?.chatId || 'Карточка водителя';
+    const profession = crm?.profession?.name || '';
     if (unavailable) return null;
 
     const onRetry = async (cardId) => {
@@ -670,6 +672,12 @@ export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, s
                 </div>
                 <div className="min-w-0 flex-1">
                     <div className="truncate text-[15.5px] font-semibold text-slate-900" title={title}>{title}</div>
+                    {/* Профессия из кабинета Fleet (просьба владельца 18.10.2026) — своей
+                        строкой, как должность в «Контактах»: длинная («Водитель на грузовом
+                        авто») не рвёт строку телефона и не уносит метку статуса вниз. */}
+                    {profession && (
+                        <div className="mt-0.5 truncate text-[12.5px] text-slate-500" title={profession}>{profession}</div>
+                    )}
                     <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-slate-500">
                         {crm?.phone ? <span>{crm.phone}</span> : <span>Карточка водителя</span>}
                         <StatusPill status={crm?.status} />

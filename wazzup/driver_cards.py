@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from flask import jsonify, request
 
 from . import driver_cards_amo as amo
-from . import driver_info
+from . import driver_info, driver_profession
 
 TZ = ZoneInfo('Asia/Almaty')
 HISTORY_LIMIT = 50
@@ -175,15 +175,16 @@ def register_driver_card_routes(bp, *, guard, actor, may_edit, require_api_key, 
     on_saved() будит очередь записи в amoCRM после коммита. options_provider()
     отдаёт справочники (снимок из базы, а без него — из amoCRM, своими
     транзакциями и с паузой после неудачи: wazzup/driver_cards_sync.py) или None.
-    driver_info_provider(driver_id, options) — данные водителя из CRM
-    (wazzup/driver_info.py: describe)."""
+    driver_info_provider(driver_id, options) — данные водителя из CRM и его
+    профессия из кабинета Fleet (wazzup/driver_info.py: describe)."""
     if options_provider is None:
         def options_provider():
             with db._get_cursor() as cursor:
                 return load_options(cursor)
     if driver_info_provider is None:
         def driver_info_provider(driver_id, options):
-            return driver_info.describe(db, driver_id, options)
+            return driver_info.describe(db, driver_id, options, profession=lambda driver, park: (
+                driver_profession.lookup(db, driver, park)))
 
     def scope(values):
         if values.get('account') != 'op':

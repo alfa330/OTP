@@ -118,13 +118,14 @@ test('unchanged drafts and changed fields are told apart', () => {
 
 // ── Отрисовка ───────────────────────────────────────────────────────────────
 
-async function bundle(entry, name) {
+async function bundle(entry, name, plugins = []) {
     const stub = join(OUT_DIR, 'axios-stub.mjs');
     writeFileSync(stub, 'const never = () => new Promise(() => {}); export default { get: never, post: never, isCancel: () => false };');
     const result = await esbuild.build({
         entryPoints: [join(process.cwd(), entry)], bundle: true, write: false, format: 'esm', platform: 'node',
         target: 'node18', jsx: 'transform', loader: { '.jsx': 'jsx', '.js': 'jsx' },
         external: ['react', 'react-dom', 'lucide-react', 'framer-motion'], alias: { axios: stub }, logLevel: 'silent',
+        plugins,
     });
     const out = join(OUT_DIR, `${name}.mjs`);
     writeFileSync(out, result.outputFiles[0].text);
@@ -596,6 +597,47 @@ test('in the small window: the pasted ID is searched and the found driver is sho
     assert.match(down, /CRM не ответила — таксопарк и город выберите сами/);
     assert.match(down, />Повторить<\/button>/);
     assert.equal(renderNote({ id: null }), '');
+});
+
+// ── Профессия из кабинета Fleet (просьба владельца 18.10.2026) ──────────────
+
+test('the profession from the Fleet cabinet: first fact in the small window, its own line under the name in the panel', async () => {
+    const moto = { id: 'cargo/courier/on-motorcycle', name: 'Курьер на мотоцикле' };
+    assert.match(renderNote({ data: foundAnswer({ info: driverInfo({ profession: moto }) }) }),
+        /Курьер на мотоцикле · \+77000000000 · LADA \(ВАЗ\) Priora/);
+    assert.match(renderNote({ data: foundAnswer({ info: driverInfo({ profession: null }) }) }),
+        /<div class="mt-0\.5 truncate text-slate-500" title="\+77000000000 · LADA/, 'нет профессии — как раньше');
+
+    // Панель берёт данные из useDriverInfo — здесь он отдаёт готовый ответ сервера.
+    const stub = join(OUT_DIR, 'driver-info-stub.mjs');
+    writeFileSync(stub, 'const never = () => new Promise(() => {});\n'
+        + 'export const useDriverInfo = () => globalThis.__driverInfo;\n'
+        + 'export const lookupDriver = never;\nexport const loadDriverCardOptions = never;\n');
+    const { DriverCardPanel: Panel } = await bundle('src/components/wazzup/ChatDriverCard.jsx', 'card-profession', [{
+        name: 'driver-info', setup(build) { build.onResolve({ filter: /^\.\/useDriverCard$/ }, () => ({ path: stub })); },
+    }]);
+    const panel = (info) => {
+        globalThis.__driverInfo = { data: info ? foundAnswer({ info }) : null, error: '', hidden: false,
+            loading: !info, reload() {} };
+        return renderToStaticMarkup(React.createElement(Panel, {
+            card: hookState({ current: card('a'), items: [card('a')] }), chat, apiBaseUrl: 'http://api.test',
+            headers: () => ({}), onClose() {} }));
+    };
+    const phoneLine = '<div class="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-slate-500">';
+    const name = '<div class="truncate text-[15.5px] font-semibold text-slate-900" title="Тестов Тест Тестович">'
+        + 'Тестов Тест Тестович</div>';
+    try {
+        const html = panel(driverInfo({ profession: moto }));
+        assert.ok(html.includes(name + '<div class="mt-0.5 truncate text-[12.5px] text-slate-500" title="Курьер на мотоцикле">'
+            + 'Курьер на мотоцикле</div>' + phoneLine + '<span>+77000000000</span><span class="inline-flex'), html.slice(0, 1600));
+        assert.match(html, /bg-emerald-50 text-emerald-700">Работает<\/span><\/div><\/div>/, 'метка статуса — в строке телефона');
+        assert.ok(panel(driverInfo()).includes(name + phoneLine + '<span>+77000000000</span>'), 'нет профессии — как раньше');
+        assert.ok(panel(driverInfo({ profession: { id: 'scouts/worker', name: '' } })).includes(name + phoneLine),
+            'пустая подпись — без пустой строки');
+        assert.match(panel(null), /<span>Карточка водителя<\/span>/);
+    } finally {
+        delete globalThis.__driverInfo;
+    }
 });
 
 const { useDriverInfo, lookupDriver } = await import(pathToFileURL(hookFile).href);

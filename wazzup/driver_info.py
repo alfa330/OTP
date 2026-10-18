@@ -373,13 +373,19 @@ def present(data, dictionary=None):
     }
 
 
-def describe(db, driver_id, options, fetch=None, dictionary_fetch=None):
-    """Ответ ручек карточки: состояние поиска, данные для экрана и подсказка полей."""
+def describe(db, driver_id, options, fetch=None, dictionary_fetch=None, profession=None):
+    """Ответ ручек карточки: состояние поиска, данные для экрана и подсказка полей.
+
+    profession(driver_id, park_id) — профессия из кабинета Fleet {'id', 'name'}
+    или None (wazzup/driver_profession.py: lookup): в CRM её нет."""
     state, data, fetched_at, stale, error = lookup(db, driver_id, fetch=fetch)
     payload = {'driverId': driver_id, 'state': state, 'stale': stale, 'error': error,
                'fetchedAt': fetched_at.isoformat() if isinstance(fetched_at, datetime) else None}
     if state == 'found':
         dictionary = current_dictionary(db, fetch=dictionary_fetch)
         payload['info'] = present(data, dictionary)
+        if profession is not None:
+            park = (data.get('park') if isinstance(data, dict) else None) or {}
+            payload['info']['profession'] = profession(driver_id, park.get('yandex_id'))
         payload['suggestion'] = suggest(data, dictionary, options)
     return payload

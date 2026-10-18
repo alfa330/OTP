@@ -85,6 +85,24 @@ def init_schema(cursor):
             payload JSONB NOT NULL,
             fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
+        -- Профессия водителя из кабинета Fleet (wazzup/driver_profession.py) с
+        -- подписью: кэш на неделю, общий для всех процессов. found = FALSE —
+        -- в этом парке водителя нет. Личных данных нет: ID и код профессии.
+        CREATE TABLE IF NOT EXISTS wazzup_driver_professions (
+            driver_id TEXT PRIMARY KEY CHECK (driver_id ~ '^[0-9a-f]{32}$'),
+            park_id TEXT NOT NULL CHECK (park_id ~ '^[0-9a-f]{32}$'),
+            found BOOLEAN NOT NULL,
+            profession_id TEXT,
+            profession_name TEXT,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CHECK (found OR profession_id IS NULL)
+        );
+        -- Справочник профессий парка из кабинета: подписи по-русски, последний снимок.
+        CREATE TABLE IF NOT EXISTS wazzup_fleet_professions (
+            park_id TEXT PRIMARY KEY CHECK (park_id ~ '^[0-9a-f]{32}$'),
+            names JSONB NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
 
         CREATE OR REPLACE FUNCTION wazzup_notify_driver_card() RETURNS TRIGGER LANGUAGE plpgsql AS $$
         BEGIN
