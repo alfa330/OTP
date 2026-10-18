@@ -64,7 +64,7 @@ const makeWindow = () => {
     };
 };
 
-function fixture({ supported = true, occupied = null, onReturn, request } = {}) {
+function fixture({ supported = true, occupied = null, onReturn, onClosed, request } = {}) {
     const saved = Object.fromEntries(['window', 'document', 'MutationObserver'].map((key) => [key, globalThis[key]]));
     const doc = dom(), target = makeWindow(), observers = [], calls = [], slots = [];
     doc.documentElement.setAttribute('data-otp-theme', 'dark');
@@ -83,7 +83,7 @@ function fixture({ supported = true, occupied = null, onReturn, request } = {}) 
     };
     let cursor = 0, effects = [], unmounted = false, lateWrites = 0;
     const h = {
-        target, doc, calls, observers, onReturn,
+        target, doc, calls, observers, onReturn, onClosed,
         useState(initial) { const i = cursor++; slots[i] ??= { value: initial };
             return [slots[i].value, (value) => { if (unmounted) lateWrites += 1;
                 slots[i].value = typeof value === 'function' ? value(slots[i].value) : value; }]; },
@@ -95,7 +95,7 @@ function fixture({ supported = true, occupied = null, onReturn, request } = {}) 
             if (old && deps.every((value, index) => Object.is(value, old.deps[index]))) return;
             slots[i] = { deps, effect }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); },
         render() { globalThis.__pipHarness = h; cursor = 0;
-            const value = useAttachmentPip({ onReturn: h.onReturn });
+            const value = useAttachmentPip({ onReturn: h.onReturn, onClosed: h.onClosed });
             const pending = effects; effects = []; pending.forEach((fn) => fn());
             return value; },
         restartEffects() { slots.forEach((slot) => slot.cleanup?.());
@@ -158,9 +158,13 @@ test('opening copies styles and theme before exposing the window, and returning 
     } finally { h.restore(); }
 });
 
-test('the browser close button returns the viewer without closing an unrelated window', async () => {
-    let returned = 0;
-    const h = fixture({ onReturn() { returned += 1; } });
+test('closing the window itself dismisses the viewer instead of reopening it, without closing an unrelated window', async () => {
+    // Owner, 18.10.2026: the window's close button (or the browser's "back to tab")
+    // must not bring the attachment back as a modal over the chat.
+    const returned = [], order = [];
+    let closed = 0;
+    const h = fixture({ onReturn(options) { returned.push(options); order.push('return'); },
+        onClosed() { closed += 1; order.push('closed'); } });
     try {
         await h.render().open();
         const other = makeWindow();
@@ -168,10 +172,31 @@ test('the browser close button returns the viewer without closing an unrelated w
         h.target.closed = true;
         h.target.emit('pagehide');
         assert.equal(h.render().pipWindow, null);
-        assert.equal(returned, 1);
+        assert.deepEqual(returned, [{ dismissed: true }]);
+        assert.equal(closed, 1);
+        assert.deepEqual(order, ['return', 'closed'], 'the host leaves the dying document first');
         assert.equal(h.target.closeCalls, 0);
         assert.equal(other.closeCalls, 0);
         assert.equal(h.observers[0].disconnected, true);
+        h.target.emit('pagehide');
+        assert.equal(closed, 1, 'a repeated event dismisses nothing');
+    } finally { h.restore(); }
+});
+
+test('"В чат" and unmounting return the viewer without dismissing it', async () => {
+    const returned = [];
+    let closed = 0;
+    const h = fixture({ onReturn(options) { returned.push(options); }, onClosed() { closed += 1; } });
+    try {
+        await h.render().open();
+        h.render().returnToChat();
+        assert.deepEqual(returned, [{ dismissed: false }]);
+        assert.equal(h.target.closeCalls, 1, 'our own close of the window is not the person closing it');
+        h.target.closed = false;                       // the browser hands out a fresh window
+        assert.equal(await h.render().open(), h.target);
+        h.unmount();
+        assert.deepEqual(returned, [{ dismissed: false }, { dismissed: false }]);
+        assert.equal(closed, 0);
     } finally { h.restore(); }
 });
 

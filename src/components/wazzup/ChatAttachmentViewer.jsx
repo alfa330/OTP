@@ -156,12 +156,25 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
             cancelMediaTransfer.current = moveAttachmentHost(portalHost, destination);
         }
     }, [portalHost]);
-    const returnHost = useCallback(() => {
-        if (portalHost.isConnected) moveHost(homeDocument.current.body);
+    /* dismissed — окно «Картинка в картинке» закрыли (его крестиком или «назад
+       во вкладку»): просмотр закрывается вместе с окном, а не открывается снова
+       модалкой поверх чата (владелец, 18.10.2026). Вернуть в модалку — кнопка
+       «В чат» в самом окне. До закрытия просмотр в чате не мелькает и звук
+       видео при переносе не возобновляется. */
+    const returnHost = useCallback(({ dismissed = false } = {}) => {
+        if (!portalHost.isConnected) return;
+        if (dismissed) {
+            portalHost.style.display = 'none';
+            portalHost.querySelectorAll('video, audio').forEach((media) => media.pause());
+        }
+        moveHost(homeDocument.current.body);
     }, [portalHost, moveHost]);
-    const pip = useAttachmentPip({ onReturn: returnHost });
+    const closeViewer = useRef(null);
+    const pip = useAttachmentPip({ onReturn: returnHost, onClosed: () => closeViewer.current?.() });
     useLayoutEffect(() => {
         portalHost.style.height = pip.pipWindow ? '100%' : '';
+        // Просмотр остался после закрытия окна (закрыть не дали) — снова виден в чате.
+        portalHost.style.display = '';
         moveHost((pip.pipWindow?.document || homeDocument.current).body);
     }, [pip.pipWindow, portalHost, moveHost]);
     useLayoutEffect(() => () => portalHost.remove(), [portalHost]);
@@ -219,6 +232,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
         video.current?.pause();
         latest.current.onClose();
     }, []);
+    closeViewer.current = close;
     const ids = { account: 'op', channelId: chat.channelId, chatId: chat.chatId, messageId: message.messageId };
     const cancelExtraction = useCallback(() => {
         extraction.current?.controller.abort();

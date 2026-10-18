@@ -26,7 +26,7 @@ await build({ entryPoints:[join(process.cwd(),'src/components/wazzup/ChatAttachm
             :path === 'react-dom' ? 'export const createPortal=(node,target)=>{globalThis.__attachmentHarness.portalTarget=target;return node;};'
             :path === 'axios' ? 'export default {get:(...v)=>globalThis.__attachmentHarness.get(...v),post:(...v)=>globalThis.__attachmentHarness.post(...v)};'
             :path.endsWith('/ios') ? 'export const IosModal=({children})=>children;'
-            :path.endsWith('/useAttachmentPip') ? 'export default ()=>globalThis.__attachmentHarness.pip;'
+            :path.endsWith('/useAttachmentPip') ? 'export default (options)=>{globalThis.__attachmentHarness.pipOptions=options;return globalThis.__attachmentHarness.pip;};'
             :'export const getDocument=(...v)=>globalThis.__attachmentHarness.getDocument(...v); export class TextLayer {};',
         }));
     }}],
@@ -123,6 +123,57 @@ test('moving the viewer keeps its host, zoom and OCR while keyboard events follo
         assert.equal(label(tree,'Извлечённый текст').props.value,'Recognized');
         assert.equal(h.posts.length,posts);assert.equal(h.requests.length,requests);
         assert.deepEqual(detached,[false,true,false]);
+    }finally{h.restore();}
+});
+
+test('closing the PiP window closes the viewer: hidden host, paused media, no modal over the chat',async()=>{
+    // Owner, 18.10.2026: closing «Картинка в картинке» must not reopen the modal.
+    let closed=0;
+    const h=fixture();
+    const pipDocument={body:{appendChild(node){node.parentNode=this;node.ownerDocument=pipDocument;node.isConnected=true;}},
+        addEventListener(){},removeEventListener(){}};
+    try{
+        h.render({onClose:()=>closed++});await tick();
+        const host=h.portalTarget;
+        h.pip={...h.pip,pipWindow:{document:pipDocument}};h.render();
+        assert.equal(host.ownerDocument,pipDocument);
+        const order=[];
+        const media={pause(){order.push('pause');}};
+        let queries=0;
+        host.querySelectorAll=(selector)=>{assert.equal(selector,'video, audio');return queries++===0?[media]:[];};
+        const body=document.body,append=body.appendChild;
+        body.appendChild=function(node){order.push('move');return append.call(this,node);};
+        h.pipOptions.onReturn({dismissed:true});
+        assert.equal(host.style.display,'none','no frame of the modal in the chat before it closes');
+        assert.deepEqual(order,['pause','move'],'media is paused before the move, so it is not resumed');
+        assert.equal(host.ownerDocument,document,'the host leaves the dying window');
+        h.pipOptions.onClosed();
+        assert.equal(closed,1);
+        body.appendChild=append;
+    }finally{h.restore();}
+});
+
+test('«В чат» returns a visible viewer, and a viewer kept after the window closed shows again',async()=>{
+    let closed=0;
+    const h=fixture();
+    const pipDocument={body:{appendChild(node){node.parentNode=this;node.ownerDocument=pipDocument;node.isConnected=true;}},
+        addEventListener(){},removeEventListener(){}};
+    try{
+        h.render({onClose:()=>closed++});await tick();
+        const host=h.portalTarget;
+        h.pip={...h.pip,pipWindow:{document:pipDocument}};h.render();
+        h.pipOptions.onReturn({dismissed:false});
+        assert.notEqual(host.style.display,'none');
+        assert.equal(host.ownerDocument,document);
+        h.pip={...h.pip,pipWindow:null};let tree=h.render();
+        assert.equal(tree.props.embedded,false);assert.equal(closed,0);
+        // Окно закрыли, а просмотр не закрылся (родитель не дал) — он не остаётся невидимым.
+        h.pip={...h.pip,pipWindow:{document:pipDocument}};h.render();
+        h.pipOptions.onReturn({dismissed:true});
+        assert.equal(host.style.display,'none');
+        h.pip={...h.pip,pipWindow:null};tree=h.render();
+        assert.equal(host.style.display,'');
+        assert.equal(tree.props.embedded,false);
     }finally{h.restore();}
 });
 

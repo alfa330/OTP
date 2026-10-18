@@ -7,8 +7,14 @@ const closeWindow = (target) => {
     try { target?.close(); } catch { /* The browser may already have closed it. */ }
 };
 
-/** Owns only the PiP window. The viewer keeps its portal host and React state. */
-export default function useAttachmentPip({ onReturn } = {}) {
+/** Owns only the PiP window. The viewer keeps its portal host and React state.
+ *
+ * onReturn({ dismissed }) moves the host back into the chat document. dismissed
+ * means the person closed the window itself (its close button or the browser's
+ * "back to tab"): onClosed follows, and the viewer closes with the window instead
+ * of reopening as a modal over the chat (owner, 18.10.2026). The viewer's own
+ * "В чат" button and unmounting return the host without dismissing. */
+export default function useAttachmentPip({ onReturn, onClosed } = {}) {
     const [pipWindow, setPipWindow] = useState(null);
     const [opening, setOpening] = useState(false);
     const [error, setError] = useState('');
@@ -18,17 +24,20 @@ export default function useAttachmentPip({ onReturn } = {}) {
     const owned = useRef(null);
     const returnCallback = useRef(onReturn);
     returnCallback.current = onReturn;
+    const closedCallback = useRef(onClosed);
+    closedCallback.current = onClosed;
 
-    const release = useCallback((session, close = true) => {
+    const release = useCallback((session, close = true, dismissed = false) => {
         if (!session || owned.current !== session) return;
         owned.current = null;
         session.window.removeEventListener('pagehide', session.onPageHide);
         session.themeObserver?.disconnect();
         session.stopStyles?.();
         // Move the existing portal host back before its document goes away.
-        try { returnCallback.current?.(); } finally {
+        try { returnCallback.current?.({ dismissed }); } finally {
             if (close) closeWindow(session.window);
             if (mounted.current) setPipWindow(null);
+            if (dismissed && mounted.current) closedCallback.current?.();
         }
     }, []);
 
@@ -85,7 +94,8 @@ export default function useAttachmentPip({ onReturn } = {}) {
             mirrorDocumentChrome(target);
             Object.assign(target.document.body.style, { margin: '0', height: '100vh', overflow: 'hidden' });
 
-            session.onPageHide = () => release(session, false);
+            // The window is gone by the person's own action: dismiss, not return.
+            session.onPageHide = () => release(session, false, true);
             if (typeof MutationObserver !== 'undefined') {
                 session.themeObserver = new MutationObserver(() => {
                     mirrorDocumentChrome(target);
