@@ -61,6 +61,7 @@ UNANSWERED_REPLY_MAX_SECONDS = 12 * 3600
 # сотрудник нажал «Отвечать не нужно», а замер 18–24.09.2026 показал, что из 151 диалога,
 # закрытого неотвеченной репликой клиента, заметная часть — именно такие благодарности. Тот,
 # кто ждёт дольше часа, со стены уходит; в итоги дня он всё равно попадает как чат без ответа.
+# Кнопку «Ответ не нужен» в самих «Чатах ОП» табло учитывает (с 19.10.2026) — см. now_block.
 WAITING_MAX_SECONDS = 60 * 60
 # Нормы владельца 25.09.2026: первый ответ — минута, ответ внутри чата — четыре.
 FIRST_TARGET_SECONDS = 60
@@ -347,8 +348,16 @@ def day_block(episodes, messages, day, *, names, now=None):
     }
 
 
+def waiting_candidates(rows, now, waiting_max_seconds=WAITING_MAX_SECONDS):
+    """Чаты, где клиент писал за последние `waiting_max_seconds`: только среди них бывает ожидание,
+    которое табло покажет, — по ним и спрашивается счётчик «Ожидают ответа» (`waiting_since`)."""
+    floor = now - timedelta(seconds=waiting_max_seconds)
+    return {(row.get('channel_id'), row.get('chat_id')) for row in rows or []
+            if not row.get('is_echo') and row.get('at') is not None and row['at'] >= floor}
+
+
 def now_block(episodes, now, *, in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPISODE_GAP_SECONDS,
-              waiting_max_seconds=WAITING_MAX_SECONDS):
+              waiting_max_seconds=WAITING_MAX_SECONDS, waiting_since=None):
     """Чаты «сейчас»: в работе и ждущие ответа, всего и по людям.
 
     В работе — последнее сообщение диалога не старше `in_work_seconds` (рассылки не в счёт).
@@ -356,11 +365,19 @@ def now_block(episodes, now, *, in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPI
     группы — чат уже не верификаторов; за человеком чат числится, пока его собственная последняя
     реплика не старше `waiting_max_seconds`. Ждёт ответа — клиент написал после последнего ответа не
     раньше `waiting_max_seconds` назад (см. WAITING_MAX_SECONDS); ожидание — от первой такой
-    реплики, как и задержка ответа."""
+    реплики, как и задержка ответа.
+
+    waiting_since — {(канал, чат): с какого момента ждёт или None} по счётчику «Ожидают ответа»
+    «Чатов ОП» (wazzup/unread.py). Он закрывает ожидание не только ответом, но и кнопкой «Ответ
+    не нужен», которой в сообщениях нет (владелец 19.10.2026: «Ждёт дольше всех» смотрит на неё).
+    None у чата — ждать нечего; время — клиент написал снова после нажатия, ждёт с этой реплики.
+    Чата нет в словаре (Global, не WhatsApp — их счётчик не ведёт) — правило сообщений, как было.
+    Ожидания, которого нет по сообщениям, счётчик не добавляет."""
     in_work_by_person = defaultdict(int)
     chats_in_work = 0
     waiting = 0
     longest_wait = None
+    waiting_since = waiting_since or {}
     for episode in episodes:
         silence = (now - episode['end']).total_seconds()
         if silence >= gap_seconds:
@@ -376,8 +393,13 @@ def now_block(episodes, now, *, in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPI
             if last is not None and (
                     now - episode['people'][last[1]]['last_at']).total_seconds() <= waiting_max_seconds:
                 in_work_by_person[last[1]] += 1
-        if episode['pending'] is not None:
-            wait = max(0.0, (now - episode['pending']).total_seconds())
+        pending = episode['pending']
+        key = (episode['channel_id'], episode['chat_id'])
+        if pending is not None and key in waiting_since:
+            tracked = waiting_since[key]
+            pending = None if tracked is None else max(pending, tracked)
+        if pending is not None:
+            wait = max(0.0, (now - pending).total_seconds())
             if wait <= waiting_max_seconds:
                 waiting += 1
                 longest_wait = wait if longest_wait is None else max(longest_wait, wait)
@@ -415,7 +437,7 @@ def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
              in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPISODE_GAP_SECONDS,
              waiting_max_seconds=WAITING_MAX_SECONDS,
              first_target_seconds=FIRST_TARGET_SECONDS, inner_target_seconds=INNER_TARGET_SECONDS,
-             live_statuses=None, status_entry=None, status_events=None):
+             live_statuses=None, status_entry=None, status_events=None, waiting_since=None):
     """Снимок табло на момент `now` (наивное время Алматы).
 
     rows — сообщения с полуночи минус `gap_seconds` до `now`: диалог, начатый вчера вечером,
@@ -423,13 +445,14 @@ def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
 
     Статусы смены — те же три источника, что у «Линии» (snapshot.assemble): `live_statuses` —
     последнее событие каждого ({id: {status_key, event_at, seconds}}), `status_entry` — каталог
-    подписей и разрядов табло, `status_events` — события с вечера прошлых суток для времени входа."""
+    подписей и разрядов табло, `status_events` — события с вечера прошлых суток для времени входа.
+    `waiting_since` — счётчик «Ожидают ответа» «Чатов ОП», см. now_block."""
     messages = classify(rows, verifier_ids)
     episodes = split_episodes(messages, gap_seconds)
     day = now.date()
     block = day_block(episodes, messages, day, names=names, now=now)
     current = now_block(episodes, now, in_work_seconds=in_work_seconds, gap_seconds=gap_seconds,
-                        waiting_max_seconds=waiting_max_seconds)
+                        waiting_max_seconds=waiting_max_seconds, waiting_since=waiting_since)
     in_work = current.pop('in_work_by_person')
     people = block.pop('operators')
     # В списке — весь состав верификаторов, а не только писавшие сегодня: статус есть у каждого,

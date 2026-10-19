@@ -244,6 +244,29 @@ def load_chat_messages(cursor, since, until, account=CHAT_ACCOUNT):
             for row in cursor.fetchall()]
 
 
+def load_chat_waiting(cursor, keys, account=CHAT_ACCOUNT):
+    """{(канал, чат): с какого момента ждёт или None} — счётчик «Ожидают ответа» «Чатов ОП».
+
+    Счётчик (wazzup/unread.py) закрывает ожидание ответом сотрудника и кнопкой «Ответ не нужен»,
+    а сообщения табло знают только про ответ. Спрашиваем лишь чаты-кандидаты (клиент писал за час,
+    `chat.waiting_candidates`) — точечно по ключу. Чата, которого счётчик не ведёт (Global, не
+    WhatsApp), в ответе нет: для него остаётся правило сообщений. Время — наивное Алматы, как у
+    табло; ожидание счётчик ведёт по времени отправки клиентом (wazzup_dt), если оно известно."""
+    keys = sorted(keys or ())
+    if not keys:
+        return {}
+    cursor.execute("""
+        SELECT s.channel_id, s.chat_id,
+               (SELECT MIN(u.sent_at) FROM wazzup_unanswered_messages u
+                 WHERE u.account = s.account AND u.channel_id = s.channel_id
+                   AND u.chat_id = s.chat_id) AT TIME ZONE 'Asia/Almaty'
+          FROM unnest(%s::text[], %s::text[]) AS k(channel_id, chat_id)
+          JOIN wazzup_chat_read_state s
+            ON s.account = %s AND s.channel_id = k.channel_id AND s.chat_id = k.chat_id
+    """, ([key[0] for key in keys], [key[1] for key in keys], account))
+    return {(row[0], row[1]): row[2] for row in cursor.fetchall()}
+
+
 def load_chat_last_message_at(cursor, account=CHAT_ACCOUNT):
     """Время последнего сообщения аккаунта (наивное, Алматы) — жив ли поток вебхука.
 
@@ -682,6 +705,14 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             # путём, что у линии: последнее событие и события с вечера для времени входа.
             status_events = _phone_events(cursor, [{'id': user_id} for user_id in names], day,
                                           lookback_hours=snapshot_mod.ENTRY_LOOKBACK_HOURS)
+            # «Ответ не нужен» — на каждом снимке, как статусы: нажали — чат уходит со стены за 10 с.
+            try:
+                waiting_since = load_chat_waiting(cursor, chat_mod.waiting_candidates(
+                    rows, now, settings.get('waiting_max_seconds', chat_mod.WAITING_MAX_SECONDS)))
+            except Exception:  # noqa: BLE001
+                # Без счётчика ожидание считается по сообщениям, как до него.
+                log.exception('%s: счётчик «Ожидают ответа» не прочитался', chat_label)
+                waiting_since = None
         try:
             statuses = live_statuses(list(names))
         except Exception:  # noqa: BLE001
@@ -690,7 +721,8 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             statuses = {}
         return chat_mod.assemble(rows, now, verifier_ids=names, names=names,
                                  last_message_at=last_message_at, live_statuses=statuses,
-                                 status_entry=status_entry, status_events=status_events, **settings)
+                                 status_entry=status_entry, status_events=status_events,
+                                 waiting_since=waiting_since, **settings)
 
     def _chat_snapshot():
         """Снимок чатов из общего кэша — один на всех зрителей, виджет и отбивку."""

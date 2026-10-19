@@ -262,6 +262,49 @@ class NowTests(unittest.TestCase):
         self.assertEqual(current['chats_waiting'], 1)
         self.assertEqual(current['longest_wait_seconds'], 20 * 60)
 
+    def test_reply_not_needed_takes_the_chat_off_the_wall(self):
+        """Владелец 19.10.2026: «Ждёт дольше всех» смотрит на «Ответ не нужен», а не только на
+        последнее сообщение сотрудника. «Рахмет» после ответа: нажали — ждать нечего."""
+        now = at(15)
+        rows = [client(at(14, 30)), reply(at(14, 31), VER_A), client(at(14, 40)),              # «Рахмет»
+                client(at(14, 50), chat='c2')]                                               # ждёт 10 мин
+        before = C.assemble(rows, now, verifier_ids=NAMES, names=NAMES, last_message_at=now)['now']
+        self.assertEqual((before['chats_waiting'], before['longest_wait_seconds']), (2, 20 * 60))
+        after = C.assemble(rows, now, verifier_ids=NAMES, names=NAMES, last_message_at=now,
+                           waiting_since={('ch', 'c1'): None, ('ch', 'c2'): at(14, 50)})['now']
+        self.assertEqual((after['chats_waiting'], after['longest_wait_seconds']), (1, 10 * 60))
+        # «Сейчас в работе» кнопка не трогает: чат с последним сообщением 20 минут назад — тот же.
+        self.assertEqual(after['chats_in_work'], before['chats_in_work'])
+
+    def test_client_writing_again_after_the_button_waits_from_that_message(self):
+        now = at(15)
+        rows = [client(at(14, 20)), reply(at(14, 21), VER_A), client(at(14, 25)),             # нажали в 14:30
+                client(at(14, 52))]                                                         # снова пишет
+        current = C.assemble(rows, now, verifier_ids=NAMES, names=NAMES, last_message_at=now,
+                             waiting_since={('ch', 'c1'): at(14, 52)})['now']
+        self.assertEqual((current['chats_waiting'], current['longest_wait_seconds']), (1, 8 * 60))
+        # Счётчик не моложе сообщений: время из wazzup_dt раньше доставки — берём позднее из двух.
+        early = C.assemble(rows, now, verifier_ids=NAMES, names=NAMES, last_message_at=now,
+                           waiting_since={('ch', 'c1'): at(14, 24)})['now']
+        self.assertEqual(early['longest_wait_seconds'], 35 * 60)
+
+    def test_counter_never_adds_a_wait_and_untracked_chats_keep_the_message_rule(self):
+        now = at(15)
+        rows = [client(at(14, 30)), reply(at(14, 31), VER_A),                               # отвечен
+                client(at(14, 45), chat='g1', channel='global')]                            # Global
+        current = C.assemble(rows, now, verifier_ids=NAMES, names=NAMES, last_message_at=now,
+                             waiting_since={('ch', 'c1'): at(14, 30)})['now']
+        self.assertEqual((current['chats_waiting'], current['longest_wait_seconds']), (1, 15 * 60))
+
+    def test_only_chats_with_a_client_message_within_the_hour_are_asked(self):
+        now = at(15)
+        rows = [client(at(14, 1)), client(at(13, 59), chat='old'), reply(at(14, 59), VER_A, chat='mine'),
+                client(at(14, 30), chat='c3', channel='ch2')]
+        self.assertEqual(C.waiting_candidates(rows, now), {('ch', 'c1'), ('ch2', 'c3')})
+        self.assertEqual(C.waiting_candidates(rows, now, waiting_max_seconds=2 * 3600),
+                         {('ch', 'c1'), ('ch', 'old'), ('ch2', 'c3')})
+        self.assertEqual(C.waiting_candidates([], now), set())
+
     def test_stream_silence_is_judged_by_the_hour_it_started(self):
         self.assertTrue(C.stream_state(at(14, 30), at(15))['silent'])       # день: 30 мин — обрыв
         self.assertFalse(C.stream_state(at(3, 30), at(5))['silent'])        # ночь: полтора часа — норма
@@ -420,6 +463,8 @@ class RouteTests(unittest.TestCase):
         # Статусы смены «Чатов ОП»: последнее событие и события для времени входа и журнала.
         self.live, self.events, self.live_asked = {}, [], []
         self.journal_events, self.events_asked = [], []
+        # Счётчик «Ожидают ответа» «Чатов ОП»: ключи, которые спросили, и его ответ.
+        self.waiting, self.waiting_asked = {}, []
         for name, value in (
                 ('load_chat_verifiers', lambda cursor, day_from, day_to=None: dict(NAMES)),
                 ('load_chat_verifier_days', lambda cursor, day_from, day_to=None: (dict(NAMES), {})),
@@ -428,7 +473,8 @@ class RouteTests(unittest.TestCase):
                 ('load_chat_last_message_at', lambda cursor, account='op': now),
                 ('load_phone_events', lambda cursor, ids, day, lookback_hours=0: self.events_asked.append(
                     lookback_hours) or [event for event in self.events if event['operator_id'] in set(ids)]),
-                ('load_journal_events', lambda cursor, operator_id, day, lookback_hours=0: list(self.journal_events))):
+                ('load_journal_events', lambda cursor, operator_id, day, lookback_hours=0: list(self.journal_events)),
+                ('load_chat_waiting', self.load_waiting)):
             patcher = mock.patch.object(op_routes, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -457,6 +503,12 @@ class RouteTests(unittest.TestCase):
         if isinstance(self.live, Exception):
             raise self.live
         return {user_id: value for user_id, value in self.live.items() if user_id in ids}
+
+    def load_waiting(self, cursor, keys, account='op'):
+        self.waiting_asked.append(set(keys))
+        if isinstance(self.waiting, Exception):
+            raise self.waiting
+        return {key: value for key, value in self.waiting.items() if key in keys}
 
     def test_operator_is_refused(self):
         self.assertEqual(self.client.get('/api/op_wallboard/chat_snapshot').status_code, 403)
@@ -535,6 +587,27 @@ class RouteTests(unittest.TestCase):
         # Того, кого нет на стене «Чата», журнал не открывает.
         self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=999&direction=chat').status_code, 404)
 
+    def test_reply_not_needed_reaches_the_wall_and_the_broadcast_snapshot(self):
+        """Клиент написал после ответа и ждёт; в «Чатах ОП» нажали «Ответ не нужен» — со стены уходит."""
+        self.requester.update(role='admin')
+        self.rows.append(client(self.now - timedelta(minutes=2)))
+        waiting = self.client.get('/api/op_wallboard/chat_snapshot').get_json()['now']
+        self.assertEqual(waiting['chats_waiting'], 1)
+        self.assertEqual(self.waiting_asked[-1], {('ch', 'c1')})   # спрашиваем только кандидатов
+        self.waiting = {('ch', 'c1'): None}
+        dismissed = self.client.get('/api/op_wallboard/chat_snapshot').get_json()['now']
+        self.assertEqual((dismissed['chats_waiting'], dismissed['longest_wait_seconds']), (0, None))
+        # Отбивка берёт тот же снимок — там тоже ушло.
+        self.assertEqual(self.bp.chat_snapshot()['now']['chats_waiting'], 0)
+
+    def test_counter_outage_falls_back_to_the_message_rule(self):
+        self.requester.update(role='admin')
+        self.rows.append(client(self.now - timedelta(minutes=2)))
+        self.waiting = RuntimeError('нет связи с базой')
+        with self.assertLogs('op_wallboard.routes', level='ERROR'):
+            body = self.client.get('/api/op_wallboard/chat_snapshot').get_json()
+        self.assertEqual(body['now']['chats_waiting'], 1)
+
     def test_chat_snapshot_is_refreshed_as_often_as_the_line(self):
         self.assertIn("chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 10,", BOT_SOURCE)
         self.assertIn("ttl_seconds=_env_int('OP_WALLBOARD_CACHE_TTL_SECONDS', 10,", BOT_SOURCE)
@@ -586,6 +659,29 @@ class LoaderSqlTests(unittest.TestCase):
         self.assertEqual(source.count("::timestamp AT TIME ZONE 'Asia/Almaty'"), 2)
         self.assertIn('NOT w.is_deleted', source)
         self.assertNotIn('ORDER BY', source)
+
+    def test_waiting_counter_is_asked_by_key_in_almaty_time(self):
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((' '.join(sql.split()), params))
+
+            def fetchall(self):
+                return [('ch', 'c1', None), ('ch2', 'c3', at(14, 50))]
+
+        cursor = Cursor()
+        self.assertEqual(op_routes.load_chat_waiting(cursor, set()), {})
+        self.assertEqual(cursor.calls, [])                              # нечего спрашивать — без запроса
+        got = op_routes.load_chat_waiting(cursor, {('ch2', 'c3'), ('ch', 'c1')})
+        self.assertEqual(got, {('ch', 'c1'): None, ('ch2', 'c3'): at(14, 50)})
+        sql, params = cursor.calls[0]
+        self.assertEqual(params, (['ch', 'ch2'], ['c1', 'c3'], 'op'))  # пары ключа не расходятся
+        self.assertIn("FROM unnest(%s::text[], %s::text[]) AS k(channel_id, chat_id)", sql)
+        self.assertIn("JOIN wazzup_chat_read_state s ON s.account = %s", sql)
+        self.assertIn("SELECT MIN(u.sent_at) FROM wazzup_unanswered_messages u", sql)
+        self.assertIn(") AT TIME ZONE 'Asia/Almaty'", sql)
 
     def test_verifiers_are_the_group_model_not_the_direction(self):
         self.assertEqual(C.VERIFIER_GROUP_MODEL, 'op_verificator')
