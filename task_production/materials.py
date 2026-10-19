@@ -104,6 +104,7 @@ UNSUPPORTED_TYPE = 'PRODUCTION_UNSUPPORTED_TYPE'
 LIBRARY_ONLY_VIDEO = 'PRODUCTION_LIBRARY_ONLY_VIDEO'
 LIBRARY_ONLY_IMAGE = 'PRODUCTION_LIBRARY_ONLY_IMAGE'
 LIBRARY_BAD_CATEGORY = 'PRODUCTION_LIBRARY_BAD_CATEGORY'
+RENAME_EMPTY = 'PRODUCTION_RENAME_EMPTY'
 LIBRARY_FOLDER = 'library'
 
 # Категории «Медиатеки» — список владельца 16.10.2026 (с типичными размерами:
@@ -190,6 +191,25 @@ def classify_library(name, size, category):
     if known is None or known[0] != wanted:
         raise ValueError(LIBRARY_ONLY_IMAGE if wanted == KIND_IMAGE else LIBRARY_ONLY_VIDEO)
     return classify(clean, size) + (code,)
+
+
+def renamed_file(value, extension):
+    """Новое имя файла «Медиатеки»: название — от человека, расширение — от самого файла.
+
+    Расширение не меняется: внутри тот же формат, и по нему файл открывается
+    после скачивания. Если человек дописал его сам («Промо.mp4»), второй раз
+    оно не добавляется. Остальное — как у имени при загрузке (clean_name).
+    """
+    suffix = ('.' + str(extension).strip().lower()) if extension else ''
+    text = str(value or '').strip()
+    # Сначала отрезать своё расширение, потом чистить: «.mp4» без названия — пусто, а не «mp4.mp4».
+    if suffix and text.lower().endswith(suffix):
+        text = text[:-len(suffix)]
+    try:
+        text = clean_name(text)
+    except ValueError:
+        raise ValueError(RENAME_EMPTY)
+    return clean_name(text + suffix)
 
 
 def library_kind_fits(material, category):
@@ -421,6 +441,7 @@ def error_message(code):
         LIBRARY_ONLY_VIDEO: 'Это не ролик: в эту категорию подходят MP4, MOV, WebM, MKV или AVI',
         LIBRARY_ONLY_IMAGE: 'Это не картинка: в «Баннеры» подходят JPG, PNG, WebP, GIF, SVG, HEIC или TIFF',
         LIBRARY_BAD_CATEGORY: 'Выберите категорию: баннеры, анимационные ролики, рекламные ролики или рилсы',
+        RENAME_EMPTY: 'Введите название файла',
         UNSUPPORTED_TYPE: 'Такой файл не принимается. Подходят ролики (MP4, MOV, WebM), '
                           'картинки (JPG, PNG, WebP, GIF, SVG, HEIC, TIFF), PDF, PSD, AI, EPS, '
                           'архивы ZIP, RAR, 7z и звук (MP3, WAV, M4A, AAC).',

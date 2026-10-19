@@ -373,9 +373,10 @@ def test_library_resume_matches_task_less_upload(db):
 
 
 def _event(cur, material_id, action, *, name='ролик.mp4', category='reels', from_category=None, actor=VIDEO,
-           kind='video', size=100):
+           kind='video', size=100, from_name=None):
     queries.add_library_event(cur, material={'id': material_id, 'name': name, 'kind': kind, 'size': size},
-                              action=action, actor_id=actor, category=category, from_category=from_category)
+                              action=action, actor_id=actor, category=category, from_category=from_category,
+                              from_name=from_name)
 
 
 def test_library_move_touches_only_the_shelf(db):
@@ -436,3 +437,29 @@ def test_library_materials_skip_tasks_and_unfinished(db):
         task_id = _task(cur, 'Задача', status='in_progress')
         in_task = _material(cur, task_id, 1, 'в задаче.mp4')
         assert set(queries.library_materials(cur, [ready, pending, in_task, str(uuid.uuid4())])) == {ready}
+
+
+def test_library_rename_and_history_search(db):
+    with db.cursor() as cur:
+        shelf = _library_video(cur, 'IMG_4521.mp4', category='reels')
+        task_id = _task(cur, 'Задача', status='in_progress')
+        in_task = _material(cur, task_id, 1, 'в задаче.mp4')
+        _event(cur, shelf, 'added', name='IMG_4521.mp4')
+        assert queries.rename_library_material(cur, shelf, 'Рилс — неделя водителей.mp4') == 1
+        _event(cur, shelf, 'renamed', name='Рилс — неделя водителей.mp4', from_name='IMG_4521.mp4', actor=HEAD)
+        # Файл задачи именем «Медиатеки» не переименовать.
+        assert queries.rename_library_material(cur, in_task, 'чужое.mp4') == 0
+        assert queries.material(cur, in_task)['name'] == 'в задаче.mp4'
+        assert queries.material(cur, shelf)['name'] == 'Рилс — неделя водителей.mp4'
+
+        events, total = queries.library_history(cur)
+        assert total == 2 and [e['action'] for e in events] == ['renamed', 'added']
+        assert (events[0]['name'], events[0]['from_name']) == ('Рилс — неделя водителей.mp4', 'IMG_4521.mp4')
+        assert events[1]['from_name'] is None
+        # После переименования файл находится в «Истории» и по новому имени, и по прежнему.
+        assert [e['action'] for e in queries.library_history(cur, query='неделя водителей')[0]] == ['renamed', 'added']
+        assert [e['action'] for e in queries.library_history(cur, query='IMG_4521')[0]] == ['renamed', 'added']
+        assert queries.library_history(cur, query='нет такого')[1] == 0
+        # В «Медиатеке» — по новому имени.
+        assert [m['id'] for m in queries.library(cur, query='неделя')[0]] == [shelf]
+        assert queries.library(cur, query='IMG_4521')[1] == 0

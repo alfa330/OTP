@@ -700,28 +700,47 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
                       'resumed': False}, 201)
 
     @route('/library/<material_id>', methods=('PATCH',))
-    def move_library_material(material_id, ctx):
-        """Перенести файл в другую категорию. Кто вправе — те же, кто вправе удалить."""
+    def update_library_material(material_id, ctx):
+        """Переименовать файл и/или перенести в другую категорию.
+
+        Кто вправе — те же, кто вправе удалить. Каждое изменение — строка «Истории».
+        """
         _require_library(ctx)
         _check_uuid(material_id)
-        category = _category_or_error(_body().get('category'))
+        data = _body()
+        if 'name' not in data and 'category' not in data:
+            raise ApiError('Нечего менять', 400, 'PRODUCTION_NOTHING_TO_CHANGE')
+        category = _category_or_error(data.get('category')) if 'category' in data else None
         with db._get_cursor() as cursor:
             material = queries.material(cursor, material_id, lock=True)
             if material is None or not materials.is_library(material) or material['status'] != 'ready':
                 raise ApiError('Файл не найден', 404, 'PRODUCTION_MATERIAL_NOT_FOUND')
             if not _can_manage_library(material, ctx):
-                raise ApiError('Перенести файл могут загрузивший, глава маркетинга и супер-админ',
+                raise ApiError('Менять файл могут загрузивший, глава маркетинга и супер-админ',
                                403, 'PRODUCTION_MOVE_FORBIDDEN')
-            if not materials.library_kind_fits(material, category):
+            if category is not None and not materials.library_kind_fits(material, category):
                 code = (materials.LIBRARY_ONLY_IMAGE if materials.LIBRARY_CATEGORY_KIND[category] == materials.KIND_IMAGE
                         else materials.LIBRARY_ONLY_VIDEO)
                 raise ApiError(materials.error_message(code), 400, code)
+            name = material['name']
+            if 'name' in data:
+                try:
+                    name = materials.renamed_file(data.get('name'), material['extension'])
+                except ValueError as exc:
+                    raise ApiError(materials.error_message(str(exc)), 400, str(exc))
             previous = material.get('library_category')
-            if previous != category:
+            current = previous
+            if category is not None and category != previous:
                 queries.set_library_category(cursor, material['id'], category)
                 queries.add_library_event(cursor, material=material, action=queries.LIBRARY_EVENT_MOVED,
                                           actor_id=ctx['user_id'], category=category, from_category=previous)
-        return _json({'ok': True, 'category': category})
+                current = category
+            if name != material['name']:
+                queries.rename_library_material(cursor, material['id'], name)
+                queries.add_library_event(cursor, material=dict(material, name=name),
+                                          action=queries.LIBRARY_EVENT_RENAMED, actor_id=ctx['user_id'],
+                                          category=current, from_name=material['name'])
+        return _json({'ok': True, 'category': current, 'name': name})
 
     @route('/library/history')
     def library_history(ctx):
@@ -755,6 +774,7 @@ def build_production_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'size': event['size'],
                 'category': event['category'],
                 'from_category': event['from_category'],
+                'from_name': event.get('from_name'),
                 'actor': people.get(actor['id']) if actor is not None else None,
                 # Файл на месте — строку можно открыть; удалённый остаётся только записью.
                 'material': files.get(event['material_id']),

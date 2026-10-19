@@ -15,6 +15,7 @@ import {
   columnOf,
   dayLabel,
   dueInfo,
+  fileBaseName,
   fileExtension,
   fileKindOf,
   filesLabel,
@@ -193,6 +194,14 @@ test('«История»: дни, время и слова действий', ()
   assert.deepEqual(groups.map((g) => [g.label, g.events.map((e) => e.id)]),
     [['Сегодня', [4, 3]], ['Вчера', [2]], ['1 октября', [1]]]);
   assert.deepEqual(groupByDay(null, now), []);
-  assert.deepEqual(HISTORY_ACTION_LABELS, { added: 'Добавлен', moved: 'Перенесён', deleted: 'Удалён' });
+  assert.deepEqual(HISTORY_ACTION_LABELS, { added: 'Добавлен', moved: 'Перенесён', renamed: 'Переименован', deleted: 'Удалён' });
 });
 
+test('переименование: правится название, расширение остаётся от файла', () => {
+  assert.equal(fileBaseName('IMG_4521.MP4', 'mp4'), 'IMG_4521');
+  assert.equal(fileBaseName('Рилс — осень.mp4', 'mp4'), 'Рилс — осень');
+  assert.equal(fileBaseName('ролик.mov.mp4', 'mp4'), 'ролик.mov');
+  assert.equal(fileBaseName('без расширения', 'mp4'), 'без расширения');
+  assert.equal(fileBaseName('кадр.png', ''), 'кадр.png');
+  assert.equal(fileBaseName(null, 'mp4'), '');
+});

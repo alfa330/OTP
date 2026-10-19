@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExtern
 import axios from 'axios';
 import {
     AlertCircle, Check, ChevronDown, Download, ExternalLink, FileText, Film, Image as ImageIcon,
-    Loader2, MoreHorizontal, Play, RotateCcw, Trash2, Upload, X,
+    Loader2, MoreHorizontal, Pencil, Play, RotateCcw, Trash2, Upload, X,
 } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosHint, IosMenu, IosModal } from '../ui/ios';
 import { startFileDownload } from '../../utils/fileDownload';
@@ -10,8 +10,8 @@ import { frameSize, productionBriefRows, sizeDimensions } from '../tasks/product
 import ProductionViewer from './ProductionViewer';
 import { uploadOwnerId, uploadStore } from './productionUpload';
 import {
-    ACCEPT_ATTRIBUTE, STATUS_LABELS, VERSION_STATE_LABELS, dueInfo, filesLabel, formatBytes, formatDateTime,
-    formatDuration, formatEta, formatShortDate, initialsOf, shortName,
+    ACCEPT_ATTRIBUTE, STATUS_LABELS, VERSION_STATE_LABELS, dueInfo, fileBaseName, filesLabel, formatBytes,
+    formatDateTime, formatDuration, formatEta, formatShortDate, initialsOf, shortName,
 } from './productionMeta';
 
 /*
@@ -131,21 +131,71 @@ export const Thumb = ({ material }) => {
     );
 };
 
+/* Название правится прямо на плитке, как в Finder: поле на месте имени, расширение
+   рядом серым — его не меняют. Enter или уход из поля — сохранить, Escape — отмена. */
+const RenameField = ({ material, onDone }) => {
+    const base = fileBaseName(material.name, material.extension);
+    const [draft, setDraft] = useState(base);
+    const inputRef = useRef(null);
+    const finished = useRef(false);
+    useEffect(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+    }, []);
+    const finish = (save) => {
+        if (finished.current) return;
+        finished.current = true;
+        const value = draft.trim();
+        onDone(save && value && value !== base ? value : null);
+    };
+    return (
+        <form
+            className="mt-1.5 flex items-center px-0.5"
+            onSubmit={(event) => { event.preventDefault(); finish(true); }}
+        >
+            <input
+                ref={inputRef}
+                value={draft}
+                maxLength={200}
+                enterKeyHint="done"
+                aria-label="Название файла"
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); finish(false); } }}
+                onBlur={() => finish(true)}
+                className="min-w-0 grow basis-0 rounded-md bg-white px-1.5 py-[3px] text-[12.5px] font-medium text-slate-900 outline-none ring-2 ring-blue-500/70"
+            />
+            {material.extension && <span className="ml-1 shrink-0 text-[12px] text-slate-400">.{material.extension}</span>}
+        </form>
+    );
+};
+
 /* badge — метка поверх кадра слева сверху (категория «Медиатеки» в общем списке);
-   actions — свои пункты меню между «Скачать» и «Удалить» (перенос в категорию). */
-export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = '', badge = null, actions = [] }) => {
+   actions — свои пункты меню между «Скачать» и «Удалить» (перенос в категорию);
+   onRename(material, name) — пункт «Переименовать» тому, кто вправе менять файл. */
+export const MaterialTile = ({ material, onOpen, onDownload, onDelete, onRename = null, meta = '', badge = null, actions = [] }) => {
     /* Удаление подтверждается на самой плитке, а не вторым окном поверх карточки:
        окно на окне — двойное затемнение, а на телефоне целый экран ради одной строки. */
     const [confirming, setConfirming] = useState(false);
+    const [renaming, setRenaming] = useState(false);
     return (
     <div className="group relative">
         <button type="button" onClick={() => onOpen(material)} className="block w-full text-left transition active:scale-[0.98]">
             <Thumb material={material} />
-            <span className="mt-1.5 block truncate px-0.5 text-[12.5px] font-medium text-slate-800" title={material.name}>{material.name}</span>
-            <span className="block truncate px-0.5 text-[11.5px] tabular-nums text-slate-400">
-                {[formatBytes(material.size), meta].filter(Boolean).join(' · ')}
-            </span>
+            {!renaming && (
+                <span className="mt-1.5 block truncate px-0.5 text-[12.5px] font-medium text-slate-800" title={material.name}>{material.name}</span>
+            )}
+            {!renaming && (
+                <span className="block truncate px-0.5 text-[11.5px] tabular-nums text-slate-400">
+                    {[formatBytes(material.size), meta].filter(Boolean).join(' · ')}
+                </span>
+            )}
         </button>
+        {renaming && (
+            <RenameField
+                material={material}
+                onDone={(name) => { setRenaming(false); if (name) onRename(material, name); }}
+            />
+        )}
         {badge && !confirming && <span className="pointer-events-none absolute left-1.5 top-1.5">{badge}</span>}
         {confirming && (
             <div className="absolute inset-x-0 top-0 flex aspect-[16/10] flex-col items-center justify-center gap-2 rounded-xl bg-slate-900/75 px-2 text-center backdrop-blur-sm">
@@ -162,7 +212,7 @@ export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = ''
                 </span>
             </div>
         )}
-        {!confirming && (
+        {!confirming && !renaming && (
         <span className="absolute right-1.5 top-1.5 opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
             <IosMenu
                 label="Действия с файлом"
@@ -173,6 +223,7 @@ export const MaterialTile = ({ material, onOpen, onDownload, onDelete, meta = ''
                 }}
                 items={[
                     { key: 'download', label: 'Скачать', icon: Download, onSelect: () => onDownload(material) },
+                    onRename && material.can_delete && { key: 'rename', label: 'Переименовать', icon: Pencil, onSelect: () => setRenaming(true) },
                     ...actions,
                     material.can_delete && { key: 'delete', label: 'Удалить', icon: Trash2, danger: true, separatorBefore: true, onSelect: () => setConfirming(true) },
                 ]}

@@ -97,6 +97,14 @@ export const LIBRARY_CATEGORIES = [
 
 export const libraryCategory = (value) => LIBRARY_CATEGORIES.find((category) => category.value === value) || null;
 
+/** Имя файла без расширения — то, что человек правит при переименовании; расширение
+    остаётся от файла (сервер допишет его сам, materials.renamed_file). */
+export const fileBaseName = (name, extension) => {
+    const text = String(name || '');
+    const suffix = extension ? `.${String(extension).toLowerCase()}` : '';
+    return suffix && text.toLowerCase().endsWith(suffix) ? text.slice(0, -suffix.length) : text;
+};
+
 /** Вид файла по расширению: 'video', 'image', 'file' или null — такого не принимаем. */
 export const fileKindOf = (file) => PRODUCTION_FILE_TYPES[fileExtension(file?.name)]?.[0] || null;
 
@@ -253,7 +261,7 @@ export const groupByDay = (events, now = new Date()) => {
 
 /* Что сделали с файлом. Слово согласовано с «файлом», а не с человеком: род
    сотрудника по имени не угадать. */
-export const HISTORY_ACTION_LABELS = { added: 'Добавлен', moved: 'Перенесён', deleted: 'Удалён' };
+export const HISTORY_ACTION_LABELS = { added: 'Добавлен', moved: 'Перенесён', renamed: 'Переименован', deleted: 'Удалён' };
 
 /** Срок задачи: подпись и просрочка. Сданная и принятая задача не «горит». */
 export const dueInfo = (task, now = new Date()) => {

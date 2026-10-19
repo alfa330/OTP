@@ -91,4 +91,8 @@ STATEMENTS = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_task_production_library_events_created "
     "ON task_production_library_events (created_at DESC, id DESC);",
+    # Переименование (просьба владельца 19.10.2026: «чтобы можно было менять
+    # название… загруженных видеороликов или банеров») — action renamed:
+    # file_name — новое имя, from_name — прежнее.
+    "ALTER TABLE task_production_library_events ADD COLUMN IF NOT EXISTS from_name VARCHAR(255);",
 )

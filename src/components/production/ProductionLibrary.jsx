@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExtern
 import axios from 'axios';
 import {
     ArrowRight, ArrowRightLeft, Check, FileText, Film, FolderInput, Image as ImageIcon, LayoutGrid, Loader2,
-    Megaphone, Plus, Search, Smartphone, Sparkles, Trash2, Upload, X,
+    Megaphone, Pencil, Plus, Search, Smartphone, Sparkles, Trash2, Upload, X,
 } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, iosInput, IosHint, IosSegmented } from '../ui/ios';
 import { startFileDownload } from '../../utils/fileDownload';
@@ -137,6 +137,7 @@ const CategoryChip = ({ value }) => {
 const ACTION_LOOK = {
     added: { icon: Plus, tone: 'bg-blue-600' },
     moved: { icon: ArrowRightLeft, tone: 'bg-slate-500' },
+    renamed: { icon: Pencil, tone: 'bg-slate-500' },
     deleted: { icon: Trash2, tone: 'bg-rose-500' },
 };
 
@@ -148,6 +149,8 @@ const HistoryRow = ({ event, onOpen }) => {
     const KindIcon = event.kind === 'video' ? Film : event.kind === 'image' ? ImageIcon : FileText;
     const deleted = event.action === 'deleted';
     const openable = Boolean(material) && !deleted;
+    // Файл на месте — под нынешним именем (его потом могли переименовать); удалённый — под тем, с каким удалили.
+    const title = material?.name || event.name;
     const Row = openable ? 'button' : 'div';
     return (
         <li>
@@ -167,8 +170,8 @@ const HistoryRow = ({ event, onOpen }) => {
                     с планшета у них свои колонки справа. */}
                 <span className="min-w-0 grow basis-0">
                     <span className="flex min-w-0 items-baseline">
-                        <span className={`min-w-0 grow basis-0 truncate text-[14px] font-medium xl:text-[15px] ${deleted ? 'text-slate-500' : 'text-slate-900'}`} title={event.name}>
-                            {event.name}
+                        <span className={`min-w-0 grow basis-0 truncate text-[14px] font-medium xl:text-[15px] ${deleted ? 'text-slate-500' : 'text-slate-900'}`} title={title}>
+                            {title}
                         </span>
                         <span className="ml-2 shrink-0 text-[12.5px] tabular-nums text-slate-400 md:hidden">{formatTime(event.at)}</span>
                     </span>
@@ -179,6 +182,11 @@ const HistoryRow = ({ event, onOpen }) => {
                                 <CategoryChip value={event.from_category} />
                                 <ArrowRight size={12} className="text-slate-400" />
                             </>
+                        )}
+                        {event.action === 'renamed' && event.from_name && (
+                            <span className="min-w-0 max-w-full truncate text-slate-500" title={event.from_name}>
+                                было «{event.from_name}»
+                            </span>
                         )}
                         <CategoryChip value={event.category} />
                         <span className="hidden tabular-nums text-slate-400 md:inline">{formatBytes(event.size)}</span>
@@ -404,6 +412,16 @@ const ProductionLibrary = ({ apiBaseUrl, headers, showToast }) => {
         }
     };
 
+    const rename = async (material, name) => {
+        try {
+            const response = await axios.patch(`${apiBaseUrl}/api/production/library/${material.id}`, { name }, { headers: headers() });
+            const saved = response.data?.name || material.name;
+            setItems((prev) => (prev || []).map((item) => (item.id === material.id ? { ...item, name: saved } : item)));
+        } catch (err) {
+            showToast?.(errorText(err, 'Не удалось переименовать файл'), 'error');
+        }
+    };
+
     const moveActions = (material) => {
         if (!material.can_delete) return [];
         return LIBRARY_CATEGORIES
@@ -600,6 +618,7 @@ const ProductionLibrary = ({ apiBaseUrl, headers, showToast }) => {
                                         meta={[shortName(item.uploaded_by_name), formatShortDate(item.ready_at || item.created_at)].filter(Boolean).join(' · ')}
                                         badge={category ? null : <CategoryBadge value={item.category} />}
                                         actions={moveActions(item)}
+                                        onRename={rename}
                                         onOpen={(material) => openFile(items, material, 'files')}
                                         onDownload={download}
                                         onDelete={remove}

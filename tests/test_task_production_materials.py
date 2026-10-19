@@ -144,6 +144,23 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(len(texts), 3)
         self.assertFalse(any(text.startswith('PRODUCTION_') for text in texts))
 
+    def test_renamed_file_keeps_extension(self):
+        self.assertEqual(materials.renamed_file('Рилс — неделя водителей', 'mp4'), 'Рилс — неделя водителей.mp4')
+        # Дописанное своё расширение второй раз не добавляется, регистр не важен.
+        self.assertEqual(materials.renamed_file('Промо.MP4', 'mp4'), 'Промо.mp4')
+        self.assertEqual(materials.renamed_file('  Баннер  осень  ', 'png'), 'Баннер осень.png')
+        # Чужое расширение — часть названия: формат файла от этого не меняется.
+        self.assertEqual(materials.renamed_file('ролик.mov', 'mp4'), 'ролик.mov.mp4')
+        self.assertEqual(materials.renamed_file('папка/кадр', 'jpg'), 'кадр.jpg')
+        long_name = materials.renamed_file('я' * 400, 'webm')
+        self.assertTrue(long_name.endswith('.webm') and len(long_name) <= materials.MAX_NAME_LENGTH)
+        for value in ('', '   ', None, '.mp4', '...'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as caught:
+                    materials.renamed_file(value, 'mp4')
+                self.assertEqual(str(caught.exception), materials.RENAME_EMPTY)
+        self.assertEqual(materials.error_message(materials.RENAME_EMPTY), 'Введите название файла')
+
     def test_library_paths_and_rights(self):
         mid = uuid.UUID('12345678-1234-5678-1234-567812345678')
         self.assertEqual(materials.library_blob_path(mid, 'mp4'), 'Production/library/%s.mp4' % mid)
@@ -479,6 +496,7 @@ class RouteTests(unittest.TestCase):
             'library': self._library,
             'library_counts': self._library_counts,
             'set_library_category': self._set_category,
+            'rename_library_material': self._rename,
             'add_library_event': self._add_event,
             'library_history': self._history,
             'library_materials': lambda cursor, ids: {
@@ -568,11 +586,18 @@ class RouteTests(unittest.TestCase):
         material['library_category'] = category
         return 1
 
-    def _add_event(self, cursor, *, material, action, actor_id, category, from_category=None):
+    def _rename(self, cursor, mid, name):
+        material = self.store['materials'].get(str(mid))
+        if material is None or material['task_id'] is not None:
+            return 0
+        material['name'] = name
+        return 1
+
+    def _add_event(self, cursor, *, material, action, actor_id, category, from_category=None, from_name=None):
         self.store['events'].append({
             'id': len(self.store['events']) + 1, 'material_id': str(material['id']), 'action': action,
             'name': material['name'], 'kind': material['kind'], 'size': material['size'], 'category': category,
-            'from_category': from_category, 'at': None,
+            'from_category': from_category, 'from_name': from_name, 'at': None,
             'actor': {'id': actor_id, 'name': 'Сотрудник %s' % actor_id, 'avatar_bucket': None, 'avatar_blob_path': None},
         })
 
@@ -1058,6 +1083,55 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(closed.get_json()['code'], 'PRODUCTION_CLOSED')
         self.assertEqual(self.store['materials'][mid]['library_category'], 'reels')
 
+    def test_library_rename(self):
+        mid = self._library_ready('IMG_4521.mp4', 'reels')
+        response = self.http.patch('/api/production/library/%s' % mid, json={'name': '  Рилс — неделя водителей '})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json(), {'ok': True, 'category': 'reels', 'name': 'Рилс — неделя водителей.mp4'})
+        self.assertEqual(self.store['materials'][mid]['name'], 'Рилс — неделя водителей.mp4')
+        renamed = self.store['events'][-1]
+        self.assertEqual((renamed['action'], renamed['name'], renamed['from_name'], renamed['category'], renamed['actor']['id']),
+                         ('renamed', 'Рилс — неделя водителей.mp4', 'IMG_4521.mp4', 'reels', self.VIDEO))
+        # То же имя — без записи в истории.
+        self.assertEqual(self.http.patch('/api/production/library/%s' % mid, json={'name': 'Рилс — неделя водителей.mp4'}).status_code, 200)
+        self.assertEqual(len(self.store['events']), 2)
+        # Пустое — отказ, имя прежнее.
+        empty = self.http.patch('/api/production/library/%s' % mid, json={'name': '   '})
+        self.assertEqual((empty.status_code, empty.get_json()['code']), (400, 'PRODUCTION_RENAME_EMPTY'))
+        self.assertEqual(self.store['materials'][mid]['name'], 'Рилс — неделя водителей.mp4')
+        nothing = self.http.patch('/api/production/library/%s' % mid, json={})
+        self.assertEqual((nothing.status_code, nothing.get_json()['code']), (400, 'PRODUCTION_NOTHING_TO_CHANGE'))
+        # Скачивается под новым именем.
+        with mock.patch.object(storage, 'sign', lambda client, bucket, path, **kw: 'https://signed/' + kw.get('name', '')):
+            url = self.http.get('/api/production/materials/%s/download' % mid).get_json()['url']
+        self.assertEqual(url, 'https://signed/Рилс — неделя водителей.mp4')
+
+    def test_library_rename_and_move_together(self):
+        mid = self._library_ready('IMG_1.mp4', 'ad')
+        response = self.http.patch('/api/production/library/%s' % mid, json={'name': 'Осень', 'category': 'reels'})
+        self.assertEqual(response.get_json(), {'ok': True, 'category': 'reels', 'name': 'Осень.mp4'})
+        self.assertEqual([(e['action'], e['category'], e['from_category'], e['from_name']) for e in self.store['events'][1:]],
+                         [('moved', 'reels', 'ad', None), ('renamed', 'reels', None, 'IMG_1.mp4')])
+        # Неподходящая категория — ни переноса, ни нового имени.
+        wrong = self.http.patch('/api/production/library/%s' % mid, json={'name': 'Другое', 'category': 'banner'})
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(self.store['materials'][mid]['name'], 'Осень.mp4')
+        self.assertEqual(len(self.store['events']), 3)
+
+    def test_library_rename_rights(self):
+        mid = self._library_ready('свой.mp4', 'reels')
+        self.user['id'] = 8  # другой сотрудник маркетинга
+        response = self.http.patch('/api/production/library/%s' % mid, json={'name': 'чужой'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.store['materials'][mid]['name'], 'свой.mp4')
+        with mock.patch.object(self, '_headed_codes', lambda uid: ['marketing']):
+            self.assertEqual(self.http.patch('/api/production/library/%s' % mid, json={'name': 'от главы'}).status_code, 200)
+        self.assertEqual(self.store['materials'][mid]['name'], 'от главы.mp4')
+        # Файл задачи этой ручкой не переименовать.
+        self.user['id'] = self.VIDEO
+        task_mid = self._ready()
+        self.assertEqual(self.http.patch('/api/production/library/%s' % task_mid, json={'name': 'x'}).status_code, 404)
+
     def test_library_delete_and_cancel_in_history(self):
         mid = self._library_ready(category='reels')
         self.assertEqual(self.http.delete('/api/production/materials/%s' % mid).status_code, 200)
@@ -1082,10 +1156,16 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(by_action['deleted']['name'], 'удалён.mp4')
         self.assertEqual(by_action['moved']['actor'], {'id': self.VIDEO, 'name': 'Сотрудник 7', 'avatar_url': None})
         self.assertEqual((by_action['moved']['from_category'], by_action['moved']['category']), ('reels', 'animation'))
+        self.assertIsNone(by_action['moved']['from_name'])
+        self.http.patch('/api/production/library/%s' % kept, json={'name': 'новое'})
+        top = self.http.get('/api/production/library/history').get_json()['events'][0]
+        self.assertEqual((top['action'], top['name'], top['from_name']), ('renamed', 'новое.mp4', 'остался.mp4'))
+        self.assertEqual(top['material']['name'], 'новое.mp4')
         self.assertEqual(body['counts'], {'': 1, 'banner': 0, 'animation': 1, 'ad': 0, 'reels': 0})
         # Плитка «Рилсы» показывает и перенос ИЗ неё.
         reels = self.http.get('/api/production/library/history?category=reels').get_json()
         self.assertEqual([e['action'] for e in reels['events']], ['moved', 'added'])
+        self.assertEqual(self.http.get('/api/production/library/history').get_json()['total'], 5)
         self.assertEqual(self.http.get('/api/production/library/history?category=x').status_code, 400)
         self.user.update(id=50, role='admin', marketing=False)
         self.assertEqual(self.http.get('/api/production/library/history').get_json()['code'], 'PRODUCTION_CLOSED')

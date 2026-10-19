@@ -461,23 +461,32 @@ def set_library_category(cursor, material_id, category):
 LIBRARY_EVENT_ADDED = 'added'
 LIBRARY_EVENT_MOVED = 'moved'
 LIBRARY_EVENT_DELETED = 'deleted'
+LIBRARY_EVENT_RENAMED = 'renamed'
 
 
-def add_library_event(cursor, *, material, action, actor_id, category, from_category=None):
+def add_library_event(cursor, *, material, action, actor_id, category, from_category=None, from_name=None):
     """Строка «Истории»: имя, вид и размер берутся из файла — после удаления их больше негде взять."""
     cursor.execute("""
         INSERT INTO task_production_library_events
-            (material_id, action, file_name, kind, file_size, category, from_category, actor_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (material_id, action, file_name, kind, file_size, category, from_category, actor_id, from_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (str(material['id']), action, material['name'], material['kind'], int(material.get('size') or 0),
-          category, from_category, None if actor_id is None else int(actor_id)))
+          category, from_category, None if actor_id is None else int(actor_id), from_name))
+
+
+def rename_library_material(cursor, material_id, name):
+    cursor.execute("""
+        UPDATE task_production_materials SET original_name = %s WHERE id = %s AND task_id IS NULL
+    """, (name, str(material_id)))
+    return cursor.rowcount
 
 
 def library_history(cursor, *, query='', category=None, limit=50, offset=0):
     """«История» «Медиатеки», свежее сверху; (события, всего).
 
     Категория отбирает и перенос ИЗ неё: файл ушёл из «Рилсов» — это тоже история «Рилсов».
-    Поиск — по имени файла и по имени сотрудника.
+    Поиск — по имени файла (тому, что было в событии, прежнему и нынешнему — после
+    переименования файл находится по любому) и по имени сотрудника.
     """
     filters = ['TRUE']
     values = []
@@ -486,23 +495,25 @@ def library_history(cursor, *, query='', category=None, limit=50, offset=0):
         values += [category, category]
     text = str(query or '').strip()
     if text:
-        filters.append('(e.file_name ILIKE %s OR u.name ILIKE %s)')
-        values += [_like(text), _like(text)]
+        filters.append('(e.file_name ILIKE %s OR e.from_name ILIKE %s OR m.original_name ILIKE %s OR u.name ILIKE %s)')
+        values += [_like(text)] * 4
     where = ' AND '.join(filters)
-    cursor.execute("""
-        SELECT COUNT(*) FROM task_production_library_events e
+    joins = """
           LEFT JOIN users u ON u.id = e.actor_id
-         WHERE """ + where, tuple(values))
+          LEFT JOIN task_production_materials m ON m.id = e.material_id
+    """
+    cursor.execute("SELECT COUNT(*) FROM task_production_library_events e" + joins + " WHERE " + where,
+                   tuple(values))
     total = int(cursor.fetchone()[0] or 0)
     cursor.execute("""
         SELECT e.id, e.material_id, e.action, e.file_name, e.kind, e.file_size, e.category, e.from_category,
-               e.actor_id, u.name, u.avatar_bucket, u.avatar_blob_path, e.created_at
+               e.actor_id, u.name, u.avatar_bucket, u.avatar_blob_path, e.created_at, e.from_name
           FROM task_production_library_events e
-          LEFT JOIN users u ON u.id = e.actor_id
+          {joins}
          WHERE {where}
          ORDER BY e.created_at DESC, e.id DESC
          LIMIT %s OFFSET %s
-    """.format(where=where), tuple(values) + (max(1, min(int(limit), 100)), max(0, int(offset))))
+    """.format(joins=joins, where=where), tuple(values) + (max(1, min(int(limit), 100)), max(0, int(offset))))
     events = []
     for row in cursor.fetchall():
         events.append({
@@ -518,6 +529,7 @@ def library_history(cursor, *, query='', category=None, limit=50, offset=0):
                 'id': row[8], 'name': row[9] or '', 'avatar_bucket': row[10], 'avatar_blob_path': row[11],
             },
             'at': row[12],
+            'from_name': row[13],
         })
     return events, total
 
