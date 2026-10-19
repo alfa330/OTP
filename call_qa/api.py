@@ -8,6 +8,7 @@ from collections import Counter
 import re
 import tempfile
 import threading
+import time
 import uuid
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
@@ -6806,6 +6807,32 @@ def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
 
 # ── Маркетинговый мониторинг: справочник осей и сделка карточки ──────────────
 
+# Перечни вариантов маркетинговых фильтров — этапы, причины и ответственные — общие для
+# всех зрителей: это все значения по всем сделкам воронки. Пересчитывать их по всей таблице
+# на каждое открытие панели стоило ~3 с базы (замер 15–19.10.2026: ~950 с за 4 дня, 7%
+# времени базы). Строки держим 10 минут; новый этап или причина из CRM появятся в списке
+# с этой задержкой. Число разговоров у каждого значения считается каждый раз заново — оно
+# зависит от зрителя и его отборов и в кэш не идёт.
+_MARKETING_LISTS_TTL_SECONDS = 600
+_marketing_lists_cache: dict = {}
+_marketing_lists_lock = threading.Lock()
+
+
+def _marketing_list_rows(cur, key, sql, params=(), version=None):
+    """Строки общего перечня из кэша процесса; `version` — дешёвый отпечаток данных,
+    при смене которого кэш сбрасывается раньше срока (сопоставление ответственных)."""
+    now = time.monotonic()
+    with _marketing_lists_lock:
+        hit = _marketing_lists_cache.get(key)
+    if hit and hit[1] == version and now - hit[0] < _MARKETING_LISTS_TTL_SECONDS:
+        return hit[2]
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    with _marketing_lists_lock:
+        _marketing_lists_cache[key] = (now, version, rows)
+    return rows
+
+
 def marketing_options(allowed_direction_ids=None, department=None,
                       subject_kind=None) -> dict:
     """Что предложить в маркетинговых фильтрах: парки, каналы, этапы, причины, люди.
@@ -6911,7 +6938,8 @@ def marketing_options(allowed_direction_ids=None, department=None,
         # Перечень один на оба режима: переключатель «сейчас / на момент
         # разговора» меняет не перечень этапов, а то, откуда берётся ответ.
         stage_calls = by_value(mkt.STAGE_CURRENT)
-        cur.execute(
+        stage_rows = _marketing_list_rows(
+            cur, "stages",
             """SELECT stage, SUM(n) FROM (
                    SELECT btrim(stage_raw) AS stage, COUNT(*) AS n FROM op_funnel_leads
                     WHERE btrim(COALESCE(stage_raw, '')) <> '' GROUP BY 1
@@ -6921,7 +6949,7 @@ def marketing_options(allowed_direction_ids=None, department=None,
                ) s GROUP BY stage""")
         stages = ordered([{"value": value, "calls": stage_calls.get(value, 0),
                            "lost": mkt.is_lost_stage(value), "_rank": -int(freq or 0)}
-                          for value, freq in cur.fetchall()])
+                          for value, freq in stage_rows])
         strip(stages)
 
         # ── Причины отказа — справочник из сделок + «Причина не указана» ───
@@ -6930,12 +6958,14 @@ def marketing_options(allowed_direction_ids=None, department=None,
         # сделки — это не пропуск менеджера, а отсутствие отказа.
         lost_sql, lost_params = mkt.lost_stage_sql(mkt.STAGE_CURRENT)
         reason_calls = by_value(mkt.REASON_CURRENT, f" AND {lost_sql}", lost_params)
-        cur.execute("""SELECT btrim(reason_raw), COUNT(*) FROM op_funnel_leads
-                        WHERE btrim(COALESCE(reason_raw, '')) <> '' AND source = ANY(%s)
-                        GROUP BY 1""", (list(mkt.REASON_SOURCES),))
+        reason_rows = _marketing_list_rows(
+            cur, "reasons",
+            """SELECT btrim(reason_raw), COUNT(*) FROM op_funnel_leads
+                WHERE btrim(COALESCE(reason_raw, '')) <> '' AND source = ANY(%s)
+                GROUP BY 1""", (list(mkt.REASON_SOURCES),))
         reasons = ordered([{"value": value, "title": value,
                             "calls": reason_calls.get(value, 0), "_rank": -int(freq)}
-                           for value, freq in cur.fetchall()])
+                           for value, freq in reason_rows])
         strip(reasons)
         reasons.append({"value": mkt.NONE_BUCKET, "title": "Причина не указана",
                         "calls": reason_calls.get('', 0)})
@@ -6949,7 +6979,12 @@ def marketing_options(allowed_direction_ids=None, department=None,
         for user_id, key, count in counted([mkt.RESPONSIBLE_ID, mkt.RESPONSIBLE_KEY]):
             slot = ('u', int(user_id)) if user_id is not None else ('k', key)
             handler_calls[slot] = handler_calls.get(slot, 0) + int(count)
-        cur.execute(
+        # Сопоставление учёток CRM со штатом правят руками — правка обязана появиться в
+        # списке сразу, а не через 10 минут: её отпечаток сбрасывает кэш перечня.
+        cur.execute("SELECT COUNT(*), MAX(updated_at) FROM op_funnel_operator_map")
+        map_version = tuple(cur.fetchone() or ())
+        owner_rows = _marketing_list_rows(
+            cur, "handlers",
             f"""SELECT l.source, l.owner_raw, omap.user_id,
                        {mkt.RESPONSIBLE_NAME}, COUNT(*)
                   FROM op_funnel_leads l
@@ -6960,9 +6995,9 @@ def marketing_options(allowed_direction_ids=None, department=None,
                          ON wmap.source = 'wazzup' AND wmap.external_key = l.owner_raw
                  WHERE btrim(COALESCE(l.owner_raw, '')) <> ''
                    AND NOT COALESCE(omap.is_ignored, FALSE)
-                 GROUP BY 1, 2, 3, 4""")
+                 GROUP BY 1, 2, 3, 4""", version=map_version)
         people = {}
-        for source, owner, user_id, name, freq in cur.fetchall():
+        for source, owner, user_id, name, freq in owner_rows:
             if user_id is not None:
                 slot = ('u', int(user_id))
                 entry = people.setdefault(slot, {"id": int(user_id), "key": None,

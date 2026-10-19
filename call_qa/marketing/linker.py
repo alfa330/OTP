@@ -290,13 +290,18 @@ def learn_dictionary(cur):
     """
     learned = normalise_park_dictionary(cur)
     for kind, column in (('park', 'park_name'), ('channel', 'utm_source')):
+        # Сначала разные написания, потом — есть ли они в словаре. Проверка `aliases ?`
+        # не годится в ключ хеш-соединения, и в обратном порядке Postgres сверял со
+        # словарём КАЖДУЮ из ~270 тыс. сделок: ~4 с на прогон, ~85 прогонов в сутки —
+        # десятая часть всего времени базы (замер 15–19.10.2026). Написаний — сотни.
         cur.execute(
             f"""
-            SELECT DISTINCT lower(btrim({column})) AS raw
-              FROM op_funnel_leads
-             WHERE btrim(COALESCE({column}, '')) <> ''
-               AND NOT EXISTS (SELECT 1 FROM qa_marketing_dict d
-                                WHERE d.kind = %s AND d.aliases ? lower(btrim({column})))
+            SELECT v.raw
+              FROM (SELECT DISTINCT lower(btrim({column})) AS raw
+                      FROM op_funnel_leads
+                     WHERE btrim(COALESCE({column}, '')) <> '') v
+             WHERE NOT EXISTS (SELECT 1 FROM qa_marketing_dict d
+                                WHERE d.kind = %s AND d.aliases ? v.raw)
             """,
             (kind,),
         )
