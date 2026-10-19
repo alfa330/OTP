@@ -55,6 +55,18 @@ export const lastSentLine = (selected = [], now = new Date()) => {
     return `Последний отчёт ушёл ${fmtSentAt(times[times.length - 1].toISOString(), now)}`;
 };
 
+/* Итог загрузки городов по ИИН одной фразой (monthText — «Октябрь 2026»): скольким водителям базы
+   город проставлен и сколько строк списка мимо базы — их список не добавляет: для обзвона нужны
+   номер и ФИО. */
+export const citiesSummary = (data = {}, monthText = '') => {
+    const parts = [`город у ${data.matched ?? 0} водителей`];
+    if ((data.updated ?? 0) !== (data.matched ?? 0)) parts.push(`изменился у ${data.updated ?? 0}`);
+    if (data.not_in_base) parts.push(`нет в базе ${data.not_in_base}`);
+    if (data.bad_iin) parts.push(`с ошибкой в ИИН ${data.bad_iin}`);
+    if (data.no_city) parts.push(`без города ${data.no_city}`);
+    return monthText ? `${monthText}: ${parts.join(', ')}` : parts.join(', ');
+};
+
 /* «в 10:00 и 19:00» — из расписания сервера. */
 export const scheduleText = (schedule = []) => {
     const list = (schedule || []).filter(Boolean);

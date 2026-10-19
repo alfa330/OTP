@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-    fmtSentAt, lastSentLine, reportNotices, sameChatIds, scheduleText,
+    citiesSummary, fmtSentAt, lastSentLine, reportNotices, sameChatIds, scheduleText,
 } from '../src/components/dial_list/signReport.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r\n').join('\n');
@@ -65,6 +65,20 @@ test('расписание — из ответа сервера', () => {
     assert.equal(scheduleText(['09:00']), 'в 09:00');
     assert.equal(scheduleText(['08:00', '13:00', '19:00']), 'в 08:00, 13:00 и 19:00');
     assert.equal(scheduleText([]), '');
+});
+
+test('итог загрузки городов — одной фразой, только ненулевое', () => {
+    assert.equal(
+        citiesSummary({ matched: 21060, updated: 21060, not_in_base: 2711, bad_iin: 0, no_city: 0 }, 'Октябрь 2026'),
+        'Октябрь 2026: город у 21060 водителей, нет в базе 2711',
+    );
+    assert.equal(
+        citiesSummary({ matched: 3, updated: 1, not_in_base: 0, bad_iin: 2, no_city: 1 }),
+        'город у 3 водителей, изменился у 1, с ошибкой в ИИН 2, без города 1',
+    );
+    const panel = read('../src/components/sip/DialListSettings.jsx');
+    assert.match(panel, /\/api\/dial_list\/departments\/\$\{departmentId\}\/leads\/cities/);
+    assert.match(panel, /citiesSummary\(data, monthLabel\(data\.period \|\| shownPeriod\)\)/);
 });
 
 test('кнопка — во вкладке «Аналитика», ручки — своего отдела', () => {

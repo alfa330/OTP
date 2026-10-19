@@ -2474,13 +2474,15 @@ class DialListService:
     # ------------------------------------------------------------ лиды отдела
     # Повторная загрузка того же номера с ДРУГИМ ИИН переписывает ИИН (и сбрасывает
     # проверку), пока водитель не подписал: подписавший остаётся как был.
+    # Город (19.10.2026) — из колонки «город», если она есть; пустой не затирает прежний.
     _IMPORT_SQL = """
         INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id,
-                                     period, iin)
+                                     period, iin, city)
         VALUES %s
         ON CONFLICT (department_id, period, phone_norm) DO UPDATE SET
             full_name = CASE WHEN EXCLUDED.full_name <> '' THEN EXCLUDED.full_name
                              ELSE dial_list_leads.full_name END,
+            city = CASE WHEN EXCLUDED.city <> '' THEN EXCLUDED.city ELSE dial_list_leads.city END,
             last_batch_id = EXCLUDED.last_batch_id,
             upload_count = dial_list_leads.upload_count + 1,
             updated_at = CURRENT_TIMESTAMP,
@@ -2497,8 +2499,8 @@ class DialListService:
     """
 
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True):
-        """rows — из common.leads_file.parse_leads_file(..., with_iin=True):
-        (row_number, fio, phone_raw, phone_norm, iin_raw). period — база какого месяца
+        """rows — из common.leads_file.parse_leads_file(..., with_iin=True[, with_city=True]):
+        (row_number, fio, phone_raw, phone_norm, iin_raw[, city]). period — база какого месяца
         (date, первый день); пусто — месяц, который обзванивается.
 
         ИИН обязателен (запрос владельца 29.09.2026): строка без него или с ошибкой
@@ -2545,8 +2547,9 @@ class DialListService:
                 seen_phones.add(phone_norm)
                 if iin:
                     seen_iins.add(iin)
+                city = sign_report.clean_city(row[5]) if len(row) > 5 else ""
                 values.append((department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id,
-                               period, iin))
+                               period, iin, city))
             if values:
                 try:
                     inserted = execute_values(cur, self._IMPORT_SQL, values, page_size=1000, fetch=True)
@@ -2563,6 +2566,65 @@ class DialListService:
             """, (counts["rows_new"], counts["rows_duplicate"], counts["rows_invalid"], counts["rows_bad_iin"],
                   batch_id))
         counts["batch_id"] = batch_id
+        return counts
+
+    # Город по ИИН (владелец, 19.10.2026): список «ИИН — город» (СМЗ-ИП за месяц) проставляет город
+    # водителям базы месяца для отчёта «Подписание водителей по городам». Водителей, которых в базе
+    # нет, список не добавляет: для обзвона нужны номер и ФИО. updated_at не трогается — город не
+    # событие журнала; строка без смены города не переписывается.
+    _CITIES_SQL = """
+        UPDATE dial_list_leads l SET city = v.city
+        FROM (VALUES %s) AS v(department_id, period, iin, city)
+        WHERE l.department_id = v.department_id AND l.period = v.period AND l.iin = v.iin
+          AND l.iin <> '' AND l.city <> v.city
+        RETURNING l.id
+    """
+
+    def import_cities(self, department_id, rows, period=None):
+        """rows — из common.leads_file.parse_city_list: (row_number, ИИН как в файле, город).
+        period — база какого месяца (date); пусто — обзваниваемый. Возвращает счёт: rows_total,
+        matched (ИИН есть в базе), updated (город поменялся), not_in_base, bad_iin, no_city,
+        duplicates (ИИН второй раз — берётся первый город)."""
+        department_id = int(department_id)
+        settings = self.department_settings(department_id)
+        if is_tez(settings):
+            raise DialListError("Города по ИИН — только у удалённого КЦ: в базе автообзвона нет ИИН", 400)
+        period = period or settings["_period"]
+        counts = {"rows_total": len(rows), "matched": 0, "updated": 0, "not_in_base": 0, "bad_iin": 0,
+                  "no_city": 0, "duplicates": 0, "period": period.isoformat()}
+        wanted = {}
+        for _row_number, iin_raw, city_raw in rows:
+            iin = clean_iin(iin_raw)
+            if not iin:
+                counts["bad_iin"] += 1
+                continue
+            city = sign_report.clean_city(city_raw)
+            if not city:
+                counts["no_city"] += 1
+                continue
+            if iin in wanted:
+                counts["duplicates"] += 1
+                continue
+            wanted[iin] = city
+        if wanted:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    SELECT iin FROM dial_list_leads
+                    WHERE department_id = %s AND period = %s AND iin <> '' AND iin = ANY(%s)
+                """, (department_id, period, list(wanted)))
+                present = {row[0] for row in cur.fetchall()}
+                values = [(department_id, period, iin, city) for iin, city in wanted.items() if iin in present]
+                if values:
+                    updated = execute_values(cur, self._CITIES_SQL, values,
+                                             template="(%s::integer, %s::date, %s, %s)", page_size=1000,
+                                             fetch=True)
+                    counts["updated"] = len(updated)
+            counts["matched"] = len(present)
+            counts["not_in_base"] = len(wanted) - len(present)
+        log.info("dial_list: города по ИИН, отдел %s, база %s: строк %d, в базе %d, обновлено %d, нет в базе %d, "
+                 "с ошибкой ИИН %d, без города %d, повторов %d", department_id, counts["period"], counts["rows_total"],
+                 counts["matched"], counts["updated"], counts["not_in_base"], counts["bad_iin"], counts["no_city"],
+                 counts["duplicates"])
         return counts
 
     def leads_summary(self, department_id, period=None):

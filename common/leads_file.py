@@ -18,6 +18,11 @@ PHONE_HEADERS = {'phone', 'телефон', 'номер', 'phone_number', 'msisd
 IIN_HEADERS = {'iin', 'иин', 'iin_driver', 'driver_iin', 'иин_водителя', 'iin_водителя'}
 IIN_MISSING_MESSAGE = ('В файле нет колонки «iin» с ИИН водителя. Добавьте её: '
                        'без ИИН нельзя проверить подписание документов.')
+# Город водителя — необязательная колонка базы «Удаленного КЦ» (with_city=True) и обязательная
+# у списка городов (parse_city_list): по ней строится отчёт «Подписание водителей по городам».
+CITY_HEADERS = {'город', 'city', 'населенный_пункт', 'населённый_пункт'}
+CITY_MISSING_MESSAGE = 'В файле нет колонки «Город».'
+IIN_COLUMN_MISSING_MESSAGE = 'В файле не нашлось колонки с ИИН.'
 MAX_LEAD_ROWS = 50000
 
 
@@ -56,7 +61,21 @@ def _rows_from_xlsx(raw_bytes):
         wb.close()
 
 
-def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False):
+def _read_rows(raw_bytes, file_ext):
+    ext = str(file_ext or '').lower()
+    if ext in ('.xlsx', '.xlsm'):
+        raw_rows = _rows_from_xlsx(raw_bytes)
+    elif ext == '.csv':
+        raw_rows = _rows_from_csv(raw_bytes)
+    else:
+        raise ValueError('Поддерживаются только .csv, .xlsx и .xlsm')
+    raw_rows = [r for r in raw_rows if any(str(c or '').strip() for c in r)]
+    if not raw_rows:
+        raise ValueError('Файл пустой')
+    return raw_rows
+
+
+def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False, with_city=False):
     """Разбирает файл в строки (row_number, ФИО, сырой телефон, phone_norm).
 
     max_rows — потолок строк с данными (по умолчанию MAX_LEAD_ROWS); файл крупнее
@@ -65,21 +84,14 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False):
     with_iin — колонка ИИН обязательна («Обзвон»): строки становятся
     (row_number, ФИО, сырой телефон, phone_norm, ИИН как в файле). Нет колонки —
     ValueError: без неё база бесполезна, и молча загрузить её нельзя. Без шапки
-    ИИН — третья колонка."""
+    ИИН — третья колонка.
+
+    with_city (только вместе с with_iin) — к строке добавляется город из колонки с шапкой
+    из CITY_HEADERS; колонки нет — пустая строка: город необязателен."""
     limit = int(max_rows) if max_rows is not None else MAX_LEAD_ROWS
-    ext = str(file_ext or '').lower()
-    if ext in ('.xlsx', '.xlsm'):
-        raw_rows = _rows_from_xlsx(raw_bytes)
-    elif ext == '.csv':
-        raw_rows = _rows_from_csv(raw_bytes)
-    else:
-        raise ValueError('Поддерживаются только .csv, .xlsx и .xlsm')
+    raw_rows = _read_rows(raw_bytes, file_ext)
 
-    raw_rows = [r for r in raw_rows if any(str(c or '').strip() for c in r)]
-    if not raw_rows:
-        raise ValueError('Файл пустой')
-
-    fio_idx, phone_idx, iin_idx, start_at = 0, 1, None, 0
+    fio_idx, phone_idx, iin_idx, city_idx, start_at = 0, 1, None, None, 0
     header = [_norm_header(c) for c in raw_rows[0]]
     known = FIO_HEADERS | PHONE_HEADERS | (IIN_HEADERS if with_iin else set())
     if any(h in known for h in header):
@@ -90,6 +102,8 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False):
                 phone_idx = idx
             elif with_iin and name in IIN_HEADERS:
                 iin_idx = idx
+            elif with_iin and with_city and name in CITY_HEADERS and city_idx is None:
+                city_idx = idx
         start_at = 1
     elif with_iin and max(len(r) for r in raw_rows) >= 3:
         iin_idx = 2
@@ -111,10 +125,55 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False):
                 f'В файле больше {limit} строк с данными. '
                 'Разделите его на несколько файлов.'
             )
-        if with_iin:
+        if with_iin and with_city:
+            city = str(raw[city_idx] or '').strip() if city_idx is not None and city_idx < len(raw) else ''
+            rows.append((offset, fio, phone_raw, normalize_kz_phone(phone_raw), iin_raw, city))
+        elif with_iin:
             rows.append((offset, fio, phone_raw, normalize_kz_phone(phone_raw), iin_raw))
         else:
             rows.append((offset, fio, phone_raw, normalize_kz_phone(phone_raw)))
+    if not rows:
+        raise ValueError('В файле не нашлось ни одной строки с данными')
+    return rows
+
+
+def _looks_like_iin(value):
+    text = _iin_cell(value)
+    return text.isdigit() and len(text) in (11, 12)
+
+
+def parse_city_list(raw_bytes, file_ext, max_rows=None):
+    """Список «ИИН — город» (например, СМЗ-ИП за месяц) → [(row_number, ИИН как в файле, город)].
+
+    Город — колонка с шапкой из CITY_HEADERS (обязательна). ИИН — колонка с шапкой из
+    IIN_HEADERS, а нет такой — та, где ИИН больше всего (сводная таблица Excel подписывает её
+    «Названия строк»). Остальные колонки (статусы по датам и прочее) не читаются."""
+    limit = int(max_rows) if max_rows is not None else MAX_LEAD_ROWS
+    raw_rows = _read_rows(raw_bytes, file_ext)
+    header = [_norm_header(c) for c in raw_rows[0]]
+    city_idx = next((idx for idx, name in enumerate(header) if name in CITY_HEADERS), None)
+    if city_idx is None:
+        raise ValueError(CITY_MISSING_MESSAGE)
+    iin_idx = next((idx for idx, name in enumerate(header) if name in IIN_HEADERS), None)
+    data = raw_rows[1:]
+    if iin_idx is None:
+        sample = data[:200]
+        width = max((len(r) for r in raw_rows), default=0)
+        scores = [(sum(1 for r in sample if idx < len(r) and _looks_like_iin(r[idx])), idx)
+                  for idx in range(width) if idx != city_idx]
+        best = max(scores, default=(0, None))
+        if not sample or best[0] * 2 < len(sample):
+            raise ValueError(IIN_COLUMN_MISSING_MESSAGE)
+        iin_idx = best[1]
+    rows = []
+    for offset, raw in enumerate(data, start=2):
+        iin_raw = _iin_cell(raw[iin_idx]) if iin_idx < len(raw) else ''
+        city = str(raw[city_idx] or '').strip() if city_idx < len(raw) else ''
+        if not iin_raw and not city:
+            continue
+        if len(rows) >= limit:
+            raise ValueError(f'В файле больше {limit} строк с данными. Разделите его на несколько файлов.')
+        rows.append((offset, iin_raw, city))
     if not rows:
         raise ValueError('В файле не нашлось ни одной строки с данными')
     return rows

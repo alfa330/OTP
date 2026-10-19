@@ -163,6 +163,10 @@
                                                              бот, selected — выбор отдела с итогом последней
                                                              отправки; PUT {chat_ids}
     GET     /api/dial_list/departments/<id>/sign_report/preview  та же картинка на сейчас (PNG)
+    POST    /api/dial_list/departments/<id>/leads/cities     города водителей базы по ИИН: multipart file
+                                                             (колонки «ИИН» и «Город»; без шапки ИИН — колонка,
+                                                             где ИИН больше всего), period=YYYY-MM; счёт строк,
+                                                             нет в базе — только числом
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка; у итога subtypes —
                                                              его типы (в PUT ключа нет — типы не трогаются)
     GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
@@ -746,7 +750,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             if tez:
                 rows = parse_leads_file(raw_bytes, file_ext, with_iin=False)
             else:
-                rows = parse_leads_file(raw_bytes, file_ext, with_iin=True)
+                # Город — необязательная колонка: по ней строится отчёт о подписании по городам.
+                rows = parse_leads_file(raw_bytes, file_ext, with_iin=True, with_city=True)
         except ValueError as exc:
             raise DialListError(str(exc))
         counts = svc.import_leads(department_id, requester_id, file_name, rows,
@@ -774,6 +779,34 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 log.exception("dial_list: файл базы Тез не попал в «Базу лидов ОП TEZ» (отдел %s)", department_id)
                 mirror = {"error": "В «Базу лидов ОП TEZ» файл не попал — загрузите его там вручную"}
         return jsonify({"status": "success", **counts, "mirror": mirror, "trip_check": trip_check}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/leads/cities', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def leads_cities(department_id):
+        """Города водителей по ИИН из списка (file: .xlsx/.csv с колонками «ИИН» и «Город», period=YYYY-MM;
+        пусто — обзваниваемый месяц): для отчёта «Подписание водителей по городам». Водителей, которых
+        нет в базе, не добавляет — только считает."""
+        _manager(department_id)
+        file_storage = request.files.get('file')
+        if not file_storage:
+            raise DialListError("file is required")
+        file_name = os.path.basename(str(file_storage.filename or 'cities.xlsx'))
+        file_ext = os.path.splitext(file_name)[1].lower()
+        if file_ext not in ('.csv', '.xlsx', '.xlsm'):
+            raise DialListError("Поддерживаются только .csv, .xlsx и .xlsm")
+        raw_bytes = file_storage.read(LEADS_MAX_FILE_SIZE_BYTES + 1)
+        if not raw_bytes:
+            raise DialListError("Файл пустой")
+        if len(raw_bytes) > LEADS_MAX_FILE_SIZE_BYTES:
+            raise DialListError(f"Файл слишком большой. Лимит: {LEADS_MAX_FILE_SIZE_MB} MB", 413)
+        period = parse_period(request.form.get('period'))
+        from common.leads_file import parse_city_list
+        try:
+            rows = parse_city_list(raw_bytes, file_ext)
+        except ValueError as exc:
+            raise DialListError(str(exc))
+        return jsonify({"status": "success", **svc.import_cities(department_id, rows, period=period)}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/summary', methods=['GET', 'OPTIONS'])
     @require_api_key

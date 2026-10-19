@@ -165,6 +165,71 @@ class RenderTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(FONTS_DIR, 'Roboto-%s.ttf' % weight)))
 
 
+def _xlsx(rows):
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(list(row))
+    stream = io.BytesIO()
+    wb.save(stream)
+    return stream.getvalue()
+
+
+class CityListParseTest(unittest.TestCase):
+    """Список «ИИН — город»: как его присылают (сводная таблица СМЗ-ИП) и как его готовят руками."""
+
+    def test_pivot_export_iin_column_found_by_values(self):
+        from common import leads_file
+        when = datetime(2026, 10, 19)
+        raw = _xlsx([
+            ('Названия строк', 'Город', when, datetime(2026, 10, 20)),
+            ('990101300001', 'Алматы', 'Подписан', 'Подписан'),
+            ('990101300002', 'Усть-Каменогорск ', 'На Подписании у Водителя', ''),
+            (None, None, None, None),
+            ('990101300003', '', 'Подписан', ''),
+        ])
+        # Пустые строки выбрасываются до нумерации — как у разбора базы (parse_leads_file).
+        self.assertEqual(leads_file.parse_city_list(raw, '.xlsx'), [
+            (2, '990101300001', 'Алматы'), (3, '990101300002', 'Усть-Каменогорск'), (4, '990101300003', '')])
+
+    def test_named_columns_numbers_and_csv(self):
+        from common import leads_file
+        raw = _xlsx([('Город', 'ИИН'), ('Астана', 50312500771), ('Шымкент', '900101300007')])
+        self.assertEqual(leads_file.parse_city_list(raw, '.xlsx'),
+                         [(2, '050312500771', 'Астана'), (3, '900101300007', 'Шымкент')])
+        csv_raw = 'iin;city\n900101300007;Тараз\n'.encode('utf-8-sig')
+        self.assertEqual(leads_file.parse_city_list(csv_raw, '.csv'), [(2, '900101300007', 'Тараз')])
+
+    def test_refusals(self):
+        from common import leads_file
+        with self.assertRaises(ValueError) as no_city:
+            leads_file.parse_city_list(_xlsx([('ИИН', 'Статус'), ('900101300007', 'Подписан')]), '.xlsx')
+        self.assertIn('Город', str(no_city.exception))
+        with self.assertRaises(ValueError) as no_iin:
+            leads_file.parse_city_list(_xlsx([('Водитель', 'Город'), ('Иванов', 'Тараз')]), '.xlsx')
+        self.assertIn('ИИН', str(no_iin.exception))
+        with self.assertRaises(ValueError):
+            leads_file.parse_city_list(b'x', '.pdf')
+
+    def test_base_file_city_column_is_optional(self):
+        from common import leads_file
+        raw = _xlsx([('fio', 'phone', 'iin', 'Город'), ('Иванов Иван', '87011234567', '900101300007', ' Кокшетау ')])
+        self.assertEqual(leads_file.parse_leads_file(raw, '.xlsx', with_iin=True, with_city=True),
+                         [(2, 'Иванов Иван', '87011234567', '77011234567', '900101300007', 'Кокшетау')])
+        plain = _xlsx([('fio', 'phone', 'iin'), ('Иванов Иван', '87011234567', '900101300007')])
+        self.assertEqual(leads_file.parse_leads_file(plain, '.xlsx', with_iin=True, with_city=True)[0][5], '')
+        # Без with_city и у баз без ИИН — прежние строки: город туда не попадает.
+        self.assertEqual(len(leads_file.parse_leads_file(raw, '.xlsx', with_iin=True)[0]), 5)
+        self.assertEqual(len(leads_file.parse_leads_file(raw, '.xlsx', with_city=True)[0]), 4)
+
+    def test_upload_route_reads_city_only_for_remote_cc(self):
+        routes = (ROOT / 'dial_list' / 'routes.py').read_text(encoding='utf-8')
+        self.assertIn('rows = parse_leads_file(raw_bytes, file_ext, with_iin=True, with_city=True)', routes)
+        self.assertIn('rows = parse_leads_file(raw_bytes, file_ext, with_iin=False)', routes)
+        self.assertIn("'/api/dial_list/departments/<int:department_id>/leads/cities'", routes)
+
+
 class WiringTest(unittest.TestCase):
     def test_schema_has_city_and_chats_table_before_indexes(self):
         ddl = dial_schema.DDL

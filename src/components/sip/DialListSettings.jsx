@@ -4,6 +4,7 @@ import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBt
 import CustomSelect from '../ui/CustomSelect';
 import useStableCallback from '../wiki/useStableCallback';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
+import { citiesSummary } from '../dial_list/signReport';
 import {
     LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
     formatSeconds, mirrorSummary, normalizeProfile, rateLabel, retryPlanText, scheduleFromInputs, tezSettingsForm,
@@ -54,6 +55,11 @@ const rowsText = (rows = [], total = 0) => {
     const more = total > rows.length ? '…' : '';
     return `${rows.length === 1 && total <= 1 ? 'строка' : 'строки'} ${rows.join(', ')}${more}`;
 };
+
+const CITIES_HINT = 'Файл с колонками «ИИН» и «Город» — например, список СМЗ-ИП за месяц. Город проставится '
+    + 'водителям базы этого месяца по ИИН — по нему строится отчёт «Подписание водителей по городам». Кого '
+    + 'в базе нет, список не добавляет (для обзвона нужны номер и ФИО) — покажем, сколько таких. Город можно '
+    + 'передать и в самой базе — колонкой «город».';
 
 /* Итог загрузки одной фразой: что добавилось и что не загрузилось и почему. */
 const uploadSummary = (data, period) => {
@@ -514,6 +520,9 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
     // идёт фоном, и плитки «вышли на линию» догоняют её сами, без кнопки «Обновить».
     const [pollUntil, setPollUntil] = useState(0);
     const fileRef = useRef(null);
+    // Города по ИИН (19.10.2026): свой файл и своя загрузка, база не трогается.
+    const citiesRef = useRef(null);
+    const [citiesBusy, setCitiesBusy] = useState(false);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -568,6 +577,31 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         } finally {
             setUploading(false);
             if (fileRef.current) fileRef.current.value = '';
+        }
+    };
+
+    const uploadCities = async (file) => {
+        if (!file || !canEdit) return;
+        setCitiesBusy(true);
+        try {
+            const body = new FormData();
+            body.append('file', file);
+            if (shownPeriod) body.append('period', shownPeriod);
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads/cities`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: authHeaders(),
+                body,
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            // Ни один ИИН списка не нашёлся в базе — скорее всего, не тот месяц или не тот файл.
+            toast(citiesSummary(data, monthLabel(data.period || shownPeriod)), data.matched ? 'success' : 'error');
+        } catch (e) {
+            toast(e.message || 'Не удалось загрузить города', 'error');
+        } finally {
+            setCitiesBusy(false);
+            if (citiesRef.current) citiesRef.current.value = '';
         }
     };
 
@@ -677,7 +711,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                             <span className="inline-block align-middle">
                                 <IosHint
                                 align="right"
-                                    text="ИИН обязателен: по нему раз в 3 часа проверяется, подписал ли водитель документы. Строки без ИИН или с ошибкой в нём не загружаются — после загрузки покажем их номера. В Excel задайте колонке iin текстовый формат: иначе длинный ИИН может превратиться в число вида 5,03E+11. Внутри месяца повторные номера и ИИН не дублируются; в базе другого месяца тот же водитель допускается."
+                                    text="ИИН обязателен: по нему раз в 3 часа проверяется, подписал ли водитель документы. Строки без ИИН или с ошибкой в нём не загружаются — после загрузки покажем их номера. В Excel задайте колонке iin текстовый формат: иначе длинный ИИН может превратиться в число вида 5,03E+11. Колонка «город» необязательна: по ней строится отчёт «Подписание водителей по городам». Внутри месяца повторные номера и ИИН не дублируются; в базе другого месяца тот же водитель допускается."
                                 />
                             </span>
                         </div>
@@ -689,10 +723,29 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                         className="hidden"
                         onChange={(e) => upload(e.target.files?.[0])}
                     />
-                    <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className={`${iosBtnPrimary} mt-4`}>
-                        <FaIcon className="fas fa-folder-open" />
-                        Выбрать файл
-                    </button>
+                    <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+                        <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} className={iosBtnPrimary}>
+                            <FaIcon className="fas fa-folder-open" />
+                            Выбрать файл
+                        </button>
+                        {/* Города по ИИН — у удалённого КЦ: в базе автообзвона Тез ИИН нет. */}
+                        {!isTez && (
+                            <span className="inline-flex items-center gap-1">
+                                <input
+                                    ref={citiesRef}
+                                    type="file"
+                                    accept=".csv,.xlsx,.xlsm"
+                                    className="hidden"
+                                    onChange={(e) => uploadCities(e.target.files?.[0])}
+                                />
+                                <button type="button" onClick={() => citiesRef.current?.click()} disabled={citiesBusy} className={iosBtnGhost}>
+                                    <FaIcon className={citiesBusy ? 'fas fa-spinner fa-spin' : 'fas fa-building'} />
+                                    Города по ИИН
+                                </button>
+                                <IosHint text={CITIES_HINT} align="right" label="Как загрузить города" />
+                            </span>
+                        )}
+                    </div>
                 </div>
             )}
 

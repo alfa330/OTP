@@ -278,6 +278,65 @@ def test_tez_rows_are_ignored_by_sender(db):
     assert sent == []
 
 
+def test_cities_by_iin(db):
+    with db._get_cursor() as cur:
+        for n, (city, department, period) in enumerate([
+                ('', RCC, date(2026, 10, 1)), ('Тараз', RCC, date(2026, 10, 1)), ('', RCC, date(2026, 10, 1)),
+                ('', RCC, date(2026, 9, 1)), ('', TEZ, date(2026, 10, 1))], start=1):
+            cur.execute("""
+                INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin, period, city, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, TIMESTAMPTZ '2026-10-01 00:00+05')
+            """, (department, '77020000%03d' % n, 'Водитель %d' % n, ('900101300007', '050312500771',
+                                                                       '990101300013', '900101300007',
+                                                                       '900101300007')[n - 1], period, city))
+    svc = dial_service.DialListService(db)
+    counts = svc.import_cities(RCC, [
+        (2, '900101300007', 'Астана'),
+        (3, '50312500771', 'Тараз'),          # ведущий ноль потерян в Excel — тот же водитель, город тот же
+        (4, '900101300007', 'Шымкент'),       # повтор ИИН — берётся первый город
+        (5, '123', 'Актау'),                  # ошибка в ИИН
+        (6, '990101300013', ''),              # без города
+        (7, '880101300000', 'Актобе'),        # такого водителя в базе нет
+    ])
+    assert counts == {'rows_total': 6, 'matched': 2, 'updated': 1, 'not_in_base': 1, 'bad_iin': 1, 'no_city': 1,
+                      'duplicates': 1, 'period': '2026-10-01'}
+    with db._get_cursor() as cur:
+        cur.execute("SELECT department_id, period, iin, city, updated_at = TIMESTAMPTZ '2026-10-01 00:00+05' "
+                    "FROM dial_list_leads ORDER BY phone_norm")
+        rows = cur.fetchall()
+    assert [(r[0], r[1].isoformat(), r[2], r[3]) for r in rows] == [
+        (RCC, '2026-10-01', '900101300007', 'Астана'),
+        (RCC, '2026-10-01', '050312500771', 'Тараз'),
+        (RCC, '2026-10-01', '990101300013', ''),
+        (RCC, '2026-09-01', '900101300007', ''),      # база другого месяца — не тронута
+        (TEZ, '2026-10-01', '900101300007', ''),      # другой отдел — не тронут
+    ]
+    assert all(r[4] for r in rows)                    # город не событие журнала: updated_at прежний
+    # Повтор того же списка ничего не переписывает; отдел автообзвона — отказ.
+    assert svc.import_cities(RCC, [(2, '900101300007', 'Астана')])['updated'] == 0
+    with pytest.raises(dial_service.DialListError) as tez:
+        svc.import_cities(TEZ, [(2, '900101300007', 'Астана')])
+    assert tez.value.status == 400
+    report = svc.sign_report_data(RCC)
+    assert [(c['city'], c['total']) for c in report['cities']] == [('Астана', 1), ('Тараз', 1), ('Город не указан', 1)]
+
+
+def test_base_upload_keeps_and_updates_city(db):
+    svc = dial_service.DialListService(db)
+    first = svc.import_leads(RCC, 2, 'база.xlsx', [
+        (2, 'Иванов Иван', '87011234501', '77011234501', '900101300007', 'Костанай'),
+        (3, 'Петров Пётр', '87011234502', '77011234502', '050312500771'),          # без колонки города
+    ], period=date(2026, 10, 1))
+    assert first['rows_new'] == 2
+    svc.import_leads(RCC, 2, 'база-2.xlsx', [
+        (2, 'Иванов Иван', '87011234501', '77011234501', '900101300007', ''),      # пустой город не затирает
+        (3, 'Петров Пётр', '87011234502', '77011234502', '050312500771', 'Атырау'),
+    ], period=date(2026, 10, 1))
+    with db._get_cursor() as cur:
+        cur.execute("SELECT phone_norm, city FROM dial_list_leads ORDER BY phone_norm")
+        assert cur.fetchall() == [('77011234501', 'Костанай'), ('77011234502', 'Атырау')]
+
+
 def test_preview_png(db):
     lead(db, 'Астана', signed=True, status='signed')
     png = dial_service.DialListService(db).sign_report_png(RCC, now=_at(19, 12, 0))
