@@ -45377,9 +45377,22 @@ class Database:
                         imported_by_id
                     ))
 
+        # Пишем только разницу. Раньше окно пересборки удалялось и вставлялось заново
+        # целиком, а событие телефона (append_operator_status_event) пересобирает три дня
+        # оператора — ~300 сегментов на КАЖДОЕ событие, хотя оно меняет 1–3 (закрывает
+        # открытый хвост и открывает новый). Замер 15–19.10.2026: ~1,5 млн удалённых и
+        # столько же вставленных строк в сутки при ~14 тыс. новых сегментов, 15% WAL базы
+        # и автовакуум таблицы каждые полчаса. Теперь сравниваем посчитанное с тем, что
+        # лежит, и трогаем только несовпавшее: после пересборки в таблице ровно те же
+        # строки, что дала бы полная замена (у нетронутых только прежние id).
+        # Авторитетные строки в сравнение не попадают и не удаляются: id для удаления
+        # берутся только из этой выборки.
+        from collections import Counter
         cursor.execute(
             """
-            DELETE FROM operator_status_segments
+            SELECT id, operator_id, status_date, start_at, end_at, duration_sec,
+                   status_key, state_note, imported_by
+            FROM operator_status_segments
             WHERE operator_id = ANY(%s)
               AND status_date >= %s
               AND status_date <= %s
@@ -45387,9 +45400,25 @@ class Database:
             """,
             (op_ids, start_date_obj, end_date_obj)
         )
-        deleted_segments = max(0, int(cursor.rowcount or 0))
+        existing_rows = cursor.fetchall() or []
+        wanted = Counter(segment_values)
+        stale_ids = []
+        for row in existing_rows:
+            key = (int(row[1]), row[2], row[3], row[4], int(row[5] or 0),
+                   row[6], row[7], row[8])
+            if wanted[key] > 0:
+                wanted[key] -= 1
+            else:
+                stale_ids.append(int(row[0]))
+        fresh_values = list(wanted.elements())
 
-        if segment_values:
+        if stale_ids:
+            cursor.execute(
+                "DELETE FROM operator_status_segments WHERE id = ANY(%s)",
+                (stale_ids,)
+            )
+
+        if fresh_values:
             execute_values(
                 cursor,
                 """
@@ -45405,13 +45434,18 @@ class Database:
                 )
                 VALUES %s
                 """,
-                segment_values,
+                fresh_values,
                 page_size=STATUS_IMPORT_INSERT_PAGE_SIZE
             )
 
         return {
             'segments_saved': len(segment_values),
-            'deleted_segments': int(deleted_segments),
+            # Сколько прежних сегментов окна заменено пересборкой — тот же смысл, что
+            # у числа строк полной замены (его пишут сводки импорта).
+            'deleted_segments': len(existing_rows),
+            # Сколько строк реально записано и удалено — для наблюдения за разницей.
+            'segments_inserted': len(fresh_values),
+            'segments_removed': len(stale_ids),
             'range_start': start_date_obj.strftime('%Y-%m-%d'),
             'range_end': end_date_obj.strftime('%Y-%m-%d')
         }

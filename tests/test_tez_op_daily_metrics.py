@@ -343,6 +343,10 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
                             (1, 7, start_at, "active", None, "status"),
                             (2, 7, stop_at, "inactive", None, "status"),
                         ]
+                elif normalized.startswith("SELECT id, operator_id, status_date"):
+                    # Уже лежащие неавторитетные сегменты окна — с ними пересборка
+                    # сравнивает посчитанное и пишет только разницу. Здесь их нет.
+                    self.rows = []
                 elif (
                     "FROM operator_status_segments" in normalized
                     and "is_authoritative" in normalized
@@ -417,11 +421,17 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
             "ORDER BY operator_id, event_at ASC, id DESC",
             candidates_sql,
         )
-        delete_sql = next(
+        # Пересборка пишет разницу: удаляет только id из выборки уже лежащих
+        # НЕавторитетных сегментов окна, так что авторитетные строки ей недоступны.
+        existing_sql = next(
+            query for query in cursor.queries
+            if query.startswith("SELECT id, operator_id, status_date")
+        )
+        self.assertIn("COALESCE(is_authoritative, FALSE) = FALSE", existing_sql)
+        self.assertFalse([
             query for query in cursor.queries
             if query.startswith("DELETE FROM operator_status_segments")
-        )
-        self.assertIn("COALESCE(is_authoritative, FALSE) = FALSE", delete_sql)
+        ], "лежащих сегментов нет — удалять нечего")
 
 
 if __name__ == "__main__":
