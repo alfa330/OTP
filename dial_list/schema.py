@@ -459,6 +459,28 @@ DDL = [
         sent_at TIMESTAMP WITH TIME ZONE
     )
     """,
+    # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
+    # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
+    # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
+    # не-HOT: новая версия строки шла во все индексы лида и с полными образами страниц в
+    # журнал (замер 15–19.10.2026: 3,3 ГБ WAL за 4 дня — треть всего WAL базы). Выборку
+    # «кому пора» (два раза в час, ~13 тыс. неподписавших) Postgres и без индекса делает за
+    # те же ~0,1 с: время уходит на сортировку, а не на поиск (EXPLAIN на проде 19.10).
+    # Стоят до индексов: это правка таблицы, а не новый индекс.
+    "DROP INDEX IF EXISTS idx_dial_list_leads_sign_due",
+    "DROP INDEX IF EXISTS idx_dial_list_leads_trip_due",
+    # Место на странице под HOT-обновление отметки: без него новая версия строки уходит на
+    # другую страницу и снова пишет все индексы. Ставится один раз (ALTER берёт блокировку).
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class
+                        WHERE oid = 'dial_list_leads'::regclass
+                          AND reloptions @> ARRAY['fillfactor=80']) THEN
+            ALTER TABLE dial_list_leads SET (fillfactor = 80);
+        END IF;
+    END $$
+    """,
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -502,9 +524,6 @@ DDL = [
         RAISE WARNING 'dial_list: в базах есть повторы ИИН — индекс uq_dial_list_leads_period_iin не создан';
     END $$
     """,
-    # Кому пора проверять подписание: только неподписавшие с ИИН.
-    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_sign_due ON dial_list_leads(period, sign_checked_at)"
-    " WHERE iin <> '' AND signed_at IS NULL",
     # Успешки оператора по дням (сводка «Операторы», аналитика).
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_success_operator"
     " ON dial_list_leads(success_operator_id, signed_at) WHERE success_attempt_id IS NOT NULL",
@@ -529,13 +548,12 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_operator_requested"
     " ON dial_list_attempts(operator_id, requested_at)",
     # Автообзвон Тез (15.10.2026). Пул по сроку — только открытые лиды; свои сроки оператора
-    # (перезвон, дожим) — по владельцу; кому пора проверять поездки — только не вышедшие на линию.
+    # (перезвон, дожим) — по владельцу. «Кому пора проверять поездки» индекса не имеет — см.
+    # выше про отметки проверок.
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_next_call ON dial_list_leads(department_id, period, next_call_at)"
     " WHERE status IN ('new', 'in_progress')",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_owner_due ON dial_list_leads(owner_operator_id, owner_call_at)"
     " WHERE owner_operator_id IS NOT NULL",
-    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_trip_due ON dial_list_leads(period, trip_checked_at)"
-    " WHERE signed_at IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_wa_messages_lead ON dial_list_wa_messages(lead_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempt_offers_offer ON dial_list_attempt_offers(offer_id)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_offers_department ON dial_list_offers(department_id, position)",

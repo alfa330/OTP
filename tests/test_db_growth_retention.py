@@ -134,6 +134,33 @@ class DroppedIndexesStayDroppedTests(unittest.TestCase):
         self.assertIn("CREATE INDEX IF NOT EXISTS idx_op_funnel_leads_day", schema.OP_FUNNEL_SCHEMA_SQL)
 
 
+class DialListCheckStampsAreHotTests(unittest.TestCase):
+    """Отметки проверок подписи и поездок пишутся у каждого неподписавшего раз в час-три.
+    Индекс по отметке делал каждое такое обновление не-HOT — новая версия строки шла во все
+    индексы лида (треть WAL базы). Индексов по отметкам нет, а на странице оставлено место."""
+
+    def setUp(self):
+        from dial_list import schema
+        self.ddl = "\n".join(schema.DDL)
+        self.schema = schema
+
+    def test_check_stamps_are_not_indexed(self):
+        for column in ("sign_checked_at", "trip_checked_at"):
+            for statement in self.schema.DDL:
+                if "CREATE INDEX" in statement and "dial_list_leads(" in statement.replace(" (", "("):
+                    self.assertNotIn(column, statement, statement)
+        for index in ("idx_dial_list_leads_sign_due", "idx_dial_list_leads_trip_due"):
+            self.assertNotIn(f"CREATE INDEX IF NOT EXISTS {index}", self.ddl)
+            self.assertIn(f"DROP INDEX IF EXISTS {index}", self.schema.DDL)
+
+    def test_fillfactor_is_set_once(self):
+        block = next(s for s in self.schema.DDL if "fillfactor" in s)
+        self.assertIn("ALTER TABLE dial_list_leads SET (fillfactor = 80)", block)
+        # ALTER берёт блокировку — только если параметра ещё нет.
+        self.assertIn("IF NOT EXISTS", block)
+        self.assertIn("reloptions @> ARRAY['fillfactor=80']", block)
+
+
 class FleetEdmFilesRetentionTests(unittest.TestCase):
     """Чистка файлов выгрузок шла только при запуске новой выгрузки — без выгрузок файлы
     по ~0,7 МБ лежали бессрочно. Теперь она идёт каждую ночь."""
