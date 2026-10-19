@@ -2090,6 +2090,28 @@ def _cache_get(call_id, model, subject_kind=config.SUBJECT_CALL):
         return None  # таблицы ещё нет
 
 
+# Ключи карточки, которых в проекции ai_review_cache не держим: оттуда их не читает
+# никто, а весили они больше половины строки (замер 19.10.2026: трасса ~35 тыс. символов,
+# транскрипт ~28 тыс. на карточку, ~19 МБ прироста базы в сутки на всю ИИ-оценку).
+# Трасса поиска правил и метаданные вызовов LLM хранятся один раз — в прогоне
+# (ai_evaluation_runs.payload), оттуда их и читают карточка, разбор и кэш по отпечатку.
+_PROJECTION_DROPPED_KEYS = ("_retrieval_trace", "_llm_meta")
+
+
+def _projection_payload(payload: dict) -> dict:
+    """Карточка для проекции ai_review_cache — КОПИЯ, исходный dict не трогаем: после
+    записи тот же payload уходит во фронт (api.py, свежая оценка)."""
+    slim = {key: value for key, value in payload.items()
+            if key not in _PROJECTION_DROPPED_KEYS}
+    # Транскрипт хранится в ai_transcript_cache; сводка дня берёт его оттуда по
+    # _transcript_cache_id (digest/data.py). Снимаем, только если ссылка есть, а
+    # встроенного ASR старого кэша (_asm — путь миграции в _resolve_call_source) нет.
+    cache_id = payload.get("_transcript_cache_id")
+    if isinstance(cache_id, int) and not isinstance(cache_id, bool) and "_asm" not in payload:
+        slim.pop("transcript", None)
+    return slim
+
+
 def _cache_put(call_id, model, payload, strict=False, subject_kind=config.SUBJECT_CALL):
     try:
         from psycopg2.extras import Json
@@ -2100,12 +2122,24 @@ def _cache_put(call_id, model, payload, strict=False, subject_kind=config.SUBJEC
                    VALUES (%s,%s,%s,%s, now())
                    ON CONFLICT (subject_kind, call_id, model)
                    DO UPDATE SET payload=EXCLUDED.payload, created_at=now()""",
-                (subject_kind, call_id, model, Json(payload)))
+                (subject_kind, call_id, model, Json(_projection_payload(payload))))
         conn.close()
     except Exception:
         if strict:
             raise  # пакетная оценка: потеря результата недопустима — наверху ретрай
         pass  # карточка ревью: best-effort (нет RW/таблицы) — просто не кэшируем
+
+
+# Что из карточки критерия кладём в журнал оценки (ai_evaluation_meta.per_criterion).
+# Читает его только счёт доверия к ИИ (_reviewed_metrics: source, ai, idx). Полная карточка
+# с цитатой и комментарием — оплаченный ответ модели — хранится один раз, в прогоне
+# (ai_evaluation_runs.payload.criteria); третья её копия здесь весила ~4,6 КБ на строку.
+_META_CRITERION_KEYS = ("idx", "criterion_id", "source", "ai", "is_critical")
+
+
+def _meta_criteria(payload: dict) -> list:
+    return [{key: item[key] for key in _META_CRITERION_KEYS if key in item}
+            for item in (payload.get("criteria") or []) if isinstance(item, dict)]
 
 
 def _meta_upsert(call_id, model, payload, subject_kind=config.SUBJECT_CALL):
@@ -2127,7 +2161,7 @@ def _meta_upsert(call_id, model, payload, subject_kind=config.SUBJECT_CALL):
                      needs_review=EXCLUDED.needs_review, review_reasons=EXCLUDED.review_reasons,
                      review_outcome=NULL, reviewed_by=NULL, reviewed_at=NULL, created_at=now()""",
                 (subject_kind, call_id, payload.get("direction_id") or 0, model,
-                 Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
+                 Json(_meta_criteria(payload)), payload.get("asr_mean_conf"),
                  bool(reasons), Json(reasons)))
         conn.close()
     except Exception:
@@ -2155,7 +2189,7 @@ def _record_review_outcome(call_id, outcome, reviewer_id=None, *, payload=None, 
                      review_outcome=EXCLUDED.review_outcome,
                      reviewed_by=EXCLUDED.reviewed_by, reviewed_at=now()""",
                 (subject_kind, call_id, payload.get("direction_id") or 0, model,
-                 Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
+                 Json(_meta_criteria(payload)), payload.get("asr_mean_conf"),
                  bool(reasons), Json(reasons), outcome, reviewer_id))
         conn.close()
     except Exception:
@@ -2191,7 +2225,7 @@ def _claim_review_outcome(cur, *, call_id: int, outcome: str, reviewer_id,
                   OR (%s AND EXCLUDED.review_outcome = 'adjudicated')
                RETURNING id""",
         (subject_kind, int(call_id), int(payload["direction_id"]), str(model),
-         Json(payload.get("criteria") or []), payload.get("asr_mean_conf"),
+         Json(_meta_criteria(payload)), payload.get("asr_mean_conf"),
          bool(reasons), Json(reasons), outcome, reviewer_id, bool(allow_reviewed)),
     )
     if not cur.fetchone():

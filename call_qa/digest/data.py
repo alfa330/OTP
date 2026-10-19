@@ -237,7 +237,16 @@ def attach_details(cur, talks, *, with_transcripts=True, with_notes=False) -> No
     # критичность, источник и уверенность. Это впятеро меньше по объёму.
     # Итог оценщика — тоже только для модели: в нём он пишет то, чего нет в
     # вердиктах («звонил пассажир, перенаправлен в поддержку Яндекс Go»).
-    transcript_col = (", payload->'transcript', payload->>'overall_comment'" if with_transcripts
+    # Транскрипт в проекции больше не хранится (call_qa/api.py, _projection_payload):
+    # он лежит один раз в ai_transcript_cache, карточка ссылается на него по
+    # _transcript_cache_id. У старых карточек он ещё в payload — берём его первым.
+    # Ссылка на внешнюю строку — только через rc.: у ai_transcript_cache свои
+    # payload и call_id, и голое имя в подзапросе ушло бы в чужую таблицу.
+    transcript_col = (""", COALESCE(payload->'transcript',
+                          (SELECT t.segments FROM ai_transcript_cache t
+                            WHERE t.id = CASE WHEN jsonb_typeof(rc.payload->'_transcript_cache_id') = 'number'
+                                              THEN (rc.payload->>'_transcript_cache_id')::bigint END)),
+                        payload->>'overall_comment'""" if with_transcripts
                       else ", NULL::jsonb, left(payload->>'overall_comment', 300)" if with_notes
                       else ", NULL::jsonb, NULL::text")
     criteria_col = ("payload->'criteria'" if with_transcripts
@@ -252,7 +261,7 @@ def attach_details(cur, talks, *, with_transcripts=True, with_notes=False) -> No
                           payload->'score_breakdown', payload->>'asr_mean_conf', payload->'media',
                           payload->>'direction_id', payload->>'call_end_party'"""
                 + transcript_col + """
-                     FROM ai_review_cache
+                     FROM ai_review_cache rc
                     WHERE subject_kind = %s AND model = %s AND call_id = ANY(%s)""",
                 (kind, model, chunk))
             for (subject_id, criteria, ai_score, breakdown, asr, media, direction_id,
