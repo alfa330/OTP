@@ -55,8 +55,8 @@ def iso(dt):
 def _database_class():
     """Нужные методы Database без импорта монолита (он поднимает пул к базе)."""
     methods = {"store_wazzup_messages", "_wazzup_chat_history_tx", "_wazzup_recent_arrivals_tx",
-               "_refresh_wazzup_chat_tx", "_wazzup_episode_kept_sql",
-               "retime_late_wazzup_messages"}
+               "_wazzup_chat_later_tx", "_refresh_wazzup_chat_tx", "_wazzup_episode_kept_sql",
+               "retime_late_wazzup_messages", "retime_wazzup_inbound_after_replies"}
     attrs = {"WAZZUP_EPISODE_REFERENCES", "WAZZUP_EPISODE_LOCK_KEY"}
     module = source_cache.parse(DB_SOURCE)
     source_class = next(node for node in module.body
@@ -85,6 +85,7 @@ ALL_REFERENCE_TABLES = tuple(table for table, _ in Database.WAZZUP_EPISODE_REFER
 
 HISTORY_MARK = "SELECT is_echo, dt, created_at, wazzup_dt IS NOT NULL"
 RECENT_MARK = "SELECT dt, created_at FROM wazzup_messages WHERE account = %s"
+LATER_MARK = "SELECT dt FROM wazzup_messages WHERE channel_id = %s AND chat_id = %s AND dt > %s"
 REPAIR_MARK = "SELECT m.message_id, m.channel_id"
 
 
@@ -164,6 +165,11 @@ class _TableCursor(_Cursor):
             self._rows = [(r["is_echo"], r["dt"], r["created_at"], r["late"]) for r in self.table
                           if r["channel_id"] == channel_id and r["chat_id"] == chat_id
                           and since <= r["created_at"] < until]
+        elif LATER_MARK in sql:
+            channel_id, chat_id, after = params
+            self._rows = [(r["dt"],) for r in self.table
+                          if r["channel_id"] == channel_id and r["chat_id"] == chat_id
+                          and r["dt"] > after]
         elif RECENT_MARK in sql:
             self._rows = _recent_answer([(r["dt"], r["created_at"]) for r in self.table])(params)
 
@@ -540,8 +546,6 @@ class StoreMessagesTests(unittest.TestCase):
                                   self.RECEIVED),
             "точное время WABA с малыми мс": (self._message(dateTime="2026-10-05T07:31:47.050Z"),
                                               self.RECEIVED),
-            "живое входящее": (self._message(dateTime="2026-10-05T07:35:00.004Z"),
-                               self.RECEIVED),
             "время не разобрать": (self._message(dateTime="2026-09-25 вечером"), self.RECEIVED),
         }
         for label, (message, received_at) in cases.items():
@@ -551,7 +555,7 @@ class StoreMessagesTests(unittest.TestCase):
                 self.assertIsNone(wazzup_dt)
                 lookups = [(sql, params) for sql, params in cursor.sql("SELECT")
                            if not sql.startswith("SELECT pg_advisory_xact_lock")]
-                self.assertEqual(lookups, [], "выборки нужны только опоздавшим")
+                self.assertEqual(lookups, [], "выборки нужны только входящим с минутным временем")
 
     def test_backlog_is_checked_once_per_webhook(self):
         cursor = _Cursor(answers={HISTORY_MARK: [], RECENT_MARK: []})
