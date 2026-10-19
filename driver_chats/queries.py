@@ -251,21 +251,33 @@ def webhook_stream_covers(cursor, window_from):
         return False
 
 
-_WEBHOOK_CLIENT_SQL = """
+# Точный номер ищется ЧЕРЕЗ хвост: у client_phone своего индекса нет, и без условия по
+# хвосту запрос проходил всю неделю событий — ~2 с на вызов, до восьми минут базы в
+# сутки (замер 15–19.10.2026). Все написания одного номера дают один хвост, а сравнение
+# client_phone = ANY(...) остаётся — ответ тот же. Выражение хвоста — ДОСЛОВНО как в
+# индексе idx_c2d_webhook_events_phone_tail (см. ниже).
+_WEBHOOK_CLIENT_SQL = r"""
     SELECT client_id
       FROM c2d_webhook_events
-     WHERE client_phone = ANY(%(variants)s)
+     WHERE right(regexp_replace(client_phone, '\D', '', 'g'), 9) = ANY(%(tails)s)
+       AND client_phone = ANY(%(variants)s)
        AND client_id IS NOT NULL
      ORDER BY event_at DESC
      LIMIT 1
 """
 
 
+def _phone_tail(value):
+    """Хвост номера так же, как его считает индекс: последние 9 цифр."""
+    return re.sub(r'\D', '', str(value or ''))[-9:]
+
+
 def webhook_client_id(cursor, variants):
     """client_id по точному номеру из потока событий. Ноль вызовов API."""
     if not variants:
         return None
-    cursor.execute(_WEBHOOK_CLIENT_SQL, {'variants': list(variants)})
+    tails = sorted({_phone_tail(value) for value in variants})
+    cursor.execute(_WEBHOOK_CLIENT_SQL, {'variants': list(variants), 'tails': tails})
     row = cursor.fetchone()
     return int(row[0]) if row and row[0] is not None else None
 

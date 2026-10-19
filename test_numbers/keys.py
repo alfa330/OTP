@@ -162,11 +162,18 @@ DIAL_LIST_ATTEMPT_NOT_TEST_SQL = (
 # Соединение — по хвосту из девяти цифр ДОСЛОВНО тем же выражением, что у индекса
 # idx_c2d_webhook_events_phone_tail (иначе планировщик уйдёт в полный проход), а
 # точное совпадение — по десяти.
+#
+# Поиск по каждому номеру реестра — LATERAL с барьером OFFSET 0. Простым JOIN планировщик
+# считал, что на хвост придётся много строк, и выбирал хеш-соединение с полным проходом
+# недели событий: ~1,4 с на КАЖДЫЙ запрос табло с этим подзапросом (EXPLAIN на проде
+# 19.10.2026). Без барьера LATERAL разворачивается в тот же JOIN. С ним — по одному
+# поиску в индексе хвоста на номер реестра: те же 40 строк за ~0,13 с.
 C2D_WEBHOOK_TEST_REQUESTS_SQL = (
     "SELECT _tw.request_id FROM " + TABLE + " _tpn "
-    "JOIN c2d_webhook_events _tw "
-    "ON right(regexp_replace(_tw.client_phone, '\\D', '', 'g'), 9) = right(_tpn.phone_key, 9) "
+    "CROSS JOIN LATERAL (SELECT _tw.request_id, _tw.client_phone FROM c2d_webhook_events _tw "
+    "WHERE right(regexp_replace(_tw.client_phone, '\\D', '', 'g'), 9) = right(_tpn.phone_key, 9) "
     "AND _tw.client_id IS NOT NULL "
+    "OFFSET 0) _tw "
     "WHERE _tw.request_id IS NOT NULL "
     "AND right(regexp_replace(_tw.client_phone, '\\D', '', 'g'), 10) = _tpn.phone_key"
 )

@@ -3486,6 +3486,15 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_at
                 ON c2d_webhook_events(event_at);
             """)
+            # Закрытые обращения — для «открытых чатов» табло (get_c2d_open_chats_by_operator):
+            # проверка «закрывалось ли обращение» без него была отдельным проходом всей
+            # недели событий, ~1,5 с на пересборку (EXPLAIN на проде 19.10.2026). Индекс
+            # крошечный: закрытий ~1,5 тыс. в сутки на ~20 тыс. событий.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_closed
+                ON c2d_webhook_events(request_id)
+                WHERE hook_type IN ('close_request', 'close_dialog');
+            """)
             # Оценка чата — обычная запись журнала (calls) с критериями направления
             # ЧМ; чат-специфика — ссылка на снапшот переписки и цитаты
             # ({messageId, text, comment}). Отдельная таблица оценок чатов была
@@ -25798,11 +25807,15 @@ class Database:
           * первое событие — в сутки, начавшиеся ДО включения вебхука, поток по
             определению неполон, и показывать по ним цифры нельзя: на стене это
             выглядело бы не как «данных нет», а как упавший вдвое объём."""
+        # Три подзапроса, а не один проход: MIN/MAX берутся из краёв индекса по event_at,
+        # счёт суток — из индекса (day, request_id). Одним SELECT с COUNT FILTER Postgres
+        # проходил всю неделю событий на каждую пересборку табло — ~1 с базы на вызов
+        # (замер 15–19.10.2026). Ответ тот же.
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT MIN(event_at), MAX(event_at),
-                       COUNT(*) FILTER (WHERE day = CURRENT_DATE)::int
-                FROM c2d_webhook_events
+                SELECT (SELECT MIN(event_at) FROM c2d_webhook_events),
+                       (SELECT MAX(event_at) FROM c2d_webhook_events),
+                       (SELECT COUNT(*) FROM c2d_webhook_events WHERE day = CURRENT_DATE)::int
             """)
             row = cursor.fetchone() or (None, None, 0)
             return {'first_event_at': row[0], 'last_event_at': row[1],
