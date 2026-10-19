@@ -54,6 +54,8 @@ import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
 import ShiftStartScreen from './ShiftStartScreen';
 import ShiftStatusMenu from './ShiftStatusMenu';
+import ShiftWriteLock from './ShiftWriteLock';
+import { shiftWriteLock } from './workspaceStatus';
 import { configureWorkspace, loadWorkspace, useWorkspace } from './workspaceStore';
 import { attachmentCache } from './attachmentCache';
 import { normalizeRole } from '../../utils/roles';
@@ -968,13 +970,15 @@ function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
  * статуса смены (toolbar) рядом с «Обновить». Второго аккаунта, показателей с
  * привязкой и ссылок в сам Wazzup в этом режиме нет — постановка владельца
  * 08.10.2026, и сервер их верификатору тоже не отдаёт (_wazzup_chat_reader_guard).
- * entering — окно только что открылось кнопкой «Начать смену» (workspace.css). */
+ * entering — окно только что открылось кнопкой «Начать смену» (workspace.css).
+ * writeLock — верификатор не в «Активном» (shiftWriteLock): поле ввода и «Ответить»
+ * закрыты, на месте поля — строка ShiftWriteLock (владелец 19.10.2026). */
 function ChatsWorkspace(props) {
     /* initialChat — цель перехода по ссылке (chatLink.js): либо пара
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
     const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user,
-        operator = false, toolbar = null, entering = false } = props;
+        operator = false, toolbar = null, entering = false, writeLock = null } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     /* Кому вообще есть смысл спрашивать сервер про обработку: верификатору и
        супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
@@ -1490,9 +1494,10 @@ function ChatsWorkspace(props) {
     // «Ожидают ответа» — про чаты, а не про сообщения с текстом.
     const searchHitsShown = !(unreadOnly && pilot.enabled) && Boolean(appliedSearch) && Boolean(messageSearch.query);
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
-    const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
+    const pilotChannelCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
         && selectedChannel?.state === 'active' && ['whatsapp', 'wapi'].includes(selectedChannel?.transport);
+    const pilotCanSend = pilotChannelCanSend && !writeLock;
     useEffect(() => {
         if (pilot.enabled && selected && thread !== null) refreshPilotThread().catch(() => {});
         return () => {
@@ -2221,6 +2226,8 @@ function ChatsWorkspace(props) {
                                                 threadBox.current.scrollTop = threadBox.current.scrollHeight;
                                         });
                                     }} />
+                            ) : writeLock && pilotChannelCanSend ? (
+                                <ShiftWriteLock />
                             ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
                                     typingEnabled={pilotCanSend && mainTab === 'chats'}
@@ -2308,7 +2315,8 @@ function OperatorWorkspace(props) {
     if (!onShift) return <div className="wazzup-scrollbar h-full overflow-y-auto">
         <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />
     </div>;
-    return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />} />;
+    return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />}
+        writeLock={shiftWriteLock(workspace.current, workspace.startKey)} />;
 }
 
 /* Кому раздел открыт верификатором, сообщает сервер флагом профиля

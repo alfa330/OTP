@@ -51,6 +51,14 @@ export const elapsedNow = (current, receivedAtMs, nowMs) => {
     return base + (Number.isFinite(drift) ? drift : 0);
 };
 
+/* Писать клиентам верификатор может только в статусе начала смены — «Активном»
+   (владелец 19.10.2026; отправку отклоняет и сервер, wazzup/pilot.py). null —
+   писать можно, иначе — текущий статус: о нём скажет строка на месте поля ввода.
+   Ключ «Активного» знает сервер (startKey), своей копии здесь нет. */
+export const shiftWriteLock = (current, startKey) => (
+    !current || !startKey || current.key === startKey ? null : current
+);
+
 /* «ЧЧ:ММ» из naive-ISO сервера (время Алматы) — без new Date(): браузер
    прочитал бы строку в своём поясе и сдвинул бы время. */
 export const clockOf = (iso) => {

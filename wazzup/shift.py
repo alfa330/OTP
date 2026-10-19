@@ -38,6 +38,9 @@ _STATUS_BY_KEY = {item['key']: item for item in STATUSES}
 ON_SHIFT_KEYS = frozenset(_STATUS_BY_KEY)
 # С него смена начинается: кнопка «Начать смену» ставит именно его.
 START_KEY = 'готов'
+# Писать клиентам верификатор может только в нём (владелец 19.10.2026): в перерыве,
+# тренинге и тех. паузе поле ввода закрыто, а отправку отклоняет сервер.
+WRITE_LOCKED_MESSAGE = 'Писать клиентам можно только в статусе «Активный»'
 
 # Конец смены — тот же ключ, что шлёт телефон при выходе: на табло он «Не в
 # сети», в часы не идёт ни у одной модели.
@@ -73,6 +76,13 @@ def normalize_key(value):
 
 def is_on_shift_key(key):
     return normalize_key(key) in ON_SHIFT_KEYS
+
+
+def writes_allowed(event):
+    """Можно ли писать клиентам при этом последнем событии статуса: только в «Активном».
+
+    Нет событий или смена закрыта — тоже нельзя: раздел в этом случае и не открывает чаты."""
+    return bool(event) and normalize_key(event.get('status_key')) == START_KEY
 
 
 def is_workspace_event(client_event_id):

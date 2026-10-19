@@ -149,6 +149,24 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual((state['label'], state['onShift'], state['tone']), ('Исход', True, 'other'))
 
 
+class WritesAllowedTests(unittest.TestCase):
+    """Владелец 19.10.2026: писать клиентам — только в статусе «Активный»."""
+
+    def test_only_the_active_status_writes(self):
+        self.assertTrue(shift.writes_allowed({'status_key': 'готов'}))
+        # Ключ телефона приходит в любом регистре и с пробелами — правило то же.
+        self.assertTrue(shift.writes_allowed({'status_key': '  Готов '}))
+        for key in ('перерыв', 'тренинг', 'тех причина', shift.LOGOUT_KEY, 'исход', '', None):
+            self.assertFalse(shift.writes_allowed({'status_key': key}), key)
+        self.assertFalse(shift.writes_allowed(None))
+        self.assertFalse(shift.writes_allowed({}))
+
+    def test_the_active_status_is_the_one_the_menu_calls_active(self):
+        labels = {item['key']: item['label'] for item in shift.STATUSES}
+        self.assertEqual(labels[shift.START_KEY], 'Активный')
+        self.assertIn('«Активный»', shift.WRITE_LOCKED_MESSAGE)
+
+
 class AutoLogoutTests(unittest.TestCase):
     def _latest(self, key='готов', minutes_ago=30, client='wzws-abc'):
         return {'status_key': key, 'event_at': NOW - timedelta(minutes=minutes_ago),

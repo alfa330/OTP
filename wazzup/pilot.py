@@ -13,14 +13,16 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from flask import Blueprint, Response, g, jsonify, request
 from requests.adapters import HTTPAdapter
 
 from . import access as access_rules
-from . import accounts, realtime
+from . import accounts, realtime, shift
 from .window import last_inbound_at
+from .workspace_store import WorkspaceStore
 
 EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',  # Global Taxi
@@ -140,23 +142,41 @@ MESSAGE_SELECT = """
 
 def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                           listen_connect=None, transport=None, event_broker=None, gcs=None,
-                          access=None, stream_limit=STREAM_LIMIT, driver_card_sync=None):
+                          access=None, stream_limit=STREAM_LIMIT, driver_card_sync=None,
+                          shift_status=None):
     """access() -> {'mode', 'can_process', ...} for the requesting user (the
     monolith's _wazzup_chat_access). It is the single rule shared with the
     section guard and the shift routes; None keeps the standalone rule above.
 
     driver_card_sync — {'wake', 'options', 'driver_info'} for the driver card routes;
     tests pass stubs, the monolith leaves the defaults (wazzup/driver_cards_sync.py,
-    wazzup/driver_info.py)."""
+    wazzup/driver_info.py).
+
+    shift_status(user_id) -> the verifier's latest status event (the same row the
+    shift routes read); tests pass a stub, the monolith leaves the store."""
     bp = Blueprint('wazzup_pilot', __name__, url_prefix='/api/wazzup/pilot')
     driver_card_sync = driver_card_sync or {}
     transport = transport or wazzup_transport
     broker = event_broker or realtime.broker
+    shift_store = WorkspaceStore(db)
 
     def may_process(user):
         if access is None:
             return eligible_user(user)
         return bool(user) and bool(access().get('can_process'))
+
+    def latest_shift_status(user_id):
+        if shift_status is not None:
+            return shift_status(user_id)
+        # Status events are stored in naive Almaty time, like the shift routes read them.
+        return shift_store.latest_status(user_id, datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None))
+
+    def write_refusal(user):
+        """A verifier writes to clients only while «Активный» (owner, 19.10.2026).
+        Nobody else has a shift, so the rule does not apply to them."""
+        if access is None or access().get('mode') != access_rules.MODE_OPERATOR:
+            return None
+        return None if shift.writes_allowed(latest_shift_status(user[0])) else shift.WRITE_LOCKED_MESSAGE
 
     def sender_author_id(user):
         # Only a verifier's reply is credited to an operator in the reports; a
@@ -398,6 +418,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             previous = cur.fetchone()
         if previous:
             return replay(previous, body, user)
+        # After the replay: a message accepted before the break must still read as sent.
+        refusal = write_refusal(user)
+        if refusal:
+            return jsonify(error=refusal, code='SHIFT_NOT_ACTIVE', state='failed', retryable=False,
+                           clientMessageId=request_id), 403
         channel = next((c for c in channels('op') if c.get('channelId') == cid), None)
         if not channel or channel.get('state') != 'active' or channel.get('transport') not in ('whatsapp', 'wapi'):
             return jsonify(error='Отправка доступна только в активных WhatsApp-каналах'), 400

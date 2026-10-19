@@ -33,6 +33,8 @@ class MemoryDatabase:
         self.actor = user() if actor is None else actor
         self.outbox, self.messages, self.statements = {}, {}, []
         self.outbox_authors, self.author_map = {}, {}
+        # Last shift status of the verifier: (status_key, event_at, client_event_id, state_note).
+        self.shift = ('готов', datetime(2026, 10, 19, 9, 0), 'wzws-start', None)
         self.lock, self.local = threading.RLock(), threading.local()
 
     def get_user(self, **_):
@@ -86,6 +88,8 @@ class MemoryCursor:
             self.row = (1,) if item and item.get('account') == 'op' and item.get('channelId') == values[0] and item.get('chatId') == values[1] and not item.get('isDeleted') else None
         elif sql.startswith('SELECT 1 FROM wazzup_messages'):
             self.row = (1,) if values[0] in self.db.messages else None
+        elif sql.startswith('SELECT status_key, event_at, client_event_id, state_note FROM operator_status_events'):
+            self.row = self.db.shift
         else:
             raise AssertionError('Unexpected SQL in isolated fixture: ' + sql)
 
@@ -238,6 +242,62 @@ class PilotRoutesTests(unittest.TestCase):
         stored = db.messages['vendor-message-1']
         self.assertEqual(('icore:42', 'Pilot Tester', 'read'),
                          (stored['authorId'], stored['authorName'], stored['status']))
+
+    def test_verifier_writes_only_while_active(self):
+        # Owner, 19.10.2026: break, training, tech pause or a closed shift — no sending.
+        # The refusal is final (a new send after «Активный»), nothing reaches the outbox or Wazzup.
+        for status in ('перерыв', 'тренинг', 'тех причина', 'выключен', None):
+            db = MemoryDatabase(user('operator'))
+            db.shift = None if status is None else (status, datetime(2026, 10, 19, 9, 5), 'wzws-x', None)
+            app, db, _, transport = fixture(db=db, access=lambda: {'mode': 'operator', 'can_process': True})
+            with app.test_client() as client:
+                response = client.post('/api/wazzup/pilot/send', json=self.body)
+            self.assertEqual(403, response.status_code, status)
+            data = response.get_json()
+            self.assertEqual(('SHIFT_NOT_ACTIVE', 'failed', False, self.body['clientMessageId']),
+                             (data['code'], data['state'], data['retryable'], data['clientMessageId']), status)
+            self.assertEqual('Писать клиентам можно только в статусе «Активный»', data['error'])
+            self.assertFalse(db.outbox, status)
+            transport.post.assert_not_called()
+
+    def test_active_status_is_read_for_the_sender_in_almaty_time(self):
+        app, db, _, transport = fixture(db=MemoryDatabase(user('operator')),
+                                        access=lambda: {'mode': 'operator', 'can_process': True})
+        with app.test_client() as client:
+            self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        transport.post.assert_called_once()
+        lookups = [values for sql, values in db.statements if 'FROM operator_status_events' in sql]
+        self.assertEqual(1, len(lookups))
+        user_id, moment = lookups[0][0], lookups[0][1]
+        self.assertEqual(42, user_id)
+        # Events are naive Almaty time: the moment is naive and five hours ahead of UTC.
+        self.assertIsNone(moment.tzinfo)
+        expected = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)
+        self.assertLess(abs((moment - expected).total_seconds()), 120)
+
+    def test_message_accepted_before_the_break_still_reads_as_sent(self):
+        # The queue repeats a request whose answer was lost; it went out while «Активный».
+        app, db, _, transport = fixture(db=MemoryDatabase(user('operator')),
+                                        access=lambda: {'mode': 'operator', 'can_process': True})
+        with app.test_client() as client:
+            self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+            db.shift = ('перерыв', datetime(2026, 10, 19, 9, 10), 'wzws-pause', None)
+            again = client.post('/api/wazzup/pilot/send', json=self.body)
+            self.assertEqual((200, 'sent'), (again.status_code, again.get_json()['state']))
+            fresh = client.post('/api/wazzup/pilot/send', json=dict(self.body, clientMessageId=str(uuid.uuid4())))
+            self.assertEqual(403, fresh.status_code)
+        transport.post.assert_called_once()
+
+    def test_without_a_shift_the_rule_does_not_apply(self):
+        # A super admin processes chats without a shift; the status table is not even read.
+        for access in ({'mode': 'full', 'can_process': True}, None):
+            db = MemoryDatabase()
+            db.shift = ('перерыв', datetime(2026, 10, 19, 9, 5), 'phone-1', None)
+            app, db, _, transport = fixture(db=db, access=(lambda access=access: access) if access else None)
+            with app.test_client() as client:
+                self.assertEqual(201, client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+            self.assertFalse([sql for sql, _ in db.statements if 'operator_status_events' in sql])
+            transport.post.assert_called_once()
 
     def test_super_admin_send_stays_out_of_the_reports(self):
         # As before the change: no author key, no mapping row, no stamp.
