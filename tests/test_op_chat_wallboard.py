@@ -456,7 +456,9 @@ def _passthrough_cache(*, fetch, before=None, after=None, **_ignored):
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.requester = {'role': 'operator', 'headed': None}
-        now = datetime.now().replace(microsecond=0)
+        # «Сейчас» — по тем же часам, что у ручки (Алматы), а не по часам машины: на CI они UTC, и
+        # сообщение «2 минуты назад» выглядело бы пятичасовым и выпадало из окна «ждёт ответа».
+        now = datetime.now(op_routes._ALMATY).replace(tzinfo=None, microsecond=0)
         self.now = now
         self.rows = [client(now - timedelta(minutes=5)), reply(now - timedelta(minutes=4), VER_A)]
         self.loaded = []
