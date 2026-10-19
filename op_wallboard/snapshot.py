@@ -463,7 +463,8 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
     }
 
 
-def _status(entry, live):
+def status_fields(entry, live):
+    """Поля статуса строки людей. Общие с «Чатом» (chat.assemble): одна разметка на обе стены."""
     label, key, weight = entry
     return {
         'status_label': label,
@@ -493,7 +494,7 @@ def build_people(people, live_statuses, status_entry, by_ext, resolve_name):
             'last_call_at': stats.get('last_call_at', ''),
             'in_roster': True,
         }
-        row.update(_status(entry, live))
+        row.update(status_fields(entry, live))
         rows.append(row)
         if ext:
             seen_exts.add(ext)
@@ -510,7 +511,7 @@ def build_people(people, live_statuses, status_entry, by_ext, resolve_name):
             'talk_seconds': stats['talk_seconds'], 'last_call_at': stats['last_call_at'],
             'in_roster': False,
         }
-        row.update(_status(('Нет в составе', 'unknown', 95), {}))
+        row.update(status_fields(('Нет в составе', 'unknown', 95), {}))
         rows.append(row)
     rows.sort(key=lambda r: (r['status_weight'], r['name']))
     return rows

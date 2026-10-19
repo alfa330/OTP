@@ -6,8 +6,11 @@
 
   * переписка приходит вебхуком Wazzup в `wazzup_messages` (аккаунт «op») за секунды, поэтому
     табло считается из своей базы, без квоты вендора и без внешних запросов;
-  * статусов людей у Wazzup нет ни в API, ни в вебхуках, и статусы на табло не показываем
-    вовсе (решение владельца 25.09.2026). «Сейчас» — это чаты: в работе и ждущие ответа;
+  * статусов людей у Wazzup нет ни в API, ни в вебхуках. С 08.10.2026 верификатор ставит статус
+    кнопкой смены в самих «Чатах ОП» (wazzup/shift.py), и он ложится в `operator_status_events`
+    теми же словами, что статусы телефона «Основы». С 19.10.2026 (владелец) табло показывает их
+    поимённо в реальном времени, как «Линия»: та же разметка, время входа и журнал. «Сейчас» в
+    плитках — по-прежнему чаты: в работе и ждущие ответа;
   * обращения с началом и закрытием у Wazzup тоже нет — есть поток сообщений по чату. Его
     режем на ДИАЛОГИ паузой (6 ч, та же единица, что у эпизодов ИИ-оценки: пауза
     бимодальна, дно между пиками 4–11 ч). Диалог относится к дню и часу своего начала — как
@@ -34,6 +37,8 @@
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+
+from . import snapshot as snapshot_mod
 
 # Группа верификаторов определяется моделью группы, а не направлением: часть верификаторов
 # числится в направлении «Основа ОП». Та же модель, что убирает их с телефонного табло
@@ -402,14 +407,23 @@ def stream_state(last_message_at, now):
             'silent': silent_seconds > threshold}
 
 
+def _unknown_status(_key):
+    return ('Нет событий', 'unknown', 90)
+
+
 def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
              in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPISODE_GAP_SECONDS,
              waiting_max_seconds=WAITING_MAX_SECONDS,
-             first_target_seconds=FIRST_TARGET_SECONDS, inner_target_seconds=INNER_TARGET_SECONDS):
+             first_target_seconds=FIRST_TARGET_SECONDS, inner_target_seconds=INNER_TARGET_SECONDS,
+             live_statuses=None, status_entry=None, status_events=None):
     """Снимок табло на момент `now` (наивное время Алматы).
 
     rows — сообщения с полуночи минус `gap_seconds` до `now`: диалог, начатый вчера вечером,
-    обязан знать своё начало, иначе его утреннее продолжение посчиталось бы новым диалогом."""
+    обязан знать своё начало, иначе его утреннее продолжение посчиталось бы новым диалогом.
+
+    Статусы смены — те же три источника, что у «Линии» (snapshot.assemble): `live_statuses` —
+    последнее событие каждого ({id: {status_key, event_at, seconds}}), `status_entry` — каталог
+    подписей и разрядов табло, `status_events` — события с вечера прошлых суток для времени входа."""
     messages = classify(rows, verifier_ids)
     episodes = split_episodes(messages, gap_seconds)
     day = now.date()
@@ -418,17 +432,25 @@ def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
                         waiting_max_seconds=waiting_max_seconds)
     in_work = current.pop('in_work_by_person')
     people = block.pop('operators')
-    for user_id, count in in_work.items():
+    # В списке — весь состав верификаторов, а не только писавшие сегодня: статус есть у каждого,
+    # кто начал смену, ещё до первого сообщения (как у «Линии» — весь состав отдела).
+    for user_id in set(int(v) for v in verifier_ids or ()) | set(in_work):
         if user_id not in people:
             people[user_id] = {'user_id': user_id, 'name': (names or {}).get(user_id) or f'#{user_id}',
                                'chats': 0, 'first_reply_seconds': None, 'inner_reply_seconds': None,
                                'reply_sums': _public_sums(empty_sums())}
+    status_entry = status_entry or _unknown_status
+    live_statuses = live_statuses or {}
     operators = []
     for user_id, person in people.items():
-        operators.append({**person, 'in_work': in_work.get(user_id, 0)})
-    # Сначала те, у кого чаты в работе, внутри — по алфавиту: строки на стене не прыгают от
-    # каждого нового сообщения, а люди без работы «сейчас» уходят вниз, но не исчезают.
-    operators.sort(key=lambda item: (0 if item['in_work'] else 1, item['name']))
+        live = live_statuses.get(user_id) or {}
+        row = {**person, 'id': user_id, 'in_work': in_work.get(user_id, 0), 'in_roster': True}
+        row.update(snapshot_mod.status_fields(status_entry(live.get('status_key')), live))
+        operators.append(row)
+    snapshot_mod.attach_entry_times(operators, status_events, day, status_entry)
+    # Как у «Линии»: по разряду статуса (работа → пауза → вне смены), внутри — по алфавиту. Строки
+    # на стене не прыгают от каждого сообщения, а глаз ищет человека по месту.
+    operators.sort(key=lambda item: (item['status_weight'], item['name']))
     current['operators'] = operators
     return {
         **block,

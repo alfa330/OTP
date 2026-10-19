@@ -14,10 +14,13 @@
   * тишина потока судится по часу: ночью полтора часа — норма, днём двадцать минут — обрыв;
   * ручки под гардом «Табло ОП», выгрузка — xlsx за период с потолком;
   * отбивка: отклонение = то, что красное на табло; направление зарегистрировано везде;
-  * экран: переключатель «Линия / Чат» как у СЗоВ, опрашивается только открытое направление,
-    статусов людей на экране чатов нет.
+  * экран: переключатель «Линия / Чат» как у СЗоВ, опрашивается только открытое направление;
+  * люди — как «Сотрудники» у «Линии» (владелец 19.10.2026): весь состав верификаторов со статусом
+    смены «Чатов ОП» тем же каталогом табло, время входа, журнал, порядок по разряду статуса,
+    таблицей внизу; опрос раз в 10 с, как у линии.
 """
 
+import re
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -241,7 +244,6 @@ class NowTests(unittest.TestCase):
         people = {p['user_id']: p for p in current['operators']}
         self.assertEqual(people[VER_A]['in_work'], 1)
         self.assertEqual(people[VER_B]['in_work'], 0)
-        self.assertEqual(current['operators'][0]['user_id'], VER_A)            # с работой — выше
 
     def test_chat_is_not_kept_on_someone_who_left_hours_ago(self):
         """Ответил в 14:01 и ушёл; «Рахмет» в 19:50 — чат в работе, но уже не его."""
@@ -270,7 +272,76 @@ class NowTests(unittest.TestCase):
         snap = self.snapshot([client(at(9))], at(9, 5))
         self.assertEqual((snap['first_target_seconds'], snap['inner_target_seconds']), (60, 240))
         self.assertEqual((snap['in_work_minutes'], snap['waiting_max_minutes']), (15, 60))
-        self.assertNotIn('status', str(sorted(snap['now'])))
+
+
+class ShiftStatusTests(unittest.TestCase):
+    """Владелец 19.10.2026: статусы верификаторов на стене «Чата» — в реальном времени, как у
+    «Основы». Слова — смены «Чатов ОП» (wazzup/shift.py), каталог — тот же, что у линии."""
+
+    @classmethod
+    def setUpClass(cls):
+        ns = _load_names(BOT_SOURCE, ('_TEZ_WALLBOARD_STATUS_CATALOG', '_TEZ_WALLBOARD_STATUS_UNKNOWN',
+                                      '_TEZ_WALLBOARD_CABINET_STATUS_KEYS', '_tez_wallboard_status_entry'),
+                         {'re': re}, '<op-chat-status-catalog>')
+        cls.entry = staticmethod(ns['_tez_wallboard_status_entry'])
+
+    def snapshot(self, rows, now, live=None, events=None, names=None):
+        names = names or NAMES
+        return C.assemble(rows, now, verifier_ids=names, names=names, last_message_at=now,
+                          live_statuses=live or {}, status_entry=self.entry, status_events=events or [])
+
+    def test_every_shift_status_reads_like_the_line(self):
+        from wazzup import shift
+        expected = {'готов': ('Активный', 'free'), 'перерыв': ('Перерыв', 'break'),
+                    'тренинг': ('Тренинг', 'training'), 'тех причина': ('Техническая пауза', 'tech'),
+                    shift.LOGOUT_KEY: ('Не в сети', 'offline')}
+        self.assertEqual(set(expected), {item['key'] for item in shift.STATUSES} | {shift.LOGOUT_KEY})
+        now = at(15)
+        for key, (label, style) in expected.items():
+            live = {VER_A: {'status_key': key, 'event_at': at(14, 50).isoformat(), 'seconds': 600}}
+            row = {p['user_id']: p for p in self.snapshot([], now, live)['now']['operators']}[VER_A]
+            self.assertEqual((row['status_label'], row['status_key'], row['status_seconds'], row['status_at']),
+                             (label, style, 600, at(14, 50).isoformat()), key)
+
+    def test_whole_roster_is_listed_even_before_the_first_message(self):
+        # Смену начали, а писать ещё не начинали: человек на стене со статусом, а не пропадает.
+        names = {VER_A: 'Иванова Айгерим', VER_B: 'Петров Данияр', 410: 'Абаев Ерлан'}
+        live = {410: {'status_key': 'готов', 'event_at': at(14).isoformat(), 'seconds': 3600}}
+        rows = self.snapshot([client(at(14, 50)), reply(at(14, 52), VER_A)], at(15), live, names=names)
+        people = {p['user_id']: p for p in rows['now']['operators']}
+        self.assertEqual(set(people), set(names))
+        self.assertEqual((people[410]['chats'], people[410]['in_work'], people[410]['status_label']),
+                         (0, 0, 'Активный'))
+        # Без статуса за 16 часов — «Нет событий», как у линии, а не «Не в сети».
+        self.assertEqual((people[VER_B]['status_key'], people[VER_B]['status_seconds']), ('unknown', None))
+        self.assertTrue(all(p['in_roster'] and p['id'] == p['user_id'] for p in people.values()))
+
+    def test_order_is_by_status_rank_then_name_like_the_line(self):
+        names = {1: 'Яковлева Ая', 2: 'Борисова Бота', 3: 'Аскаров Арман', 4: 'Ветрова Вера', 5: 'Гусев Гани'}
+        live = {1: {'status_key': 'готов', 'event_at': at(14).isoformat(), 'seconds': 1},
+                2: {'status_key': 'перерыв', 'event_at': at(14).isoformat(), 'seconds': 1},
+                3: {'status_key': 'выключен', 'event_at': at(14).isoformat(), 'seconds': 1},
+                4: {'status_key': 'готов', 'event_at': at(14).isoformat(), 'seconds': 1}}
+        order = [p['name'] for p in self.snapshot([], at(15), live, names=names)['now']['operators']]
+        self.assertEqual(order, ['Ветрова Вера', 'Яковлева Ая', 'Борисова Бота', 'Аскаров Арман', 'Гусев Гани'])
+
+    def test_entry_is_the_start_of_the_shift_and_a_night_shift_keeps_yesterday(self):
+        events = [{'operator_id': VER_A, 'event_at': at(9, 2), 'status_key': 'готов'},
+                  {'operator_id': VER_A, 'event_at': at(12), 'status_key': 'перерыв'},
+                  {'operator_id': VER_A, 'event_at': at(12, 40), 'status_key': 'готов'},
+                  {'operator_id': VER_B, 'event_at': at(21, day=DAY - timedelta(days=1)), 'status_key': 'готов'},
+                  {'operator_id': VER_B, 'event_at': at(23, 30, day=DAY - timedelta(days=1)), 'status_key': 'перерыв'},
+                  {'operator_id': VER_B, 'event_at': at(23, 50, day=DAY - timedelta(days=1)), 'status_key': 'готов'},
+                  {'operator_id': VER_B, 'event_at': at(1, 30), 'status_key': 'перерыв'}]
+        people = {p['user_id']: p for p in self.snapshot([], at(15), events=events)['now']['operators']}
+        self.assertEqual(people[VER_A]['entry_at'], at(9, 2).strftime('%Y-%m-%dT%H:%M:%S'))
+        self.assertEqual(people[VER_B]['entry_at'],
+                         at(21, day=DAY - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S'))
+
+    def test_without_a_catalog_everyone_is_unknown_not_an_error(self):
+        snap = C.assemble([client(at(14, 50)), reply(at(14, 52), VER_A)], at(15), verifier_ids=NAMES,
+                          names=NAMES, last_message_at=at(15))
+        self.assertEqual({p['status_key'] for p in snap['now']['operators']}, {'unknown'})
 
 
 class ExportTests(unittest.TestCase):
@@ -343,14 +414,21 @@ class RouteTests(unittest.TestCase):
     def setUp(self):
         self.requester = {'role': 'operator', 'headed': None}
         now = datetime.now().replace(microsecond=0)
+        self.now = now
         self.rows = [client(now - timedelta(minutes=5)), reply(now - timedelta(minutes=4), VER_A)]
         self.loaded = []
+        # Статусы смены «Чатов ОП»: последнее событие и события для времени входа и журнала.
+        self.live, self.events, self.live_asked = {}, [], []
+        self.journal_events, self.events_asked = [], []
         for name, value in (
                 ('load_chat_verifiers', lambda cursor, day_from, day_to=None: dict(NAMES)),
                 ('load_chat_verifier_days', lambda cursor, day_from, day_to=None: (dict(NAMES), {})),
                 ('load_chat_messages',
                  lambda cursor, since, until, account='op': self.loaded.append((since, until)) or list(self.rows)),
-                ('load_chat_last_message_at', lambda cursor, account='op': now)):
+                ('load_chat_last_message_at', lambda cursor, account='op': now),
+                ('load_phone_events', lambda cursor, ids, day, lookback_hours=0: self.events_asked.append(
+                    lookback_hours) or [event for event in self.events if event['operator_id'] in set(ids)]),
+                ('load_journal_events', lambda cursor, operator_id, day, lookback_hours=0: list(self.journal_events))):
             patcher = mock.patch.object(op_routes, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -368,10 +446,17 @@ class RouteTests(unittest.TestCase):
             db=db, require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
             guard=guard, department_id=department_id, snapshot_with_cache=_passthrough_cache,
             restore_cache=lambda *a, **k: None, persist_cache=lambda *a, **k: None,
-            status_entry=lambda key: ('—', 'unknown', 90), load_people=lambda dept, day: [],
-            live_statuses=lambda ids: {})
+            status_entry=lambda key: {'готов': ('Активный', 'free', 20), 'перерыв': ('Перерыв', 'break', 60)}.get(
+                key, ('Нет событий', 'unknown', 90)),
+            load_people=lambda dept, day: [], live_statuses=self.live_statuses)
         app.register_blueprint(self.bp)
         self.client = app.test_client()
+
+    def live_statuses(self, ids):
+        self.live_asked.append(sorted(ids))
+        if isinstance(self.live, Exception):
+            raise self.live
+        return {user_id: value for user_id, value in self.live.items() if user_id in ids}
 
     def test_operator_is_refused(self):
         self.assertEqual(self.client.get('/api/op_wallboard/chat_snapshot').status_code, 403)
@@ -406,6 +491,83 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(since, datetime.combine(day, datetime.min.time()) - timedelta(hours=6))
         self.assertEqual(until, datetime.combine(day + timedelta(days=1), datetime.min.time())
                          + timedelta(hours=6))
+
+    def test_chat_board_shows_shift_statuses_and_entry_of_every_verifier(self):
+        self.requester.update(role='admin', headed=7)
+        started = (self.now - timedelta(minutes=50)).replace(second=0)
+        self.live = {VER_B: {'status_key': 'перерыв', 'event_at': started.isoformat(), 'seconds': 300}}
+        self.events = [{'operator_id': VER_B, 'event_at': started, 'status_key': 'готов'},
+                       {'operator_id': 999, 'event_at': started, 'status_key': 'готов'}]
+        body = self.client.get('/api/op_wallboard/chat_snapshot').get_json()
+        people = {p['user_id']: p for p in body['now']['operators']}
+        self.assertEqual(set(people), set(NAMES))              # и тот, кто сегодня ещё не писал
+        self.assertEqual((people[VER_B]['status_label'], people[VER_B]['status_key'],
+                          people[VER_B]['status_seconds']), ('Перерыв', 'break', 300))
+        self.assertEqual(people[VER_B]['entry_at'], started.strftime('%Y-%m-%dT%H:%M:%S'))
+        self.assertEqual((people[VER_A]['status_key'], people[VER_A]['entry_at']), ('unknown', None))
+        self.assertEqual(self.live_asked[-1], sorted(NAMES))   # статусы — только состава
+        # События — с вечера прошлых суток, как у линии: вход ночной смены ложится на её начало.
+        self.assertEqual(self.events_asked[-1], op_routes.snapshot_mod.ENTRY_LOOKBACK_HOURS)
+
+    def test_status_outage_keeps_the_chat_numbers(self):
+        self.requester.update(role='admin')
+        self.live = RuntimeError('база статусов недоступна')
+        with self.assertLogs('op_wallboard.routes', level='ERROR'):
+            response = self.client.get('/api/op_wallboard/chat_snapshot')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['today']['chats'], 1)
+        self.assertEqual({p['status_key'] for p in body['now']['operators']}, {'unknown'})
+
+    def test_journal_opens_a_verifier_of_the_chat_board(self):
+        self.requester.update(role='admin')
+        start = (self.now - timedelta(minutes=30)).replace(second=0)
+        self.live = {VER_A: {'status_key': 'готов', 'event_at': start.isoformat(), 'seconds': 1800}}
+        self.journal_events = [(start, 'готов')]
+        response = self.client.get(f'/api/op_wallboard/journal?operator_id={VER_A}&direction=chat')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertEqual(body['name'], NAMES[VER_A])
+        self.assertEqual([(s['status_label'], s['start_at']) for s in body['segments']],
+                         [('Активный', start.strftime('%Y-%m-%dT%H:%M:%S'))])
+        # Без direction=chat журнал ищет человека на линии (здесь её снимка нет вовсе) — не на «Чате».
+        self.assertNotEqual(self.client.get(f'/api/op_wallboard/journal?operator_id={VER_A}').status_code, 200)
+        # Того, кого нет на стене «Чата», журнал не открывает.
+        self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=999&direction=chat').status_code, 404)
+
+    def test_chat_snapshot_is_refreshed_as_often_as_the_line(self):
+        self.assertIn("chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 10,", BOT_SOURCE)
+        self.assertIn("ttl_seconds=_env_int('OP_WALLBOARD_CACHE_TTL_SECONDS', 10,", BOT_SOURCE)
+
+    def test_statuses_are_read_every_snapshot_but_the_messages_only_every_half_minute(self):
+        """Статусы — на каждом снимке (10 с), переписка суток — не чаще, чем раньше (30 с)."""
+        self.requester.update(role='admin')
+        for _ in range(3):
+            self.assertEqual(self.client.get('/api/op_wallboard/chat_snapshot').status_code, 200)
+        self.assertEqual(len(self.live_asked), 3)
+        self.assertEqual(len(self.loaded), 1)
+        # Новый ответ в переписке виден, когда истёк её срок, — не раньше и не позже.
+        self.rows.append(client(self.now - timedelta(minutes=1), chat='c2'))
+        with mock.patch.object(op_routes.time, 'time', return_value=op_routes.time.time() + 31):
+            body = self.client.get('/api/op_wallboard/chat_snapshot').get_json()
+        self.assertEqual(len(self.loaded), 2)
+        self.assertEqual(body['today']['chats'], 2)
+
+    def test_new_day_rereads_the_messages_at_once(self):
+        """В полночь вчерашняя переписка не считается за новые сутки даже на полминуты."""
+        self.requester.update(role='admin')
+        moments = iter([datetime(2026, 10, 19, 23, 59, 50), datetime(2026, 10, 20, 0, 0, 5)])
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next(moments).replace(tzinfo=tz)
+
+        with mock.patch.object(op_routes, 'datetime', Clock):
+            for _ in range(2):
+                self.assertEqual(self.client.get('/api/op_wallboard/chat_snapshot').status_code, 200)
+        self.assertEqual([since.date() for since, _until in self.loaded],
+                         [date(2026, 10, 18), date(2026, 10, 19)])
 
     def test_broadcast_reads_the_same_cached_snapshot(self):
         self.assertTrue(callable(self.bp.chat_snapshot))
@@ -626,6 +788,7 @@ class FrontendTests(unittest.TestCase):
         cls.board = (MONITORING / 'OpChatWallboard.jsx').read_text(encoding='utf-8-sig')
         cls.shared = (MONITORING / 'opWallboardShared.js').read_text(encoding='utf-8-sig')
         cls.szov_view = (MONITORING / 'SzovWallboardView.jsx').read_text(encoding='utf-8-sig')
+        cls.journal = (MONITORING / 'OpStatusJournal.jsx').read_text(encoding='utf-8-sig')
         cls.app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig')
 
     def test_switch_is_line_and_chat_like_szov(self):
@@ -676,13 +839,37 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("pluralRu(maxDays, 'сутки', 'суток', 'суток')", self.szov_view)
         self.assertIn("const OP_CHAT_SOURCE_LABEL = 'База iCORE';", self.view)
 
-    def test_no_people_statuses_on_the_chat_board(self):
-        """Решение владельца 25.09.2026: у Wazzup статусов нет — и на экране их нет."""
-        for word in ('Онлайн', 'Перерыв', 'Тренинг', 'Не в системе', 'CHAT_STATUS_STYLE', 'status_key'):
-            self.assertNotIn(word, self.board, word)
+    def test_people_are_a_table_with_shift_statuses_like_the_line(self):
+        """Владелец 19.10.2026 (вместо решения 25.09 «статусов нет»): статусы верификаторов — в
+        реальном времени, как у «Основы», а их показатели — таблицей внизу."""
+        # Тот же чип с временем в статусе, время входа и журнал по строке, что у «Линии».
+        for piece in ('const chip = opStatusChip(row);', 'opEntryTime(row.entry_at, snapshot?.day)',
+                      'formatSeconds(row.status_seconds)',
+                      "row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal)"):
+            self.assertIn(piece, self.board, piece)
+        for header in ('Сотрудник', 'Статус', 'Время входа', 'В работе', 'Чатов за сутки',
+                       'Первый ответ, мин', 'Внутри чата, мин'):
+            self.assertIn(f'>{header}</th>', self.board, header)
+        # Таблица — последней секцией во всю ширину; правой колонки больше нет.
+        self.assertNotIn('VerifiersColumn', self.board)
+        self.assertNotIn('lg:grid-cols-[minmax(0,1fr)_19rem]', self.board)
+        body = self.board[self.board.index('export default function OpChatWallboardBody('):]
+        self.assertLess(body.index('title="По часам"'), body.index('title="Верификаторы"'))
+        self.assertIn('selectedId={selectedId} onOpenJournal={onOpenJournal}', body)
+        # Журнал «Чата» — своим направлением, и на стене, и на весь экран.
+        chat = self.view[self.view.index('function OpChatBoard('):self.view.index('// Выбор направления')]
+        self.assertIn('direction="chat"', chat)
+        self.assertEqual(chat.count('onOpenJournal={openJournal}'), 2)
+        self.assertIn('closeOnEscape={!journalRow}', chat)
+        self.assertIn("const board = direction === 'chat' ? '&direction=chat' : '';", self.journal)
+        # Плитки «сейчас» — по-прежнему про чаты.
         chat_metrics = self.shared[self.shared.index('export const OP_CHAT_METRICS'):
                                    self.shared.index('export const OP_CHAT_METRIC_MAP')]
         self.assertNotIn('Онлайн', chat_metrics)
+
+    def test_chat_board_is_polled_as_often_as_the_line(self):
+        self.assertIn('export const OP_CHAT_POLL_INTERVAL_MS = 10000;', self.shared)
+        self.assertIn('export const OP_POLL_INTERVAL_MS = 10000;', self.shared)
 
     def test_only_reply_time_is_coloured(self):
         chat_metrics = self.shared[self.shared.index('export const OP_CHAT_METRICS'):

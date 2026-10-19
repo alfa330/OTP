@@ -2,7 +2,8 @@
 """HTTP «Табло ОП»: один снимок для всех зрителей.
 
     GET /api/op_wallboard/snapshot       снимок дня: итоги, часы, люди, разрезы по группам
-    GET /api/op_wallboard/journal        журнал статусов одного сотрудника за сутки (?operator_id=)
+    GET /api/op_wallboard/journal        журнал статусов одного сотрудника за сутки (?operator_id=,
+                                         верификатор со стены «Чата» — &direction=chat)
     GET /api/op_wallboard/chat_snapshot  направление «Чат»: чаты верификаторов в Wazzup (#367)
     GET /api/op_wallboard/chat_export    то же за период файлом .xlsx (?date_from=&date_to=)
 
@@ -341,7 +342,7 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                                  sl_seconds=snapshot_mod.DEFAULT_SL_SECONDS,
                                  ar_min_percent=snapshot_mod.DEFAULT_AR_MIN_PERCENT,
                                  ar_max_percent=snapshot_mod.DEFAULT_AR_MAX_PERCENT,
-                                 chat_ttl_seconds=30, chat_stale_max_seconds=600,
+                                 chat_ttl_seconds=10, chat_messages_ttl_seconds=30, chat_stale_max_seconds=600,
                                  chat_settings=None, chat_export_max_days=chat_export_mod.MAX_DAYS,
                                  lead_ttl_seconds=60):
     bp = Blueprint('op_wallboard', __name__, url_prefix='/api/op_wallboard')
@@ -604,7 +605,8 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         Без кэша: запрос точечный (один человек, индекс по operator_id и времени), а панель
         перечитывает журнал только когда в снимке у человека сменился статус. Открыть можно лишь
         того, кто стоит на табло, — граница отдела та же, что у снимка, и чужие события телефона
-        через эту ручку не читаются."""
+        через эту ручку не читаются. `direction=chat` — верификатор со стены «Чата»: на линии его
+        нет, и стоять на табло он обязан там."""
         if request.method == 'OPTIONS':
             return build_cors_preflight_response()
         _, refusal = guard()
@@ -614,12 +616,13 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             operator_id = int(str(request.args.get('operator_id') or '').strip())
         except ValueError:
             return jsonify({"error": "Не указан сотрудник"}), 400
+        chat_board = request.args.get('direction') == 'chat'
         try:
-            payload = _snapshot()
+            payload = _chat_snapshot() if chat_board else _snapshot()
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": str(exc)[:200]}), 503
-        row = next((item for item in payload.get('operators') or []
-                    if item.get('id') == operator_id), None)
+        board_rows = (payload.get('now') or {}).get('operators') if chat_board else payload.get('operators')
+        row = next((item for item in board_rows or [] if item.get('id') == operator_id), None)
         if row is None:
             return jsonify({"error": "Сотрудника нет на табло"}), 404
         now = datetime.now(_ALMATY).replace(tzinfo=None)
@@ -652,17 +655,42 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
     chat_source = 'база iCORE'
     settings = dict(chat_settings or {})
 
+    # Переписка суток (тысячи строк) — раз в chat_messages_ttl_seconds, как было до статусов; снимок
+    # же обновляется раз в chat_ttl_seconds ради статусов смены (точечные запросы по составу). Так
+    # статусы на стене живые, как у линии, а база не читает переписку втрое чаще прежнего.
+    # Под замком снимка (chat_lock): два расчёта разом сюда не заходят.
+    chat_messages_cache = {'ts': 0.0, 'day': None, 'value': None}
+
+    def _chat_messages(cursor, now, day, since):
+        if (chat_messages_cache['value'] is not None and chat_messages_cache['day'] == day
+                and time.time() - chat_messages_cache['ts'] < chat_messages_ttl_seconds):
+            return chat_messages_cache['value']
+        value = (load_chat_verifiers(cursor, day),
+                 load_chat_messages(cursor, since, now + timedelta(minutes=1)),
+                 load_chat_last_message_at(cursor))
+        chat_messages_cache.update(ts=time.time(), day=day, value=value)
+        return value
+
     def _chat_fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
         gap = settings.get('gap_seconds', chat_mod.EPISODE_GAP_SECONDS)
         since = datetime.combine(day, datetime.min.time()) - timedelta(seconds=gap)
         with db._get_cursor() as cursor:
-            names = load_chat_verifiers(cursor, day)
-            rows = load_chat_messages(cursor, since, now + timedelta(minutes=1))
-            last_message_at = load_chat_last_message_at(cursor)
+            names, rows, last_message_at = _chat_messages(cursor, now, day, since)
+            # Статусы смены «Чатов ОП» лежат там же, где статусы телефонов, — и читаются тем же
+            # путём, что у линии: последнее событие и события с вечера для времени входа.
+            status_events = _phone_events(cursor, [{'id': user_id} for user_id in names], day,
+                                          lookback_hours=snapshot_mod.ENTRY_LOOKBACK_HOURS)
+        try:
+            statuses = live_statuses(list(names))
+        except Exception:  # noqa: BLE001
+            # Без статусов цифры чатов верны: список людей теряет разметку, а не всё табло.
+            log.exception('%s: статусы смены не прочитались', chat_label)
+            statuses = {}
         return chat_mod.assemble(rows, now, verifier_ids=names, names=names,
-                                 last_message_at=last_message_at, **settings)
+                                 last_message_at=last_message_at, live_statuses=statuses,
+                                 status_entry=status_entry, status_events=status_events, **settings)
 
     def _chat_snapshot():
         """Снимок чатов из общего кэша — один на всех зрителей, виджет и отбивку."""

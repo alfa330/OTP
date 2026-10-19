@@ -515,11 +515,21 @@ function OpChatBoard({
 }) {
     const { snapshot, error, loading, refresh } = useOpChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
+    const [journalOperatorId, setJournalOperatorId] = useState(null);
     const notice = useMemo(
         () => wallboardStaleNotice(snapshot, error, OP_CHAT_SOURCE_LABEL) || opChatFreshnessNotice(snapshot),
         [error, snapshot],
     );
     const clock = opChatClockLabel(snapshot);
+
+    // Журнал статусов смены — как у «Линии»: перечитывается, когда в снимке у человека сменился статус.
+    const journalRow = useMemo(
+        () => (snapshot?.now?.operators || []).find((row) => row.id != null && row.id === journalOperatorId) || null,
+        [journalOperatorId, snapshot],
+    );
+    const journalRefreshKey = journalRow ? `${snapshot?.day}|${journalRow.status_key}|${journalRow.status_at}` : '';
+    const openJournal = useCallback((row) => setJournalOperatorId(row.id), []);
+    const closeJournal = useCallback(() => setJournalOperatorId(null), []);
 
     const header = (
         <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
@@ -594,7 +604,8 @@ function OpChatBoard({
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            <OpChatWallboardBody snapshot={snapshot} scale={1} />
+            <OpChatWallboardBody snapshot={snapshot} scale={1}
+                                 selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
                     open
@@ -603,12 +614,24 @@ function OpChatBoard({
                     icon="fa-comments"
                     title="Табло ОП · чаты"
                     subtitle={`${clock ? `${clock} · ` : ''}Esc чтобы выйти`}
+                    // Esc при открытом журнале закрывает журнал, а не всю стену разом.
+                    closeOnEscape={!journalRow}
                     onClose={() => setFullscreen(false)}
                 >
-                    <OpChatWallboardBody snapshot={snapshot} scale={1.35} />
+                    <OpChatWallboardBody snapshot={snapshot} scale={1.35}
+                                         selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
                 </FullscreenSheet>,
                 document.body,
             ) : null}
+            <OpStatusJournalPanel
+                operator={journalRow}
+                refreshKey={journalRefreshKey}
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                onClose={closeJournal}
+                z={fullscreen ? FULLSCREEN_Z + 10 : JOURNAL_Z}
+                direction="chat"
+            />
         </div>
     );
 }

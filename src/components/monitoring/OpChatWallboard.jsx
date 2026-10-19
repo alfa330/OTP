@@ -13,19 +13,22 @@ import {
     YAxis,
 } from 'recharts';
 import FaIcon from '../common/FaIcon';
-import { APPLE_FONT, iosCard } from '../ui/ios';
+import { APPLE_FONT } from '../ui/ios';
 import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 import { WALLBOARD_TONE_TEXT, chatReplyTone, formatInt, formatMinutes, pluralRu } from './szovWallboardShared';
-import { OP_CHAT_METRIC_MAP, opMetricHint, readOpMetric } from './opWallboardShared';
+import { opEntryTime } from './opWallboardGroups';
+import { OP_CHAT_METRIC_MAP, formatCount, formatSeconds, opMetricHint, opStatusChip, readOpMetric } from './opWallboardShared';
 
 /*
- * «Табло ОП» · «Чат» — чаты верификаторов в Wazzup (задача #367). Раскладка та же, что у «Чата»
- * табло СЗоВ, чтобы взгляд не переучивался: «сейчас» и итоги дня слева, график по часам, люди
- * справа. Отличие одно, и оно из источника: статусов у Wazzup нет, и на табло их нет вовсе
- * (решение владельца 25.09.2026) — «сейчас» здесь про чаты, а не про людей.
+ * «Табло ОП» · «Чат» — чаты верификаторов в Wazzup (задача #367). Сверху — как у «Чата» табло
+ * СЗоВ: плитки «сейчас» про чаты, итоги дня, график по часам. Снизу — люди, как «Сотрудники» у
+ * «Линии» (владелец 19.10.2026): статус смены в реальном времени, время входа, журнал по нажатию
+ * и счётчики дня одной таблицей. Статус ставит сам верификатор кнопкой смены в «Чатах ОП» — у
+ * Wazzup статусов нет.
  *
  * Цвет — только у времени ответа и только относительно нормы из снимка (первый ответ — минута,
- * внутри чата — четыре, решение владельца). Остальные плитки нейтральные.
+ * внутри чата — четыре, решение владельца) и у статусов людей (те же цвета, что у «Линии»).
+ * Остальное нейтральное.
  */
 
 const CHART_COLORS = {
@@ -45,67 +48,124 @@ const NowTile = ({ metricKey, snapshot, scale }) => {
 };
 
 /*
- * Правая колонка: кто из верификаторов сегодня писал клиентам, сколько чатов у него сейчас в работе
- * и за сутки и как он отвечает. Чат, где писали двое, засчитан обоим — поэтому сумма по людям
- * больше «Чатов за сутки», и это не ошибка (так же считают «Чаты ОП» и «Воронка ОП»).
+ * Не начинал смену: статуса за последние 16 часов нет, чатов сегодня тоже. Как «без событий
+ * телефона» у «Линии»: такие люди не прячутся, а сворачиваются в одну строку с числом.
  */
-const VerifiersColumn = ({ people, firstTarget, innerTarget, scale = 1 }) => {
-    const items = Array.isArray(people) ? people : [];
-    const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
-    return (
-        <div className={`${iosCard} flex flex-col p-5`}>
-            <div className="mb-2 flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                <FaIcon className="fas fa-user-check"></FaIcon>
-                <span>Верификаторы сегодня</span>
+const isIdleVerifier = (row) => row.status_key === 'unknown' && !row.chats && !row.in_work;
+
+/*
+ * Поимённый список — та же таблица, что «Сотрудники» у «Линии»: статус смены с временем в нём,
+ * время входа, строка с журналом нажимается целиком, порядок — по разряду статуса (его ставит
+ * сервер). Дальше — счётчики чатов. Чат, где писали двое, засчитан обоим — поэтому сумма «Чатов
+ * за сутки» по людям больше плитки дня, и это не ошибка (так же считают «Чаты ОП» и «Воронка ОП»).
+ * Время ответа — в минутах, цвет — по норме из снимка; прочерк — отвечать сегодня было не на что.
+ */
+export const VerifiersTable = ({ snapshot, firstTarget, innerTarget, scale = 1, selectedId = null, onOpenJournal = null }) => {
+    const [showIdle, setShowIdle] = useState(false);
+    const rows = snapshot?.now?.operators || [];
+    if (!rows.length) {
+        return <div className="text-[13px] text-slate-500">В группе верификаторов нет сотрудников.</div>;
+    }
+    const idle = rows.filter(isIdleVerifier);
+    const working = rows.filter((row) => !isIdleVerifier(row));
+    const shown = showIdle ? [...working, ...idle] : working;
+    const head = 'px-3 pb-2 text-[12px] font-medium text-slate-400';
+    const cell = 'px-3 py-2.5 text-right tabular-nums';
+    const count = (value) => (
+        <td className={`${cell} ${value ? 'text-slate-700' : 'text-slate-300'}`}>{formatCount(value)}</td>
+    );
+    const reply = (seconds, target) => (
+        <td className={`${cell} ${seconds === null || seconds === undefined
+            ? 'text-slate-300' : WALLBOARD_TONE_TEXT[chatReplyTone(seconds, target)]}`}>
+            {formatMinutes(seconds, 1, false)}
+        </td>
+    );
+    const toggle = idle.length ? (
+        <button
+            type="button"
+            onClick={() => setShowIdle((value) => !value)}
+            className="mt-2 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98]"
+        >
+            <FaIcon className={`fas ${showIdle ? 'fa-chevron-up' : 'fa-chevron-down'} text-[10px]`} aria-hidden="true" />
+            {showIdle ? 'Скрыть' : 'Показать'} не начинавших смену
+            <span className="tabular-nums text-slate-400">{idle.length}</span>
+        </button>
+    ) : null;
+    if (!shown.length) {
+        return (
+            <div>
+                <div className="text-[13px] text-slate-500">Сегодня никто из верификаторов не начинал смену.</div>
+                {toggle}
             </div>
-            {items.length === 0 ? (
-                <div className="py-1.5 text-[15px] text-slate-400">Сегодня ещё никто не писал</div>
-            ) : (
-                <ul className="min-h-0 divide-y divide-slate-100 overflow-y-auto">
-                    {items.map((item) => (
-                        <li key={item.user_id} className="py-3">
-                            <div className="leading-snug text-slate-800" style={{ fontSize: nameSize }}>{item.name}</div>
-                            {/* flex-wrap + whitespace-nowrap в паре: строка переносится целиком,
-                                а не сжимает каждый кусок с переносом внутри слова. */}
-                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[14px] font-medium tabular-nums text-slate-400">
-                                {item.in_work ? (
-                                    <>
-                                        <span className="whitespace-nowrap text-slate-600">
-                                            {formatInt(item.in_work)} {chatsWord(item.in_work)} в работе
+        );
+    }
+    return (
+        <div>
+            <div className="-mx-3 overflow-x-auto">
+                <table className="w-full text-left" style={{ fontSize: `${13 * scale}px` }}>
+                    <thead>
+                        <tr className="border-b border-slate-200/80">
+                            <th className={head}>Сотрудник</th>
+                            <th className={head}>Статус</th>
+                            <th className={head}>Время входа</th>
+                            <th className={`${head} text-right`}>В работе</th>
+                            <th className={`${head} text-right`}>Чатов за сутки</th>
+                            <th className={`${head} text-right`}>Первый ответ, мин</th>
+                            <th className={`${head} text-right`}>Внутри чата, мин</th>
+                            <th className="w-8 pb-2" aria-hidden="true" />
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {shown.map((row) => {
+                            const chip = opStatusChip(row);
+                            const entry = opEntryTime(row.entry_at, snapshot?.day);
+                            const canOpen = row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal);
+                            const selected = canOpen && row.id === selectedId;
+                            return (
+                                <tr
+                                    key={row.user_id}
+                                    onClick={canOpen ? () => onOpenJournal(row) : undefined}
+                                    className={`transition-colors ${canOpen ? 'cursor-pointer' : ''} ${
+                                        selected ? 'bg-blue-50' : canOpen ? 'hover:bg-slate-50' : ''} ${
+                                        chip.muted ? 'text-slate-400' : 'text-slate-700'}`}
+                                >
+                                    <td className="px-3 py-2.5">
+                                        {canOpen ? (
+                                            <button
+                                                type="button"
+                                                onClick={(event) => { event.stopPropagation(); onOpenJournal(row); }}
+                                                title="Журнал статусов"
+                                                className={`rounded text-left font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+                                                    selected ? 'text-blue-700' : 'text-slate-900'}`}
+                                            >
+                                                {row.name}
+                                            </button>
+                                        ) : <span className="font-medium">{row.name}</span>}
+                                    </td>
+                                    <td className="px-3 py-2.5">
+                                        <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[0.92em] font-medium ${chip.className}`}>
+                                            {chip.label}
+                                            {row.status_seconds ? <span className="font-normal tabular-nums opacity-70">{formatSeconds(row.status_seconds)}</span> : null}
                                         </span>
-                                        <span className="text-slate-300">·</span>
-                                    </>
-                                ) : null}
-                                <span className="whitespace-nowrap">
-                                    {formatInt(item.chats)} {item.in_work ? '' : `${chatsWord(item.chats)} `}за сутки
-                                </span>
-                            </div>
-                            {/* Время ответа — только у того, кому сегодня было на что отвечать:
-                                у остальных строка была бы парой прочерков, то есть шумом. */}
-                            {item.first_reply_seconds !== null || item.inner_reply_seconds !== null ? (
-                                <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-[13px] tabular-nums text-slate-400">
-                                    <span className="whitespace-nowrap">
-                                        первый{' '}
-                                        <span className={`font-medium ${WALLBOARD_TONE_TEXT[
-                                            chatReplyTone(item.first_reply_seconds, firstTarget)]}`}>
-                                            {formatMinutes(item.first_reply_seconds, 1, false)}
-                                        </span>
-                                    </span>
-                                    <span className="text-slate-300">·</span>
-                                    <span className="whitespace-nowrap">
-                                        внутри{' '}
-                                        <span className={`font-medium ${WALLBOARD_TONE_TEXT[
-                                            chatReplyTone(item.inner_reply_seconds, innerTarget)]}`}>
-                                            {formatMinutes(item.inner_reply_seconds, 1, false)}
-                                        </span>
-                                    </span>
-                                    <span>мин</span>
-                                </div>
-                            ) : null}
-                        </li>
-                    ))}
-                </ul>
-            )}
+                                    </td>
+                                    <td className={`px-3 py-2.5 tabular-nums ${entry.time === '—' ? 'text-slate-300' : ''}`}>
+                                        {entry.time}
+                                        {entry.previousDay ? <span className="ml-1.5 text-slate-400">вчера</span> : null}
+                                    </td>
+                                    {count(row.in_work)}
+                                    {count(row.chats)}
+                                    {reply(row.first_reply_seconds, firstTarget)}
+                                    {reply(row.inner_reply_seconds, innerTarget)}
+                                    <td className="py-2.5 pr-3 text-right text-[11px] text-slate-300">
+                                        {canOpen ? <FaIcon className="fas fa-chevron-right" aria-hidden="true" /> : null}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+            {toggle}
         </div>
     );
 };
@@ -262,56 +322,57 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1, tooltipMode = 'metrics' }
 };
 
 /** Тело табло «Чат». Одна разметка для страницы и для стены — различается только масштабом. */
-export default function OpChatWallboardBody({ snapshot, scale = 1 }) {
+export default function OpChatWallboardBody({ snapshot, scale = 1, selectedId = null, onOpenJournal = null }) {
     const [tooltipMode, setTooltipMode] = useState(OP_CHAT_TOOLTIP_MODES[0].key);
     const today = snapshot?.today || {};
     const firstTarget = Number(snapshot?.first_target_seconds) || 60;
     const innerTarget = Number(snapshot?.inner_target_seconds) || 240;
 
     return (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]" style={{ fontFamily: APPLE_FONT }}>
-            <div className="space-y-4">
-                <Section icon="fa-bolt" title="Чаты · сейчас">
-                    <Grid>
-                        <NowTile metricKey="op_chat_in_work" snapshot={snapshot} scale={scale} />
-                        <NowTile metricKey="op_chat_waiting" snapshot={snapshot} scale={scale} />
-                        <NowTile metricKey="op_chat_longest_wait" snapshot={snapshot} scale={scale} />
-                        <NowTile metricKey="op_chat_verifiers" snapshot={snapshot} scale={scale} />
-                    </Grid>
-                </Section>
+        <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
+            <Section icon="fa-bolt" title="Чаты · сейчас">
+                <Grid>
+                    <NowTile metricKey="op_chat_in_work" snapshot={snapshot} scale={scale} />
+                    <NowTile metricKey="op_chat_waiting" snapshot={snapshot} scale={scale} />
+                    <NowTile metricKey="op_chat_longest_wait" snapshot={snapshot} scale={scale} />
+                    <NowTile metricKey="op_chat_verifiers" snapshot={snapshot} scale={scale} />
+                </Grid>
+            </Section>
 
-                <Section icon="fa-chart-bar" title="Показатели за день">
-                    <Grid cols={3}>
-                        <StatTile label="Чатов за сутки" value={formatInt(today.chats)} scale={scale} />
-                        <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds, 1, false)}
-                                  unit="мин" tone={chatReplyTone(today.first_reply_seconds, firstTarget)} scale={scale} />
-                        <StatTile label="Ответ внутри чата" value={formatMinutes(today.inner_reply_seconds, 1, false)}
-                                  unit="мин" tone={chatReplyTone(today.inner_reply_seconds, innerTarget)} scale={scale} />
-                    </Grid>
-                </Section>
+            <Section icon="fa-chart-bar" title="Показатели за день">
+                <Grid cols={3}>
+                    <StatTile label="Чатов за сутки" value={formatInt(today.chats)} scale={scale} />
+                    <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds, 1, false)}
+                              unit="мин" tone={chatReplyTone(today.first_reply_seconds, firstTarget)} scale={scale} />
+                    <StatTile label="Ответ внутри чата" value={formatMinutes(today.inner_reply_seconds, 1, false)}
+                              unit="мин" tone={chatReplyTone(today.inner_reply_seconds, innerTarget)} scale={scale} />
+                </Grid>
+            </Section>
 
-                <Section
-                    icon="fa-clock"
-                    title="По часам"
-                    right={(
-                        <div className="flex items-center gap-3">
-                            <span className="hidden text-[12.5px] text-slate-400 xl:inline">
-                                {tooltipMode === 'people'
-                                    ? 'наведите на час — покажем, кто писал и сколько чатов'
-                                    : `ответ внутри чата и сколько верификаторов писали; норма ${formatMinutes(innerTarget, 0)}`}
-                            </span>
-                            <SegmentedSwitch compact value={tooltipMode} options={OP_CHAT_TOOLTIP_MODES}
-                                             onChange={setTooltipMode} />
-                        </div>
-                    )}
-                >
-                    <HourlyChart rows={snapshot?.hourly} targetSeconds={innerTarget} scale={scale}
-                                 tooltipMode={tooltipMode} />
-                </Section>
-            </div>
+            <Section
+                icon="fa-clock"
+                title="По часам"
+                right={(
+                    <div className="flex items-center gap-3">
+                        <span className="hidden text-[12.5px] text-slate-400 xl:inline">
+                            {tooltipMode === 'people'
+                                ? 'наведите на час — покажем, кто писал и сколько чатов'
+                                : `ответ внутри чата и сколько верификаторов писали; норма ${formatMinutes(innerTarget, 0)}`}
+                        </span>
+                        <SegmentedSwitch compact value={tooltipMode} options={OP_CHAT_TOOLTIP_MODES}
+                                         onChange={setTooltipMode} />
+                    </div>
+                )}
+            >
+                <HourlyChart rows={snapshot?.hourly} targetSeconds={innerTarget} scale={scale}
+                             tooltipMode={tooltipMode} />
+            </Section>
 
-            <VerifiersColumn people={snapshot?.now?.operators} firstTarget={firstTarget}
-                             innerTarget={innerTarget} scale={scale} />
+            <Section icon="fa-users" title="Верификаторы"
+                     right={<span className="text-[12px] text-slate-500">статусы — смена в «Чатах ОП», счётчики — переписка за день</span>}>
+                <VerifiersTable snapshot={snapshot} firstTarget={firstTarget} innerTarget={innerTarget}
+                                scale={scale} selectedId={selectedId} onOpenJournal={onOpenJournal} />
+            </Section>
         </div>
     );
 }

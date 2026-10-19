@@ -22,7 +22,7 @@ import { OP_JOURNAL_PATH, opStatusChip } from './opWallboardShared';
 // Ближе этого к низу — «человек смотрит на текущий статус»: новый отрезок прокручивает список сам.
 const STICK_TO_BOTTOM_PX = 80;
 
-function useStatusJournal({ apiBaseUrl, withAccessTokenHeader, operatorId, refreshKey }) {
+function useStatusJournal({ apiBaseUrl, withAccessTokenHeader, operatorId, refreshKey, direction }) {
     const [state, setState] = useState({ data: null, error: null, loading: false, fetchedAt: 0 });
     const headersRef = useRef(withAccessTokenHeader);
     headersRef.current = withAccessTokenHeader;
@@ -37,7 +37,9 @@ function useStatusJournal({ apiBaseUrl, withAccessTokenHeader, operatorId, refre
         const controller = typeof AbortController === 'function' ? new AbortController() : null;
         setState((prev) => ({ ...prev, loading: true }));
         const build = headersRef.current;
-        fetch(`${apiBaseUrl}${OP_JOURNAL_PATH}?operator_id=${encodeURIComponent(operatorId)}`, {
+        // Верификатор со стены «Чата»: на линии его нет, и сервер ищет его в снимке чатов.
+        const board = direction === 'chat' ? '&direction=chat' : '';
+        fetch(`${apiBaseUrl}${OP_JOURNAL_PATH}?operator_id=${encodeURIComponent(operatorId)}${board}`, {
             headers: build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' },
             credentials: 'include',
             signal: controller?.signal,
@@ -53,7 +55,7 @@ function useStatusJournal({ apiBaseUrl, withAccessTokenHeader, operatorId, refre
                 setState((prev) => ({ ...prev, loading: false, error: error?.message || 'Журнал недоступен' }));
             });
         return () => controller?.abort?.();
-    }, [apiBaseUrl, operatorId, refreshKey]);
+    }, [apiBaseUrl, operatorId, refreshKey, direction]);
 
     return state;
 }
@@ -95,7 +97,7 @@ const formatDay = (day) => {
 };
 
 export default function OpStatusJournalPanel({
-    operator, refreshKey, apiBaseUrl, withAccessTokenHeader, onClose, z = 85,
+    operator, refreshKey, apiBaseUrl, withAccessTokenHeader, onClose, z = 85, direction = 'line',
 }) {
     const open = Boolean(operator?.id);
     // Имя держим и после закрытия: панель ещё полсекунды уезжает, и шапка не должна пустеть.
@@ -105,7 +107,7 @@ export default function OpStatusJournalPanel({
     const isNarrowShell = useIsMobileShell();
     useScreenBackGesture(isNarrowShell && open, onClose);
     const { data, error, loading, fetchedAt } = useStatusJournal({
-        apiBaseUrl, withAccessTokenHeader, operatorId: operator?.id, refreshKey,
+        apiBaseUrl, withAccessTokenHeader, operatorId: operator?.id, refreshKey, direction,
     });
     const segments = data?.segments || [];
     const scrollRef = useRef(null);

@@ -1083,7 +1083,8 @@ class FrontendTests(unittest.TestCase):
         # Строка журнала — из полного снимка: смена группы не закрывает журнал.
         self.assertIn('(snapshot?.operators || []).find((row) => row.id != null && row.id === journalOperatorId)', self.view)
         self.assertIn('journalRow.status_key}|${journalRow.status_at}', self.view)
-        self.assertIn('}, [apiBaseUrl, operatorId, refreshKey]);', journal)
+        # Перечитывается по смене статуса в снимке (и по стене: «Линия» или «Чат»), не по таймеру.
+        self.assertIn('}, [apiBaseUrl, operatorId, refreshKey, direction]);', journal)
         self.assertNotIn('setInterval(() => fetch', journal)
         self.assertIn("export const OP_JOURNAL_PATH = '/api/op_wallboard/journal';", self.shared)
         # Esc при открытом журнале на стене закрывает журнал, а не стену.

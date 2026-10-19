@@ -68042,7 +68042,8 @@ try:
         ar_min_percent=_env_int('OP_WALLBOARD_AR_MIN_PERCENT', 3, minimum=0, maximum=50),
         ar_max_percent=_env_int('OP_WALLBOARD_AR_MAX_PERCENT', 5, minimum=0, maximum=50),
         # Направление «Чат» (#367): чаты верификаторов в Wazzup. Нормы — владельца 25.09.2026.
-        chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 30, minimum=5, maximum=600),
+        # Снимок раз в 10 с, как у линии: на стене статусы смены в реальном времени (19.10.2026).
+        chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 10, minimum=5, maximum=600),
         chat_export_max_days=_env_int('OP_CHAT_EXPORT_MAX_DAYS', 31, minimum=1, maximum=45),
         chat_settings={
             'first_target_seconds': _env_int('OP_CHAT_WALLBOARD_FIRST_TARGET_SECONDS', 60,
