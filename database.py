@@ -90,6 +90,10 @@ STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PA
 # (purge_old_operator_status_events) drops events older than this, and segment rebuilds are
 # clamped to this floor so they never depend on already-purged events. Minimum 30d guard rail.
 STATUS_EVENTS_RETENTION_DAYS = _env_int('STATUS_EVENTS_RETENTION_DAYS', 120, minimum=30)
+# Прогоны парсера резюме: каждый хранит полный снимок выдачи, а раздел читает только
+# последний успешный. Две недели — запас на разбор «что нашлось вчера»; без чистки 98%
+# recruiting_resumes были повторами (89 тыс. строк на 1,8 тыс. разных резюме, 19.10.2026).
+RECRUITING_RUNS_KEEP_DAYS = _env_int('RECRUITING_RUNS_KEEP_DAYS', 14, minimum=1)
 SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
 # Канал «тычков» колокола уведомлений: pg_notify шлют триггеры на таблицах
 # источников (см. _init_bell_notify_schema_tx), слушает notifications/realtime.py.
@@ -3706,13 +3710,14 @@ class Database:
                 ADD COLUMN IF NOT EXISTS sensitive_data_unlocked_by INTEGER
                     REFERENCES users(id) ON DELETE SET NULL;
             """)
-            # Раздел «Сессии» листает только живые сессии: частичный индекс
-            # снимает seq scan по всей таблице (живых ~четверть от всех строк).
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_user_sessions_active_last_seen
-                ON user_sessions(last_seen_at DESC, session_id)
-                WHERE revoked_at IS NULL;
-            """)
+            # Индекса по last_seen_at нет НАМЕРЕННО. Список «Сессий» собирает живые
+            # сессии в MATERIALIZED CTE и сортирует людей по MAX(last_seen_at), карточка
+            # идёт по idx_user_sessions_user_id — частичный индекс по сырому last_seen_at
+            # не нужен ни одному запросу (и на проде idx_scan = 0). Зато из-за него каждое
+            # продление сессии (touch раз в минуту на активную вкладку) было не-HOT
+            # обновлением: к 19.10.2026 индекс на 9 тыс. строк раздуло до 31 МБ. Удалён
+            # в базе 19.10; здесь — чтобы он не вернулся на базе, где ещё есть.
+            cursor.execute("DROP INDEX IF EXISTS idx_user_sessions_active_last_seen;")
             # Журнал выдачи доступа: карточка сессии показывает, кто и когда
             # открыл или закрыл чувствительные данные. Живёт ровно столько же,
             # сколько сама сессия — ретенция чистит его каскадом.
@@ -54753,11 +54758,35 @@ class Database:
             """, (run_uuid,))
             run_row = cursor.fetchone()
 
+        self._prune_recruiting_parse_runs(keep_run_uuid=run_uuid)
         return {
             "run": self._serialize_recruiting_run_row(run_row),
             "inserted": len(deduped_rows),
             "duplicates_dropped": max(0, len(normalized_rows) - len(deduped_rows))
         }
+
+    def _prune_recruiting_parse_runs(self, keep_run_uuid, keep_days=None):
+        """Удалить прогоны парсера старше RECRUITING_RUNS_KEEP_DAYS; резюме уходят каскадом.
+
+        Зовётся после записи нового успешного прогона, поэтому последний успешный
+        остаётся всегда (его uuid исключён явно). Своей транзакцией и без исключений
+        наружу: сбой чистки не должен отменить уже записанный прогон."""
+        days = RECRUITING_RUNS_KEEP_DAYS if keep_days is None else int(keep_days)
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM recruiting_parse_runs
+                    WHERE finished_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                                        - make_interval(days => %s)
+                      AND run_uuid <> %s::uuid
+                """, (days, keep_run_uuid))
+                removed = int(cursor.rowcount or 0)
+        except Exception:
+            logging.exception("recruiting: чистка старых прогонов не удалась")
+            return 0
+        if removed:
+            logging.info("recruiting: удалено %s прогонов старше %s дней", removed, days)
+        return removed
 
     def save_recruiting_parse_failure(self, error_message, source='enbek', triggered_by='scheduler'):
         source_norm = (str(source or 'enbek').strip().lower() or 'enbek')[:64]

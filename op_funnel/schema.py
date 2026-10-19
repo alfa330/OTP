@@ -204,11 +204,10 @@ CREATE TABLE IF NOT EXISTS op_funnel_leads (
 
 CREATE INDEX IF NOT EXISTS idx_op_funnel_leads_day
     ON op_funnel_leads (direction_code, work_day DESC, user_id);
-CREATE INDEX IF NOT EXISTS idx_op_funnel_leads_reason
-    ON op_funnel_leads (direction_code, work_day, reason_bucket, reason_code)
-    WHERE reason_bucket <> '';
-CREATE INDEX IF NOT EXISTS idx_op_funnel_leads_phone
-    ON op_funnel_leads (phone) WHERE phone <> '';
+-- Индексов по причине и по телефону нет намеренно (удалены 19.10.2026): их не читает
+-- ни один запрос (и на проде idx_scan = 0). Список за причиной всегда фильтрует
+-- направление и сутки и идёт по idx_op_funnel_leads_day, а телефон ищется по
+-- `phones LIKE`, где btree не помогает.
 
 -- ── ЗАФИКСИРОВАННЫЙ СУТОЧНЫЙ ИТОГ ──────────────────────────────────────────
 -- Одна строка = один оператор за одни сутки одного направления.
@@ -542,6 +541,10 @@ OP_FUNNEL_SCHEMA_MIGRATIONS = (
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS registered SMALLINT NOT NULL DEFAULT 0",
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_source_raw TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_campaign TEXT NOT NULL DEFAULT ''",
+    # 19.10.2026: индексы, которые не читает ни один запрос (на проде idx_scan = 0),
+    # 14 МБ. Удалены в базе; здесь — чтобы не вернулись на базе, где ещё есть.
+    "DROP INDEX IF EXISTS idx_op_funnel_leads_reason",
+    "DROP INDEX IF EXISTS idx_op_funnel_leads_phone",
 )
 
 

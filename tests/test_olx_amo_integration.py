@@ -137,6 +137,15 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("WHERE result IN ('lead_created', 'manual_review')", index)
         self.assertIn('phone_normalized IS NOT NULL', index)
 
+    def test_poll_runs_keep_only_the_time_index(self):
+        """Журнал опросов по кабинету не читает ни один запрос — индекс по кабинету
+        весил 64 МБ и удалён. Разворот схемы обязан его не создавать и снимать там,
+        где он ещё есть; индекс по времени нужен ночной чистке."""
+        ddl = '\n'.join(schema._STATEMENTS)
+        self.assertNotIn('idx_olx_poll_runs_cabinet', ddl)
+        self.assertIn('DROP INDEX IF EXISTS idx_olx_poll_runs_cabinet', schema._MIGRATIONS)
+        self.assertIn('idx_olx_poll_runs_started', ddl)
+
     def test_journal_keeps_both_phone_forms_and_both_times(self):
         """Раздел 7 ТЗ требует номер до и после и обе отметки времени."""
         journal = next(s for s in schema._STATEMENTS
@@ -354,6 +363,38 @@ class WiringTests(unittest.TestCase):
         block = block[:block.index(')')]
         self.assertIn('max_instances=1', block)
         self.assertIn('coalesce=True', block)
+
+    def test_poll_runs_journal_is_pruned_nightly(self):
+        """Журнал опросов — ~31 тыс. строк в сутки; без ночной чистки он за полтора
+        месяца занял 255 МБ из 5 ГБ диска базы."""
+        block = self.bot[self.bot.index("id='olx_amo_retention_daily'") - 300:]
+        block = block[:block.index('coalesce=True')]
+        self.assertIn('olx_amo_retention_job', block)
+        self.assertIn('CronTrigger(hour=3, minute=50', block)
+        self.assertIn('max_instances=1', block)
+        job = self.bot[self.bot.index('async def olx_amo_retention_job'):]
+        job = job[:job.index('\nasync def ')]
+        # Свой пул робота, а не общий executor_pool на четыре места.
+        self.assertIn('olx_amo_pool', job)
+        self.assertIn('olx_amo_service.prune_poll_runs(db)', job)
+        self.assertEqual(7, service.POLL_RUNS_KEEP_DAYS)
+
+    def test_prune_deletes_by_almaty_wall_clock(self):
+        """started_at пишется стенным временем Алматы — граница считается в той же зоне."""
+        from olx_amo import queries
+
+        class _Cursor(object):
+            rowcount = 31000
+
+            def execute(self, sql, params=None):
+                self.sql, self.params = sql, params
+
+        cursor = _Cursor()
+        self.assertEqual(31000, queries.prune_poll_runs(cursor, 7))
+        self.assertIn('DELETE FROM olx_poll_runs', cursor.sql)
+        self.assertIn("CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'", cursor.sql)
+        self.assertIn('make_interval(days => %s)', cursor.sql)
+        self.assertEqual((7,), cursor.params)
 
     def test_robot_has_its_own_thread_pool(self):
         """В общем пуле бота четыре места на всё приложение."""

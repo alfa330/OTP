@@ -750,6 +750,20 @@ def finish_poll_run(cursor, run_id, **counters):
     )
 
 
+def prune_poll_runs(cursor, keep_days):
+    """Удалить прогоны опроса старше `keep_days` суток. Возвращает число удалённых.
+
+    started_at — стенное время Алматы (см. _NOW), поэтому и граница считается в той
+    же зоне, а не по NOW() базы в UTC."""
+    cursor.execute(
+        """
+        DELETE FROM olx_poll_runs
+         WHERE started_at < {now} - make_interval(days => %s)
+        """.format(now=_NOW),
+        (int(keep_days),))
+    return int(cursor.rowcount or 0)
+
+
 def list_alert_chats(cursor):
     """Чаты, выбранные для отбивки. Порядок — по названию, как в списке."""
     cursor.execute(

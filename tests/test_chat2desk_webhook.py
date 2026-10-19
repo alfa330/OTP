@@ -138,6 +138,24 @@ class WebhookNormalizeTests(unittest.TestCase):
         self.assertTrue(row['is_new_request'])
         self.assertEqual(row['payload']['hook_type'], 'inbox')
 
+    def test_client_card_goes_to_columns_not_into_payload(self):
+        """Карточка клиента — больше трети тела события, и читают из неё только
+        телефон, имя и id. Они ложатся в колонки, а саму карточку в payload не храним;
+        прочие ключи события (текст, вложения, время) остаются как есть."""
+        row = NS['_chat2desk_webhook_events'](_event(
+            'inbox', '2026-09-18T07:59:37Z', message_id=42, request_id=7,
+            type='from_client', text='Здравствуйте', attachments=[],
+            client={'id': 12568, 'phone': '[wa_gupshup] KZ.1', 'client_phone': '77000000101',
+                    'name': 'Тестовый Водитель', 'assigned_name': None,
+                    'external_id': 'ext-1', 'avatar': 'https://example.com/a.png'}))[0]
+        self.assertEqual(row['client_phone'], '77000000101')
+        self.assertEqual(row['client_name'], 'Тестовый Водитель')
+        self.assertEqual(row['client_id'], 12568)
+        self.assertNotIn('client', row['payload'])
+        self.assertEqual(row['payload']['text'], 'Здравствуйте')
+        self.assertEqual(row['payload']['message_id'], 42)
+        self.assertEqual(row['payload']['event_time'], '2026-09-18T07:59:37Z')
+
     def test_repeat_delivery_has_the_same_key(self):
         """Вендор повторяет неуспешную доставку трижды — ключ обязан совпасть."""
         body = _event('inbox', '2026-09-18T07:59:37Z', message_id=42, request_id=7,

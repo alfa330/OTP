@@ -43655,7 +43655,11 @@ def _chat2desk_webhook_events(payload):
             'client_name': client_name,
             'is_new_request': (bool(item.get('is_new_request'))
                                if 'is_new_request' in item else None),
-            'payload': item,
+            # Тело события — без карточки клиента: телефон, имя и id из неё уже
+            # разложены по колонкам выше, а сам ключ `client` не читает никто. Это
+            # больше трети тела (замер 19.10.2026: ~38% текста payload, ~27 из 125 МБ
+            # на недельном ретеншне). Остальные ключи храним все — событие не урезаем.
+            'payload': {key: value for key, value in item.items() if key != 'client'},
         })
     return rows
 
@@ -48872,6 +48876,28 @@ async def olx_amo_retry_job():
     if summary.get('retried'):
         logging.info("Лиды OLX: повторно отправлено %s из %s",
                      summary.get('recovered'), summary.get('retried'))
+
+
+async def olx_amo_retention_job():
+    """Ночная чистка журнала опросов OLX: прогоны старше недели (см. POLL_RUNS_KEEP_DAYS).
+
+    Журнал пишется по строке на кабинет дважды в минуту, ~31 тыс. строк в сутки, и без
+    чистки за полтора месяца занял 255 МБ из 5 ГБ диска базы. Пул — свой, роботный:
+    занимать удалением общий executor_pool незачем."""
+    try:
+        from olx_amo import service as olx_amo_service
+    except Exception:
+        logging.exception("Лиды OLX: модуль не импортировался, чистка журнала пропущена")
+        return
+    try:
+        removed = await asyncio.get_event_loop().run_in_executor(
+            olx_amo_pool, lambda: olx_amo_service.prune_poll_runs(db))
+    except Exception:
+        logging.exception("Лиды OLX: чистка журнала опросов не удалась")
+        return
+    if removed:
+        logging.info("Лиды OLX: журнал опросов, удалено %s прогонов старше %s дней",
+                     removed, olx_amo_service.POLL_RUNS_KEEP_DAYS)
 
 
 # ── Пропущенные входящие → amoCRM (задача #291) ─────────────────────────────
@@ -70379,6 +70405,27 @@ async def run_chatapp_retention_async():
         logging.exception("chatapp retention failed")
 
 
+async def run_fleet_edm_retention_async():
+    # Файлы выгрузок «Провайдер ЭДО» старше срока (fleet_edm.queries.cleanup, 60 дней) и
+    # контрольные точки упавших заданий. Раньше чистка шла только при запуске НОВОЙ
+    # выгрузки: нет выгрузок — файлы по ~0,7 МБ лежат бессрочно (54 МБ к 19.10.2026).
+    # Пул общий, а не fleet_edm_pool: тот на одно место и бывает занят выгрузкой часами.
+    def _run():
+        from fleet_edm import queries as fleet_edm_queries
+        with db._get_cursor() as cursor:
+            return fleet_edm_queries.cleanup(cursor)
+
+    loop = asyncio.get_event_loop()
+    try:
+        removed = await loop.run_in_executor(executor_pool, _run)
+    except Exception:
+        logging.exception("fleet_edm retention failed")
+        return None
+    if removed:
+        logging.info("Провайдер ЭДО: удалено %s файлов выгрузок старше срока", removed)
+    return removed
+
+
 async def run_ai_qa_daily_sample_async():
     # Ежедневная выборка «ИИ-оценки» — в своём пуле: проход идёт часами.
     loop = asyncio.get_event_loop()
@@ -71619,6 +71666,15 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True
     )
+    # Файлы выгрузок «Провайдер ЭДО» — в той же ночной серии ретеншнов.
+    scheduler.add_job(
+        run_fleet_edm_retention_async,
+        CronTrigger(hour=3, minute=55, timezone=ZoneInfo('Asia/Almaty')),
+        id='fleet_edm_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
 
     # Напоминания о дедлайнах заметок и задач: каждые 5 минут — достаточная точность
     # при интервале «максимум за сутки», и дешевле, чем гонять раз в минуту.
@@ -72130,6 +72186,16 @@ if __name__ == '__main__':
             CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
             id='olx_amo_alerts',
             misfire_grace_time=120,
+            max_instances=1,
+            coalesce=True
+        )
+        # Журнал опросов — неделя (olx_amo.service.POLL_RUNS_KEEP_DAYS). 03:50 — в той же
+        # ночной серии ретеншнов 03:20–03:45, после них.
+        scheduler.add_job(
+            olx_amo_retention_job,
+            CronTrigger(hour=3, minute=50, timezone=ZoneInfo('Asia/Almaty')),
+            id='olx_amo_retention_daily',
+            misfire_grace_time=3600,
             max_instances=1,
             coalesce=True
         )

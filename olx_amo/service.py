@@ -725,6 +725,18 @@ def poll_all(db, pool=None):
     return results
 
 
+# Сколько суток хранить журнал опросов. Читателей у журнала нет: сторож простоя
+# смотрит olx_accounts.last_poll_at. Журнал нужен только для разбора руками, а пишется
+# по ~31 тыс. строк в сутки — без чистки он за полтора месяца дорос до 255 МБ.
+POLL_RUNS_KEEP_DAYS = 7
+
+
+def prune_poll_runs(db, keep_days=POLL_RUNS_KEEP_DAYS):
+    """Ночная чистка журнала опросов. Возвращает число удалённых прогонов."""
+    with db._get_cursor() as cursor:
+        return queries.prune_poll_runs(cursor, keep_days)
+
+
 def retry_failed(db, limit=100):
     """Повторить обращения, упавшие по дороге в amoCRM.
 

@@ -41,6 +41,10 @@
   простой: робот молча перестал видеть чаты, и это обнаруживают постфактум.
   Пустой опрос — тоже строка в этой таблице, поэтому «последний опрос был
   20 минут назад» отличимо от «опросы идут, обращений нет».
+  Строк ~31 тыс. в сутки (девять кабинетов дважды в минуту), а сторож простоя
+  читает `olx_accounts.last_poll_at`, не журнал. Поэтому журнал хранится неделю
+  (`service.POLL_RUNS_KEEP_DAYS`, ночная чистка): за полтора месяца без неё он
+  дорос до 1,17 млн строк и 255 МБ.
 """
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
@@ -342,8 +346,8 @@ _STATEMENTS = [
     )
     """ % {'now': _NOW},
 
-    "CREATE INDEX IF NOT EXISTS idx_olx_poll_runs_cabinet "
-    "ON olx_poll_runs (cabinet_code, started_at DESC)",
+    # Индекс по времени держит ночную чистку журнала (prune_poll_runs). Индекса по
+    # кабинету нет намеренно: журнал по кабинету не читает ни один запрос.
     "CREATE INDEX IF NOT EXISTS idx_olx_poll_runs_started "
     "ON olx_poll_runs (started_at DESC)",
 ]
@@ -357,6 +361,11 @@ _MIGRATIONS = [
 
     # Повторное обращение после автоответа: робот молчит, а чат ждёт человека.
     "ALTER TABLE olx_threads ADD COLUMN IF NOT EXISTS awaiting_human_since TIMESTAMP",
+
+    # 19.10.2026: индекс (cabinet_code, started_at) не нужен ни одному запросу (и на
+    # проде idx_scan = 0), а весил 64 МБ из 255 МБ журнала. Удалён в базе; здесь —
+    # чтобы он не вернулся на базе, где ещё есть.
+    "DROP INDEX IF EXISTS idx_olx_poll_runs_cabinet",
 ]
 
 
