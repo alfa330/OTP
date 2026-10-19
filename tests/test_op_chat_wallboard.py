@@ -908,7 +908,10 @@ class FrontendTests(unittest.TestCase):
         root = self.view[self.view.index('export default function OpWallboardView('):]
         self.assertNotIn('useOpWallboardSnapshot', root)
         self.assertNotIn('useOpChatWallboardSnapshot', root)
-        self.assertIn("if (direction === 'chat') {\n        return <OpChatBoard", root)
+        # Выбор одного направления: чат ИЛИ линия, второе не монтируется. С #392 рядом с ними в
+        # корне живёт окно «Отчёт по сменам» — одно на оба направления, поэтому выбор тернарный.
+        self.assertIn("{direction === 'chat'\n                ? <OpChatBoard", root)
+        self.assertIn("\n                : <OpLineWallboard", root)
         self.assertEqual(self.view.count('useOpWallboardSnapshot({'), 1)
         self.assertEqual(self.view.count('useOpChatWallboardSnapshot({'), 1)
 

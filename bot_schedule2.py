@@ -68074,6 +68074,25 @@ try:
 except Exception:
     logging.exception("Табло ОП: Blueprint НЕ подключён")
 
+# --- «Активность операторов» (#392): вкладка «Отчёт» табло ОП ----------------------------------
+# Завершённые смены операторов ОП за месяц — те же события iCORE Phone и касания FreePBX, что у
+# табло, но по сменам, а не по суткам. Права — guard табло плюс поимённый список «уполномоченных»
+# (op_wallboard/activity_routes.EXTRA_ACCESS_USER_IDS); само табло тем людям не открывается.
+try:
+    from op_wallboard import activity_routes as op_activity_routes  # noqa: E402
+    from database import STATUS_EVENTS_RETENTION_DAYS as _OP_ACTIVITY_RETENTION_DAYS  # noqa: E402
+
+    app.register_blueprint(op_activity_routes.build_op_activity_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        guard=op_activity_routes.make_activity_guard(_op_wallboard_guard),
+        retention_days=_OP_ACTIVITY_RETENTION_DAYS,
+    ))
+    logging.info("Активность операторов: Blueprint подключён на /api/op_wallboard/activity")
+except Exception:
+    logging.exception("Активность операторов: Blueprint НЕ подключён")
+
 
 # ── Раздел «Воронка ОП»: ежедневная воронка обзвона по направлениям продаж ────
 # Задачи #301, #302, #303, #305 — четыре супервайзера вели одну и ту же

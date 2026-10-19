@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
@@ -27,6 +27,12 @@ import {
     useOpChatWallboardSnapshot,
     useOpWallboardSnapshot,
 } from './opWallboardShared';
+
+// «Отчёт по сменам» (ТЗ #392) — завершённые смены операторов ОП за месяц, полноэкранным окном
+// из шапки табло, рядом с «Отбивкой» и «Виджетом». Код отчёта грузится при первом открытии и
+// заранее — при наведении на кнопку, а на телефоне — в момент касания: стене в зале он не нужен.
+const loadActivityReport = () => import('./OpActivityReport');
+const OpActivityReportSheet = lazy(loadActivityReport);
 
 /*
  * «Табло ОП» — отдел продаж на FreePBX. Раскладка та же, что у табло СЗоВ и Тез: ключевые
@@ -314,7 +320,7 @@ const BROADCAST_HINT = (
 /** Направление «Линия»: звонки на FreePBX и статусы iCORE Phone. */
 function OpLineWallboard({
     apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false, widgetOpen, onToggleWidget,
-    directionSwitch = null,
+    directionSwitch = null, reportButton = null,
 }) {
     const { snapshot, error, loading, refresh } = useOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -410,6 +416,7 @@ function OpLineWallboard({
                         showToast={showToast}
                     />
                 ) : null}
+                {reportButton}
                 <button type="button" className={`${iosBtnGhost} disabled:opacity-40`} disabled={loading} onClick={() => refresh()}>
                     <FaIcon className={`fas fa-rotate ${loading ? 'animate-spin' : ''}`}></FaIcon>
                     Обновить
@@ -511,7 +518,7 @@ const OP_CHAT_BROADCAST_HINT = (
 /** Направление «Чат»: переписка верификаторов в Wazzup — чаты в работе, время ответа, люди. */
 function OpChatBoard({
     apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false,
-    canPersonalChatBroadcast = false, widgetOpen, onToggleWidget, directionSwitch = null,
+    canPersonalChatBroadcast = false, widgetOpen, onToggleWidget, directionSwitch = null, reportButton = null,
 }) {
     const { snapshot, error, loading, refresh } = useOpChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -562,6 +569,7 @@ function OpChatBoard({
                         showToast={showToast}
                     />
                 ) : null}
+                {reportButton}
                 {/* Пока снимка нет, выгружать нечего: кнопка появляется вместе с цифрами. */}
                 {snapshot ? (
                     <ChatExportControls
@@ -665,9 +673,47 @@ export default function OpWallboardView(props) {
     const directionSwitch = (
         <SegmentedSwitch value={direction} options={OP_WALLBOARD_VIEWS} onChange={changeDirection} />
     );
+
+    // «Отчёт по сменам» — один на табло: кнопка стоит в шапке любого направления рядом с
+    // «Отбивкой», окно живёт здесь и переживает переключение «Линия / Чат». Раз открытое, оно
+    // остаётся смонтированным: закрывается плавно и при повторном открытии стоит на тех же
+    // фильтрах и той же странице.
+    const [reportOpen, setReportOpen] = useState(false);
+    const [reportMounted, setReportMounted] = useState(false);
+    const openReport = useCallback(() => {
+        setReportMounted(true);
+        setReportOpen(true);
+    }, []);
+    const closeReport = useCallback(() => setReportOpen(false), []);
+    const reportButton = (
+        <button type="button" className={iosBtnGhost} onClick={openReport}
+                onMouseEnter={loadActivityReport} onFocus={loadActivityReport} onPointerDown={loadActivityReport}
+                title="Завершённые смены операторов за месяц: статусы, звонки, журнал смены, Excel">
+            <FaIcon className="fas fa-clock-rotate-left"></FaIcon>
+            Отчёт по сменам
+        </button>
+    );
+    const reportSheet = reportMounted ? (
+        <Suspense fallback={null}>
+            <OpActivityReportSheet
+                open={reportOpen}
+                onClose={closeReport}
+                user={props.user}
+                apiBaseUrl={props.apiBaseUrl}
+                withAccessTokenHeader={props.withAccessTokenHeader}
+                showToast={props.showToast}
+                z={FULLSCREEN_Z}
+            />
+        </Suspense>
+    ) : null;
+
     // Монтируется только выбранное направление: у каждого свой опрос, и скрытое молчит.
-    if (direction === 'chat') {
-        return <OpChatBoard {...props} directionSwitch={directionSwitch} />;
-    }
-    return <OpLineWallboard {...props} directionSwitch={directionSwitch} />;
+    return (
+        <>
+            {direction === 'chat'
+                ? <OpChatBoard {...props} directionSwitch={directionSwitch} reportButton={reportButton} />
+                : <OpLineWallboard {...props} directionSwitch={directionSwitch} reportButton={reportButton} />}
+            {reportSheet}
+        </>
+    );
 }
