@@ -49,11 +49,12 @@ def test_parse_messages_splits_blocks_and_keeps_tail():
     ({'dialed_at': 0, 'ended_at': 20, 'cause': 18}, ('no_answer', '')),                       # не таймер B
     # 15:46 того же дня: Binotel 32 с не достучался до оператора связи и вернул «занято»/«сброшен».
     ({'dialed_at': 0, 'ended_at': 33.1, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
-    ({'dialed_at': 0, 'ended_at': 33.0, 'cause': 17}, ('no_link', '')),
-    ({'dialed_at': 0, 'ended_at': 33.0, 'ringing_at': 5, 'cause': 21}, ('rejected', '')),   # гудки были — сбросил
-    # Его же «недоступен» (480 → 19) и ответ на 35–36-й секунде — тоже сеть, а не водитель; раньше 31 с — нет.
-    ({'dialed_at': 0, 'ended_at': 35.2, 'cause': 19, 'originate_reason': 0}, ('no_link', '')),
     ({'dialed_at': 0, 'ended_at': 36.0, 'cause': 21, 'originate_reason': 0}, ('no_link', '')),
+    ({'dialed_at': 0, 'ended_at': 33.0, 'ringing_at': 5, 'cause': 21}, ('rejected', '')),   # гудки были — сбросил
+    # «Занято» (486 → 17) и «недоступен» (480 → 19) на 33–35-й секунде — живые исходы, не блок: по 14 000 звонкам
+    # 16–19.10.2026 блок приходит только причинами 18 и 21, а 17/19 в этом окне — хвост сообщений оператора связи.
+    ({'dialed_at': 0, 'ended_at': 33.0, 'cause': 17}, ('busy', '')),
+    ({'dialed_at': 0, 'ended_at': 35.2, 'cause': 19, 'originate_reason': 0}, ('no_answer', '')),
     ({'dialed_at': 0, 'ended_at': 29.0, 'cause': 19, 'originate_reason': 0}, ('no_answer', '')),
     # Свой отбой по сроку вызова (40 с, причина 0, Reason 3) — недозвон: гудки были ранним звуком.
     ({'dialed_at': 0, 'ended_at': 40.1, 'cause': 0, 'originate_reason': 3}, ('no_answer', '')),
@@ -309,7 +310,8 @@ def test_ramp_after_link_recovery(tmp_path):
     clock.now += 600
     assert sum(info['capacity'] for info in d.lines_state().values()) == 20   # ступень 20 = предел — разгон кончился
     assert d.ramp_since == 0.0
-    # Новый отказ сети на разгоне — пауза сразу (не ждём трёх) и длиннее прошлой: 15 минут.
+    # Отказы сети на разгоне: одиночный «сброшен» на 33-й секунде бывает и при здоровой сети (0,5–1 % звонков,
+    # 17–19.10.2026) — разгон не прерывает; три подряд — пауза, и длиннее прошлой: 15 минут.
     d.finish({'call_id': 5, 'line': '901', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
               'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
     for call_id in (6, 7, 8):
@@ -320,6 +322,13 @@ def test_ramp_after_link_recovery(tmp_path):
               'ended_at': clock.now, 'played_to_end': True, 'cause': 16})
     assert sum(info['capacity'] for info in d.lines_state().values()) == 3
     d.finish(_no_link(clock, 10, line='901'))
+    assert d.link_level == 0 and sum(info['capacity'] for info in d.lines_state().values()) == 3   # один — не повод
+    d.finish({'call_id': 11, 'line': '902', 'dialed_at': clock.now - 20, 'ended_at': clock.now, 'cause': 17})
+    assert d.link_fails == 0                                      # живой «занято» — связь есть, счёт подряд с нуля
+    for call_id in (12, 13):
+        d.finish(_no_link(clock, call_id, line='901'))
+    assert d.link_level == 0
+    d.finish(_no_link(clock, 14, line='901'))
     assert d.link_down_until - clock.now == 900 and sum(info['capacity'] for info in d.lines_state().values()) == 0
 
 

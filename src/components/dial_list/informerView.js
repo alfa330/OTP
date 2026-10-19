@@ -69,9 +69,20 @@ export const RESULT_LABEL = {
     rejected: 'Сбросил',
     line_busy: 'Линия занята',
     no_link: 'Сеть не пропустила',
-    failed: 'Ошибка АТС',
+    failed: 'Сбой АТС',
     lost: 'Итог не пришёл',
     '': 'Звоним',
+};
+
+/* «Почему не дозвонились»: итоги последней настоящей попытки водителей, до которых ещё не дозвонились
+   (сервер: analytics.unreached) → строки для баров, самые частые сверху, доля — от всех недозвонов. */
+export const unreachedRows = (unreached = {}) => {
+    const rows = Object.entries(unreached)
+        .map(([key, count]) => ({ key, label: RESULT_LABEL[key] || key, count: Number(count) || 0 }))
+        .filter((r) => r.count > 0)
+        .sort((a, b) => b.count - a.count);
+    const total = rows.reduce((sum, r) => sum + r.count, 0);
+    return { total, rows: rows.map((r) => ({ ...r, share: total ? r.count / total : 0 })) };
 };
 
 export const STATE_LABEL = {

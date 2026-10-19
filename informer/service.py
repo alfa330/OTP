@@ -272,16 +272,37 @@ class InformerService:
                 SELECT COUNT(*), COUNT(*) FILTER (WHERE result = 'answered'),
                        COUNT(*) FILTER (WHERE result = 'line_busy'),
                        COUNT(*) FILTER (WHERE result = 'no_link'),
+                       COUNT(*) FILTER (WHERE result = 'failed'),
                        COUNT(*) FILTER (WHERE NOT finished)
                 FROM informer_calls WHERE campaign_id = %s
             """, (int(campaign_id),))
-            calls_total, calls_answered, calls_line_busy, calls_no_link, calls_open = cur.fetchone()
+            calls_total, calls_answered, calls_line_busy, calls_no_link, calls_failed, calls_open = cur.fetchone()
             cur.execute("""
                 SELECT result, COUNT(*) FROM informer_calls
                 WHERE campaign_id = %s AND finished AND NOT (result = ANY(%s))
                 GROUP BY result
             """, (int(campaign_id), list(rules.NOT_ATTEMPTS)))
             results = {res: int(n) for res, n in cur.fetchall()}
+            # Очередь: кому ещё не звонили, кто ждёт повтора после неудачной попытки, кому звоним сейчас.
+            cur.execute("""
+                SELECT COUNT(*) FILTER (WHERE state = 'pending' AND attempts = 0),
+                       COUNT(*) FILTER (WHERE state = 'pending' AND attempts > 0),
+                       COUNT(*) FILTER (WHERE state = 'calling')
+                FROM informer_targets WHERE campaign_id = %s
+            """, (int(campaign_id),))
+            queue_fresh, queue_retry, queue_calling = cur.fetchone()
+            # Почему не дозвонились: последняя настоящая попытка каждого водителя, до которого ещё не дозвонились
+            # («линия занята», «сеть не пропустила» и «сбой АТС» — не попытки, они про водителя ничего не говорят).
+            cur.execute("""
+                SELECT last.result, COUNT(*)
+                FROM informer_targets t
+                JOIN (SELECT DISTINCT ON (target_id) target_id, result FROM informer_calls
+                      WHERE campaign_id = %s AND finished AND NOT (result = ANY(%s))
+                      ORDER BY target_id, id DESC) last ON last.target_id = t.id
+                WHERE t.campaign_id = %s AND t.state IN ('pending', 'calling', 'given_up')
+                GROUP BY last.result
+            """, (int(campaign_id), list(rules.NOT_ATTEMPTS), int(campaign_id)))
+            unreached = {res: int(n) for res, n in cur.fetchall()}
             signing, signed_map = self._signing(cur, campaign_id, department_id)
             targets = []
             if targets_limit:
@@ -322,7 +343,11 @@ class InformerService:
             },
             "calls": {"total": int(calls_total or 0), "answered": int(calls_answered or 0),
                       "line_busy": int(calls_line_busy or 0), "no_link": int(calls_no_link or 0),
+                      "failed": int(calls_failed or 0),
                       "open": int(calls_open or 0), "results": results},
+            "queue": {"fresh": int(queue_fresh or 0), "retry": int(queue_retry or 0),
+                      "calling": int(queue_calling or 0)},
+            "unreached": unreached,
             "signing": signing,
         }
         campaign["targets"] = targets
@@ -688,7 +713,16 @@ class InformerService:
             # Поздний «итог не пришёл» по водителю, до которого уже дозвонились, ничего не портит.
             new_state, next_at, new_attempts = state, None, int(attempts or 0)
         else:
-            new_state, next_at, new_attempts = rules.after_result(result, attempts, max_attempts, retry_min, now)
+            failed_before = 0
+            if result == rules.RESULT_FAILED:
+                # Сколько «сбоев АТС» у водителя уже было (этот звонок уже записан — без него).
+                cur.execute("""
+                    SELECT COUNT(*) FROM informer_calls
+                    WHERE campaign_id = %s AND target_id = %s AND finished AND result = %s AND id <> %s
+                """, (campaign_id, target_id, rules.RESULT_FAILED, int(call_id)))
+                failed_before = int(cur.fetchone()[0] or 0)
+            new_state, next_at, new_attempts = rules.after_result(result, attempts, max_attempts, retry_min, now,
+                                                                  failed_before=failed_before)
             if campaign_status == rules.CAMPAIGN_DONE and new_state == rules.STATE_PENDING:
                 new_state = rules.STATE_STOPPED
         cur.execute("""

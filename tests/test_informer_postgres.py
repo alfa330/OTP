@@ -365,6 +365,10 @@ def test_retry_then_give_up(env):
     svc.campaign_action(DEPT, campaign['id'], 'start')
     fail(svc, poll(svc)['calls'][0], rules.RESULT_NO_ANSWER)
     assert poll(svc)['calls'] == []
+    analytics = svc.campaign_detail(DEPT, campaign['id'])['analytics']
+    # Водитель не дозвонился раз и ждёт повтора — это видно отдельно от «ещё не звонили» и «попытки кончились».
+    assert analytics['queue'] == {'fresh': 0, 'retry': 1, 'calling': 0}
+    assert analytics['unreached'] == {'no_answer': 1}
     clock.tick(minutes=31)
     second = poll(svc)['calls']
     assert len(second) == 1
@@ -373,6 +377,33 @@ def test_retry_then_give_up(env):
     assert detail['targets'][0]['state'] == 'given_up'
     assert detail['status'] == 'done'
     assert detail['analytics']['calls']['results'] == {'no_answer': 1, 'busy': 1}
+    assert detail['analytics']['unreached'] == {'busy': 1}            # последняя настоящая попытка
+    assert detail['analytics']['queue'] == {'fresh': 0, 'retry': 0, 'calling': 0}
+
+
+def test_failed_is_not_an_attempt_until_the_cap(env):
+    """19.10.2026: «сбой АТС» (502/503 от Binotel) сжигал попытку — 11 водителей рассылки 9 попали в «не
+    дозвонились», хотя до них вызов не дошёл. Теперь попытка цела, повтор через обычный интервал, но после
+    max_attempts сбоев по одному водителю — сдаёмся."""
+    svc, clock, _ = env
+    campaign = make_campaign(svc, phones(1), max_attempts=2, retry_after_min=30)
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    fail(svc, poll(svc)['calls'][0], rules.RESULT_FAILED)
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['targets'][0]['state'] == 'pending' and detail['targets'][0]['attempts'] == 0
+    assert detail['analytics']['calls']['failed'] == 1 and detail['analytics']['calls']['results'] == {}
+    assert detail['analytics']['unreached'] == {}                      # про водителя сбой ничего не говорит
+    assert poll(svc)['calls'] == []                                    # повтор — через обычный интервал
+    clock.tick(minutes=31)
+    second = poll(svc)['calls']
+    assert len(second) == 1
+    fail(svc, second[0], rules.RESULT_NO_ANSWER)                       # настоящая попытка — первая
+    assert svc.campaign_detail(DEPT, campaign['id'])['targets'][0]['attempts'] == 1
+    clock.tick(minutes=31)
+    fail(svc, poll(svc)['calls'][0], rules.RESULT_FAILED)              # второй сбой — предел сбоев, сдаёмся
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['targets'][0]['state'] == 'given_up' and detail['targets'][0]['attempts'] == 1
+    assert detail['status'] == 'done'
 
 
 def test_stale_call_is_lost_then_late_result_wins(env):

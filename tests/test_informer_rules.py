@@ -53,6 +53,15 @@ def test_after_result():
         rules.STATE_PENDING, NOW + timedelta(seconds=rules.NO_LINK_RETRY_SECONDS), 1)
     assert rules.RESULT_NO_LINK in rules.RESULTS and rules.RESULT_NO_LINK in rules.NOT_ATTEMPTS
     assert rules.RESULT_LABELS[rules.RESULT_NO_LINK] == 'Сеть не пропустила'
+    # «Сбой АТС» (502/503 от Binotel, отказ робота) — водителю не звонили: попытка цела, повтор через обычный
+    # интервал; но после max_attempts сбоев по одному водителю — сдаёмся, «битый» номер не крутим вечно.
+    assert rules.after_result(rules.RESULT_FAILED, 1, 2, 45, NOW) == (
+        rules.STATE_PENDING, NOW + timedelta(minutes=45), 0)
+    assert rules.after_result(rules.RESULT_FAILED, 2, 2, 45, NOW, failed_before=0) == (
+        rules.STATE_PENDING, NOW + timedelta(minutes=45), 1)
+    assert rules.after_result(rules.RESULT_FAILED, 2, 2, 45, NOW, failed_before=1) == (rules.STATE_GIVEN_UP, None, 1)
+    assert rules.after_result(rules.RESULT_FAILED, 1, 1, 45, NOW) == (rules.STATE_GIVEN_UP, None, 0)
+    assert rules.RESULT_FAILED in rules.NOT_ATTEMPTS and rules.RESULT_LABELS[rules.RESULT_FAILED] == 'Сбой АТС'
 
 
 def test_window_by_almaty_time():

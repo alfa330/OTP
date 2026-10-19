@@ -12,7 +12,7 @@ import {
     CALLS_PER_LINE, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds,
     campaignActions, lineCapacity,
     lineRate, partsLabel, percent, plural, robotSummary, seconds, shortDateTime, speechEstimate, stageLabel,
-    stageShares, trackEstimateMs,
+    stageShares, trackEstimateMs, unreachedRows,
 } from './informerView';
 
 /*
@@ -606,6 +606,11 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
     const givenUp = states.given_up || 0;
     const stopped = states.stopped || 0;
     const queue = (states.pending || 0) + (states.calling || 0);
+    // Очередь по частям: ждут повтора после неудачной попытки, ещё не звонили, звоним сейчас.
+    const retry = a?.queue?.retry ?? 0;
+    const fresh = a?.queue?.fresh ?? Math.max(0, queue - retry);
+    const calling = a?.queue?.calling ?? (states.calling || 0);
+    const reasons = unreachedRows(a?.unreached);
     const processed = answered + givenUp;
     const progress = total ? Math.round((processed / total) * 100) : 0;
     const width = (n) => `${total ? (n / total) * 100 : 0}%`;
@@ -633,9 +638,11 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
 
     const progressHint = `Обработанные — те, кому дозвонились, и те, у кого попытки кончились (до ${campaign?.max_attempts} `
         + `${plural(campaign?.max_attempts || 0, 'попытки', 'попыток', 'попыток')}, повтор через ${campaign?.retry_after_min} мин). `
-        + `Остальные ждут своей очереди в окне ${campaign?.window_start}–${campaign?.window_end} по Алматы.`
-        + (a?.calls?.line_busy || a?.calls?.no_link
-            ? ` Повторов, которые попыткой не считаются: линия занята — ${a.calls.line_busy || 0}, сеть не пропустила — ${a.calls.no_link || 0}.`
+        + '«Ждут повтора» — не дозвонились хотя бы раз, позвоним снова; «ещё не звонили» — до них очередь не дошла. '
+        + `Звоним в окне ${campaign?.window_start}–${campaign?.window_end} по Алматы.`
+        + (a?.calls?.line_busy || a?.calls?.no_link || a?.calls?.failed
+            ? ` Звонки, которые попыткой не считаются (до водителя не дошли): линия занята — ${a.calls.line_busy || 0}, `
+              + `сеть не пропустила — ${a.calls.no_link || 0}, сбой АТС — ${a.calls.failed || 0}.`
             : '')
         + ' Темп — сколько звонков в минуту робот набирает сейчас: каждый запуск и возобновление начинается с прогрева '
         + `3 → 7 → 10 → 15 → 20 → 25 в минуту по 5 минут, не выше темпа рассылки ${campaign?.max_per_minute}.`;
@@ -663,13 +670,16 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                 <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-100">
                     {answered > 0 && <div className="bg-emerald-500" style={{ width: width(answered) }} title={`Дозвонились: ${answered}`} />}
                     {givenUp > 0 && <div className="bg-slate-400" style={{ width: width(givenUp) }} title={`Не дозвонились: ${givenUp}`} />}
+                    {retry > 0 && <div className="bg-amber-300" style={{ width: width(retry) }} title={`Ждут повтора: ${retry}`} />}
                     {stopped > 0 && <div className="bg-slate-300" style={{ width: width(stopped) }} title={`Не звонили: ${stopped}`} />}
                 </div>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
                     <Legend tone="bg-emerald-500" label="Дозвонились" value={answered} />
                     <Legend tone="bg-slate-400" label="Не дозвонились" value={givenUp} />
+                    {retry > 0 && <Legend tone="bg-amber-300" label="Ждут повтора" value={retry} />}
                     {stopped > 0 && <Legend tone="bg-slate-300" label="Не звонили" value={stopped} />}
-                    <Legend tone="bg-slate-100 ring-1 ring-slate-300" label="В очереди" value={queue} />
+                    <Legend tone="bg-slate-100 ring-1 ring-slate-300" label="Ещё не звонили" value={fresh} />
+                    {calling > 0 && <Legend tone="bg-sky-400" label="Звоним сейчас" value={calling} />}
                 </div>
                 <div className="text-[12px] text-slate-500">
                     Сейчас <span className="tabular-nums text-slate-700">{rateNow} в минуту</span>
@@ -697,6 +707,29 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                             + (signing.checked_at ? `; проверка Sapar на ${shortDateTime(signing.checked_at)}.` : '.')} />
                 )}
             </div>
+
+            {reasons.total > 0 && (
+                <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>
+                    <CardTitle hint={'Водители, до которых пока не дозвонились (ждут повтора или попытки кончились): что ответила сеть '
+                        + 'на последний настоящий звонок каждому. «Не ответил» — гудки шли до конца; «Недоступен» — выключен или вне '
+                        + 'сети; «Занято»; «Сбросил» — отклонил вызов. Звонки, которые до водителя не дошли (линия занята, сеть не '
+                        + 'пропустила, сбой АТС), сюда не входят.'}
+                        right={<div className="text-[12.5px] tabular-nums text-slate-500">{reasons.total}</div>}>
+                        Почему не дозвонились
+                    </CardTitle>
+                    <div className="space-y-1.5">
+                        {reasons.rows.map((r) => (
+                            <div key={r.key} className="grid grid-cols-[6.5rem_minmax(0,1fr)_3.75rem] items-center gap-2 text-[12px] sm:grid-cols-[8rem_minmax(0,1fr)_4.5rem]">
+                                <div className="truncate text-slate-600">{r.label}</div>
+                                <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                                    <div className="h-full rounded-full bg-slate-400" style={{ width: `${Math.max(1, r.share * 100)}%` }} />
+                                </div>
+                                <div className="text-right tabular-nums text-slate-700">{r.count}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {shares.total > 0 && (
                 <div className={`${iosCard} space-y-2.5 px-4 py-3.5`}>

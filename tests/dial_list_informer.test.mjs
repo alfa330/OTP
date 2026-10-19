@@ -25,6 +25,7 @@ import {
     CALLS_PER_LINE, CALL_OVERHEAD_S, DEFAULT_AUDIO_S, EXPECTED_RING_S, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL,
     campaignActions, lineCapacity,
     lineRate, partsLabel, plural, robotSummary, seconds, speechEstimate, stageLabel, stageShares, trackEstimateMs,
+    unreachedRows,
 } from '../src/components/dial_list/informerView.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r\n').join('\n');
@@ -115,6 +116,15 @@ test('итоги звонков подписаны так же, как на се
     assert.equal(RESULT_LABEL.no_link, 'Сеть не пропустила');
 });
 
+test('«почему не дозвонились»: подписи сервера, самые частые сверху, доли от всех недозвонов', () => {
+    const { total, rows } = unreachedRows({ busy: 2, no_answer: 5, unavailable: 3, rejected: 0 });
+    assert.equal(total, 10);
+    assert.deepEqual(rows.map((r) => [r.label, r.count, r.share]), [
+        ['Не ответил', 5, 0.5], ['Недоступен', 3, 0.3], ['Занято', 2, 0.2],
+    ]);
+    assert.deepEqual(unreachedRows(undefined), { total: 0, rows: [] });
+});
+
 test('«где положил трубку» — как на сервере', () => {
     assert.equal(stageLabel('kz'), 'положил на казахской части');
     assert.equal(stageLabel('ru'), 'положил на русской части');
@@ -167,7 +177,8 @@ test('темп в форме — сколько тянет робот при д�
     const panel = read('../src/components/dial_list/DialListInformerPanel.jsx');
     // 16.10.2026: CALLS_PER_LINE попал в подсказку без импорта — «Ошибка приложения» на входе во вкладку.
     const imported = panel.match(/import \{([^}]+)\} from '\.\/informerView'/)[1];
-    for (const name of ['CALLS_PER_LINE', 'MAX_ACTIVE_CALLS', 'MAX_PER_MINUTE', 'lineRate', 'lineCapacity', 'callSeconds']) {
+    for (const name of ['CALLS_PER_LINE', 'MAX_ACTIVE_CALLS', 'MAX_PER_MINUTE', 'lineRate', 'lineCapacity', 'callSeconds',
+        'unreachedRows']) {
         assert.ok(new RegExp(`\\b${name}\\b`).test(imported), `${name} используется в панели, но не импортирован`);
     }
     assert.match(panel, /type="number" min=\{1\} max=\{MAX_PER_MINUTE\}/);

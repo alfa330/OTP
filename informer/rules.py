@@ -52,8 +52,11 @@ RESULT_LOST = 'lost'                # итог не пришёл (перезап
 RESULT_NO_LINK = 'no_link'
 RESULTS = (RESULT_ANSWERED, RESULT_NO_ANSWER, RESULT_BUSY, RESULT_UNAVAILABLE, RESULT_REJECTED,
            RESULT_LINE_BUSY, RESULT_NO_LINK, RESULT_FAILED, RESULT_LOST)
-# Водителю не звонили вовсе — попыткой не считается, в доли итогов не входит.
-NOT_ATTEMPTS = (RESULT_LINE_BUSY, RESULT_NO_LINK)
+# Водителю не звонили вовсе — попыткой не считается, в доли итогов не входит. «Сбой АТС» — тоже: это 502/503 от
+# Binotel или отказ самого робота, до водителя вызов не дошёл (19.10.2026: 71 такой звонок рассылки 9, 11 водителей
+# из-за них записаны в «не дозвонились»). Повтор — через обычный интервал, но не больше max_attempts сбоев
+# подряд по одному водителю, иначе «битый» номер крутился бы вечно.
+NOT_ATTEMPTS = (RESULT_LINE_BUSY, RESULT_NO_LINK, RESULT_FAILED)
 NO_LINK_RETRY_SECONDS = 300         # связь пропала — повтор не раньше, чем через 5 минут
 # Прогрев темпа (владелец, 17.10.2026, после того как 20 в минуту с утра за 15 минут снова уронили номер:
 # «каждое автоинформирование начинать через прогрев — сначала 3, 7, 10, 15, 20»). Ступени — звонков в минуту,
@@ -92,7 +95,7 @@ RESULT_LABELS = {
     RESULT_REJECTED: 'Сбросил',
     RESULT_LINE_BUSY: 'Линия занята',
     RESULT_NO_LINK: 'Сеть не пропустила',
-    RESULT_FAILED: 'Ошибка АТС',
+    RESULT_FAILED: 'Сбой АТС',
     RESULT_LOST: 'Итог не пришёл',
     '': 'Звоним',
 }
@@ -176,10 +179,11 @@ def stage_label(stage):
     return f"положил на части «{LANG_LABELS.get(stage, stage)}»"
 
 
-def after_result(result, attempts, max_attempts, retry_after_minutes, now):
+def after_result(result, attempts, max_attempts, retry_after_minutes, now, failed_before=0):
     """(состояние водителя, когда звонить снова | None, попыток после учёта) по итогу звонка.
 
-    «Линия занята» и «Сеть не пропустила» попыткой не считаются: водителю не звонили вовсе."""
+    «Линия занята», «Сеть не пропустила» и «Сбой АТС» попыткой не считаются: водителю не звонили вовсе.
+    failed_before — сколько «сбоев АТС» у водителя уже было: после max_attempts сбоев сдаёмся."""
     attempts = max(0, int(attempts))
     if result == RESULT_ANSWERED:
         return STATE_DONE, None, attempts
@@ -187,6 +191,10 @@ def after_result(result, attempts, max_attempts, retry_after_minutes, now):
         return STATE_PENDING, now + timedelta(seconds=LINE_BUSY_RETRY_SECONDS), max(0, attempts - 1)
     if result == RESULT_NO_LINK:
         return STATE_PENDING, now + timedelta(seconds=NO_LINK_RETRY_SECONDS), max(0, attempts - 1)
+    if result == RESULT_FAILED:
+        if int(failed_before or 0) + 1 >= int(max_attempts):
+            return STATE_GIVEN_UP, None, max(0, attempts - 1)
+        return STATE_PENDING, now + timedelta(minutes=int(retry_after_minutes)), max(0, attempts - 1)
     if attempts >= int(max_attempts):
         return STATE_GIVEN_UP, None, attempts
     return STATE_PENDING, now + timedelta(minutes=int(retry_after_minutes)), attempts
