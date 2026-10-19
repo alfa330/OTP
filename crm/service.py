@@ -110,6 +110,13 @@ def deliver_ticket(db, ticket_id, *, attachment=None, gcs=None):
     subtitle = 'Обращение %s · %s' % (telegram.ticket_number(ticket_id),
                                       payload['queue_title'] or '')
     due_text = _due_text(payload['due_at'])
+    # Оператора называем только там, где тематика об этом просит (задача #383,
+    # «Сотрудничество»): остальным группам имя лишнее — решение владельца
+    # 19.08.2026. Имя — записанное в обращение при создании (то же «Кто завёл» в
+    # карточке), поэтому и после проверки супервайзером, и при «Отправить ещё
+    # раз» это оператор, который обращение завёл, а не тот, кто его отправил.
+    author_name = (payload['created_by_name']
+                   if scenarios.shows_author_in_group(payload['scenario_key']) else None)
 
     # Данные водителя уходят ПОДПИСЬЮ к картинке, а не на саму картинку: ИИН с
     # неё не скопировать, а с него и начинается работа специалиста в группе. У
@@ -126,7 +133,8 @@ def deliver_ticket(db, ticket_id, *, attachment=None, gcs=None):
     if picture is not None:
         caption = telegram.build_card_caption(
             ticket_id=ticket_id, data_rows=data_rows,
-            priority=payload['priority'], due_text=due_text, mentions=mentions)
+            priority=payload['priority'], due_text=due_text, mentions=mentions,
+            author_name=author_name)
         result, error = transport.send_attachment(
             payload['chat_id'], file_name='ticket-%d.png' % ticket_id,
             stream=io.BytesIO(picture), mimetype='image/png',
@@ -152,6 +160,7 @@ def deliver_ticket(db, ticket_id, *, attachment=None, gcs=None):
             due_text=due_text,
             own_wording=bool(scenario.get('body_template')),
             mentions=mentions,
+            author_name=author_name,
         )
         result, error = transport.send_message(payload['chat_id'], text)
 

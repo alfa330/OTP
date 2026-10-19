@@ -129,6 +129,73 @@ class TicketMessageTest(unittest.TestCase):
         self.assertIn('ticket_id=42', message)
 
 
+class OperatorLineTest(unittest.TestCase):
+    """Задача #383: «Сотрудничество» называет в группе оператора, который завёл
+    обращение. Остальным группам имя автора лишнее (решение владельца
+    19.08.2026), поэтому строка появляется, только когда имя передали.
+    """
+
+    LINE = '🙍 <b>Оператор:</b> Тестова Дана'
+    TAGS = '👥 <b>Ответственные:</b> @coop_desk'
+
+    def message(self, **kwargs):
+        payload = dict(
+            ticket_id=77, subject='Сотрудничество с таксопарками · ТОО «Альфа»',
+            body='Название компании: ТОО «Альфа»', queue_title='Сотрудничество',
+            heading='Просьба связаться по вопросу сотрудничества',
+        )
+        payload.update(kwargs)
+        return telegram.build_ticket_message(**payload)
+
+    def test_operator_closes_the_message(self):
+        out = self.message(author_name='Тестова Дана')
+        self.assertTrue(out.endswith('\n\n' + self.LINE), out[-80:])
+
+    def test_no_name_no_line(self):
+        for name in (None, '', '   '):
+            self.assertNotIn('Оператор', self.message(author_name=name), repr(name))
+
+    def test_name_is_escaped_and_kept_on_one_line(self):
+        out = self.message(author_name='Тестова\n<Дана>')
+        self.assertIn('🙍 <b>Оператор:</b> Тестова &lt;Дана&gt;', out)
+        for raw in ('Тестова\r\nДана', ' Тестова\t Дана ', 'Тестова  Дана'):
+            self.assertIn(self.LINE, self.message(author_name=raw), repr(raw))
+
+    def test_without_tail_the_message_ends_with_its_text(self):
+        """Без оператора и тегов хвоста нет вовсе: сообщение кончается текстом,
+        а длинное режется ровно по пределу Telegram — как до правки."""
+        self.assertFalse(self.message().endswith(chr(10)))
+        self.assertEqual(len(self.message(body='я' * 9000, client_name='К' * 3000)),
+                         telegram.MESSAGE_LIMIT)
+        self.assertFalse(telegram.build_card_caption(ticket_id=10, data_rows=[]).endswith(chr(10)))
+        caption = telegram.build_card_caption(
+            ticket_id=10, data_rows=[{'label': 'Длинное поле', 'value': 'я' * 2000}])
+        self.assertEqual(len(caption), telegram.CAPTION_LIMIT)
+
+    def test_operator_stands_right_above_the_tags(self):
+        """Хвост сообщения: кто завёл и кого зовут — подряд, теги последними."""
+        out = self.message(author_name='Тестова Дана', mentions=[{'username': 'coop_desk'}])
+        self.assertTrue(out.endswith('\n\n%s\n%s' % (self.LINE, self.TAGS)), out[-120:])
+
+    def test_long_ticket_does_not_cut_the_operator_off(self):
+        """Обрезка по пределу Telegram ест текст, а не хвост: имя — то, ради
+        чего тематика его просила, и молча потерять его нельзя."""
+        out = self.message(body='я' * 9000, client_name='К' * 3000,
+                           author_name='Тестова Дана', mentions=[{'username': 'coop_desk'}])
+        self.assertLessEqual(len(out), telegram.MESSAGE_LIMIT)
+        self.assertTrue(out.endswith('%s\n%s' % (self.LINE, self.TAGS)), out[-120:])
+
+    def test_card_caption_names_the_operator_the_same_way(self):
+        """Признак тематики значит одно и то же, чем бы обращение ни ушло: у
+        картинки имя встаёт в подпись — над тегами и вне обрезки."""
+        text = telegram.build_card_caption(
+            ticket_id=10, data_rows=[{'label': 'Длинное поле', 'value': 'я' * 2000}],
+            mentions=[{'username': 'coop_desk'}], author_name='Тестова Дана')
+        self.assertLessEqual(len(text), telegram.CAPTION_LIMIT)
+        self.assertTrue(text.endswith('%s\n%s' % (self.LINE, self.TAGS)), text[-120:])
+        self.assertNotIn('Оператор', telegram.build_card_caption(ticket_id=10, data_rows=[]))
+
+
 class NoButtonsTest(unittest.TestCase):
     """Кнопок под сообщением больше нет (решение владельца 19.08.2026).
 

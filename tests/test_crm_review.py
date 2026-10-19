@@ -577,6 +577,17 @@ class SendDecisionTest(ServiceCase):
         self.assertIn('<b>Тип сотрудничества:</b> С Яндексом', transport.sent[0]['text'])
         self.assertIn('review_sent', [call['kind'] for call in fake.find('add_event')])
 
+    def test_the_group_sees_the_operator_not_the_supervisor(self):
+        """Задача #383: в группу обращение отправил супервайзер, но имя в
+        сообщении — того, кто его завёл: звонок принимал оператор."""
+        _fake, transport = self.wire(payload=coop_payload(created_by_name='Тестова Дана'),
+                                     ticket=pending(), route_context=coop_context())
+        delivered, error = service.review_send(self.db, 110, ctx=self.CTX)
+        self.assertTrue(delivered, error)
+        text = transport.sent[0]['text']
+        self.assertIn('🙍 <b>Оператор:</b> Тестова Дана', text)
+        self.assertNotIn(self.CTX['name'], text)
+
     def test_decision_is_written_before_the_network(self):
         """И сеть — без открытого курсора: пул делят колокол и аукцион."""
         fake, _transport = self.wire(payload=coop_payload(), ticket=pending(),

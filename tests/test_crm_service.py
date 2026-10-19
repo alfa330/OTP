@@ -17,8 +17,9 @@
 
 import unittest
 from contextlib import contextmanager
+from unittest import mock
 
-from crm import service, transport
+from crm import scenarios, service, transport
 
 
 class PoolViolation(AssertionError):
@@ -197,6 +198,24 @@ PARCEL_PAYLOAD = dict(
         'contact_number': '+7 777 000 00 00', 'parcel_city': 'Атырау',
         'delivery_date': '2026-08-20', 'parcel_description': 'синяя коробка Kaspi',
     },
+)
+
+
+# «Сотрудничество» с таксопарком: в группу уходит сразу, текстом.
+COOP_ANSWERS = {
+    'coop_channel': 'Звонок', 'coop_park': 'iTaxi', 'coop_city': 'Алматы',
+    'coop_type': scenarios.COOP_WITH_PARKS, 'coop_company': 'ТОО «Альфа»',
+    'coop_phone': '+7 777 000 00 00', 'coop_service': 'Реклама на автомобилях парка',
+}
+COOP_PAYLOAD = dict(
+    PAYLOAD,
+    subject=scenarios.render_subject('cooperation', COOP_ANSWERS),
+    body=scenarios.render_body('cooperation', COOP_ANSWERS),
+    priority='normal',
+    created_by_name='Тестова Дана',
+    queue_title='Сотрудничество',
+    scenario_key='cooperation',
+    answers=COOP_ANSWERS,
 )
 
 
@@ -421,6 +440,65 @@ class DeliveryTest(ServiceCase):
         self.wire(payload=dict(PAYLOAD))
         service.deliver_ticket(self.db, 42)
         self.assertEqual(self.db.max_depth, 1)
+
+
+class OperatorNameTest(ServiceCase):
+    """Задача #383: в группе «Сотрудничество» видно, кто из операторов завёл
+    обращение. Остальным группам имя автора лишнее — решение владельца
+    19.08.2026 для них в силе."""
+
+    def test_cooperation_names_the_operator(self):
+        queries, transport = self.wire(payload=dict(COOP_PAYLOAD))
+        ok, error = service.deliver_ticket(self.db, 42)
+
+        self.assertTrue(ok, error)
+        self.assertEqual(transport.files, [])
+        self.assertIn('🙍 <b>Оператор:</b> Тестова Дана', transport.sent[0]['text'])
+        # Имя — только в сообщении группы. В нить ложится прежний текст
+        # обращения: в карточке оператор и так стоит строкой «Кто завёл».
+        self.assertEqual(queries.find('add_message')[0]['body'], COOP_PAYLOAD['body'])
+
+    def test_resend_names_the_same_operator(self):
+        """«Отправить ещё раз» после сбоя — та же отправка и то же имя автора."""
+        _queries, transport = self.wire(payload=dict(COOP_PAYLOAD, delivery_status='failed'))
+        ok, error = service.deliver_ticket(self.db, 42)
+        self.assertTrue(ok, error)
+        self.assertIn('🙍 <b>Оператор:</b> Тестова Дана', transport.sent[0]['text'])
+
+    def test_unnamed_author_adds_no_line(self):
+        _queries, transport = self.wire(payload=dict(COOP_PAYLOAD, created_by_name=None))
+        service.deliver_ticket(self.db, 42)
+        self.assertNotIn('Оператор', transport.sent[0]['text'])
+
+    def test_other_groups_still_do_not_name_the_author(self):
+        _queries, transport = self.wire(payload=dict(PARCEL_PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        text = transport.sent[0]['text']
+        self.assertNotIn('Оператор', text)
+        self.assertNotIn(PARCEL_PAYLOAD['created_by_name'], text)
+
+    def test_card_caption_does_not_name_the_author_either(self):
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        caption = transport.files[0]['caption']
+        self.assertNotIn('Оператор', caption)
+        self.assertNotIn(PAYLOAD['created_by_name'], caption)
+
+    def test_the_mark_means_the_same_for_a_card(self):
+        """Признак тематики не зависит от того, чем ушло обращение: у картинки
+        имя встаёт в подпись. Сейчас таких тематик нет — тест держит проводку."""
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        with mock.patch.object(service.scenarios, 'shows_author_in_group', return_value=True):
+            service.deliver_ticket(self.db, 42)
+        self.assertIn('🙍 <b>Оператор:</b> Иванов И.', transport.files[0]['caption'])
+
+    def test_refused_card_falls_back_to_text_with_the_name(self):
+        """Telegram не принял картинку — запасной текст несёт то же имя."""
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        transport._file_error = 'PHOTO_INVALID_DIMENSIONS'
+        with mock.patch.object(service.scenarios, 'shows_author_in_group', return_value=True):
+            service.deliver_ticket(self.db, 42)
+        self.assertIn('🙍 <b>Оператор:</b> Иванов И.', transport.sent[0]['text'])
 
 
 class OfficeMentionTest(ServiceCase):

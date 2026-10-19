@@ -187,6 +187,15 @@ class CooperationTest(unittest.TestCase):
         self.assertEqual(sc.get(self.KEY)['queue_code'], 'cooperation')
         self.assertIn('cooperation', {code for code, *_ in schema._SEED_QUEUES})
 
+    def test_only_cooperation_names_the_operator_in_the_group(self):
+        """Задача #383 — про одну категорию. Остальным группам имя автора
+        лишнее (решение владельца 19.08.2026), и расширять правило «по смыслу»
+        нельзя."""
+        named = [item['key'] for item in sc.SCENARIOS if sc.shows_author_in_group(item['key'])]
+        self.assertEqual(named, [self.KEY])
+        self.assertFalse(sc.shows_author_in_group('нет такой тематики'))
+        self.assertFalse(sc.shows_author_in_group(None))
+
     def test_fields_before_the_type_are_asked_always(self):
         self.assertEqual(self.keys({})[:4],
                          ['coop_channel', 'coop_park', 'coop_city', 'coop_type'])

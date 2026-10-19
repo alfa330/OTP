@@ -145,9 +145,32 @@ def mentions_line(mentions):
     return '👥 <b>Ответственные:</b> %s' % ' '.join(names)
 
 
+def author_line(author_name):
+    """Строка «Оператор: …» — кто завёл обращение, или None, если называть некого.
+
+    Имя сюда передают только тематики, которые просят назвать оператора
+    (scenarios.shows_author_in_group); остальным группам оно лишнее — см.
+    build_ticket_message.
+    """
+    # Одной строкой: перенос внутри имени разорвал бы подпись.
+    name = ' '.join(str(author_name or '').split())
+    if not name:
+        return None
+    return '🙍 <b>Оператор:</b> %s' % html.escape(name)
+
+
+def _with_tail(lines, limit, tail_lines):
+    """Текст сообщения и хвост, которого обрезка не касается (оператор, теги)."""
+    tail = chr(10).join([line for line in tail_lines if line])
+    if not tail:
+        return _clip(chr(10).join(lines), limit)
+    return '%s\n\n%s' % (_clip(chr(10).join(lines), limit - len(tail) - 2), tail)
+
+
 def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
                          priority='normal', client_name=None, client_phone=None,
-                         due_text=None, own_wording=False, mentions=None):
+                         due_text=None, own_wording=False, mentions=None,
+                         author_name=None):
     """Текст исходного сообщения обращения (HTML-разметка Telegram).
 
     Шапка устроена так, как её нарисовали в ТЗ задачи #206: первой строкой —
@@ -200,20 +223,21 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
     # Кто обратился, из какого отдела и когда — в группе лишнее (просьба
     # владельца 19.08.2026). Отвечают не человеку, а обращению; имя, отдел и
     # время видны в карточке, куда ведёт ссылка в шапке.
+    #
+    # Исключение — author_name: его передают только тематики, которые просят
+    # назвать оператора (задача #383, «Сотрудничество»). Отдел и время не
+    # пишутся и там.
 
     # Теги — последней строкой, и обрезка их не касается. Обрезать сообщение
     # целиком было бы дешевле, но у длинного обращения обрезанным оказался бы
     # именно хвост, то есть теги: сообщение ушло бы, а уведомления — нет, и
-    # понять это можно было бы только по молчанию группы.
-    tail = mentions_line(mentions)
-    if not tail:
-        return _clip('\n'.join(lines), MESSAGE_LIMIT)
-    text = _clip('\n'.join(lines), MESSAGE_LIMIT - len(tail) - 2)
-    return '%s\n\n%s' % (text, tail)
+    # понять это можно было бы только по молчанию группы. Оператор стоит прямо
+    # над тегами и тоже вне обрезки: ради этой строки тематика его и называет.
+    return _with_tail(lines, MESSAGE_LIMIT, (author_line(author_name), mentions_line(mentions)))
 
 
 def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None,
-                       mentions=None):
+                       mentions=None, author_name=None):
     """Подпись к карточке-картинке: то, чего в картинке физически быть не может.
 
     Две вещи. Ссылка — с картинки не нажать, а специалисту из группы нужен не
@@ -241,13 +265,11 @@ def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None
         lines.append('<b>%s:</b> %s' % (html.escape(str(row['label'])),
                                         html.escape(str(row['value']))))
 
-    # Теги ответственных — последней строкой и вне обрезки, по той же причине,
-    # что и в текстовом сообщении: у длинной подписи обрезался бы именно хвост,
-    # и обращение ушло бы без уведомления тому, кому оно адресовано.
-    tail = mentions_line(mentions)
-    if not tail:
-        return _clip(chr(10).join(lines), CAPTION_LIMIT)
-    return '%s\n\n%s' % (_clip(chr(10).join(lines), CAPTION_LIMIT - len(tail) - 2), tail)
+    # Оператор (если тематика его называет) и теги ответственных — последними
+    # строками и вне обрезки, по той же причине, что и в текстовом сообщении: у
+    # длинной подписи обрезался бы именно хвост, и обращение ушло бы без
+    # уведомления тому, кому оно адресовано.
+    return _with_tail(lines, CAPTION_LIMIT, (author_line(author_name), mentions_line(mentions)))
 
 
 def build_reply_message(*, ticket_id, author_name, body, iin=None):
