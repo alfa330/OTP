@@ -71372,6 +71372,16 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error scheduling dial_list sign check: {e}")
 
+    async def dial_list_sign_report_job():
+        # «Удаленный КЦ»: картинка «Подписание водителей по городам» в группы, выбранные во
+        # вкладке «Аналитика» (владелец, 19.10.2026: в 10:00 и в 19:00). Джоба ставит рассылку в
+        # свой поток раздела и не ждёт; повтор слота не уходит (dial_list/service.py).
+        try:
+            if _dial_list_service is not None:
+                _dial_list_service.request_sign_report('планировщик')
+        except Exception as e:
+            logging.exception(f"Error scheduling dial_list sign report: {e}")
+
     async def dial_list_trips_check_job():
         # Автообзвон Тез КЦ: вышли ли водители базы на линию (поездки в TEZ APP). Так же,
         # как подписание: джоба ставит прогон в поток раздела и не ждёт; кому пора —
@@ -71497,6 +71507,19 @@ if __name__ == '__main__':
         misfire_grace_time=600,
         max_instances=1,
         coalesce=True
+    )
+
+    # «Удаленный КЦ»: отчёт «Подписание водителей по городам» в выбранные группы — в 10:00 и
+    # 19:00 по Алматы. И раз при старте: выкладка ровно в 10:00 иначе съела бы отчёт — неотправленный
+    # слот уходит в пределах часа (sign_report.SLOT_LATE_MAX), отправленный повторно не уходит.
+    scheduler.add_job(
+        dial_list_sign_report_job,
+        CronTrigger(hour='10,19', minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='dial_list_sign_report',
+        misfire_grace_time=1800,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')),
     )
 
     # Автообзвон Тез КЦ: проверка поездок водителей в TEZ APP — каждые полчаса, в

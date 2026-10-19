@@ -158,6 +158,11 @@
     GET     /api/dial_list/departments/<id>/announcement_stats  точность распознавания сообщения сети по речи
                                                              за ?days= (14): подозрительные плечи против
                                                              финалов Binotel — безопасен ли режим auto
+    GET/PUT /api/dial_list/departments/<id>/sign_report/chats  группы для картинки «Подписание водителей по
+                                                             городам» (10:00 и 19:00): available — где есть
+                                                             бот, selected — выбор отдела с итогом последней
+                                                             отправки; PUT {chat_ids}
+    GET     /api/dial_list/departments/<id>/sign_report/preview  та же картинка на сейчас (PNG)
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка; у итога subtypes —
                                                              его типы (в PUT ключа нет — типы не трогаются)
     GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
@@ -786,6 +791,29 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(department_id)
         period = parse_period(request.args.get('period'))
         return jsonify({"status": "success", **svc.analytics(department_id, period=period)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/sign_report/chats', methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def sign_report_chats(department_id):
+        """Группы для отчёта «Подписание водителей по городам» (в 10:00 и 19:00 по Алматы): выбор
+        отдела и все группы, куда добавлен бот. PUT {"chat_ids": [...]} — заменить выбор."""
+        requester_id, _scope = _manager(department_id)
+        if request.method == 'GET':
+            return jsonify({"status": "success", **svc.sign_report_chats(department_id)}), 200
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", **svc.save_sign_report_chats(
+            department_id, payload.get('chat_ids'), changed_by=requester_id)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/sign_report/preview', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def sign_report_preview(department_id):
+        """Картинка отчёта на сейчас (PNG) — то, что уйдёт в группы."""
+        _manager(department_id)
+        response = send_file(BytesIO(svc.sign_report_png(department_id)), mimetype='image/png')
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @bp.route('/api/dial_list/departments/<int:department_id>/announcement_stats', methods=['GET', 'OPTIONS'])
     @require_api_key

@@ -138,6 +138,7 @@ from test_numbers import keys as test_keys
 
 from . import live_calls
 from . import pay
+from . import sign_report
 from . import signing
 from .sign_check import IN_FLIGHT_STATES, SignChecker
 from .trips_check import TripChecker
@@ -1225,6 +1226,15 @@ def _iso(value):
     return str(value)
 
 
+def _default_telegram_send(chat_id, png):
+    """Картинка отчёта в группу ботом портала: (result, error) — общий транспорт «Обращений»,
+    исключений не бросает, токен бота из текста ошибки вычищен."""
+    import io
+    from crm import transport
+    return transport.send_attachment(chat_id, file_name=sign_report.FILE_NAME, stream=io.BytesIO(png),
+                                     mimetype="image/png")
+
+
 def _iso_utc(value):
     """Момент → ISO-8601 в UTC (без пояса — уже UTC, как sign_check_due); не момент — None."""
     if not isinstance(value, datetime):
@@ -1393,8 +1403,13 @@ class DialListService:
     """Вся логика раздела. `db` — экземпляр Database из database.py."""
 
     def __init__(self, db, client_factory=None, sign_checker=None, calls_submit=None, trip_checker=None,
-                 trips_fetch=None, trips_configured=None, wa_client_factory=None):
+                 trips_fetch=None, trips_configured=None, wa_client_factory=None, telegram_send=None):
         self.db = db
+        # Отчёт о подписании в группы (19.10.2026): telegram_send(chat_id, png) -> (result, error);
+        # не передан — бот портала (crm.transport). Рассылка — свой поток, одна за раз.
+        self._telegram_send = telegram_send
+        self._sign_report_lock = threading.Lock()
+        self._sign_report_running = False
         self._client_factory = client_factory or self._default_client
         self._clients = {}
         self._clients_lock = threading.Lock()
@@ -6802,6 +6817,245 @@ class DialListService:
             "is_active_period": period == settings["_period"],
         })
         return data
+
+    # ------------------------------------------------------------ отчёт о подписании в Telegram
+    # Просьба владельца 19.10.2026: картинка «Подписание водителей по городам» (sign_report.py) в
+    # выбранные руководителем группы — в 10:00 и в 19:00. Своего реестра групп раздел не заводит:
+    # группы, куда добавлен бот, копит общая таблица it_ticket_channels (обработчик my_chat_member),
+    # оттуда же берут «Обращения» и «Лиды OLX». У отдела хранится только выбор и итог отправки.
+    # Отчёт — по базе обзваниваемого месяца: той же, что видят операторы.
+    SIGN_REPORT_RETRY_SEC = 5
+    _SIGN_REPORT_DUE_SQL = """
+        SELECT c.department_id, c.chat_id
+        FROM dial_list_sign_report_chats c
+        JOIN dial_list_department_settings s ON s.department_id = c.department_id
+        WHERE COALESCE(s.profile, 'remote_cc') = 'remote_cc'
+          AND (c.last_slot IS NULL OR c.last_slot < %s)
+        ORDER BY c.department_id, c.chat_id
+    """
+
+    def _remote_cc_settings(self, department_id):
+        """Настройки отдела удалённого КЦ; у автообзвона Тез отчёта о подписании нет."""
+        settings = self.department_settings(department_id)
+        if is_tez(settings):
+            raise DialListError("Отчёт о подписании есть только у удалённого КЦ", 400)
+        return settings
+
+    def _bot_groups(self):
+        """{chat_id: группа} — где сейчас есть бот; None — реестр не прочитался."""
+        try:
+            channels = self.db.list_it_ticket_channels(active_only=True) or []
+        except Exception:
+            log.exception("dial_list: не удалось прочитать группы бота (it_ticket_channels)")
+            return None
+        groups = {}
+        for channel in channels:
+            try:
+                groups[int(channel.get("chat_id"))] = channel
+            except (TypeError, ValueError):
+                continue
+        return groups
+
+    def sign_report_chats(self, department_id):
+        """Куда уходит отчёт отдела: выбранные группы (с итогом последней отправки) и все группы
+        бота для выбора. schedule — часы отправки по Алматы."""
+        department_id = int(department_id)
+        self._remote_cc_settings(department_id)
+        groups = self._bot_groups()
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT chat_id, title, last_sent_at, last_error, last_slot
+                FROM dial_list_sign_report_chats WHERE department_id = %s
+                ORDER BY lower(title), chat_id
+            """, (department_id,))
+            rows = cur.fetchall()
+        available = sorted(
+            ({"chat_id": chat_id, "title": (group.get("title") or str(chat_id))}
+             for chat_id, group in (groups or {}).items()),
+            key=lambda g: (g["title"].lower(), g["chat_id"]))
+        selected = [{
+            "chat_id": int(r[0]),
+            # Название — из реестра бота: группу могли переименовать после выбора.
+            "title": ((groups or {}).get(int(r[0])) or {}).get("title") or r[1] or str(r[0]),
+            "last_sent_at": _iso(r[2]),
+            "last_error": r[3] or "",
+            "last_slot": _iso(r[4]),
+            # Бота могли убрать из группы уже после выбора: отчёт туда не дойдёт — сказать прямо.
+            "is_available": groups is None or int(r[0]) in groups,
+        } for r in rows]
+        return {
+            "department_id": department_id,
+            "available": available,
+            "selected": selected,
+            "chosen_ids": [s["chat_id"] for s in selected],
+            "schedule": ["%02d:00" % hour for hour in sign_report.SLOT_HOURS],
+            "registry_ok": groups is not None,
+        }
+
+    def save_sign_report_chats(self, department_id, chat_ids, changed_by=None, now=None):
+        """Сохранить выбор групп отдела ({"chat_ids": [...]}). Группа, где бота нет, — 400:
+        отчёт туда не дойдёт. Итог прошлых отправок у оставшихся групп сохраняется.
+
+        Новой группе текущий слот засчитан как отработанный: первый отчёт — в ближайшие 10:00
+        или 19:00, а не при случайном перезапуске сервера через полчаса после выбора."""
+        department_id = int(department_id)
+        current_slot = sign_report.slot_for(now or sign_report.now_utc())
+        self._remote_cc_settings(department_id)
+        if not isinstance(chat_ids, list):
+            raise DialListError("chat_ids: нужен список групп")
+        wanted = []
+        for value in chat_ids:
+            try:
+                chat_id = int(value)
+            except (TypeError, ValueError):
+                raise DialListError("chat_ids: идентификатор группы — число")
+            if chat_id not in wanted:
+                wanted.append(chat_id)
+        groups = self._bot_groups()
+        if groups is None:
+            raise DialListError("Список групп бота сейчас недоступен — повторите через минуту", 503)
+        unknown = [chat_id for chat_id in wanted if chat_id not in groups]
+        if unknown:
+            raise DialListError("Бота нет в группах: %s" % ", ".join(str(x) for x in unknown))
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                DELETE FROM dial_list_sign_report_chats
+                WHERE department_id = %s AND NOT (chat_id = ANY(%s::bigint[]))
+            """, (department_id, wanted))
+            for chat_id in wanted:
+                group = groups[chat_id]
+                cur.execute("""
+                    INSERT INTO dial_list_sign_report_chats (department_id, chat_id, title, chat_type, added_by,
+                                                             last_slot)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (department_id, chat_id) DO UPDATE SET
+                        title = EXCLUDED.title, chat_type = EXCLUDED.chat_type
+                """, (department_id, chat_id, str(group.get("title") or "")[:255],
+                      str(group.get("chat_type") or "")[:32], changed_by, current_slot))
+        log.info("dial_list: отчёт о подписании отдела %s — группы %s (сохранил %s)",
+                 department_id, wanted, changed_by)
+        return self.sign_report_chats(department_id)
+
+    def sign_report_data(self, department_id):
+        """Строки отчёта по базе обзваниваемого месяца отдела (sign_report.build) + period."""
+        department_id = int(department_id)
+        period = self._remote_cc_settings(department_id)["_period"]
+        with self.db._get_cursor() as cur:
+            rows = sign_report.collect(cur, department_id, period)
+        report = sign_report.build(rows)
+        report["period"] = period
+        return report
+
+    def sign_report_png(self, department_id, now=None):
+        """Картинка отчёта на сейчас — то, что уйдёт в группы (предпросмотр во вкладке)."""
+        return sign_report.render_png(self.sign_report_data(department_id), now or sign_report.now_utc())
+
+    def request_sign_report(self, reason=""):
+        """Разослать отчёт в своём потоке, не дожидаясь (планировщик бота). Идёт рассылка —
+        вторую не начинаем: слот она закроет сама."""
+        with self._sign_report_lock:
+            if self._sign_report_running:
+                return False
+            self._sign_report_running = True
+        threading.Thread(target=self._sign_report_run, args=(reason,), name="dial-sign-report",
+                         daemon=True).start()
+        return True
+
+    def _sign_report_run(self, reason):
+        try:
+            self.send_sign_reports(reason=reason)
+        except Exception:
+            log.exception("dial_list: рассылка отчёта о подписании упала (%s)", reason)
+        finally:
+            with self._sign_report_lock:
+                self._sign_report_running = False
+
+    def send_sign_reports(self, now=None, reason=""):
+        """Отправить отчёт за текущий слот (10:00 / 19:00) всем группам, которым он ещё не ушёл.
+
+        Группа сначала «забирает» слот (last_slot) короткой транзакцией и только потом получает
+        картинку: два экземпляра сервера рядом (выкладка) не пришлют её дважды. Не дошло — второй
+        попыткой через SIGN_REPORT_RETRY_SEC, потом ошибка остаётся у группы (её видно во
+        вкладке), а слот считается отработанным: опоздавший отчёт не досылается. Сеть — вне
+        транзакций. Пустая база месяца — картинки нет, у группы причина."""
+        now = now or sign_report.now_utc()
+        slot = sign_report.slot_for(now)
+        summary = {"reason": reason, "slot": slot.isoformat() if slot else None,
+                   "sent": 0, "failed": 0, "skipped": 0}
+        if slot is None:
+            return summary
+        with self.db._get_cursor() as cur:
+            cur.execute(self._SIGN_REPORT_DUE_SQL, (slot,))
+            due = cur.fetchall()
+        by_department = {}
+        for department_id, chat_id in due:
+            by_department.setdefault(int(department_id), []).append(int(chat_id))
+        for department_id, chat_ids in by_department.items():
+            png, problem = None, ""
+            try:
+                report = self.sign_report_data(department_id)
+                if report["totals"]["total"]:
+                    # Время в подзаголовке — когда собрали, а не время слота: после перезапуска
+                    # сервера отчёт может уйти на несколько минут позже.
+                    png = sign_report.render_png(report, now)
+                else:
+                    problem = "В базе месяца никого — отчёт не отправлен"
+            except Exception:
+                log.exception("dial_list: отчёт о подписании отдела %s не собрался", department_id)
+                problem = "Отчёт не собрался — подробности в журнале сервера"
+            for chat_id in chat_ids:
+                if not self._claim_sign_report(department_id, chat_id, slot):
+                    continue
+                error = problem
+                if png is not None:
+                    error = self._send_sign_report(chat_id, png)
+                self._finish_sign_report(department_id, chat_id, error)
+                if png is None:
+                    summary["skipped"] += 1
+                elif error:
+                    summary["failed"] += 1
+                else:
+                    summary["sent"] += 1
+        if due:
+            log.info("dial_list: отчёт о подписании за %s (%s): отправлено %d, не дошло %d, без картинки %d",
+                     summary["slot"], reason, summary["sent"], summary["failed"], summary["skipped"])
+        return summary
+
+    def _claim_sign_report(self, department_id, chat_id, slot):
+        """Забрать слот за группой; False — его уже забрал другой процесс (или группу убрали)."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                UPDATE dial_list_sign_report_chats SET last_slot = %s
+                WHERE department_id = %s AND chat_id = %s AND (last_slot IS NULL OR last_slot < %s)
+                RETURNING chat_id
+            """, (slot, department_id, chat_id, slot))
+            return cur.fetchone() is not None
+
+    def _send_sign_report(self, chat_id, png):
+        """Картинка в группу; '' — дошла, иначе текст ошибки Telegram (без токена бота)."""
+        send = self._telegram_send or _default_telegram_send
+        error = ""
+        for attempt in range(2):
+            if attempt:
+                time.sleep(self.SIGN_REPORT_RETRY_SEC)
+            try:
+                _result, error = send(chat_id, png)
+            except Exception as exc:  # отправка не бросает, подменённая в тестах — может
+                error = "%s: %s" % (type(exc).__name__, exc)
+            if not error:
+                return ""
+            log.warning("dial_list: отчёт о подписании в группу %s не ушёл (попытка %d): %s",
+                        chat_id, attempt + 1, error)
+        return str(error)[:500]
+
+    def _finish_sign_report(self, department_id, chat_id, error):
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                UPDATE dial_list_sign_report_chats
+                SET last_sent_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE last_sent_at END,
+                    last_error = %s
+                WHERE department_id = %s AND chat_id = %s
+            """, (not error, error or "", department_id, chat_id))
 
     # ------------------------------------------------------------ замер распознавания сообщения сети
     # Ревью 13.10.2026: сообщение сети, распознанное по речи, не отличить надёжно от мелодии вместо

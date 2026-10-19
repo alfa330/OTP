@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_BREAKDOWN, signMeta } from './signStatus';
+import DialListSignReport from './DialListSignReport';
 
 /*
  * Вкладка «Аналитика» раздела «Обзвон» (просьба владельца 29.09.2026: сводку
@@ -269,6 +270,7 @@ const ByDayCard = ({ days }) => {
 
 const DialListAnalytics = ({
     apiBaseUrl, authHeaders, departmentId, periods = [], activePeriod = '', period = '', onPeriodChange, onOpenJournal,
+    canEdit = true, showToast,
 }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -323,6 +325,14 @@ const DialListAnalytics = ({
                     <button type="button" onClick={load} disabled={loading} className={`${iosBtnGhost} shrink-0`} aria-label="Обновить" title="Обновить">
                         <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
                     </button>
+                    {/* Картинка «Подписание по городам» в группы в 10:00 и 19:00 (владелец, 19.10.2026). */}
+                    <DialListSignReport
+                        apiBaseUrl={apiBaseUrl}
+                        authHeaders={authHeaders}
+                        departmentId={departmentId}
+                        canEdit={canEdit}
+                        showToast={showToast}
+                    />
                 </div>
                 <SignCheckLine check={check} />
             </div>

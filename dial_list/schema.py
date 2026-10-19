@@ -41,6 +41,9 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_attempt_offers       какие офферы оператор отметил в итоге звонка.
     dial_list_wa_messages          журнал и outbox отправок шаблона WhatsApp
                                    (ChatApp) водителю: строка пишется до запроса.
+    dial_list_sign_report_chats    в какие Telegram-группы отдел шлёт картинку
+                                   «Подписание водителей по городам» (10:00 и 19:00)
+                                   и чем кончилась последняя отправка.
 
 Профиль отдела (dial_list_department_settings.profile, 15.10.2026): 'remote_cc' —
 удалённый КЦ, как было; 'tez' — автообзвон Тез КЦ на том же движке: база без ИИН,
@@ -457,6 +460,29 @@ DDL = [
         error TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         sent_at TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    # Город водителя (владелец, 19.10.2026: отчёт «Подписание водителей по городам»): из колонки
+    # «город» файла базы или из списка городов по ИИН (service.import_cities). '' — не указан.
+    # Индекса нет: отчёт — один проход по базе месяца дважды в день.
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS city VARCHAR(64) NOT NULL DEFAULT ''",
+    # Куда отдел шлёт отчёт о подписании (sign_report.py): группы из реестра бота
+    # (it_ticket_channels), FK на него нет — реестр общий и чистится своим кодом, как у «Лидов OLX».
+    #   last_slot     слот (10:00 / 19:00 по Алматы), который группа уже забрала: два процесса рядом
+    #                 (выкладка) не пришлют отчёт дважды
+    #   last_sent_at  когда отчёт последний раз дошёл; last_error — почему не дошёл последний ('' — дошёл)
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_sign_report_chats (
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        chat_id BIGINT NOT NULL,
+        title VARCHAR(255) NOT NULL DEFAULT '',
+        chat_type VARCHAR(32) NOT NULL DEFAULT '',
+        added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_slot TIMESTAMP WITH TIME ZONE,
+        last_sent_at TIMESTAMP WITH TIME ZONE,
+        last_error TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (department_id, chat_id)
     )
     """,
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.

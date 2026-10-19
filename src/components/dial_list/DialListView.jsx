@@ -521,6 +521,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             period={period}
                             onPeriodChange={setPeriod}
                             onOpenJournal={openJournal}
+                            canEdit={canEdit}
+                            showToast={showToast}
                         />
                     )}
 
