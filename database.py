@@ -7792,6 +7792,22 @@ class Database:
                     trip_done    = EXCLUDED.trip_done,
                     robot_closed = EXCLUDED.robot_closed,
                     synced_at    = NOW()
+                -- Неизменившуюся сделку не переписываем. Выгрузка раз в три часа и перед
+                -- каждой отбивкой берёт все сделки за 16 дней, и почти все они те же:
+                -- ~110 тыс. холостых UPDATE в сутки, ~600 МБ WAL за 4 дня (замер
+                -- 15–19.10.2026). synced_at никто не читает — свежесть выгрузки живёт в
+                -- журнале amo_lead_syncs.
+                WHERE (amo_leads.name, amo_leads.created_at, amo_leads.created_date,
+                       amo_leads.stage, amo_leads.responsible, amo_leads.tags,
+                       amo_leads.utm_source, amo_leads.utm_medium, amo_leads.utm_campaign,
+                       amo_leads.utm_term, amo_leads.registered, amo_leads.trip_done,
+                       amo_leads.robot_closed)
+                      IS DISTINCT FROM
+                      (EXCLUDED.name, EXCLUDED.created_at, EXCLUDED.created_date,
+                       EXCLUDED.stage, EXCLUDED.responsible, EXCLUDED.tags,
+                       EXCLUDED.utm_source, EXCLUDED.utm_medium, EXCLUDED.utm_campaign,
+                       EXCLUDED.utm_term, EXCLUDED.registered, EXCLUDED.trip_done,
+                       EXCLUDED.robot_closed)
             """, payload, page_size=500)
         return len(payload)
 

@@ -604,7 +604,11 @@ JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
 JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS = int(os.getenv('JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS', '90'))
-JWT_SESSION_TOUCH_INTERVAL_SECONDS = max(0, int(os.getenv('JWT_SESSION_TOUCH_INTERVAL_SECONDS', '60')))
+# Как часто продлевать last_seen_at сессии. «Активность» в «Сессиях» и «Моих устройствах»
+# — только время для показа, порогов «в сети» по нему нет. Раз в минуту на каждую открытую
+# вкладку выходило ~130 тыс. UPDATE в сутки и ~670 МБ WAL за 4 дня (замер 15–19.10.2026);
+# раз в 5 минут — впятеро меньше, а смена IP или браузера по-прежнему пишется сразу.
+JWT_SESSION_TOUCH_INTERVAL_SECONDS = max(0, int(os.getenv('JWT_SESSION_TOUCH_INTERVAL_SECONDS', '300')))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
 JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
