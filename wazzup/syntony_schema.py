@@ -1,4 +1,7 @@
-"""Durable, independently leased delivery of the Global Wazzup webhooks."""
+"""Durable, independently leased delivery of forwarded Wazzup webhooks.
+
+`route` names the receiver (wazzup/syntony.py: ROUTES). Rows written before
+routes existed are Syntony's, hence the default."""
 
 
 def init_schema(cursor):
@@ -21,6 +24,8 @@ def init_schema(cursor):
         );
         ALTER TABLE wazzup_syntony_outbox
             ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+        ALTER TABLE wazzup_syntony_outbox
+            ADD COLUMN IF NOT EXISTS route TEXT NOT NULL DEFAULT 'syntony';
         CREATE INDEX IF NOT EXISTS idx_wazzup_syntony_due
             ON wazzup_syntony_outbox(next_attempt_at, id)
             WHERE phase IN ('ready', 'resolve');

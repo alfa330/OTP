@@ -1,9 +1,26 @@
-# Пересылка Global в Syntony
+# Пересылка вебхуков: Global → Syntony, Help Taxi → CRM «Потока»
 
 Приёмник iCORE остаётся `/api/wazzup/webhook/<token>`. После сохранения сообщений
-и статусов он записывает исходные события Global в отдельную очередь PostgreSQL
-и отвечает Wazzup. Внешний POST выполняется фоновым работником; HTTP-запрос к
-Syntony не держит транзакцию БД и не задерживает ответ приёмника Wazzup.
+и статусов он записывает исходные события пересылаемых каналов в отдельную очередь
+PostgreSQL и отвечает Wazzup. Внешний POST выполняется фоновым работником;
+HTTP-запрос к получателю не держит транзакцию БД и не задерживает ответ приёмника.
+
+Маршрутов два (`wazzup/syntony.py: ROUTES`), у каждого свои каналы, свой адрес,
+ключ и выключатель. Очередь и работник общие, колонка `route` очереди называет
+получателя. Всё, что ниже сказано про Syntony, верно и для второго маршрута.
+
+| Маршрут | Каналы | Настройки |
+|---|---|---|
+| `syntony` | Global (два канала ниже) | `SYNTONY_WEBHOOK_*` |
+| `potok_crm` | `6983db13-ae8e-4b27-b09d-6c10ae4f54cf` — +77070253322 «Help Taxi» | `POTOK_CRM_WEBHOOK_*` |
+
+**Help Taxi → CRM «Потока» (20.10.2026).** До 15.10.2026 номер жил в аккаунте
+Wazzup «Поток», чей вебхук смотрит в CRM группы. С 15.10 номер в аккаунте `op`,
+вебхук которого приходит в iCORE, и CRM этих событий больше не получала.
+Пересылаются входящие, исходящие (в том числе ответы из «Чатов ОП»), правки,
+удаления и статусы канала — в исходной форме вебхука Wazzup. Событий
+`createContact`/`createDeal` нет: у аккаунта `op` эта подписка выключена, контакт
+и сделку CRM заводит сама по первому сообщению номера.
 
 ## Границы пересылки
 
@@ -40,7 +57,16 @@ SYNTONY_WEBHOOK_API_URL=<HTTPS endpoint Syntony>
 SYNTONY_WEBHOOK_API_KEY=<ключ Syntony>
 SYNTONY_WEBHOOK_AUTH_HEADER=Authorization
 SYNTONY_WEBHOOK_AUTH_PREFIX=Bearer
+
+POTOK_CRM_WEBHOOK_ENABLED=true
+POTOK_CRM_WEBHOOK_API_URL=<HTTPS endpoint CRM «Потока»>
+POTOK_CRM_WEBHOOK_API_KEY=<ключ, который проверяет CRM>
+POTOK_CRM_WEBHOOK_AUTH_HEADER=Authorization
+POTOK_CRM_WEBHOOK_AUTH_PREFIX=Bearer
 ```
+
+Без `..._ENABLED=true` и полного набора маршрут молчит: события его каналов в
+очередь не встают. Пересылка начинается с момента включения, прошлое не досылается.
 
 В запросе: `POST`, `Content-Type: application/json`,
 `Authorization: Bearer <ключ Syntony>` и стабильный `Idempotency-Key`.
@@ -74,16 +100,16 @@ SYNTONY_WEBHOOK_AUTH_PREFIX=Bearer
 Сводка без содержимого сообщений:
 
 ```sql
-SELECT phase, count(*), min(created_at), max(completed_at)
-FROM wazzup_syntony_outbox GROUP BY phase;
+SELECT route, phase, count(*), min(created_at), max(completed_at)
+FROM wazzup_syntony_outbox GROUP BY route, phase;
 
-SELECT phase, last_error, count(*)
+SELECT route, phase, last_error, count(*)
 FROM wazzup_syntony_outbox
 WHERE phase IN ('ready', 'resolve', 'failed')
-GROUP BY phase, last_error;
+GROUP BY route, phase, last_error;
 
-SELECT count(*) AS delivered, max(delivered_at) AS last_delivery
-FROM wazzup_syntony_outbox WHERE delivered_at IS NOT NULL;
+SELECT route, count(*) AS delivered, max(delivered_at) AS last_delivery
+FROM wazzup_syntony_outbox WHERE delivered_at IS NOT NULL GROUP BY route;
 ```
 
 `receipt` — только отпечаток входного пакета, не отдельная HTTP-доставка.
