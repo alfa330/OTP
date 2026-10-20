@@ -149,7 +149,9 @@ import {
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { useChatWaitingCount, waitingBadgeLabel } from './components/wazzup/chatWaitingBadge';
-import { installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand, setEmbedStatus } from './components/wazzup/embedBridge';
+import {
+    adoptEmbedIdentityFromSearch, installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand, setEmbedStatus,
+} from './components/wazzup/embedBridge';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 // Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
 import { stripPaymentsParams } from './components/payments/paymentsLink';
@@ -338,7 +340,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
    20.10.2026): портал рисует один раздел без меню и слушает команды страницы,
    в которую встроен (components/wazzup/embedBridge.js). Признак — с адреса загрузки. */
 const CHATS_EMBED = typeof window !== 'undefined' && isChatsEmbedSearch(window.location.search);
-if (CHATS_EMBED) installEmbedBridge();
+if (CHATS_EMBED) {
+    installEmbedBridge();
+    // Пользователь CRM в адресе окна — чтобы CRM видела авторов сообщений.
+    adoptEmbedIdentityFromSearch(window.location.search);
+}
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';

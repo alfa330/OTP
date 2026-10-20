@@ -19,6 +19,12 @@
  *   { type: 'icore.chats.error', requestId, code, message }
  * Команда, пришедшая до входа или до QR, ждёт и выполняется, когда окно готово.
  *
+ * Кто сейчас в CRM — чтобы CRM видела авторов сообщений (wazzup/crm_identity.py):
+ *   { type: 'icore.chats.identify', crmUserId: '352', crmUserName?: 'Иванова Айгерим' }
+ *   или в адресе окна: …&crmUserId=352&crmUserName=…
+ * Окно передаёт пару серверу от имени вошедшей учётки iCORE и отвечает
+ *   { type: 'icore.chats.identified', crmUserId }.
+ *
  * Слушаем только window.parent — команду может дать лишь страница, в которую окно
  * встроено. Отправить сообщение за человека команда не может: окно лишь открывает
  * чат, первое сообщение отправляет он сам (то же правило, что у ИИ-помощника).
@@ -56,11 +62,45 @@ export const parseEmbedCommand = (data) => {
     } };
 };
 
+/** Пользователь CRM из команды или адреса → { crmUserId, crmUserName } или null. */
+export const parseEmbedIdentity = (data) => {
+    if (!data || typeof data !== 'object') return null;
+    const raw = typeof data.crmUserId === 'number' ? String(data.crmUserId) : data.crmUserId;
+    const crmUserId = typeof raw === 'string' ? raw.trim() : '';
+    if (!/^[A-Za-z0-9_.@:-]{1,64}$/.test(crmUserId)) return null;
+    return { crmUserId, crmUserName: cleanText(data.crmUserName) };
+};
+
 let target = null;          // { win, parent }
 let parentOrigin = '*';     // откуда пришла последняя команда — туда и ответы с номером
 let status = null;
 let pending = null;
 let handler = null;
+let identity = null;
+let identityHandler = null;
+
+const setIdentity = (next) => {
+    if (!next || (identity && identity.crmUserId === next.crmUserId
+        && identity.crmUserName === next.crmUserName)) return;
+    identity = next;
+    identityHandler?.(identity);
+};
+
+/** Пользователь CRM: известный — сразу, сменившийся — по мере прихода. Возвращает отписку. */
+export const takeEmbedIdentity = (onIdentity) => {
+    identityHandler = onIdentity;
+    if (identity) onIdentity(identity);
+    return () => { if (identityHandler === onIdentity) identityHandler = null; };
+};
+
+/** Пользователь CRM из адреса окна (?crmUserId=…&crmUserName=…). */
+export const adoptEmbedIdentityFromSearch = (search) => {
+    try {
+        setIdentity(parseEmbedIdentity(Object.fromEntries(new URLSearchParams(String(search || '')))));
+    } catch (error) {
+        // Битый адрес — пользователь CRM придёт командой, если CRM его пришлёт.
+    }
+};
 
 const post = (message, origin = '*') => {
     if (!target) return;
@@ -106,6 +146,13 @@ export const installEmbedBridge = (win = typeof window === 'undefined' ? null : 
     target = { win, parent: win.parent };
     win.addEventListener('message', (event) => {
         if (event.source !== target.parent) return;
+        if (event.data?.type === `${EMBED_MESSAGE_PREFIX}identify`) {
+            parentOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
+            const next = parseEmbedIdentity(event.data);
+            if (next) setIdentity(next);
+            else replyToEmbedParent('error', { code: 'BAD_IDENTITY', message: 'Нужен crmUserId — id пользователя CRM' });
+            return;
+        }
         const parsed = parseEmbedCommand(event.data);
         if (!parsed) return;
         parentOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
@@ -121,4 +168,5 @@ export const installEmbedBridge = (win = typeof window === 'undefined' ? null : 
 /** Только для тестов: вернуть мост в исходное состояние. */
 export const resetEmbedBridgeForTests = () => {
     target = null; parentOrigin = '*'; status = null; pending = null; handler = null;
+    identity = null; identityHandler = null;
 };

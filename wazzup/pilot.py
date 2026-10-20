@@ -237,6 +237,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         driver_info_provider=driver_card_sync.get('driver_info'))
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, exclusions)
+    # The CRM user behind the window's iCORE account: who wrote, for the CRM (crm_identity.py).
+    from .crm_identity import register_crm_identity_route
+    register_crm_identity_route(bp, actor, require_api_key, preflight, db)
     from .send_check import register_send_check_route
     register_send_check_route(bp, actor, require_api_key, preflight, db, exclusions)
     from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError

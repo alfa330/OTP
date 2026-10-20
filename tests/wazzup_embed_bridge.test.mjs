@@ -3,8 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    installEmbedBridge, isChatsEmbedSearch, parseEmbedCommand, queueEmbedCommand, replyToEmbedParent,
-    resetEmbedBridgeForTests, setEmbedStatus, takeEmbedCommands,
+    adoptEmbedIdentityFromSearch, installEmbedBridge, isChatsEmbedSearch, parseEmbedCommand, parseEmbedIdentity,
+    queueEmbedCommand, replyToEmbedParent, resetEmbedBridgeForTests, setEmbedStatus, takeEmbedCommands,
+    takeEmbedIdentity,
 } from '../src/components/wazzup/embedBridge.js';
 
 /* «Чаты ОП» окном в CRM «Потока» (владелец, 20.10.2026): команды страницы-хозяина. */
@@ -92,7 +93,7 @@ test('вне iframe мост не слушает, но номер из адре�
 
 test('портал: окно — один раздел без меню, со сторожем смены; номер из адреса — команда', () => {
     const app = read('src/App.jsx');
-    assert.match(app, /const CHATS_EMBED = typeof window !== 'undefined' && isChatsEmbedSearch\(window\.location\.search\);\nif \(CHATS_EMBED\) installEmbedBridge\(\);/);
+    assert.match(app, /const CHATS_EMBED = typeof window !== 'undefined' && isChatsEmbedSearch\(window\.location\.search\);\nif \(CHATS_EMBED\) \{\n\s*installEmbedBridge\(\);[\s\S]{0,120}adoptEmbedIdentityFromSearch\(window\.location\.search\);\n\}/);
     const screen = app.slice(app.indexOf('            if (CHATS_EMBED) {\n                return ('), app.indexOf('                <div className="flex h-screen overflow-hidden">'));
     assert.match(screen, /<WazzupChatsView[\s\S]*embed\n\s*onLogout=\{handleLogout\}/);
     assert.match(screen, /<WazzupShiftKeeper/);
@@ -113,4 +114,33 @@ test('раздел: команда открывает свой чат, при н
     assert.doesNotMatch(handler, /enqueueMessage|\/pilot\/send/, 'команда CRM ничего не отправляет за человека');
     assert.match(view, /return takeEmbedCommands\(\(command\) => openForEmbedRef\.current\(command\)\);/);
     assert.match(view, /useEffect\(\(\) => \{ if \(embed\) setEmbedStatus\('locked'\); \}, \[embed\]\);/);
+});
+
+test('пользователь CRM: командой или в адресе окна; известный — сразу, повтор — без нового запроса', () => {
+    resetEmbedBridgeForTests();
+    assert.deepEqual(parseEmbedIdentity({ crmUserId: 352, crmUserName: ' Иванова Айгерим ' }),
+        { crmUserId: '352', crmUserName: 'Иванова Айгерим' });
+    assert.equal(parseEmbedIdentity({ crmUserId: 'a b' }), null);
+    assert.equal(parseEmbedIdentity({}), null);
+    adoptEmbedIdentityFromSearch('?embed=1&crmUserId=352&crmUserName=%D0%98%D0%B2%D0%B0%D0%BD');
+    const seen = [];
+    takeEmbedIdentity((identity) => seen.push(identity));
+    assert.deepEqual(seen, [{ crmUserId: '352', crmUserName: 'Иван' }]);
+    const { win, posted, send } = frame();
+    installEmbedBridge(win);
+    send({ type: 'icore.chats.identify', crmUserId: '352', crmUserName: 'Иван' });
+    assert.equal(seen.length, 1, 'та же пара — без нового запроса');
+    send({ type: 'icore.chats.identify', crmUserId: '401', crmUserName: 'Пётр' });
+    assert.deepEqual(seen.at(-1), { crmUserId: '401', crmUserName: 'Пётр' });
+    send({ type: 'icore.chats.identify' });
+    assert.equal(posted.at(-1).message.code, 'BAD_IDENTITY');
+    resetEmbedBridgeForTests();
+});
+
+test('раздел: пару «учётка iCORE ↔ пользователь CRM» передаёт тот, кто пишет', () => {
+    const view = read('src/components/wazzup/WazzupChatsView.jsx');
+    const effect = view.slice(view.indexOf('        if (!embedReady || !pilot.enabled) return undefined;'));
+    assert.match(effect, /return takeEmbedIdentity\(\(identity\) => \{/);
+    assert.match(effect, /axios\.post\(`\$\{apiBaseUrl\}\/api\/wazzup\/pilot\/crm-identity`, identity, \{ headers: headers\(\) \}\)/);
+    assert.match(effect, /replyToEmbedParent\('identified', \{ crmUserId: identity\.crmUserId \}\)/);
 });

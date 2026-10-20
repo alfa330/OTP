@@ -8,6 +8,7 @@ def init_schema(cursor):
     from .notes_schema import init_schema as init_notes_schema
     from .uploads_schema import init_schema as init_uploads_schema
     from .driver_cards_schema import init_schema as init_driver_cards_schema
+    from .crm_identity import init_schema as init_crm_identity_schema
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS wazzup_pilot_outbox (
             request_id UUID PRIMARY KEY, account TEXT NOT NULL,
@@ -116,3 +117,4 @@ def init_schema(cursor):
     init_notes_schema(cursor)
     init_uploads_schema(cursor)
     init_driver_cards_schema(cursor)
+    init_crm_identity_schema(cursor)

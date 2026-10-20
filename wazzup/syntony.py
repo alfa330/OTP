@@ -24,6 +24,8 @@ from uuid import uuid4
 
 import requests
 
+from . import crm_identity
+
 
 GLOBAL_CHANNEL_IDS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
@@ -61,14 +63,22 @@ class Config:
 @dataclass(frozen=True)
 class Route:
     """Which channels go where. `env` prefixes the route's own settings:
-    <env>_ENABLED, _API_URL, _API_KEY, _AUTH_HEADER, _AUTH_PREFIX."""
+    <env>_ENABLED, _API_URL, _API_KEY, _AUTH_HEADER, _AUTH_PREFIX.
+
+    prepare(db, body) -> (body, ready) shapes a delivery right before it is
+    sent; not ready means «try again shortly». None sends the queued bytes."""
     name: str
     env: str
     channels: frozenset
+    prepare: object = field(default=None, compare=False)
 
 
 SYNTONY = Route('syntony', 'SYNTONY_WEBHOOK', GLOBAL_CHANNEL_IDS)
-POTOK_CRM = Route('potok_crm', 'POTOK_CRM_WEBHOOK', POTOK_CRM_CHANNEL_IDS)
+# The CRM sees who wrote: the echo of an iCORE send gets its CRM user (crm_identity.py).
+POTOK_CRM = Route('potok_crm', 'POTOK_CRM_WEBHOOK', POTOK_CRM_CHANNEL_IDS,
+                  prepare=crm_identity.attach_authors)
+# How soon a delivery waiting for its author is tried again.
+PREPARE_RETRY_SECONDS = 2
 ROUTES = (SYNTONY, POTOK_CRM)
 _ROUTES_BY_NAME = {route.name: route for route in ROUTES}
 
@@ -411,9 +421,24 @@ def process_once(db, transport=None):
     if item['phase'] == 'resolve':
         _resolve(db, item, route)
         return True
+    body = bytes(item['payload'])
+    if route.prepare is not None:
+        try:
+            body, ready = route.prepare(db, body)
+        except Exception:
+            # Shaping must never cost the delivery itself: send what was queued.
+            logger.warning('Wazzup relay could not prepare a %s delivery', route.name)
+            body, ready = bytes(item['payload']), True
+        if not ready:
+            _retry(db, item, PREPARE_RETRY_SECONDS, 'awaiting_author')
+            # The worker otherwise sleeps up to IDLE_SECONDS between drains.
+            timer = threading.Timer(PREPARE_RETRY_SECONDS + 0.2, wake)
+            timer.daemon = True
+            timer.start()
+            return True
     try:
         success, error, response = _post(
-            config, bytes(item['payload']), item['fingerprint'], transport)
+            config, body, item['fingerprint'], transport)
         delay = _retry_delay(item['attempts'] + 1, response)
     except (requests.RequestException, OSError, ValueError, TypeError):
         success, error, delay = False, 'transport_error', _retry_delay(item['attempts'] + 1)

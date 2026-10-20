@@ -54,7 +54,7 @@ import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
 import NewChatButton from './NewChatButton';
 import { draftChat } from './newChat';
-import { replyToEmbedParent, setEmbedStatus, takeEmbedCommands } from './embedBridge';
+import { replyToEmbedParent, setEmbedStatus, takeEmbedCommands, takeEmbedIdentity } from './embedBridge';
 import ShiftStartScreen from './ShiftStartScreen';
 import ShiftStatusMenu from './ShiftStatusMenu';
 import ShiftWriteLock from './ShiftWriteLock';
@@ -1823,6 +1823,22 @@ function ChatsWorkspace(props) {
         setEmbedStatus('ready');
         return takeEmbedCommands((command) => openForEmbedRef.current(command));
     }, [embedReady]);
+    /* Пользователь CRM за этой учёткой (wazzup/crm_identity.py): пересылка в CRM
+       подпишет им эхо наших отправок — CRM видит, кто написал. Пишет тот, кто
+       обрабатывает чаты, — ему пару и запоминать. */
+    useEffect(() => {
+        if (!embedReady || !pilot.enabled) return undefined;
+        let sentKey = '';
+        return takeEmbedIdentity((identity) => {
+            const key = `${identity.crmUserId}|${identity.crmUserName}`;
+            if (key === sentKey) return;
+            sentKey = key;
+            axios.post(`${apiBaseUrl}/api/wazzup/pilot/crm-identity`, identity, { headers: headers() })
+                .then(() => replyToEmbedParent('identified', { crmUserId: identity.crmUserId }))
+                .catch(() => { sentKey = ''; });
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [embedReady, pilot.enabled, apiBaseUrl]);
 
     /* Ссылка на этот чат. Кладём в буфер: адресную строку человек не открывает,
        а ссылку надо отправить в переписке. Запасной путь через execCommand
