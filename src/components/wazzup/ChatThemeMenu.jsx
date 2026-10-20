@@ -6,7 +6,7 @@ import { CHAT_THEMES } from './chatThemes';
 /* Выбор темы чатов в шапке раздела, рядом с «Обновить» (chatThemes.js).
  * Образец у пункта — маленькая переписка: подложка, чужой пузырь слева, свой
  * справа, теми же цветами, что красят окно. Список — темы этого человека
- * (общие и его личные). */
+ * (общие и его личные); выбирать не из чего — кнопки нет. */
 const swatchOf = (theme) => function ChatThemeSwatch() {
     return <span aria-hidden="true" className="relative h-[18px] w-[26px] shrink-0 overflow-hidden rounded-[5px] ring-1 ring-slate-900/10"
         style={{ background: theme.swatch || theme.wall }}>
@@ -22,6 +22,7 @@ const swatchFor = (theme) => {
 };
 
 export default function ChatThemeMenu({ selected, themes = CHAT_THEMES, onChoose }) {
+    if (themes.length < 2) return null;
     return <IosMenu label="Тема чатов" trigger={{ icon: <Palette size={13} />, text: 'Тема', className: iosBtnGhost }}
         items={themes.map((theme) => ({
             key: theme.id, label: theme.name, icon: swatchFor(theme),

@@ -20,7 +20,10 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
  *
  * Личная тема (owners — id учёток) есть только у названных сотрудников: у
  * остальных её нет ни в меню, ни по сохранённому значению. У владельца она
- * включается сама, один раз; дальше выбор за ним, как у любой темы. */
+ * включается сама, один раз; дальше выбор за ним, как у любой темы.
+ *
+ * Учёткам из STANDARD_ONLY — только стандартная тема: кнопки «Тема» у них
+ * нет, сохранённый выбор не действует. */
 
 export const DEFAULT_CHAT_THEME = 'standard';
 
@@ -50,9 +53,9 @@ const ALL_THEMES = Object.freeze([
         accent: '#475569', quote: 'rgba(71, 85, 105, 0.1)', quoteInk: '#1e293b', read: '#0369a1', meta: '#4b5563',
         pill: 'rgba(255, 255, 255, 0.78)', pillInk: '#475569',
     },
-    // Личная. Подложку переписки украшает мозаика (chatThemeRose.svg в слое темы).
+    // Подложку переписки украшает мозаика (chatThemeRose.svg в слое темы).
     {
-        id: 'rose', name: 'Роза', owners: Object.freeze([241]),
+        id: 'rose', name: 'Роза',
         wall: 'linear-gradient(160deg, #fcf3f6 0%, #f6e3ea 100%)', swatch: '#f8e8ee',
         incoming: '#ffffff', incomingLine: 'rgba(150, 64, 104, 0.14)', outgoing: '#f9dae6',
         accent: '#c0447a', quote: 'rgba(192, 68, 122, 0.1)', quoteInk: '#6a1f42', read: '#1d63c9', meta: '#7b5063',
@@ -75,8 +78,13 @@ const ALL_THEMES = Object.freeze([
 
 // Общие темы — у всех; к ним человек видит свои личные.
 export const CHAT_THEMES = Object.freeze(ALL_THEMES.filter((theme) => !theme.owners));
-export const chatThemesFor = (owner) => (owner == null ? CHAT_THEMES
-    : ALL_THEMES.filter((theme) => !theme.owners || theme.owners.includes(Number(owner))));
+const STANDARD_ONLY = Object.freeze([241]);
+const STANDARD_THEMES = Object.freeze(ALL_THEMES.filter((theme) => theme.id === DEFAULT_CHAT_THEME));
+export function chatThemesFor(owner) {
+    if (owner == null) return CHAT_THEMES;
+    if (STANDARD_ONLY.includes(Number(owner))) return STANDARD_THEMES;
+    return ALL_THEMES.filter((theme) => !theme.owners || theme.owners.includes(Number(owner)));
+}
 
 export const chatThemeById = (id) => ALL_THEMES.find((theme) => theme.id === id) || ALL_THEMES[0];
 

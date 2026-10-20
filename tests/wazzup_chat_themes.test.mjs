@@ -82,69 +82,61 @@ test('Night shows only after its stylesheet arrived: until then the window keeps
     assert.equal(themes.useChatTheme(7).applied.id, 'night');
 });
 
-test('a personal theme belongs to its owners only: not in the menu, not from a saved value, not by choice', async () => {
+test('Rose is shared: in everyone\'s menu, chosen like any other theme, never on by itself', async () => {
     const storage = memory();
-    storage.setItem('icore.wazzup.chatTheme.7', 'rose');
-    storage.setItem('icore.wazzup.chatTheme.personal.7', 'rose');
     const themes = await freshTab(storage);
-    assert.deepEqual(themes.chatThemesFor(241).map((theme) => theme.id),
-        ['standard', 'sky', 'sand', 'lavender', 'graphite', 'rose', 'night']);
-    assert.deepEqual(themes.chatThemesFor('241').map((theme) => theme.id), themes.chatThemesFor(241).map((theme) => theme.id));
-    for (const owner of [7, null, undefined, 0]) {
-        assert.equal(themes.chatThemesFor(owner).some((theme) => theme.id === 'rose'), false, String(owner));
+    assert.equal(themes.chatThemeById('rose').owners, undefined);
+    for (const owner of [7, '7', 8, null, undefined, 0]) {
+        assert.equal(themes.chatThemesFor(owner).some((theme) => theme.id === 'rose'), true, String(owner));
     }
-    assert.equal(themes.CHAT_THEMES.some((theme) => theme.owners), false, 'the shared list has no personal themes');
-    const other = themes.useChatTheme(7);
-    assert.equal(other.selected, 'standard', 'a saved value does not give the theme');
-    assert.equal(other.themes.some((theme) => theme.id === 'rose'), false);
-    themes.setChatTheme(7, 'rose');
-    assert.equal(themes.useChatTheme(7).selected, 'standard', 'nor does choosing it');
+    assert.equal(themes.useChatTheme(7).selected, 'standard', 'nobody gets it without choosing');
+    themes.useChatTheme(7).choose('rose');
+    assert.equal((await freshTab(storage)).useChatTheme(7).selected, 'rose', 'the choice survives a reload');
 });
 
-test('the personal theme turns on by itself once; afterwards the owner chooses', async () => {
+test('a standard-only account gets no other theme: not in the menu, not from a saved value, not by choice', async () => {
     const storage = memory();
+    storage.setItem('icore.wazzup.chatTheme.241', 'rose');
+    storage.setItem('icore.wazzup.chatTheme.personal.241', 'rose');
     const themes = await freshTab(storage);
-    assert.equal(themes.useChatTheme(241).selected, 'rose');
-    themes.useChatTheme(241).choose('sky');
-    let reloaded = await freshTab(storage);
-    assert.equal(reloaded.useChatTheme(241).selected, 'sky', 'the choice survives a reload');
-    reloaded.useChatTheme(241).choose('standard');
-    reloaded = await freshTab(storage);
-    assert.equal(reloaded.useChatTheme(241).selected, 'standard', 'the standard one too — the personal does not come back');
-    reloaded.useChatTheme(241).choose('rose');
-    assert.equal((await freshTab(storage)).useChatTheme(241).selected, 'rose');
-});
-
-test('an owner who had picked a theme before still gets the personal one once', async () => {
-    const storage = memory();
-    storage.setItem('icore.wazzup.chatTheme.241', 'sand');
-    const themes = await freshTab(storage);
-    assert.equal(themes.useChatTheme(241).selected, 'rose');
-    themes.useChatTheme(241).choose('sand');
-    assert.equal((await freshTab(storage)).useChatTheme(241).selected, 'sand');
+    for (const owner of [241, '241']) {
+        assert.deepEqual(themes.chatThemesFor(owner).map((theme) => theme.id), ['standard'], String(owner));
+    }
+    const limited = themes.useChatTheme(241);
+    assert.equal(limited.selected, 'standard', 'a theme saved earlier no longer applies');
+    assert.deepEqual(limited.themes.map((theme) => theme.id), ['standard']);
+    for (const id of ['rose', 'sky', 'night', 'cherry']) {
+        themes.setChatTheme(241, id);
+        assert.equal(themes.useChatTheme(241).selected, 'standard', id);
+    }
+    await themes.loadThemeLayer('rose');
+    assert.equal(themes.useChatTheme(241).applied.id, 'standard');
+    assert.deepEqual(themes.useChatTheme(7).themes, themes.CHAT_THEMES, 'other accounts keep every shared theme');
 });
 
 test('storage refusing the one-time mark leaves the owner\'s own choice alone', async () => {
+    const owner = (await freshTab(memory())).chatThemeById('cherry').owners[0];
     const storage = memory();
-    storage.setItem('icore.wazzup.chatTheme.241', 'sand');
+    storage.setItem(`icore.wazzup.chatTheme.${owner}`, 'sand');
     const setItem = storage.setItem;
     storage.setItem = (key, value) => {
         if (key.startsWith('icore.wazzup.chatTheme.personal.')) throw new Error('QuotaExceededError');
         setItem(key, value);
     };
     const themes = await freshTab(storage);
-    themes.useChatTheme(241);
-    assert.equal(storage.map.get('icore.wazzup.chatTheme.241'), 'sand');
+    themes.useChatTheme(owner);
+    assert.equal(storage.map.get(`icore.wazzup.chatTheme.${owner}`), 'sand');
 });
 
 test('Rose, like Night, shows only after its stylesheet arrived', async () => {
     const themes = await freshTab(memory());
-    const before = themes.useChatTheme(241);
+    themes.setChatTheme(7, 'rose');
+    const before = themes.useChatTheme(7);
     assert.equal(before.selected, 'rose');
     assert.equal(before.applied.id, 'standard');
     await themes.loadThemeLayer('rose');
-    assert.equal(themes.useChatTheme(241).applied.id, 'rose');
-    assert.equal(themes.useChatTheme(7).applied.id, 'standard', 'another person keeps the standard window');
+    assert.equal(themes.useChatTheme(7).applied.id, 'rose');
+    assert.equal(themes.useChatTheme(8).applied.id, 'standard', 'another person keeps the standard window');
 });
 
 test('Cherry stays personal even when another account saves or requests its id', async () => {
@@ -168,8 +160,6 @@ test('Cherry stays personal even when another account saves or requests its id',
     assert.equal(themes.useChatTheme(foreign).selected, 'standard');
     themes.setChatTheme(foreign, 'cherry');
     assert.equal(themes.useChatTheme(foreign).selected, 'standard');
-    const roseOwner = themes.chatThemeById('rose').owners[0];
-    assert.equal(themes.useChatTheme(roseOwner).selected, 'rose', 'an existing personal theme is unchanged');
 });
 
 test('Cherry is the initial personal choice once and respects later choices across reloads', async () => {
@@ -205,14 +195,14 @@ test('Cherry is applied only after its own stylesheet loads', async () => {
     assert.equal(themes.useChatTheme(owner).applied.id, 'cherry');
 });
 
-test('five themes besides the standard one, each with every colour the stylesheet reads', async () => {
+test('six shared themes besides the standard one, each with every colour the stylesheet reads', async () => {
     const themes = await freshTab(memory());
-    assert.equal(themes.CHAT_THEMES.length, 6);
-    assert.equal(new Set(themes.CHAT_THEMES.map((theme) => theme.name)).size, 6);
+    assert.deepEqual(themes.CHAT_THEMES.map((theme) => theme.id),
+        ['standard', 'sky', 'sand', 'lavender', 'graphite', 'rose', 'night']);
+    assert.equal(new Set(themes.CHAT_THEMES.map((theme) => theme.name)).size, 7);
     assert.deepEqual(themes.chatThemeStyle(themes.chatThemeById('standard')), {});
-    const available = new Map([...themes.chatThemesFor(241), themes.chatThemeById('cherry')]
-        .map((theme) => [theme.id, theme]));
-    for (const theme of [...available.values()].filter((item) => item.id !== 'standard')) {
+    const available = [...themes.CHAT_THEMES, themes.chatThemeById('cherry')];
+    for (const theme of available.filter((item) => item.id !== 'standard')) {
         const style = themes.chatThemeStyle(theme);
         assert.equal(Object.keys(style).length, 11, theme.id);
         for (const [name, value] of Object.entries(style)) assert.ok(value, `${theme.id}: ${name}`);

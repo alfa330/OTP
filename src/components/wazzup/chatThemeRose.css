@@ -3,8 +3,7 @@
        python3 scripts/build_chat_rose_theme.py
 
    Тема «Роза» раздела «Чаты ОП»: розовое окно раздела с data-chat-theme="rose"
-   и его меню. Тема личная (owners в chatThemes.js), слой грузится по
-   требованию (loadThemeLayer в chatThemes.js). */
+   и его меню. Слой грузится по требованию (loadThemeLayer в chatThemes.js). */
 
 /* «Роза» — то, что живёт вне утилит Tailwind. Склеивается в начало
  * src/components/wazzup/chatThemeRose.css скриптом build_chat_rose_theme.py,
