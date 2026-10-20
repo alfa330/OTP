@@ -2688,9 +2688,16 @@ const canAccessWaterSectionForUser = (userLike) => {
    сервер — discipline/access.py; тест сверяет списки. */
 const DISCIPLINE_DEPARTMENT_CODES = ['szov', 'op', 'tez'];
 
+/* Выкладка по шагам (владелец, 20.10.2026: «опубликовать на данный момент для
+   суперадминов»): пока раздел видят только супер-админы. Тот же флаг —
+   SUPER_ADMIN_ONLY в discipline/access.py, тест сверяет оба. Открыть раздел
+   по правилам выше — false здесь и там. */
+const DISCIPLINE_SUPER_ADMIN_ONLY = true;
+
 const canAccessDisciplineSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
+    if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;
     const headed = aiQaHeadDepartmentCodesOf(userLike);
     if (isDepartmentHead(userLike) && headed.some((code) => DISCIPLINE_DEPARTMENT_CODES.includes(code))) return true;
     if (role === 'admin') return false;

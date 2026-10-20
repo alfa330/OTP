@@ -6,11 +6,25 @@ tests/test_discipline_postgres.py (запускается с DISCIPLINE_TEST_POR
 """
 
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta
 
 from discipline import access, catalog, files, service
 
 AT = datetime(2026, 10, 20, 12, 0)
+
+# Правила ТЗ проверяются для всех ролей; выкладка «пока только супер-админам»
+# (access.SUPER_ADMIN_ONLY) — в SuperAdminRolloutTests. Значение флага в коде
+# запоминаем до того, как модуль его снимет.
+ROLLOUT_IN_CODE = access.SUPER_ADMIN_ONLY
+
+
+def setUpModule():
+    access.SUPER_ADMIN_ONLY = False
+
+
+def tearDownModule():
+    access.SUPER_ADMIN_ONLY = ROLLOUT_IN_CODE
 
 
 def rec(record_id, days_ago, weight=1, cancelled=False, department=1, title='Опоздание'):
@@ -299,3 +313,17 @@ class TimeValueTests(unittest.TestCase):
         self.assertIsNone(service._timecodes_value('  '))
         for raw in ('видео 10:15', '–14:41', '25:00', '10:00, 10:01, 10:02, 10:03, 10:04, 10:05'):
             self.assertEqual(self._refused(service._timecodes_value, raw), 'EVIDENCE_NOTE', raw)
+
+
+class SuperAdminRolloutTests(unittest.TestCase):
+    """Владелец, 20.10.2026: «опубликовать на данный момент для суперадминов»."""
+
+    def test_flag_is_on_until_the_section_opens(self):
+        self.assertTrue(ROLLOUT_IN_CODE)
+
+    def test_only_super_admin_opens_section(self):
+        with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True):
+            self.assertTrue(access.can_open_section(ctx('super_admin', department_id=None)))
+            for who in (ctx('admin', headed=[1]), ctx('sv', groups=[5]), ctx('operator'), ctx('trainee'), ctx('admin')):
+                self.assertFalse(access.can_open_section(who), who['role'])
+

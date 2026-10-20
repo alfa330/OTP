@@ -16,7 +16,8 @@ from datetime import datetime, timedelta
 import pytest
 
 from tests.test_discipline_postgres import (  # noqa: F401 — фикстура db
-    ADMIN, HEAD_SZOV, OP_A, OP_B, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, use_sample_ladder)
+    ADMIN, HEAD_SZOV, OP_A, OP_B, SUPER, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, section_open_for_all,
+    use_sample_ladder)
 
 flask = pytest.importorskip('flask')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (DISCIPLINE_TEST_PORT)')
@@ -446,3 +447,28 @@ def test_edit_keeps_old_free_text_but_checks_new(client, db):
     assert client.patch(url, headers=h(SV_A), json={'shift_label': '10:00-19:00', 'evidence_note': '10:15'}).status_code == 200
     item = client.get(url, headers=h(SV_A)).get_json()
     assert (item['shift_label'], item['evidence_note']) == ('10:00–19:00', '10:15')
+
+
+def test_rollout_only_super_admins(client, db, monkeypatch):
+    """Пока раздел открыт одним супер-админам (владелец, 20.10.2026): остальным —
+    отказ на ручках и пусто в колоколе, а пробная запись на живого оператора не
+    шлёт ни колокола, ни Telegram ни ему, ни его СВ, ни главе отдела."""
+    from discipline import access
+    from notifications import sources
+
+    monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', True)
+    for user in (ADMIN, HEAD_SZOV, SV_A, OP_A, TRAINEE_A):
+        refused = client.get('/api/discipline/ping', headers=h(user))
+        assert (refused.status_code, refused.get_json()['code']) == (403, 'DISCIPLINE_SECTION_CLOSED'), user
+    assert client.get('/api/discipline/ping', headers=h(SUPER)).status_code == 200
+    created = _create(client, SUPER, OP_A, datetime.now().replace(second=0, microsecond=0) - timedelta(days=1))
+    assert created.status_code == 201, created.get_json()
+    with db.cursor() as cur:
+        cur.execute('SELECT COUNT(*) FROM discipline_notifications')
+        assert cur.fetchone()[0] == 0
+        assert sources.discipline(cur, {'user_id': SV_A}, 10) == (0, [])
+    assert client.sent == []
+    # Флаг снят — те же люди снова по правилам ТЗ.
+    monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', False)
+    assert client.get('/api/discipline/ping', headers=h(SV_A)).status_code == 200
+

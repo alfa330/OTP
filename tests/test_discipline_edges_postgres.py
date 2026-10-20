@@ -12,7 +12,8 @@ import pytest
 from discipline import access, catalog, queries, report, schema, service
 from tests.test_discipline_postgres import (  # noqa: F401 — фикстура db
     DESCRIPTION, HEAD_SZOV, NOW, OP_A, OP_B, PORT, SUPER, SV_A, SV_B, SZOV, TODAY, _change_ladder,
-    _create_at, bell_titles, create, ctx_of, db, enriched, measure_id, type_id, upload, use_sample_ladder,
+    _create_at, bell_titles, create, ctx_of, db, enriched, measure_id, section_open_for_all, type_id, upload,
+    use_sample_ladder,
 )
 
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (DISCIPLINE_TEST_PORT)')

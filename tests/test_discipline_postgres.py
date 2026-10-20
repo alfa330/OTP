@@ -25,6 +25,13 @@ from discipline import access, catalog, queries, report, schema, service, act_do
 PORT = os.environ.get('DISCIPLINE_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (DISCIPLINE_TEST_PORT)')
 
+
+@pytest.fixture(autouse=True)
+def section_open_for_all(monkeypatch):
+    """Здесь проверяются правила ТЗ для всех ролей. Выкладка «пока только
+    супер-админам» (access.SUPER_ADMIN_ONLY) — отдельными тестами."""
+    monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', False)
+
 SUPER, ADMIN, HEAD_SZOV, HEAD_OP, SV_A, SV_B, OP_A, OP_B, OP_OP, TRAINEE_A, FIRED = (
     1, 2, 100, 200, 300, 301, 400, 401, 402, 403, 404)
 SZOV, OP, TEZ, REMOTE = 1, 2, 3, 4

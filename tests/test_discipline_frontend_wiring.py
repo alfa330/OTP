@@ -13,7 +13,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from discipline import catalog
+from discipline import access, catalog
 from notifications import sources
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,16 @@ class AppWiringTests(unittest.TestCase):
         codes = tuple(re.findall(r"'([a-z_]+)'", match.group(1)))
         self.assertEqual(codes, catalog.SECTION_DEPARTMENT_CODES)
         self.assertIn("discipline: ['szov', 'op', 'tez'],", APP)
+
+    def test_rollout_flag_matches_server(self):
+        # Пока раздел открыт одним супер-админам — и в меню, и на сервере.
+        match = re.search(r"const DISCIPLINE_SUPER_ADMIN_ONLY = (true|false);", APP)
+        self.assertTrue(match)
+        self.assertEqual(match.group(1) == 'true', access.SUPER_ADMIN_ONLY)
+        body = APP[APP.index('const canAccessDisciplineSectionForUser'):APP.index('const isDisciplineOperatorUser')]
+        self.assertLess(body.index("if (role === 'super_admin') return true;"),
+                        body.index('if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;'))
+        self.assertLess(body.index('if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;'), body.index('isDepartmentHead(userLike)'))
 
     def test_admin_without_heading_is_out(self):
         body = APP[APP.index('const canAccessDisciplineSectionForUser'):APP.index('const isDisciplineOperatorUser')]

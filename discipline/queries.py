@@ -1013,6 +1013,16 @@ def super_admins(cursor):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def only_super_admins(cursor, user_ids):
+    """Из получателей — только супер-админы (раздел пока открыт им одним)."""
+    ids = _int_list(user_ids)
+    if not ids:
+        return []
+    cursor.execute("SELECT id FROM users WHERE id = ANY(%s) AND role = 'super_admin'", (ids,))
+    allowed = {int(row[0]) for row in cursor.fetchall()}
+    return [user_id for user_id in ids if user_id in allowed]
+
+
 def invalidate_file(cursor, file_id, user_id, reason):
     cursor.execute(
         'UPDATE discipline_files SET invalid_at = ' + _NOW + ', invalid_by = %s, invalid_reason = %s '

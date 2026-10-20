@@ -14,7 +14,7 @@
 
 import html
 
-from . import catalog, queries
+from . import access, catalog, queries
 
 
 def record_link(base_url, record_id):
@@ -45,6 +45,10 @@ def push(cursor, outbox, *, event, user_ids, settings, title, body=None, record_
     """Колокол каждому + Telegram тем, у кого он привязан, если событие включено."""
     excluded = {int(x) for x in exclude or () if x}
     targets = [int(u) for u in user_ids or () if u and int(u) not in excluded]
+    # Раздел пока открыт одним супер-админам — остальным ни колокола, ни Telegram,
+    # и в колоколе ничего не копится до открытия раздела (access.SUPER_ADMIN_ONLY).
+    if access.SUPER_ADMIN_ONLY and targets:
+        targets = queries.only_super_admins(cursor, targets)
     created = queries.push_notifications(
         cursor, user_ids=targets, kind=event, title=title, body=body, record_id=record_id,
         control_id=control_id, tone=tone, dedupe_key=dedupe_key)

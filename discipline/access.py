@@ -43,6 +43,15 @@ SCOPE_MANAGER = 'manager'
 SCOPE_GROUPS = 'groups'
 SCOPE_OWN = 'own'
 
+# Выкладка по шагам. Владелец, 20.10.2026: «опубликовать на данный момент для
+# суперадминов». Пока флаг стоит, раздел открыт только супер-админам: остальным
+# его закрывает сервер (can_open_section — на каждом роуте и в колоколе), меню
+# его не показывает (DISCIPLINE_SUPER_ADMIN_ONLY в App.jsx, тест сверяет оба
+# флага), и ни колокол, ни Telegram никому, кроме супер-админов, не уходят
+# (notify.push): пробная запись на живого оператора не должна дойти ни до него,
+# ни до его СВ и главы. Открыть раздел по правилам ТЗ — False здесь и в App.jsx.
+SUPER_ADMIN_ONLY = True
+
 
 def normalize_role(role):
     value = str(role or '').strip().lower()
@@ -105,6 +114,8 @@ def is_operator(ctx):
 def can_open_section(ctx):
     """Пускать ли в раздел вообще. Проверяется на КАЖДОМ роуте: спрятанный пункт
     меню — не доступ, раздел открывается и прямым адресом ?view=discipline."""
+    if SUPER_ADMIN_ONLY and not is_super_admin(ctx):
+        return False
     return is_manager(ctx) or is_supervisor(ctx) or is_operator(ctx)
 
 
