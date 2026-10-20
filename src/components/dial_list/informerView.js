@@ -10,7 +10,8 @@ import { GAP_S, LEAD_IN_S, TAIL_S } from './informerAudio.js';
    того же дня поднял до 10, 15, 20: «давай на 10 увеличим», «ещё до 15», «до 20»). Место звонок держит на время вызова (~12 с до ответа),
    записи и отбоя (~2 с). */
 export const CALLS_PER_LINE = 2;
-export const MAX_ACTIVE_CALLS = 20;
+// 20.10.2026: владелец отключил пару линий робота — «максимально звонков поставить на 10, а то у других ошибки выходят».
+export const MAX_ACTIVE_CALLS = 10;
 export const EXPECTED_RING_S = 12;
 export const CALL_OVERHEAD_S = 2;
 export const DEFAULT_AUDIO_S = 25;

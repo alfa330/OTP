@@ -206,19 +206,20 @@ def test_played_to_end_and_originate_failure_without_channel(tmp_path):
     assert by_id[32]['result'] == 'busy'
 
 
-def test_at_most_twenty_calls_at_once(tmp_path):
+def test_at_most_ten_calls_at_once(tmp_path):
     """Владелец, 16.10.2026, после того как залп 46 в минуту уронил исходящие всему кабинету: «жёстких залпов
-    делать не надо вообще, по 3 максимум»; вечером поднимал до 10, 15, 20. Портал видит ровно столько мест,
-    лишнее от него — «линия занята», в очередь."""
+    делать не надо вообще, по 3 максимум»; вечером поднимал до 10, 15, 20; 20.10.2026 вернул 10 («у других ошибки
+    выходят» — робот делит линии с операторами). Портал видит ровно столько мест, лишнее от него — «линия занята»,
+    в очередь."""
     lines = tuple(str(900 + i) for i in range(25))
     jobs = [job(100 + i, line=line) for i, line in enumerate(lines)]
     d, portal, ami, clock = make(tmp_path, [{'calls': jobs, 'next_poll_sec': 2}], audio={3: WAV}, lines=lines)
     state = d.lines_state()
-    assert sum(info['capacity'] for info in state.values()) == 20          # всего двадцать мест…
-    assert [line for line, info in state.items() if info['capacity']] == [str(900 + i) for i in range(20)]   # …по одному
+    assert sum(info['capacity'] for info in state.values()) == 10          # всего десять мест…
+    assert [line for line, info in state.items() if info['capacity']] == [str(900 + i) for i in range(10)]   # …по одному
     d.tick()
-    assert len(ami.sent) == 20
-    assert len([r for r in portal.results if r['result'] == 'line_busy']) == 5
+    assert len(ami.sent) == 10
+    assert len([r for r in portal.results if r['result'] == 'line_busy']) == 15
     assert d.rate_room() == float('inf') and d.active_room() == 0
     assert all(info['capacity'] == info['active'] for info in d.lines_state().values())   # мест нет
     d.finish({'call_id': 101, 'line': '901', 'dialed_at': clock.now - 30, 'answered_at': clock.now - 26,
@@ -306,10 +307,10 @@ def test_ramp_after_link_recovery(tmp_path):
     clock.now += 300
     assert sum(info['capacity'] for info in d.lines_state().values()) == 7
     clock.now += 300
-    assert sum(info['capacity'] for info in d.lines_state().values()) == 10
-    clock.now += 600
-    assert sum(info['capacity'] for info in d.lines_state().values()) == 20   # ступень 20 = предел — разгон кончился
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 10   # ступень 10 = предел — разгон кончился
     assert d.ramp_since == 0.0
+    clock.now += 600
+    assert sum(info['capacity'] for info in d.lines_state().values()) == 10   # выше предела не растём
     # Отказы сети на разгоне: одиночный «сброшен» на 33-й секунде бывает и при здоровой сети (0,5–1 % звонков,
     # 17–19.10.2026) — разгон не прерывает; три подряд — пауза, и длиннее прошлой: 15 минут.
     d.finish({'call_id': 5, 'line': '901', 'dialed_at': clock.now - 12, 'answered_at': clock.now - 8,
@@ -377,7 +378,7 @@ def test_config_reads_lines_and_minute_guard(monkeypatch):
     assert config['lines'] == ['902', '907', '939'] and config['max_per_minute'] == 0
     monkeypatch.setenv('INFORMER_MAX_PER_MINUTE', '25')
     assert informer.load_config()['max_per_minute'] == 25
-    assert config['max_active'] == informer.MAX_ACTIVE_CALLS == 20       # по умолчанию — не больше двадцати разом
+    assert config['max_active'] == informer.MAX_ACTIVE_CALLS == 10       # по умолчанию — не больше десяти разом
     monkeypatch.setenv('INFORMER_MAX_ACTIVE', '0')
     assert informer.load_config()['max_active'] == 0
     assert informer.load_config()['dial_gap_ms'] == informer.DIAL_GAP_MS == 1000

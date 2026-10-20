@@ -104,20 +104,21 @@ def test_warmup_stages():
     assert rules.warmup_rate(-1) == 3
 
 
-def test_line_rate_is_what_robot_fits_with_twenty_at_once():
+def test_line_rate_is_what_robot_fits_with_ten_at_once():
     """Владелец, 16.10.2026: в поле темпа сразу максимум — сколько тянет робот; с того же дня — предел звонков
-    разом («жёстких залпов делать не надо вообще, по 3 максимум», вечером — «на 10», «ещё до 15», «до 20»)."""
+    разом («жёстких залпов делать не надо вообще, по 3 максимум», вечером — «на 10», «ещё до 15», «до 20»;
+    20.10.2026 — снова 10: «у других ошибки выходят»)."""
     nine = {str(n): {'capacity': 2, 'active': 0} for n in (902, 907, 919, 923, 925, 928, 939, 942, 944)}
     assert rules.line_capacity(nine) == 18
     assert rules.line_capacity({'939': {'capacity': 'x'}, '940': None, '941': {'capacity': 2}}) == 2
-    assert rules.MAX_ACTIVE_CALLS == 20
-    # Звонок держит место: ~12 с до ответа + запись + ~2 с на отбой; мест — не больше двадцати (у девяти линий — 18).
-    assert rules.line_rate(18, 25520) == 27                 # 18 × 60 / 39,52 с
-    assert rules.line_rate(18, 8120) == 48                  # запись короче — звонков больше: 1080 / 22,12 с
-    assert rules.line_rate(18) == 27                        # записи ещё нет — обычные 25 с: 1080 / 39 с
+    assert rules.MAX_ACTIVE_CALLS == 10
+    # Звонок держит место: ~12 с до ответа + запись + ~2 с на отбой; мест — не больше десяти (у девяти линий — 18).
+    assert rules.line_rate(18, 25520) == 15                 # 10 × 60 / 39,52 с
+    assert rules.line_rate(18, 8120) == 27                  # запись короче — звонков больше: 600 / 22,12 с
+    assert rules.line_rate(18) == 15                        # записи ещё нет — обычные 25 с: 600 / 39 с
     assert rules.line_rate(0, 25520) == 3                   # линий не видно — как одна линия (2 звонка)
     assert rules.line_rate(2, 300000) == 1                  # даже на пятиминутной записи не ноль
-    assert rules.line_rate(10000, 1000) == 80               # и тысяча линий — двадцать звонков разом
+    assert rules.line_rate(10000, 1000) == 40               # и тысяча линий — десять звонков разом
 
 
 def test_wav_encode_round_trip():
