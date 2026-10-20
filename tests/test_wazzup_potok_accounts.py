@@ -409,7 +409,8 @@ class WiringSourceTests(unittest.TestCase):
         self.assertIn('data-testid="wazzup-account-switch"', VIEW_SOURCE)
         self.assertIn("params: { account }", VIEW_SOURCE)                  # аналитика / авторы
         self.assertIn("account: accountRef.current", VIEW_SOURCE)         # чаты / лента
-        self.assertIn("syncWazzupChatDeepLink(selected, account)", VIEW_SOURCE)
+        # Заготовка чата из «+» в адрес не попадает (newChat.js).
+        self.assertIn("syncWazzupChatDeepLink(selected?.isNew ? null : selected, account)", VIEW_SOURCE)
         self.assertIn("buildWazzupChatLink(selected, account)", VIEW_SOURCE)
         self.assertIn("история хранится 45 дней", VIEW_SOURCE)
         self.assertNotIn("WAZZUP_APP_BASE", VIEW_SOURCE, "воркспейс — по аккаунту, не константой")
