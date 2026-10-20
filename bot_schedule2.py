@@ -1500,6 +1500,12 @@ def _validate_authenticated_identity_header():
     if not authenticated_user_id:
         return None
 
+    # Вторая линия к enforce_embed_session_scope: личность могла подтвердиться уже в
+    # декораторе ручки, после хуков запроса.
+    embed_refusal = wazzup_embed_auth.scope_refusal(getattr(g, 'auth_scope', None), request.path)
+    if embed_refusal:
+        return jsonify({"error": embed_refusal, "code": "EMBED_SCOPE"}), 403
+
     original_header = _get_original_request_user_id_header()
     if not original_header:
         return None
@@ -1535,7 +1541,8 @@ def _decode_token(token, expected_type, verify_exp=True):
     return payload
 
 
-def _build_access_token(user, session_id):
+def _build_access_token(user, session_id, scope=None):
+    """scope — сессия окна «Чатов ОП» в CRM (wazzup/embed_auth.py: только чаты)."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user[0]),
@@ -1546,10 +1553,12 @@ def _build_access_token(user, session_id):
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES)).timestamp())
     }
+    if scope:
+        payload["scp"] = scope
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def _build_refresh_token(user_id, session_id):
+def _build_refresh_token(user_id, session_id, scope=None):
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
@@ -1558,6 +1567,8 @@ def _build_refresh_token(user_id, session_id):
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=JWT_REFRESH_TOKEN_DAYS)).timestamp())
     }
+    if scope:
+        payload["scp"] = scope
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -1752,6 +1763,8 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
                 )
 
             _set_request_auth_context(user_id, user=user)
+            # Сессия окна «Чатов ОП» в CRM — только чаты (embed_auth.py, проверка ниже).
+            g.auth_scope = payload.get("scp") or None
             _record_elapsed_server_timing("auth-access", auth_started_at)
             return payload
         except AuthError as auth_error:
@@ -1791,10 +1804,12 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
 
             user = _validate_user_session_principal(user_id=user_id, session_id=session_id, user=user)
 
+            # Сессия окна CRM остаётся сессией окна и после обновления (embed_auth.py).
+            scope = payload.get("scp") or None
             if rotate_tokens:
-                new_access_token = _build_access_token(user, session_id)
+                new_access_token = _build_access_token(user, session_id, scope=scope)
                 if rotate_refresh_token:
-                    new_refresh_token = _build_refresh_token(user_id, session_id)
+                    new_refresh_token = _build_refresh_token(user_id, session_id, scope=scope)
                     grace_seconds = max(0, int(JWT_REFRESH_PREVIOUS_TOKEN_GRACE_SECONDS))
                     previous_refresh_valid_until = (
                         datetime.utcnow() + timedelta(seconds=grace_seconds)
@@ -1836,6 +1851,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
                     _record_elapsed_server_timing("auth-touch", touch_started_at)
 
             _set_request_auth_context(user_id, user=user)
+            g.auth_scope = scope
             _record_elapsed_server_timing("auth-refresh", auth_started_at)
             return payload
         except AuthError as auth_error:
@@ -5467,6 +5483,16 @@ def enforce_api_origin_protection():
     return jsonify({"error": "Invalid request origin"}), 403
 
 
+@app.before_request
+def enforce_embed_session_scope():
+    """Сессия окна «Чатов ОП» в CRM — только чаты и вход-выход (wazzup/embed_auth.py).
+    403, а не 401: на 401 окно пошло бы обновлять сессию по кругу."""
+    refusal = wazzup_embed_auth.scope_refusal(getattr(g, 'auth_scope', None), request.path)
+    if refusal and request.method != 'OPTIONS':
+        return jsonify({"error": refusal, "code": "EMBED_SCOPE"}), 403
+    return None
+
+
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -5564,7 +5590,10 @@ def after_request(response):
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
     if pending_tokens:
         access_token, refresh_token = pending_tokens
-        _set_auth_cookies(response, access_token, refresh_token)
+        # Окно CRM живёт на токенах: общие куки домена API перебили бы сессию
+        # портала в том же браузере (wazzup/embed_auth.py).
+        if getattr(g, 'auth_scope', None) != wazzup_embed_auth.SCOPE:
+            _set_auth_cookies(response, access_token, refresh_token)
         
         # Inject custom headers for Bearer clients so they can intercept rotated tokens
         response.headers['X-New-Access-Token'] = access_token
@@ -9504,6 +9533,7 @@ from wazzup import chat_search as wazzup_chat_search  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
+from wazzup import embed_auth as wazzup_embed_auth  # noqa: E402
 
 # Обработка чатов (отправка, живые обновления, заметки, вложения). Гард — тот
 # же, что у ленты: пройти его мало, право писать решает _wazzup_chat_access.
@@ -9520,6 +9550,58 @@ app.register_blueprint(build_pilot_blueprint(
     stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+
+
+def _wazzup_chat_mode_for(user_id):
+    """Режим «Чатов ОП» чужой учётки ('full' / 'operator' / 'potok' / None) — тем же
+    правилом, что у запросов. Нужен входу из CRM: ссылку получает только тот, кому раздел
+    открыт. Запрос CRM своей учётки не несёт, поэтому человек подставляется на время."""
+    saved = {name: getattr(g, name) for name in ('user_id', '_wazzup_chat_access') if hasattr(g, name)}
+    try:
+        g.pop('_wazzup_chat_access', None)
+        g.user_id = int(user_id)
+        return _wazzup_chat_access().get('mode')
+    finally:
+        g.pop('_wazzup_chat_access', None)
+        g.pop('user_id', None)
+        for name, value in saved.items():
+            setattr(g, name, value)
+
+
+def _issue_embed_session_response(user, auth_transport='bearer'):
+    """Сессия окна «Чатов ОП» в CRM по одноразовой ссылке (wazzup/embed_auth.py): как вход
+    паролем, но только чаты (scope), без кук и — решение владельца 20.10.2026 «без QR из CRM» —
+    чаты этой сессии открыты сразу."""
+    session_id = str(uuid.uuid4())
+    scope = wazzup_embed_auth.SCOPE
+    access_token = _build_access_token(user, session_id, scope=scope)
+    refresh_token = _build_refresh_token(user[0], session_id, scope=scope)
+    db.create_user_session(
+        session_id=session_id,
+        user_id=user[0],
+        refresh_token_hash=_hash_token(refresh_token),
+        expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS),
+        user_agent=request.headers.get('User-Agent'),
+        ip_address=_client_ip()
+    )
+    with db._get_cursor() as cursor:
+        cursor.execute("""INSERT INTO wazzup_chat_access (session_id, user_id)
+                          VALUES (%s::uuid, %s) ON CONFLICT (session_id) DO NOTHING""",
+                       (session_id, int(user[0])))
+    _set_request_auth_context(user[0], user=user)
+    response = jsonify(_build_auth_response_payload(
+        _get_user_payload(user), transport=auth_transport,
+        access_token=access_token, refresh_token=refresh_token))
+    response.headers[JWT_AUTH_TRANSPORT_HEADER_NAME] = auth_transport
+    return response, 200
+
+
+# Вход в окно «Чатов ОП» в CRM без пароля: CRM просит одноразовую ссылку своим ключом.
+app.register_blueprint(wazzup_embed_auth.build_embed_blueprint(
+    db=db, preflight=_build_cors_preflight_response, portal_base_url=TASK_WEB_APP_BASE_URL,
+    chat_mode=_wazzup_chat_mode_for, load_user=lambda user_id: db.get_user(id=user_id),
+    issue_session=_issue_embed_session_response, client_ip=_client_ip,
+))
 # Карточка водителя в чатах Верификаторов: свой поток пишет её поля в сделку
 # amoCRM этого чата (wazzup/driver_cards_sync.py), не занимая общий пул бота.
 from wazzup import driver_cards_sync as wazzup_driver_cards_sync  # noqa: E402
@@ -15208,9 +15290,12 @@ def login():
 
             _clear_login_rate_limit_failures(login_value)
 
+            # Вход паролем внутри окна «Чатов ОП» в CRM — тоже сессия окна: только
+            # чаты и без кук (wazzup/embed_auth.py). QR при этом остаётся.
+            scope = wazzup_embed_auth.SCOPE if data.get('embed') is True else None
             session_id = str(uuid.uuid4())
-            access_token = _build_access_token(user_profile, session_id)
-            refresh_token = _build_refresh_token(user[0], session_id)
+            access_token = _build_access_token(user_profile, session_id, scope=scope)
+            refresh_token = _build_refresh_token(user[0], session_id, scope=scope)
             db.create_user_session(
                 session_id=session_id,
                 user_id=user[0],
@@ -15229,7 +15314,8 @@ def login():
             )
             response = jsonify(response_payload)
             response.headers[JWT_AUTH_TRANSPORT_HEADER_NAME] = auth_transport
-            _set_auth_cookies(response, access_token, refresh_token)
+            if not scope:
+                _set_auth_cookies(response, access_token, refresh_token)
             return response, 200
 
         _register_login_rate_limit_failure(login_value)

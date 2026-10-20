@@ -19,11 +19,12 @@
  *   { type: 'icore.chats.error', requestId, code, message }
  * Команда, пришедшая до входа или до QR, ждёт и выполняется, когда окно готово.
  *
- * Кто сейчас в CRM — чтобы CRM видела авторов сообщений (wazzup/crm_identity.py):
- *   { type: 'icore.chats.identify', crmUserId: '352', crmUserName?: 'Иванова Айгерим' }
- *   или в адресе окна: …&crmUserId=352&crmUserName=…
- * Окно передаёт пару серверу от имени вошедшей учётки iCORE и отвечает
+ * Кто сейчас в CRM — чтобы CRM видела авторов сообщений (wazzup/crm_identity.py): в адресе
+ * окна, который iCORE выдаёт серверу CRM, — …&crmUserId=…&crmUserName=…&crmExp=…&crmSig=…
+ * (подпись iCORE). Окно передаёт пару серверу от имени вошедшей учётки и отвечает
  *   { type: 'icore.chats.identified', crmUserId }.
+ * Команда { type: 'icore.chats.identify', …те же поля с подписью } — на смену пользователя CRM
+ * без перезагрузки окна; без подписи — ошибка BAD_IDENTITY.
  *
  * Слушаем только window.parent — команду может дать лишь страница, в которую окно
  * встроено. Отправить сообщение за человека команда не может: окно лишь открывает
@@ -62,13 +63,18 @@ export const parseEmbedCommand = (data) => {
     } };
 };
 
-/** Пользователь CRM из команды или адреса → { crmUserId, crmUserName } или null. */
+/** Пользователь CRM из адреса окна (или команды) → { crmUserId, crmUserName, crmExp, crmSig }
+ *  или null. Подпись ставит iCORE, выдавая CRM адрес окна (wazzup/embed_auth.py), — без неё
+ *  сервер пару не запомнит, и окно её не шлёт. */
 export const parseEmbedIdentity = (data) => {
     if (!data || typeof data !== 'object') return null;
     const raw = typeof data.crmUserId === 'number' ? String(data.crmUserId) : data.crmUserId;
     const crmUserId = typeof raw === 'string' ? raw.trim() : '';
     if (!/^[A-Za-z0-9_.@:-]{1,64}$/.test(crmUserId)) return null;
-    return { crmUserId, crmUserName: cleanText(data.crmUserName) };
+    const crmExp = String(data.crmExp ?? '').trim();
+    const crmSig = String(data.crmSig ?? '').trim().toLowerCase();
+    if (!/^\d{9,12}$/.test(crmExp) || !/^[0-9a-f]{64}$/.test(crmSig)) return null;
+    return { crmUserId, crmUserName: cleanText(data.crmUserName), crmExp, crmSig };
 };
 
 let target = null;          // { win, parent }
@@ -150,7 +156,8 @@ export const installEmbedBridge = (win = typeof window === 'undefined' ? null : 
             parentOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
             const next = parseEmbedIdentity(event.data);
             if (next) setIdentity(next);
-            else replyToEmbedParent('error', { code: 'BAD_IDENTITY', message: 'Нужен crmUserId — id пользователя CRM' });
+            else replyToEmbedParent('error', { code: 'BAD_IDENTITY',
+                message: 'Нужны crmUserId и подпись iCORE (crmExp, crmSig) из адреса окна' });
             return;
         }
         const parsed = parseEmbedCommand(event.data);

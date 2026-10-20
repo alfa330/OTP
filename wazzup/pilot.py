@@ -238,8 +238,11 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, exclusions)
     # The CRM user behind the window's iCORE account: who wrote, for the CRM (crm_identity.py).
+    # A free pair is taken only by an operator whose sign-in the supervisor confirmed by QR;
+    # others are paired by name when the CRM opens the window (embed_auth.py).
     from .crm_identity import register_crm_identity_route
-    register_crm_identity_route(bp, actor, require_api_key, preflight, db)
+    register_crm_identity_route(bp, actor, require_api_key, preflight, db,
+                                may_bind=lambda: access is None or access().get('mode') in access_rules.GATED_MODES)
     from .send_check import register_send_check_route
     register_send_check_route(bp, actor, require_api_key, preflight, db, exclusions)
     from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError

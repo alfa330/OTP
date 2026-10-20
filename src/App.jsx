@@ -152,6 +152,7 @@ import { useChatWaitingCount, waitingBadgeLabel } from './components/wazzup/chat
 import {
     adoptEmbedIdentityFromSearch, installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand, setEmbedStatus,
 } from './components/wazzup/embedBridge';
+import { isEmbedApiAllowed } from './components/wazzup/embedLaunch';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 // Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
 import { stripPaymentsParams } from './components/payments/paymentsLink';
@@ -346,6 +347,16 @@ if (CHATS_EMBED) {
     adoptEmbedIdentityFromSearch(window.location.search);
 }
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
+/* В окне CRM портал рисует одни чаты: фоновые запросы других разделов окну не нужны, а
+   сессии окна сервер их и не откроет (wazzup/embed_auth.py) — не шлём их вовсе. */
+if (CHATS_EMBED) {
+    axios.interceptors.request.use((config) => {
+        if (!isEmbedApiAllowed(config?.url, API_BASE_URL)) {
+            throw new axios.CanceledError('В окне CRM открыты только «Чаты ОП»');
+        }
+        return config;
+    });
+}
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const SUPERVISOR_OPERATORS_SV_FILTER_KEY = 'supervisor_operators_sv_filter';
@@ -51093,7 +51104,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     const response = await axios.post(`${API_BASE_URL}/api/login`, {
                         login: login.trim(),
                         password: password.trim(),
-                        auth_transport: requestedAuthTransport
+                        auth_transport: requestedAuthTransport,
+                        // Вход в окне «Чатов ОП» в CRM — сессия окна: только чаты, без кук.
+                        ...(CHATS_EMBED ? { embed: true } : {})
                     }, {
                         headers: withAccessTokenHeader(
                             { 'Content-Type': 'application/json' },

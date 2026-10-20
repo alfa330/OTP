@@ -5,8 +5,10 @@
 (WAZZUP_PILOT_TEST_PORT), как у остальных тестов пересылки.
 """
 import json
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from flask import Blueprint, Flask
@@ -92,21 +94,128 @@ def test_without_our_echoes_the_bytes_stay_untouched():
     assert db.queries == []
 
 
-def test_route_binds_the_signed_in_person_and_refuses_garbage():
-    db = RowsDb([])
+CRM_KEY = 'synthetic-crm-key-0000000000000000'
+
+
+def signed(crm_user_id='352', crm_user_name='Айгерим', exp=None):
+    exp = int(time.time()) + 600 if exp is None else exp
+    return {'crmUserId': crm_user_id, 'crmUserName': crm_user_name, 'crmExp': str(exp),
+            'crmSig': crm_identity.sign_identity(CRM_KEY, crm_user_id, crm_user_name, exp)}
+
+
+def test_signature_is_ours_and_short_lived():
+    now = 1_790_000_000
+    good = crm_identity.sign_identity(CRM_KEY, '352', 'Айгерим', now + 600)
+    assert crm_identity.identity_signed(CRM_KEY, '352', 'Айгерим', now + 600, good, now=now)
+    assert not crm_identity.identity_signed(CRM_KEY, '353', 'Айгерим', now + 600, good, now=now), 'другой пользователь'
+    assert not crm_identity.identity_signed(CRM_KEY, '352', 'Пётр', now + 600, good, now=now), 'другое имя'
+    assert not crm_identity.identity_signed('other-key', '352', 'Айгерим', now + 600, good, now=now)
+    assert not crm_identity.identity_signed(CRM_KEY, '352', 'Айгерим', now - 1,
+                                            crm_identity.sign_identity(CRM_KEY, '352', 'Айгерим', now - 1), now=now)
+    far = now + crm_identity.IDENTITY_TTL_SECONDS + 3600
+    assert not crm_identity.identity_signed(CRM_KEY, '352', 'Айгерим', far,
+                                            crm_identity.sign_identity(CRM_KEY, '352', 'Айгерим', far), now=now)
+    assert not crm_identity.identity_signed('', '352', 'Айгерим', now + 600, good, now=now), 'без ключа пар нет'
+    assert not crm_identity.identity_signed(CRM_KEY, '352', 'Айгерим', now + 600, 'zz', now=now)
+
+
+class PairsDb:
+    """Пары «учётка ↔ пользователь CRM» для ручки окна: owner — чья учётка закреплена за
+    пользователем CRM из запроса, mine — за кем закреплена учётка запроса."""
+
+    def __init__(self, owner=None, mine=None):
+        self.owner, self.mine, self.queries = owner, mine, []
+
+    @contextmanager
+    def _get_cursor(self):
+        db = self
+
+        class Cursor:
+            row = None
+
+            def execute(self, sql, params=()):
+                text = ' '.join(sql.split())
+                db.queries.append((text, params))
+                self.row = None
+                if 'FROM wazzup_crm_identities i JOIN users u' in text:
+                    self.row = (db.owner,) if db.owner is not None else None
+                elif text.startswith('SELECT crm_user_id FROM wazzup_crm_identities WHERE user_id'):
+                    self.row = (db.mine,) if db.mine is not None else None
+
+            def fetchone(self):
+                return self.row
+
+        yield Cursor()
+
+    def writes(self):
+        return [query for query in self.queries if not query[0].startswith('SELECT')]
+
+
+def identity_client(db, may_bind=lambda: True):
     bp = Blueprint('identity_test', __name__, url_prefix='/api/wazzup/pilot')
     crm_identity.register_crm_identity_route(bp, lambda: (user('operator'), None), lambda fn: fn,
-                                             lambda: ('', 204), db)
+                                             lambda: ('', 204), db, may_bind=may_bind)
     app = Flask(__name__)
     app.register_blueprint(bp)
-    client = app.test_client()
-    ok = client.post('/api/wazzup/pilot/crm-identity', json={'crmUserId': '352', 'crmUserName': 'Айгерим'})
+    return app.test_client()
+
+
+def test_route_binds_the_signed_in_person_only_with_our_signature(monkeypatch):
+    monkeypatch.setenv(crm_identity.KEY_ENV, CRM_KEY)
+    db = PairsDb()
+    client = identity_client(db)
+    ok = client.post('/api/wazzup/pilot/crm-identity', json=signed())
     assert ok.status_code == 200 and ok.get_json()['crmUserId'] == '352'
-    sql, params = db.queries[0]
+    # Один к одному: пользователь CRM, которого назвала другая учётка, у прежней снимается.
+    (drop_sql, drop_params), (sql, params) = db.writes()
+    assert drop_sql.startswith('DELETE FROM wazzup_crm_identities WHERE crm_user_id = %s AND user_id <> %s')
+    assert drop_params == ('352', 42)
     assert sql.startswith('INSERT INTO wazzup_crm_identities')
     assert params == (42, '352', 'Айгерим')
+    # Без подписи, с чужой, с просроченной — пару не запоминаем: так чужого пользователя CRM
+    # к себе не привязать, даже встроив окно в свою страницу.
+    forged = dict(signed(), crmUserId='999')
+    for body in ({'crmUserId': '352', 'crmUserName': 'Айгерим'}, forged,
+                 signed(exp=int(time.time()) - 5), dict(signed(), crmSig='0' * 64)):
+        response = client.post('/api/wazzup/pilot/crm-identity', json=body)
+        assert (response.status_code, response.get_json()['code']) == (403, 'IDENTITY_UNSIGNED'), body
     assert client.post('/api/wazzup/pilot/crm-identity', json={'crmUserId': 'a b'}).status_code == 400
-    assert len(db.queries) == 1
+    assert len(db.writes()) == 2
+
+
+def test_window_takes_only_a_free_pair(monkeypatch):
+    """Общий компьютер: в окне пользователя CRM 352 вошёл паролем другой человек — или осталась
+    сессия прежнего. Подпись в адресе верна, но чужую пару окно не занимает: иначе 352 дальше
+    открывал бы чужую учётку без пароля."""
+    monkeypatch.setenv(crm_identity.KEY_ENV, CRM_KEY)
+    post = lambda db, **kwargs: identity_client(db, **kwargs).post('/api/wazzup/pilot/crm-identity', json=signed())
+    for taken in (PairsDb(owner=43), PairsDb(mine='401')):
+        response = post(taken)
+        assert (response.status_code, response.get_json()['code']) == (409, 'PAIR_TAKEN')
+        assert taken.writes() == [], 'прежняя пара остаётся как была'
+    # Свободную пару занимает только оператор, чей вход подтвердил СВ (QR), — не админ.
+    closed = PairsDb()
+    response = post(closed, may_bind=lambda: False)
+    assert (response.status_code, response.get_json()['code']) == (403, 'PAIR_NOT_ALLOWED')
+    assert closed.writes() == []
+    # Своя пара — обновляется у любого: так меняется имя пользователя CRM.
+    own = PairsDb(owner=42, mine='352')
+    assert post(own, may_bind=lambda: False).status_code == 200
+    assert own.writes()[-1][1] == (42, '352', 'Айгерим')
+
+
+def test_chats_let_only_an_operator_behind_the_qr_take_a_free_pair():
+    source = (Path(__file__).resolve().parents[1] / 'wazzup' / 'pilot.py').read_text(encoding='utf-8')
+    assert ("register_crm_identity_route(bp, actor, require_api_key, preflight, db,\n"
+            "                                may_bind=lambda: access is None or access().get('mode') in "
+            "access_rules.GATED_MODES)") in source
+
+
+def test_without_the_crm_key_nothing_is_bound(monkeypatch):
+    monkeypatch.delenv(crm_identity.KEY_ENV, raising=False)
+    db = PairsDb()
+    assert identity_client(db).post('/api/wazzup/pilot/crm-identity', json=signed()).status_code == 403
+    assert db.queries == []
 
 
 @pytest.fixture

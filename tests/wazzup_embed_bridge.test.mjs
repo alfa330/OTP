@@ -116,23 +116,29 @@ test('раздел: команда открывает свой чат, при н
     assert.match(view, /useEffect\(\(\) => \{ if \(embed\) setEmbedStatus\('locked'\); \}, \[embed\]\);/);
 });
 
-test('пользователь CRM: командой или в адресе окна; известный — сразу, повтор — без нового запроса', () => {
+test('пользователь CRM: из адреса окна с подписью iCORE; без подписи — не берём', () => {
     resetEmbedBridgeForTests();
-    assert.deepEqual(parseEmbedIdentity({ crmUserId: 352, crmUserName: ' Иванова Айгерим ' }),
-        { crmUserId: '352', crmUserName: 'Иванова Айгерим' });
-    assert.equal(parseEmbedIdentity({ crmUserId: 'a b' }), null);
-    assert.equal(parseEmbedIdentity({}), null);
-    adoptEmbedIdentityFromSearch('?embed=1&crmUserId=352&crmUserName=%D0%98%D0%B2%D0%B0%D0%BD');
+    const sig = 'a'.repeat(64);
+    const proof = { crmExp: '1790003600', crmSig: sig };
+    assert.deepEqual(parseEmbedIdentity({ crmUserId: 352, crmUserName: ' Иванова Айгерим ', ...proof }),
+        { crmUserId: '352', crmUserName: 'Иванова Айгерим', ...proof });
+    assert.equal(parseEmbedIdentity({ crmUserId: '352', crmUserName: 'Иван' }), null, 'без подписи пары нет');
+    assert.equal(parseEmbedIdentity({ crmUserId: '352', crmExp: 'soon', crmSig: sig }), null);
+    assert.equal(parseEmbedIdentity({ crmUserId: '352', crmExp: '1790003600', crmSig: 'xyz' }), null);
+    assert.equal(parseEmbedIdentity({ crmUserId: 'a b', ...proof }), null);
+    adoptEmbedIdentityFromSearch('?embed=1&crmUserId=352&crmUserName=Иван');
     const seen = [];
     takeEmbedIdentity((identity) => seen.push(identity));
-    assert.deepEqual(seen, [{ crmUserId: '352', crmUserName: 'Иван' }]);
+    assert.deepEqual(seen, [], 'адрес без подписи пару не даёт');
+    adoptEmbedIdentityFromSearch(`?embed=1&crmUserId=352&crmUserName=%D0%98%D0%B2%D0%B0%D0%BD&crmExp=1790003600&crmSig=${sig}`);
+    assert.deepEqual(seen, [{ crmUserId: '352', crmUserName: 'Иван', ...proof }]);
     const { win, posted, send } = frame();
     installEmbedBridge(win);
-    send({ type: 'icore.chats.identify', crmUserId: '352', crmUserName: 'Иван' });
+    send({ type: 'icore.chats.identify', crmUserId: '352', crmUserName: 'Иван', ...proof });
     assert.equal(seen.length, 1, 'та же пара — без нового запроса');
-    send({ type: 'icore.chats.identify', crmUserId: '401', crmUserName: 'Пётр' });
-    assert.deepEqual(seen.at(-1), { crmUserId: '401', crmUserName: 'Пётр' });
-    send({ type: 'icore.chats.identify' });
+    send({ type: 'icore.chats.identify', crmUserId: '401', crmUserName: 'Пётр', crmExp: '1790003600', crmSig: 'b'.repeat(64) });
+    assert.equal(seen.at(-1).crmUserId, '401');
+    send({ type: 'icore.chats.identify', crmUserId: '402' });
     assert.equal(posted.at(-1).message.code, 'BAD_IDENTITY');
     resetEmbedBridgeForTests();
 });

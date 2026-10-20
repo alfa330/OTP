@@ -1,4 +1,5 @@
 ﻿import './staleBundleRecovery';
+import { embedLaunchDone, reloadPending } from './embedLaunchBoot';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
@@ -42,13 +43,18 @@ try {
      кэша файлы, которые Vite только что пересобрал. */
   startPwaRuntime({ baseUrl: routerBase, withServiceWorker: import.meta.env.PROD });
   const root = ReactDOM.createRoot(document.getElementById('root'));
-  root.render(
-    <BrowserRouter basename={routerBase}>
-      <ErrorBoundary>
-        <App />
-      </ErrorBoundary>
-    </BrowserRouter>
-  );
+  /* Окно «Чатов ОП» в CRM сначала меняет ссылку входа на сессию (embedLaunchBoot.js);
+     вне окна обещание уже выполнено. После обмена окно перезагружается — не рисуем. */
+  embedLaunchDone.then((launch) => {
+    if (reloadPending(launch)) return;
+    root.render(
+      <BrowserRouter basename={routerBase}>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </BrowserRouter>
+    );
+  }).catch((err) => console.error('Root rendering error:', err));
 } catch (err) {
   console.error('Root rendering error:', err);
   document.getElementById('root').innerHTML = `
