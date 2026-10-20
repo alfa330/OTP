@@ -18,6 +18,24 @@ const parse = (iso) => {
     return Number.isNaN(d.getTime()) ? null : d;
 };
 
+/* Порядок ленты — как у сервера: время с точностью до МИКРОСЕКУНДЫ, затем id.
+ * Date хранит только миллисекунды, а сервер разводит сообщения и на 1 мкс:
+ * ответ клиента «2ГИС» встаёт сразу за ответом оператора из окна iCORE
+ * (wazzup/delivery.py, «Ответы из окна iCORE»), опоздавшие сжаты в первую
+ * миллисекунду минуты. По Date такие сообщения равны, и порядок решал бы
+ * случайный messageId. Ключ меньше 2^53 (≈1,8·10^15). */
+export const messageTimeKey = (iso) => {
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return NaN;
+    const fraction = /\.\d{3}(\d{1,3})/.exec(String(iso));
+    return ms * 1000 + (fraction ? Number(fraction[1].padEnd(3, '0')) : 0);
+};
+
+export const compareMessageTime = (a, b) => {
+    const delta = messageTimeKey(a.dt) - messageTimeKey(b.dt);
+    return (Number.isFinite(delta) ? delta : 0) || String(a.messageId).localeCompare(String(b.messageId));
+};
+
 export const localDayKey = (iso) => {
     const d = parse(iso);
     return d ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` : '';

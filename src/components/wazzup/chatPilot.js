@@ -1,5 +1,7 @@
+import { compareMessageTime } from './messageTime.js';
+
 // Keep loaded history while applying webhook updates, including edits/deletions.
-const STATUS_ORDER = { queued: 0, pending: 0, sent: 1, error: 2, delivered: 3, read: 4 };
+const STATUS_ORDER ={ queued: 0, pending: 0, sent: 1, error: 2, delivered: 3, read: 4 };
 
 // Статус доставки не откатывается: опоздавшее «доставлено» не гасит «прочитано».
 export const laterStatus = (current, next) => ((STATUS_ORDER[current] ?? -1) > (STATUS_ORDER[next] ?? -1) ? current : next);
@@ -93,11 +95,7 @@ export const mergePilotMessages = (previous = [], incoming = []) => {
         }
         byId.set(message.messageId, merged);
     }
-    return [...byId.values()].sort((a, b) => {
-        const delta = new Date(a.dt).getTime() - new Date(b.dt).getTime();
-        return (Number.isFinite(delta) ? delta : 0)
-            || String(a.messageId).localeCompare(String(b.messageId));
-    });
+    return [...byId.values()].sort(compareMessageTime);
 };
 
 // SSE can split a line or a UTF-8 character between network chunks. The caller

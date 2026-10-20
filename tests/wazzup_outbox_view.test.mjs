@@ -29,7 +29,7 @@ await build({
         import { outboxMessages, pilotChatKey } from './chatPilot';
         import { chatKeyOf, configureSendQueue, enqueueMessage, outboxProblems, outboxSnapshot, resetSendQueueForTests,
             retryMessage, settleOutbox, takeBackMessage, useChatOutbox, useOutbox } from './sendQueue';
-        import { localDayKey } from './messageTime';
+        import { compareMessageTime, localDayKey } from './messageTime';
         import { messageQuote } from './threadPresentation';
         import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
         const fmtDay = (iso) => 'day ' + String(iso).slice(0, 10);

@@ -34,8 +34,9 @@ def _database_class():
     cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
     wanted = {'store_wazzup_messages', '_wazzup_chat_history_tx', '_wazzup_recent_arrivals_tx',
               '_wazzup_chat_later_tx', '_refresh_wazzup_chat_tx', 'update_wazzup_statuses',
-              '_wazzup_episode_kept_sql', 'retime_wazzup_inbound_after_replies'}
-    attrs = {'WAZZUP_EPISODE_REFERENCES', 'WAZZUP_EPISODE_LOCK_KEY'}
+              '_wazzup_episode_kept_sql', 'retime_wazzup_inbound_after_replies',
+              '_retime_wazzup_chat_after_replies_tx'}
+    attrs = {'WAZZUP_EPISODE_REFERENCES', 'WAZZUP_EPISODE_LOCK_KEY', 'WAZZUP_RETIME_CHATS_PER_READ'}
     body = [n for n in cls.body
             if (isinstance(n, ast.FunctionDef) and n.name in wanted)
             or (isinstance(n, ast.Assign) and len(n.targets) == 1
@@ -185,9 +186,10 @@ def test_receiver_orders_like_wazzup_and_the_answer_waits_for_a_reply(pg):
     assert cursor.fetchone() == ('sorry', True)
 
 
-def _old_rows(cursor, rows):
+def _old_rows(cursor, rows, statuses=None):
     """Строки так, как их сохранил приёмник ДО правки: время Wazzup, приход — created_at.
     Вставка в порядке прихода — триггер «ждут ответа» считает так же, как на проде."""
+    statuses = statuses or {}
     for mid, echo, sent, received in sorted(rows, key=lambda r: r[3]):
         if echo:
             _outbox(cursor, mid)
@@ -195,7 +197,8 @@ def _old_rows(cursor, rows):
             (message_id,channel_id,chat_type,chat_id,dt,is_echo,type,text,status,author_id,author_name,
              account,created_at)
             VALUES (%s,%s,'whatsapp',%s,%s,%s,'text',%s,%s,%s,%s,'op',%s)""",
-                       (mid, CHANNEL, CHAT, _almaty(sent), echo, mid, 'read' if echo else 'inbound',
+                       (mid, CHANNEL, CHAT, _almaty(sent), echo, mid,
+                        statuses.get(mid, 'read' if echo else 'inbound'),
                         'icore:42' if echo else None, 'Оператор' if echo else None, _almaty(received)))
 
 
@@ -266,3 +269,45 @@ def test_repair_never_deletes_or_splits_an_evaluated_episode(pg):
     assert cursor.fetchone()[0] == 1
     cursor.execute("SELECT count(*) FROM wazzup_messages WHERE chat_id=%s AND dt > %s", (CHAT, register))
     assert cursor.fetchone()[0] == 0, 'ничего не ушло за конец оценённого эпизода'
+
+
+def test_phone_reply_after_the_moved_answer_clears_waiting(pg):
+    connection, cursor, database, _ = pg
+    db = database()
+    for mid, echo, sent, received in sorted([r for r in CHAT_1 if r[0] != 'sorry'], key=lambda r: r[3]):
+        if echo:
+            _outbox(cursor, mid)
+            connection.commit()
+            db.store_wazzup_messages([dict(messageId=mid, channelId=CHANNEL, chatId=CHAT, chatType='whatsapp',
+                                           dateTime=_almaty(sent).isoformat(), isEcho=True, type='text',
+                                           text=mid, status='pending', authorId='icore:42',
+                                           authorName='Оператор')])
+            db.update_wazzup_statuses([dict(messageId=mid, status='sent')])
+        else:
+            db.store_wazzup_messages([dict(messageId=mid, channelId=CHANNEL, chatId=CHAT, chatType='whatsapp',
+                                           dateTime=_iso(_almaty(sent)), isEcho=False, type='text', text=mid,
+                                           status='inbound')], received_at=_almaty(received))
+    assert _waiting(cursor)[2] == ['no', 'wolt', 'only']
+    # Оператор ответил с телефона: эхо с минутным временем (номер после «only»).
+    db.store_wazzup_messages([dict(messageId='phone-ok', channelId=CHANNEL, chatId=CHAT, chatType='whatsapp',
+                                   dateTime='2026-10-19T06:23:00.005Z', isEcho=True, type='text',
+                                   text='ok', status='sent', authorId='7', authorName='Оператор')],
+                             received_at=_almaty((2026, 10, 19, 11, 23, 58)))
+    assert _order(cursor)[-4:] == ['no', 'wolt', 'only', 'phone-ok']
+    assert _waiting(cursor)[0] == 0 and _waiting(cursor)[2] == [], 'ответ с телефона снял ожидание'
+
+
+def test_repair_does_not_reopen_a_chat_closed_with_no_reply_needed(pg):
+    connection, cursor, database, _ = pg
+    # Вопрос из окна iCORE не дошёл (error) — ответом он не считается, и ответы
+    # клиента после приветствия счётчик учёл; оператор нажал «Ответ не нужен».
+    _old_rows(cursor, [r for r in CHAT_1 if r[0] != 'sorry'], statuses={'register?': 'error'})
+    connection.commit()
+    assert _waiting(cursor)[0] == 4, "courier, no, wolt, only"
+    cursor.execute('SELECT wazzup_dismiss_unanswered(%s, %s, %s)', (CHANNEL, CHAT, 'only'))
+    connection.commit()
+    assert _waiting(cursor)[0] == 0
+    result = database().retime_wazzup_inbound_after_replies(
+        account='op', apply=True, waiting_since=_almaty((2026, 10, 19)))
+    assert result['messages'] == 4, 'порядок чинится'
+    assert result['waiting_chats'] == [] and _waiting(cursor)[0] == 0, '«Ответ не нужен» остаётся в силе'

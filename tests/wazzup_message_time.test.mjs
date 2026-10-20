@@ -18,7 +18,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lateDeliveryNote, localDayKey } from '../src/components/wazzup/messageTime.js';
+import {
+  compareMessageTime, lateDeliveryNote, localDayKey, messageTimeKey,
+} from '../src/components/wazzup/messageTime.js';
+import { mergePilotMessages } from '../src/components/wazzup/chatPilot.js';
 
 test('день ленты считается по местному времени, а не по UTC-строке', () => {
   assert.equal(localDayKey('2026-10-05T18:59:00+00:00'), '2026-10-05'); // 23:59 Алматы
@@ -65,4 +68,41 @@ test('лента делит дни местным днём и показывае
   assert.match(view, /const lateNote = lateDeliveryNote\(msg\);/);
   // подсказка рисуется именно по lateNote — а не лежит в файле мёртвой веткой
   assert.match(view, /\{lateNote \? \(\s*<span[^>]*title=\{lateNote\}/);
+});
+
+/*
+ * 3. ПОРЯДОК ЛЕНТЫ — ДО МИКРОСЕКУНДЫ, как у сервера. Ответ клиента «2ГИС»,
+ *    пришедший после ответа оператора из окна iCORE, сервер ставит на 1 мкс позже
+ *    ответа (wazzup/delivery.py). Date хранит миллисекунды: по нему они равны, и
+ *    порядок решал бы случайный messageId (жалоба 19.10.2026).
+ */
+test('ключ времени различает микросекунды и понимает любую дробь', () => {
+  const base = Date.parse('2026-10-19T06:23:29.565Z') * 1000;
+  assert.equal(messageTimeKey('2026-10-19T06:23:29.565821+00:00'), base + 821);
+  assert.equal(messageTimeKey('2026-10-19T06:23:29.565Z'), base, 'миллисекунды браузера');
+  assert.equal(messageTimeKey('2026-10-19T06:23:29.56501+00:00'), base + 10);
+  assert.equal(messageTimeKey('2026-10-19T06:23:29+00:00'), base - 565000, 'isoformat без дроби');
+  assert.ok(Number.isSafeInteger(messageTimeKey('2026-10-19T06:23:29.565821+00:00')));
+  assert.ok(Number.isNaN(messageTimeKey('не дата')));
+});
+
+test('ответы клиента идут за вопросом оператора, хотя их id «меньше»', () => {
+  const question = { messageId: 'f716', dt: '2026-10-19T06:23:29.565821+00:00', isEcho: true };
+  const replies = [
+    { messageId: 'd226', dt: '2026-10-19T06:23:29.565822+00:00' },
+    { messageId: '0d7e', dt: '2026-10-19T06:23:29.565823+00:00' },
+    { messageId: '1c52', dt: '2026-10-19T06:23:29.565824+00:00' },
+  ];
+  const expected = ['f716', 'd226', '0d7e', '1c52'];
+  assert.deepEqual([...replies, question].sort(compareMessageTime).map((m) => m.messageId), expected);
+  assert.deepEqual(mergePilotMessages([question], replies.slice().reverse()).map((m) => m.messageId), expected);
+  // равное время — по id, как ORDER BY dt, message_id
+  assert.deepEqual([{ messageId: 'b', dt: question.dt }, { messageId: 'a', dt: question.dt }]
+    .sort(compareMessageTime).map((m) => m.messageId), ['a', 'b']);
+});
+
+test('лента в разделе сортируется тем же порядком', () => {
+  const view = readFileSync(new URL('../src/components/wazzup/WazzupChatsView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /\]\.sort\(compareMessageTime\);/);
+  assert.doesNotMatch(view, /new Date\(a\.dt\) - new Date\(b\.dt\)/);
 });

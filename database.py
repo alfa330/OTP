@@ -24673,13 +24673,14 @@ class Database:
         received_at — момент прихода вебхука; передаёт только приёмник.
         Входящее канала на обычном WhatsApp, пришедшее с опозданием, получает
         время доставки (wazzup/delivery.py), исходное время уходит в
-        wazzup_dt. Пришедшее вовремя встаёт не раньше ответа с точным временем
-        (из окна iCORE), который к его приходу уже был в чате. Время задаётся
-        только при первой вставке: повторная доставка того же сообщения его не
-        двигает. Забор «Потока» время прихода не передаёт — у окна чатов время
-        своё и точное."""
+        wazzup_dt. Сообщение с минутным временем (входящее или ответ с
+        телефона), пришедшее вовремя, встаёт не раньше сообщения с точным
+        временем (ответа из окна iCORE), которое к его приходу уже было в чате.
+        Время задаётся только при первой вставке: повторная доставка того же
+        сообщения его не двигает. Забор «Потока» время прихода не передаёт — у
+        окна чатов время своё и точное."""
         from wazzup.delivery import (after_known_replies, delivery_backlog, delivery_time,
-                                     is_in_time_inbound, is_late_inbound, parse_wazzup_dt,
+                                     is_in_time, is_late_inbound, parse_wazzup_dt,
                                      reply_pending)
         from wazzup.names import author_key
         if not isinstance(messages, list) or not messages:
@@ -24726,9 +24727,9 @@ class Database:
                             received_at, reply_pending(history, received_at),
                             after=max(known, default=None))
                         wazzup_dt = dt
-                elif is_in_time_inbound(parsed_dt, received_at, is_echo):
+                elif is_in_time(parsed_dt, received_at):
                     placed = after_known_replies(parsed_dt, self._wazzup_chat_later_tx(
-                        cursor, chat_key[0], chat_key[1], parsed_dt))
+                        cursor, chat_key[0], chat_key[1], parsed_dt, skip_late=is_echo))
                     if placed != parsed_dt:
                         stored_dt = moment = placed
                 if moment is not None:
@@ -24785,14 +24786,16 @@ class Database:
                 for r in cursor.fetchall()]
 
     @staticmethod
-    def _wazzup_chat_later_tx(cursor, channel_id, chat_id, dt):
+    def _wazzup_chat_later_tx(cursor, channel_id, chat_id, dt, skip_late=False):
         """Время сообщений чата позже dt — для wazzup.delivery.after_known_replies.
         Всё, что уже лежит в базе, к приходу этого сообщения в чате уже было, в
         том числе записанное раньше него в том же вебхуке (та же транзакция).
-        Индекс по каналу, чату и времени."""
+        skip_late — для ответа с телефона: опоздавшие входящие ему не указ
+        (wazzup/delivery.py). Индекс по каналу, чату и времени."""
         cursor.execute("""
             SELECT dt FROM wazzup_messages
-             WHERE channel_id = %s AND chat_id = %s AND dt > %s""",
+             WHERE channel_id = %s AND chat_id = %s AND dt > %s"""
+                       + (" AND wazzup_dt IS NULL" if skip_late else ""),
             (channel_id, chat_id, dt))
         return [r[0] for r in cursor.fetchall()]
 
@@ -65334,183 +65337,231 @@ class Database:
                      len(result['episodes_kept']), result['outside_episodes'])
         return result
 
+    WAZZUP_RETIME_CHATS_PER_READ = 200
+
     def retime_wazzup_inbound_after_replies(self, account='op', apply=False, waiting_since=None):
-        """Разовая починка входящих с минутным временем, которые пришли вовремя,
+        """Разовая починка сообщений с минутным временем, которые пришли вовремя,
         но ПОСЛЕ ответа из окна iCORE с точным временем позже их минуты, —
         сохранённых до того, как приёмник начал ставить их за таким ответом
         (wazzup/delivery.py, «Ответы из окна iCORE»; жалоба 19.10.2026).
 
         Проход тот же, что у приёмника (delivery.replay_after_replies): чат — по
         порядку прихода, created_at — момент вебхука (строку аккаунта с вебхуком
-        вставляет только приёмник, ответ iCORE — ручка отправки).
+        вставляет только приёмник, ответ iCORE — ручка отправки). Сначала одним
+        чтением находятся чаты со сдвигами, потом каждый чат чинится своей
+        короткой транзакцией и заново читается под блокировкой: вебхуки этих
+        чатов ждут доли секунды, а не всю починку. Строка, которую за это время
+        поменяли (не совпало старое время), не трогается — чат в skipped_chats,
+        повторный запуск его доделает.
 
         Эпизоды. Оценённый (_wazzup_episode_kept_sql) не удаляется никогда; его
         сообщение, которое ушло бы за конец эпизода, остаётся на месте
-        (kept_in_place): сборка подхватила бы его отдельным эпизодом из одного
-        сообщения. Неоценённые эпизоды чата с самого раннего сдвинутого сообщения
-        удаляются — их пересобирает build_wazzup_episodes (ручка «пересобрать»
-        или ночь); удаляются только те, что сборка соберёт заново: позже конца
-        последнего оценённого эпизода чата. Неоценённый со сдвинутым сообщением
-        перед оценённым остаётся как был (stale_episodes).
+        (kept_in_place): сборка подхватила бы его отдельным эпизодом. Неоценённые
+        эпизоды чата с самого раннего сдвинутого сообщения удаляются — их
+        пересобирает build_wazzup_episodes (ручка «пересобрать» или ночь);
+        удаляются только те, что сборка соберёт заново: позже конца последнего
+        оценённого эпизода чата. Неоценённый со сдвинутым сообщением перед
+        оценённым остаётся как был (stale_episodes).
 
-        waiting_since — вернуть в «ждут ответа» чаты, где сдвинутое входящее
-        встало после последнего ответа оператора: до починки счётчик сравнивал
-        с ответом его минуту и считал отвеченным. Только сдвинутые не раньше
-        этого момента и только там, где счётчик пуст, а последнее входящее чата —
-        сдвинутое (иначе позже было что-то, что счётчик уже учёл или сняли
-        «Ответ не нужен»). None — счётчик не трогать.
+        waiting_since — вернуть в «ждут ответа» чаты, которые счётчик пропустил
+        из-за этой ошибки: клиент написал последним, после ответа оператора, а
+        счётчик сравнил с ответом его минуту и счёл отвеченным. Возвращаются
+        только сдвинутые входящие, чьё старое время не позже последнего ответа
+        (answered_through), а новое — позже него и не раньше waiting_since, и
+        только если счётчик чата пуст, последнее сообщение чата — такое входящее
+        и после него не приходило ни одного ответа. Пустой счётчик при входящем
+        позже answered_through значит «Ответ не нужен» — такие не трогаются.
+        None — счётчик не трогать.
 
-        apply=False — холостой прогон: только чтение (годится и для
-        соединения только на чтение), итог тот же. Повторный запуск ничего не
-        находит: сдвинутое время уже не минутное."""
+        apply=False — холостой прогон: только чтение (годится и для соединения
+        только на чтение), итог тот же. Повторный запуск ничего не находит:
+        сдвинутое время уже не минутное."""
         from wazzup import accounts as wz_accounts
-        from wazzup.delivery import LATE_DELIVERY, replay_after_replies
-        from wazzup.pilot import EXCLUDED_CHANNELS
+        from wazzup.delivery import replay_after_replies
         if (wz_accounts.ACCOUNTS.get(account) or {}).get('source') != 'webhook':
             raise ValueError(f"починка только для аккаунта с вебхуком, а не {account!r}")
         result = {'account': account, 'applied': bool(apply), 'messages': 0, 'chats': 0,
                   'kept_in_place': 0, 'episodes_deleted': {}, 'episodes_kept': [],
-                  'stale_episodes': [], 'waiting_chats': [], 'waiting_messages': 0}
+                  'stale_episodes': [], 'waiting_chats': [], 'waiting_messages': 0,
+                  'skipped_chats': []}
         with self._get_cursor() as cursor:
-            # Ночная сборка и кнопка «пересобрать» ждут конца транзакции.
-            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (self.WAZZUP_EPISODE_LOCK_KEY,))
+            # Точное время в чате канала с минутным временем бывает только у ответа
+            # из окна iCORE (он есть в wazzup_pilot_outbox) и у опоздавшего
+            # (wazzup_dt): только в таких чатах правилу есть за кем ставить. Обе
+            # выборки малы — проход по каждому сообщению базе с 0,1 CPU не по силам.
             cursor.execute("""
-                SELECT m.message_id, m.channel_id, m.chat_id, m.is_echo, m.dt,
-                       m.created_at, m.wazzup_dt IS NOT NULL, m.is_deleted, m.chat_type
-                  FROM wazzup_messages m
-                 WHERE m.account = %s
-                   AND (m.channel_id, m.chat_id) IN (
-                       SELECT channel_id, chat_id FROM wazzup_messages
-                        WHERE account = %s AND NOT is_echo AND wazzup_dt IS NULL
-                          AND created_at - dt <= %s
-                          AND date_trunc('second', dt) = date_trunc('minute', dt))
-                 ORDER BY m.channel_id, m.chat_id, m.created_at, m.dt, m.message_id""",
-                (account, account, LATE_DELIVERY))
-            chats = {}
-            for (message_id, channel_id, chat_id, is_echo, dt, created_at, late,
-                 is_deleted, chat_type) in cursor.fetchall():
-                chats.setdefault((channel_id, chat_id), []).append({
-                    'message_id': message_id, 'is_echo': is_echo, 'dt': dt,
-                    'created_at': created_at, 'late': late, 'is_deleted': is_deleted,
-                    'chat_type': chat_type})
-            kept_sql, plans = None, {}
-            for key, history in chats.items():
-                moves = replay_after_replies(history)
-                if not moves:
-                    continue
-                if kept_sql is None:
-                    kept_sql = self._wazzup_episode_kept_sql(cursor)
-                cursor.execute(f"""
-                    SELECT e.id, e.kind, e.started_at, e.ended_at, {kept_sql}
-                      FROM wazzup_episodes e
-                     WHERE e.channel_id = %s AND e.chat_id = %s
-                     ORDER BY e.started_at""", key)
-                episodes = cursor.fetchall()
-                keep = set()
-                while True:
-                    crossing = {mid for mid, old, new in moves
-                                for _, _, started, ended, kept in episodes
-                                if kept and started <= old <= ended < new}
-                    if crossing <= keep:
-                        break
-                    keep |= crossing
-                    moves = replay_after_replies(history, frozenset(keep))
-                result['kept_in_place'] += len(keep)
-                if moves:
-                    plans[key] = {'moves': moves, 'episodes': episodes, 'history': history}
-            moves = [move for plan in plans.values() for move in plan['moves']]
-            if apply and moves:
+                SELECT m.channel_id, m.chat_id
+                  FROM wazzup_pilot_outbox o
+                  JOIN wazzup_messages m ON m.message_id = o.message_id AND m.account = o.account
+                 WHERE o.account = %s AND o.message_id IS NOT NULL
+                UNION
+                SELECT channel_id, chat_id FROM wazzup_messages
+                 WHERE account = %s AND wazzup_dt IS NOT NULL""", (account, account))
+            keys = cursor.fetchall()
+        chats = {}
+        # Историю — пачками чатов: ~70 тыс. строк одним ответом не укладываются в
+        # statement_timeout соединения на чтение (30 с).
+        for start in range(0, len(keys), self.WAZZUP_RETIME_CHATS_PER_READ):
+            batch = keys[start:start + self.WAZZUP_RETIME_CHATS_PER_READ]
+            with self._get_cursor() as cursor:
                 cursor.execute("""
-                    UPDATE wazzup_messages m
-                       SET dt = v.new_dt
-                      FROM unnest(%s::text[], %s::timestamptz[], %s::timestamptz[])
-                           AS v(message_id, old_dt, new_dt)
-                     WHERE m.message_id = v.message_id AND m.account = %s
-                       AND m.dt = v.old_dt AND m.wazzup_dt IS NULL AND NOT m.is_echo""",
-                    ([mid for mid, _, _ in moves], [old for _, old, _ in moves],
-                     [new for _, _, new in moves], account))
-                if cursor.rowcount != len(moves):
-                    raise RuntimeError(
-                        f"wazzup inbound retime: сдвинуто {cursor.rowcount} строк из {len(moves)}")
-            for (channel_id, chat_id), plan in plans.items():
-                since = min(old for _, old, _ in plan['moves'])
-                episodes = plan['episodes']
-                kept_end = max((ended for _, _, _, ended, kept in episodes if kept), default=None)
-                result['episodes_kept'].extend(
-                    eid for eid, _, started, ended, kept in episodes
-                    if kept and any(started <= old <= ended for _, old, _ in plan['moves']))
-                doomed = [eid for eid, _, started, ended, kept in episodes
-                          if not kept and ended >= since and (kept_end is None or started > kept_end)]
-                result['stale_episodes'].extend(
-                    eid for eid, _, started, ended, kept in episodes
-                    if not kept and ended >= since and eid not in doomed
-                    and any(started <= old <= ended for _, old, _ in plan['moves']))
-                if apply:
-                    self._refresh_wazzup_chat_tx(cursor, channel_id, chat_id, account=account)
-                    if doomed:
-                        cursor.execute(f"""
-                            DELETE FROM wazzup_episodes e
-                             WHERE e.id = ANY(%s) AND NOT {kept_sql}
-                            RETURNING e.kind""", (doomed,))
-                        kinds = [row[0] for row in cursor.fetchall()]
-                    else:
-                        kinds = []
-                else:
-                    kinds = [kind for eid, kind, *_ in episodes if eid in doomed]
-                for kind in kinds:
-                    result['episodes_deleted'][kind] = result['episodes_deleted'].get(kind, 0) + 1
-                if (waiting_since is None or account != 'op' or channel_id in EXCLUDED_CHANNELS):
-                    continue
-                # Счётчик «ждут ответа» (wazzup/unread.py) — под той же блокировкой
-                # строки, что и у приёмника: пришедшее за время починки он уже учёл.
-                cursor.execute("""
-                    SELECT answered_through, unread_count FROM wazzup_chat_read_state
-                     WHERE account = %s AND channel_id = %s AND chat_id = %s"""
-                               + (" FOR UPDATE" if apply else ""), (account, channel_id, chat_id))
-                state = cursor.fetchone()
-                if not state or state[0] is None or state[1]:
-                    continue
-                answered = state[0]
-                placed = {mid: new for mid, _, new in plan['moves']}
-                inbound = [m for m in plan['history']
-                           if not m['is_echo'] and not m['is_deleted'] and m['chat_type'] == 'whatsapp']
-                last = max(inbound, default=None,
-                           key=lambda m: (placed.get(m['message_id'], m['dt']), m['message_id']))
-                if last is None or last['message_id'] not in placed:
-                    continue
-                waiting = sorted((placed[m['message_id']], m['message_id']) for m in inbound
-                                 if m['message_id'] in placed and placed[m['message_id']] > answered
-                                 and placed[m['message_id']] >= waiting_since)
-                if not waiting:
-                    continue
-                result['waiting_chats'].append(chat_id)
-                result['waiting_messages'] += len(waiting)
-                if apply:
-                    cursor.execute("""
-                        INSERT INTO wazzup_unanswered_messages
-                            (account, channel_id, chat_id, message_id, sent_at)
-                        SELECT %s, %s, %s, v.message_id, v.sent_at
-                          FROM unnest(%s::text[], %s::timestamptz[]) AS v(message_id, sent_at)
-                        ON CONFLICT DO NOTHING""",
-                        (account, channel_id, chat_id, [mid for _, mid in waiting],
-                         [sent for sent, _ in waiting]))
-                    inserted = cursor.rowcount
-                    if inserted:
-                        cursor.execute("""
-                            UPDATE wazzup_chat_read_state
-                               SET unread_count = unread_count + %s, last_inbound_id = %s,
-                                   revision = revision + 1, updated_at = now()
-                             WHERE account = %s AND channel_id = %s AND chat_id = %s""",
-                            (inserted, waiting[-1][1], account, channel_id, chat_id))
-            result['messages'] = len(moves)
-            result['chats'] = len(plans)
+                    SELECT m.message_id, m.channel_id, m.chat_id, m.is_echo, m.dt,
+                           m.created_at, m.wazzup_dt IS NOT NULL
+                      FROM wazzup_messages m
+                      JOIN unnest(%s::text[], %s::text[]) AS c(channel_id, chat_id)
+                        ON m.channel_id = c.channel_id AND m.chat_id = c.chat_id
+                     WHERE m.account = %s
+                     ORDER BY m.channel_id, m.chat_id, m.created_at, m.dt, m.message_id""",
+                    ([k[0] for k in batch], [k[1] for k in batch], account))
+                for message_id, channel_id, chat_id, is_echo, dt, created_at, late in cursor.fetchall():
+                    chats.setdefault((channel_id, chat_id), []).append({
+                        'message_id': message_id, 'is_echo': is_echo, 'dt': dt,
+                        'created_at': created_at, 'late': late})
+        for key in [key for key, history in chats.items() if replay_after_replies(history)]:
+            with self._get_cursor() as cursor:
+                outcome = self._retime_wazzup_chat_after_replies_tx(
+                    cursor, account, key, apply, waiting_since)
+            result['kept_in_place'] += outcome['kept_in_place']
+            if outcome['skipped']:
+                result['skipped_chats'].append(key[1])
+                continue
+            if not outcome['moves']:
+                continue
+            result['messages'] += len(outcome['moves'])
+            result['chats'] += 1
+            for kind in outcome['episodes_deleted']:
+                result['episodes_deleted'][kind] = result['episodes_deleted'].get(kind, 0) + 1
+            result['episodes_kept'].extend(outcome['episodes_kept'])
+            result['stale_episodes'].extend(outcome['stale_episodes'])
+            if outcome['waiting']:
+                result['waiting_chats'].append(key[1])
+                result['waiting_messages'] += len(outcome['waiting'])
         logging.info("wazzup inbound retime (%s, apply=%s): сообщений %s, чатов %s, оставлено на "
                      "месте %s, эпизодов удалено %s, оценённых затронуто %s, устаревших %s, "
-                     "ждут ответа: чатов %s", account, apply, result['messages'], result['chats'],
-                     result['kept_in_place'], result['episodes_deleted'],
+                     "ждут ответа: чатов %s, отложено чатов %s", account, apply, result['messages'],
+                     result['chats'], result['kept_in_place'], result['episodes_deleted'],
                      len(result['episodes_kept']), len(result['stale_episodes']),
-                     len(result['waiting_chats']))
+                     len(result['waiting_chats']), len(result['skipped_chats']))
         return result
+
+    def _retime_wazzup_chat_after_replies_tx(self, cursor, account, key, apply, waiting_since):
+        """Один чат разовой починки retime_wazzup_inbound_after_replies — в своей
+        транзакции. Порядок блокировок как у приёмника: строка счётчика «ждут
+        ответа» (её берёт триггер вставки), потом сообщения, потом сводка чата."""
+        from wazzup.delivery import replay_after_replies
+        from wazzup.pilot import EXCLUDED_CHANNELS
+        channel_id, chat_id = key
+        out = {'moves': [], 'kept_in_place': 0, 'episodes_deleted': [], 'episodes_kept': [],
+               'stale_episodes': [], 'waiting': [], 'skipped': False}
+        # Ночная сборка и кнопка «пересобрать» ждут конца транзакции чата.
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (self.WAZZUP_EPISODE_LOCK_KEY,))
+        counts_waiting = (waiting_since is not None and account == 'op'
+                          and channel_id not in EXCLUDED_CHANNELS)
+        state = None
+        if counts_waiting:
+            cursor.execute("""
+                SELECT answered_through, unread_count FROM wazzup_chat_read_state
+                 WHERE account = %s AND channel_id = %s AND chat_id = %s"""
+                           + (" FOR UPDATE" if apply else ""), (account, channel_id, chat_id))
+            state = cursor.fetchone()
+        cursor.execute("""
+            SELECT message_id, is_echo, dt, created_at, wazzup_dt IS NOT NULL, is_deleted, chat_type
+              FROM wazzup_messages
+             WHERE account = %s AND channel_id = %s AND chat_id = %s
+             ORDER BY created_at, dt, message_id""", (account, channel_id, chat_id))
+        history = [{'message_id': r[0], 'is_echo': r[1], 'dt': r[2], 'created_at': r[3],
+                    'late': r[4], 'is_deleted': r[5], 'chat_type': r[6]} for r in cursor.fetchall()]
+        moves = replay_after_replies(history)
+        if not moves:
+            return out
+        kept_sql = self._wazzup_episode_kept_sql(cursor)
+        cursor.execute(f"""
+            SELECT e.id, e.kind, e.started_at, e.ended_at, {kept_sql}
+              FROM wazzup_episodes e
+             WHERE e.channel_id = %s AND e.chat_id = %s
+             ORDER BY e.started_at""", key)
+        episodes = cursor.fetchall()
+        keep = set()
+        while True:
+            crossing = {mid for mid, old, new in moves
+                        for _, _, started, ended, kept in episodes
+                        if kept and started <= old <= ended < new}
+            if crossing <= keep:
+                break
+            keep |= crossing
+            moves = replay_after_replies(history, frozenset(keep))
+        out['kept_in_place'] = len(keep)
+        if not moves:
+            return out
+        if apply:
+            cursor.execute("""
+                UPDATE wazzup_messages m
+                   SET dt = v.new_dt
+                  FROM unnest(%s::text[], %s::timestamptz[], %s::timestamptz[])
+                       AS v(message_id, old_dt, new_dt)
+                 WHERE m.message_id = v.message_id AND m.account = %s
+                   AND m.dt = v.old_dt AND m.wazzup_dt IS NULL""",
+                ([mid for mid, _, _ in moves], [old for _, old, _ in moves],
+                 [new for _, _, new in moves], account))
+            if cursor.rowcount != len(moves):
+                # Строку успели поменять: чат целиком откатывается и ждёт повтора.
+                cursor.connection.rollback()
+                out['skipped'] = True
+                return out
+        since = min(old for _, old, _ in moves)
+        kept_end = max((ended for _, _, _, ended, kept in episodes if kept), default=None)
+        out['episodes_kept'] = [eid for eid, _, started, ended, kept in episodes
+                                if kept and any(started <= old <= ended for _, old, _ in moves)]
+        doomed = [eid for eid, _, started, ended, kept in episodes
+                  if not kept and ended >= since and (kept_end is None or started > kept_end)]
+        out['stale_episodes'] = [eid for eid, _, started, ended, kept in episodes
+                                 if not kept and ended >= since and eid not in doomed
+                                 and any(started <= old <= ended for _, old, _ in moves)]
+        if apply:
+            self._refresh_wazzup_chat_tx(cursor, channel_id, chat_id, account=account)
+            if doomed:
+                cursor.execute(f"""
+                    DELETE FROM wazzup_episodes e
+                     WHERE e.id = ANY(%s) AND NOT {kept_sql}
+                    RETURNING e.kind""", (doomed,))
+                out['episodes_deleted'] = [row[0] for row in cursor.fetchall()]
+        else:
+            out['episodes_deleted'] = [kind for eid, kind, *_ in episodes if eid in doomed]
+        out['moves'] = moves
+        if not counts_waiting or not state or state[0] is None or state[1]:
+            return out
+        answered = state[0]
+        old = {mid: before for mid, before, _ in moves}
+        placed = {mid: after for mid, _, after in moves}
+        alive = [m for m in history if not m['is_deleted']]
+        last = max(alive, key=lambda m: (placed.get(m['message_id'], m['dt']), m['message_id']))
+        replied_later = any(m['is_echo'] and m['created_at'] > last['created_at'] for m in alive)
+        waiting = sorted((placed[m['message_id']], m['message_id']) for m in alive
+                         if not m['is_echo'] and m['chat_type'] == 'whatsapp'
+                         and m['message_id'] in placed
+                         and old[m['message_id']] <= answered < placed[m['message_id']]
+                         and placed[m['message_id']] >= waiting_since)
+        if replied_later or not waiting or waiting[-1][1] != last['message_id']:
+            return out
+        out['waiting'] = waiting
+        if apply:
+            cursor.execute("""
+                INSERT INTO wazzup_unanswered_messages
+                    (account, channel_id, chat_id, message_id, sent_at)
+                SELECT %s, %s, %s, v.message_id, v.sent_at
+                  FROM unnest(%s::text[], %s::timestamptz[]) AS v(message_id, sent_at)
+                ON CONFLICT DO NOTHING""",
+                (account, channel_id, chat_id, [mid for _, mid in waiting],
+                 [sent for sent, _ in waiting]))
+            inserted = cursor.rowcount
+            if inserted:
+                cursor.execute("""
+                    UPDATE wazzup_chat_read_state
+                       SET unread_count = unread_count + %s, last_inbound_id = %s,
+                           revision = revision + 1, updated_at = now()
+                     WHERE account = %s AND channel_id = %s AND chat_id = %s""",
+                    (inserted, waiting[-1][1], account, channel_id, chat_id))
+        return out
 
     def _init_test_numbers_schema_tx(self, cursor):
         """Схема «Реестра тестовых номеров» — БЕЗ своего SAVEPOINT, намеренно.

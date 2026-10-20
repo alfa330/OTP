@@ -25,7 +25,11 @@ from wazzup import delivery
 from wazzup.pilot import EXCLUDED_CHANNELS
 
 STEP = timedelta(microseconds=1)
-REPAIR = "SELECT m.message_id, m.channel_id, m.chat_id, m.is_echo, m.dt, m.created_at, m.wazzup_dt IS NOT NULL, m.is_deleted"
+REPAIR = ("SELECT m.message_id, m.channel_id, m.chat_id, m.is_echo, m.dt, m.created_at, "
+          "m.wazzup_dt IS NOT NULL FROM wazzup_messages m")
+KEYS = "SELECT m.channel_id, m.chat_id FROM wazzup_pilot_outbox o"
+CHAT_ROWS = ("SELECT message_id, is_echo, dt, created_at, wazzup_dt IS NOT NULL, is_deleted, chat_type "
+             "FROM wazzup_messages WHERE account = %s AND channel_id = %s AND chat_id = %s")
 EPISODES = "FROM wazzup_episodes e WHERE e.channel_id = %s AND e.chat_id = %s ORDER BY e.started_at"
 STATE = "SELECT answered_through, unread_count FROM wazzup_chat_read_state"
 
@@ -77,7 +81,17 @@ def _history(rows, chat="77000000000", channel=WA):
 
 def _repair_rows(history):
     return [(m["message_id"], m["channel_id"], m["chat_id"], m["is_echo"], m["dt"],
-             m["created_at"], m["late"], m["is_deleted"], m["chat_type"]) for m in history]
+             m["created_at"], m["late"]) for m in history]
+
+
+def _chat_rows(histories):
+    """Ответ на чтение одного чата под блокировкой — в порядке прихода."""
+    def answer(params):
+        _, channel, chat = params
+        return [(m["message_id"], m["is_echo"], m["dt"], m["created_at"], m["late"],
+                 m["is_deleted"], m["chat_type"]) for history in histories for m in history
+                if m["channel_id"] == channel and m["chat_id"] == chat]
+    return answer
 
 
 class _RepairCursor(_Cursor):
@@ -101,7 +115,9 @@ def _repair(histories, apply=True, episodes=None, states=None, update_rowcount=N
     states = states or {}
     cursor = _RepairCursor(answers={
         "SELECT pg_advisory_xact_lock": [],
-        REPAIR: rows,
+        KEYS: sorted({(m["channel_id"], m["chat_id"]) for history in histories for m in history}),
+        REPAIR: lambda params: [r for r in rows if (r[1], r[2]) in set(zip(params[0], params[1]))],
+        CHAT_ROWS: _chat_rows(histories),
         "WHERE to_regclass(name) IS NOT NULL": [(t,) for t in kept_tables],
         EPISODES: lambda params: episodes.get(params[1], []),
         STATE: lambda params: [states[params[2]]] if params[2] in states else [],
@@ -131,16 +147,14 @@ class RuleTests(unittest.TestCase):
     def test_in_time_is_the_complement_of_late(self):
         stamp = self.MINUTE.replace(microsecond=2000)
         for lag in (timedelta(0), timedelta(seconds=54), delivery.LATE_DELIVERY):
-            self.assertTrue(delivery.is_in_time_inbound(stamp, stamp + lag, False), lag)
+            self.assertTrue(delivery.is_in_time(stamp, stamp + lag), lag)
             self.assertFalse(delivery.is_late_inbound(stamp, stamp + lag, False), lag)
         later = stamp + delivery.LATE_DELIVERY + STEP
-        self.assertFalse(delivery.is_in_time_inbound(stamp, later, False))
+        self.assertFalse(delivery.is_in_time(stamp, later))
         self.assertTrue(delivery.is_late_inbound(stamp, later, False))
-        self.assertFalse(delivery.is_in_time_inbound(stamp, stamp, True), "исходящее не двигаем")
-        self.assertFalse(delivery.is_in_time_inbound(self.at(47, 230), self.at(48), False),
-                         "точное время WABA")
-        self.assertFalse(delivery.is_in_time_inbound(stamp, None, False), "без момента прихода")
-        self.assertFalse(delivery.is_in_time_inbound(None, self.at(54), False))
+        self.assertFalse(delivery.is_in_time(self.at(47, 230), self.at(48)), "точное время WABA")
+        self.assertFalse(delivery.is_in_time(stamp, None), "без момента прихода")
+        self.assertFalse(delivery.is_in_time(None, self.at(54)))
 
     def test_goes_right_after_the_latest_exact_message_already_there(self):
         stamp = self.MINUTE.replace(microsecond=2000)
@@ -178,6 +192,36 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(by_id["wolt"], register + STEP, "«no» на месте — следующее за вопросом")
         self.assertEqual(by_id["only"], register + 2 * STEP)
 
+    def test_replay_does_not_put_a_phone_reply_behind_late_inbound(self):
+        # Жалоба 06.10: после простоя досланные вопросы встали на момент доставки
+        # (12:35:10), а приветствие, нажатое раньше, телефон отправил в 12:35. Ответ
+        # с телефона за опоздавшими не встаёт — у них время доставки, не написания.
+        delivered = almaty(2026, 10, 5, 12, 35, 10, 161292)
+        history = [
+            {"message_id": "q2", "is_echo": False, "dt": delivered, "created_at": delivered, "late": True},
+            {"message_id": "hello", "is_echo": True, "dt": almaty(2026, 10, 5, 12, 35, 0, 1000),
+             "created_at": almaty(2026, 10, 5, 12, 35, 18, 734677), "late": False},
+            {"message_id": "client", "is_echo": False, "dt": almaty(2026, 10, 5, 12, 35, 0, 2000),
+             "created_at": almaty(2026, 10, 5, 12, 35, 40), "late": False},
+        ]
+        self.assertEqual(delivery.replay_after_replies(history),
+                         [("client", almaty(2026, 10, 5, 12, 35, 0, 2000), delivered + STEP)],
+                         "входящее за опоздавшим — встаёт, ответ с телефона — нет")
+
+    def test_replay_never_takes_a_time_held_by_a_later_arrival(self):
+        # «da» сохранил старый приёмник (минута), опоздавшее фото пришло позже и уже
+        # стоит на reply + 1 мкс: «da» встаёт за ответ, но не на то же время.
+        reply = almaty(2026, 10, 19, 11, 23, 29, 537000)
+        history = [
+            {"message_id": "reply", "is_echo": True, "dt": reply, "created_at": reply, "late": False},
+            {"message_id": "da", "is_echo": False, "dt": almaty(2026, 10, 19, 11, 23, 0, 2000),
+             "created_at": almaty(2026, 10, 19, 11, 23, 40), "late": False},
+            {"message_id": "photo", "is_echo": False, "dt": reply + STEP,
+             "created_at": almaty(2026, 10, 19, 11, 23, 55), "late": True},
+        ]
+        (mid, _, placed), = delivery.replay_after_replies(history)
+        self.assertEqual((mid, placed), ("da", reply + 2 * STEP))
+
 
 class WebhookOrderTests(unittest.TestCase):
     """Приёмник: вебхук за вебхуком, ответы iCORE — строкой архива из send()."""
@@ -202,6 +246,16 @@ class WebhookOrderTests(unittest.TestCase):
         self.assertLess(times["no"], times["wolt"])
         self.assertLess(times["wolt"], times["only"])
         self.assertEqual(_webhook_order(rows)[0], [m for m in CHAT_1_WAZZUP if m in {r[0] for r in rows}])
+
+    def test_phone_reply_after_a_moved_answer_goes_below_it(self):
+        # Оператор ответил на «only» с телефона/из окна Wazzup — время минутное, как
+        # у входящих. Без правила ответ встал бы над «no/wolt/only» и не снял бы
+        # «ждут ответа» (находка разбора).
+        rows = [r for r in CHAT_1 if r[0] != "sorry"] + [
+            ("phone-ok", True, (2026, 10, 19, 11, 23, 0, 5000), (2026, 10, 19, 11, 23, 58, 120000))]
+        order, times = _webhook_order(rows)
+        self.assertEqual(order[-4:], ["no", "wolt", "only", "phone-ok"])
+        self.assertEqual(times["phone-ok"], almaty(2026, 10, 19, 11, 23, 29, 537000) + 4 * STEP)
 
     def test_without_a_reply_from_icore_nothing_changes(self):
         phone_replies = [(mid, echo, sent if not echo else (sent[:5] + (0, 1000 * (i % 3 + 1))), received)
@@ -242,10 +296,17 @@ class StoreLookupTests(unittest.TestCase):
         self.assertEqual(insert[4], reply + STEP)
         self.assertIsNone(insert[-1], "время Wazzup в той же минуте — «ждут ответа» сравнивает время ленты")
 
-    def test_echo_and_exact_time_do_not_look_up(self):
-        for message in (self._message(isEcho=True, authorId="1", authorName="оператор"),
-                        self._message(dt="2026-10-19T06:23:47.230Z"),
-                        self._message(channelId=WABA, dt="2026-10-19T06:23:29.537Z")):
+    def test_phone_reply_with_minute_time_moves_the_same_way(self):
+        reply = almaty(2026, 10, 19, 11, 23, 29, 537000)
+        cursor = self._store([self._message(isEcho=True, authorId="1", authorName="оператор")],
+                             later=[reply])
+        (_, insert), = cursor.sql("INSERT INTO wazzup_messages")
+        self.assertEqual(insert[4], reply + STEP)
+
+    def test_exact_time_does_not_look_up(self):
+        for message in (self._message(dt="2026-10-19T06:23:47.230Z"),
+                        self._message(channelId=WABA, dt="2026-10-19T06:23:29.537Z"),
+                        self._message(isEcho=True, dt="2026-10-19T06:23:29.537Z")):
             with self.subTest(message["dateTime"]):
                 cursor = self._store([message], later=[almaty(2026, 10, 19, 11, 23, 50)])
                 self.assertEqual([e for e in cursor.executions if LATER_MARK in e[0]], [])
@@ -261,22 +322,46 @@ class RepairTests(unittest.TestCase):
         self.assertEqual((result["messages"], result["chats"]), (5, 2))
         # и приёмник ставит те же сообщения на то же время
         _, times = _webhook_order(CHAT_1)
-        (_, (ids, olds, news, account)), = cursor.sql("UPDATE wazzup_messages m")
-        self.assertEqual(account, "op")
-        for mid, new in zip(ids, news):
-            if mid in times:
-                self.assertEqual(new, times[mid], mid)
+        updates = cursor.sql("UPDATE wazzup_messages m")
+        self.assertEqual(len(updates), 2, "каждый чат — своей транзакцией")
+        for _, (ids, olds, news, account) in updates:
+            self.assertEqual(account, "op")
+            for mid, new in zip(ids, news):
+                if mid in times:
+                    self.assertEqual(new, times[mid], mid)
 
-    def test_update_is_guarded_and_partial_update_aborts(self):
+    def test_each_chat_is_reread_under_its_own_lock(self):
+        first, second = _history(CHAT_1, chat="c-1"), _history(CHAT_2, chat="c-2")
+        cursor, _ = _repair([first, second])
+        steps = [sql.split()[1] for sql, _ in cursor.executions
+                 if sql.startswith(("SELECT pg_advisory_xact_lock", "SELECT message_id", "UPDATE wazzup_messages"))]
+        self.assertEqual(steps, ["pg_advisory_xact_lock(%s)", "message_id,", "wazzup_messages"] * 2)
+
+    def test_history_is_read_in_batches_of_chats(self):
+        first, second = _history(CHAT_1, chat="c-1"), _history(CHAT_2, chat="c-2")
+        original = Database.WAZZUP_RETIME_CHATS_PER_READ
+        Database.WAZZUP_RETIME_CHATS_PER_READ = 1
+        try:
+            cursor, result = _repair([first, second])
+        finally:
+            Database.WAZZUP_RETIME_CHATS_PER_READ = original
+        reads = [params for sql, params in cursor.executions if REPAIR in sql]
+        self.assertEqual([len(params[0]) for params in reads], [1, 1], "30 с на чтение — пачками")
+        self.assertEqual(result["chats"], 2)
+
+    def test_update_is_guarded_and_a_changed_chat_waits_for_rerun(self):
         cursor, _ = _repair([_history(CHAT_1)])
         (sql, _), = cursor.sql("UPDATE wazzup_messages m")
         self.assertIn("SET dt = v.new_dt", sql)
-        self.assertIn("m.dt = v.old_dt AND m.wazzup_dt IS NULL AND NOT m.is_echo", sql,
+        self.assertIn("m.dt = v.old_dt AND m.wazzup_dt IS NULL", sql,
                       "строку, которую успели поменять, починка не трогает")
         self.assertNotIn("wazzup_dt =", sql.split("WHERE")[0], "время Wazzup не пишется")
-        with self.assertRaises(RuntimeError):
-            _repair([_history(CHAT_1)], update_rowcount=3)
         self.assertEqual(len(cursor.sql("INSERT INTO wazzup_chats")), 1, "сводка чата пересчитана")
+        changed, result = _repair([_history(CHAT_1)], update_rowcount=3)
+        self.assertEqual(changed.connection.rollbacks, 1, "чат откатан целиком")
+        self.assertEqual(changed.sql("INSERT INTO wazzup_chats"), [])
+        self.assertEqual((result["messages"], result["chats"], result["skipped_chats"]),
+                         (0, 0, ["77000000000"]))
 
     def test_dry_run_only_reads(self):
         episodes = {"77000000000": [(1, "dialog", almaty(2026, 10, 19, 11, 21), almaty(2026, 10, 19, 11, 24, 24), False)]}
@@ -367,6 +452,11 @@ class RepairWaitingTests(unittest.TestCase):
         (state_sql, _), = [e for e in cursor.executions if STATE in e[0]]
         self.assertIn("FOR UPDATE", state_sql)
         self.assertEqual((result["waiting_chats"], result["waiting_messages"]), (["77000000000"], 3))
+        # Порядок блокировок как у приёмника: счётчик (его берёт триггер вставки) —
+        # раньше сообщений и сводки чата, иначе встречный вебхук ловит взаимную блокировку.
+        order = [i for i, (sql, _) in enumerate(cursor.executions)
+                 if STATE in sql or sql.startswith(("UPDATE wazzup_messages m", "INSERT INTO wazzup_chats"))]
+        self.assertTrue(STATE in cursor.executions[order[0]][0])
 
     def test_counter_left_alone_where_it_was_not_silent(self):
         cases = {
@@ -381,6 +471,12 @@ class RepairWaitingTests(unittest.TestCase):
                 rows=self._rows() + [("later", False, (2026, 10, 19, 11, 30, 0, 1000),
                                       (2026, 10, 19, 11, 30, 5))]),
             "Global счётчик не ведёт": dict(state=(self.REGISTER, 0), channel=sorted(EXCLUDED_CHANNELS)[0]),
+            # ответы позже приветствия счётчик учёл, пустой он после «Ответ не нужен»
+            "сняли «Ответ не нужен»": dict(state=(almaty(2026, 10, 19, 11, 21, 40, 385000), 0)),
+            "ответили с телефона вовремя": dict(state=(self.REGISTER, 0), rows=self._rows() + [
+                ("phone-ok", True, (2026, 10, 19, 11, 23, 0, 5000), (2026, 10, 19, 11, 23, 58))]),
+            "ответили с телефона, эхо опоздало": dict(state=(self.REGISTER, 0), rows=self._rows() + [
+                ("phone-ok", True, (2026, 10, 19, 11, 23, 0, 5000), (2026, 10, 19, 11, 27, 30))]),
         }
         for label, case in cases.items():
             with self.subTest(label):

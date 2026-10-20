@@ -16,7 +16,7 @@ import {
     buildWazzupChatLink, findWazzupChatExact, matchWazzupChatsByPhone, syncWazzupChatDeepLink,
     normalizeWazzupAccount, WAZZUP_DEFAULT_ACCOUNT,
 } from './chatLink';
-import { lateDeliveryNote, localDayKey } from './messageTime';
+import { compareMessageTime, lateDeliveryNote, localDayKey } from './messageTime';
 import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
@@ -1781,7 +1781,7 @@ function ChatsWorkspace(props) {
         // Сообщения в пути — в конце ленты; сбой — на своём времени (chatPilot.js).
         const entries = [...thread, ...localMessages.filter((m) => !m.local.pinned), ...notes.items.map((note) => ({
             _note: note, messageId: `note:${note.id}`, dt: note.createdAt,
-        }))].sort((a, b) => new Date(a.dt) - new Date(b.dt) || a.messageId.localeCompare(b.messageId));
+        }))].sort(compareMessageTime);
         [...entries, ...localMessages.filter((m) => m.local.pinned)].forEach((m) => {
             const day = localDayKey(m.dt);
             if (day && day !== lastDay) { out.push({ _day: fmtDay(m.dt), messageId: `day-${day}` }); lastDay = day; }

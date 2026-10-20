@@ -56,8 +56,9 @@ def _database_class():
     """Нужные методы Database без импорта монолита (он поднимает пул к базе)."""
     methods = {"store_wazzup_messages", "_wazzup_chat_history_tx", "_wazzup_recent_arrivals_tx",
                "_wazzup_chat_later_tx", "_refresh_wazzup_chat_tx", "_wazzup_episode_kept_sql",
-               "retime_late_wazzup_messages", "retime_wazzup_inbound_after_replies"}
-    attrs = {"WAZZUP_EPISODE_REFERENCES", "WAZZUP_EPISODE_LOCK_KEY"}
+               "retime_late_wazzup_messages", "retime_wazzup_inbound_after_replies",
+               "_retime_wazzup_chat_after_replies_tx"}
+    attrs = {"WAZZUP_EPISODE_REFERENCES", "WAZZUP_EPISODE_LOCK_KEY", "WAZZUP_RETIME_CHATS_PER_READ"}
     module = source_cache.parse(DB_SOURCE)
     source_class = next(node for node in module.body
                         if isinstance(node, ast.ClassDef) and node.name == "Database")
@@ -169,7 +170,8 @@ class _TableCursor(_Cursor):
             channel_id, chat_id, after = params
             self._rows = [(r["dt"],) for r in self.table
                           if r["channel_id"] == channel_id and r["chat_id"] == chat_id
-                          and r["dt"] > after]
+                          and r["dt"] > after
+                          and not ("wazzup_dt IS NULL" in sql and r["late"])]
         elif RECENT_MARK in sql:
             self._rows = _recent_answer([(r["dt"], r["created_at"]) for r in self.table])(params)
 
