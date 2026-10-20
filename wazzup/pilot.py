@@ -20,7 +20,7 @@ from flask import Blueprint, Response, g, jsonify, request
 from requests.adapters import HTTPAdapter
 
 from . import access as access_rules
-from . import accounts, realtime, shift
+from . import accounts, new_chat, realtime, shift
 from .window import last_inbound_at
 from .workspace_store import WorkspaceStore
 
@@ -232,8 +232,12 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return error
         enabled = (request.args.get('account', 'op') == 'op'
                    and may_process(db.get_user(id=user_id)))
+        # Where the «+» may start a chat (wazzup/new_chat.py); the channel list is cached.
+        new_chat_ids = (new_chat.new_chat_channel_ids(channels('op'), EXCLUDED_CHANNELS)
+                        if enabled else [])
         return jsonify(enabled=enabled, canSend=enabled and bool(accounts.api_key('op')),
-                       excludedChannelIds=sorted(EXCLUDED_CHANNELS), maxTextLength=MAX_TEXT)
+                       excludedChannelIds=sorted(EXCLUDED_CHANNELS), maxTextLength=MAX_TEXT,
+                       newChatChannelIds=new_chat_ids)
 
     @bp.route('/stream', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -431,11 +435,24 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if template_error:
             return jsonify(error=template_error), 400
         display_text = render_template_preview('op', cid, text) if not attachment_id else ''
+        starting = False
         with db._get_cursor() as cur:
             cur.execute("SELECT chat_type FROM wazzup_chats WHERE account='op' AND channel_id=%s AND chat_id=%s",
                         (cid, chat))
             known = cur.fetchone()
-            if not known or known[0] != 'whatsapp':
+            if not known and body.get('newChat') is True:
+                # The «+»: the first message is what creates the chat (wazzup/new_chat.py).
+                if not new_chat.may_start_chat(channel, EXCLUDED_CHANNELS):
+                    return jsonify(error='В этом канале нельзя начинать переписку первыми',
+                                   code='NEW_CHAT_CHANNEL'), 403
+                if new_chat.normalize_phone(chat) != chat:
+                    return jsonify(error='Укажите номер в международном формате, например 77001234567',
+                                   code='NEW_CHAT_PHONE'), 400
+                first_error = new_chat.first_message_error(channel, text, attachment_id, reply_to)
+                if first_error:
+                    return jsonify(error=first_error, code='NEW_CHAT_FIRST_MESSAGE'), 400
+                starting = True
+            elif not known or known[0] != 'whatsapp':
                 return jsonify(error='Выберите существующий личный чат WhatsApp'), 400
             if reply_to:
                 cur.execute("SELECT 1 FROM wazzup_messages WHERE account='op' AND channel_id=%s AND chat_id=%s "
@@ -525,6 +542,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                     'isEcho': True, 'type': attachment['message_type'] if attachment else 'text',
                     'text': attachment['original_name'] if attachment else display_text,
                     'status': 'pending',
+                    # A chat started with the «+» takes the name typed in its form.
+                    **({'contact': {'name': new_chat.clean_contact_name(body.get('contactName')),
+                                    'phone': chat}} if starting else {}),
                     **({'authorId': author_id, 'authorName': user[2]} if author_id else {})}],
                     account='op')
             elif author_id:

@@ -52,6 +52,8 @@ import { DriverCardButton, DriverCardPanel } from './ChatDriverCard';
 import DriverCardsTab from './DriverCardsTab';
 import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
+import NewChatButton from './NewChatButton';
+import { draftChat } from './newChat';
 import ShiftStartScreen from './ShiftStartScreen';
 import ShiftStatusMenu from './ShiftStatusMenu';
 import ShiftWriteLock from './ShiftWriteLock';
@@ -1467,14 +1469,15 @@ function ChatsWorkspace(props) {
     useEffect(() => {
         if (!attachmentAllowed) setAttachmentSelection(null);
     }, [attachmentAllowed]);
-    const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected)
+    // Заготовке чата из «+» (newChat.js) заметки, карточка и ссылка ни к чему: чата ещё нет.
+    const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected) && !selected.isNew
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
     /* Карточка водителя (ChatDriverCard.jsx) — у каждого чата Верификаторов,
        кроме Global: его чаты обрабатываются отдельно. Видят её все, кому открыта
        переписка; заполнять может тот, кто обрабатывает (решает сервер, canEdit). */
     const driverCardEnabled = account === 'op' && Boolean(selected?.channelId && selected?.chatId)
-        && !GLOBAL_CHANNEL_IDS.has(selected.channelId);
+        && !selected.isNew && !GLOBAL_CHANNEL_IDS.has(selected.channelId);
     const driverCard = useDriverCard({ enabled: driverCardEnabled, chat: selected, apiBaseUrl, headers,
         live: pilot.enabled && pilot.connection === 'live' });
     // Ждущие ответа — вверху списка (chatListOrder.js); счётчик ведётся только у «op».
@@ -1498,6 +1501,10 @@ function ChatsWorkspace(props) {
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
         && selectedChannel?.state === 'active' && ['whatsapp', 'wapi'].includes(selectedChannel?.transport);
     const pilotCanSend = pilotChannelCanSend && !writeLock;
+    // Каналы «+» считает сервер (wazzup/new_chat.py); писать первыми — то же письмо клиенту.
+    const newChatChannelIds = useMemo(() => pilot.capability?.newChatChannelIds || [], [pilot.capability]);
+    const canStartChats = pilot.enabled && account === 'op' && Boolean(pilot.capability?.canSend)
+        && !writeLock && newChatChannelIds.length > 0;
     useEffect(() => {
         if (pilot.enabled && selected && thread !== null) refreshPilotThread().catch(() => {});
         return () => {
@@ -1564,6 +1571,29 @@ function ChatsWorkspace(props) {
         if (!focus) setSearchFocusId(null);
         loadThread(chat, { focus });
     };
+
+    /* «+» (newChat.js): номер, которому уже писали в этом канале, открывает свой
+       чат; новый — заготовку, которую заведёт первое сообщение. Сбой проверки —
+       строкой в окне «+», а не тостом: окно остаётся открытым с набранным. */
+    const startNewChat = async ({ channelId, phone, name }) => {
+        let row = null;
+        try {
+            const { data } = await axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
+                headers: headers(), params: { account: 'op', channel_id: channelId, chat_id: phone, limit: 1 },
+            });
+            row = findWazzupChatExact(data.items || [], { channelId, chatId: phone });
+        } catch (error) {
+            throw new Error('Не удалось проверить номер. Попробуйте ещё раз.');
+        }
+        setMainTab('chats');
+        openChat(row || draftChat({ channelId, phone, name }));
+    };
+
+    /* Первое сообщение заготовки несёт newChat — им сервер и заводит чат
+       (wazzup/new_chat.py). Дальше заготовку заменяет настоящая строка чата. */
+    const sendMessage = (message) => enqueueMessage(selected?.isNew
+        && pilotChatKey('op', selected) === pilotChatKey('op', message)
+        ? { ...message, newChat: true, contactName: selected.contactName || undefined } : message);
 
     /* Строка «Сообщений»: чат открывается сразу на найденном. Уже открытый чат,
        где это сообщение загружено, не перечитывается — лента лишь встаёт на него. */
@@ -1710,7 +1740,9 @@ function ChatsWorkspace(props) {
        после этого теряла и чат, и состояния «не найден» / «несколько». */
     useEffect(() => {
         if (!selected && deepLinkPending.current) return undefined;
-        syncWazzupChatDeepLink(selected, account);
+        /* Заготовка из «+» в адрес не попадает: такого чата ещё нет, и
+           перезагрузка показала бы «не найден» вместо пустого раздела. */
+        syncWazzupChatDeepLink(selected?.isNew ? null : selected, account);
         return () => {
             /* Уборку тоже держим за флагом. Она срабатывает не только при
                размонтировании, но и перед КАЖДЫМ следующим прогоном эффекта —
@@ -1720,7 +1752,7 @@ function ChatsWorkspace(props) {
                раздела метку снимает сам App (syncAppViewWithUrl). */
             if (!deepLinkPending.current) syncWazzupChatDeepLink(null, accountRef.current);
         };
-    }, [selected?.channelId, selected?.chatId, account]);
+    }, [selected?.channelId, selected?.chatId, selected?.isNew, account]);
 
     /* Ссылка на этот чат. Кладём в буфер: адресную строку человек не открывает,
        а ссылку надо отправить в переписке. Запасной путь через execCommand
@@ -1914,11 +1946,15 @@ function ChatsWorkspace(props) {
                 {/* Список чатов */}
                 <div className="wz-contact-list flex w-80 shrink-0 flex-col border-r border-slate-200">
                     <div className="border-b border-slate-100 p-2.5">
-                        <div className="relative">
-                            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                            <input value={search} onChange={(e) => onSearchInput(e.target.value)}
-                                   placeholder="Имя, телефон или текст…"
-                                   className={`${iosInput} py-2 pl-9 text-[13px]`} />
+                        <div className="flex items-center gap-2">
+                            <div className="relative min-w-0 flex-1">
+                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                <input value={search} onChange={(e) => onSearchInput(e.target.value)}
+                                       placeholder="Имя, телефон или текст…"
+                                       className={`${iosInput} py-2 pl-9 text-[13px]`} />
+                            </div>
+                            {canStartChats && <NewChatButton channels={channels} allowedIds={newChatChannelIds}
+                                preferredChannelId={selected?.channelId} onStart={startNewChat} />}
                         </div>
                         {pilot.enabled && <div className="mt-2 flex items-center gap-2 text-xs">
                             <button type="button" onClick={() => setUnreadOnly(!unreadOnly)}
@@ -2134,16 +2170,16 @@ function ChatsWorkspace(props) {
                                             {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
                                         </IosBadge>
                                     )}
-                                    <button type="button" onClick={copyChatLink}
+                                    {!selected.isNew && <button type="button" onClick={copyChatLink}
                                             title="Скопировать ссылку на этот чат"
                                             className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
                                         <Link2 size={12} /> Ссылка
-                                    </button>
+                                    </button>}
                                     {/* Пока строка списка не пришла, транспорт чата
                                         неизвестен, а он стоит в адресе Wazzup: ссылка
                                         собралась бы наугад «как whatsapp» и у чата
                                         другого транспорта вела бы в пустоту. */}
-                                    {selected.chatType && !operator && (
+                                    {selected.chatType && !operator && !selected.isNew && (
                                         <a href={wazzupChatUrl(selected, accounts, account)} target="_blank" rel="noopener noreferrer"
                                            title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
                                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
@@ -2230,7 +2266,8 @@ function ChatsWorkspace(props) {
                                 <ShiftWriteLock />
                             ) : pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
-                                    typingEnabled={pilotCanSend && mainTab === 'chats'}
+                                    typingEnabled={pilotCanSend && mainTab === 'chats' && !selected.isNew}
+                                    firstContact={Boolean(selected.isNew)}
                                     channelTransport={selectedChannel?.transport}
                                     lastInboundAt={lastInboundAt}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
@@ -2240,7 +2277,7 @@ function ChatsWorkspace(props) {
                                     draftOwner={draftOwner}
                                     restore={draftRestore?.key === selectedKey ? draftRestore : null}
                                     onRestored={(id) => setDraftRestore((current) => (current?.id === id ? null : current))}
-                                    onSend={enqueueMessage} />
+                                    onSend={sendMessage} />
                             )}
                         </>
                     )}

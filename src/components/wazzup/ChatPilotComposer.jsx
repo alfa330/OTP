@@ -52,9 +52,12 @@ const writeDraft = (slot, text, preview = '', replyTo = null, attachment = null)
 // сохранить. Осознанный Enter через секунду отправит его как обычно.
 const FILE_SUBMIT_GUARD_MS = 1000;
 
+/* firstContact — чат начат кнопкой «+» и сообщений в нём ещё нет (newChat.js):
+   в канале WABA первое сообщение — только шаблоном, а файл сервер примет лишь
+   в существующий чат, поэтому скрепки до первого сообщения нет. */
 function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInboundAt, onSend, onSent, replyTo,
     onCancelReply, restore = null, onRestored, draftOwner = null, authorName = '', maxLength = 4096,
-    typingEnabled = false }) {
+    typingEnabled = false, firstContact = false }) {
     const typing = useChatTypingSender({ apiBaseUrl, headers, chat, enabled: typingEnabled });
     const storageKey = { owner: draftOwner, chatKey: pilotChatKey('op', chat), legacyKey: pilotDraftStorageKey(chat) };
     const [saved] = useState(() => readDraft(storageKey));
@@ -129,7 +132,8 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
     const canSubmit = !uploading && (Boolean(attachment) || (Boolean(text.trim()) && !tooLong));
     const assistDisabled = hasFile || Boolean(preview) || !text.trim() || tooLong || Boolean(assistAction);
     const assistHint = preview ? 'Одобренный шаблон нельзя изменять. Уберите шаблон, чтобы написать обычное сообщение.' : '';
-    const showWabaHint = useWabaWindowExpired(channelTransport === 'wapi', lastInboundAt);
+    const windowExpired = useWabaWindowExpired(channelTransport === 'wapi', lastInboundAt);
+    const showWabaHint = windowExpired || (firstContact && channelTransport === 'wapi');
 
     const setDraft = (value, nextPreview = '') => {
         textRef.current = value;
@@ -330,6 +334,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                     className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-200 disabled:opacity-40"><X size={17} /></button>
             </div>}
             <div className="flex flex-wrap items-end gap-1.5 sm:flex-nowrap">
+                {!firstContact && <>
                 <input ref={fileInputRef} type="file" accept={UPLOAD_ACCEPT} onChange={chooseFile} tabIndex={-1}
                     disabled={Boolean(preview) || hasFile} className="hidden" aria-label="Выбрать файл" />
                 <button type="button" disabled={Boolean(preview) || hasFile} aria-label="Прикрепить файл" title={preview ? 'Уберите шаблон, чтобы прикрепить файл' : 'Прикрепить файл'}
@@ -338,6 +343,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, channelTransport, lastInbou
                     }} className="flex h-10 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 disabled:opacity-35">
                     <Paperclip size={20} />
                 </button>
+                </>}
                 <ChatComposerTools apiBaseUrl={apiBaseUrl} headers={headers} channelId={chat.channelId}
                     composerRef={textareaRef} composerKeyDownRef={composerKeyDownRef}
                     locked={hasFile} emojiDisabled={Boolean(preview) || hasFile} slash={!preview && !hasFile && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}

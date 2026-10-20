@@ -170,6 +170,8 @@ async function deliver(item) {
         account: 'op', channelId: item.channelId, chatId: item.chatId, text: item.text, clientMessageId: id,
         ...(item.attachmentId ? { attachmentId: item.attachmentId } : {}),
         ...(item.replyToMessageId ? { replyToMessageId: item.replyToMessageId } : {}),
+        // Чат начат кнопкой «+»: его ещё нет, первое сообщение его и заведёт (newChat.js).
+        ...(item.newChat ? { newChat: true, ...(item.contactName ? { contactName: item.contactName } : {}) } : {}),
     };
     let inProgressSince = null;
     let rechecks = 0;

@@ -522,3 +522,16 @@ test('nothing is queued before the queue knows whose it is', async () => {
     await flush();
     assert.equal(calls.length, 0);
 });
+
+test('the first message of a chat started with «+» carries newChat and the typed name, others do not', async () => {
+    const q = await freshQueue(memoryStorage());
+    const calls = controlledPost();
+    q.configureSendQueue({ apiBaseUrl: '', ownerId: 7, headers: () => ({}) });
+    q.enqueueMessage(message('шаблон', { chatId: '77001234567', newChat: true, contactName: 'Иван' }));
+    q.enqueueMessage(message('без имени', { chatId: '77001234568', newChat: true }));
+    q.enqueueMessage(message('обычное', { chatId: 'B' }));
+    await flush();
+    assert.deepEqual(calls.map((call) => [call.body.text, call.body.newChat, call.body.contactName]),
+        [['шаблон', true, 'Иван'], ['без имени', true, undefined], ['обычное', undefined, undefined]]);
+    assert.ok(!('contactName' in calls[1].body));
+});
