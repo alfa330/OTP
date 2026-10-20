@@ -157,11 +157,11 @@ def redeem(stand, challenge_id, code, *, approver=SV, store=None, moment=None):
 
 def test_verifier_is_decided_by_the_group_of_the_day_not_the_direction(stand):
     # Направление у него «Основа ОП», группа — верификаторы: решает группа.
-    assert state(stand, VERIFIER) == {'verifier': True, 'unlocked': False}
+    assert state(stand, VERIFIER) == {'verifier': True, 'potok': False, 'unlocked': False}
     # И наоборот: направление «Верификатор», а группа — «Основа».
-    assert state(stand, OSNOVA) == {'verifier': False, 'unlocked': False}
+    assert state(stand, OSNOVA) == {'verifier': False, 'potok': False, 'unlocked': False}
     assert state(stand, SV)['verifier'] is False
-    assert state(stand, 999) == {'verifier': False, 'unlocked': False}
+    assert state(stand, 999) == {'verifier': False, 'potok': False, 'unlocked': False}
 
 
 def test_membership_dates_and_direction_fallback(stand):
@@ -210,14 +210,14 @@ def test_access_belongs_to_one_live_session(stand):
     other = new_session(stand)
     challenge = open_challenge(stand, session)
     assert redeem(stand, challenge, '482915')[0] == 'granted'
-    assert state(stand, VERIFIER, session) == {'verifier': True, 'unlocked': True}
+    assert state(stand, VERIFIER, session) == {'verifier': True, 'potok': False, 'unlocked': True}
     assert state(stand, VERIFIER, other)['unlocked'] is False
     # «Нет сессии» во всех её видах — закрыто, а не ошибка запроса.
     for missing in (None, '', 'None', 'not-a-session', 12345):
-        assert state(stand, VERIFIER, missing) == {'verifier': True, 'unlocked': False}, missing
+        assert state(stand, VERIFIER, missing) == {'verifier': True, 'potok': False, 'unlocked': False}, missing
         assert stand['store'].session_is_live(missing, VERIFIER) is False
     # Чужой человек с этой же сессией доступа не получает.
-    assert state(stand, OSNOVA, session) == {'verifier': False, 'unlocked': False}
+    assert state(stand, OSNOVA, session) == {'verifier': False, 'potok': False, 'unlocked': False}
     assert stand['store'].session_is_live(session, VERIFIER) is True
     assert stand['store'].session_is_live(session, OSNOVA) is False
 
@@ -233,9 +233,9 @@ def test_portal_qr_opens_the_chats_of_that_session_only(stand):
         connection.commit()
 
     session, other = new_session(stand), new_session(stand)
-    assert state(stand, VERIFIER, session) == {'verifier': True, 'unlocked': False}
+    assert state(stand, VERIFIER, session) == {'verifier': True, 'potok': False, 'unlocked': False}
     unlock_portal(session)
-    assert state(stand, VERIFIER, session) == {'verifier': True, 'unlocked': True}
+    assert state(stand, VERIFIER, session) == {'verifier': True, 'potok': False, 'unlocked': True}
     assert state(stand, VERIFIER, other)['unlocked'] is False
     cursor.execute('SELECT COUNT(*) FROM wazzup_chat_access')
     assert cursor.fetchone()[0] == 0
@@ -250,7 +250,7 @@ def test_portal_qr_opens_the_chats_of_that_session_only(stand):
     unlock_portal(stranger)
     assert state(stand, VERIFIER, stranger)['unlocked'] is False
     # Обычный QR верификатором не делает: оператор «Основы» остаётся без режима обработки.
-    assert state(stand, OSNOVA, stranger) == {'verifier': False, 'unlocked': False}
+    assert state(stand, OSNOVA, stranger) == {'verifier': False, 'potok': False, 'unlocked': False}
     # Снял подтверждение сам (выход из QR-доступа) — чаты снова закрыты.
     cursor.execute("UPDATE user_sessions SET sensitive_data_unlocked = FALSE WHERE session_id = %s",
                    (session,))

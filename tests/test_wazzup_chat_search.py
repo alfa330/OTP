@@ -291,7 +291,8 @@ def route_app(name, path, cursor, **extra):
                      _record_elapsed_server_timing=lambda *_: None,
                      _build_cors_preflight_response=lambda: ('', 204),
                      _wazzup_chat_reader_guard=lambda: (1, None),
-                     _wazzup_account_arg=lambda: request.args.get('account', 'op'), **extra)
+                     _wazzup_account_arg=lambda: request.args.get('account', 'op'),
+                     _wazzup_channel_scope=lambda: None, **extra)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[])), 'bot_schedule2.py', 'exec'),
          namespace)
     app = Flask(__name__)
@@ -323,8 +324,9 @@ def test_search_route_answers_503_when_the_query_runs_out_of_time(pg, monkeypatc
     message(cursor, '77000000001', 1, 'техпаспорт')
     monkeypatch.setattr(chat_search, 'STATEMENT_TIMEOUT', '20ms')
     real = chat_search.recent_hits_query
-    monkeypatch.setattr(chat_search, 'recent_hits_query', lambda *args: (
-        real(*args)[0].replace('FROM wazzup_messages m', 'FROM wazzup_messages m, pg_sleep(0.3)'), real(*args)[1]))
+    monkeypatch.setattr(chat_search, 'recent_hits_query', lambda *args, **kwargs: (
+        real(*args, **kwargs)[0].replace('FROM wazzup_messages m', 'FROM wazzup_messages m, pg_sleep(0.3)'),
+        real(*args, **kwargs)[1]))
     response = route_app('api_wazzup_chat_search', '/api/wazzup/chat-search', cursor).get(
         '/api/wazzup/chat-search', query_string={'q': 'техпаспорт'})
     assert response.status_code == 503

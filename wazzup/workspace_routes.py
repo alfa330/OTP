@@ -166,10 +166,11 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
                 'logoutKey': shift.LOGOUT_KEY, 'current': current_for(user_id, moment),
                 'heartbeatSeconds': heartbeat_seconds}
 
-    def operator_guard(*, allow_locked=False):
-        """(access, error). Статусы и отметки — только верификатору с открытым доступом."""
+    def operator_guard(*, allow_locked=False, modes=(access.MODE_OPERATOR,)):
+        """(access, error). Статусы и отметки — только верификатору с открытым
+        доступом; QR замка (modes=GATED_MODES) — ещё и группе «Поток»."""
         state = chat_access()
-        if state.get('mode') != access.MODE_OPERATOR:
+        if state.get('mode') not in modes:
             return None, fail('Раздел в этом режиме открыт верификаторам', 403)
         if state.get('locked') and not allow_locked:
             return None, fail('Доступ к чатам не подтверждён', 403, code='CHAT_ACCESS_LOCKED')
@@ -299,7 +300,7 @@ def build_wazzup_workspace_blueprint(*, db, require_api_key, build_cors_prefligh
         что вернул сервер, и начинают показывать обычный код без перезагрузки."""
         if request.method == 'OPTIONS':
             return build_cors_preflight_response()
-        state, error = operator_guard(allow_locked=True)
+        state, error = operator_guard(allow_locked=True, modes=access.GATED_MODES)
         if error:
             return error
         session_id = current_session_id()

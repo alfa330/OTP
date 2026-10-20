@@ -225,8 +225,9 @@ test('боковая панель: бейдж во всех трёх ветка�
     assert.ok(app.includes('crmUnreadCount,\n                wazzupWaitingCount,\n                canAccessCrmSection,'),
         'число — в зависимостях меню');
     assert.match(app, /const wazzupWaitingCount = useChatWaitingCount\(\);/);
-    assert.match(app, /\{user && \(isWazzupChatOperator\(user\) \|\| normalizeRole\(user\.role\) === 'super_admin'\)\n\s*&& canAccessVerifierChatsForUser\(user\) && \(\n\s*<Suspense fallback=\{null\}>\n\s*<WazzupWaitingKeeper\n\s*key=\{user\.id\}/);
+    // «Поток» (20.10.2026) обрабатывает свой канал — счётчик и у него.
+    assert.match(app, /\{user && \(isWazzupChatOperator\(user\) \|\| isWazzupChatPotok\(user\)\n\s*\|\| normalizeRole\(user\.role\) === 'super_admin'\)\n\s*&& canAccessVerifierChatsForUser\(user\) && \(\n\s*<Suspense fallback=\{null\}>\n\s*<WazzupWaitingKeeper\n\s*key=\{user\.id\}/);
     // Верификатору — замок из хранилища смены (иначе после QR число застывало вне раздела).
-    assert.match(app, /mayProcess\n\s*operator=\{isWazzupChatOperator\(user\)\}\n\s*userId=\{user\.id\}\n\s*\/>/);
+    assert.match(app, /mayProcess\n\s*operator=\{isWazzupChatOperator\(user\) \|\| isWazzupChatPotok\(user\)\}\n\s*userId=\{user\.id\}\n\s*\/>/);
     assert.match(app, /const WazzupWaitingKeeper = lazyWithRetry\(\(\) => import\('\.\/components\/wazzup\/WazzupWaitingKeeper'\)\);/);
 });

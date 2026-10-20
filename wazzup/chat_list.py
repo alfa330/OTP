@@ -56,14 +56,19 @@ def _row_select(account):
     return select, waiting
 
 
-def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0, chat_id=None):
+def chat_list_queries(account, channel_id=None, q='', limit=30, offset=0, chat_id=None,
+                      channel_ids=None):
     """((SQL, параметры) счёта, (SQL, параметры) страницы).
 
-    chat_id — точный номер: «Чаты по каналам» — чаты этого номера во всех каналах."""
+    chat_id — точный номер: «Чаты по каналам» — чаты этого номера во всех каналах.
+    channel_ids — каналы, открытые человеку (группе «Поток» — один); None — все."""
     where, params = ['c.account = %s'], [account]
     if channel_id:
         where.append('c.channel_id = %s')
         params.append(channel_id)
+    if channel_ids is not None:
+        where.append('c.channel_id = ANY(%s)')
+        params.append(sorted(channel_ids))
     if chat_id:
         where.append('c.chat_id = %s')
         params.append(chat_id)
@@ -98,18 +103,25 @@ def chat_rows_query(account, pairs):
 
 CHANNEL_COUNTS_SQL = ('SELECT chat_id, COUNT(*) FROM wazzup_chats'
                       ' WHERE account = %s AND chat_id = ANY(%s) GROUP BY chat_id')
+CHANNEL_COUNTS_IN_SCOPE_SQL = ('SELECT chat_id, COUNT(*) FROM wazzup_chats'
+                               ' WHERE account = %s AND chat_id = ANY(%s) AND channel_id = ANY(%s)'
+                               ' GROUP BY chat_id')
 
 
-def attach_channel_counts(cursor, account, items):
+def attach_channel_counts(cursor, account, items, channel_ids=None):
     """В скольких каналах аккаунта есть чат с номером строки (channelsCount).
 
     Стрелка «Чаты по каналам» в строке нужна, только если каналов больше одного:
     иначе она открывала бы список из одного этого же чата. Один запрос на
-    страницу, по индексу (account, chat_id)."""
+    страницу, по индексу (account, chat_id). channel_ids — каналы человека:
+    чужие каналы стрелку не рисуют, их чаты ему всё равно не открыть."""
     numbers = sorted({item['chatId'] for item in items if item.get('chatId')})
     if not numbers:
         return items
-    cursor.execute(CHANNEL_COUNTS_SQL, (account, numbers))
+    if channel_ids is not None:
+        cursor.execute(CHANNEL_COUNTS_IN_SCOPE_SQL, (account, numbers, sorted(channel_ids)))
+    else:
+        cursor.execute(CHANNEL_COUNTS_SQL, (account, numbers))
     counts = dict(cursor.fetchall())
     for item in items:
         item['channelsCount'] = counts.get(item.get('chatId'), 1)

@@ -194,18 +194,29 @@ class OperatorStateTests(unittest.TestCase):
 
     def test_verifier_with_confirmed_session(self):
         state, params = self._state(('operator', 'working', 'op', 'op_verificator', True))
-        self.assertEqual(state, {'verifier': True, 'unlocked': True})
+        self.assertEqual(state, {'verifier': True, 'potok': False, 'unlocked': True})
         self.assertEqual((params['day'], params['sales_department_id'], params['session_id']),
                          (date(2026, 10, 8), 367, SESSION))
 
     def test_verifier_without_confirmation_is_locked(self):
         state, _ = self._state(('operator', 'working', 'op', 'op_verificator', False))
-        self.assertEqual(state, {'verifier': True, 'unlocked': False})
+        self.assertEqual(state, {'verifier': True, 'potok': False, 'unlocked': False})
 
     def test_confirmation_does_not_make_anyone_a_verifier(self):
         """Строка доступа осталась, а человека перевели в другую группу."""
         state, _ = self._state(('operator', 'working', 'op', 'op_osnova', True))
-        self.assertEqual(state, {'verifier': False, 'unlocked': False})
+        self.assertEqual(state, {'verifier': False, 'potok': False, 'unlocked': False})
+
+    def test_potok_group_is_its_own_mode_behind_the_same_qr(self):
+        """Группа «Поток» (владелец, 20.10.2026): не верификатор, но тот же замок."""
+        state, _ = self._state(('operator', 'working', 'op', 'op_potok', True))
+        self.assertEqual(state, {'verifier': False, 'potok': True, 'unlocked': True})
+        state, _ = self._state(('operator', 'working', 'op', 'op_potok', False))
+        self.assertEqual(state, {'verifier': False, 'potok': True, 'unlocked': False})
+        for row in (('sv', 'working', 'op', 'op_potok', True), ('operator', 'fired', 'op', 'op_potok', True),
+                    ('operator', 'working', 'szov', 'op_potok', True)):
+            state, _ = self._state(row)
+            self.assertEqual(state, {'verifier': False, 'potok': False, 'unlocked': False}, row)
 
     def test_session_id_is_cleaned(self):
         self.assertEqual(access.clean_session_id(SESSION.upper()), SESSION)
@@ -216,12 +227,12 @@ class OperatorStateTests(unittest.TestCase):
     def test_no_session_means_locked_and_does_not_break_the_query(self):
         for missing in (None, '', 'None', 'not-a-session'):
             state, params = self._state(('operator', 'working', 'op', 'op_verificator', True), missing)
-            self.assertEqual(state, {'verifier': True, 'unlocked': False})
+            self.assertEqual(state, {'verifier': True, 'potok': False, 'unlocked': False})
             uuid.UUID(params['session_id'])          # в запрос ушёл разбираемый uuid, не пустая строка
 
     def test_unknown_user(self):
         state, _ = self._state(None)
-        self.assertEqual(state, {'verifier': False, 'unlocked': False})
+        self.assertEqual(state, {'verifier': False, 'potok': False, 'unlocked': False})
 
     def test_query_reads_the_group_of_the_day_first(self):
         sql = ' '.join(access._OPERATOR_STATE_SQL.split())
@@ -249,10 +260,14 @@ USERS = {
     7: ('operator', 'working'),         # оператор «Основы»
     8: ('operator', 'working'),         # оператор СЗоВ
     9: ('super_admin', 'fired'),
+    10: ('operator', 'working'),        # группа «Поток», доступ подтверждён
+    11: ('operator', 'working'),        # группа «Поток», доступ не подтверждён
 }
 FULL_AUDIENCE = {1, 2, 3, 4, 9}
-OPERATOR_STATES = {5: {'verifier': True, 'unlocked': True},
-                   6: {'verifier': True, 'unlocked': False}}
+OPERATOR_STATES = {5: {'verifier': True, 'potok': False, 'unlocked': True},
+                   6: {'verifier': True, 'potok': False, 'unlocked': False},
+                   10: {'verifier': False, 'potok': True, 'unlocked': True},
+                   11: {'verifier': False, 'potok': True, 'unlocked': False}}
 
 
 def _user_tuple(user_id):
@@ -282,10 +297,12 @@ class ChatAccessWiringTests(unittest.TestCase):
             test.state_calls.append((user_id, session_id, sales_department_id))
             if test.broken_state:
                 raise RuntimeError('pool timeout')
-            return OPERATOR_STATES.get(user_id, {'verifier': False, 'unlocked': False})
+            return OPERATOR_STATES.get(user_id, {'verifier': False, 'potok': False, 'unlocked': False})
 
         wazzup_access = SimpleNamespace(
             MODE_FULL=access.MODE_FULL, MODE_OPERATOR=access.MODE_OPERATOR,
+            MODE_POTOK=access.MODE_POTOK, GATED_MODES=access.GATED_MODES,
+            POTOK_CHANNEL_IDS=access.POTOK_CHANNEL_IDS,
             processes_without_gate=access.processes_without_gate,
             load_operator_state=load_operator_state)
         self.g = SimpleNamespace(user_id=None)
@@ -321,6 +338,8 @@ class ChatAccessWiringTests(unittest.TestCase):
             7: (None, False, False),
             8: (None, False, False),
             9: ('full', False, False),          # уволенный супер-админ не пишет
+            10: ('potok', False, True),         # «Поток» после QR пишет
+            11: ('potok', True, False),         # «Поток» до QR — замок
             None: (None, False, False),
         }
         for user_id, (mode, locked, can_process) in expected.items():
@@ -329,6 +348,9 @@ class ChatAccessWiringTests(unittest.TestCase):
                 self.assertEqual((state['mode'], state['locked'], state['can_process']),
                                  (mode, locked, can_process))
                 self.assertEqual(state['user_id'], user_id)
+                # Свои каналы — только у «Потока»: +77070253322 (владелец, 20.10.2026).
+                self.assertEqual(state['channels'],
+                                 access.POTOK_CHANNEL_IDS if mode == 'potok' else None)
 
     def test_full_audience_is_not_asked_about_the_gate(self):
         """Прежней аудитории раздела запрос про группу и подтверждение не нужен."""
@@ -357,11 +379,14 @@ class ChatAccessWiringTests(unittest.TestCase):
             self.assertEqual(guard(), (user_id, None), user_id)
         self._as(5)
         self.assertEqual(guard(), (5, None))
-        self._as(6)
-        requester, error = guard()
-        self.assertIsNone(requester)
-        self.assertEqual(error[1], 403)
-        self.assertEqual(error[0]['code'], 'CHAT_ACCESS_LOCKED')
+        self._as(10)
+        self.assertEqual(guard(), (10, None))
+        for locked_id in (6, 11):
+            self._as(locked_id)
+            requester, error = guard()
+            self.assertIsNone(requester)
+            self.assertEqual(error[1], 403)
+            self.assertEqual(error[0]['code'], 'CHAT_ACCESS_LOCKED')
         for user_id in (7, 8, None):
             self._as(user_id)
             self.assertEqual(guard(), forbidden, user_id)
@@ -371,8 +396,9 @@ class ChatAccessWiringTests(unittest.TestCase):
         guard = self.namespace['_wazzup_chat_reader_guard']
         for account in ('potok', None):
             self.account = account
-            self._as(5)
-            self.assertEqual(guard(), (None, ({'error': 'forbidden'}, 403)), account)
+            for gated in (5, 10):
+                self._as(gated)
+                self.assertEqual(guard(), (None, ({'error': 'forbidden'}, 403)), (gated, account))
             self._as(2)
             self.assertEqual(guard(), (2, None), account)
 
@@ -403,6 +429,7 @@ class WiringTextTests(unittest.TestCase):
 
     def test_profile_flag_reaches_the_portal(self):
         self.assertIn('"wazzup_chat_operator": wazzup_chat_operator,', BOT_SOURCE)
+        self.assertIn('"wazzup_chat_potok": wazzup_chat_potok,', BOT_SOURCE)
         payload = BOT_SOURCE[BOT_SOURCE.index('def _get_user_payload(user):'):]
         payload = payload[:payload.index('\ndef ', 10)]
         # Флаг считается тем же правилом, что и доступ, — без сессии, только «верификатор ли».

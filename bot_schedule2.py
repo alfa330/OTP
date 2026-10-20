@@ -1308,15 +1308,20 @@ def _get_user_payload(user):
     # Спрашиваем только у рядовых операторов продаж: остальным флаг не положен, и
     # лишний запрос на каждый вход был бы платой ни за что. Отказ базы вход не
     # роняет: без флага пункта просто не будет, а границу держит сервер.
+    # Тем же запросом — оператор группы «Поток» (владелец, 20.10.2026): ему раздел
+    # открыт за тем же QR, но только канал +77070253322 и без смены.
     wazzup_chat_operator = False
+    wazzup_chat_potok = False
     if (user_id is not None and str(role or '').strip().lower() == 'operator'
             and (str(department_code or '').strip().lower() == 'op'
                  or department_id == AI_QA_OP_DEPARTMENT_ID)):
         try:
             with db._get_cursor() as cursor:
-                wazzup_chat_operator = bool(wazzup_access.load_operator_state(
+                chat_state = wazzup_access.load_operator_state(
                     cursor, user_id, None, datetime.now(ZoneInfo('Asia/Almaty')).date(),
-                    AI_QA_OP_DEPARTMENT_ID)['verifier'])
+                    AI_QA_OP_DEPARTMENT_ID)
+            wazzup_chat_operator = bool(chat_state['verifier'])
+            wazzup_chat_potok = bool(chat_state.get('potok'))
         except Exception:
             logging.exception("Не удалось определить режим «Чатов ОП» пользователя %s", user_id)
 
@@ -1353,6 +1358,7 @@ def _get_user_payload(user):
         "baiga_access": baiga_access,
         "production_access": production_access,
         "wazzup_chat_operator": wazzup_chat_operator,
+        "wazzup_chat_potok": wazzup_chat_potok,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -5899,7 +5905,12 @@ def _wazzup_chat_access():
                          только пока его сессии подтверждён доступ — обычным QR
                          портала (скан супервайзера, админа или главы отдела)
                          либо прежним кодом чатов; до этого locked=True;
+        mode 'potok'     оператор группы «Поток» (владелец, 20.10.2026): то же,
+                         что у верификатора, но только каналы channels
+                         (+77070253322) и без смены;
         mode None        раздел закрыт.
+
+    channels — каналы, открытые человеку; None — все каналы аккаунта.
 
     Считается один раз на запрос: в одном запросе его спрашивают и гард ручки,
     и отправка, и авторство сообщения."""
@@ -5910,7 +5921,8 @@ def _wazzup_chat_access():
     if cached is not None:
         return cached
     requester_id = getattr(g, 'user_id', None)
-    state = {'user_id': requester_id, 'mode': None, 'locked': False, 'can_process': False}
+    state = {'user_id': requester_id, 'mode': None, 'locked': False, 'can_process': False,
+             'channels': None}
     if requester_id is not None:
         full_id, _full_error = _verifier_chats_guard()
         if full_id is not None:
@@ -5928,10 +5940,14 @@ def _wazzup_chat_access():
             except Exception:
                 # Не узнали — считаем закрытым: раздел с перепиской не открывается «на всякий случай».
                 logging.exception("Чаты ОП: не удалось определить режим раздела для %s", requester_id)
-                operator = {'verifier': False, 'unlocked': False}
+                operator = {'verifier': False, 'potok': False, 'unlocked': False}
             if operator['verifier']:
                 state.update(mode=wazzup_access.MODE_OPERATOR, locked=not operator['unlocked'],
                              can_process=bool(operator['unlocked']))
+            elif operator.get('potok'):
+                state.update(mode=wazzup_access.MODE_POTOK, locked=not operator['unlocked'],
+                             can_process=bool(operator['unlocked']),
+                             channels=wazzup_access.POTOK_CHANNEL_IDS)
     try:
         g._wazzup_chat_access = state
     except RuntimeError:
@@ -5949,7 +5965,9 @@ def _wazzup_chat_reader_guard():
     state = _wazzup_chat_access()
     if state['mode'] == wazzup_access.MODE_FULL:
         return state['user_id'], None
-    if state['mode'] == wazzup_access.MODE_OPERATOR:
+    # Группа «Поток» — тот же замок и только «op»; свои каналы ручки берут
+    # из _wazzup_channel_scope.
+    if state['mode'] in wazzup_access.GATED_MODES:
         if state['locked']:
             return None, (jsonify({"error": "Доступ к чатам не подтверждён",
                                    "code": "CHAT_ACCESS_LOCKED"}), 403)
@@ -5957,6 +5975,12 @@ def _wazzup_chat_reader_guard():
             return None, (jsonify({"error": "forbidden"}), 403)
         return state['user_id'], None
     return None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _wazzup_channel_scope():
+    """Каналы «Чатов ОП», открытые человеку запроса: frozenset или None — все.
+    Группе «Поток» — только +77070253322 (wazzup/access.py: POTOK_CHANNEL_IDS)."""
+    return _wazzup_chat_access().get('channels')
 
 
 def _wazzup_chat_approver_context(approver_id):
@@ -9319,6 +9343,9 @@ def api_wazzup_channels():
                 items.append({'channelId': cid, 'name': cid, 'plainId': None,
                               'transport': None, 'state': None,
                               'chatsCount': chats_count, 'lastMessageAt': last_at})
+        scope = _wazzup_channel_scope()
+        if scope is not None:
+            items = [item for item in items if item['channelId'] in scope]
         items.sort(key=lambda x: (-(x['chatsCount'] or 0), str(x['name'] or '')))
         return jsonify({"status": "success", "items": items}), 200
     except Exception as error:
@@ -9349,8 +9376,10 @@ def api_wazzup_chats():
         offset = max(int(request.args.get('offset', 0)), 0)
     except (TypeError, ValueError):
         offset = 0
-    # Ждущие ответа — первыми (wazzup/chat_list.py).
-    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset, chat_id)
+    # Ждущие ответа — первыми (wazzup/chat_list.py). Группе «Поток» — только её каналы.
+    scope = _wazzup_channel_scope()
+    count, page = wazzup_chat_list.chat_list_queries(account, channel_id, q, limit, offset, chat_id,
+                                                     channel_ids=scope)
     started = time.perf_counter()
     try:
         with db._get_cursor() as cursor:
@@ -9358,7 +9387,7 @@ def api_wazzup_chats():
             total = cursor.fetchone()[0]
             cursor.execute(*page)
             items = [wazzup_chat_list.chat_list_item(r) for r in cursor.fetchall()]
-            wazzup_chat_list.attach_channel_counts(cursor, account, items)
+            wazzup_chat_list.attach_channel_counts(cursor, account, items, channel_ids=scope)
         _record_elapsed_server_timing('chats', started)
         return jsonify({"status": "success", "items": items, "total": total}), 200
     except Exception as error:
@@ -9395,7 +9424,8 @@ def api_wazzup_chat_search():
     started = time.perf_counter()
     try:
         with db._get_cursor() as cursor:
-            items, next_cursor = wazzup_chat_search.search_messages(cursor, account, query, limit, before)
+            items, next_cursor = wazzup_chat_search.search_messages(
+                cursor, account, query, limit, before, channel_ids=_wazzup_channel_scope())
         _record_elapsed_server_timing('search', started)
         return jsonify({"status": "success", "items": items, "next": next_cursor}), 200
     except psycopg2.errors.QueryCanceled:
@@ -9421,6 +9451,9 @@ def api_wazzup_chat_messages():
     chat_id = (request.args.get('chat_id') or '').strip()
     if not channel_id or not chat_id:
         return jsonify({"error": "channel_id and chat_id are required"}), 400
+    scope = _wazzup_channel_scope()
+    if scope is not None and channel_id not in scope:
+        return jsonify({"error": "Этот канал вам не открыт"}), 403
     before = (request.args.get('before') or '').strip() or None  # ISO-курсор вверх
     # Сообщение из поиска: лента открывается на нём (wazzup/chat_search.py).
     focus = (request.args.get('focus') or '').strip()[:200] or None

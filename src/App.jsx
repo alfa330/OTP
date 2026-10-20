@@ -2235,6 +2235,11 @@ const canAccessAiQaForUser = (userLike) => (
 const isWazzupChatOperator = (userLike) => Boolean(
     userLike?.wazzup_chat_operator ?? userLike?.wazzupChatOperator
 );
+/* Оператор группы «Поток» (владелец, 20.10.2026): «Чаты ОП» за тем же QR, но только
+   канал +77070253322 и без смены. Флаг тоже считает сервер (wazzup_chat_potok). */
+const isWazzupChatPotok = (userLike) => Boolean(
+    userLike?.wazzup_chat_potok ?? userLike?.wazzupChatPotok
+);
 
 /* «Чаты ОП» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
    отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
@@ -2247,7 +2252,7 @@ const canAccessVerifierChatsForUser = (userLike) => {
     // Наблюдатель «Маркетинга» вычитается ПЕРВЫМ: разбор звонков ему открыт, а
     // переписка Верификаторов в выданный ему перечень разделов не входит.
     if (isMarketingObserver(userLike)) return false;
-    if (isWazzupChatOperator(userLike)) return true;
+    if (isWazzupChatOperator(userLike) || isWazzupChatPotok(userLike)) return true;
     if (normalizeRole(userLike?.role) === 'super_admin') return true;
     // Глобальный админ — админ, не назначенный главой отдела: по решению
     // владельца переписку читают все такие админы. У главы с базовой
@@ -63353,7 +63358,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     {/* Счётчик «Ожидают ответа» в пункте «Чаты ОП», пока раздел не
                         открыт. Только у тех, кто обрабатывает чаты (верификатор,
                         супер-админ): у остальных счётчика нет и в самом разделе. */}
-                    {user && (isWazzupChatOperator(user) || normalizeRole(user.role) === 'super_admin')
+                    {user && (isWazzupChatOperator(user) || isWazzupChatPotok(user)
+                        || normalizeRole(user.role) === 'super_admin')
                         && canAccessVerifierChatsForUser(user) && (
                         <Suspense fallback={null}>
                             <WazzupWaitingKeeper
@@ -63361,7 +63367,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 apiBaseUrl={API_BASE_URL}
                                 withAccessTokenHeader={withAccessTokenHeader}
                                 mayProcess
-                                operator={isWazzupChatOperator(user)}
+                                operator={isWazzupChatOperator(user) || isWazzupChatPotok(user)}
                                 userId={user.id}
                             />
                         </Suspense>

@@ -63,6 +63,8 @@ const NAMES = [
     'canAccessAiQaForUser',
     // Верификатор: раздел ему открывает флаг профиля, который считает сервер.
     'isWazzupChatOperator',
+    // Группа «Поток» (20.10.2026) — свой флаг профиля, тот же раздел.
+    'isWazzupChatPotok',
     'canAccessVerifierChatsForUser',
 ];
 
@@ -118,6 +120,13 @@ const PEOPLE = [
     ['флаг выключен явно', {
         id: 19, role: 'operator', department_code: 'op', wazzup_chat_operator: false,
     }, false, false],
+    // Группа «Поток» (владелец, 20.10.2026): свой канал за тем же QR — флаг тоже от сервера.
+    ['оператор «Потока» (флаг профиля)', {
+        id: 20, role: 'operator', department_code: 'op', wazzup_chat_potok: true,
+    }, true, false],
+    ['оператор «Потока» (флаг в camelCase)', {
+        id: 21, role: 'operator', department_code: 'op', wazzupChatPotok: true,
+    }, true, false],
     // 183 стоит в ОБОИХ поимённых списках — исторически, до их разделения.
     ['оператор из обоих поимённых списков', { id: 183, role: 'operator' }, true, true],
     // А вот поимённый доступ к «ИИ-оценке» переписку ОП НЕ открывает: ради

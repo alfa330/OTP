@@ -24,7 +24,8 @@ def history_app(db):
     module = ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[]))
     namespace = dict(db=db, jsonify=jsonify, request=request, logging=logging,
                      _wazzup_chat_reader_guard=lambda: (1, None),
-                     _wazzup_account_arg=lambda: request.args.get('account', 'op'))
+                     _wazzup_account_arg=lambda: request.args.get('account', 'op'),
+                     _wazzup_channel_scope=lambda: None)
     exec(compile(module, str(path), 'exec'), namespace)
     app = Flask(__name__)
     app.add_url_rule('/api/wazzup/chat-messages', view_func=namespace['api_wazzup_chat_messages'])

@@ -980,7 +980,7 @@ function ChatsWorkspace(props) {
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
     const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user,
-        operator = false, toolbar = null, entering = false, writeLock = null } = props;
+        operator = false, potok = false, toolbar = null, entering = false, writeLock = null } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     /* Кому вообще есть смысл спрашивать сервер про обработку: верификатору и
        супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
@@ -1476,7 +1476,7 @@ function ChatsWorkspace(props) {
     /* Карточка водителя (ChatDriverCard.jsx) — у каждого чата Верификаторов,
        кроме Global: его чаты обрабатываются отдельно. Видят её все, кому открыта
        переписка; заполнять может тот, кто обрабатывает (решает сервер, canEdit). */
-    const driverCardEnabled = account === 'op' && Boolean(selected?.channelId && selected?.chatId)
+    const driverCardEnabled = account === 'op' && !potok && Boolean(selected?.channelId && selected?.chatId)
         && !selected.isNew && !GLOBAL_CHANNEL_IDS.has(selected.channelId);
     const driverCard = useDriverCard({ enabled: driverCardEnabled, chat: selected, apiBaseUrl, headers,
         live: pilot.enabled && pilot.connection === 'live' });
@@ -1904,8 +1904,8 @@ function ChatsWorkspace(props) {
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
                     </>}
-                    {/* Верификатору — только переписка и «только карточки». */}
-                    {operator && (
+                    {/* Верификатору — только переписка и «только карточки»; «Потоку» — одна переписка. */}
+                    {operator && !potok && (
                         <div className="flex rounded-xl bg-slate-100 p-1">
                             {segBtn('chats', MessageSquare, 'Чаты')}
                             {segBtn('cards', IdCard, 'Карточки')}
@@ -1931,7 +1931,7 @@ function ChatsWorkspace(props) {
 
             {/* «Только карточки». Скрывается, а не размонтируется: поиск и период
                 переживают переход в чат и обратно; список свежий при каждом открытии. */}
-            {account === 'op' && (
+            {account === 'op' && !potok && (
                 <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"
                      style={{ display: mainTab === 'cards' ? undefined : 'none' }}>
                     <DriverCardsTab apiBaseUrl={apiBaseUrl} headers={headers} active={mainTab === 'cards'}
@@ -2312,42 +2312,49 @@ function ChatsWorkspace(props) {
  *
  * Состояние смены общее с WazzupShiftKeeper (workspaceStore.js): он грузит его
  * при входе в портал, поэтому раздел обычно открывается без запроса. */
-function OperatorWorkspace(props) {
-    const { apiBaseUrl, withAccessTokenHeader, user } = props;
+/* Состояние замка и смены — общее хранилище workspaceStore.js: у верификатора его
+   ведёт ещё и WazzupShiftKeeper, у «Потока» — только раздел. */
+function useGatedWorkspace({ apiBaseUrl, withAccessTokenHeader, user }) {
     const workspace = useWorkspace(user?.id);
-    /* Окно открыто кнопкой «Начать смену» — играем открытие. Перезагрузка
-       страницы посреди смены его не играет: человек уже работал. Ref, а не
-       состояние: признак обязан быть готов к первому же кадру окна, иначе оно
-       мелькнуло бы целиком до начала анимации. */
-    const startedHere = useRef(false);
     const headers = useRef(withAccessTokenHeader);
     headers.current = withAccessTokenHeader;
-
     useEffect(() => {
         if (workspace.ready) return;
         configureWorkspace({ apiBaseUrl, ownerId: user?.id, headers: () => headers.current?.() });
         loadWorkspace();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiBaseUrl, user?.id]);
+    return workspace;
+}
+
+function WorkspaceLoading({ error }) {
+    return (
+        <div className="grid h-full overflow-y-auto px-4 py-8 place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
+            {error ? (
+                <div className="max-w-sm text-center">
+                    <AlertCircle size={22} className="mx-auto text-slate-400" />
+                    <p className="mt-2">{error}</p>
+                    <button type="button" onClick={loadWorkspace} className={`${iosBtnGhost} mt-2`}>
+                        <RefreshCw size={13} /> Повторить
+                    </button>
+                </div>
+            ) : <Loader2 size={20} className="animate-spin text-slate-400" />}
+        </div>
+    );
+}
+
+function OperatorWorkspace(props) {
+    const workspace = useGatedWorkspace(props);
+    /* Окно открыто кнопкой «Начать смену» — играем открытие. Перезагрузка
+       страницы посреди смены его не играет: человек уже работал. Ref, а не
+       состояние: признак обязан быть готов к первому же кадру окна, иначе оно
+       мелькнуло бы целиком до начала анимации. */
+    const startedHere = useRef(false);
 
     const onShift = Boolean(workspace.current?.onShift);
     useEffect(() => { if (!onShift) startedHere.current = false; }, [onShift]);
 
-    if (!workspace.ready) {
-        return (
-            <div className="grid h-full overflow-y-auto px-4 py-8 place-items-center text-[13.5px] text-slate-500" style={{ fontFamily: APPLE_FONT }}>
-                {workspace.error ? (
-                    <div className="max-w-sm text-center">
-                        <AlertCircle size={22} className="mx-auto text-slate-400" />
-                        <p className="mt-2">{workspace.error}</p>
-                        <button type="button" onClick={loadWorkspace} className={`${iosBtnGhost} mt-2`}>
-                            <RefreshCw size={13} /> Повторить
-                        </button>
-                    </div>
-                ) : <Loader2 size={20} className="animate-spin text-slate-400" />}
-            </div>
-        );
-    }
+    if (!workspace.ready) return <WorkspaceLoading error={workspace.error} />;
     if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
     if (!onShift) return <div className="wazzup-scrollbar h-full overflow-y-auto">
         <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />
@@ -2356,10 +2363,25 @@ function OperatorWorkspace(props) {
         writeLock={shiftWriteLock(workspace.current, workspace.startKey)} />;
 }
 
-/* Кому раздел открыт верификатором, сообщает сервер флагом профиля
-   (wazzup_chat_operator): группа верификаторов определяется моделью группы на
-   сегодня, и портал сам этого не выведет. */
+/* Раздел у группы «Поток» (владелец, 20.10.2026): тот же замок с обычным QR от
+ * супервайзера, затем окно чатов — только канал +77070253322 (остальные сервер
+ * не отдаёт) и без смены: ни «Начать смену», ни статусов, писать можно сразу.
+ * Карточки водителя нет — она пишет сделку amoCRM верификаторов, а «Поток»
+ * ведёт водителей в своей CRM. */
+function PotokWorkspace(props) {
+    const workspace = useGatedWorkspace(props);
+    if (!workspace.ready) return <WorkspaceLoading error={workspace.error} />;
+    if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
+    return <ChatsWorkspace {...props} operator potok />;
+}
+
+/* Кому раздел открыт верификатором или «Потоком», сообщает сервер флагами
+   профиля (wazzup_chat_operator, wazzup_chat_potok): группа определяется моделью
+   группы на сегодня, и портал сам этого не выведет. */
 export default function WazzupChatsView(props) {
     const operator = Boolean(props.user?.wazzup_chat_operator ?? props.user?.wazzupChatOperator);
-    return operator ? <OperatorWorkspace key={props.user?.id} {...props} /> : <ChatsWorkspace key={props.user?.id} {...props} />;
+    const potok = Boolean(props.user?.wazzup_chat_potok ?? props.user?.wazzupChatPotok);
+    if (operator) return <OperatorWorkspace key={props.user?.id} {...props} />;
+    if (potok) return <PotokWorkspace key={props.user?.id} {...props} />;
+    return <ChatsWorkspace key={props.user?.id} {...props} />;
 }

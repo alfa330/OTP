@@ -165,6 +165,24 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return eligible_user(user)
         return bool(user) and bool(access().get('can_process'))
 
+    def channel_scope():
+        """Channels open to the requesting person: the «Поток» group gets
+        +77070253322 only (wazzup/access.py); None means every channel."""
+        return access().get('channels') if access is not None else None
+
+    class ScopedExclusions:
+        """Global plus, for a channel-scoped person, every channel outside the
+        scope. The route modules only ask `channel in excluded_channels`, so a
+        channel the person may not open is refused exactly like Global."""
+
+        def __contains__(self, channel_id):
+            if channel_id in EXCLUDED_CHANNELS:
+                return True
+            scope = channel_scope()
+            return scope is not None and channel_id not in scope
+
+    exclusions = ScopedExclusions()
+
     def latest_shift_status(user_id):
         if shift_status is not None:
             return shift_status(user_id)
@@ -179,9 +197,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         return None if shift.writes_allowed(latest_shift_status(user[0])) else shift.WRITE_LOCKED_MESSAGE
 
     def sender_author_id(user):
-        # Only a verifier's reply is credited to an operator in the reports; a
-        # super admin stays out of them, as before.
-        if access is not None and access().get('mode') == access_rules.MODE_OPERATOR:
+        # Only an operator's reply (a verifier or the «Поток» group) is credited
+        # in the reports; a super admin stays out of them, as before.
+        if access is not None and access().get('mode') in access_rules.GATED_MODES:
             return access_rules.icore_author_id(user[0])
         return None
 
@@ -195,31 +213,34 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         return user, None
 
     from .unread import register_unread_routes
-    register_unread_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    register_unread_routes(bp, actor, require_api_key, preflight, db, exclusions,
+                           channel_scope=channel_scope)
     from .templates import register_template_routes, validate_template_message, render_template_preview
     register_template_routes(bp, actor, require_api_key, preflight, db,
-                             excluded_channels=EXCLUDED_CHANNELS)
+                             excluded_channels=exclusions)
     from .assist import register_assist_routes
     register_assist_routes(bp, actor, require_api_key, preflight)
     from .attachments import register_attachment_routes
-    register_attachment_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    register_attachment_routes(bp, actor, require_api_key, preflight, db, exclusions)
     from .notes import register_note_routes
-    register_note_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    register_note_routes(bp, actor, require_api_key, preflight, db, exclusions)
     from .driver_cards import register_driver_card_routes
     from . import driver_cards_sync
+    # The driver card writes the verifiers' amoCRM deal; the «Поток» group works in its own CRM.
     register_driver_card_routes(
         bp, guard=guard, actor=actor, require_api_key=require_api_key, preflight=preflight, db=db,
-        may_edit=lambda user_id: may_process(db.get_user(id=user_id)),
-        excluded_channels=EXCLUDED_CHANNELS,
+        may_edit=lambda user_id: (may_process(db.get_user(id=user_id))
+                                  and (access is None or access().get('mode') != access_rules.MODE_POTOK)),
+        excluded_channels=exclusions,
         on_saved=driver_card_sync.get('wake', driver_cards_sync.wake),
         options_provider=driver_card_sync.get('options', lambda: driver_cards_sync.current_options(db)),
         driver_info_provider=driver_card_sync.get('driver_info'))
     from .typing import register_typing_routes
-    register_typing_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    register_typing_routes(bp, actor, require_api_key, preflight, db, exclusions)
     from .send_check import register_send_check_route
-    register_send_check_route(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    register_send_check_route(bp, actor, require_api_key, preflight, db, exclusions)
     from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError
-    register_upload_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS,
+    register_upload_routes(bp, actor, require_api_key, preflight, db, exclusions,
                            channels=channels, gcs=gcs)
 
     @bp.route('', methods=['GET', 'OPTIONS'])
@@ -233,7 +254,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         enabled = (request.args.get('account', 'op') == 'op'
                    and may_process(db.get_user(id=user_id)))
         # Where the «+» may start a chat (wazzup/new_chat.py); the channel list is cached.
-        new_chat_ids = (new_chat.new_chat_channel_ids(channels('op'), EXCLUDED_CHANNELS)
+        new_chat_ids = (new_chat.new_chat_channel_ids(channels('op'), EXCLUDED_CHANNELS,
+                                                      allowed=channel_scope())
                         if enabled else [])
         return jsonify(enabled=enabled, canSend=enabled and bool(accounts.api_key('op')),
                        excludedChannelIds=sorted(EXCLUDED_CHANNELS), maxTextLength=MAX_TEXT,
@@ -267,6 +289,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         # sends its `id:` (an empty `cursor` frame the client ignores), so a
         # reconnect resumes instead of reconciling.
         only_unread = request.args.get('only') == 'unread'
+        # Read inside the request: the generator runs outside its context. Every
+        # chat event carries its channel; other channels never reach a scoped person.
+        scope = channel_scope()
 
         def generate():
             cursor, resumed = broker.resume_from(epoch, after)
@@ -276,6 +301,13 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             # Re-authenticate on reconnect; revoked access cannot hold a stream forever.
             while time.monotonic() - started < 120:
                 events, cursor = broker.wait(cursor)
+                if scope is not None and events:
+                    events = [e for e in events if e.get('unavailable') or e.get('reload')
+                              or e.get('channelId') in scope]
+                    if not events:
+                        # Only other channels changed: still move the resume point.
+                        yield f'id: {cursor}\nevent: cursor\ndata: {{}}\n\n'
+                        continue
                 if any(e.get('unavailable') for e in events):
                     yield f'id: {cursor}\nevent: unavailable\ndata: {{}}\n\n'
                 elif any(e.get('reload') for e in events):
@@ -329,6 +361,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 or len(cid) > 100 or len(chat) > 100 or not isinstance(ids, list) or len(ids) > 2000
                 or any(not isinstance(v, str) or len(v) > 100 for v in ids)):
             return jsonify(error='Некорректный запрос обновления'), 400
+        scope = channel_scope()
+        if scope is not None and cid not in scope:
+            return jsonify(error='Этот канал вам не открыт'), 403
         # Refresh the whole displayed range (incl. changes, deletions and gaps
         # accumulated offline). A bounded response resets an oversized window.
         with db._get_cursor() as cur:
@@ -410,6 +445,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         body['clientMessageId'] = request_id
         if cid in EXCLUDED_CHANNELS:
             return jsonify(error='Global обрабатывается отдельно и исключён из отправки'), 403
+        scope = channel_scope()
+        if scope is not None and cid not in scope:
+            return jsonify(error='Этот канал вам не открыт', code='CHANNEL_NOT_ALLOWED',
+                           state='failed', retryable=False), 403
         key = accounts.api_key('op')
         if not key:
             # Nothing was attempted: a definite failure, not a lost answer to re-check.

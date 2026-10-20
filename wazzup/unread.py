@@ -189,7 +189,10 @@ def read_item(row):
     return dict(zip(('channelId', 'chatId', 'unreadCount', 'lastInboundId', 'unreadVersion'), row))
 
 
-def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_channels=()):
+def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_channels=(),
+                           channel_scope=lambda: None):
+    """channel_scope() -> каналы человека запроса или None (все): счётчик
+    «Ожидают ответа» у группы «Поток» — только по её каналу."""
     @bp.route('/unread', methods=['GET', 'OPTIONS'])
     @require_api_key
     def unread_snapshot():
@@ -204,14 +207,17 @@ def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_c
         after = request.args.get('after', '')
         if len(after) > 512:
             return jsonify(error='Некорректный указатель страницы'), 400
+        scope = channel_scope()
         with db._get_cursor() as cur:
             cur.execute("""SELECT s.channel_id,s.chat_id,s.unread_count,s.last_inbound_id,s.revision,
                     c.chat_type,c.contact_name,c.contact_phone,c.last_message_at,
                     c.last_message_text,c.last_message_is_echo
                 FROM wazzup_chat_read_state s
                 LEFT JOIN wazzup_chats c ON c.account=s.account AND c.channel_id=s.channel_id AND c.chat_id=s.chat_id
-                WHERE s.account='op' AND s.unread_count>0 AND s.channel_id || ':' || s.chat_id > %s
-                ORDER BY s.channel_id || ':' || s.chat_id LIMIT 1001""", (after,))
+                WHERE s.account='op' AND s.unread_count>0 AND s.channel_id || ':' || s.chat_id > %s"""
+                + (" AND s.channel_id = ANY(%s)" if scope is not None else "")
+                + " ORDER BY s.channel_id || ':' || s.chat_id LIMIT 1001",
+                (after, sorted(scope)) if scope is not None else (after,))
             rows = cur.fetchall()
         items = []
         for row in rows[:1000]:

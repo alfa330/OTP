@@ -112,20 +112,29 @@ def _older_than(before):
     return ' AND m.dt <= %s AND (m.dt, m.message_id) < (%s, %s)', [moment, moment, message_id]
 
 
-def recent_hits_query(account, query, limit=PAGE_SIZE, before=None, window=None):
+def _in_channels(channel_ids):
+    """Условие «только каналы человека» и его параметры; channel_ids None — все."""
+    if channel_ids is None:
+        return '', []
+    return ' AND m.channel_id = ANY(%s)', [sorted(channel_ids)]
+
+
+def recent_hits_query(account, query, limit=PAGE_SIZE, before=None, window=None, channel_ids=None):
     """Шаг 1: (SQL, параметры) совпадений среди window последних сообщений
     аккаунта (старше before), свежие сверху, не больше limit + 1 — лишняя
     говорит, что есть следующая страница. Последней строкой с флагом edge
     идёт самое старое сообщение окна — если окно заполнено целиком, то есть
-    за ним архив продолжается."""
+    за ним архив продолжается. channel_ids — каналы человека (группе «Поток»
+    открыт один); окно тогда — последние сообщения этих каналов."""
     window = window or RECENT_WINDOW
     older, params = _older_than(before)
+    scope, scope_params = _in_channels(channel_ids)
     sql = f"""
         WITH recent AS MATERIALIZED (
             SELECT m.channel_id, m.chat_id, m.message_id, m.dt, m.is_echo, m.type, m.status,
                    m.text, m.is_deleted
               FROM wazzup_messages m
-             WHERE m.account = %s{older}
+             WHERE m.account = %s{scope}{older}
              ORDER BY m.dt DESC, m.message_id DESC
              LIMIT %s)
         (SELECT r.channel_id, r.chat_id, r.message_id, r.dt, r.is_echo, r.type, r.status, r.text, FALSE
@@ -138,18 +147,19 @@ def recent_hits_query(account, query, limit=PAGE_SIZE, before=None, window=None)
            FROM (SELECT message_id, dt, COUNT(*) OVER () AS scanned FROM recent
                   ORDER BY dt, message_id LIMIT 1) e
           WHERE e.scanned = %s)"""
-    return sql, [account, *params, window, f'%{escape_like(query)}%', limit + 1, window]
+    return sql, [account, *scope_params, *params, window, f'%{escape_like(query)}%', limit + 1, window]
 
 
-def message_hits_query(account, query, limit=PAGE_SIZE, before=None):
+def message_hits_query(account, query, limit=PAGE_SIZE, before=None, channel_ids=None):
     """Шаг 2: (SQL, параметры) совпадений старше before по всему архиву,
     свежие сверху, не больше limit + 1."""
     older, params = _older_than(before)
+    scope, scope_params = _in_channels(channel_ids)
     return ('SELECT m.channel_id, m.chat_id, m.message_id, m.dt, m.is_echo, m.type, m.status, m.text'
             " FROM wazzup_messages m WHERE m.account = %s AND NOT m.is_deleted"
-            " AND m.text ILIKE %s ESCAPE '\\'" + older
+            " AND m.text ILIKE %s ESCAPE '\\'" + scope + older
             + ' ORDER BY m.dt DESC, m.message_id DESC LIMIT %s',
-            [account, f'%{escape_like(query)}%', *params, limit + 1])
+            [account, f'%{escape_like(query)}%', *scope_params, *params, limit + 1])
 
 
 def snippet(text, query):
@@ -167,13 +177,13 @@ def snippet(text, query):
     return ('…' if start else '') + flat[start:end] + ('…' if end < len(flat) else '')
 
 
-def search_messages(cursor, account, query, limit=PAGE_SIZE, before=None):
+def search_messages(cursor, account, query, limit=PAGE_SIZE, before=None, channel_ids=None):
     """(найденные сообщения, указатель следующей страницы или None).
 
     Каждое сообщение несёт строку своего чата (как в списке): из поиска чат
-    открывается тем же путём, что и из списка."""
+    открывается тем же путём, что и из списка. channel_ids — каналы человека."""
     cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
-    cursor.execute(*recent_hits_query(account, query, limit, before))
+    cursor.execute(*recent_hits_query(account, query, limit, before, channel_ids=channel_ids))
     rows, edge = [], None
     for row in cursor.fetchall():
         if row[8]:
@@ -184,7 +194,7 @@ def search_messages(cursor, account, query, limit=PAGE_SIZE, before=None):
         # Свежее окно страницы не набрало — слово редкое: дальше только индекс
         # триграмм. Проход по времени был бы ставкой на то же, чего не нашлось.
         cursor.execute('SET LOCAL enable_indexscan = off')
-        cursor.execute(*message_hits_query(account, query, limit - len(rows), edge))
+        cursor.execute(*message_hits_query(account, query, limit - len(rows), edge, channel_ids))
         rows.extend(cursor.fetchall())
         cursor.execute('SET LOCAL enable_indexscan = on')
     more = len(rows) > limit

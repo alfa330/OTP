@@ -13,6 +13,13 @@
 осталась на просмотре переписки — её считает `_verifier_chats_guard` в
 bot_schedule2.py, сюда она не входит.
 
+С 20.10.2026 (владелец) пишет и группа «Поток» — рядовой оператор отдела продаж,
+чья группа на сегодня считается по модели «Поток»: только в канал +77070253322
+«Help Taxi» (POTOK_CHANNEL_IDS), доступ — тем же обычным QR от супервайзера,
+смены и статусов у него нет. Раньше «Поток» писал водителям из окна Wazzup в своей
+CRM; теперь номер в аккаунте «op», и окно ему даёт «Чаты ОП» (в том числе
+встроенными в CRM).
+
 Обычный QR — решение владельца 09.10.2026 («чтобы раздел открывался через
 обычный QR и его могли открывать супервайзеры»). До него у чатов был отдельный
 ключ: свой код (`OTPW:`, своя подпись), а супервайзер вводил ещё и временный код
@@ -31,6 +38,9 @@ from datetime import datetime, timedelta, timezone
 
 SALES_DEPARTMENT_CODE = 'op'
 VERIFIER_MODEL = 'op_verificator'
+POTOK_MODEL = 'op_potok'
+# +77070253322 «Help Taxi» — единственный канал группы «Поток» (владелец, 20.10.2026).
+POTOK_CHANNEL_IDS = frozenset({'6983db13-ae8e-4b27-b09d-6c10ae4f54cf'})
 # Стажёра здесь нет намеренно: QR ему портал не выдаёт нигде, кроме «Чатов
 # водителей», и переписку с клиентами от имени компании он не ведёт.
 OPERATOR_ROLES = frozenset({'operator'})
@@ -38,6 +48,9 @@ DISMISSED_STATUSES = frozenset({'fired', 'dismissal'})
 
 MODE_FULL = 'full'
 MODE_OPERATOR = 'operator'
+MODE_POTOK = 'potok'
+# Режимы, в которых раздел открывается за QR и только в аккаунте «op».
+GATED_MODES = frozenset({MODE_OPERATOR, MODE_POTOK})
 
 QR_PREFIX = 'OTPW:'
 QR_TTL_SECONDS = 300
@@ -81,6 +94,15 @@ def is_verifier(role, department_code, day_model, status=None):
     return (normalize(role) in OPERATOR_ROLES
             and normalize(department_code) == SALES_DEPARTMENT_CODE
             and normalize(day_model) == VERIFIER_MODEL
+            and not is_dismissed(status))
+
+
+def is_potok_operator(role, department_code, day_model, status=None):
+    """Рядовой оператор группы «Поток» отдела продаж — по модели группы на сегодня,
+    той же лестницей, что у верификатора."""
+    return (normalize(role) in OPERATOR_ROLES
+            and normalize(department_code) == SALES_DEPARTMENT_CODE
+            and normalize(day_model) == POTOK_MODEL
             and not is_dismissed(status))
 
 
@@ -157,10 +179,12 @@ _OPERATOR_STATE_SQL = """
 
 
 def load_operator_state(cursor, user_id, session_id, day, sales_department_id):
-    """{'verifier': bool, 'unlocked': bool} — один запрос на всё.
+    """{'verifier': bool, 'potok': bool, 'unlocked': bool} — один запрос на всё.
 
-    unlocked — сессия подтверждена обычным QR портала (`sensitive_data_unlocked`,
-    тот же признак, что открывает «Вики») или прежним кодом чатов.
+    potok — оператор группы «Поток» (is_potok_operator). unlocked — сессия
+    верификатора или «Потока» подтверждена обычным QR портала
+    (`sensitive_data_unlocked`, тот же признак, что открывает «Вики») или прежним
+    кодом чатов.
 
     Отдел продаж узнаём и по id: код в справочнике заполнен не везде, а по
     одному полю человек молча терялся бы (то же правило в `_department_code_of_user`).
@@ -178,9 +202,11 @@ def load_operator_state(cursor, user_id, session_id, day, sales_department_id):
     })
     row = cursor.fetchone()
     if not row:
-        return {'verifier': False, 'unlocked': False}
+        return {'verifier': False, 'potok': False, 'unlocked': False}
     verifier = is_verifier(row[0], row[2], row[3], row[1])
-    return {'verifier': verifier, 'unlocked': bool(verifier and session and row[4])}
+    potok = is_potok_operator(row[0], row[2], row[3], row[1])
+    return {'verifier': verifier, 'potok': potok,
+            'unlocked': bool((verifier or potok) and session and row[4])}
 
 
 # ── Код для сканера ──────────────────────────────────────────────────────────
