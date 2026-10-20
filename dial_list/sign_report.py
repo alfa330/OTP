@@ -28,6 +28,13 @@ SLOT_HOURS = (10, 19)
 # Сколько слот ждёт отправки: сервер мог перезапуститься ровно в 10:00 (выкладка) — тогда отчёт
 # уходит при старте. Старше — пропускаем: утренний отчёт к обеду только путает.
 SLOT_LATE_MAX = timedelta(hours=1)
+# Перепроверка подписания перед отчётом (владелец, 20.10.2026: «до отправки показателей все данные самые
+# актуальные — начать собирать примерно за 30 минут»): в 9:30 и 18:30 Sapar заново спрашивают обо всех
+# неподписавших базы отчёта. Проверенные обычным прогоном за REFRESH_FRESH до её начала — уже свежие.
+REFRESH_LEAD = timedelta(minutes=30)
+REFRESH_FRESH = timedelta(minutes=15)
+# Срок перепроверки — за минуту до отчёта: отчёт уходит с тем, что успели.
+REFRESH_DEADLINE_GAP = timedelta(minutes=1)
 
 UNKNOWN_CITY = "Город не указан"
 # Пороги цвета доли подписавших (у владельца на картинке ≥ 40 % — зелёная, ниже — жёлтая, 0 % —
@@ -119,6 +126,27 @@ def slot_for(now):
         return None
     slot = max(candidates)
     return slot if local - slot <= SLOT_LATE_MAX else None
+
+
+def next_slot(now):
+    """Ближайший слот отправки после `now` (aware) — datetime по Алматы."""
+    local = now.astimezone(signing.PERIOD_TZ)
+    for days_ahead in (0, 1):
+        day = (local + timedelta(days=days_ahead)).date()
+        for hour in SLOT_HOURS:
+            moment = datetime(day.year, day.month, day.day, hour, 0, tzinfo=signing.PERIOD_TZ)
+            if moment > local:
+                return moment
+    return None
+
+
+def refresh_window(now):
+    """(слот, fresh_before, deadline), если `now` — в получасе перед слотом (с запасом на опоздавший
+    запуск джобы и на перезапуск сервера посреди перепроверки), иначе None."""
+    slot = next_slot(now)
+    if slot is None or now < slot - REFRESH_LEAD - timedelta(minutes=5):
+        return None
+    return slot, slot - REFRESH_LEAD - REFRESH_FRESH, slot - REFRESH_DEADLINE_GAP
 
 
 # ── картинка ─────────────────────────────────────────────────────────────────────────────────

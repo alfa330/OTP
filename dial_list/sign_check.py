@@ -64,6 +64,12 @@ WRITE_CHUNK = 200
 IN_FLIGHT_MAX_AGE_MINUTES = 90
 # Проверка «сейчас» упёрлась в лежащий Sapar — столько секунд следующие не пробуем.
 NOW_BACKOFF_SEC = 30
+# Перепроверка перед отчётом о подписании (владелец, 20.10.2026: «до отправки показателей все данные
+# самые актуальные — начать собирать примерно за 30 минут до рассылки»). Последовательно водитель —
+# ~0,17 с (замер прода 19.10: 1 538 за 4 мин 20 с), 12 тыс. неподписавших в полчаса не уложились бы:
+# столько потоков, у каждого та же пауза между запросами. Проверка «сейчас» держит к Sapar 4.
+REFRESH_LANES = 3
+REFRESH_MAX_LEADS = 60000
 
 ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 IN_FLIGHT_STATES = ("requested", "leg_ringing", "leg_answered", "ended")
@@ -109,7 +115,10 @@ class SignChecker:
         self._lock = threading.Lock()
         self._running = False
         self._again = False
+        # Ждущая перепроверка перед отчётом (request_refresh): идёт сразу за текущим прогоном.
+        self._refresh = None
         self.last_run = None
+        self.last_refresh = None
         # До какого момента (time.monotonic) проверку «сейчас» не пробуем: Sapar лежит.
         self._now_backoff_until = 0.0
 
@@ -131,18 +140,41 @@ class SignChecker:
         self._executor.submit(self._loop, reason)
         return True
 
+    def request_refresh(self, bases, fresh_before, deadline, reason=""):
+        """Поставить перепроверку перед отчётом (refresh) в тот же поток: идёт прогон — сразу после
+        него. Поздний запрос заменяет ждущий: у них одна цель — свежие статусы к ближайшему отчёту."""
+        with self._lock:
+            self._refresh = {"bases": list(bases or ()), "fresh_before": fresh_before, "deadline": deadline,
+                             "reason": reason}
+            if self._running:
+                return False
+            self._running = True
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dial-sign")
+        self._executor.submit(self._loop, None)
+        return True
+
     def _loop(self, reason):
+        # reason None — поток поднят перепроверкой: обычный прогон за ней не должен.
+        owed = reason is not None
         while True:
-            try:
-                self.run(reason=reason)
-            except Exception:
-                log.exception("dial_list: проверка подписания упала (%s)", reason)
             with self._lock:
-                if not self._again:
-                    self._running = False
-                    return
-                self._again = False
-            reason = "повтор после прогона"
+                refresh, self._refresh = self._refresh, None
+                if refresh is None and not owed:
+                    if not self._again:
+                        self._running = False
+                        return
+                    self._again = False
+                    owed, reason = True, "повтор после прогона"
+            try:
+                if refresh is not None:
+                    self.refresh(**refresh)
+                else:
+                    owed = False
+                    self.run(reason=reason)
+            except Exception:
+                log.exception("dial_list: проверка подписания упала (%s)",
+                              refresh.get("reason") if refresh is not None else reason)
 
     # ------------------------------------------------------------ прогон
     _DUE_SQL = """
@@ -239,6 +271,131 @@ class SignChecker:
                      f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
         if lead_ids is None:
             self.last_run = summary
+        return summary
+
+    # ------------------------------------------------------------ перепроверка перед отчётом
+    _REFRESH_SQL = """
+        SELECT l.id, l.iin, l.period
+        FROM dial_list_leads l
+        WHERE l.iin <> '' AND l.signed_at IS NULL
+          AND (l.sign_checked_at IS NULL OR l.sign_checked_at < %(fresh_before)s)
+          AND ({bases})
+        ORDER BY l.sign_checked_at ASC NULLS FIRST, l.created_at ASC
+        LIMIT %(limit)s
+    """
+
+    def refresh(self, bases, fresh_before, deadline, reason="", now=None, lanes=REFRESH_LANES):
+        """Перепроверить к отчёту всех неподписавших баз `bases` [(department_id, period)], кого
+        проверяли раньше fresh_before (момент, aware): в отчёте статусы на время рассылки, а не
+        трёхчасовой давности. deadline (aware) — после него новых запросов нет, отчёт уходит с тем,
+        что успели. Как прогон: один запрос на пару (ИИН, месяц документов), итог пачками (_write),
+        подписавшие снимаются со списков, по ним решается успешка; Sapar лежит — остановка. Запросы —
+        в `lanes` потоков, у каждого свой requests.Session и та же пауза, что у прогона."""
+        summary = {"reason": reason, "refresh": True, "due": 0, "checked": 0, "signed": 0, "errors": 0,
+                   "stopped": "", "successes": 0, "closed_rows": 0}
+        if not self.configured():
+            log.warning("dial_list: перепроверка перед отчётом пропущена — нет доступа к Sapar (SAPAR_API)")
+            summary["stopped"] = "not_configured"
+            self.last_refresh = summary
+            return summary
+        bases = [(int(department_id), period) for department_id, period in bases or ()]
+        if not bases:
+            self.last_refresh = summary
+            return summary
+        now = now or _utcnow()
+        params = {"fresh_before": fresh_before, "limit": REFRESH_MAX_LEADS}
+        clauses = []
+        for index, (department_id, period) in enumerate(bases):
+            params["d%d" % index], params["p%d" % index] = department_id, period
+            clauses.append("(l.department_id = %%(d%d)s AND l.period = %%(p%d)s)" % (index, index))
+        with self.db._get_cursor() as cur:
+            cur.execute(self._REFRESH_SQL.format(bases=" OR ".join(clauses)), params)
+            due = cur.fetchall()
+        summary["due"] = len(due)
+        groups = OrderedDict()
+        for lead_id, iin, period in due:
+            groups.setdefault((str(iin), signing.doc_month_for(period)), []).append(str(lead_id))
+
+        started = time.monotonic()
+        end = started + max(0.0, (deadline - now).total_seconds())
+        work, answers, stop = queue.Queue(), queue.Queue(), threading.Event()
+        for key in groups:
+            work.put(key)
+        lanes = max(1, min(int(lanes), len(groups) or 1))
+
+        def lane():
+            session = _new_session()
+            first = True
+            try:
+                while not stop.is_set() and time.monotonic() < end:
+                    try:
+                        key = work.get_nowait()
+                    except queue.Empty:
+                        return
+                    if not first and REQUEST_PAUSE_SEC:
+                        self._sleep(REQUEST_PAUSE_SEC)
+                    first = False
+                    iin, (month, year) = key
+                    try:
+                        result = self._fetch(iin, month, year, session=session)
+                    except Exception as exc:  # sapar.driver_documents не бросает, подменённый fetch — может
+                        result = {"ok": False, "error": str(exc), "systemic": True}
+                    answers.put((key, result))
+            finally:
+                if session is not None:
+                    session.close()
+                answers.put(None)
+
+        threads = [threading.Thread(target=lane, name="dial-sign-refresh-%d" % i, daemon=True)
+                   for i in range(lanes)] if groups else []
+        for thread in threads:
+            thread.start()
+        pending, newly_signed = [], []
+        systemic_in_row, finished = 0, 0
+        try:
+            while finished < len(threads):
+                item = answers.get()
+                if item is None:
+                    finished += 1
+                    continue
+                key, result = item
+                ids = groups[key]
+                if not result.get("ok"):
+                    summary["errors"] += len(ids)
+                    error = str(result.get("error") or "Sapar не ответил")[:300]
+                    pending.extend(("error", lid, error, bool(result.get("systemic"))) for lid in ids)
+                    if result.get("systemic"):
+                        systemic_in_row += 1
+                        if systemic_in_row >= MAX_SYSTEMIC_ERRORS_IN_ROW and not stop.is_set():
+                            summary["stopped"] = "sapar_unavailable"
+                            stop.set()
+                    continue
+                systemic_in_row = 0
+                code, docs_json, signed_at = _package_verdict(result.get("yandex") or [], now)
+                for lid in ids:
+                    pending.append(("ok", lid, code, docs_json, signed_at))
+                    summary["checked"] += 1
+                    if signed_at is not None:
+                        newly_signed.append(lid)
+                if len(pending) >= WRITE_CHUNK:
+                    self._write(pending, now)
+                    pending = []
+        finally:
+            stop.set()
+            if pending:
+                self._write(pending, now)
+        if not summary["stopped"] and not work.empty():
+            summary["stopped"] = "deadline"
+        summary["signed"] = len(newly_signed)
+        summary["closed_rows"] = self.close_signed_rows(newly_signed)
+        summary["successes"] = self.resolve_successes(now)
+        summary["elapsed_sec"] = round(time.monotonic() - started, 1)
+        log.info("dial_list: перепроверка подписания перед отчётом (%s): к проверке %d, проверено %d, подписали %d, "
+                 "успешек %d, снято со списков %d, ошибок %d, потоков %d, за %.0f с%s", reason, len(due),
+                 summary["checked"], summary["signed"], summary["successes"], summary["closed_rows"],
+                 summary["errors"], len(threads), summary["elapsed_sec"],
+                 f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
+        self.last_refresh = summary
         return summary
 
     # ------------------------------------------------------------ проверка «сейчас»

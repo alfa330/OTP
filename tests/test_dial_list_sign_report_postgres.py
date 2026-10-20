@@ -337,6 +337,71 @@ def test_base_upload_keeps_and_updates_city(db):
         assert cur.fetchall() == [('77011234501', 'Костанай'), ('77011234502', 'Атырау')]
 
 
+def test_refresh_before_report_rechecks_stale_unsigned_of_report_base(db):
+    """Перепроверка перед отчётом (владелец, 20.10.2026) на настоящей схеме: только база отчёта, только
+    неподписавшие, проверенные раньше fresh_before; итог пишет настоящий _write."""
+    from dial_list import sign_check
+    utc = timezone.utc
+    rows = [
+        # (id-метка, отдел, месяц, ИИН, проверен когда, подписал)
+        ('stale', RCC, date(2026, 10, 1), '900101300007', datetime(2026, 10, 20, 1, 0, tzinfo=utc), False),
+        ('never', RCC, date(2026, 10, 1), '050312500771', None, False),
+        ('fresh', RCC, date(2026, 10, 1), '990101300013', datetime(2026, 10, 20, 4, 20, tzinfo=utc), False),
+        ('signed', RCC, date(2026, 10, 1), '880101300000', datetime(2026, 10, 20, 1, 0, tzinfo=utc), True),
+        ('september', RCC, date(2026, 9, 1), '990101300023', datetime(2026, 10, 20, 1, 0, tzinfo=utc), False),
+        ('tez', TEZ, date(2026, 10, 1), '880101300010', datetime(2026, 10, 20, 1, 0, tzinfo=utc), False),
+    ]
+    ids = {}
+    with db._get_cursor() as cur:
+        for n, (label, department, period, iin, checked, signed) in enumerate(rows, start=1):
+            cur.execute("""
+                INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin, period, sign_status,
+                                             sign_checked_at, signed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (department, '77030000%03d' % n, 'Водитель %d' % n, iin, period,
+                  'signed' if signed else 'unsigned', checked, _at(18, 12) if signed else None))
+            ids[str(cur.fetchone()[0])] = label
+    asked = []
+
+    def fetch(iin, month, year, session=None):
+        asked.append((iin, month, year))
+        return {'ok': True, 'yandex': [{'ServiceId': 1, 'Status': 'Подписано',
+                                        'DocSignDateByDriver': '2026-10-20T03:00:00'}]}
+
+    checker = sign_check.SignChecker(db, fetch=fetch, configured=lambda: True, sleep=lambda s: None)
+    now = datetime(2026, 10, 20, 4, 30, tzinfo=utc)
+    summary = checker.refresh([(RCC, date(2026, 10, 1))], datetime(2026, 10, 20, 4, 15, tzinfo=utc),
+                              datetime(2026, 10, 20, 4, 59, tzinfo=utc), reason='тест', now=now)
+    assert sorted(asked) == sorted([('900101300007', 9, 2026), ('050312500771', 9, 2026)])
+    assert (summary['due'], summary['checked'], summary['signed']) == (2, 2, 2)
+    with db._get_cursor() as cur:
+        cur.execute("SELECT id, signed_at IS NOT NULL, sign_checked_at FROM dial_list_leads")
+        state = {ids[str(r[0])]: (r[1], r[2]) for r in cur.fetchall()}
+    assert state['stale'] == (True, now) and state['never'] == (True, now)
+    assert state['fresh'][0] is False and state['september'][0] is False and state['tez'][0] is False
+    # Как обычный прогон, перепроверка решает успешку по всем подписавшим без решения — двум новым и
+    # засеянному подписавшему; звонков не было, поэтому успешек нет.
+    with db._get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM dial_list_leads WHERE success_resolved_at IS NOT NULL "
+                    "AND success_attempt_id IS NULL")
+        assert cur.fetchone()[0] == 3
+
+
+def test_refresh_request_only_for_departments_with_groups(db):
+    planned = []
+    svc = dial_service.DialListService(db)
+    svc.sign_checker.request_refresh = lambda bases, fresh_before, deadline, reason='': planned.append(
+        (bases, fresh_before, deadline))
+    assert svc.request_sign_report_refresh(now=_at(19, 9, 30)) is None          # групп нет — ничего
+    svc.save_sign_report_chats(RCC, [GROUP_A], changed_by=2, now=_at(19, 8, 0))
+    with db._get_cursor() as cur:
+        cur.execute("INSERT INTO dial_list_sign_report_chats (department_id, chat_id, title) VALUES (560, %s, 'x')",
+                    (GROUP_B,))
+    result = svc.request_sign_report_refresh(now=_at(19, 18, 30))
+    assert result['bases'] == [(RCC, '2026-10-01')]                             # отдел Тез — мимо
+    assert planned == [([(RCC, date(2026, 10, 1))], _at(19, 18, 15), _at(19, 18, 59))]
+
+
 def test_preview_png(db):
     lead(db, 'Астана', signed=True, status='signed')
     png = dial_service.DialListService(db).sign_report_png(RCC, now=_at(19, 12, 0))

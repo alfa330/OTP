@@ -71520,6 +71520,16 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error scheduling dial_list sign report: {e}")
 
+    async def dial_list_sign_report_refresh_job():
+        # «Удаленный КЦ»: за полчаса до отчёта о подписании — перепроверка в Sapar всех неподписавших
+        # базы отчёта, чтобы к 10:00 и 19:00 статусы были свежими (владелец, 20.10.2026). Идёт в потоке
+        # проверки подписания; групп нет или не время — no-op (dial_list/service.py).
+        try:
+            if _dial_list_service is not None:
+                _dial_list_service.request_sign_report_refresh('планировщик')
+        except Exception as e:
+            logging.exception(f"Error scheduling dial_list sign report refresh: {e}")
+
     async def dial_list_trips_check_job():
         # Автообзвон Тез КЦ: вышли ли водители базы на линию (поездки в TEZ APP). Так же,
         # как подписание: джоба ставит прогон в поток раздела и не ждёт; кому пора —
@@ -71655,6 +71665,19 @@ if __name__ == '__main__':
         CronTrigger(hour='10,19', minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='dial_list_sign_report',
         misfire_grace_time=1800,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')),
+    )
+
+    # За полчаса до отчёта (9:30 и 18:30) — перепроверка подписания всех неподписавших базы отчёта. И раз
+    # при старте: перезапуск посреди перепроверки иначе оставил бы часть статусов старыми (сервис сам решает,
+    # в окне ли он, и не проверяет уже проверенных).
+    scheduler.add_job(
+        dial_list_sign_report_refresh_job,
+        CronTrigger(hour='9,18', minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='dial_list_sign_report_refresh',
+        misfire_grace_time=900,
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(ZoneInfo('Asia/Almaty')),

@@ -419,6 +419,129 @@ class SignCheckRunTests(unittest.TestCase):
         self.assertNotIn('run_in_executor', inspect.getsource(sign_check))
 
 
+class SignRefreshTests(unittest.TestCase):
+    """Перепроверка перед отчётом о подписании (владелец, 20.10.2026): все неподписавшие баз отчёта,
+    кроме только что проверенных, — параллельно, к сроку. Sapar подменён, потоки настоящие."""
+
+    NOW = datetime(2026, 10, 20, 4, 30, tzinfo=timezone.utc)          # 9:30 по Алматы
+    FRESH = datetime(2026, 10, 20, 4, 15, tzinfo=timezone.utc)
+    DEADLINE = datetime(2026, 10, 20, 4, 59, tzinfo=timezone.utc)
+    BASES = [(1954, date(2026, 10, 1))]
+
+    def _checker(self, due, fetch, configured=True):
+        checker, written, cur = SignCheckRunTests._checker(self, due, fetch, configured)
+        closed, resolved = [], []
+        checker.close_signed_rows = lambda ids: closed.extend(ids) or len(ids)
+        checker.resolve_successes = lambda now=None, lead_ids=None: resolved.append(now) or 0
+        return checker, written, cur, closed, resolved
+
+    def test_due_sql_bases_and_freshness(self):
+        checker, _, cur, _, _ = self._checker([], lambda *a, **k: {'ok': True, 'yandex': []})
+        checker.refresh([(1954, date(2026, 10, 1)), (2001, date(2026, 9, 1))], self.FRESH, self.DEADLINE,
+                        now=self.NOW)
+        sql, params = cur.sql[0]
+        self.assertIn('l.signed_at IS NULL', sql)
+        self.assertIn('(l.sign_checked_at IS NULL OR l.sign_checked_at < %(fresh_before)s)', sql)
+        self.assertIn('(l.department_id = %(d0)s AND l.period = %(p0)s) OR '
+                      '(l.department_id = %(d1)s AND l.period = %(p1)s)', sql)
+        self.assertEqual((params['d0'], params['p0'], params['d1'], params['p1'], params['fresh_before']),
+                         (1954, date(2026, 10, 1), 2001, date(2026, 9, 1), self.FRESH))
+
+    def test_every_driver_once_in_parallel_lanes(self):
+        import threading
+        import time
+        lock, active, peak, calls = threading.Lock(), [0], [0], []
+
+        def fetch(iin, month, year, session=None):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+                calls.append((iin, month, year))
+            time.sleep(0.01)
+            with lock:
+                active[0] -= 1
+            signed = iin.endswith('0')
+            return {'ok': True, 'yandex': [_doc('Подписано' if signed else 'НаПодписанииУВодителя',
+                                                '2026-10-20T03:00:00' if signed else None)]}
+
+        due = [(f'l{i}', f'{i:012d}', date(2026, 10, 1)) for i in range(40)]
+        checker, written, _, closed, resolved = self._checker(due, fetch)
+        summary = checker.refresh(self.BASES, self.FRESH, self.DEADLINE, reason='тест', now=self.NOW)
+        self.assertEqual(sorted(calls), sorted((f'{i:012d}', 9, 2026) for i in range(40)))
+        self.assertEqual(peak[0], sign_check.REFRESH_LANES)
+        self.assertEqual((summary['due'], summary['checked'], summary['signed'], summary['stopped']), (40, 40, 4, ''))
+        self.assertEqual({w[1] for w in written}, {f'l{i}' for i in range(40)})
+        self.assertEqual(sorted(closed), sorted(f'l{i}' for i in range(0, 40, 10)))
+        self.assertEqual(resolved, [self.NOW])
+        self.assertIs(checker.last_refresh, summary)
+
+    def test_deadline_stops_new_requests(self):
+        calls = []
+        due = [(f'l{i}', f'{i:012d}', date(2026, 10, 1)) for i in range(5)]
+        checker, written, _, _, _ = self._checker(due, lambda iin, *a, **k: calls.append(iin) or {'ok': True})
+        summary = checker.refresh(self.BASES, self.FRESH, self.NOW, now=self.NOW)   # срок уже вышел
+        self.assertEqual((calls, written, summary['stopped']), ([], [], 'deadline'))
+
+    def test_sapar_down_stops_and_keeps_check_time(self):
+        import time
+        calls = []
+
+        def fetch(iin, month, year, session=None):
+            calls.append(iin)
+            time.sleep(0.02)                     # настоящий запрос идёт не мгновенно
+            return {'ok': False, 'error': 'timeout', 'systemic': True}
+
+        due = [(f'l{i}', f'{i:012d}', date(2026, 10, 1)) for i in range(60)]
+        checker, written, _, _, _ = self._checker(due, fetch)
+        summary = checker.refresh(self.BASES, self.FRESH, self.DEADLINE, now=self.NOW)
+        self.assertEqual(summary['stopped'], 'sapar_unavailable')
+        # Остановка — после MAX_SYSTEMIC_ERRORS_IN_ROW сбоев подряд; запросы, уже ушедшие в других потоках,
+        # дорабатывают, новых нет.
+        self.assertLessEqual(len(calls), sign_check.MAX_SYSTEMIC_ERRORS_IN_ROW + 2 * sign_check.REFRESH_LANES)
+        self.assertEqual(len(written), len(calls))
+        self.assertTrue(all(w[0] == 'error' and w[3] is True for w in written))
+
+    def test_not_configured_and_no_bases(self):
+        checker, _, cur, _, _ = self._checker([], lambda *a, **k: None, configured=False)
+        self.assertEqual(checker.refresh(self.BASES, self.FRESH, self.DEADLINE, now=self.NOW)['stopped'],
+                         'not_configured')
+        checker, _, cur, _, _ = self._checker([], lambda *a, **k: None)
+        self.assertEqual(checker.refresh([], self.FRESH, self.DEADLINE, now=self.NOW)['due'], 0)
+        self.assertEqual(cur.sql, [])
+
+    def test_refresh_waits_for_running_check_then_normal_runs_resume(self):
+        import threading
+        import time
+        gate, order = threading.Event(), []
+        checker = sign_check.SignChecker(db=None, configured=lambda: True)
+        checker.run = lambda **kw: (order.append(('run', kw.get('reason'))), gate.wait(5))
+        checker.refresh = lambda **kw: order.append(('refresh', kw['reason']))
+        self.assertTrue(checker.request('планировщик'))
+        # Обычный прогон идёт — перепроверка ждёт его и идёт сразу за ним; поздняя заменяет раннюю.
+        self.assertFalse(checker.request_refresh(self.BASES, self.FRESH, self.DEADLINE, reason='первая'))
+        self.assertFalse(checker.request_refresh(self.BASES, self.FRESH, self.DEADLINE, reason='вторая'))
+        self.assertFalse(checker.request('загрузка базы'))
+        gate.set()
+        for _ in range(100):
+            if not checker._running:
+                break
+            time.sleep(0.02)
+        self.assertEqual(order, [('run', 'планировщик'), ('refresh', 'вторая'), ('run', 'повтор после прогона')])
+
+    def test_refresh_alone_does_not_start_a_normal_run(self):
+        import time
+        order = []
+        checker = sign_check.SignChecker(db=None, configured=lambda: True)
+        checker.run = lambda **kw: order.append(('run', kw.get('reason')))
+        checker.refresh = lambda **kw: order.append(('refresh', kw['reason']))
+        self.assertTrue(checker.request_refresh(self.BASES, self.FRESH, self.DEADLINE, reason='перед отчётом'))
+        for _ in range(100):
+            if not checker._running:
+                break
+            time.sleep(0.02)
+        self.assertEqual(order, [('refresh', 'перед отчётом')])
+
+
 class CheckNowTests(unittest.TestCase):
     """Проверка «сейчас» (владелец, 11.10.2026: «подписавших не выдавать»): её ждёт
     оператор, поэтому параллельно, с таймаутом на запрос и сроком на всё; Sapar лежит —

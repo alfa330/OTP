@@ -11,7 +11,7 @@ import os
 import pathlib
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -163,6 +163,79 @@ class RenderTest(unittest.TestCase):
         from crm.card import FONTS_DIR
         for weight in ('Regular', 'Bold'):
             self.assertTrue(os.path.exists(os.path.join(FONTS_DIR, 'Roboto-%s.ttf' % weight)))
+
+
+class RefreshWindowTest(unittest.TestCase):
+    """Перепроверка перед отчётом (владелец, 20.10.2026): за полчаса до 10:00 и 19:00."""
+
+    def test_next_slot(self):
+        self.assertEqual(sign_report.next_slot(_at(20, 9, 30)), _at(20, 10, 0))
+        self.assertEqual(sign_report.next_slot(_at(20, 10, 0)), _at(20, 19, 0))
+        self.assertEqual(sign_report.next_slot(_at(20, 23, 0)), _at(21, 10, 0))
+
+    def test_window_and_freshness(self):
+        self.assertEqual(sign_report.refresh_window(_at(20, 9, 30)),
+                         (_at(20, 10, 0), _at(20, 9, 15), _at(20, 9, 59)))
+        # Перезапуск сервера посреди перепроверки — окно то же, свежими считаются проверенные с 9:15.
+        self.assertEqual(sign_report.refresh_window(_at(20, 9, 47)),
+                         (_at(20, 10, 0), _at(20, 9, 15), _at(20, 9, 59)))
+        self.assertEqual(sign_report.refresh_window(_at(20, 18, 30))[0], _at(20, 19, 0))
+        for outside in (_at(20, 9, 20), _at(20, 10, 0), _at(20, 12, 0), _at(20, 18, 20), _at(20, 21, 0)):
+            with self.subTest(now=outside.isoformat()):
+                self.assertIsNone(sign_report.refresh_window(outside))
+
+    def test_scheduler_fires_half_an_hour_before_each_slot(self):
+        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        start = bot.index('scheduler.add_job(\n        dial_list_sign_report_refresh_job,')
+        block = bot[start:bot.index(')\n', bot.index("id='dial_list_sign_report_refresh'", start))]
+        hours = ','.join(str(h - 1) for h in sign_report.SLOT_HOURS)
+        minute = 60 - int(sign_report.REFRESH_LEAD.total_seconds() // 60)
+        self.assertIn(f"CronTrigger(hour='{hours}', minute={minute}, timezone=ZoneInfo('Asia/Almaty'))", block)
+        self.assertIn('next_run_time=', block)
+        self.assertIn("_dial_list_service.request_sign_report_refresh('планировщик')", bot)
+
+
+class RefreshRequestTest(unittest.TestCase):
+    """Сервис: окно, отделы с выбранными группами, база обзваниваемого месяца → поток проверки."""
+
+    def _service(self, department_ids):
+        svc = dial_service.DialListService.__new__(dial_service.DialListService)
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.append(sql)
+
+            def fetchall(self):
+                return [(d,) for d in department_ids]
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def cursor():
+            yield Cur()
+
+        svc.db = type('Db', (), {'_get_cursor': staticmethod(cursor)})()
+        svc.department_settings = lambda d: {'_period': date(2026, 10, 1), 'profile': 'remote_cc'}
+        calls = []
+        svc.sign_checker = type('Checker', (), {'request_refresh': lambda self, *a, **k: calls.append((a, k))})()
+        return svc, calls, seen
+
+    def test_refresh_for_departments_with_groups(self):
+        svc, calls, seen = self._service([1954])
+        planned = svc.request_sign_report_refresh('планировщик', now=_at(20, 9, 30))
+        self.assertEqual(planned['bases'], [(1954, '2026-10-01')])
+        (bases, fresh_before, deadline), kwargs = calls[0]
+        self.assertEqual((bases, fresh_before, deadline), ([(1954, date(2026, 10, 1))], _at(20, 9, 15), _at(20, 9, 59)))
+        self.assertIn('10:00', kwargs['reason'])
+        self.assertIn("COALESCE(s.profile, 'remote_cc') = 'remote_cc'", seen[0])
+
+    def test_nothing_outside_window_or_without_groups(self):
+        svc, calls, _ = self._service([1954])
+        self.assertIsNone(svc.request_sign_report_refresh(now=_at(20, 12, 0)))
+        svc, calls_empty, _ = self._service([])
+        self.assertIsNone(svc.request_sign_report_refresh(now=_at(20, 18, 30)))
+        self.assertEqual((calls, calls_empty), ([], []))
 
 
 def _xlsx(rows):

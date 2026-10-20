@@ -7012,6 +7012,38 @@ class DialListService:
         """Картинка отчёта на сейчас — то, что уйдёт в группы (предпросмотр во вкладке)."""
         return sign_report.render_png(self.sign_report_data(department_id), now or sign_report.now_utc())
 
+    _SIGN_REPORT_DEPARTMENTS_SQL = """
+        SELECT DISTINCT c.department_id
+        FROM dial_list_sign_report_chats c
+        JOIN dial_list_department_settings s ON s.department_id = c.department_id
+        WHERE COALESCE(s.profile, 'remote_cc') = 'remote_cc'
+        ORDER BY c.department_id
+    """
+
+    def request_sign_report_refresh(self, reason="", now=None):
+        """За полчаса до отчёта (9:30 и 18:30; и при старте сервера в этом окне) — перепроверить в Sapar
+        всех неподписавших базы обзваниваемого месяца у отделов, которым отчёт отправляется (выбраны
+        группы): к 10:00 и 19:00 статусы свежие (владелец, 20.10.2026). Вне окна, без групп — ничего.
+        Перепроверка идёт в потоке проверки подписания (sign_check.SignChecker.refresh). Возвращает
+        поставленное или None."""
+        now = now or sign_report.now_utc()
+        window = sign_report.refresh_window(now)
+        if window is None:
+            return None
+        slot, fresh_before, deadline = window
+        with self.db._get_cursor() as cur:
+            cur.execute(self._SIGN_REPORT_DEPARTMENTS_SQL)
+            department_ids = [int(r[0]) for r in cur.fetchall()]
+        bases = [(department_id, self.department_settings(department_id)["_period"])
+                 for department_id in department_ids]
+        if not bases:
+            return None
+        self.sign_checker.request_refresh(bases, fresh_before, deadline,
+                                          reason="%s, отчёт %s" % (reason or "перед отчётом",
+                                                                   slot.strftime("%H:%M")))
+        return {"slot": slot.isoformat(), "bases": [(d, p.isoformat()) for d, p in bases],
+                "fresh_before": fresh_before.isoformat(), "deadline": deadline.isoformat()}
+
     def request_sign_report(self, reason=""):
         """Разослать отчёт в своём потоке, не дожидаясь (планировщик бота). Идёт рассылка —
         вторую не начинаем: слот она закроет сама."""
