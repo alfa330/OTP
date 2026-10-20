@@ -2,20 +2,23 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
     Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, FileSignature, FileText, FolderKanban, Gauge, Landmark,
-    Loader2, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
+    Loader2, Mail, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
 } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import FixedPaymentsPanel from './FixedPaymentsPanel';
+import RequisitesMailings from './RequisitesMailings';
+import SupplierLetters from './SupplierLetters';
 import {
     CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
-    DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, cardNumberLabel, fileSizeLabel, fmtDate, fmtMoney, pageRange, parseAmount,
+    DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel, fmtDate, fmtMoney,
+    mailingPill, mailingWhen, pageRange, parseAmount,
 } from './paymentsMeta';
 import {
-    AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormSelect, Pager,
-    TonePill, UserSelect, cardCell, errorText, useFits,
+    AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormInput, FormSelect,
+    Pager, TonePill, UserSelect, cardCell, errorText, fromKeyboard, revealAnchor, useFits,
 } from './paymentsUi';
 
 /*
@@ -56,6 +59,9 @@ const SECTIONS = [
     { value: 'templates', label: 'Регулярные платежи', icon: CalendarClock, group: 'pay', need: (caps) => caps.is_admin || caps.sees_all_requests, about: 'Аренда, связь, лицензии: поставщик, договор и реквизиты подставляются в заявку сами.' },
     { value: 'limits', label: 'Лимиты согласования', icon: Gauge, group: 'approval', about: 'Кто, до какой суммы и по каким поставщикам утверждает заявки.' },
     { value: 'routes', label: 'Маршруты согласования', icon: Route, group: 'approval', about: 'Кто утверждает, когда ни один лимит не подошёл, и нужен ли этап руководителя.' },
+    // Не справочник ТЗ, а журнал: письма поставщикам о смене реквизитов наших компаний (20.10.2026).
+    // В списке — после восьми справочников п. 13, в меню — в конце своей группы «Поставщики и платежи».
+    { value: 'mailings', label: 'Письма поставщикам', icon: Mail, group: 'pay', need: 'is_admin', about: 'Письма о смене реквизитов наших компаний: кому ушли, кому нет и само письмо.' },
     { value: 'categories', label: 'Категории закупа', icon: Tags, group: 'lists', about: 'По категориям группируются затраты и выбирается согласующий.' },
     { value: 'asset_categories', label: 'Категории имущества', icon: Boxes, group: 'lists', about: 'Виды имущества для постановки на учёт: техника, мебель, оборудование.' },
     { value: 'projects', label: 'Проекты', icon: FolderKanban, group: 'lists', about: 'Проекты, к которым относят расходы.' },
@@ -103,6 +109,7 @@ const toDraft = (name, row = {}) => {
             return {
                 ...base, legal_name: row.legal_name || '', bin: row.bin || '', kind: row.kind || null,
                 vat_payer: Boolean(row.vat_payer), requisites: row.requisites || '', contact: row.contact || '',
+                emails: (row.emails || []).join(', '),
                 category_id: row.category_id ?? null, responsible_user_id: row.responsible_user_id ?? null,
                 approver_user_id: row.approver_user_id ?? null, approval_limit: orBlank(row.approval_limit),
             };
@@ -171,8 +178,15 @@ const conditionsLine = (row) => [
 /* Текст строки для поиска по списку. */
 const rowText = (row) => [
     row.name, row.legal_name, row.bin, row.number, row.counterparty_name, row.legal_entity_name, row.holder_name,
-    row.owner_name, row.delegate_name, row.approver_name, row.iik, row.bank_name, row.subject,
+    row.owner_name, row.delegate_name, row.approver_name, row.iik, row.bank_name, row.subject, ...(row.emails || []),
 ].filter(Boolean).join(' ').toLowerCase();
+
+/* Письмо поставщикам о смене реквизитов компании — меткой в строке, пока оно ждёт,
+   уходит или дошло не до всех (RequisitesMailings.jsx). */
+const MailPill = ({ state, ready }) => {
+    const pill = mailingPill(state, { ready });
+    return pill ? <TonePill tone={pill.tone}>{pill.label}</TonePill> : null;
+};
 
 const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
     <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[11.5px] text-slate-600">{label}</span>
@@ -185,11 +199,11 @@ const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
    названия (категории, проекты) колонок не имеют — у них null, они стоят списком.
    `tools` — то, что нужно ячейкам с действиями: чтение номера карты и тост. */
 const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · ');
-export const dictionaryColumns = (name, { loadCardNumber, showToast } = {}) => {
+export const dictionaryColumns = (name, { loadCardNumber, showToast, mailReady = true, mailWide = false } = {}) => {
     switch (name) {
         case 'counterparties':
             return [
-                { key: 'name', label: 'Поставщик', cell: (row) => ({ main: row.name, strong: true, sub: partyLine(row) }) },
+                { key: 'name', label: 'Поставщик', cell: (row) => ({ main: row.name, strong: true, sub: [partyLine(row), emailsShort(row.emails)].filter(Boolean).join(' · ') }) },
                 { key: 'category', label: 'Категория', width: 150, cell: (row) => ({ main: row.category_name }) },
                 { key: 'contracts', label: 'Договоры', width: 150, cell: (row) => (row.active_contracts ? { main: `действующих: ${row.active_contracts}` } : { main: 'нет действующего', muted: true }) },
                 {
@@ -216,8 +230,10 @@ export const dictionaryColumns = (name, { loadCardNumber, showToast } = {}) => {
         case 'legal_entities':
             return [
                 { key: 'name', label: 'Компания', cell: (row) => ({ main: row.name, strong: true, sub: partyLine(row) }) },
-                { key: 'account', label: 'Счёт', width: 256, cell: (row) => (row.iik ? { main: row.iik, mono: true, sub: row.bank_name } : { main: 'не указан', muted: true }) },
-                { key: 'state', label: '', width: 232, align: 'right', cell: (row) => <><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></> },
+                { key: 'account', label: 'Счёт', width: mailWide ? 216 : 256, cell: (row) => (row.iik ? { main: row.iik, mono: true, sub: row.bank_name } : { main: 'не указан', muted: true }) },
+                // Метка письма и «Скопировать реквизиты» — в одну строку: пока у кого-то метка есть,
+                // колонка шире, а счёт уже; меток нет — таблица прежней ширины.
+                { key: 'state', label: '', width: mailWide ? 360 : 232, align: 'right', cell: (row) => <><MailPill state={row.mailing} ready={mailReady} /><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></> },
             ];
         case 'counterparty_accounts':
             return [
@@ -346,7 +362,7 @@ const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
 };
 
 /* Экраны, у которых нет общего списка с окном записи. */
-const OWN_SCREENS = ['settings', 'templates'];
+const OWN_SCREENS = ['settings', 'templates', 'mailings'];
 
 /** Справочники, которые человеку показываются, — в порядке левого списка. Нужны и разделу:
     по ним адрес знает, какой справочник открыт на деле (paymentsLink.js). */
@@ -368,6 +384,11 @@ const PaymentsDictionaries = ({
 
     const [rows, setRows] = useState([]);
     const [canEdit, setCanEdit] = useState(false);
+    // Почта для писем поставщикам: подключена ли и сколько адресов (только «Реквизиты компаний»).
+    const [mailInfo, setMailInfo] = useState(null);
+    // Что не так в поле «Почта» поставщика — после первой попытки сохранить; отказ сервера — там же.
+    const [emailsTried, setEmailsTried] = useState(false);
+    const [emailsRefused, setEmailsRefused] = useState('');
     const [loading, setLoading] = useState(false);
     const [filter, setFilter] = useState('');
     const [editing, setEditing] = useState(null);   // строка справочника; {} — новая запись
@@ -394,6 +415,7 @@ const PaymentsDictionaries = ({
             if (ticketRef.current !== ticket) return;
             setRows(response.data?.items || []);
             setCanEdit(Boolean(response.data?.can_edit));
+            setMailInfo(response.data?.mail || null);
         } catch (err) {
             if (ticketRef.current === ticket) toastRef.current?.(errorText(err, 'Не удалось загрузить справочник'), 'error');
         } finally {
@@ -403,7 +425,7 @@ const PaymentsDictionaries = ({
 
     /* Строки предыдущего справочника сбрасываются ДО загрузки нового: иначе
        один кадр строки поставщиков рисуются отрисовщиком лимитов. */
-    useEffect(() => { setRows([]); setFilter(''); setCanEdit(false); load(); }, [load]);
+    useEffect(() => { setRows([]); setFilter(''); setCanEdit(false); setMailInfo(null); load(); }, [load]);
 
     const categoryRoots = useMemo(() => (name === 'categories' ? rows : dictionaries?.categories || []).filter((item) => !item.parent_id), [rows, name, dictionaries]);
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
@@ -417,13 +439,33 @@ const PaymentsDictionaries = ({
         setError('');
         setConfirmDelete(false);
         setContractFile(null);
+        setEmailsTried(false);
+        setEmailsRefused('');
         setEditing(row || {});
         setDraft(toDraft(name, row || {}));
     };
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
     const changed = async () => { await load(); onDictionariesChanged?.(); };
 
-    const save = async () => {
+    /* Тост после сохранения компании: изменились реквизиты — когда уйдёт письмо поставщикам. */
+    const savedText = (mailing) => {
+        if (!mailing) return 'Сохранено';
+        if (mailing.status === 'reverted') return 'Сохранено. Реквизиты как прежде — письмо поставщикам не уйдёт';
+        if (!mailing.recipients?.addresses) return 'Сохранено. Письмо о новых реквизитах некому отправить: у поставщиков нет почты';
+        if (!mailing.ready) return 'Сохранено. Письмо поставщикам уйдёт, когда подключат почту';
+        return `Сохранено. Письмо поставщикам уйдёт ${mailingWhen(mailing.send_after)}`;
+    };
+
+    // Поле «Почта» стоит в начале окна: долистали до «Сохранить» — подвести к нему.
+    const revealEmails = (event) => requestAnimationFrame(() => revealAnchor(
+        document.querySelector('[data-issue-anchor="supplier-emails"]'), { focus: fromKeyboard(event) }));
+
+    const save = async (event) => {
+        if (name === 'counterparties' && emailsIssue(draft.emails)) {
+            setEmailsTried(true);
+            revealEmails(event);
+            return;
+        }
         setSaving(true);
         setError('');
         try {
@@ -439,11 +481,18 @@ const PaymentsDictionaries = ({
                 form.append('file', contractFile, contractFile.name);
                 await axios.post(`${apiBaseUrl}/api/payments/dictionaries/contracts/${response.data.id}/file`, form, { headers: headers() });
             }
-            toastRef.current?.('Сохранено', 'success');
+            toastRef.current?.(savedText(response.data?.mailing), 'success');
             setEditing(null);
             await changed();
         } catch (err) {
-            setError(errorText(err, 'Не удалось сохранить'));
+            if (err?.response?.data?.field === 'emails') {
+                // Сервер не принял адрес, который форма пропустила, — красным у поля, а не сверху окна.
+                setEmailsRefused(String(err.response.data.error || '').replace(/^Почта: /, ''));
+                setEmailsTried(true);
+                revealEmails(event);
+            } else {
+                setError(errorText(err, 'Не удалось сохранить'));
+            }
             // Запись могла сохраниться, а файл — нет: список показывает, что есть на деле.
             load();
         } finally {
@@ -516,11 +565,13 @@ const PaymentsDictionaries = ({
                     title: row.name,
                     sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.iik && `ИИК ${row.iik}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · '),
                     side: <><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></>,
+                    // На узком экране метка письма — под названием: справа ей рядом с кнопкой не уместиться.
+                    note: <MailPill state={row.mailing} ready={mailInfo?.ready !== false} />,
                 };
             case 'counterparties':
                 return {
                     title: row.name,
-                    sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС', row.category_name,
+                    sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС', emailsShort(row.emails), row.category_name,
                         row.active_contracts ? `действующих договоров: ${row.active_contracts}` : 'без действующего договора',
                         row.approver_name && `согласует ${row.approver_name}${row.approval_limit ? ` до ${fmtMoney(row.approval_limit)}` : ''}`].filter(Boolean).join(' · '),
                     side: <Hidden active={row.is_active} />,
@@ -685,14 +736,20 @@ const PaymentsDictionaries = ({
                         </div>
                         {partyFields}
                         <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="Контакт">{text('contact', { maxLength: 1000, placeholder: 'Имя, телефон, почта' })}</Field>
+                            <Field label="Почта" hint={HINTS.supplierEmails} anchor="supplier-emails" issue={emailsTried ? (emailsIssue(draft.emails) || emailsRefused) : ''}>
+                                <FormInput value={draft.emails ?? ''} onChange={(event) => { setEmailsRefused(''); set('emails', event.target.value); }} inputMode="email"
+                                    autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={1300} placeholder="buh@company.kz" />
+                            </Field>
+                            <Field label="Контакт">{text('contact', { maxLength: 1000, placeholder: 'Имя, телефон' })}</Field>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Категория" hint="Чем поставщик обычно занимается — категория закупа.">
                                 <FormSelect value={draft.category_id} onChange={(v) => set('category_id', v || null)} options={anyOf(categoryOptions, 'Не выбрана')} ariaLabel="Категория" />
                             </Field>
+                            <Field label="Ответственный" hint="Кто в компании ведёт этого поставщика.">
+                                <UserSelect users={users} value={draft.responsible_user_id} onChange={(v) => set('responsible_user_id', v)} placeholder="Не назначен" />
+                            </Field>
                         </div>
-                        <Field label="Ответственный" hint="Кто в компании ведёт этого поставщика.">
-                            <UserSelect users={users} value={draft.responsible_user_id} onChange={(v) => set('responsible_user_id', v)} placeholder="Не назначен" />
-                        </Field>
                         <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Согласующий" hint={HINTS.supplierApprover}>
                                 <UserSelect users={users} value={draft.approver_user_id} onChange={(v) => set('approver_user_id', v)} placeholder="По общим правилам" />
@@ -893,7 +950,9 @@ const PaymentsDictionaries = ({
 
     /* Таблица встаёт, только когда помещается в поле целиком (useFits): его ширину решают меню
        портала и левый список, а не одно окно. Не помещается — записи идут карточками. */
-    const columns = dictionaryColumns(name, { loadCardNumber, showToast });
+    const mailReady = mailInfo?.ready !== false;
+    const mailWide = name === 'legal_entities' && rows.some((row) => mailingPill(row.mailing, { ready: mailReady }));
+    const columns = dictionaryColumns(name, { loadCardNumber, showToast, mailReady, mailWide });
     const [paneRef, fits] = useFits(dictionaryTableMin(columns));
     const asTable = Boolean(columns && fits);
 
@@ -909,7 +968,7 @@ const PaymentsDictionaries = ({
         const view = rowView(item);
         const line = (entry, { inner = false } = {}) => {
             const info = inner ? rowView(entry) : view;
-            return (
+            const row = (
                 <div key={entry.id} data-row={entry.id} className={`flex items-center gap-3 ${inner ? 'border-t border-slate-100 py-2 pl-7 pr-3.5' : 'px-3.5 py-2.5'}`}>
                     <button type="button" className="min-w-0 grow basis-0 rounded-lg text-left transition hover:opacity-70" onClick={() => openEditor(entry)}>
                         <span className={`block truncate text-[13.5px] ${inner ? 'text-slate-700' : `font-medium ${idle(entry) ? 'text-slate-500' : 'text-slate-900'}`}`}>{info.title}</span>
@@ -919,6 +978,15 @@ const PaymentsDictionaries = ({
                     {info.side && <span className="flex shrink-0 items-center gap-2">{info.side}</span>}
                     <ChevronRight size={15} className="shrink-0 text-slate-300" aria-hidden="true" />
                 </div>
+            );
+            // Метка письма компании — своей строкой под записью: рядом с кнопкой справа
+            // на телефоне ей не хватало места, и она обрезалась.
+            if (inner || !info.note || !mailingPill(entry.mailing, { ready: mailInfo?.ready !== false })) return row;
+            return (
+                <React.Fragment key={entry.id}>
+                    {row}
+                    <div className="-mt-1 px-3.5 pb-2.5" data-row-note={entry.id}>{info.note}</div>
+                </React.Fragment>
             );
         };
         return (
@@ -993,6 +1061,7 @@ const PaymentsDictionaries = ({
                 {name === 'settings' && (
                     <Settings apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} onSaved={onSettingsChanged} />
                 )}
+                {name === 'mailings' && <SupplierLetters apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />}
                 {name === 'templates' && (
                     <FixedPaymentsPanel
                         apiBaseUrl={apiBaseUrl}
@@ -1122,6 +1191,10 @@ const PaymentsDictionaries = ({
                         </Field>
                     )}
                 </fieldset>
+                {/* Письма поставщикам о смене реквизитов — тому, кто реквизиты правит. */}
+                {editing && !isNew && canEdit && name === 'legal_entities' && (
+                    <RequisitesMailings apiBaseUrl={apiBaseUrl} headers={headers} entity={editing} draft={draft} showToast={showToast} onChanged={load} />
+                )}
                 </div>
             </IosModal>
         </div>

@@ -869,6 +869,63 @@ _STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_payment_request_observers_user ON payment_request_observers (user_id)",
 
+    # ── Почта поставщиков и письма о смене наших реквизитов (20.10.2026) ────
+    #
+    # Просьба владельца: «добавление эмайла контрагентов поставщиков и тд,
+    # автомат рассылка по эмайлом при изменении реквизитов». Адреса — массивом
+    # в нижнем регистре (payments/mail.parse_emails). Рассылка — снимок
+    # реквизитов «как было / как стало» и адресаты, собранные в момент отправки;
+    # устройство — payments/requisites_mail.py. Ожидающее письмо у компании одно.
+    "ALTER TABLE payment_counterparties ADD COLUMN IF NOT EXISTS emails TEXT[] NOT NULL DEFAULT '{}'",
+    """
+    CREATE TABLE IF NOT EXISTS payment_requisites_mailings (
+        id                 SERIAL PRIMARY KEY,
+        legal_entity_id    INTEGER NOT NULL REFERENCES payment_legal_entities(id) ON DELETE CASCADE,
+        status             VARCHAR(16) NOT NULL DEFAULT 'pending',
+        before_data        JSONB NOT NULL,
+        after_data         JSONB NOT NULL,
+        send_after         TIMESTAMP NOT NULL,
+        created_at         TIMESTAMP NOT NULL DEFAULT %(now)s,
+        created_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_by_name    VARCHAR(200),
+        updated_at         TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by_name    VARCHAR(200),
+        started_at         TIMESTAMP,
+        finished_at        TIMESTAMP,
+        cancelled_at       TIMESTAMP,
+        cancelled_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        cancelled_by_name  VARCHAR(200),
+        last_error         TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_requisites_mailings_pending "
+    "ON payment_requisites_mailings (legal_entity_id) WHERE status = 'pending'",
+    "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mailings_entity "
+    "ON payment_requisites_mailings (legal_entity_id, id DESC)",
+    # Планировщик спрашивает раз в минуту, есть ли работа: по этому индексу.
+    "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mailings_open "
+    "ON payment_requisites_mailings (send_after) WHERE status IN ('pending', 'sending')",
+    """
+    CREATE TABLE IF NOT EXISTS payment_requisites_mail_recipients (
+        id                  SERIAL PRIMARY KEY,
+        mailing_id          INTEGER NOT NULL REFERENCES payment_requisites_mailings(id) ON DELETE CASCADE,
+        email               VARCHAR(254) NOT NULL,
+        counterparty_ids    INTEGER[] NOT NULL DEFAULT '{}',
+        counterparty_names  TEXT[] NOT NULL DEFAULT '{}',
+        status              VARCHAR(16) NOT NULL DEFAULT 'queued',
+        attempts            SMALLINT NOT NULL DEFAULT 0,
+        next_attempt_at     TIMESTAMP,
+        last_error          TEXT,
+        sent_at             TIMESTAMP,
+        message_id          VARCHAR(255),
+        updated_at          TIMESTAMP NOT NULL DEFAULT %(now)s,
+        UNIQUE (mailing_id, email)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mail_recipients_open "
+    "ON payment_requisites_mail_recipients (mailing_id) WHERE status IN ('queued', 'sending', 'failed')",
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
@@ -927,6 +984,8 @@ TABLES = (
     'payment_settings', 'payment_request_offers', 'payment_subtasks',
     'payment_asset_categories', 'payment_assets', 'payment_asset_moves',
     'payment_notifications', 'payment_request_observers',
+    # Почта поставщиков: письма о смене реквизитов
+    'payment_requisites_mailings', 'payment_requisites_mail_recipients',
 )
 
 
@@ -945,6 +1004,17 @@ def init_payments_schema(cursor):
         cursor.execute("RELEASE SAVEPOINT payments_trgm")
     except Exception:  # noqa: BLE001 — без trigram раздел живёт, просто медленнее ищет
         cursor.execute("ROLLBACK TO SAVEPOINT payments_trgm")
+    # Почта поставщиков, записанная раньше в «Контакт», — в поле «Почта», один раз.
+    # Под своим SAVEPOINT: сбой переноса не должен оставить раздел без схемы.
+    cursor.execute("SAVEPOINT payments_contact_emails")
+    try:
+        from . import requisites_mail
+        requisites_mail.adopt_contact_emails(cursor)
+        cursor.execute("RELEASE SAVEPOINT payments_contact_emails")
+    except Exception:  # noqa: BLE001
+        cursor.execute("ROLLBACK TO SAVEPOINT payments_contact_emails")
+        import logging
+        logging.exception('Оплата счетов: почта из «Контакта» не перенесена')
     # Заявки первой версии (12 шагов) переводятся на этапы и подзадачи. Под
     # своим SAVEPOINT: сбой переноса не должен оставить раздел без схемы —
     # непереведённую заявку перенос подберёт при следующем старте.

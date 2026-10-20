@@ -12,7 +12,7 @@ from io import BytesIO
 
 from flask import request, send_file
 
-from . import access, cards, directory, files, fixed, queries, schema, workflow
+from . import access, cards, directory, files, fixed, mail, queries, requisites_mail, schema, workflow
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   digits, jsonify, party_kind, payload as _payload)
 
@@ -45,6 +45,22 @@ def _iban(value, *, required=False):
     if not text.isalnum() or len(text) > 34:
         raise ApiError('ИИК: только латинские буквы и цифры, до 34 знаков')
     return text
+
+
+def _emails(value):
+    """Почта поставщика: адреса через запятую. Не похожее на адрес — отказ с
+    названием адреса: письмо о реквизитах не должно уходить на опечатку."""
+    try:
+        return mail.parse_emails(value)
+    except mail.EmailError as exc:
+        raise ApiError('Почта: %s' % exc, code='PAYMENTS_EMAIL_INVALID', extra={'field': 'emails'})
+
+
+def _mail_info(recipients):
+    """Почта для писем поставщикам: подключена ли, кому уйдёт и сколько ждать."""
+    return {'ready': mail.ready(), 'recipients': recipients,
+            'delay_minutes': requisites_mail.SEND_DELAY_MINUTES,
+            'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}
 
 
 def _user(cursor, value, field):
@@ -111,11 +127,21 @@ def register(api):
             raise ApiError('Этот справочник ведёт финансовый отдел', code='PAYMENTS_FORBIDDEN', status=403)
         with db._get_cursor() as cursor:
             rows = _READERS[name](cursor, request.args)
+            can_edit = access.can_save_dictionary(ctx, name, row_id=1, roles=ctx['roles'])
+            # Письма поставщикам о смене реквизитов видит тот, кто реквизиты правит.
+            mailing = (requisites_mail.states(cursor), requisites_mail.recipients_overview(cursor)) \
+                if name == 'legal_entities' and can_edit else None
+        body = {'items': rows, 'can_edit': can_edit}
         if name == 'legal_entities':
             for entity in rows:
                 entity['requisites_text'] = directory.requisites_text(entity)
-        return jsonify({'items': rows,
-                        'can_edit': access.can_save_dictionary(ctx, name, row_id=1, roles=ctx['roles'])})
+                if mailing:
+                    (latest, counts), _recipients = mailing
+                    entity['mailing'] = latest.get(entity['id'])
+                    entity['mailings_count'] = counts.get(entity['id'], 0)
+            if mailing:
+                body['mail'] = _mail_info(mailing[1])
+        return jsonify(body)
 
     def _save_named(cursor, name, data, row_id, ctx):
         title = as_text(data.get('name'), 'Название', required=True, limit=200)
@@ -148,6 +174,12 @@ def register(api):
 
     def _save_counterparty(cursor, data, row_id, ctx):
         category_id = as_int(data.get('category_id'), 'category_id')
+        # Окно, открытое до появления поля «Почта» (старая вкладка браузера), почту не
+        # присылает — и не должно стирать её записью карточки.
+        if 'emails' in data or not row_id:
+            emails = _emails(data.get('emails'))
+        else:
+            emails = (directory.read_counterparty(cursor, row_id) or {}).get('emails') or []
         return directory.upsert_counterparty(cursor, counterparty_id=row_id, fields={
             'name': as_text(data.get('name'), 'Наименование', required=True, limit=200),
             'legal_name': as_text(data.get('legal_name'), 'Юридическое наименование', limit=300),
@@ -156,6 +188,7 @@ def register(api):
             'vat_payer': as_bool(data.get('vat_payer')),
             'requisites': as_text(data.get('requisites'), 'Прочие реквизиты', limit=4000),
             'contact': as_text(data.get('contact'), 'Контакт', limit=1000),
+            'emails': emails,
             'category_id': category_id,
             'responsible_user_id': _user(cursor, data.get('responsible_user_id'), 'Ответственный'),
             # П. 13.1 и п. 6: согласующий поставщика и лимит, в пределах
@@ -326,13 +359,23 @@ def register(api):
             if duplicate:
                 raise ApiError('«%s» уже есть в справочнике' % duplicate[1],
                                code='PAYMENTS_DUPLICATE', status=409, extra={'id': duplicate[0]})
+            # Реквизиты нашей компании «как было» — до записи и под блокировкой
+            # строки: изменились — поставщикам уйдёт письмо (requisites_mail).
+            before = directory.read_legal_entity(cursor, row_id, lock=True) \
+                if name == 'legal_entities' and row_id else None
             if name in _SAVERS:
                 saved = _SAVERS[name](cursor, data, row_id, ctx)
             else:
                 saved = _save_named(cursor, name, data, row_id, ctx)
+            mailing = requisites_mail.after_entity_saved(
+                cursor, saved, before, directory.read_legal_entity(cursor, saved), _actor(ctx)) \
+                if before and saved else None
         if not saved:
             raise ApiError('Запись не найдена', status=404)
-        return jsonify({'status': 'success', 'id': saved})
+        body = {'status': 'success', 'id': saved}
+        if mailing:
+            body['mailing'] = mailing
+        return jsonify(body)
 
     @route('/dictionaries/<name>/<int:row_id>', methods=('DELETE',))
     def dictionary_delete(ctx, name, row_id):
@@ -406,6 +449,74 @@ def register(api):
         return send_file(BytesIO(data), as_attachment=not as_bool(request.args.get('inline')),
                          download_name=item['file_name'],
                          mimetype=item.get('file_type') or 'application/octet-stream')
+
+    # ── Письма поставщикам о смене реквизитов компании ──────────────────────
+
+    def _mailing_guard(ctx):
+        if not access.can_save_dictionary(ctx, 'legal_entities', 1, ctx['roles']):
+            raise ApiError('Письма поставщикам ведёт администратор раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
+
+    def _mailing_reply(cursor, entity_id):
+        items, total = requisites_mail.history(cursor, entity_id)
+        entity = directory.read_legal_entity(cursor, entity_id)
+        name, address = mail.sender_of(mail.config(), (entity or {}).get('name'))
+        return {'items': items, 'total': total,
+                # С чем форма сверяет правку: реквизиты, которые знают поставщики.
+                'known': requisites_mail.known_now(cursor, entity_id, entity),
+                'sender': {'name': name, 'address': address},
+                'mail': _mail_info(requisites_mail.recipients_overview(cursor))}
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailings')
+    def entity_mailings(ctx, entity_id):
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            if not directory.read_legal_entity(cursor, entity_id):
+                raise ApiError('Компания не найдена', status=404)
+            return jsonify(_mailing_reply(cursor, entity_id))
+
+    def _mailing_action(ctx, entity_id, mailing_id, action):
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            try:
+                done = action(cursor, entity_id, mailing_id, _actor(ctx))
+            except requisites_mail.MailingError as exc:
+                raise ApiError(str(exc), code=exc.code, status=exc.status)
+            body = _mailing_reply(cursor, entity_id)
+        if isinstance(done, dict):
+            body.update(done)
+        return jsonify(dict(body, status='success'))
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/cancel', methods=('POST',))
+    def entity_mailing_cancel(ctx, entity_id, mailing_id):
+        return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.cancel)
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/retry', methods=('POST',))
+    def entity_mailing_retry(ctx, entity_id, mailing_id):
+        return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.retry)
+
+    # ── «Письма поставщикам»: все письма раздела и одно письмо целиком ──────
+
+    @route('/mailings')
+    def mailings_journal(ctx):
+        _mailing_guard(ctx)
+        limit = min(max(as_int(request.args.get('limit'), 'limit') or 20, 1), 100)
+        offset = max(as_int(request.args.get('offset'), 'offset') or 0, 0)
+        with db._get_cursor() as cursor:
+            items, total = requisites_mail.journal(cursor, limit=limit, offset=offset)
+            info = _mail_info(requisites_mail.recipients_overview(cursor))
+        return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset, 'mail': info})
+
+    @route('/mailings/<int:mailing_id>')
+    def mailing_detail(ctx, mailing_id):
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            try:
+                item = requisites_mail.detail(cursor, mailing_id)
+            except requisites_mail.MailingError as exc:
+                raise ApiError(str(exc), code=exc.code, status=exc.status)
+        name, address = mail.sender_of(mail.config(), item.get('legal_entity_name'))
+        return jsonify({'item': item, 'sender': {'name': name, 'address': address},
+                        'mail': {'ready': mail.ready(), 'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}})
 
     @route('/dictionaries/cards/<int:card_id>/number')
     def card_number(ctx, card_id):

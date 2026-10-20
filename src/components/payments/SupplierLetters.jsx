@@ -1,0 +1,392 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import axios from 'axios';
+import { Loader2 } from 'lucide-react';
+import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
+import {
+    DICTIONARY_PAGE_SIZE, LETTER_FORMS, changedLine, fmtDateTime, letterDay, letterInitials, letterMoment, letterTime,
+    mailingSummary, minutesWord, plural, recipientState,
+} from './paymentsMeta';
+import { Bone, GroupDivider, NoticeBox, Pager, TonePill, errorText } from './paymentsUi';
+
+/*
+ * «Письма поставщикам» — письма о смене реквизитов наших компаний внутри раздела
+ * (просьба владельца 20.10.2026: «всё же должно быть внутри раздела Оплата счетов…
+ * аккуратно и удобно в стиле ios/macos»). Устройство писем — payments/requisites_mail.py.
+ *
+ * Как «Почта» на Mac: список по дням — кружок с буквами компании, название, время,
+ * что изменилось и чем кончилось; письмо открывается окном с шапкой «от кого, кому,
+ * тема» и самим письмом в том виде, в каком его получает поставщик (HTML письма —
+ * в изолированном фрейме без скриптов), рядом — кому ушло и кому нет. Оттуда же
+ * «Не отправлять» и «Отправить ещё раз».
+ *
+ * Видит администратор раздела — тот, кто правит «Реквизиты компаний» (то же правило
+ * у ручек: routes_directory._mailing_guard).
+ */
+
+const POLL_MS = 30000;
+const FRAME_START = 560;
+const live = (item) => item?.status === 'pending' || item?.status === 'sending';
+
+/* Письмо как его видит поставщик. Фрейм без скриптов (sandbox без allow-scripts):
+   HTML собирает сервер, но и чужое в нём не выполнилось бы. Рост — по содержимому. */
+export const LetterFrame = ({ html, onHeight }) => {
+    const ref = useRef(null);
+    const [height, setHeight] = useState(FRAME_START);
+    const heightRef = useRef(FRAME_START);
+    const measure = useCallback(() => {
+        const next = ref.current?.contentDocument?.documentElement?.scrollHeight;
+        if (!next || Math.abs(next - heightRef.current) < 2) return;
+        heightRef.current = next;
+        setHeight(next);
+        onHeight?.(next);
+    }, [onHeight]);
+    useEffect(() => {
+        const frame = ref.current;
+        if (!frame || typeof ResizeObserver !== 'function') return undefined;
+        // Окно сузили (телефон, край экрана) — письмо переносится и меняет рост.
+        const observer = new ResizeObserver(() => measure());
+        observer.observe(frame);
+        return () => observer.disconnect();
+    }, [measure]);
+    return (
+        <iframe
+            ref={ref}
+            title="Письмо поставщику"
+            srcDoc={html}
+            sandbox="allow-same-origin"
+            referrerPolicy="no-referrer"
+            onLoad={measure}
+            style={{ height }}
+            className="block w-full border-0 bg-[#f5f5f7]"
+            data-letter-frame
+        />
+    );
+};
+
+const toLine = (item, recipients) => {
+    // Кому письмо адресовано — по алфавиту, как в «Почте»; убранные и отданные новому письму — не адресаты.
+    const list = (item?.recipients || []).filter((recipient) => recipient.status !== 'removed' && recipient.status !== 'superseded')
+        .slice().sort((a, b) => a.email.localeCompare(b.email));
+    if (!list.length) {
+        const addresses = recipients?.addresses || 0;
+        return addresses ? `поставщикам с почтой — ${plural(addresses, ['адрес', 'адреса', 'адресов'])}` : 'адресов пока нет';
+    }
+    const shown = list.slice(0, 2).map((recipient) => recipient.email).join(', ');
+    return list.length > 2 ? `${shown} и ещё ${list.length - 2}` : shown;
+};
+
+/* Шапка письма, как в «Почте»: кружок отправителя, от кого, когда, кому, тема — и само письмо.
+   `bare` — без своей карточки (внутри карточки письма в окне компании). */
+export const LetterView = ({ item, sender, recipients, bare = false, onHeight }) => {
+    const name = sender?.name || item?.legal_entity_name || '';
+    return (
+        <div className={bare ? '' : `${iosCard} overflow-hidden`} data-letter-view>
+            <div className="flex gap-3 px-4 py-3.5">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-b from-slate-300 to-slate-400 text-[14px] font-semibold text-white" aria-hidden="true">
+                    {letterInitials(name)}
+                </span>
+                {/* basis-0: оболочка телефона переносит ряды с gap — без него текст уезжал бы под кружок. */}
+                <div className="min-w-0 grow basis-0">
+                    <div className="flex items-baseline justify-between gap-3">
+                        <span className="min-w-0 truncate text-[14px] font-semibold text-slate-900">{name}</span>
+                        <span className="shrink-0 text-[12px] tabular-nums text-slate-500">{fmtDateTime(letterMoment(item))}</span>
+                    </div>
+                    <div className="truncate text-[12.5px] text-slate-500">{sender?.address || 'почта для писем не подключена'}</div>
+                    <div className="mt-1 truncate text-[12.5px] text-slate-600"><span className="text-slate-400">Кому: </span>{toLine(item, recipients)}</div>
+                    <div className="mt-1.5 text-[14px] font-medium leading-snug text-slate-900">{item?.letter?.subject}</div>
+                </div>
+            </div>
+            {item?.letter?.html && <div className="border-t border-slate-100"><LetterFrame html={item.letter.html} onHeight={onHeight} /></div>}
+        </div>
+    );
+};
+
+/* Кому ушло и кому нет — по адресу, с поставщиками и ответом сервера. */
+export const RecipientList = ({ item, recipients }) => {
+    const list = item?.recipients || [];
+    if (!list.length) {
+        const without = recipients?.without_email || 0;
+        return (
+            <div className={`${iosCard} px-4 py-3.5 text-[13px] leading-relaxed text-slate-600`} data-recipient-list="pending">
+                Адреса соберутся в момент отправки — у тех поставщиков, у кого к этому времени указана почта.
+                {' '}Сейчас это {plural(recipients?.addresses || 0, ['адрес', 'адреса', 'адресов'])}
+                {without ? `; без почты — ${plural(without, ['поставщик', 'поставщика', 'поставщиков'])}` : ''}.
+            </div>
+        );
+    }
+    return (
+        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`} data-recipient-list="ready">
+            {list.map((recipient) => {
+                const state = recipientState(recipient);
+                const problem = recipient.status === 'failed' && recipient.last_error;
+                return (
+                    <div key={recipient.email} className="flex items-start gap-3 px-4 py-2.5" data-recipient={recipient.status}>
+                        <div className="min-w-0 grow basis-0">
+                            <div className="truncate text-[13.5px] text-slate-900">{recipient.email}</div>
+                            {recipient.counterparty_names?.length > 0 && (
+                                <div className="truncate text-[12px] text-slate-500">{recipient.counterparty_names.join(', ')}</div>
+                            )}
+                            {problem && <div className="mt-0.5 break-words text-[12px] leading-snug text-rose-700">{recipient.last_error}</div>}
+                        </div>
+                        <TonePill tone={state.tone} className="mt-0.5 shrink-0">{state.label}</TonePill>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
+const LetterSkeleton = () => (
+    <div className={`${iosCard} overflow-hidden`} aria-hidden="true">
+        <div className="flex gap-3 px-4 py-3.5">
+            <span className="h-10 w-10 shrink-0 animate-pulse rounded-full bg-slate-200/70 motion-reduce:animate-none" />
+            <div className="min-w-0 grow basis-0 space-y-2 pt-1">
+                <Bone className="h-3 w-40" />
+                <Bone className="h-2.5 w-56 max-w-full" />
+                <Bone className="h-2.5 w-64 max-w-full" />
+            </div>
+        </div>
+        <div className="border-t border-slate-100 bg-[#f5f5f7]" style={{ height: FRAME_START }} />
+    </div>
+);
+
+/* Окно письма: «Письмо» и «Кому», внизу — что с письмом можно сделать. */
+export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToast, onChanged }) => {
+    const [reply, setReply] = useState(null);
+    const [tab, setTab] = useState('letter');
+    const [busy, setBusy] = useState(false);
+    const [confirm, setConfirm] = useState(false);
+    const [frameHeight, setFrameHeight] = useState(0);
+    const toastRef = useRef(showToast);
+    useEffect(() => { toastRef.current = showToast; }, [showToast]);
+    const ticketRef = useRef(0);
+
+    const load = useCallback(async ({ quiet = false } = {}) => {
+        if (!mailingId) return;
+        const ticket = ticketRef.current + 1;
+        ticketRef.current = ticket;
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/payments/mailings/${mailingId}`, { headers: headers() });
+            if (ticketRef.current === ticket) setReply(response.data || null);
+        } catch (err) {
+            if (ticketRef.current === ticket && !quiet) toastRef.current?.(errorText(err, 'Не удалось открыть письмо'), 'error');
+        }
+    }, [apiBaseUrl, headers, mailingId]);
+
+    useEffect(() => {
+        setReply(null);
+        setTab('letter');
+        setConfirm(false);
+        setFrameHeight(0);
+        if (mailingId) load();
+        return () => { ticketRef.current += 1; };
+    }, [mailingId, load]);
+
+    const item = reply?.item;
+    useEffect(() => {
+        if (!live(item)) return undefined;
+        const timer = setInterval(() => {
+            if (typeof document === 'undefined' || document.visibilityState === 'visible') load({ quiet: true });
+        }, POLL_MS);
+        return () => clearInterval(timer);
+    }, [item, load]);
+
+    const act = async (action, done) => {
+        if (!item) return;
+        setBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/payments/dictionaries/legal_entities/${item.legal_entity_id}/mailings/${item.id}/${action}`,
+                {}, { headers: headers() });
+            toastRef.current?.(done(response.data || {}), 'success');
+            onChanged?.();
+        } catch (err) {
+            toastRef.current?.(errorText(err, 'Не получилось'), 'error');
+        } finally {
+            setBusy(false);
+            setConfirm(false);
+            load({ quiet: true });
+        }
+    };
+
+    const ready = reply?.mail?.ready !== false;
+    const failed = (item?.recipients || []).filter((recipient) => recipient.status === 'failed' && !recipient.next_attempt_at);
+    const pending = item?.status === 'pending';
+    const canRetry = item?.status === 'done' && item?.latest && failed.length > 0;
+    const count = (item?.recipients || []).filter((recipient) => recipient.status !== 'superseded').length;
+    return (
+        <IosModal
+            open={Boolean(mailingId)}
+            onClose={onClose}
+            title={item?.legal_entity_name || 'Письмо поставщикам'}
+            subtitle={item ? mailingSummary(item, { ready }) : ''}
+            maxWidth="max-w-3xl"
+            sizeKey={`${item ? 'ready' : 'loading'}:${tab}:${frameHeight}`}
+            footer={(
+                <>
+                    {pending && (confirm ? (
+                        <div className="mr-auto flex items-center gap-2 text-[12.5px] text-slate-600">
+                            Не отправлять письмо?
+                            <button type="button" className={`${iosBtnSecondary} !text-rose-700`} disabled={busy} onClick={() => act('cancel', () => 'Письмо не уйдёт')}>
+                                {busy && <Loader2 size={13} className="animate-spin" />} Да
+                            </button>
+                            <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setConfirm(false)}>Нет</button>
+                        </div>
+                    ) : (
+                        <button type="button" className={`${iosBtnSecondary} mr-auto`} disabled={busy} onClick={() => setConfirm(true)}>Не отправлять</button>
+                    ))}
+                    {canRetry && (
+                        <button type="button" className={`${iosBtnSecondary} mr-auto`} disabled={busy}
+                            onClick={() => act('retry', (done) => (done.queued
+                                ? `Письмо уйдёт ещё раз: ${plural(done.queued, ['адрес', 'адреса', 'адресов'])}`
+                                : 'Отправлять некуда: адресов, до которых письмо не дошло, у поставщиков больше нет'))}>
+                            {busy && <Loader2 size={13} className="animate-spin" />} Отправить ещё раз
+                        </button>
+                    )}
+                    <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
+                </>
+            )}
+        >
+            <div className="space-y-3" data-letter-window={item ? 'ready' : 'loading'}>
+                <IosSegmented
+                    value={tab}
+                    onChange={setTab}
+                    slide
+                    ariaLabel="Письмо или кому"
+                    options={[{ value: 'letter', label: 'Письмо' }, { value: 'recipients', label: 'Кому', count }]}
+                />
+                {item?.last_error && live(item) && (
+                    <NoticeBox tone="amber" text={`${item.last_error}. Попробуем снова через ${minutesWord(reply?.mail?.pause_minutes || 10)}.`} />
+                )}
+                {!item && <LetterSkeleton />}
+                {item && tab === 'letter' && (
+                    <LetterView item={item} sender={reply?.sender} recipients={reply?.mail?.recipients} onHeight={setFrameHeight} />
+                )}
+                {item && tab === 'recipients' && <RecipientList item={item} recipients={reply?.mail?.recipients} />}
+            </div>
+        </IosModal>
+    );
+};
+
+export const LetterRow = ({ item, onOpen }) => {
+    const failed = item.counts?.failed > 0;
+    return (
+        <button
+            type="button"
+            onClick={() => onOpen(item.id)}
+            data-letter-row={item.id}
+            data-letter-status={item.status}
+            className="flex w-full items-start gap-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-left shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition hover:brightness-[0.98] active:scale-[0.995]"
+        >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-b from-slate-300 to-slate-400 text-[13px] font-semibold text-white" aria-hidden="true">
+                {letterInitials(item.legal_entity_name)}
+            </span>
+            <span className="min-w-0 grow basis-0">
+                <span className="flex items-baseline justify-between gap-3">
+                    <span className="min-w-0 truncate text-[13.5px] font-semibold text-slate-900">{item.legal_entity_name}</span>
+                    <span className="shrink-0 text-[12px] tabular-nums text-slate-500">{letterTime(letterMoment(item))}</span>
+                </span>
+                <span className="block truncate text-[13px] text-slate-700">
+                    {item.changed?.length ? `Изменилось: ${changedLine(item.changed)}` : item.subject}
+                </span>
+                <span className="block truncate text-[12px] text-slate-500">
+                    {/* Красным — только то, что не ушло; автор правки — серым. */}
+                    <span className={failed ? 'text-rose-700' : undefined}>{mailingSummary(item)}</span>
+                    {(item.updated_by_name || item.created_by_name) && ` · ${item.updated_by_name || item.created_by_name}`}
+                </span>
+            </span>
+        </button>
+    );
+};
+
+/* Экран «Письма поставщикам» в «Справочниках». */
+const SupplierLetters = ({ apiBaseUrl, headers, showToast }) => {
+    const [reply, setReply] = useState(null);
+    const [page, setPage] = useState(1);
+    // С первого кадра — заготовка списка, а не пустое место до ответа сервера.
+    const [loading, setLoading] = useState(true);
+    const [openId, setOpenId] = useState(null);
+    const toastRef = useRef(showToast);
+    useEffect(() => { toastRef.current = showToast; }, [showToast]);
+    const ticketRef = useRef(0);
+
+    const load = useCallback(async ({ quiet = false } = {}) => {
+        const ticket = ticketRef.current + 1;
+        ticketRef.current = ticket;
+        if (!quiet) setLoading(true);
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/payments/mailings`, {
+                headers: headers(), params: { limit: DICTIONARY_PAGE_SIZE, offset: (page - 1) * DICTIONARY_PAGE_SIZE },
+            });
+            if (ticketRef.current === ticket) setReply(response.data || null);
+        } catch (err) {
+            if (ticketRef.current === ticket && !quiet) toastRef.current?.(errorText(err, 'Не удалось загрузить письма'), 'error');
+        } finally {
+            if (ticketRef.current === ticket) setLoading(false);
+        }
+    }, [apiBaseUrl, headers, page]);
+
+    useEffect(() => {
+        load();
+        return () => { ticketRef.current += 1; };
+    }, [load]);
+
+    const items = reply?.items || [];
+    const waiting = items.some(live);
+    // Письмо ждёт или уходит — список перечитывается сам.
+    useEffect(() => {
+        if (!waiting) return undefined;
+        const timer = setInterval(() => {
+            if (typeof document === 'undefined' || document.visibilityState === 'visible') load({ quiet: true });
+        }, POLL_MS);
+        return () => clearInterval(timer);
+    }, [waiting, load]);
+
+    const groups = [];
+    items.forEach((item) => {
+        const day = letterDay(letterMoment(item));
+        if (!groups.length || groups[groups.length - 1].day !== day) groups.push({ day, items: [] });
+        groups[groups.length - 1].items.push(item);
+    });
+
+    return (
+        <div className="space-y-2" data-supplier-letters>
+            {reply?.mail && reply.mail.ready === false && (
+                <NoticeBox tone="amber" text="Почта для писем пока не подключена — письма ждут и уйдут, когда её подключат." />
+            )}
+            {!reply && loading && (
+                <div className="space-y-1.5" aria-hidden="true">
+                    {[0, 1, 2].map((index) => (
+                        <div key={index} className="flex gap-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3">
+                            <span className="h-9 w-9 shrink-0 animate-pulse rounded-full bg-slate-200/70 motion-reduce:animate-none" />
+                            <span className="min-w-0 grow basis-0 space-y-2 pt-1"><Bone className="h-3 w-40" /><Bone className="h-2.5 w-64 max-w-full" /></span>
+                        </div>
+                    ))}
+                </div>
+            )}
+            {reply && !items.length && (
+                <div className={`${iosCard} px-4 py-10 text-center`} data-supplier-letters-empty>
+                    <div className="text-[13.5px] font-medium text-slate-700">Писем пока не было</div>
+                    <div className="mt-1 text-[12.5px] text-slate-500">Письмо уходит само, когда меняются реквизиты компании в «Реквизитах компаний».</div>
+                </div>
+            )}
+            {groups.map((group) => (
+                <div key={group.day} className="space-y-1.5">
+                    <GroupDivider>{group.day}</GroupDivider>
+                    {group.items.map((item) => <LetterRow key={item.id} item={item} onOpen={setOpenId} />)}
+                </div>
+            ))}
+            <Pager page={page} pageSize={DICTIONARY_PAGE_SIZE} total={reply?.total || 0} loading={loading} forms={LETTER_FORMS} onPage={setPage} />
+            <LetterWindow
+                apiBaseUrl={apiBaseUrl}
+                headers={headers}
+                mailingId={openId}
+                onClose={() => setOpenId(null)}
+                showToast={showToast}
+                onChanged={() => load({ quiet: true })}
+            />
+        </div>
+    );
+};
+
+export default SupplierLetters;

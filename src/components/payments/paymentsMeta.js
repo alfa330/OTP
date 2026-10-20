@@ -461,6 +461,14 @@ export const HINTS = {
         intro: 'Кто будет следить за ходом заявки — например, пока вы в отпуске.',
         outro: 'Наблюдатель видит заявку и её ход, а в колокол ему приходят те же сообщения, что и инициатору: согласовано, оплачено, вернули на доработку. Действовать по заявке он не может. Добавить и снять наблюдателей можно и потом — в окне заявки.',
     },
+    supplierEmails: {
+        intro: 'Почта поставщика: бухгалтерия, менеджер, общий ящик.',
+        outro: 'Когда меняются реквизиты наших компаний, сюда само уходит письмо с новыми реквизитами. Несколько адресов — через запятую, до пяти.',
+    },
+    requisitesMail: {
+        intro: 'Изменились реквизиты компании — поставщикам с почтой само уходит письмо: что было, что стало и новые реквизиты целиком.',
+        outro: 'Письмо уходит через 10 минут после сохранения. Поправка в эти минуты попадёт в то же письмо, «Не отправлять» его отменит. Получают все поставщики, у которых указана почта. «Отправлено» — письмо принял почтовый сервер; если адреса не существует, отказ придёт позже в сам ящик.',
+    },
 };
 
 /* Наблюдателей у заявки — не больше этого (workflow.MAX_OBSERVERS; сервер отдаёт его в
@@ -1718,4 +1726,238 @@ export const activeFilterCount = (filters) => {
         count += 1;
     });
     return count;
+};
+
+/* ── Почта поставщиков и письма о смене реквизитов (просьба владельца 20.10.2026) ──
+   Те же правила, что у сервера (payments/mail.py, payments/requisites_mail.py):
+   форма подсвечивает ошибку и предупреждает о письме до того, как сервер ответит.
+   Таблицы случаев — общие у tests/payments_requisites_mail.test.mjs и
+   tests/test_payments_requisites_mail.py: правило меняется в обоих местах. */
+export const MAX_SUPPLIER_EMAILS = 5;
+const EMAIL_RE = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+/* Невидимое из Telegram, сайтов и Word убирается до разбора; разделители — явным набором,
+   тем же, что у сервера (у Python и JavaScript «пробел» понимается по-разному). */
+const EMAIL_INVISIBLE_RE = /[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g;
+const EMAIL_SPLIT_RE = /[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000,;]+/;
+
+const cleanEmail = (part) => {
+    let token = part.replace(/^[<>]+|[<>]+$/g, '');
+    if (/^mailto:/i.test(token)) token = token.slice(7);
+    token = token.replace(/\.+$/, '').toLowerCase();
+    if (!token) return '';
+    const local = token.split('@')[0];
+    if (token.length > 254 || !EMAIL_RE.test(token) || token.includes('..') || local.startsWith('.') || local.endsWith('.')) return null;
+    return token;
+};
+
+/* Адреса из поля «Почта»: через запятую, точку с запятой, пробел или перенос строки.
+   { emails, bad, tooMany }: bad — первое, что не похоже на адрес (пусто — всё верно). */
+export const parseEmails = (value) => {
+    const emails = [];
+    const parts = String(value ?? '').replace(EMAIL_INVISIBLE_RE, '').split(EMAIL_SPLIT_RE).filter(Boolean);
+    for (const part of parts) {
+        const token = cleanEmail(part);
+        if (token === null) return { emails, bad: part, tooMany: false };
+        if (token && !emails.includes(token)) emails.push(token);
+    }
+    return { emails, bad: '', tooMany: emails.length > MAX_SUPPLIER_EMAILS };
+};
+
+/* Что не так с полем «Почта» — строкой под полем; пусто — всё верно. */
+export const emailsIssue = (value) => {
+    const { bad, tooMany } = parseEmails(value);
+    if (bad) return `«${bad.slice(0, 80)}» — не похоже на адрес почты`;
+    return tooMany ? `Не больше ${MAX_SUPPLIER_EMAILS} адресов у одного поставщика` : '';
+};
+
+/* Почта поставщика в строке списка: первый адрес и «+N». */
+export const emailsShort = (emails) => {
+    const list = emails || [];
+    if (!list.length) return '';
+    return list.length > 1 ? `${list[0]} +${list.length - 1}` : list[0];
+};
+
+/* Поля реквизитов, правка которых уводит письмо поставщикам, — те, что идут в
+   «Скопировать реквизиты». Форма (ТОО/ИП) и примечание писем не вызывают.
+   ИИК и БИН сравниваются так, как их пишет сервер: ИИК — верхним регистром без
+   пробелов, БИН — цифрами. */
+export const REQUISITE_FIELDS = ['name', 'bin', 'legal_address', 'iik', 'bank_name', 'bik', 'kbe', 'vat_payer', 'requisites'];
+const MULTILINE_REQUISITES = ['legal_address', 'requisites'];
+const requisiteValue = (field, value) => {
+    if (field === 'vat_payer') return Boolean(value);
+    const text = String(value ?? '').replace(/\r/g, '');
+    if (field === 'iik') return text.split(/\s+/).join('').toUpperCase();
+    if (field === 'bin') return text.replace(/[^\p{Nd}]/gu, '');
+    return MULTILINE_REQUISITES.includes(field) ? text.split('\n').map((line) => line.trim()).join('\n').trim() : text.trim();
+};
+export const requisitesChanged = (before, after) => REQUISITE_FIELDS
+    .filter((field) => requisiteValue(field, before?.[field]) !== requisiteValue(field, after?.[field]));
+
+/* «Сейчас» по часам Алматы строкой «YYYY-MM-DDTHH:MM:SS» — как время писем от сервера. */
+export const almatyNow = () => new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString().slice(0, 19);
+const dueBy = (value, now) => Boolean(value) && String(value).slice(0, 19) <= now;
+
+/* Когда уйдёт письмо: «в 14:35» сегодня, «21.10 в 14:35» — в другой день (часы Алматы). */
+export const mailingWhen = (value, today = todayISO()) => {
+    const parts = dateParts(value);
+    if (!parts || !parts.hh) return '';
+    const time = `${parts.hh}:${parts.mm}`;
+    return `${parts.y}-${parts.m}-${parts.d}` === today ? `в ${time}` : `${parts.d}.${parts.m} в ${time}`;
+};
+
+/* Метка письма в строке компании — только то, что ждёт внимания: письмо скоро уйдёт,
+   уходит, не уходит (почта не подключена или не пускает) или ушло не на все адреса.
+   Ушедшее на все — без метки. Срок прошёл — «уходит», а не время в прошлом. */
+export const mailingPill = (state, { ready = true, today, now = almatyNow() } = {}) => {
+    if (!state) return null;
+    if (state.status === 'pending') {
+        if (!ready) return { tone: 'blocked', label: 'письмо ждёт почту' };
+        if (state.last_error) return { tone: 'blocked', label: 'письмо не уходит' };
+        return { tone: 'current', label: dueBy(state.send_after, now) ? 'письмо уходит' : `письмо ${mailingWhen(state.send_after, today)}` };
+    }
+    if (state.status === 'sending') return state.last_error || !ready ? { tone: 'blocked', label: 'письмо не уходит' } : { tone: 'current', label: 'письмо уходит' };
+    if (state.status === 'done' && state.failed > 0) return { tone: 'overdue', label: `письмо не ушло: ${state.failed}` };
+    return null;
+};
+
+const ADDRESS_FORMS = ['адрес', 'адреса', 'адресов'];
+// «из 1 адреса», «из 2 адресов», «из 21 адреса» — после «из» родительный падеж.
+const ADDRESS_FROM_FORMS = ['адреса', 'адресов', 'адресов'];
+const NOTICE_NAMES = 3;
+
+/* «через 1 минуту», «через 2 минуты», «через 10 минут». */
+export const minutesWord = (count) => plural(count, ['минуту', 'минуты', 'минут']);
+
+/* «Изменилось: ИИК, банк» — сокращения остаются заглавными. */
+export const changedLine = (labels) => (labels || [])
+    .map((label) => (label === label.toUpperCase() ? label : label.toLowerCase()))
+    .join(', ');
+
+/* Письмо из истории одной строкой: когда и чем кончилось. «Отправлено» — письмо
+   принял почтовый сервер; отказ «такого адреса нет» может прийти позже в сам ящик. */
+export const mailingSummary = (item, { ready = true, today, now = almatyNow() } = {}) => {
+    const counts = item?.counts || {};
+    const sent = counts.sent || 0;
+    switch (item?.status) {
+        case 'pending':
+            if (!ready) return 'Ждёт подключения почты';
+            if (item.last_error) return 'Не уходит';
+            return dueBy(item.send_after, now) ? 'Уходит' : `Уйдёт ${mailingWhen(item.send_after, today)}`;
+        case 'sending':
+            return `${item.last_error || !ready ? 'Не уходит' : 'Отправляется'}: ${sent} из ${plural(counts.total || 0, ADDRESS_FROM_FORMS)}`;
+        case 'done': {
+            const removed = counts.removed || 0;
+            const superseded = counts.superseded || 0;
+            if (!counts.total && !removed && !superseded) return 'Некому было отправить: ни у одного поставщика нет почты';
+            const missed = (counts.failed || 0) + removed;
+            const parts = [missed ? `Отправлено ${sent} из ${plural(sent + missed, ADDRESS_FROM_FORMS)}` : `Отправлено на ${plural(sent, ADDRESS_FORMS)}`];
+            if (counts.failed) parts.push(`не ушло: ${counts.failed}`);
+            if (removed) parts.push(`адрес убран: ${removed}`);
+            if (superseded) parts.push(`ещё ${plural(superseded, ADDRESS_FORMS)} — новым письмом`);
+            return parts.join(' · ');
+        }
+        case 'cancelled':
+            return `Отменено${item.cancelled_by_name ? ` · ${item.cancelled_by_name}` : ''}`;
+        default:
+            return '';
+    }
+};
+
+/* Строка перед сохранением изменённых реквизитов: уйдёт ли письмо и когда, сколько
+   адресов его получат и у кого почты нет. `waiting` — письмо уже ждёт отправки;
+   `reverting` — реквизиты вернутся к тем, что знают поставщики, и письма не будет. */
+export const mailNotice = ({ recipients, delayMinutes = 10, ready = true, waiting = false, reverting = false } = {}) => {
+    if (reverting) {
+        return waiting
+            ? 'Реквизиты вернутся к тем, что знают поставщики, — ждущее письмо не уйдёт.'
+            : 'Реквизиты вернутся к тем, что знают поставщики, — письма не будет.';
+    }
+    const addresses = recipients?.addresses || 0;
+    const without = recipients?.without_email || 0;
+    const names = recipients?.without_names || [];
+    let first;
+    if (!ready) {
+        first = waiting
+            ? 'Письмо, которое ждёт отправки, уйдёт уже с этими реквизитами, когда подключат почту.'
+            : 'После сохранения письмо о новых реквизитах уйдёт поставщикам, когда подключат почту: сейчас она не подключена.';
+    } else {
+        first = waiting
+            ? `Письмо, которое ждёт отправки, уйдёт уже с этими реквизитами — через ${minutesWord(delayMinutes)} после сохранения.`
+            : `После сохранения поставщикам уйдёт письмо о новых реквизитах — через ${minutesWord(delayMinutes)}.`;
+    }
+    const parts = [first];
+    if (!addresses) {
+        parts.push('Но сейчас ни у одного поставщика не указана почта — письмо некому отправить.');
+    } else {
+        parts.push(`Получат ${plural(addresses, ADDRESS_FORMS)}.`);
+        if (without) {
+            // Названий — не больше трёх: двадцать имён подряд прячут главное.
+            const shown = names.slice(0, NOTICE_NAMES);
+            const rest = without - shown.length;
+            parts.push(`Без почты — ${plural(without, ['поставщик', 'поставщика', 'поставщиков'])}: ${shown.join(', ')}${rest > 0 ? ` и ещё ${rest}` : ''}.`);
+        }
+    }
+    return parts.join(' ');
+};
+
+/* ── «Письма поставщикам» — журнал писем раздела (просьба владельца 20.10.2026:
+   «всё же должно быть внутри раздела Оплата счетов») ─────────────────────────── */
+export const LETTER_FORMS = ['письмо', 'письма', 'писем'];
+const MONTHS_GENITIVE = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+const shiftDay = (iso, days) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+};
+
+/* Момент письма для списка: ждёт — когда уйдёт, отменено — когда отменили, иначе — когда ушло. */
+export const letterMoment = (item) => {
+    if (item?.status === 'pending') return item.send_after;
+    if (item?.status === 'cancelled') return item.cancelled_at || item.updated_at;
+    return item?.started_at || item?.updated_at || item?.created_at;
+};
+
+/* Подпись дня над письмами, как в «Почте»: «Сегодня», «Вчера», «20 октября», «3 марта 2025». */
+export const letterDay = (value, today = todayISO()) => {
+    const parts = dateParts(value);
+    if (!parts) return '';
+    const iso = `${parts.y}-${parts.m}-${parts.d}`;
+    if (iso === today) return 'Сегодня';
+    if (iso === shiftDay(today, -1)) return 'Вчера';
+    const label = `${Number(parts.d)} ${MONTHS_GENITIVE[Number(parts.m) - 1]}`;
+    return parts.y === today.slice(0, 4) ? label : `${label} ${parts.y}`;
+};
+
+/* Время в строке письма: сегодня — «16:43», в другой день — «20.10». */
+export const letterTime = (value, today = todayISO()) => {
+    const parts = dateParts(value);
+    if (!parts) return '';
+    return `${parts.y}-${parts.m}-${parts.d}` === today && parts.hh ? `${parts.hh}:${parts.mm}` : `${parts.d}.${parts.m}`;
+};
+
+/* Кружок отправителя — буквы названия компании без «ТОО», «ИП» и кавычек: «ИП Иванов» → «И». */
+export const letterInitials = (name) => {
+    const words = String(name || '').replace(/[«»"'“”]/g, ' ').split(/\s+/)
+        .filter((word) => word && !/^(ТОО|ИП|АО|ООО|ОАО|ЗАО|ТДО|КХ|LLP|LLC)$/i.test(word));
+    return words.slice(0, 2).map((word) => word[0]).join('').toUpperCase() || '·';
+};
+
+/* Как дела у адреса: ушло, ждёт, повтор, не ушло, убран, ушло новым письмом. */
+export const recipientState = (recipient, { today } = {}) => {
+    switch (recipient?.status) {
+        case 'sent': {
+            const parts = dateParts(recipient.sent_at);
+            return { tone: 'done', label: parts?.hh ? `ушло в ${parts.hh}:${parts.mm}` : 'ушло' };
+        }
+        case 'failed':
+            return recipient.next_attempt_at
+                ? { tone: 'blocked', label: `повтор ${mailingWhen(recipient.next_attempt_at, today)}` }
+                : { tone: 'overdue', label: 'не ушло' };
+        case 'removed':
+            return { tone: 'neutral', label: 'адрес убран' };
+        case 'superseded':
+            return { tone: 'neutral', label: 'новым письмом' };
+        default:
+            return { tone: 'current', label: 'ждёт' };
+    }
 };

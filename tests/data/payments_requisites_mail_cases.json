@@ -1,0 +1,328 @@
+{
+  "_about": "«Оплата счетов», почта поставщиков и письма о смене реквизитов (20.10.2026). Одни и те же случаи читают tests/test_payments_requisites_mail.py (payments/mail.parse_emails, payments/requisites_mail.changed_fields) и tests/payments_requisites_mail.test.mjs (paymentsMeta.parseEmails, requisitesChanged): форма и сервер обязаны решать одинаково. bad — что именно не похоже на адрес (null — всё верно). Невидимые символы (BOM, нулевой пробел) убираются до разбора, разделители — один явный набор у обеих сторон.",
+  "emails": [
+    {
+      "input": "",
+      "emails": [],
+      "bad": null
+    },
+    {
+      "input": "buh@romashka.kz",
+      "emails": [
+        "buh@romashka.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "Buh@Romashka.KZ, info@romashka.kz",
+      "emails": [
+        "buh@romashka.kz",
+        "info@romashka.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "a@x.kz; b@x.kz\nc@x.kz  d@x.kz",
+      "emails": [
+        "a@x.kz",
+        "b@x.kz",
+        "c@x.kz",
+        "d@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "a@x.kz, a@x.kz, A@X.KZ",
+      "emails": [
+        "a@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "<buh@x.kz>",
+      "emails": [
+        "buh@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "mailto:buh@x.kz",
+      "emails": [
+        "buh@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "buh@x.kz.",
+      "emails": [
+        "buh@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "buh@x.kz, , ;",
+      "emails": [
+        "buh@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "first.last+tag@sub.domain.kz",
+      "emails": [
+        "first.last+tag@sub.domain.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "buh@x",
+      "emails": [],
+      "bad": "buh@x"
+    },
+    {
+      "input": "Иван <ivan@x.kz>",
+      "emails": [],
+      "bad": "Иван"
+    },
+    {
+      "input": "ok@x.kz, buh@почта.рф",
+      "emails": [
+        "ok@x.kz"
+      ],
+      "bad": "buh@почта.рф"
+    },
+    {
+      "input": "a..b@x.kz",
+      "emails": [],
+      "bad": "a..b@x.kz"
+    },
+    {
+      "input": ".a@x.kz",
+      "emails": [],
+      "bad": ".a@x.kz"
+    },
+    {
+      "input": "a.@x.kz",
+      "emails": [],
+      "bad": "a.@x.kz"
+    },
+    {
+      "input": "buh@-x.kz",
+      "emails": [],
+      "bad": "buh@-x.kz"
+    },
+    {
+      "input": "buh@@x.kz",
+      "emails": [],
+      "bad": "buh@@x.kz"
+    },
+    {
+      "input": "8 701 123 45 67",
+      "emails": [],
+      "bad": "8"
+    },
+    {
+      "input": "\ufeffbuh@x.kz",
+      "emails": [
+        "buh@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "buh@x.kz\u200b, info@x.kz\u2060",
+      "emails": [
+        "buh@x.kz",
+        "info@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "a@x.kz\u00a0b@x.kz\u3000c@x.kz",
+      "emails": [
+        "a@x.kz",
+        "b@x.kz",
+        "c@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "a@x.kz, b@x.kz, c@x.kz, d@x.kz, e@x.kz",
+      "emails": [
+        "a@x.kz",
+        "b@x.kz",
+        "c@x.kz",
+        "d@x.kz",
+        "e@x.kz"
+      ],
+      "bad": null
+    },
+    {
+      "input": "buh\u001c@x.kz",
+      "emails": [],
+      "bad": "buh\u001c@x.kz"
+    }
+  ],
+  "too_many": "a@x.kz, b@x.kz, c@x.kz, d@x.kz, e@x.kz, f@x.kz",
+  "requisites": [
+    {
+      "about": "ничего не меняли",
+      "before": {
+        "name": "ТОО «Наша»",
+        "bin": "123456789012",
+        "iik": "KZ11",
+        "vat_payer": true
+      },
+      "after": {
+        "name": "ТОО «Наша»",
+        "bin": "123456789012",
+        "iik": "KZ11",
+        "vat_payer": true
+      },
+      "changed": []
+    },
+    {
+      "about": "сменили счёт",
+      "before": {
+        "iik": "KZ11",
+        "bank_name": "АО «Альфа»"
+      },
+      "after": {
+        "iik": "KZ22",
+        "bank_name": "АО «Альфа»"
+      },
+      "changed": [
+        "iik"
+      ]
+    },
+    {
+      "about": "пробелы по краям — не смена",
+      "before": {
+        "name": "ТОО «Наша»",
+        "kbe": "17"
+      },
+      "after": {
+        "name": "  ТОО «Наша» ",
+        "kbe": "17 "
+      },
+      "changed": []
+    },
+    {
+      "about": "пусто и null — одно и то же",
+      "before": {
+        "bik": null,
+        "legal_address": null
+      },
+      "after": {
+        "bik": "",
+        "legal_address": "   "
+      },
+      "changed": []
+    },
+    {
+      "about": "стал плательщиком НДС",
+      "before": {
+        "vat_payer": false
+      },
+      "after": {
+        "vat_payer": true
+      },
+      "changed": [
+        "vat_payer"
+      ]
+    },
+    {
+      "about": "многострочные поля: переносы Windows и пробелы в строках — не смена",
+      "before": {
+        "requisites": "Корр. счёт KZ99\nСвидетельство НДС 1234"
+      },
+      "after": {
+        "requisites": "Корр. счёт KZ99  \r\n  Свидетельство НДС 1234\r\n"
+      },
+      "changed": []
+    },
+    {
+      "about": "адрес и банк — в порядке «Скопировать реквизиты»",
+      "before": {
+        "bank_name": "АО «Альфа»",
+        "legal_address": "Алматы, Абая 1"
+      },
+      "after": {
+        "bank_name": "АО «Бета»",
+        "legal_address": "Астана, Мангилик Ел 2"
+      },
+      "changed": [
+        "legal_address",
+        "bank_name"
+      ]
+    },
+    {
+      "about": "форма, примечание и «скрыта» — не реквизиты",
+      "before": {
+        "kind": "too",
+        "note": "старое",
+        "is_active": true
+      },
+      "after": {
+        "kind": "ip",
+        "note": "новое",
+        "is_active": false
+      },
+      "changed": []
+    },
+    {
+      "about": "дописали пустой реквизит — тоже смена: поставщики его не знали",
+      "before": {
+        "bik": ""
+      },
+      "after": {
+        "bik": "TESTKZKA"
+      },
+      "changed": [
+        "bik"
+      ]
+    },
+    {
+      "about": "новое наименование",
+      "before": {
+        "name": "ТОО «Старое»"
+      },
+      "after": {
+        "name": "ТОО «Новое»"
+      },
+      "changed": [
+        "name"
+      ]
+    },
+    {
+      "about": "ИИК, записанный когда-то иначе, — тот же счёт",
+      "before": {
+        "iik": "kz11 2233"
+      },
+      "after": {
+        "iik": "KZ112233"
+      },
+      "changed": []
+    },
+    {
+      "about": "БИН с пробелами — тот же БИН",
+      "before": {
+        "bin": "123 456 789 012"
+      },
+      "after": {
+        "bin": "123456789012"
+      },
+      "changed": []
+    },
+    {
+      "about": "другой ИИК — смена",
+      "before": {
+        "iik": "kz11 2233"
+      },
+      "after": {
+        "iik": "KZ112234"
+      },
+      "changed": [
+        "iik"
+      ]
+    }
+  ]
+}

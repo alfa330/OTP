@@ -144,11 +144,14 @@ def list_legal_entities(cursor, include_inactive=False):
     return [row_map(_ENTITY_FIELDS, row) for row in cursor.fetchall()]
 
 
-def read_legal_entity(cursor, entity_id):
+def read_legal_entity(cursor, entity_id, lock=False):
+    """`lock` — строка компании блокируется до конца транзакции: правка реквизитов
+    сверяет «как было» с «как стало» для письма поставщикам (requisites_mail), и
+    две одновременные правки иначе завели бы два письма."""
     if not entity_id:
         return None
-    cursor.execute("SELECT %s FROM payment_legal_entities WHERE id = %%s" % ', '.join(_ENTITY_FIELDS),
-                   (int(entity_id),))
+    cursor.execute("SELECT %s FROM payment_legal_entities WHERE id = %%s%s"
+                   % (', '.join(_ENTITY_FIELDS), ' FOR UPDATE' if lock else ''), (int(entity_id),))
     row = cursor.fetchone()
     return row_map(_ENTITY_FIELDS, row) if row else None
 
@@ -171,11 +174,12 @@ def upsert_legal_entity(cursor, *, entity_id=None, fields, actor_id=None):
 
 # ─── Поставщики (п. 13.1) ────────────────────────────────────────────────────
 
+# `emails` — адреса для писем о смене наших реквизитов (requisites_mail.py).
 _COUNTERPARTY_FIELDS = ('id', 'name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
-                        'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
+                        'emails', 'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
                         'note', 'is_active')
 _COUNTERPARTY_WRITE = ('name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
-                       'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
+                       'emails', 'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
                        'note', 'is_active')
 _COUNTERPARTY_SQL = """
     SELECT %s, cat.name, resp.name, appr.name,
@@ -191,6 +195,7 @@ _COUNTERPARTY_SQL = """
 
 def _counterparty_row(row):
     item = row_map(_COUNTERPARTY_FIELDS, row[:len(_COUNTERPARTY_FIELDS)])
+    item['emails'] = list(item.get('emails') or [])
     extra = row[len(_COUNTERPARTY_FIELDS):]
     item['category_name'], item['responsible_name'], item['approver_name'] = extra[0], extra[1], extra[2]
     item['active_contracts'] = int(extra[3] or 0)
@@ -202,9 +207,10 @@ def list_counterparties(cursor, include_inactive=False, query=None):
     if not include_inactive:
         clauses.append('cp.is_active')
     if query:
-        clauses.append("(cp.name ILIKE %s OR COALESCE(cp.legal_name, '') ILIKE %s OR COALESCE(cp.bin, '') ILIKE %s)")
+        clauses.append("(cp.name ILIKE %s OR COALESCE(cp.legal_name, '') ILIKE %s OR COALESCE(cp.bin, '') ILIKE %s "
+                       "OR array_to_string(cp.emails, ' ') ILIKE %s)")
         like = like_pattern(query)
-        params += [like, like, like]
+        params += [like, like, like, like]
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     cursor.execute(_COUNTERPARTY_SQL + where + ' ORDER BY cp.name', params)
     return [_counterparty_row(row) for row in cursor.fetchall()]
@@ -219,7 +225,8 @@ def read_counterparty(cursor, counterparty_id):
 
 
 def upsert_counterparty(cursor, *, counterparty_id=None, fields, actor_id=None):
-    values = [fields.get(col) for col in _COUNTERPARTY_WRITE]
+    # Поставщик, заведённый одним названием из заявки, почты не знает: пустой список, не NULL.
+    values = [fields.get(col) if col != 'emails' else list(fields.get('emails') or []) for col in _COUNTERPARTY_WRITE]
     if counterparty_id:
         cursor.execute(
             "UPDATE payment_counterparties SET %s WHERE id = %%s RETURNING id"
@@ -763,6 +770,8 @@ _USED_BY = {
         ('payment_approval_orders', 'legal_entity_id', 'в лимитах согласования'),
         ('payment_approval_routes', 'legal_entity_id', 'в маршрутах согласования'),
         ('payment_assets', 'legal_entity_id', 'в имуществе'),
+        # Письма поставщикам о смене её реквизитов — переписка с ними, а не черновик.
+        ('payment_requisites_mailings', 'legal_entity_id', 'в письмах поставщикам'),
     ),
     'counterparty_accounts': (
         ('payment_requests', 'counterparty_account_id', 'в заявках'),

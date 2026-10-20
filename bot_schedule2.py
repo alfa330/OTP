@@ -67544,6 +67544,29 @@ async def payments_fixed_generation_async():
         logging.exception("payments fixed generation failed")
 
 
+def payments_requisites_mail_job():
+    """Письма поставщикам о смене реквизитов наших компаний (payments/requisites_mail.py).
+
+    Раз в минуту: письмо, чьи десять минут после сохранения прошли, уходит.
+    Почта не подключена (нет PAYMENTS_SMTP_*) — прогон заканчивается, не заходя
+    в базу. Место в общем пуле держится не дольше бюджета прогона.
+    """
+    try:
+        from payments import requisites_mail as payments_requisites_mail
+
+        payments_requisites_mail.run(db)
+    except Exception:
+        logging.exception("Оплата счетов: письма о смене реквизитов не отправились")
+
+
+async def payments_requisites_mail_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, payments_requisites_mail_job)
+    except Exception:
+        logging.exception("payments requisites mail failed")
+
+
 # ── Раздел «Чаты водителей» (задача #271) ────────────────────────────────────
 # Оператор СЗоВ ищет переписку водителя по номеру телефона, открывает нужный
 # чат, снимает скриншот средствами системы и жмёт «Передан» — в этот же чат
@@ -71781,6 +71804,17 @@ if __name__ == '__main__':
         CronTrigger(hour=9, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='payments_deadline_reminders_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Оплата счетов»: письма поставщикам о смене наших реквизитов — каждую
+    # минуту, через десять минут после сохранения реквизитов.
+    scheduler.add_job(
+        payments_requisites_mail_async,
+        CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty')),
+        id='payments_requisites_mail_minutely',
+        misfire_grace_time=60,
         max_instances=1,
         coalesce=True
     )
