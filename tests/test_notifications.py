@@ -1041,7 +1041,10 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'news_posts',
                            # «Оплата счетов» (#381): уведомления процесса закупа —
                            # новая задача, согласовано, оплачено, срок.
-                           'payment_notifications')
+                           'payment_notifications',
+                           # «Дисциплина» (#254): нарушения, объяснительные, акты
+                           # и особый контроль — адресно, как у «Оплаты счетов».
+                           'discipline_notifications')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

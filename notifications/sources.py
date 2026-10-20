@@ -37,7 +37,7 @@ from datetime import datetime, time as day_time, timedelta
 # «Оплата счетов» — сразу за задачами: это те же «сделайте к сроку» (согласовать,
 # оплатить, приложить чек), только из процесса закупа.
 SOURCES = ('wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'crm', 'complaints', 'training_plans', 'lms', 'surveys', 'events', 'four_you',
+           'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events', 'four_you',
            'birthdays')
 
 # В какие разделы ведут строки источника — все значения поля 'view' его
@@ -57,6 +57,7 @@ SOURCE_VIEWS = {
     'crm': ('crm_tickets',),
     'complaints': ('complaints',),
     'training_plans': ('complaints', None),
+    'discipline': ('discipline',),
     'lms': ('lms',),
     'surveys': ('surveys',),
     'events': ('events',),
@@ -69,7 +70,7 @@ SOURCE_VIEWS = {
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
 # «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
 # набор, а _notifications_viewer_context: тому, кто в раздел не входит.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments'})
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline'})
 
 
 def sources_outside_views(allowed_views):
@@ -664,6 +665,36 @@ def payments(cursor, viewer, limit):
     } for row in rows]
 
 
+def discipline(cursor, viewer, limit):
+    """«Дисциплина» (#254): нарушения, объяснительные, акты, особый контроль.
+
+    Строки лежат готовыми в discipline_notifications — их пишет сам процесс в
+    момент события (discipline/service.py), уведомление адресное. Отдаём его,
+    только пока у человека есть доступ: раздел открыт и запись (или контроль)
+    ему видна сегодня. Гаснет, когда человек открыл запись (или принял решение
+    по контролю), либо когда дело сделано — объяснительная получена, запись закрыта.
+    """
+    from discipline import access as discipline_access
+    from discipline import queries as discipline_queries
+
+    today = _almaty_now().date()
+    ctx = discipline_queries.load_access_context(cursor, viewer['user_id'], today)
+    if not ctx or not discipline_access.can_open_section(ctx):
+        return 0, []
+    total, rows = discipline_queries.bell(cursor, ctx, limit, today)
+    return total, [{
+        'source': 'discipline',
+        'id': row['id'],
+        'title': row['title'],
+        'body': row['body'] or '',
+        'at': _iso(row['created_at']),
+        'view': 'discipline',
+        'target': ('record:%d' % row['record_id']) if row.get('record_id')
+        else ('control:%d' % row['control_id']) if row.get('control_id') else None,
+        'tone': 'warning' if row['tone'] == 'warning' else 'default',
+    } for row in rows]
+
+
 def _complaint_author_items(cursor, viewer, limit):
     """Ответ для водителя и вопрос группы по своим жалобам — для источника crm.
 
@@ -1075,6 +1106,7 @@ _HANDLERS = {
     'crm': crm,
     'complaints': complaints,
     'training_plans': training_plans,
+    'discipline': discipline,
     'lms': lms,
     'surveys': surveys,
     'events': events,

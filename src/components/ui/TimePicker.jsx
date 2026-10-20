@@ -209,14 +209,16 @@ export function IosTimePicker({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
 
-    /* Открытую панель прокручиваем к выбранным часу и минуте. Считаем сами, а
+    /* Открытую панель прокручиваем к выбранным часу и минуте, а у пустого поля —
+       к времени по умолчанию (defaultTime): иначе панель открывалась на 00, и до
+       рабочего утра или времени нарушения приходилось листать. Считаем сами, а
        не через scrollIntoView: тот тащит за собой и внешнюю прокрутку модалки,
        и поле уезжает из-под панели. */
     useLayoutEffect(() => {
         if (!open || !coords) return;
         [hourColRef, minuteColRef].forEach((ref) => {
             const col = ref.current;
-            const active = col?.querySelector('[data-active="1"]');
+            const active = col?.querySelector('[data-active="1"]') || col?.querySelector('[data-anchor="1"]');
             if (col && active) col.scrollTop = active.offsetTop - (col.clientHeight - active.offsetHeight) / 2;
         });
     }, [open, coords]);
@@ -357,6 +359,9 @@ export function IosTimePicker({
     const outOfRange = (total) => (minTotal !== null && total < minTotal) || (maxTotal !== null && total > maxTotal);
     const minutes = [];
     for (let m = 0; m < 60; m += (step > 0 ? step : 1)) minutes.push(m);
+    // Минута-ориентир пустого поля — ближайшая по шагу к минутам defaultTime.
+    const anchorMinute = minutes.reduce((best, m) => (
+        Math.abs(m - (anchor % 60)) < Math.abs(best - (anchor % 60)) ? m : best), minutes[0]);
 
     const panel = open && coords ? createPortal(
         <div
@@ -376,6 +381,7 @@ export function IosTimePicker({
                         // Час доступен, пока в нём есть хоть одна допустимая минута.
                         isOff: (h) => minutes.every((m) => outOfRange(h * 60 + m)),
                         isOn: (h) => current !== null && Math.floor(current / 60) === h,
+                        isAnchor: (h) => Math.floor(anchor / 60) === h,
                         text: (h) => pad(h),
                         pick: (h) => { guessedFromRef.current = null; setDraft(emit(h * 60 + (anchor % 60))); },
                     },
@@ -386,6 +392,7 @@ export function IosTimePicker({
                         items: minutes,
                         isOff: (m) => outOfRange(Math.floor(anchor / 60) * 60 + m),
                         isOn: (m) => current !== null && current % 60 === m,
+                        isAnchor: (m) => m === anchorMinute,
                         text: (m) => pad(m),
                         pick: (m) => { guessedFromRef.current = null; setDraft(emit(Math.floor(anchor / 60) * 60 + m)); setOpen(false); },
                     },
@@ -403,6 +410,7 @@ export function IosTimePicker({
                                         key={item}
                                         type="button"
                                         data-active={on ? '1' : undefined}
+                                        data-anchor={col.isAnchor(item) ? '1' : undefined}
                                         disabled={off}
                                         className={colBtn(on, off)}
                                         /* Фокус остаётся в поле: гасить его на каждый клик по часу

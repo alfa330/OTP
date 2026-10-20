@@ -7138,6 +7138,7 @@ class Database:
             self._init_payments_schema_tx(cursor)
             self._init_library_schema_tx(cursor)
             self._init_complaints_schema_tx(cursor)
+            self._init_discipline_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
             self._init_test_numbers_schema_tx(cursor)
@@ -7469,6 +7470,10 @@ class Database:
                     -- (дело сделано, заявку открыли), чтобы бейдж обновился
                     -- во всех его вкладках.
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'discipline_notifications' THEN
+                    -- «Дисциплина» (#254): так же адресно — строку пишет сам
+                    -- процесс одному человеку, будим только его.
+                    targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -7591,6 +7596,14 @@ class Database:
             (
                 'trg_bell_payment_notifications',
                 'payment_notifications',
+                'AFTER UPDATE OF read_at',
+                'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
+            ),
+            # «Дисциплина» (#254): появление уведомления и его погашение.
+            ('trg_bell_discipline_notifications_insert', 'discipline_notifications', 'AFTER INSERT', ''),
+            (
+                'trg_bell_discipline_notifications',
+                'discipline_notifications',
                 'AFTER UPDATE OF read_at',
                 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
             ),
@@ -8210,6 +8223,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT complaints_schema")
+
+    def _init_discipline_schema_tx(self, cursor):
+        """Схема раздела «Дисциплина» (таблицы discipline_*, задача #254).
+
+        DDL — в пакете discipline/schema.py, импорт локальный (цикл). Вызывается
+        ПОСЛЕ базового DDL: запись ссылается на trainings, groups, departments и
+        users. Под SAVEPOINT, как у «Жалоб»: сломанная миграция раздела не должна
+        ронять инициализацию базы — раздел тогда честно скажет о себе 503.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT discipline_schema")
+        try:
+            from discipline.schema import init_discipline_schema
+            init_discipline_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT discipline_schema")
+            logging.exception(
+                "Схема раздела «Дисциплина» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT discipline_schema")
 
     def _init_payments_schema_tx(self, cursor):
         """Схема раздела «Оплата счетов» (задача #179): заявки, шаги маршрута,

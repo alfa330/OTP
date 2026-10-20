@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldCheck, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
@@ -42,6 +42,7 @@ const SOURCE_META = {
     crm: { label: 'Обращения', icon: Headset, tint: 'text-emerald-600 bg-emerald-50' },
     complaints: { label: 'Жалобы', icon: MessageSquareWarning, tint: 'text-red-600 bg-red-50' },
     training_plans: { label: 'Тренинги', icon: CalendarCheck, tint: 'text-lime-700 bg-lime-50' },
+    discipline: { label: 'Дисциплина', icon: ShieldAlert, tint: 'text-rose-700 bg-rose-50' },
     lms: { label: 'Обучение', icon: GraduationCap, tint: 'text-indigo-600 bg-indigo-50' },
     surveys: { label: 'Опросы', icon: ClipboardList, tint: 'text-sky-600 bg-sky-50' },
     events: { label: 'Ивенты', icon: CalendarDays, tint: 'text-rose-600 bg-rose-50' },

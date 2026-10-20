@@ -1,0 +1,167 @@
+# -*- coding: utf-8 -*-
+"""«Дисциплина» (#254): раздел подключён к порталу во всех местах, а зеркала
+правил на клиенте совпадают с сервером.
+
+Забытая строка регистрации не роняет сборку — она молча прячет раздел
+(редирект гарда «Этап 10», пропавший пункт меню, неоткрывающаяся ссылка из
+Telegram). Поэтому каждое место проверяется здесь явно.
+"""
+
+import json
+import re
+import subprocess
+import unittest
+from pathlib import Path
+
+from discipline import catalog
+from notifications import sources
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+BELL = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
+RULES = ROOT / 'src' / 'components' / 'discipline' / 'disciplineRules.js'
+
+
+def _js_object(name):
+    """Значение экспортированного объекта disciplineRules.js — через node."""
+    script = "import(%s).then((m) => console.log(JSON.stringify(m[%s])))" % (
+        json.dumps(RULES.as_uri()), json.dumps(name))
+    out = subprocess.run(['node', '--input-type=module', '-e', script], capture_output=True, text=True,
+                         check=True, timeout=30)
+    return json.loads(out.stdout)
+
+
+class AppWiringTests(unittest.TestCase):
+    def test_lazy_view_and_render_behind_qr_lock(self):
+        self.assertIn("const DisciplineView = lazyWithRetry(() => import('./components/discipline/DisciplineView'));", APP)
+        self.assertIn('{view === "discipline" && canAccessDisciplineSection && (sensitiveSectionsLocked ? (', APP)
+        self.assertIn('focusRequest={disciplineFocusRequest}', APP)
+
+    def test_guard_url_and_sidebar(self):
+        self.assertIn("if (view === 'discipline' && canAccessDisciplineSection) return;", APP)
+        self.assertIn("(requestedViewFromUrl !== 'discipline' || canAccessDisciplineSection)", APP)
+        self.assertEqual(APP.count("handleSidebarViewNavigation(e, 'discipline')"), 1)
+        self.assertIn("showDisciplineMenu && deptAllowsInner('discipline')", APP)
+        self.assertIn("discipline: 'Discipline',", APP)
+        # Зависимости эффектов и мемо меню: без них признак застывает на первом рендере.
+        self.assertIn('canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection', APP)
+        self.assertIn('canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]', APP)
+        self.assertIn('canAccessWaterSection,\n                showDisciplineMenu,', APP)
+        self.assertIn("|| view === 'discipline' || view === 'baiga' || view === 'driver_mailings') {", APP)
+
+    def test_department_lists_match_server(self):
+        match = re.search(r"const DISCIPLINE_DEPARTMENT_CODES = \[([^\]]*)\];", APP)
+        self.assertTrue(match)
+        codes = tuple(re.findall(r"'([a-z_]+)'", match.group(1)))
+        self.assertEqual(codes, catalog.SECTION_DEPARTMENT_CODES)
+        self.assertIn("discipline: ['szov', 'op', 'tez'],", APP)
+
+    def test_admin_without_heading_is_out(self):
+        body = APP[APP.index('const canAccessDisciplineSectionForUser'):APP.index('const isDisciplineOperatorUser')]
+        # Порядок важен: глава отдела раздела проходит раньше, чем админ отсекается.
+        self.assertLess(body.index('isDepartmentHead(userLike)'), body.index("if (role === 'admin') return false;"))
+
+    def test_qr_rule_matches_portal_lock(self):
+        # Сервер просит QR у роли «оператор» — общий замок портала тоже.
+        self.assertIn("const SENSITIVE_QR_GATED_ROLES = new Set(['operator',", APP)
+
+    def test_bell(self):
+        self.assertIn('discipline', sources.SOURCES)
+        self.assertEqual(sources.SOURCE_VIEWS['discipline'], ('discipline',))
+        self.assertIn('discipline', sources.OWN_CIRCLE_VIEWS)
+        self.assertIn("discipline: { label: 'Дисциплина'", BELL)
+        self.assertIn("if (nextView === 'discipline' && target) {", APP)
+
+
+class MirrorTests(unittest.TestCase):
+    def test_state_labels_and_tones(self):
+        self.assertEqual(_js_object('STATE_LABELS'), dict(catalog.STATE_LABELS))
+        self.assertEqual(_js_object('STATE_TONES'), dict(catalog.STATE_TONES))
+
+    def test_step_labels(self):
+        self.assertEqual(_js_object('STEP_LABELS'), dict(catalog.STEP_LABELS))
+
+    def test_description_minimum(self):
+        self.assertEqual(_js_object('DESCRIPTION_MIN'), catalog.DESCRIPTION_MIN_CHARS)
+
+    def test_file_limits(self):
+        # Размер и число файлов клиент проверяет до отправки — по тем же пределам.
+        limits = _js_object('FILE_LIMITS')
+        self.assertEqual(set(limits), set(catalog.FILE_KINDS))
+        for kind, spec in catalog.FILE_KINDS.items():
+            self.assertEqual(limits[kind]['maxBytes'], spec['max_bytes'], kind)
+            self.assertEqual(limits[kind]['maxFiles'], spec['max_files'], kind)
+            self.assertEqual(limits[kind].get('videoMaxBytes'), spec.get('video_max_bytes'), kind)
+
+    def test_states_beside_step_are_known(self):
+        for name in ('CARD_STATES_BESIDE_STEP', 'ROW_STATES_BESIDE_STEP'):
+            self.assertLessEqual(set(_js_object(name)), set(catalog.STATE_LABELS), name)
+
+
+class StackAndDraftTests(unittest.TestCase):
+    VIEW = (ROOT / 'src' / 'components' / 'discipline' / 'DisciplineView.jsx').read_text(encoding='utf-8')
+    FORM = (ROOT / 'src' / 'components' / 'discipline' / 'RecordForm.jsx').read_text(encoding='utf-8')
+
+    def test_one_window_for_the_stack(self):
+        # Одно окно на стопку: жест «назад» на телефоне снимает один уровень, как
+        # шеврон, и возвращает false — запись окна в истории остаётся для
+        # следующего жеста (useScreenBackGesture: false = «остаюсь»).
+        self.assertEqual(self.VIEW.count('<IosModal'), 1)
+        self.assertIn('const stepBack = onBack ? () => { onBack(); return false; } : null;', self.VIEW)
+        self.assertIn('onClose={mobile && stepBack ? stepBack : onClose}', self.VIEW)
+
+    def test_bell_focus_is_reset_when_leaving(self):
+        self.assertIn("if (view !== 'discipline') setDisciplineFocusRequest(null);", APP)
+
+    def test_drafts_are_per_user_and_cleared_on_logout(self):
+        self.assertIn('readDrafts(userId)', self.FORM)
+        self.assertIn('userId={ping?.user_id}', self.VIEW)
+        self.assertIn(".filter((key) => key.startsWith('otp.discipline.draft.'))", APP)
+
+    def test_section_root_paints_page_on_phone(self):
+        # MobilePageChrome красит страницу на телефоне цветом корня раздела;
+        # прозрачный корень открывал логотип с фона портала под карточками.
+        root = re.search(r'return \(\s*<div className="(mx-auto w-full max-w-\[1180px\][^"]*)"', self.VIEW)
+        self.assertIsNotNone(root)
+        self.assertIn('bg-gray-50', root.group(1).split())
+
+
+
+class TimeFieldsTests(unittest.TestCase):
+    """Дата, смена и тайм-код — пикерами портала (владелец, 20.10.2026: «сделай
+    кастомный пикер», «чтобы просто вводилось время, а не рандомные числа»)."""
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+
+    def test_no_system_date_or_time_fields_in_section(self):
+        for path in sorted(self.DIR.glob('*.jsx')):
+            text = path.read_text(encoding='utf-8')
+            for native in ('type="datetime-local"', 'type="date"', 'type="time"'):
+                self.assertNotIn(native, text, path.name)
+
+    def test_both_forms_use_time_fields(self):
+        form = (self.DIR / 'RecordForm.jsx').read_text(encoding='utf-8')
+        sheet = (self.DIR / 'RecordSheet.jsx').read_text(encoding='utf-8')
+        for text in (form, sheet):
+            for field in ('<MomentField', '<ShiftField', '<TimecodeField'):
+                self.assertIn(field, text)
+        # Ответ сервера о формате — к своему полю.
+        self.assertIn("SHIFT_FORMAT: 'shift_label'", form)
+        self.assertIn("EVIDENCE_NOTE: 'evidence'", form)
+        self.assertIn("SHIFT_FORMAT: 'shift_label', EVIDENCE_NOTE: 'evidence_note'", sheet)
+
+    def test_time_fields_use_portal_pickers(self):
+        fields = (self.DIR / 'TimeFields.jsx').read_text(encoding='utf-8')
+        self.assertIn("import IosDatePicker from '../ui/DatePicker';", fields)
+        self.assertIn("import { IosTimePicker } from '../ui/TimePicker';", fields)
+        # Обёртка с красной рамкой — всегда одна и та же: условная пересоздала бы поле.
+        self.assertIn("const ring = (on) => `rounded-xl ${on ? INVALID_RING : ''}`;", fields)
+
+    def test_empty_time_panel_opens_at_default_time(self):
+        # Пустой тайм-код: панель часов открывается у времени нарушения, а не на 00.
+        picker = (ROOT / 'src' / 'components' / 'ui' / 'TimePicker.jsx').read_text(encoding='utf-8')
+        self.assertIn("col?.querySelector('[data-active=\"1\"]') || col?.querySelector('[data-anchor=\"1\"]')", picker)
+        self.assertIn("data-anchor={col.isAnchor(item) ? '1' : undefined}", picker)
+
+
+if __name__ == '__main__':
+    unittest.main()

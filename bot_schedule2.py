@@ -67124,6 +67124,37 @@ except Exception:
     logging.exception("Раздел «Жалобы»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Дисциплина» (задача #254) ─────────────────────────────────────────
+# Нарушения, объяснительные, акты и особый контроль операторов СЗоВ, ОП и Теза.
+# Ключ QR-подтверждения тот же, что у «Моих оценок»: рядовые открывают свои
+# записи только после него. Файлы — свой бакет или общий бакет вложений задач.
+def _discipline_bucket_name():
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_DISCIPLINE') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+try:
+    from discipline.routes import build_discipline_blueprint  # noqa: E402
+
+    app.register_blueprint(build_discipline_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+        gcs={'bucket_name': _discipline_bucket_name, 'client': get_gcs_client},
+        avatar_url=_build_avatar_signed_url,
+    ))
+    logging.info("Раздел «Дисциплина»: Blueprint подключён на /api/discipline")
+except Exception:
+    logging.exception("Раздел «Дисциплина»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Посылки» (реестр невостребованных посылок фронт-офисов) ──────────
 # Тот же приём, что у вики и обращений. Ключ sensitive-access тот же самый:
 # в карточке ФИО и телефон живого водителя, и оба отдела — фронт-офисы и СЗоВ —
@@ -67512,6 +67543,37 @@ async def payments_deadline_reminders_async():
         return await loop.run_in_executor(executor_pool, payments_deadline_reminders_job)
     except Exception:
         logging.exception("payments deadline reminders failed")
+
+
+def discipline_reminders_job():
+    """«Дисциплина» (#254): срок объяснительной (повтор оператору за 4 часа,
+    просрочка — СВ и руководителю), 3 дня до конца особого контроля и «примите
+    решение» по его окончании. Одно напоминание на срок — повторный прогон
+    ничего не дублирует. Telegram уходит после фиксации транзакции."""
+    try:
+        from discipline import notify as discipline_notify
+        from discipline import service as discipline_service
+
+        outbox = discipline_notify.Outbox()
+        with db._get_cursor() as cursor:
+            discipline_service.run_reminders(
+                cursor, now=discipline_service.now_almaty(), today=discipline_service.today_almaty(),
+                base_url=TASK_WEB_APP_BASE_URL, outbox=outbox)
+        for chat_id, text, markup in outbox.messages:
+            try:
+                _send_telegram_text_message(chat_id, text, parse_mode='HTML', reply_markup=markup)
+            except Exception:
+                logging.warning("Дисциплина: Telegram не принял напоминание для %s", chat_id, exc_info=True)
+    except Exception:
+        logging.exception("Дисциплина: напоминания не отработали")
+
+
+async def discipline_reminders_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, discipline_reminders_job)
+    except Exception:
+        logging.exception("discipline reminders failed")
 
 
 def payments_fixed_generation_job():
@@ -71794,6 +71856,18 @@ if __name__ == '__main__':
         CronTrigger(hour=6, minute=5, timezone=ZoneInfo('Asia/Almaty')),
         id='payments_fixed_generation_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Дисциплина» (#254): срок объяснительной и окончание особого контроля.
+    # Каждые 30 минут: повтор оператору уходит «за 4 часа до срока», и раз в
+    # сутки его было бы не поймать. Работа — несколько узких запросов.
+    scheduler.add_job(
+        discipline_reminders_async,
+        CronTrigger(minute='*/30', timezone=ZoneInfo('Asia/Almaty')),
+        id='discipline_reminders',
+        misfire_grace_time=900,
         max_instances=1,
         coalesce=True
     )

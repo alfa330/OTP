@@ -263,6 +263,7 @@ const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsVi
 const ComplaintsView = lazyWithRetry(() => import('./components/complaints/ComplaintsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
+const DisciplineView = lazyWithRetry(() => import('./components/discipline/DisciplineView'));
 const ThermoboxesView = lazyWithRetry(() => import('./components/thermoboxes/ThermoboxesView'));
 const TestNumbersView = lazyWithRetry(() => import('./components/test_numbers/TestNumbersView'));
 const BaigaView = lazyWithRetry(() => import('./components/baiga/BaigaView'));
@@ -538,6 +539,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
  *   water — фронт-офисы, СЗоВ и ОП (canAccessWaterSectionForUser);
+ *   discipline — СЗоВ, ОП и Тез (canAccessDisciplineSectionForUser);
  *   thermoboxes — THERMOBOXES_SECTION_DEPARTMENT_CODES;
  *   baiga — отделы круга раздела по умолчанию (baiga/access.py: SECTION_DEPARTMENT_CODES);
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
@@ -563,6 +565,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Жалобы принимает СЗоВ, разбирают отделы сотрудников (complaints/catalog.py:
     // HANDLER_DEPARTMENT_CODES) — пункт виден при выборе любого из них.
     complaints: ['szov', 'op', 'front_office', 'remote_cc', 'request_processing_department'],
+    // «Дисциплина» (#254): нарушения операторов СЗоВ, ОП и Теза.
+    discipline: ['szov', 'op', 'tez'],
     // Раздел отдела продаж. У СЗоВ своя переписка в Chat2Desk, поэтому в его
     // наборе «Чатов Верификаторов» нет (решение владельца 09.09.2026) —
     // круг доступа при этом не менялся, см. canAccessVerifierChatsForUser.
@@ -897,6 +901,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
     water: 'Water accounting',
+    discipline: 'Discipline',
     thermoboxes: 'Thermoboxes',
     test_numbers: 'Test numbers',
     baiga: 'Baiga lists',
@@ -2666,6 +2671,41 @@ const canAccessWaterSectionForUser = (userLike) => {
     return WATER_CHECK_DEPARTMENT_CODES.some((code) => own === code || headed.includes(code));
 };
 
+/* «Дисциплина» (#254) — нарушения, объяснительные, акты и особый контроль
+   операторов. Отделы — СЗоВ, ОП и Тез (решение владельца 20.10.2026).
+
+   Кому открыт:
+     супер-админ — все три отдела;
+     глава СЗоВ, ОП или Теза (любая базовая роль) — свои отделы;
+     супервайзер этих отделов — только свои группы («СВ видит только свою группу»);
+     оператор и стажёр этих отделов — только свои записи (ТЗ п. 3);
+     админ, который не глава одного из трёх отделов, — нет («если админ не
+       руководитель этих трёх отделов, он не может просматривать раздел»).
+
+   Здесь решается только «пускать ли в раздел»; оператору пункт меню
+   показывается, лишь когда у него есть записи (showDisciplineMenu ниже) — иначе
+   пустой раздел у каждого оператора был бы шумом. Обязательную границу держит
+   сервер — discipline/access.py; тест сверяет списки. */
+const DISCIPLINE_DEPARTMENT_CODES = ['szov', 'op', 'tez'];
+
+const canAccessDisciplineSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    const headed = aiQaHeadDepartmentCodesOf(userLike);
+    if (isDepartmentHead(userLike) && headed.some((code) => DISCIPLINE_DEPARTMENT_CODES.includes(code))) return true;
+    if (role === 'admin') return false;
+    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    if (!DISCIPLINE_DEPARTMENT_CODES.includes(own)) return false;
+    return role === 'sv' || role === 'operator' || role === 'trainee';
+};
+
+const isDisciplineOperatorUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    return (role === 'operator' || role === 'trainee')
+        && canAccessDisciplineSectionForUser(userLike)
+        && !(isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some((code) => DISCIPLINE_DEPARTMENT_CODES.includes(code)));
+};
+
 /* «Термокороба» (#363) — условия выдачи термокоробов по фронт-офисам.
 
    Фронт-офисы заполняют остатки и условия, колл-центр СЗоВ смотрит и по ним
@@ -3218,6 +3258,8 @@ const buildAppViewUrl = (nextView) => {
         if (nextView !== 'payments') stripPaymentsParams(url);
         /* То же с открытой оценкой «ИИ-оценки» (eval=…, evalLink.js). */
         if (nextView !== 'ai_qa') stripAiQaParams(url);
+        /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
+        if (nextView !== 'discipline') url.searchParams.delete('record');
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3279,6 +3321,8 @@ const syncAppViewWithUrl = (nextView) => {
            закрытую карточку. Условие «не ai_qa»: иначе ссылка на оценку стиралась бы
            сразу после входа, раньше, чем раздел её откроет. */
         if (nextView !== 'ai_qa') stripAiQaParams(url);
+        /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
+        if (nextView !== 'discipline') url.searchParams.delete('record');
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {
@@ -43338,6 +43382,42 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canAccessComplaintsSection = canAccessComplaintsSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
+            const canAccessDisciplineSection = canAccessDisciplineSectionForUser(user);
+            // Оператору пункт «Дисциплина» — только если у него есть записи:
+            // число своих записей сервер отдаёт в /ping без QR (сами записи — за QR).
+            const [disciplineOwnTotal, setDisciplineOwnTotal] = useState(null);
+            const [disciplinePingNonce, setDisciplinePingNonce] = useState(0);
+            const disciplinePingAtRef = useRef(0);
+            const disciplineOperator = isDisciplineOperatorUser(user);
+            useEffect(() => {
+                if (!user?.id || !disciplineOperator) { setDisciplineOwnTotal(null); return undefined; }
+                let alive = true;
+                disciplinePingAtRef.current = Date.now();
+                // Сбой запроса (истёкший токен, обрыв сети после сна) пункт меню не
+                // прячет: остаётся прежнее число, ноль — только из ответа сервера.
+                fetch(`${API_BASE_URL}/api/discipline/ping`, { credentials: 'include', headers: withAccessTokenHeader() })
+                    .then((response) => (response.ok ? response.json() : null))
+                    .then((data) => {
+                        if (!alive) return;
+                        if (data && Number.isFinite(Number(data.own_total))) setDisciplineOwnTotal(Number(data.own_total));
+                        else setDisciplineOwnTotal((prev) => prev ?? 0);
+                    })
+                    .catch(() => { if (alive) setDisciplineOwnTotal((prev) => prev ?? 0); });
+                return () => { alive = false; };
+            }, [user?.id, disciplineOperator, disciplinePingNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+            /* Первая запись о нарушении появилась, пока портал открыт: пункт меню
+               приходит при возврате на вкладку (не чаще раза в минуту) и при
+               переходе из колокола, а не после перезагрузки страницы. */
+            useEffect(() => {
+                if (!user?.id || !disciplineOperator) return undefined;
+                const onVisible = () => {
+                    if (document.visibilityState !== 'visible' || Date.now() - disciplinePingAtRef.current < 60000) return;
+                    setDisciplinePingNonce((n) => n + 1);
+                };
+                document.addEventListener('visibilitychange', onVisible);
+                return () => document.removeEventListener('visibilitychange', onVisible);
+            }, [user?.id, disciplineOperator]);
+            const showDisciplineMenu = canAccessDisciplineSection && (!disciplineOperator || disciplineOwnTotal > 0);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
             const canAccessTestNumbersSection = canAccessTestNumbersSectionForUser(user);
             const canAccessBaigaSection = canAccessBaigaSectionForUser(user);
@@ -43506,6 +43586,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             // Клик по уведомлению «Оплаты счетов»: раздел открывает заявку из уведомления.
             const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
+            // «Дисциплина»: переход из колокола — запись или особый контроль.
+            const [disciplineFocusRequest, setDisciplineFocusRequest] = useState(null);
             // «Продакшн»: какую карточку открыть при входе (переход из «Задач»).
             const [productionFocusRequest, setProductionFocusRequest] = useState(null);
             // Клик по уведомлению о заявке на изменение смены: раздел один,
@@ -47083,7 +47165,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
                     (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
                     // «Жалобы»: ссылка из группы ведёт на ?view=complaints&complaint_id=<id>.
-                    (requestedViewFromUrl !== 'complaints' || canAccessComplaintsSection);
+                    (requestedViewFromUrl !== 'complaints' || canAccessComplaintsSection) &&
+                    // «Дисциплина»: ссылка из Telegram ведёт на ?view=discipline&record=<id>.
+                    (requestedViewFromUrl !== 'discipline' || canAccessDisciplineSection);
                 if (canOpenRequestedView) {
                     redirectToView(requestedViewFromUrl);
                     return;
@@ -47100,7 +47184,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -51192,6 +51276,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const confirmLogout = () => {
                 revokeServerSessionInBackground();
                 clearAuthTokens();
+                /* Черновики формы «Дисциплины» — ФИО и описание нарушения: на общем
+                   компьютере они не должны пережить выход. */
+                try {
+                    Object.keys(window.localStorage)
+                        .filter((key) => key.startsWith('otp.discipline.draft.'))
+                        .forEach((key) => window.localStorage.removeItem(key));
+                } catch { /* хранилище недоступно — чистить нечего */ }
 
                 if (isMounted.current) {
                     clearSensitiveQrPolling();
@@ -53151,6 +53242,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view === 'parcels' && canAccessParcelsSection) return;
                 // «Учёт воды» — тот же периметр и та же причина.
                 if (view === 'water' && canAccessWaterSection) return;
+                if (view === 'discipline' && canAccessDisciplineSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
                 // «Реестр тестовых номеров» — свой предикат: раздел общефирменный,
@@ -53191,7 +53283,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -53266,7 +53358,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Проверяем доступ…» без кнопки QR.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'water' || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'baiga' || view === 'driver_mailings') {
+                        || view === 'discipline' || view === 'baiga' || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -53401,6 +53493,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view !== 'tasks') setTaskFocusRequest(null);
                 if (view !== 'payments') setPaymentsFocusRequest(null);
                 if (view !== 'production') setProductionFocusRequest(null);
+                if (view !== 'discipline') setDisciplineFocusRequest(null);
             }, [view]);
 
             useEffect(() => {
@@ -53652,6 +53745,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         requestId: Number(target),
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
+                }
+                // «Дисциплина»: target — «record:<id>» или «control:<id>»
+                // (notifications/sources.py: discipline).
+                if (nextView === 'discipline') setDisciplinePingNonce((n) => n + 1);
+                if (nextView === 'discipline' && target) {
+                    const [kind, rawId] = String(target).split(':');
+                    const targetId = Number(rawId);
+                    if (targetId) {
+                        setDisciplineFocusRequest((prev) => ({
+                            recordId: kind === 'record' ? targetId : null,
+                            controlId: kind === 'control' ? targetId : null,
+                            nonce: Number(prev?.nonce || 0) + 1,
+                        }));
+                    }
                 }
                 /* Заявки по сменам: один и тот же раздел открывается по-разному
                    у двух сторон — оператору нужна вкладка «Запросы», а
@@ -55275,6 +55382,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     {renderDividerIfInner(
                                         canAccessCrmSection && deptAllowsInner('crm_tickets'),
                                         canAccessComplaintsSection && deptAllowsInner('complaints'),
+                                        showDisciplineMenu && deptAllowsInner('discipline'),
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
                                         canAccessWaterSection && deptAllowsInner('water'),
                                         canAccessThermoboxesSection && deptAllowsInner('thermoboxes'),
@@ -55364,6 +55472,26 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         {complaintsBadgeCount}
                                                     </span>
                                                 )}
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Дисциплина» (#254) — нарушения, объяснительные, акты и
+                                        особый контроль. Объявлен ОДИН раз в общей части меню:
+                                        круг (главы и СВ СЗоВ, ОП, Теза, супер-админ, операторы
+                                        со своими записями) не совпадает ни с одной ролевой
+                                        веткой. Что видно внутри, считает бэкенд. */}
+                                    {showDisciplineMenu && (
+                                    <SidebarDeptScope section="discipline" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'discipline')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'discipline' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-user-shield"></FaIcon>
+                                                <span className="sidebar-text">Дисциплина</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -56140,6 +56268,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 canAccessComplaintsSection,
                 canAccessParcelsSection,
                 canAccessWaterSection,
+                showDisciplineMenu,
                 canAccessThermoboxesSection,
                 canAccessTestNumbersSection,
                 canAccessBaigaSection,
@@ -56689,6 +56818,25 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* «Дисциплина» — за QR-замком у оператора: записи о дисциплине —
+                            персональные данные (ТЗ п. 16). СВ и руководителю замок не нужен. */}
+                        {view === "discipline" && canAccessDisciplineSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Дисциплина"
+                                description="Ваши записи о нарушениях и объяснительные. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <DisciplineView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    focusRequest={disciplineFocusRequest}
                                 />
                             </Suspense>
                         ))}
