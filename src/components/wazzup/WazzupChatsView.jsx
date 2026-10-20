@@ -5,7 +5,7 @@ import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
-    IdCard,
+    IdCard, LogOut,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -54,6 +54,7 @@ import useDriverCard from './useDriverCard';
 import ChatAccessGate from './ChatAccessGate';
 import NewChatButton from './NewChatButton';
 import { draftChat } from './newChat';
+import { replyToEmbedParent, setEmbedStatus, takeEmbedCommands } from './embedBridge';
 import ShiftStartScreen from './ShiftStartScreen';
 import ShiftStatusMenu from './ShiftStatusMenu';
 import ShiftWriteLock from './ShiftWriteLock';
@@ -980,7 +981,8 @@ function ChatsWorkspace(props) {
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
     const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user,
-        operator = false, potok = false, toolbar = null, entering = false, writeLock = null } = props;
+        operator = false, potok = false, toolbar = null, entering = false, writeLock = null,
+        embed = false, onLogout = null } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     /* Кому вообще есть смысл спрашивать сервер про обработку: верификатору и
        супер-админу (wazzup/access.py). Это подсказка, а не право — решает ответ
@@ -1754,6 +1756,74 @@ function ChatsWorkspace(props) {
         };
     }, [selected?.channelId, selected?.chatId, selected?.isNew, account]);
 
+    /* Номер, который писал в несколько каналов: список отбирается по номеру, выбор
+       за человеком — как у ссылки на номер (chatLink.js). */
+    const showNumberChats = (phone) => {
+        deepLinkRequest.current?.abort();
+        clearTimeout(searchDebounce.current);
+        setMainTab('chats');
+        setSearch(phone); setAppliedSearch(phone);
+        messageSearch.reset(); setSearchFocusId(null);
+        threadRequest.current.controller?.abort();
+        setSelected(null); setThread(null);
+        setDeepLinkMiss(''); setDeepLinkChatUrl(''); setDeepLinkMany(phone);
+        loadChats({ reset: true, q: phone });
+    };
+
+    /* Команда CRM «открыть чат с номером» (embedBridge.js). Свой чат номера —
+       открыть; номер писал в несколько каналов — показать их; номеру ещё не
+       писали — новый чат, как «+»: в канале из команды, единственном доступном
+       или выбранном человеком. Первое сообщение отправляет человек. */
+    const [newChatRequest, setNewChatRequest] = useState(null);
+    const openForEmbed = async ({ phone, name, channelId, requestId }) => {
+        const reply = (type, payload = {}) => replyToEmbedParent(type, { requestId, phone, ...payload });
+        let rows;
+        try {
+            const { data } = await axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
+                headers: headers(), params: { account: 'op', chat_id: phone, limit: 20 },
+            });
+            rows = (data.items || []).filter((row) => row.chatId === phone
+                && (!channelId || row.channelId === channelId));
+        } catch (error) {
+            reply('error', { code: 'LOAD_FAILED', message: 'Не удалось проверить номер, повторите' });
+            return;
+        }
+        setMainTab('chats');
+        if (rows.length === 1) {
+            openChat(rows[0]);
+            reply('opened', { channelId: rows[0].channelId, chatId: rows[0].chatId, isNew: false });
+            return;
+        }
+        if (rows.length > 1) {
+            showNumberChats(phone);
+            reply('pending', { reason: 'several_chats' });
+            return;
+        }
+        const allowed = canStartChats ? newChatChannelIds : [];
+        const target = channelId ? (allowed.includes(channelId) ? channelId : '')
+            : (allowed.length === 1 ? allowed[0] : '');
+        if (target) {
+            openChat(draftChat({ channelId: target, phone, name }));
+            reply('opened', { channelId: target, chatId: phone, isNew: true });
+            return;
+        }
+        if (!channelId && allowed.length > 1) {
+            setNewChatRequest({ phone, name, nonce: Date.now() });
+            reply('pending', { reason: 'choose_channel' });
+            return;
+        }
+        reply('error', { code: 'CANNOT_START', message: 'С этим номером чата нет, а начать новый здесь нельзя' });
+    };
+    const openForEmbedRef = useRef(openForEmbed);
+    openForEmbedRef.current = openForEmbed;
+    // Готово, когда известно, где можно начинать чаты: иначе «новый чат» решался бы вслепую.
+    const embedReady = embed && (!mayProcess || pilot.capability !== null || pilot.connection === 'unavailable');
+    useEffect(() => {
+        if (!embedReady) return undefined;
+        setEmbedStatus('ready');
+        return takeEmbedCommands((command) => openForEmbedRef.current(command));
+    }, [embedReady]);
+
     /* Ссылка на этот чат. Кладём в буфер: адресную строку человек не открывает,
        а ссылку надо отправить в переписке. Запасной путь через execCommand
        нужен не для красоты — clipboard.writeText есть только в защищённом
@@ -1919,6 +1989,12 @@ function ChatsWorkspace(props) {
                             <RefreshCw size={13} /> Обновить
                         </button>
                     )}
+                    {/* В окне CRM меню портала нет — выйти из учётки можно только здесь. */}
+                    {embed && onLogout && (
+                        <button type="button" onClick={onLogout} className={iosBtnGhost} title="Выйти из учётки iCORE">
+                            <LogOut size={13} /> Выйти
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -1954,7 +2030,8 @@ function ChatsWorkspace(props) {
                                        className={`${iosInput} py-2 pl-9 text-[13px]`} />
                             </div>
                             {canStartChats && <NewChatButton channels={channels} allowedIds={newChatChannelIds}
-                                preferredChannelId={selected?.channelId} onStart={startNewChat} />}
+                                preferredChannelId={selected?.channelId} onStart={startNewChat}
+                                request={newChatRequest} />}
                         </div>
                         {pilot.enabled && <div className="mt-2 flex items-center gap-2 text-xs">
                             <button type="button" onClick={() => setUnreadOnly(!unreadOnly)}
@@ -2343,6 +2420,24 @@ function WorkspaceLoading({ error }) {
     );
 }
 
+/* Экран до окна чатов (замок, «Начать смену»). В окне CRM меню портала нет —
+   выйти из чужой учётки можно только отсюда; CRM узнаёт, что окно ждёт человека. */
+function GateScreen({ embed, onLogout, children }) {
+    useEffect(() => { if (embed) setEmbedStatus('locked'); }, [embed]);
+    return (
+        <div className="wazzup-scrollbar h-full overflow-y-auto">
+            {children}
+            {embed && onLogout && (
+                <div className="flex justify-center pb-6">
+                    <button type="button" onClick={onLogout} className={iosBtnGhost}>
+                        <LogOut size={13} /> Выйти из учётки
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function OperatorWorkspace(props) {
     const workspace = useGatedWorkspace(props);
     /* Окно открыто кнопкой «Начать смену» — играем открытие. Перезагрузка
@@ -2355,10 +2450,10 @@ function OperatorWorkspace(props) {
     useEffect(() => { if (!onShift) startedHere.current = false; }, [onShift]);
 
     if (!workspace.ready) return <WorkspaceLoading error={workspace.error} />;
-    if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
-    if (!onShift) return <div className="wazzup-scrollbar h-full overflow-y-auto">
+    if (workspace.locked) return <GateScreen embed={props.embed} onLogout={props.onLogout}><ChatAccessGate /></GateScreen>;
+    if (!onShift) return <GateScreen embed={props.embed} onLogout={props.onLogout}>
         <ShiftStartScreen onStartIntent={(value) => { startedHere.current = value; }} />
-    </div>;
+    </GateScreen>;
     return <ChatsWorkspace {...props} operator entering={startedHere.current} toolbar={<ShiftStatusMenu />}
         writeLock={shiftWriteLock(workspace.current, workspace.startKey)} />;
 }
@@ -2371,7 +2466,7 @@ function OperatorWorkspace(props) {
 function PotokWorkspace(props) {
     const workspace = useGatedWorkspace(props);
     if (!workspace.ready) return <WorkspaceLoading error={workspace.error} />;
-    if (workspace.locked) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate /></div>;
+    if (workspace.locked) return <GateScreen embed={props.embed} onLogout={props.onLogout}><ChatAccessGate /></GateScreen>;
     return <ChatsWorkspace {...props} operator potok />;
 }
 

@@ -105,7 +105,7 @@ test('раздел: поле ввода и «Ответить» — только
     const view = readFileSync('src/components/wazzup/WazzupChatsView.jsx', 'utf8').replace(/\r\n/g, '\n');
     assert.match(view, /import ShiftWriteLock from '\.\/ShiftWriteLock';/);
     assert.match(view, /import \{ shiftWriteLock \} from '\.\/workspaceStatus';/);
-    assert.match(view, /operator = false, potok = false, toolbar = null, entering = false, writeLock = null \} = props;/);
+    assert.match(view, /operator = false, potok = false, toolbar = null, entering = false, writeLock = null,\n\s*embed = false, onLogout = null \} = props;/);
     assert.match(view, /const pilotChannelCanSend = pilot\.enabled && pilot\.capability\?\.canSend && selected\?\.chatType === 'whatsapp'\n/);
     assert.match(view, /const pilotCanSend = pilotChannelCanSend && !writeLock;/);
     assert.match(view, /onReply=\{pilotCanSend && !m\.local \? chooseReply : undefined\}/);

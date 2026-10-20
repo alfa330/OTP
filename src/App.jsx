@@ -149,6 +149,7 @@ import {
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { useChatWaitingCount, waitingBadgeLabel } from './components/wazzup/chatWaitingBadge';
+import { installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand, setEmbedStatus } from './components/wazzup/embedBridge';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
 // Метки адреса «Оплаты счетов» — из модуля адреса: сам раздел грузится lazy.
 import { stripPaymentsParams } from './components/payments/paymentsLink';
@@ -333,6 +334,11 @@ if (typeof window !== 'undefined') {
 }
 
 const APP_BASE_URL = import.meta.env.BASE_URL || '/';
+/* «Чаты ОП» окном в CRM группы «Поток» (?view=wazzup_chats&embed=1, владелец
+   20.10.2026): портал рисует один раздел без меню и слушает команды страницы,
+   в которую встроен (components/wazzup/embedBridge.js). Признак — с адреса загрузки. */
+const CHATS_EMBED = typeof window !== 'undefined' && isChatsEmbedSearch(window.location.search);
+if (CHATS_EMBED) installEmbedBridge();
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
@@ -43593,6 +43599,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                открывал бы тот же чат. */
             const [wazzupInitialChat, setWazzupInitialChat] = useState(null);
             const clearWazzupInitialChat = useCallback(() => setWazzupInitialChat(null), []);
+            /* Окно чатов в CRM: CRM узнаёт, что нужен вход или что учётке чаты не
+               открыты; номер из адреса окна (?chat=<номер>) — та же команда «открыть
+               чат», что и от кнопки CRM, а не поиск ссылки: номеру, которому ещё не
+               писали, окно откроет новый чат. */
+            useEffect(() => {
+                if (!CHATS_EMBED) return;
+                if (!user?.id) setEmbedStatus('login');
+                else if (!canAccessVerifierChatsSection) setEmbedStatus('no_access');
+            }, [user?.id, canAccessVerifierChatsSection]);
+            useEffect(() => {
+                if (!CHATS_EMBED || !wazzupInitialChat?.phone || wazzupInitialChat.channelId) return;
+                queueEmbedCommand({ phone: wazzupInitialChat.phone, name: '', channelId: '', requestId: '' });
+                setWazzupInitialChat(null);
+            }, [wazzupInitialChat]);
 
             /* Раздел прочитан — колокол обязан узнать об этом сам.
                Связь была односторонней: заход в «Ивенты» гасил бейдж в сайдбаре,
@@ -56438,6 +56458,48 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     </div>
                 );
             };
+
+            /* Окно чатов в CRM (?embed=1) — один раздел, без меню, колокола и прочего
+               портала. Сторож смены верификатора нужен и здесь: смена идёт, пока
+               открыто окно. */
+            if (CHATS_EMBED) {
+                return (
+                    <div className="h-screen overflow-hidden bg-white">
+                        {canAccessVerifierChatsSection ? (
+                            <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
+                                <WazzupChatsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    initialChat={wazzupInitialChat}
+                                    onInitialChatConsumed={clearWazzupInitialChat}
+                                    embed
+                                    onLogout={handleLogout}
+                                />
+                            </Suspense>
+                        ) : (
+                            <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-[14px] text-slate-600">
+                                <p>Этой учётке «Чаты ОП» не открыты.</p>
+                                <button type="button" onClick={handleLogout}
+                                    className="rounded-xl px-3 py-2 text-[13px] font-medium text-slate-500 transition hover:bg-slate-100">
+                                    Выйти из учётки
+                                </button>
+                            </div>
+                        )}
+                        {isWazzupChatOperator(user) && (
+                            <Suspense fallback={null}>
+                                <WazzupShiftKeeper
+                                    userId={user.id}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
+                    </div>
+                );
+            }
 
             return (
                 <div className="flex h-screen overflow-hidden">

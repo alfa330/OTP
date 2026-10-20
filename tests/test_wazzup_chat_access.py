@@ -440,8 +440,10 @@ class WiringTextTests(unittest.TestCase):
     def test_frontend_predicate_reads_the_flag(self):
         predicate = APP_SOURCE.split('const canAccessVerifierChatsForUser = (userLike) => {', 1)[1]
         predicate = predicate.split('\n};', 1)[0]
-        self.assertIn('if (isWazzupChatOperator(userLike)) return true;', predicate)
+        # Группа «Поток» (20.10.2026) — свой флаг профиля, тот же раздел.
+        self.assertIn('if (isWazzupChatOperator(userLike) || isWazzupChatPotok(userLike)) return true;', predicate)
         self.assertIn('userLike?.wazzup_chat_operator ?? userLike?.wazzupChatOperator', APP_SOURCE)
+        self.assertIn('userLike?.wazzup_chat_potok ?? userLike?.wazzupChatPotok', APP_SOURCE)
         # Сторож смены смонтирован на весь портал, а не только в разделе.
         self.assertIn('{isWazzupChatOperator(user) && (', APP_SOURCE)
         self.assertIn('<WazzupShiftKeeper', APP_SOURCE)

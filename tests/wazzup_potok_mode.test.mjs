@@ -11,7 +11,7 @@ const app = read('src/App.jsx');
 
 test('раздел: «Поток» — замок с QR и окно чатов без смены', () => {
     const potok = view.slice(view.indexOf('function PotokWorkspace('), view.indexOf('export default function WazzupChatsView('));
-    assert.match(potok, /if \(workspace\.locked\) return <div className="wazzup-scrollbar h-full overflow-y-auto"><ChatAccessGate \/><\/div>;/);
+    assert.match(potok, /if \(workspace\.locked\) return <GateScreen embed=\{props\.embed\} onLogout=\{props\.onLogout\}><ChatAccessGate \/><\/GateScreen>;/);
     assert.match(potok, /return <ChatsWorkspace \{\.\.\.props\} operator potok \/>;/);
     assert.doesNotMatch(potok, /ShiftStartScreen|ShiftStatusMenu|writeLock/, 'смены у «Потока» нет');
     assert.match(view, /if \(potok\) return <PotokWorkspace key=\{props\.user\?\.id\} \{\.\.\.props\} \/>;/);

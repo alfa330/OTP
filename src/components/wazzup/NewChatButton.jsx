@@ -15,8 +15,11 @@ const label = 'mb-1 block px-1 text-[12px] font-medium text-slate-500';
  * спрашивается, только если начинать можно больше чем в одном.
  *
  * onStart({ channelId, phone, name }) открывает чат — существующий или
- * заготовку; пока он ищет существующий, кнопка «Начать» крутится. */
-export default function NewChatButton({ channels, allowedIds, preferredChannelId, onStart }) {
+ * заготовку; пока он ищет существующий, кнопка «Начать» крутится.
+ *
+ * request { phone, name, nonce } — окно открывает команда CRM (embedBridge.js):
+ * номер уже вписан, канал выбирает человек, потому что начинать можно в нескольких. */
+export default function NewChatButton({ channels, allowedIds, preferredChannelId, onStart, request = null }) {
     const [open, setOpen] = useState(false);
     const [channelId, setChannelId] = useState('');
     const [phone, setPhone] = useState('');
@@ -32,6 +35,16 @@ export default function NewChatButton({ channels, allowedIds, preferredChannelId
     const pointerInside = useRef(false);
     // Варианты — постоянным массивом: CustomSelect пересчитывает подсветку на каждый новый.
     const options = useMemo(() => newChatChannelOptions(channels, allowedIds), [channels, allowedIds]);
+
+    useEffect(() => {
+        if (!request?.nonce || !options.length) return;
+        setChannelId(defaultNewChatChannel(options, preferredChannelId));
+        setPhone(request.phone ? `+${request.phone}` : '');
+        setName(request.name || '');
+        setError(''); setBusy(false);
+        setOpen(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [request?.nonce]);
 
     useEffect(() => {
         if (!open) return undefined;

@@ -137,7 +137,9 @@ class MountTests(unittest.TestCase):
         бы от масштабированного предка, и координаты поехали бы."""
         self.assertIn('<AssistantOrb', self.app)
         orb_at = self.app.index('<AssistantOrb')
-        toast_at = self.app.index('<ToastContainer')
+        # Окно чатов для CRM (?embed=1) — своя короткая оболочка выше по файлу,
+        # со своими тостами и без шарика; сверяем с тостами основной оболочки.
+        toast_at = self.app.rindex('<ToastContainer')
         self.assertLess(orb_at, toast_at, 'шарик обязан стоять до тостов')
         # ToastContainer — сиблинг корневого div; значит и шарик тоже.
         self.assertGreater(orb_at, self.app.index('main-content'))
