@@ -9,6 +9,7 @@ are never automatically retried: the vendor deduplicates for only 60 seconds.
 """
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -245,7 +246,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                                 may_bind=lambda: access is None or access().get('mode') in access_rules.GATED_MODES)
     from .send_check import register_send_check_route
     register_send_check_route(bp, actor, require_api_key, preflight, db, exclusions)
-    from .uploads import register_upload_routes, resolve_upload, sign_upload, UploadError
+    from .uploads import (register_upload_routes, resolve_upload, require_storage, issue_link,
+                          link_origin, UploadError)
     register_upload_routes(bp, actor, require_api_key, preflight, db, exclusions,
                            channels=channels, gcs=gcs)
 
@@ -508,7 +510,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if attachment_id:
             try:
                 attachment = resolve_upload(db, user[0], cid, chat, attachment_id)
-                content_uri = sign_upload(gcs, attachment)
+                require_storage(gcs)
             except UploadError as error:
                 # No outbox attempt or vendor POST exists at this point.
                 return jsonify(error=error.message, code=error.code, state='failed', retryable=False), error.status
@@ -524,6 +526,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id,attachment_id "
                             "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
                 return replay(cur.fetchone(), body, user)
+            if attachment:
+                # Wazzup downloads the file from this link while answering the POST.
+                content_uri = issue_link(cur, attachment, link_origin() + bp.url_prefix)
             if author_id:
                 # The vendor echoes API sends as "Admin" with no author id, so the
                 # reports credit nobody. Our own author key is bound to the sender
@@ -536,7 +541,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         _server_timing('wz-checks', stage)
         stage = time.perf_counter()
         started = time.monotonic()
-        state, code, explanation, message_id = 'unknown', 'SEND_UNKNOWN', '', None
+        state, code, explanation, message_id, detail = 'unknown', 'SEND_UNKNOWN', '', None, ''
         try:
             response = transport.post(WAZZUP_API_ORIGIN + '/v3/message',
                 headers={'Authorization': 'Bearer ' + key}, timeout=(5, 20),
@@ -552,6 +557,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                 message_id, state, code = str(data['messageId']), 'sent', None
             elif 400 <= response.status_code < 500:
                 code = str(data.get('error') or 'SEND_REJECTED') if isinstance(data, dict) else 'SEND_REJECTED'
+                # The code alone hid the cause for two weeks («Bad response from content store»).
+                # Links are masked: a description may repeat the request.
+                detail = (re.sub(r'https?://\S+', '<link>', str(data.get('description') or ''))[:200]
+                          if isinstance(data, dict) else '')
                 if 'REPEATED' not in code.upper() and response.status_code not in (408,):
                     state = 'failed'
                 explanation = 'Wazzup отклонил отправку (' + code[:100] + ').'
@@ -571,8 +580,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             cur.execute("""UPDATE wazzup_pilot_outbox SET state=%s,message_id=%s,
                 error_code=%s,error_message=%s,updated_at=now() WHERE request_id=%s""",
                 (state, message_id, code, explanation, request_id))
-        logging.info('Wazzup pilot send state=%s duration_ms=%d request_id=%s code=%s', state,
-                     round((time.monotonic() - started) * 1000), request_id, code)
+        logging.info('Wazzup pilot send state=%s duration_ms=%d request_id=%s code=%s detail=%s', state,
+                     round((time.monotonic() - started) * 1000), request_id, code, detail or '-')
         if state != 'sent':
             return jsonify(error=explanation, code=code, state=state, retryable=False,
                            clientMessageId=request_id), 422 if state == 'failed' else 409

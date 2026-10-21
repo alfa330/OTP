@@ -1,14 +1,18 @@
 """Attachment idempotency on explicitly selected disposable local PostgreSQL."""
+import hashlib
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import timedelta
+from urllib.parse import urlsplit
 
 import pytest
 import requests
 
 from tests.test_wazzup_pilot import CHANNEL, MemoryDatabase
 from tests.test_wazzup_pilot_persistence import PORT, pg  # noqa: F401
-from tests.test_wazzup_uploads import CHAT, PATH, FakeStorage, client_for, send_body, upload
+from tests.test_wazzup_uploads import (CHAT, PATH, PDF, FakeStorage, client_for, fetch_during_post,
+                                       send_body, upload)
 from wazzup import pilot, uploads
 from wazzup.uploads_schema import init_schema
 
@@ -35,6 +39,7 @@ def database(connection, local=None):
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
+    monkeypatch.delenv('RENDER_EXTERNAL_URL', raising=False)
     monkeypatch.setattr(pilot.accounts, 'api_key', lambda account: 'synthetic-key')
     monkeypatch.setattr(uploads, 'schedule_cleanup', lambda *args: None)
     uploads._rate.__globals__['_usage'].clear()
@@ -76,6 +81,39 @@ def test_upload_schema_and_real_send_replay_keep_expired_unknown_attempt(pg):
     for table in ('wazzup_messages', 'wazzup_chat_notes', 'wazzup_syntony_outbox'):
         cursor.execute('SELECT COUNT(*) FROM ' + table)
         assert cursor.fetchone() == (0,)
+
+
+def test_wazzup_downloads_the_file_by_its_link_during_the_send(pg):
+    connection, cursor, _, connect = pg
+    init_schema(cursor)  # repeat migrations
+    connection.commit()
+    add_chat(connection, cursor)
+    db = database(connection)
+    storage = FakeStorage(db)
+    client, transport = client_for(db, storage)
+    attachment = upload(client, filename='Договор.pdf').json['attachment']
+    fetched = []
+    # Wazzup's download is another request on another connection: it finds the
+    # link only if the claim was committed before the vendor POST.
+    fetch_during_post(client_for(database(connect()), storage)[0], transport, fetched)
+    assert client.post(PATH + '/send', json=send_body(attachment)).status_code == 201
+    [(uri, download)] = fetched
+    assert download.status_code == 200 and download.data == PDF
+    path = urlsplit(uri).path
+    cursor.execute('SELECT link_hash, link_expires_at - now() FROM wazzup_pilot_uploads')
+    digest, left = cursor.fetchone()
+    connection.commit()
+    assert digest == hashlib.sha256(path.split('/')[-2].encode()).hexdigest()
+    assert timedelta(minutes=29) < left <= timedelta(minutes=30)
+    cursor.execute("UPDATE wazzup_pilot_uploads SET link_expires_at=now()-interval '1 second'")
+    connection.commit()
+    assert client.get(path).status_code == 404
+    cursor.execute("UPDATE wazzup_pilot_uploads SET link_expires_at=now()+interval '1 minute',deleted_at=now()")
+    connection.commit()
+    assert client.get(path).status_code == 404
+    cursor.execute('UPDATE wazzup_pilot_uploads SET deleted_at=NULL')
+    connection.commit()
+    assert client.get(path).status_code == 200
 
 
 def test_parallel_uploads_commit_one_file_and_one_outbox_send(pg):

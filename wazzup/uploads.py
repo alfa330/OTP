@@ -1,19 +1,23 @@
-"""Scoped file staging. Only the server turns an attachment ID into a GCS URL.
+"""Scoped file staging. Only the server turns an attachment ID into a link.
 
 The upload route never sends a message. Files are immutable, private objects;
-Wazzup receives a short-lived direct URL only for a newly claimed outbox entry.
+Wazzup receives a short-lived link to this API only for a newly claimed outbox
+entry and downloads the file from the route below.
 """
 import hashlib
 import io
+import logging
+import os
 import re
+import secrets
 import threading
 import time
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.parse import quote
 
-from flask import jsonify, request
+from flask import Response, g, jsonify, request
 from PIL import Image, UnidentifiedImageError
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -23,6 +27,15 @@ MAX_FILE = 10 * 1024 * 1024
 MAX_IMAGE = 5 * 1024 * 1024
 MAX_BODY = MAX_FILE + 64 * 1024
 STAGING_PREFIX = 'wazzup/pilot/uploads/'
+# Wazzup refused every signed storage URL (403 BAD_RESPONSE «Bad response from
+# content store»: all 26 attachments of 08–21.10.2026) yet took a short link
+# without a query (checked 21.10.2026). So it downloads from this API while it
+# answers the send; the link outlives that only for the vendor's own retries.
+LINK_MINUTES = 30
+# Encoded length of the link's last segment: the link stays within ~200
+# characters, not the 900–1200 of a signed URL.
+LINK_NAME_LIMIT = 100
+_LINK_TOKEN = re.compile(r'[A-Za-z0-9_-]{43}')
 _slots = threading.BoundedSemaphore(2)
 _cleanup_lock = threading.Lock()
 _cleanup_running = threading.Lock()
@@ -87,20 +100,44 @@ def resolve_upload(db, user_id, channel_id, chat_id, attachment_id):
     return item
 
 
-def sign_upload(gcs, item):
-    """Do not persist this bearer URL in chat history, drafts, logs or errors."""
+def require_storage(gcs):
     if not gcs or not callable(gcs.get('client')):
         raise UploadError('Хранилище вложений недоступно', 503, 'ATTACHMENT_STORAGE_OFF')
-    filename = item['original_name']
-    ascii_name = re.sub(r'[^A-Za-z0-9._-]', '_', filename) or 'file'
-    disposition = 'attachment; filename="' + ascii_name + '"; filename*=UTF-8\'\'' + quote(filename, safe='')
-    try:
-        return gcs['client']().bucket(item['bucket']).blob(item['blob_path']).generate_signed_url(
-            version='v4', expiration=timedelta(minutes=30), method='GET',
-            response_disposition=disposition, response_type=item['content_type'])
-    except Exception:
-        raise UploadError('Не удалось подготовить файл к отправке. Попробуйте ещё раз.',
-                          503, 'ATTACHMENT_STORAGE_OFF') from None
+
+
+def link_origin():
+    """This API as Wazzup reaches it: no redirects are followed, so never plain
+    http behind Render's proxy. A local stand falls back to the request itself."""
+    origin = (os.getenv('RENDER_EXTERNAL_URL') or '').strip().rstrip('/')
+    if origin:
+        return origin
+    scheme = (request.headers.get('X-Forwarded-Proto') or request.scheme).split(',')[0].strip()
+    return scheme + '://' + request.host
+
+
+def link_name(filename):
+    """The link's last segment. Wazzup names the file after it (a link without
+    Content-Disposition arrived under its basename), so a client sees the
+    original name on a document. A long name is cut, its extension kept."""
+    stem, _, extension = filename.rpartition('.')
+    while stem and len(quote(stem + '.' + extension, safe='')) > LINK_NAME_LIMIT:
+        stem = stem[:-1]
+    return quote((stem.strip() or 'file') + '.' + extension, safe='')
+
+
+def _link_digest(token):
+    return hashlib.sha256(token.encode('ascii')).hexdigest()
+
+
+def issue_link(cursor, item, base):
+    """Called in the transaction that claims the outbox entry, so the link works
+    before the vendor POST. Only the token's hash is kept: do not persist the
+    link itself in chat history, drafts, logs or errors."""
+    token = secrets.token_urlsafe(32)
+    cursor.execute("UPDATE wazzup_pilot_uploads SET link_hash=%s,"
+                   "link_expires_at=now() + %s * interval '1 minute' WHERE account='op' AND id=%s",
+                   (_link_digest(token), LINK_MINUTES, item['id']))
+    return base + '/files/' + token + '/' + link_name(item['original_name'])
 
 
 def prepare_file(data, filename):
@@ -336,6 +373,39 @@ def register_upload_routes(bp, actor, require_api_key, preflight, db, excluded_c
             if incoming_files is not None:
                 for _, file in incoming_files.items(multi=True):
                     file.close()
+
+    @bp.route('/files/<token>/<path:name>', methods=['GET'])
+    def vendor_file(token, name):
+        """Wazzup downloads an attachment here while it answers our send. There
+        is no session: the random token is the key. The name is Wazzup's only."""
+        started = time.monotonic()
+        row = None
+        if _LINK_TOKEN.fullmatch(token):
+            with db._get_cursor() as cursor:
+                cursor.execute("SELECT bucket,blob_path,content_type FROM wazzup_pilot_uploads "
+                               "WHERE account='op' AND link_hash=%s AND link_expires_at > now() "
+                               "AND deleted_at IS NULL", (_link_digest(token),))
+                row = cursor.fetchone()
+        if not row:
+            return Response('Not found', status=404, content_type='text/plain')
+        bucket, path, mime = row
+        try:
+            data = gcs['client']().bucket(bucket).blob(path).download_as_bytes(timeout=20)
+        except Exception as error:
+            gone = getattr(error, 'code', None) == 404
+            logging.warning('Wazzup pilot file fetch failed status=%d error_type=%s',
+                            404 if gone else 503, type(error).__name__)
+            return Response('Not found' if gone else 'Unavailable', status=404 if gone else 503,
+                            content_type='text/plain')
+        logging.info('Wazzup pilot file fetch method=%s size=%d duration_ms=%d agent=%s', request.method,
+                     len(data), round((time.monotonic() - started) * 1000),
+                     (request.headers.get('User-Agent') or '-')[:80])
+        # The monolith stamps no-store on every /api/ answer. The link Wazzup
+        # accepted was an ordinary cacheable file; the key already expires.
+        g.allow_public_cache = True
+        response = Response(data, content_type=mime)
+        response.headers['Cache-Control'] = 'private, max-age=300'
+        return response
 
 
 def _check_replay(item, prepared, channel_id, chat_id):

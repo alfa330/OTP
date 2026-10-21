@@ -21,4 +21,10 @@ def init_schema(cursor):
         CREATE INDEX IF NOT EXISTS idx_wazzup_pilot_uploads_expiry
             ON wazzup_pilot_uploads(expires_at) WHERE deleted_at IS NULL;
         ALTER TABLE wazzup_pilot_outbox ADD COLUMN IF NOT EXISTS attachment_id UUID;
+        -- The link Wazzup downloads the file from (wazzup/uploads.issue_link):
+        -- sha256 of its random token, never the token itself.
+        ALTER TABLE wazzup_pilot_uploads ADD COLUMN IF NOT EXISTS link_hash TEXT;
+        ALTER TABLE wazzup_pilot_uploads ADD COLUMN IF NOT EXISTS link_expires_at TIMESTAMPTZ;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wazzup_pilot_uploads_link
+            ON wazzup_pilot_uploads(link_hash) WHERE link_hash IS NOT NULL;
     """)

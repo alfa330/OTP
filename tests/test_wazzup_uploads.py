@@ -1,4 +1,6 @@
 """Synthetic uploads only. Storage and vendor HTTP are local test doubles."""
+import functools
+import hashlib
 import io
 import random
 import threading
@@ -7,10 +9,11 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
+from urllib.parse import quote, urlsplit
 
 import pytest
 import requests
-from flask import Flask
+from flask import Flask, g, request
 from PIL import Image
 from werkzeug.datastructures import FileStorage
 
@@ -70,6 +73,16 @@ class UploadCursor(MemoryCursor):
             for item in self.db.uploads.values():
                 if (item['id'], item['bucket'], item['blob_path']) == values:
                     item['deleted_at'] = datetime.now(timezone.utc)
+        elif sql.startswith('UPDATE wazzup_pilot_uploads SET link_hash=%s,'):
+            digest, minutes, identifier = values
+            for item in self.db.uploads.values():
+                if item['id'] == identifier:
+                    item['link_hash'] = digest
+                    item['link_expires_at'] = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        elif sql.startswith('SELECT bucket,blob_path,content_type FROM wazzup_pilot_uploads'):
+            item = next((v for v in self.db.uploads.values() if v.get('link_hash') == values[0]
+                         and v['link_expires_at'] > datetime.now(timezone.utc) and not v['deleted_at']), None)
+            self.row = (item['bucket'], item['blob_path'], item['content_type']) if item else None
         else:
             raise AssertionError('Unexpected upload SQL: ' + sql)
 
@@ -79,7 +92,7 @@ class UploadCursor(MemoryCursor):
 
 class FakeStorage:
     def __init__(self, database):
-        self.db, self.objects, self.uploads, self.deletes, self.signatures = database, {}, [], [], []
+        self.db, self.objects, self.uploads, self.deletes, self.downloads = database, {}, [], [], []
         self.barrier = None
 
     @property
@@ -111,12 +124,35 @@ class FakeStorage:
                 owner.objects.pop(path, None)
                 owner.deletes.append(path)
 
-            def generate_signed_url(self, **kwargs):
+            def download_as_bytes(self, **kwargs):
                 assert not getattr(owner.db.local, 'transaction', False)
-                owner.signatures.append((path, kwargs))
-                return 'https://storage.googleapis.com/synthetic-test-bucket/' + path + '?synthetic-secret-signature'
+                owner.downloads.append(path)
+                if path not in owner.objects:
+                    error = RuntimeError('synthetic 404 for ' + path)
+                    error.code = 404
+                    raise error
+                return owner.objects[path]
 
         return Blob()
+
+
+def issued_links(database):
+    return [item['link_hash'] for item in database.uploads.values() if item.get('link_hash')]
+
+
+def fetch_during_post(client, transport, fetched):
+    """Wazzup downloads the file while it answers the send: from its own
+    connection, so the fetch runs in another thread with its own contexts."""
+    def post(url, **kwargs):
+        uri = kwargs['json']['contentUri']
+        worker = threading.Thread(target=lambda: fetched.append((uri, client.get(urlsplit(uri).path))))
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        answer = Mock(status_code=201)
+        answer.json.return_value = {'messageId': 'synthetic-media-id'}
+        return answer
+    transport.post.side_effect = post
 
 
 def client_for(database, storage, transport=None):
@@ -135,6 +171,7 @@ def client_for(database, storage, transport=None):
 
 @pytest.fixture
 def fixture(monkeypatch):
+    monkeypatch.delenv('RENDER_EXTERNAL_URL', raising=False)
     monkeypatch.setattr(pilot.accounts, 'api_key', lambda account: 'synthetic-key')
     monkeypatch.setattr(uploads, 'schedule_cleanup', lambda *args: None)
     uploads._rate.__globals__['_usage'].clear()
@@ -209,7 +246,7 @@ def test_upload_is_private_scoped_immutable_and_does_not_send(fixture):
     replay = upload(client, client_id=identifier)
     assert replay.status_code == 200 and replay.json == first.json
     assert len(storage.uploads) == 1 and len(database.uploads) == 1
-    assert not storage.signatures and not database.outbox and not database.messages
+    assert not issued_links(database) and not database.outbox and not database.messages
     transport.post.assert_not_called()
     for changes in ({'data': b'%PDF-different'}, {'chatId': 'other'}, {'filename': 'other.pdf'}):
         rejected = upload(client, client_id=identifier, **changes)
@@ -266,29 +303,131 @@ def test_multipart_large_png_is_preserved_and_streams_close_on_rejection(fixture
     assert closed and all(closed)
 
 
-def test_send_uses_direct_url_and_scoped_attachment_then_replays_even_after_expiry(fixture):
+def test_send_gives_wazzup_a_short_link_it_downloads_during_the_post(fixture):
     client, database, storage, transport = fixture
     attachment = upload(client).json['attachment']
     body = send_body(attachment)
+    fetched = []
+    fetch_during_post(client, transport, fetched)
     response = client.post(PATH + '/send', json=body)
     assert response.status_code == 201
     payload = transport.post.call_args.kwargs['json']
-    assert 'text' not in payload and payload['contentUri'].startswith('https://storage.googleapis.com/')
-    assert payload['crmMessageId'] == body['clientMessageId']
-    signature = storage.signatures[0][1]
-    assert signature['expiration'] == timedelta(minutes=30) and signature['method'] == 'GET'
-    assert 'filename*=UTF-8' in signature['response_disposition']
+    assert 'text' not in payload and payload['crmMessageId'] == body['clientMessageId']
+    # Wazzup refused every signed storage URL and took a short link without a query.
+    uri = payload['contentUri']
+    parts = urlsplit(uri)
+    assert uri.startswith('http://localhost' + PATH + '/files/') and not parts.query and len(uri) < 200
+    token, name = parts.path[len(PATH + '/files/'):].split('/')
+    assert name == quote('Тест.pdf', safe='')
+    [(fetched_uri, download)] = fetched
+    assert fetched_uri == uri and download.status_code == 200 and download.data == PDF
+    assert download.headers['Content-Type'] == 'application/pdf'
+    assert download.headers['Cache-Control'] == 'private, max-age=300'
+    assert 'Content-Disposition' not in download.headers
+    # Only the token's hash is stored; the link reaches neither the browser nor the archive.
+    item = next(iter(database.uploads.values()))
+    assert item['link_hash'] == hashlib.sha256(token.encode()).hexdigest()
+    assert token not in response.text and token not in str(database.outbox) + str(database.messages)
     fallback = database.messages['synthetic-media-id']
     assert fallback['type'] == 'document' and fallback['text'] == 'Тест.pdf'
-    assert 'contentUri' not in fallback and 'synthetic-secret' not in response.text
-    item = next(iter(database.uploads.values()))
+    assert 'contentUri' not in fallback
     item['expires_at'] = datetime.now(timezone.utc) - timedelta(hours=1)
     item['deleted_at'] = datetime.now(timezone.utc)
+    assert client.get(parts.path).status_code == 404
     assert client.post(PATH + '/send', json=body).status_code == 200
-    assert len(storage.signatures) == 1
+    assert issued_links(database) == [item['link_hash']]
     transport.post.assert_called_once()
     conflict = client.post(PATH + '/send', json=body | {'attachmentId': str(uuid.uuid4())})
     assert conflict.status_code == 409 and conflict.json['code'] == 'REQUEST_CONFLICT'
+
+
+def test_file_link_needs_no_session_and_dies_with_its_key(fixture):
+    client, database, storage, transport = fixture
+    attachment = upload(client, data=image(), filename='photo.png').json['attachment']
+    fetched = []
+    fetch_during_post(client, transport, fetched)
+    assert client.post(PATH + '/send', json=send_body(attachment)).status_code == 201
+    [(uri, _)] = fetched
+    path = urlsplit(uri).path
+    # Wazzup has no portal session: another app whose every guard refuses still serves the file.
+    def refuse(*_args, **_kwargs):
+        raise AssertionError('the file link must not ask for a session')
+    def locked(view):
+        return functools.wraps(view)(refuse)
+    outsider = Flask(__name__)
+    outsider.register_blueprint(pilot.build_pilot_blueprint(
+        db=database, require_api_key=locked, guard=refuse, channels=lambda account: [],
+        preflight=refuse, transport=Mock(), gcs=storage.config))
+
+    @outsider.after_request
+    def monolith_no_store(response):
+        # bot_schedule2.after_request: no-store on /api/ unless the route opts out.
+        if request.path.startswith('/api/') and not getattr(g, 'allow_public_cache', False):
+            response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    stranger = outsider.test_client()
+    served = stranger.get(path)
+    assert served.status_code == 200 and served.data == image()
+    assert served.headers['Content-Type'] == 'image/png'
+    # The refused storage URLs answered no-store, the accepted link a cacheable file.
+    assert served.headers['Cache-Control'] == 'private, max-age=300'
+    assert stranger.head(path).status_code == 200
+    # The name is only for Wazzup; the token alone opens the file.
+    assert stranger.get(path.rsplit('/', 1)[0] + '/other-name.png?filename=x').status_code == 200
+    token = path.split('/')[-2]
+    for broken in (path.replace(token, token[:-1] + ('A' if token[-1] != 'A' else 'B')),
+                   path.replace(token, token[:20]), PATH + '/files/' + 'x' * 43 + '/photo.png'):
+        assert stranger.get(broken).status_code == 404
+    item = next(iter(database.uploads.values()))
+    item['link_expires_at'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert stranger.get(path).status_code == 404
+    item['link_expires_at'] = datetime.now(timezone.utc) + timedelta(minutes=1)
+    storage.objects.clear()
+    assert stranger.get(path).status_code == 404
+
+
+def test_file_link_reports_storage_failure_without_the_key(fixture, monkeypatch, caplog):
+    client, database, storage, transport = fixture
+    attachment = upload(client).json['attachment']
+    fetched = []
+    fetch_during_post(client, transport, fetched)
+    monkeypatch.setattr(storage, 'bucket', lambda _: (_ for _ in ()).throw(RuntimeError('synthetic outage')))
+    caplog.set_level('INFO')
+    assert client.post(PATH + '/send', json=send_body(attachment)).status_code == 201
+    [(uri, download)] = fetched
+    assert download.status_code == 503
+    token = urlsplit(uri).path.split('/')[-2]
+    assert 'file fetch failed status=503' in caplog.text and token not in caplog.text
+
+
+@pytest.mark.parametrize('filename,expected', [
+    ('photo.png', 'photo.png'),
+    ('Договор аренды.pdf', quote('Договор аренды.pdf', safe='')),
+    ('a/b?c#d.pdf', quote('a/b?c#d.pdf', safe='')),
+    ('.pdf', 'file.pdf'),
+])
+def test_link_name_keeps_the_original_name_in_one_segment(filename, expected):
+    assert uploads.link_name(filename) == expected
+
+
+def test_link_name_cuts_a_long_name_and_keeps_the_extension():
+    name = uploads.link_name('Очень длинное имя документа ' * 10 + '.xlsx')
+    assert len(name) <= uploads.LINK_NAME_LIMIT and name.endswith('.xlsx') and '/' not in name
+    assert uploads.link_name('a' * 300 + '.pdf') == 'a' * 96 + '.pdf'
+
+
+def test_link_origin_prefers_render_public_address(monkeypatch):
+    app = Flask(__name__)
+    monkeypatch.setenv('RENDER_EXTERNAL_URL', 'https://otp.example.onrender.com/')
+    with app.test_request_context('/', base_url='http://internal:10000'):
+        assert uploads.link_origin() == 'https://otp.example.onrender.com'
+    monkeypatch.delenv('RENDER_EXTERNAL_URL')
+    # Behind a TLS proxy a plain-http link would answer with a redirect, which Wazzup does not follow.
+    with app.test_request_context('/', base_url='http://otp.example', headers={'X-Forwarded-Proto': 'https'}):
+        assert uploads.link_origin() == 'https://otp.example'
+    with app.test_request_context('/', base_url='http://localhost:5000'):
+        assert uploads.link_origin() == 'http://localhost:5000'
 
 
 def test_unknown_file_send_is_never_retried_after_expiry(fixture):
@@ -299,7 +438,7 @@ def test_unknown_file_send_is_never_retried_after_expiry(fixture):
     next(iter(database.uploads.values()))['expires_at'] = datetime.now(timezone.utc) - timedelta(hours=1)
     assert client.post(PATH + '/send', json=body).json['state'] == 'unknown'
     transport.post.assert_called_once()
-    assert len(storage.signatures) == 1
+    assert len(issued_links(database)) == 1
 
 
 def test_attachment_send_rejects_wrong_chat_author_text_and_expiry_without_vendor(fixture):
@@ -315,7 +454,7 @@ def test_attachment_send_rejects_wrong_chat_author_text_and_expiry_without_vendo
     expired = client.post(PATH + '/send', json=body)
     assert expired.status_code == 410 and expired.json['state'] == 'failed'
     assert expired.json['code'] == 'ATTACHMENT_EXPIRED'
-    assert not database.outbox and not storage.signatures
+    assert not database.outbox and not issued_links(database)
     transport.post.assert_not_called()
 
 
