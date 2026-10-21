@@ -22,6 +22,9 @@
     пишет причину в `problem` и больше в этот ящик не стучится: вход с неверным паролем
     раз в десять минут почта сочла бы подбором. Письма ждут, окно компании показывает
     причину; новый пароль или удачная «Проверить» её снимают.
+  * Gmail — и кнопкой «Войти через Google» (google_mail.py, решение владельца 21.10.2026):
+    тогда `security = 'oauth'`, в `password_enc` — токен обновления, письма уходят через
+    Gmail API (opener()), а не по SMTP.
 """
 
 import html as _html
@@ -33,10 +36,11 @@ import socket
 import time
 from collections import namedtuple
 
-from . import cards, mail
+from . import cards, google_mail, mail
 from .sqlutil import NOW_SQL, row_map
 
 # Почтовые порты наружу: 465 — SSL с первого байта, 587 и 2525 — STARTTLS.
+# Вход через Google — не SMTP: `security = 'oauth'`, письма уходят через Gmail API.
 # Порт 25 Render не выпускает вовсе.
 PORTS = {465: 'ssl', 587: 'starttls', 2525: 'starttls'}
 
@@ -90,6 +94,18 @@ Settings = namedtuple('Settings', 'address provider host port security login pas
 
 # Почтовый сервер для «Подключить» и «Проверить»; тесты подменяют.
 TRANSPORT = mail.Transport
+OAUTH = 'oauth'
+
+
+def opener(settings):
+    """Чем отправлять: Gmail API для входа через Google, иначе SMTP."""
+    return google_mail.Transport if settings.security == OAUTH else TRANSPORT
+
+
+def google_settings(email, refresh_token):
+    """Почта, подключённая кнопкой «Войти через Google»."""
+    return Settings(address=email, provider='gmail', host=google_mail.HOST, port=443, security=OAUTH,
+                    login=email, password=refresh_token)
 
 
 class MailboxError(Exception):
@@ -263,7 +279,9 @@ def prepare(data, *, current=None, allow_local=False, mx=None, resolve=None):
         raise MailboxError(str(exc), field='address', code='PAYMENTS_EMAIL_INVALID') from None
     password = str(data.get('password') or '').strip()
     if not password:
-        if not current or current.get('address') != address:
+        # Пароль можно не вводить только у почты по паролю: у входа через Google в
+        # password_enc — токен обновления, по SMTP он не пароль.
+        if not current or current.get('address') != address or current.get('security') == OAUTH:
             raise MailboxError('Введите пароль приложения', field='password', code='PAYMENTS_MAILBOX_PASSWORD')
         password = decrypt(current.get('password_enc'))
         if password is None:
@@ -321,6 +339,10 @@ def refusal(exc, settings):
     """Отказ почты при «Подключить» и «Проверить» → MailboxError у того поля, которое править."""
     item = PROVIDERS.get(settings.provider) or {}
     help_url = item.get('help_url')
+    if settings.security == OAUTH:
+        # Вход через Google: пароля нет — чинится новым входом.
+        code = 'PAYMENTS_MAILBOX_LOGIN' if exc.reason == 'login' else 'PAYMENTS_MAILBOX_SEND'
+        return MailboxError(str(exc), code=code)
     if exc.reason == 'login':
         hint = item.get('password_hint') or MANUAL_HINT
         return MailboxError(('Почта не приняла пароль. %s %s' % (hint, _server_reply(exc))).strip(), field='password',
@@ -339,7 +361,7 @@ def verify(settings, entity_name, *, transport=None):
     вышло — MailboxError. Соединение — на одну проверку."""
     message = test_letter(settings, entity_name)
     try:
-        with (transport or TRANSPORT)(config(settings)) as smtp:
+        with (transport or opener(settings))(config(settings)) as smtp:
             return smtp.send(message)
     except mail.MailError as exc:
         raise refusal(exc, settings) from None
@@ -363,9 +385,11 @@ def view(row):
     if not row:
         return None
     item = PROVIDERS.get(row.get('provider')) or {}
+    google = row['security'] == OAUTH
     return {'address': row['address'], 'provider': row.get('provider'), 'label': item.get('label'),
             'host': row['host'], 'port': row['port'], 'security': row['security'],
-            'manual': not row.get('provider') or item.get('host') != row['host'],
+            'method': 'google' if google else 'password',
+            'manual': not google and (not row.get('provider') or item.get('host') != row['host']),
             'help_url': item.get('help_url'), 'checked_at': row.get('checked_at'), 'problem': row.get('problem'),
             'problem_at': row.get('problem_at'), 'updated_at': row.get('updated_at'),
             'updated_by_name': row.get('updated_by_name')}

@@ -14,6 +14,7 @@ tests/test_payments_requisites_mail_postgres.py на настоящем Postgres
 (tests/data/payments_requisites_mail_cases.json): форма и сервер решают одинаково.
 """
 
+import base64
 import json
 import os
 import smtplib
@@ -26,7 +27,7 @@ from unittest import mock
 
 from flask import Flask
 
-from payments import access, directory, mail, mailbox, requisites_mail, routes, routes_directory
+from payments import access, directory, google_mail, mail, mailbox, requisites_mail, routes, routes_directory
 
 CASES = json.loads((Path(__file__).resolve().parent / 'data' / 'payments_requisites_mail_cases.json')
                    .read_text(encoding='utf-8'))
@@ -265,6 +266,150 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(mailbox.pause_key(GMAIL), ('smtp.gmail.com', 'buh@company.kz'))
 
 
+class GoogleMailTests(unittest.TestCase):
+    """«Войти через Google» (решение владельца 21.10.2026): OAuth и отправка через Gmail API."""
+
+    CFG = {'client_id': 'cid', 'client_secret': 'secret', 'redirect_uri': 'https://api.example/cb',
+           'auth_url': google_mail.AUTH_URL, 'token_url': google_mail.TOKEN_URL, 'send_url': google_mail.SEND_URL}
+
+    def setUp(self):
+        patcher = mock.patch.dict('os.environ', {'JWT_SECRET': 'unit-secret'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        google_mail._TOKENS.clear()
+        self.addCleanup(google_mail._TOKENS.clear)
+
+    @staticmethod
+    def reply(status, body=None, text=''):
+        response = mock.Mock(status_code=status, text=text or json.dumps(body or {}))
+        response.json.return_value = body if body is not None else {}
+        return response
+
+    @staticmethod
+    def id_token(payload):
+        part = lambda data: base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip('=')  # noqa: E731
+        return part({'alg': 'RS256'}) + '.' + part(payload) + '.sig'
+
+    def test_config_only_with_both_keys(self):
+        self.assertIsNone(google_mail.config({}))
+        self.assertIsNone(google_mail.config({'PAYMENTS_GOOGLE_CLIENT_ID': 'cid'}))
+        cfg = google_mail.config({'PAYMENTS_GOOGLE_CLIENT_ID': ' cid ', 'PAYMENTS_GOOGLE_CLIENT_SECRET': 'sec'})
+        self.assertEqual((cfg['client_id'], cfg['redirect_uri'], cfg['token_url']),
+                         ('cid', google_mail.DEFAULT_REDIRECT, google_mail.TOKEN_URL))
+        self.assertTrue(google_mail.DEFAULT_REDIRECT.endswith('/api/payments/mailbox/google/callback'))
+
+    def test_state_is_signed_and_expires(self):
+        token = google_mail.sign_state({'e': 3, 'u': 10, 'o': 'https://alfa330.github.io'}, now=1000)
+        self.assertEqual(google_mail.read_state(token, now=1100)['e'], 3)
+        self.assertIsNone(google_mail.read_state(token, now=1000 + google_mail.STATE_SECONDS + 1), 'срок вышел')
+        raw, signature = token.split('.')
+        forged = base64.urlsafe_b64encode(json.dumps({'e': 4, 'exp': 99999999999}).encode()).decode().rstrip('=')
+        self.assertIsNone(google_mail.read_state(forged + '.' + signature, now=1100), 'чужая компания с той же подписью')
+        self.assertIsNone(google_mail.read_state('мусор'))
+        with mock.patch.dict('os.environ', {'JWT_SECRET': 'другой'}):
+            self.assertIsNone(google_mail.read_state(token, now=1100))
+
+    def test_portal_origin(self):
+        self.assertEqual(google_mail.portal_origin('https://alfa330.github.io/'), 'https://alfa330.github.io')
+        self.assertEqual(google_mail.portal_origin('https://evil.example', env={}), 'https://alfa330.github.io')
+        self.assertEqual(google_mail.portal_origin('http://127.0.0.1:5283', env={}), 'https://alfa330.github.io')
+        self.assertEqual(google_mail.portal_origin('http://127.0.0.1:5283', env={'PAYMENTS_MAIL_ALLOW_LOCAL': '1'}),
+                         'http://127.0.0.1:5283', 'стенд')
+
+    def test_auth_url_asks_only_for_sending(self):
+        from urllib.parse import parse_qs, urlsplit
+        url = google_mail.auth_url(self.CFG, 'ST', login_hint='buh@company.kz')
+        query = {key: value[0] for key, value in parse_qs(urlsplit(url).query).items()}
+        self.assertTrue(url.startswith(google_mail.AUTH_URL + '?'))
+        self.assertEqual(query['scope'], 'openid email https://www.googleapis.com/auth/gmail.send',
+                         'только отправка — читать почту портал не может')
+        self.assertEqual((query['access_type'], query['prompt'], query['state'], query['login_hint']),
+                         ('offline', 'consent', 'ST', 'buh@company.kz'))
+
+    def test_exchange_and_email(self):
+        good = {'access_token': 'at', 'refresh_token': 'rt', 'scope': 'openid email https://www.googleapis.com/auth/gmail.send',
+                'id_token': self.id_token({'email': 'Buh@Company.KZ', 'email_verified': True})}
+        with mock.patch.object(google_mail, '_post', return_value=self.reply(200, good)) as post:
+            tokens = google_mail.exchange(self.CFG, 'CODE')
+        self.assertEqual(post.call_args.args[1]['grant_type'], 'authorization_code')
+        self.assertEqual(google_mail.email_of(tokens), 'buh@company.kz')
+        for body, words in (({'error': 'invalid_grant', 'error_description': 'Bad Request'}, 'Bad Request'),
+                            (dict(good, scope='openid email'), 'Отправлять письма'),
+                            ({k: v for k, v in good.items() if k != 'refresh_token'}, 'постоянный доступ')):
+            with self.subTest(words):
+                with mock.patch.object(google_mail, '_post', return_value=self.reply(200 if 'access_token' in body else 400, body)):
+                    with self.assertRaises(google_mail.GoogleError) as caught:
+                        google_mail.exchange(self.CFG, 'CODE')
+                self.assertIn(words, str(caught.exception))
+        with self.assertRaises(google_mail.GoogleError):
+            google_mail.email_of({'id_token': self.id_token({'email': 'a@x.kz', 'email_verified': False})})
+
+    def test_access_token_is_cached_and_revocation_is_a_login_problem(self):
+        with mock.patch.object(google_mail, '_post', return_value=self.reply(200, {'access_token': 'at1', 'expires_in': 3600})) as post:
+            self.assertEqual(google_mail.access_token(self.CFG, 'rt', clock=lambda: 0.0), 'at1')
+            self.assertEqual(google_mail.access_token(self.CFG, 'rt', clock=lambda: 3000.0), 'at1')
+        self.assertEqual(post.call_count, 1, 'токен доступа живёт около часа — Google не спрашиваем на каждое письмо')
+        with mock.patch.object(google_mail, '_post', return_value=self.reply(400, {'error': 'invalid_grant'})):
+            with self.assertRaises(mail.MailError) as caught:
+                google_mail.access_token(self.CFG, 'revoked', clock=lambda: 0.0)
+        self.assertEqual((caught.exception.kind, caught.exception.reason), ('transport', 'login'))
+        self.assertIn('войдите через Google заново', str(caught.exception))
+        with mock.patch.object(google_mail, '_post', side_effect=OSError('нет сети')):
+            with self.assertRaises(mail.MailError) as caught:
+                google_mail.access_token(self.CFG, 'other', clock=lambda: 0.0)
+        self.assertEqual(caught.exception.reason, 'connect')
+
+    def test_gmail_api_transport(self):
+        cfg = mailbox.config(mailbox.google_settings('buh@company.kz', 'rt'))
+        message = mail.build_message(cfg, to=['a@x.kz'], subject='s', text='t', html=None, display_name='ТОО «Наша»')
+        with mock.patch.object(google_mail, 'access_token', return_value='at'), \
+                mock.patch.object(google_mail, '_post', return_value=self.reply(200, {'id': 'g1'})) as post:
+            with google_mail.Transport(cfg, google=self.CFG) as smtp:
+                smtp.deadline(7)
+                self.assertTrue(smtp.send(message).startswith('<'))
+                self.assertFalse(smtp.closed)
+        self.assertEqual(post.call_args.args[0], google_mail.SEND_URL)
+        self.assertEqual(post.call_args.kwargs['headers'], {'Authorization': 'Bearer at'})
+        self.assertEqual(post.call_args.kwargs['timeout'], 7.0)
+        raw = base64.urlsafe_b64decode(post.call_args.kwargs['json']['raw'] + '==')
+        self.assertIn(b'To: a@x.kz', raw)
+        cases = ((429, {'error': {'message': 'Too many'}}, 'throttled', None),
+                 (403, {'error': {'message': 'Limit', 'errors': [{'reason': 'dailyLimitExceeded'}]}}, 'throttled', None),
+                 (403, {'error': {'message': 'Insufficient Permission', 'errors': [{'reason': 'insufficientPermissions'}]}},
+                  'transport', 'login'),
+                 (400, {'error': {'message': 'Invalid To header'}}, 'permanent', None),
+                 (503, {'error': {'message': 'Backend Error'}}, 'temporary', None))
+        for status, body, kind, reason in cases:
+            with self.subTest(status):
+                with mock.patch.object(google_mail, 'access_token', return_value='at'), \
+                        mock.patch.object(google_mail, '_post', return_value=self.reply(status, body)):
+                    with google_mail.Transport(cfg, google=self.CFG) as smtp:
+                        with self.assertRaises(mail.MailError) as caught:
+                            smtp.send(message)
+                self.assertEqual((caught.exception.kind, caught.exception.reason), (kind, reason))
+        with mock.patch.object(google_mail, 'config', return_value=None):
+            with self.assertRaises(mail.MailError) as caught:
+                with google_mail.Transport(cfg):
+                    pass
+        self.assertIn('не настроен', str(caught.exception))
+
+    def test_google_mailbox_is_sent_through_the_api(self):
+        settings = mailbox.google_settings('buh@company.kz', 'rt')
+        self.assertIs(mailbox.opener(settings), google_mail.Transport)
+        self.assertIs(mailbox.opener(GMAIL), mailbox.TRANSPORT)
+        row = {'legal_entity_id': 3, 'address': 'buh@company.kz', 'provider': 'gmail', 'host': google_mail.HOST, 'port': 443,
+               'security': 'oauth', 'login': 'buh@company.kz', 'password_enc': 'x', 'checked_at': None, 'problem': None,
+               'problem_at': None, 'updated_at': None, 'updated_by_name': None}
+        shown = mailbox.view(row)
+        self.assertEqual((shown['method'], shown['manual']), ('google', False))
+        with self.assertRaises(mailbox.MailboxError) as caught:
+            mailbox.prepare({'address': 'buh@company.kz'}, current=dict(row, password_enc=mailbox.encrypt('rt')),
+                            mx=lambda domain: ['aspmx.l.google.com'])
+        self.assertEqual(caught.exception.field, 'password', 'токен Google — не пароль для SMTP')
+        refusal = mailbox.refusal(mail.MailError('transport', 'Google отозвал доступ', reason='login'), settings)
+        self.assertEqual((refusal.code, refusal.field, str(refusal)), ('PAYMENTS_MAILBOX_LOGIN', None, 'Google отозвал доступ'))
+
+
 class ChangedFieldsTests(unittest.TestCase):
     def test_shared_cases(self):
         for case in CASES['requisites']:
@@ -442,10 +587,15 @@ class _FakeSock:
 
 
 class _FakeSMTP:
-    """Почтовый сервер на месте smtplib: что он ответит — задаёт тест."""
+    """Почтовый сервер на месте smtplib: что он ответит — задаёт тест.
+
+    `auth_errors` — способ входа → ошибка; `close_after_refusal` — как Gmail: отказал в
+    пароле и закрыл соединение, следующий способ входа уже не спросить."""
     instances = []
     connect_error = None
-    login_error_next = None
+    auth_methods = 'LOGIN PLAIN XOAUTH2'
+    auth_errors = {}
+    close_after_refusal = False
     send_errors = []
     refused_next = {}
 
@@ -454,21 +604,45 @@ class _FakeSMTP:
         self.calls = []
         self.sock = _FakeSock()
         self.tls_context = None
+        self.ehlo_resp = None
+        self.esmtp_features = {}
         _FakeSMTP.instances.append(self)
         if _FakeSMTP.connect_error:
             raise _FakeSMTP.connect_error
 
     def ehlo(self):
         self.calls.append('ehlo')
+        self.ehlo_resp = b'smtp.test'
+        self.esmtp_features = {'auth': _FakeSMTP.auth_methods} if _FakeSMTP.auth_methods else {}
+
+    def ehlo_or_helo_if_needed(self):
+        if self.ehlo_resp is None:
+            self.ehlo()
+
+    def has_extn(self, name):
+        return name.lower() in self.esmtp_features
 
     def starttls(self, context=None):
         self.tls_context = context
         self.calls.append('starttls')
 
-    def login(self, user, password):
-        self.calls.append(('login', user))
-        if _FakeSMTP.login_error_next:
-            raise _FakeSMTP.login_error_next
+    def auth_plain(self, challenge=None):
+        return '\0%s\0%s' % (self.user, self.password)
+
+    auth_login = auth_plain
+    auth_cram_md5 = auth_plain
+
+    def auth(self, mechanism, authobject, *, initial_response_ok=True):
+        if self.sock is None:
+            raise smtplib.SMTPServerDisconnected('Connection unexpectedly closed')
+        self.calls.append(('auth', mechanism, self.user))
+        authobject().encode('ascii')          # smtplib кодирует логин и пароль в ASCII
+        error = _FakeSMTP.auth_errors.get(mechanism)
+        if error:
+            if _FakeSMTP.close_after_refusal:
+                self.sock = None
+            raise error
+        return 235, b'2.7.0 Accepted'
 
     def send_message(self, message):
         self.calls.append(('send', message['To']))
@@ -491,7 +665,9 @@ class TransportTests(unittest.TestCase):
     def setUp(self):
         _FakeSMTP.instances = []
         _FakeSMTP.connect_error = None
-        _FakeSMTP.login_error_next = None
+        _FakeSMTP.auth_methods = 'LOGIN PLAIN XOAUTH2'
+        _FakeSMTP.auth_errors = {}
+        _FakeSMTP.close_after_refusal = False
         _FakeSMTP.send_errors = []
         _FakeSMTP.refused_next = {}
         for name in ('SMTP', 'SMTP_SSL'):
@@ -510,24 +686,63 @@ class TransportTests(unittest.TestCase):
         server = _FakeSMTP.instances[0]
         self.assertEqual((server.host, server.port, server.timeout), ('smtp.gmail.com', 465, mail.TIMEOUT_SECONDS))
         self.assertIsNotNone(server.context, 'SSL проверяет сертификат сервера')
-        self.assertEqual(server.calls, [('login', 'buh@company.kz'), ('send', 'a@x.kz'), 'quit'])
+        self.assertEqual(server.calls, ['ehlo', ('auth', 'PLAIN', 'buh@company.kz'), ('send', 'a@x.kz'), 'quit'],
+                         'вход — способом PLAIN, как у smtplib.login')
         self.assertEqual(sock.timeouts, [7.0, mail.QUIT_SECONDS], 'остаток бюджета, затем короткий QUIT')
 
     def test_starttls(self):
         with mail.Transport(mailbox.config(GMAIL._replace(port=587, security='starttls'))) as smtp:
             smtp.send(self.message)
         server = _FakeSMTP.instances[0]
-        self.assertEqual(server.calls[:4], ['ehlo', 'starttls', 'ehlo', ('login', 'buh@company.kz')])
+        self.assertEqual(server.calls[:4], ['ehlo', 'starttls', 'ehlo', ('auth', 'PLAIN', 'buh@company.kz')])
         self.assertIsNotNone(server.tls_context)
 
     def test_login_refused_is_transport(self):
-        _FakeSMTP.login_error_next = smtplib.SMTPAuthenticationError(535, b'5.7.8 Username and Password not accepted')
+        _FakeSMTP.auth_errors = {'PLAIN': smtplib.SMTPAuthenticationError(535, b'5.7.8 Username and Password not accepted'),
+                                 'LOGIN': smtplib.SMTPAuthenticationError(535, b'5.7.8 Username and Password not accepted')}
         with self.assertRaises(mail.MailError) as caught:
             with mail.Transport(self.cfg):
                 pass
         self.assertEqual((caught.exception.kind, caught.exception.reason), ('transport', 'login'))
         self.assertIn('логин или пароль приложения', str(caught.exception))
         self.assertIn('535 5.7.8 Username and Password not accepted', str(caught.exception))
+
+    def test_refused_password_survives_a_closed_connection(self):
+        """Gmail (21.10.2026): 535 на PLAIN — и соединение закрыто. smtplib.login пробовал бы
+        LOGIN и падал «Connection unexpectedly closed»; ответом остаётся отказ в пароле."""
+        _FakeSMTP.auth_errors = {'PLAIN': smtplib.SMTPAuthenticationError(
+            535, b'5.7.8 Username and Password not accepted. For more information, go to\n5.7.8  https://support.google.com/mail/?p=BadCredentials')}
+        _FakeSMTP.close_after_refusal = True
+        with self.assertRaises(mail.MailError) as caught:
+            with mail.Transport(self.cfg):
+                pass
+        self.assertEqual((caught.exception.kind, caught.exception.reason), ('transport', 'login'))
+        self.assertIn('535 5.7.8 Username and Password not accepted', str(caught.exception))
+        self.assertEqual([call for call in _FakeSMTP.instances[0].calls if call[0] == 'auth'],
+                         [('auth', 'PLAIN', 'buh@company.kz')], 'соединение закрыто — второй способ не спрашивали')
+
+    def test_second_method_is_tried_while_the_connection_lives(self):
+        _FakeSMTP.auth_errors = {'PLAIN': smtplib.SMTPAuthenticationError(504, b'5.5.4 Unrecognized authentication type')}
+        with mail.Transport(self.cfg) as smtp:
+            smtp.send(self.message)
+        self.assertEqual([call for call in _FakeSMTP.instances[0].calls if call[0] == 'auth'],
+                         [('auth', 'PLAIN', 'buh@company.kz'), ('auth', 'LOGIN', 'buh@company.kz')])
+
+    def test_password_not_in_latin_is_a_password_problem(self):
+        cfg = self.cfg._replace(password='пароль')
+        with self.assertRaises(mail.MailError) as caught:
+            with mail.Transport(cfg):
+                pass
+        self.assertEqual(caught.exception.reason, 'login')
+        self.assertIn('не латиницей', str(caught.exception))
+
+    def test_server_without_password_login(self):
+        _FakeSMTP.auth_methods = ''
+        with self.assertRaises(mail.MailError) as caught:
+            with mail.Transport(self.cfg):
+                pass
+        self.assertEqual(caught.exception.reason, 'connect')
+        self.assertIn('Сервер не предлагает вход по паролю', str(caught.exception))
 
     def test_no_connection_is_transport(self):
         _FakeSMTP.connect_error = TimeoutError('timed out')
@@ -908,6 +1123,110 @@ class DictionaryRoutesTests(unittest.TestCase):
         self.directory.delete_row.return_value = 1
         self.assertEqual(client.delete('/api/payments/dictionaries/counterparty_emails/41').status_code, 200)
         self.assertEqual(self.directory.delete_row.call_args.args[1:], ('counterparty_emails', 41))
+
+    # ── «Войти через Google» ──────────────────────────────────────────────
+
+    GOOGLE = {'client_id': 'cid', 'client_secret': 'secret', 'redirect_uri': 'https://api.example/cb',
+              'auth_url': 'https://accounts.google.com/o/oauth2/v2/auth', 'token_url': 'https://oauth2.googleapis.com/token',
+              'send_url': 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'}
+
+    def test_google_start_gives_a_signed_link(self):
+        from urllib.parse import parse_qs, urlsplit
+        client = self.client()
+        with mock.patch.object(routes_directory.google_mail, 'config', return_value=None):
+            response = client.post('/api/payments/dictionaries/legal_entities/3/mailbox/google', json={})
+        self.assertEqual((response.status_code, response.get_json()['code']), (503, 'PAYMENTS_GOOGLE_OFF'))
+        self.directory.read_legal_entity.return_value = {'id': 3, 'name': 'ТОО «Наша»'}
+        with mock.patch.dict('os.environ', {'JWT_SECRET': 'unit'}), \
+                mock.patch.object(routes_directory.google_mail, 'config', return_value=self.GOOGLE):
+            body = client.post('/api/payments/dictionaries/legal_entities/3/mailbox/google',
+                               json={'address': 'Buh@Company.KZ', 'return_to': 'https://alfa330.github.io/OTP/?view=payments'},
+                               headers={'Origin': 'https://alfa330.github.io'}).get_json()
+            query = {key: value[0] for key, value in parse_qs(urlsplit(body['url']).query).items()}
+            state = google_mail.read_state(query['state'])
+            evil = client.post('/api/payments/dictionaries/legal_entities/3/mailbox/google',
+                               json={'return_to': 'https://evil.example/steal'},
+                               headers={'Origin': 'https://evil.example'}).get_json()
+            evil_state = google_mail.read_state(parse_qs(urlsplit(evil['url']).query)['state'][0])
+        self.assertEqual({key: state[key] for key in ('e', 'u', 'n', 'o', 'r')},
+                         {'e': 3, 'u': ADMIN, 'n': 'Админ Раздела', 'o': 'https://alfa330.github.io',
+                          'r': 'https://alfa330.github.io/OTP/?view=payments'})
+        self.assertEqual(query['login_hint'], 'buh@company.kz')
+        self.assertEqual((evil_state['o'], evil_state['r']), ('https://alfa330.github.io', ''),
+                         'итог сообщается только окну портала')
+
+    def google_callback(self, client, *, query, state=None, email='buh@company.kz'):
+        tokens = {'access_token': 'at', 'refresh_token': 'rt-new'}
+        with mock.patch.dict('os.environ', {'JWT_SECRET': 'unit'}), \
+                mock.patch.object(routes_directory.google_mail, 'config', return_value=self.GOOGLE), \
+                mock.patch.object(routes_directory.google_mail, 'exchange', return_value=tokens) as exchange, \
+                mock.patch.object(routes_directory.google_mail, 'email_of', return_value=email), \
+                mock.patch.object(routes_directory.google_mail, 'revoke') as revoke:
+            if state is None:
+                state = google_mail.sign_state({'e': 3, 'u': ADMIN, 'n': 'Админ Раздела',
+                                                'o': 'https://alfa330.github.io', 'r': ''})
+            response = client.get('/api/payments/mailbox/google/callback?' + query.replace('STATE', state))
+        return response, exchange, revoke
+
+    def test_google_callback_connects_the_company_mailbox(self):
+        client = self.client()
+        self.directory.read_legal_entity.return_value = {'id': 3, 'name': 'ТОО «Наша»'}
+        self.box.OAUTH = 'oauth'
+        self.box.google_settings.side_effect = mailbox.google_settings
+        self.box.read.return_value = {'security': 'oauth', 'password_enc': 'old'}
+        self.box.decrypt.return_value = 'rt-old'
+        response, exchange, revoke = self.google_callback(client, query='state=STATE&code=CODE')
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertIn('Почта подключена', page)
+        self.assertIn('buh@company.kz — с неё уйдут письма поставщикам о смене реквизитов ТОО «Наша»', page)
+        self.assertIn('window.opener.postMessage(note,"https://alfa330.github.io")', page)
+        self.assertEqual(exchange.call_args.args[1], 'CODE')
+        settings = self.box.verify.call_args.args[0]
+        self.assertEqual((settings.address, settings.security, settings.password), ('buh@company.kz', 'oauth', 'rt-new'))
+        self.assertEqual(self.box.save.call_args.args[1:], (3, settings, {'id': ADMIN, 'name': 'Админ Раздела'}))
+        revoke.assert_called_once_with('rt-old')
+
+    def test_google_callback_refuses_what_it_should(self):
+        client = self.client()
+        self.directory.read_legal_entity.return_value = {'id': 3, 'name': 'ТОО «Наша»'}
+        self.box.read.return_value = None
+        cases = (('state=bad&code=CODE', 'Ссылка входа устарела'), ('state=STATE&error=access_denied', 'Вход отменён'))
+        for query, words in cases:
+            with self.subTest(words):
+                response, exchange, _revoke = self.google_callback(client, query=query)
+                self.assertIn(words, response.get_data(as_text=True))
+                exchange.assert_not_called()
+        self.box.verify.side_effect = mailbox.MailboxError('Gmail не пускает отправку: 403', code='PAYMENTS_MAILBOX_LOGIN')
+        response, _exchange, _revoke = self.google_callback(client, query='state=STATE&code=CODE')
+        self.assertIn('Gmail не пускает отправку: 403', response.get_data(as_text=True))
+        self.box.save.assert_not_called()
+        reader = self.client(can_edit=False)
+        self.box.verify.side_effect = None
+        response, _exchange, _revoke = self.google_callback(reader, query='state=STATE&code=CODE')
+        self.assertIn('Нет прав', response.get_data(as_text=True))
+        self.box.save.assert_not_called()
+
+    def test_google_callback_page_does_not_break_out_of_its_script(self):
+        client = self.client()
+        self.directory.read_legal_entity.return_value = {'id': 3, 'name': '</script><script>alert(1)</script>'}
+        self.box.read.return_value = None
+        self.box.google_settings.side_effect = mailbox.google_settings
+        response, _exchange, _revoke = self.google_callback(client, query='state=STATE&code=CODE')
+        page = response.get_data(as_text=True)
+        self.assertNotIn('<script>alert(1)', page)
+        self.assertEqual(page.count('<script>'), 1)
+
+    def test_removing_a_google_mailbox_revokes_access(self):
+        client = self.client()
+        self.directory.read_legal_entity.return_value = {'id': 3}
+        self.box.OAUTH = 'oauth'
+        self.box.read.return_value = {'security': 'oauth', 'password_enc': 'enc'}
+        self.box.decrypt.return_value = 'rt'
+        with mock.patch.object(routes_directory.google_mail, 'revoke') as revoke:
+            self.assertEqual(client.delete('/api/payments/dictionaries/legal_entities/3/mailbox').status_code, 200)
+        revoke.assert_called_once_with('rt')
 
     def test_mailing_errors_become_409(self):
         client = self.client()

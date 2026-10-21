@@ -170,7 +170,42 @@ def _reply_text(exc):
     raw = getattr(exc, 'smtp_error', b'') or b''
     text = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)
     text = ' '.join(text.split())[:300]
-    return ('%s %s' % (code, text)).strip() if code else (text or exc.__class__.__name__)
+    return ('%s %s' % (code, text)).strip() if code else (text or str(exc) or exc.__class__.__name__)
+
+
+# Способы входа по старшинству — как у smtplib.login.
+_AUTH_METHODS = ('CRAM-MD5', 'PLAIN', 'LOGIN')
+
+
+def _login(smtp, user, password):
+    """Вход в ящик — как smtplib.login, но отказ в пароле не теряется.
+
+    Gmail на неверный пароль отвечает 535 и тут же закрывает соединение. smtplib.login
+    после отказа пробует следующий способ входа и падает «Connection unexpectedly
+    closed» (найдено 21.10.2026 на попытке подключить Gmail): окно сказало бы «нет связи
+    с сервером», а на деле не принят пароль. Здесь первый отказ и остаётся ответом."""
+    smtp.ehlo_or_helo_if_needed()
+    if not smtp.has_extn('auth'):
+        raise smtplib.SMTPNotSupportedError('Сервер не предлагает вход по паролю (SMTP AUTH)')
+    advertised = smtp.esmtp_features['auth'].upper().split()
+    methods = [method for method in _AUTH_METHODS if method in advertised]
+    if not methods:
+        raise smtplib.SMTPException('Сервер не предлагает знакомого способа входа: %s' % ' '.join(advertised))
+    smtp.user, smtp.password = user, password
+    refused = None
+    for method in methods:
+        try:
+            code, _reply = smtp.auth(method, getattr(smtp, 'auth_' + method.lower().replace('-', '_')))
+        except smtplib.SMTPAuthenticationError as exc:
+            refused = refused or exc
+            continue
+        except smtplib.SMTPServerDisconnected:
+            if refused is not None:
+                raise refused from None
+            raise
+        if code in (235, 503):
+            return
+    raise refused or smtplib.SMTPAuthenticationError(535, b'Authentication failed')
 
 
 def refusal_kind(code, text):
@@ -206,11 +241,16 @@ class Transport:
                     self.smtp.starttls(context=ssl.create_default_context())
                     self.smtp.ehlo()
             if cfg.user:
-                self.smtp.login(cfg.user, cfg.password)
+                _login(self.smtp, cfg.user, cfg.password)
         except smtplib.SMTPAuthenticationError as exc:
             self.close()
             raise MailError('transport', 'Почта не приняла логин или пароль приложения (%s)' % _reply_text(exc),
                             reason='login')
+        except UnicodeEncodeError:
+            # Логин и пароль почтовый сервер принимает только латиницей (smtplib кодирует их в ASCII).
+            self.close()
+            raise MailError('transport', 'Почта не приняла логин или пароль приложения (в пароле есть русские '
+                            'буквы или другие знаки не латиницей)', reason='login')
         except (smtplib.SMTPException, OSError) as exc:
             self.close()
             raise MailError('transport', 'Нет связи с почтовым сервером %s:%s — %s'

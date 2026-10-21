@@ -20,9 +20,34 @@ import { ErrorBox, Field, FieldHint, FormInput, TonePill, errorText, fromKeyboar
  *
  * `controlRef` — окну компании: есть ли недоподключённая почта и «подключить» её
  * перед «Сохранить», чтобы набранный пароль не пропал с закрытием окна.
+ *
+ * «Войти через Google» (владелец 21.10.2026: «без каких-либо лишних действий»): выбрали
+ * аккаунт, разрешили отправку — почта подключена, пароль не нужен (payments/google_mail.py).
+ * Google открывается отдельным окошком поверх портала; ответ приходит сообщением от
+ * страницы API (postMessage), а если окошко не открылось или его закрыли — блок просто
+ * перечитывает почту компании.
  */
 
 const EMPTY = { address: '', password: '', host: '', port: '465' };
+const GOOGLE_NOTE = 'otp-payments-mailbox';
+
+/* Значок Google — как требуют правила оформления кнопки «Войти через Google». */
+const GoogleMark = () => (
+    <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
+        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+    </svg>
+);
+
+const apiOrigin = (apiBaseUrl) => {
+    try {
+        return new URL(apiBaseUrl, typeof window === 'undefined' ? 'http://localhost' : window.location.href).origin;
+    } catch {
+        return '';
+    }
+};
 const DETECT_DELAY_MS = 500;
 const ANCHORS = ['address', 'password', 'host', 'port'];
 
@@ -53,6 +78,8 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
     const [busy, setBusy] = useState(null);         // 'connect' | 'check' | 'remove'
     const [confirmRemove, setConfirmRemove] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
+    const [googleOn, setGoogleOn] = useState(Boolean(entity?.google_mail));
+    const popupRef = useRef(null);
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
     const ticketRef = useRef(0);
@@ -68,7 +95,9 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
         ticketRef.current = ticket;
         try {
             const response = await axios.get(base, { headers: headers() });
-            if (ticketRef.current === ticket) setBox(response.data?.mailbox || null);
+            if (ticketRef.current !== ticket) return;
+            setBox(response.data?.mailbox || null);
+            if (response.data?.google) setGoogleOn(Boolean(response.data.google.enabled));
         } catch {
             // Блок уже показал то, что пришло со списком.
         }
@@ -210,6 +239,72 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
         }
     };
 
+    /* Ответ Google: страница API сообщает итог окну портала. */
+    useEffect(() => {
+        if (busy !== 'google') return undefined;
+        const origin = apiOrigin(apiBaseUrl);
+        const onMessage = (event) => {
+            if (event.origin !== origin || event.data?.type !== GOOGLE_NOTE || event.data.entity !== entityId) return;
+            setBusy(null);
+            ticketRef.current += 1;
+            refresh();
+            onChanged?.();
+            if (event.data.ok) {
+                setEditing(false);
+                setForm(EMPTY);
+                toastRef.current?.('Почта подключена через Google — пробное письмо во входящих', 'success');
+            } else {
+                toastRef.current?.(`${event.data.title}: ${event.data.text}`, 'error');
+            }
+        };
+        // Окошко закрыли или Google открылся вкладкой (телефон) — почту просто перечитываем.
+        const onBack = () => { if (document.visibilityState === 'visible') refresh(); };
+        const timer = setInterval(() => {
+            if (popupRef.current && popupRef.current.closed) {
+                popupRef.current = null;
+                setBusy(null);
+                refresh();
+                onChanged?.();
+            }
+        }, 800);
+        window.addEventListener('message', onMessage);
+        document.addEventListener('visibilitychange', onBack);
+        return () => {
+            clearInterval(timer);
+            window.removeEventListener('message', onMessage);
+            document.removeEventListener('visibilitychange', onBack);
+        };
+    }, [apiBaseUrl, busy, entityId, onChanged, refresh]);
+
+    // Почта подключилась (ответ Google или перечитали) — форма больше не нужна.
+    useEffect(() => {
+        if (box && busy === null && editing && box.method === 'google' && !form.address && !form.password) setEditing(false);
+    }, [box, busy, editing, form.address, form.password]);
+
+    const startGoogle = async () => {
+        setBusy('google');
+        setIssues({});
+        try {
+            const response = await axios.post(`${base}/google`, {
+                address: oneAddress(form.address).address || box?.address || '',
+                return_to: typeof window === 'undefined' ? '' : window.location.href,
+            }, { headers: headers() });
+            const url = response.data?.url;
+            if (!url) throw new Error('no url');
+            const popup = window.open(url, 'otp-google-mailbox', 'popup=yes,width=520,height=680');
+            if (popup) {
+                popupRef.current = popup;
+                popup.focus?.();
+            } else {
+                // Окошки запрещены (телефон, настройки браузера) — Google в этой же вкладке.
+                window.location.assign(url);
+            }
+        } catch (err) {
+            setBusy(null);
+            toastRef.current?.(errorText(err, 'Не удалось открыть вход через Google'), 'error');
+        }
+    };
+
     const remove = async () => {
         setBusy('remove');
         try {
@@ -251,7 +346,7 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
                             <div className="truncate text-[12.5px] text-slate-500">{mailboxLine(box)}</div>
                             {problem && (
                                 <div className="mt-1.5 break-words text-[12.5px] leading-snug text-rose-700" data-mailbox-problem>
-                                    {problem}. Письма компании ждут — введите пароль заново.
+                                    {problem}. {box.method === 'google' ? 'Письма компании ждут — войдите через Google заново.' : 'Письма компании ждут — введите пароль заново.'}
                                 </div>
                             )}
                         </div>
@@ -268,7 +363,13 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
                         ) : (
                             <>
                                 <button type="button" className={`${iosBtnGhost} mr-auto !text-rose-600`} disabled={Boolean(busy)} onClick={() => setConfirmRemove(true)}>Отключить</button>
-                                <button type="button" className={iosBtnSecondary} disabled={Boolean(busy)} onClick={startEdit}>{problem ? 'Ввести пароль' : 'Изменить'}</button>
+                                {box.method === 'google' ? (
+                                    <button type="button" className={iosBtnSecondary} disabled={Boolean(busy)} onClick={startGoogle}>
+                                        {busy === 'google' && <Loader2 size={13} className="animate-spin" />} Войти заново
+                                    </button>
+                                ) : (
+                                    <button type="button" className={iosBtnSecondary} disabled={Boolean(busy)} onClick={startEdit}>{problem ? 'Ввести пароль' : 'Изменить'}</button>
+                                )}
                                 <button type="button" className={iosBtnSecondary} disabled={Boolean(busy)} onClick={check}>
                                     {busy === 'check' && <Loader2 size={13} className="animate-spin" />} Проверить
                                 </button>
@@ -292,6 +393,21 @@ const CompanyMailbox = ({ apiBaseUrl, headers, entity, showToast, onChanged, con
                     <p className="px-1 text-[12.5px] leading-snug text-slate-600">
                         Письма поставщикам о смене реквизитов этой компании уходят с её почты. Пока почта не подключена, письма ждут.
                     </p>
+                )}
+                {googleOn && (
+                    <div className="space-y-3" data-mailbox-google>
+                        <button type="button" onClick={startGoogle} disabled={Boolean(busy)} data-mailbox-google-start
+                            className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-[14px] font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 active:scale-[0.99] disabled:opacity-60">
+                            {busy === 'google' ? <Loader2 size={16} className="animate-spin" /> : <GoogleMark />}
+                            {busy === 'google' ? 'Ждём ответа Google…' : 'Войти через Google'}
+                        </button>
+                        <p className="-mt-1 px-1 text-[12px] leading-snug text-slate-500">
+                            Для Gmail: выберите аккаунт и разрешите отправку писем — пароль не нужен.
+                        </p>
+                        <div className="flex items-center gap-3 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400" aria-hidden="true">
+                            <span className="h-px grow basis-0 bg-slate-200" />или по паролю приложения<span className="h-px grow basis-0 bg-slate-200" />
+                        </div>
+                    </div>
                 )}
                 <Field label="Адрес почты" required optionalMark={false} anchor="mailbox-address" issue={issues.address}>
                     <FormInput type="email" inputMode="email" name="mailbox-address" autoComplete="off" spellCheck={false}

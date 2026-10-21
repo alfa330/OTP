@@ -963,7 +963,7 @@ _STATEMENTS = [
         provider         VARCHAR(32),
         host             VARCHAR(253) NOT NULL,
         port             INTEGER NOT NULL,
-        security         VARCHAR(16) NOT NULL CHECK (security IN ('ssl', 'starttls', 'none')),
+        security         VARCHAR(16) NOT NULL CHECK (security IN ('ssl', 'starttls', 'none', 'oauth')),
         login            VARCHAR(254) NOT NULL,
         password_enc     TEXT NOT NULL,
         checked_at       TIMESTAMP,
@@ -973,6 +973,19 @@ _STATEMENTS = [
         updated_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
         updated_by_name  VARCHAR(200)
     )
+    """,
+    # Вход через Google (21.10.2026, google_mail.py): почта, созданная раньше, получает 'oauth' в проверке.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'payment_entity_mailboxes_security_check'
+                      AND pg_get_constraintdef(oid) NOT LIKE '%oauth%') THEN
+            ALTER TABLE payment_entity_mailboxes DROP CONSTRAINT payment_entity_mailboxes_security_check;
+            ALTER TABLE payment_entity_mailboxes ADD CONSTRAINT payment_entity_mailboxes_security_check
+                CHECK (security IN ('ssl', 'starttls', 'none', 'oauth'));
+        END IF;
+    END $$
     """,
 
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────

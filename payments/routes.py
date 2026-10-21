@@ -1535,8 +1535,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             total=total, truncated=total > len(rows), text_warning_patch=excel_text_warning)
         return send_file(stream, as_attachment=True, download_name=report.file_name(), mimetype=XLSX_MIME)
 
+    # bp — для ручек без входа в портал (ответ Google на «Войти через Google»).
     api = Api(route=payments_route, db=db, gcs=gcs, flush=_flush, base_url=web_app_base_url,
-              store_files=_store_files, check_uploads=_check_uploads)
+              store_files=_store_files, check_uploads=_check_uploads, bp=bp)
     routes_directory.register(api)
     routes_assets.register(api)
     return bp

@@ -1040,3 +1040,46 @@ def test_mailbox_row_keeps_password_encrypted(db):
         cur.execute("DELETE FROM payment_legal_entities WHERE id = %s", (entity,))
         cur.execute("SELECT COUNT(*) FROM payment_entity_mailboxes")
         assert cur.fetchone()[0] == 0, 'компанию удалили — её почта уходит с ней'
+
+
+def test_google_mailbox_row_and_old_check_migration(db, monkeypatch):
+    """«Войти через Google»: почта с security = 'oauth' — в таблице прода, где проверка была без 'oauth'."""
+    from payments import google_mail
+    with db._get_cursor() as cur:
+        entity = new_entity(cur, mail_box=None)
+        cur.execute("ALTER TABLE payment_entity_mailboxes DROP CONSTRAINT payment_entity_mailboxes_security_check")
+        cur.execute("ALTER TABLE payment_entity_mailboxes ADD CONSTRAINT payment_entity_mailboxes_security_check "
+                    "CHECK (security IN ('ssl', 'starttls', 'none'))")
+        migrate = next(sql for sql in schema.statements() if 'DO $$' in sql and 'payment_entity_mailboxes_security_check' in sql)
+        cur.execute(migrate)
+        cur.execute(migrate)
+        settings = mailbox.google_settings('buh@company.kz', 'refresh-token')
+        mailbox.save(cur, entity, settings, ADMIN)
+        row = mailbox.read(cur, entity)
+        assert (row['security'], row['host'], mailbox.decrypt(row['password_enc'])) == ('oauth', google_mail.HOST, 'refresh-token')
+        assert mailbox.view(row)['method'] == 'google'
+        assert mailbox.outboxes(cur, [entity])[entity] == settings
+        supplier(cur, 'ТОО «Поставщик»', ['buh@supplier.kz'])
+        save(cur, entity, kbe='19')
+        make_due(cur)
+
+    sent = []
+
+    class FakeGmail:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def send(self, message):
+            sent.append((self.cfg.password, message['To'], message['From'].addresses[0].addr_spec))
+            return '<g@company.kz>'
+
+    monkeypatch.setattr(google_mail, 'Transport', FakeGmail)
+    result = rm.run(db)
+    assert result['sent'] == 1
+    assert sent == [('refresh-token', 'buh@supplier.kz', 'buh@company.kz')], 'письмо ушло через Gmail API с токеном компании'

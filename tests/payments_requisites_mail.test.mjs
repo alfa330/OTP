@@ -497,3 +497,28 @@ test('«Почта поставщиков»: колонки, проверка с
     assert.match(dict, /<CompanyMailbox key=\{editing\.id\}/);
     assert.ok(dict.indexOf('<CompanyMailbox ') < dict.indexOf('<RequisitesMailings '), 'почта — над письмами');
 });
+
+test('«Войти через Google»: кнопка, когда вход настроен; у подключённой — «вход через Google» и «Войти заново»', async () => {
+    const { default: CompanyMailbox } = await bundle('src/components/payments/CompanyMailbox.jsx', 'mailbox');
+    const { mailboxLine } = await import('../src/components/payments/paymentsMeta.js');
+    const props = (entity) => ({ apiBaseUrl: 'https://api.example', headers: () => ({}), entity: { id: 3, name: 'ТОО «Наша»', ...entity }, showToast: () => {} });
+    const on = renderToStaticMarkup(h(CompanyMailbox, props({ mailbox: null, google_mail: true })));
+    assert.match(on, /data-mailbox-google-start="true"[^>]*>.*Войти через Google<\/button>/s);
+    assert.match(on, /<svg viewBox="0 0 48 48"/, 'значок Google по правилам оформления кнопки');
+    assert.match(on, /или по паролю приложения/);
+    assert.ok(on.indexOf('Войти через Google') < on.indexOf('Адрес почты'), 'Google — первым, пароль — запасной путь');
+    const off = renderToStaticMarkup(h(CompanyMailbox, props({ mailbox: null, google_mail: false })));
+    assert.doesNotMatch(off, /Войти через Google/, 'вход не настроен на сервере — кнопки нет');
+    const google = { address: 'buh@company.kz', label: 'Gmail', method: 'google', host: 'gmail.googleapis.com', port: 443,
+        checked_at: '2026-10-21T20:05:00', problem: null };
+    const ready = renderToStaticMarkup(h(CompanyMailbox, props({ mailbox: google, google_mail: true })));
+    assert.match(ready, /Gmail · вход через Google · проверено/);
+    assert.match(ready, /> ?Войти заново<\/button>/);
+    assert.doesNotMatch(ready, />Изменить</, 'у входа через Google пароля нет — менять нечего');
+    const broken = renderToStaticMarkup(h(CompanyMailbox, props({ mailbox: { ...google, problem: 'Google отозвал доступ к почте' }, google_mail: true })));
+    assert.match(broken, /Google отозвал доступ к почте\. Письма компании ждут — войдите через Google заново\./);
+    assert.equal(mailboxLine({ method: 'google', label: 'Gmail' }), 'Gmail · вход через Google');
+    const source_ = source('src/components/payments/CompanyMailbox.jsx');
+    assert.match(source_, /event\.origin !== origin/, 'итог принимается только от страницы API');
+    assert.match(source_, /window\.location\.assign\(url\)/, 'окошки запрещены — Google в этой же вкладке');
+});

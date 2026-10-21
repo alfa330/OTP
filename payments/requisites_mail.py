@@ -782,7 +782,8 @@ def _send_from(db, entity_id, mailing_ids, settings, *, transport, clock, starte
     outcome = {'claimed': 0, 'sent': 0, 'failed': 0, 'attempts': 0}
     letters = {}
     try:
-        with (transport or mail.Transport)(cfg) as smtp:
+        # SMTP или Gmail API (вход через Google) — по тому, как подключена почта компании.
+        with (transport or mailbox.opener(settings))(cfg) as smtp:
             with db._get_cursor() as cursor:
                 outcome['claimed'] = len(_claim_due(cursor, entity_id))
                 due = _due(cursor, limit, entity_id)
