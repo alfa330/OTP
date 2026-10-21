@@ -82,6 +82,16 @@ class SignedMeaningTest(unittest.TestCase):
         self.assertIn('l.signed_at IS NOT NULL OR l.sign_status = %(processing)s', sql)
         self.assertIn(sign_report.test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, sql)
         self.assertIn('GROUP BY l.city', sql)
+        # Отчёт строго по списку месяца, если он загружен (владелец, 21.10.2026).
+        self.assertIn('FROM dial_list_report_roster r', sql)
+
+    def test_report_only_phone_is_never_shown_as_a_number(self):
+        placeholder = dial_service.report_only_phone('900101300007')
+        self.assertTrue(dial_service.is_report_only_phone(placeholder))
+        self.assertLessEqual(len(placeholder), 16)          # dial_list_leads.phone_norm VARCHAR(16)
+        self.assertEqual(dial_service.mask_phone(placeholder), 'нет номера')
+        self.assertFalse(dial_service.is_report_only_phone('77011234567'))
+        self.assertEqual(dial_service.mask_phone('77011234567'), '+7 ••• ••• 45 67')
 
     def test_collect_passes_processing_status(self):
         seen = {}
@@ -264,15 +274,21 @@ class CityListParseTest(unittest.TestCase):
         ])
         # Пустые строки выбрасываются до нумерации — как у разбора базы (parse_leads_file).
         self.assertEqual(leads_file.parse_city_list(raw, '.xlsx'), [
-            (2, '990101300001', 'Алматы'), (3, '990101300002', 'Усть-Каменогорск'), (4, '990101300003', '')])
+            (2, '990101300001', 'Алматы', ''), (3, '990101300002', 'Усть-Каменогорск', ''),
+            (4, '990101300003', '', '')])
 
     def test_named_columns_numbers_and_csv(self):
         from common import leads_file
         raw = _xlsx([('Город', 'ИИН'), ('Астана', 50312500771), ('Шымкент', '900101300007')])
         self.assertEqual(leads_file.parse_city_list(raw, '.xlsx'),
-                         [(2, '050312500771', 'Астана'), (3, '900101300007', 'Шымкент')])
+                         [(2, '050312500771', 'Астана', ''), (3, '900101300007', 'Шымкент', '')])
         csv_raw = 'iin;city\n900101300007;Тараз\n'.encode('utf-8-sig')
-        self.assertEqual(leads_file.parse_city_list(csv_raw, '.csv'), [(2, '900101300007', 'Тараз')])
+        self.assertEqual(leads_file.parse_city_list(csv_raw, '.csv'), [(2, '900101300007', 'Тараз', '')])
+
+    def test_optional_fio_column_is_not_taken_for_iin(self):
+        from common import leads_file
+        raw = _xlsx([('Названия строк', 'ФИО', 'Город'), ('900101300007', 'Иванова Айгерим', 'Тараз')])
+        self.assertEqual(leads_file.parse_city_list(raw, '.xlsx'), [(2, '900101300007', 'Тараз', 'Иванова Айгерим')])
 
     def test_refusals(self):
         from common import leads_file

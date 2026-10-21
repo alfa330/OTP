@@ -45,7 +45,9 @@ SHARE_RED_BELOW = 20.0
 TITLE = "Подписание водителей по городам"
 FILE_NAME = "podpisanie-po-gorodam.png"
 
-# Подписал — в том числе «на проверке у Яндекса» (см. шапку модуля).
+# Подписал — в том числе «на проверке у Яндекса» (см. шапку модуля). Состав — список месяца
+# (dial_list_report_roster, «Города по ИИН»; владелец, 21.10.2026: «отчёт строго по списку»): загружен —
+# только его водители, водители базы не из списка в отчёт не входят; не загружен — вся база.
 _BY_CITY_SQL = """
     SELECT l.city,
            COUNT(*),
@@ -54,6 +56,10 @@ _BY_CITY_SQL = """
     WHERE l.department_id = %(department_id)s AND l.period = %(period)s
       -- Номер из реестра тестовых — проверка обзвона, а не водитель.
       AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+      AND (NOT EXISTS (SELECT 1 FROM dial_list_report_roster r
+                       WHERE r.department_id = %(department_id)s AND r.period = %(period)s)
+           OR EXISTS (SELECT 1 FROM dial_list_report_roster r
+                      WHERE r.department_id = l.department_id AND r.period = l.period AND r.iin = l.iin))
     GROUP BY l.city
 """
 

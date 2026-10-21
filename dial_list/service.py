@@ -1284,10 +1284,28 @@ def mask_iin(iin):
     return f"•••• •••• {digits[-4:]}" if len(digits) >= 4 else ""
 
 
+# Водитель из списка месяца без номера (владелец, 21.10.2026: «отчёт строго по списку»): в базе только для
+# отчёта о подписании — Sapar проверяет его по ИИН, обзванивать некуда. Номер в строке — заглушка из ИИН
+# (уникальна, как и ИИН в базе месяца); строка исключена из обзвона и в список не возвращается. Номер с
+# ИИН придёт обычной загрузкой базы — строка станет обычной (import_leads).
+REPORT_ONLY_PHONE_PREFIX = "iin:"
+REPORT_ONLY_NOTE = "Нет номера — только для отчёта о подписании"
+
+
+def report_only_phone(iin):
+    return REPORT_ONLY_PHONE_PREFIX + str(iin)
+
+
+def is_report_only_phone(phone_norm):
+    return str(phone_norm or "").startswith(REPORT_ONLY_PHONE_PREFIX)
+
+
 def mask_phone(phone_norm):
     """Номер для журнала руководителя: только хвост. Полный номер из раздела не
     выходит ни в одну ручку — ни оператору, ни руководителю: руководитель
     удалённого КЦ тоже удалёнщик, а файл с номерами у загрузившего и так есть."""
+    if is_report_only_phone(phone_norm):
+        return "нет номера"
     digits = "".join(ch for ch in str(phone_norm or "") if ch.isdigit())
     if len(digits) < 4:
         return "•••"
@@ -2498,6 +2516,23 @@ class DialListService:
         RETURNING (xmax = 0) AS inserted
     """
 
+    # Строка «без номера» (REPORT_ONLY_*) получает номер из загрузки базы: обычный водитель обзвона.
+    # Исключение «только для отчёта» снимается; исключённого руководителем по другой причине не трогаем.
+    _ATTACH_PHONE_SQL = """
+        UPDATE dial_list_leads l
+        SET phone_norm = v.phone,
+            full_name = CASE WHEN v.fio <> '' THEN v.fio ELSE l.full_name END,
+            city = CASE WHEN v.city <> '' THEN v.city ELSE l.city END,
+            status = CASE WHEN l.status = 'excluded' AND l.note = v.marker THEN 'new' ELSE l.status END,
+            note = CASE WHEN l.note = v.marker THEN '' ELSE l.note END,
+            first_batch_id = COALESCE(l.first_batch_id, v.batch),
+            last_batch_id = v.batch,
+            updated_at = CURRENT_TIMESTAMP
+        FROM (VALUES %s) AS v(phone, fio, city, marker, batch, department_id, period, placeholder)
+        WHERE l.department_id = v.department_id AND l.period = v.period AND l.phone_norm = v.placeholder
+        RETURNING l.id
+    """
+
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True):
         """rows — из common.leads_file.parse_leads_file(..., with_iin=True[, with_city=True]):
         (row_number, fio, phone_raw, phone_norm, iin_raw[, city]). period — база какого месяца
@@ -2523,10 +2558,12 @@ class DialListService:
             # не вторая строка (и не падение на уникальном индексе посреди загрузки).
             cur.execute("""
                 SELECT phone_norm, iin FROM dial_list_leads
-                WHERE department_id = %s AND period = %s AND iin <> ''
+                WHERE department_id = %s AND period = %s
             """, (department_id, period))
-            iin_owner = {r[1]: r[0] for r in cur.fetchall()}
-            seen_phones, seen_iins, values = set(), set(), []
+            base_rows = cur.fetchall()
+            iin_owner = {r[1]: r[0] for r in base_rows if r[1]}
+            base_phones = {r[0] for r in base_rows}
+            seen_phones, seen_iins, values, attach = set(), set(), [], []
             for row in rows:
                 row_number, fio, _phone_raw, phone_norm = row[0], row[1], row[2], row[3]
                 if not phone_norm:
@@ -2541,13 +2578,22 @@ class DialListService:
                         counts["bad_iin_rows"].append(int(row_number))
                     continue
                 owner = iin_owner.get(iin) if iin else None
+                city = sign_report.clean_city(row[5]) if len(row) > 5 else ""
+                if (owner and is_report_only_phone(owner) and phone_norm not in base_phones
+                        and phone_norm not in seen_phones and iin not in seen_iins):
+                    # Водитель списка, добавленный без номера (только для отчёта), пришёл с номером — его
+                    # строка становится обычной, а не второй строкой того же ИИН.
+                    seen_phones.add(phone_norm)
+                    seen_iins.add(iin)
+                    attach.append((phone_norm, str(fio or "").strip()[:255], city, REPORT_ONLY_NOTE, batch_id,
+                                   department_id, period, owner))
+                    continue
                 if phone_norm in seen_phones or (iin and iin in seen_iins) or (owner and owner != phone_norm):
                     counts["rows_duplicate"] += 1
                     continue
                 seen_phones.add(phone_norm)
                 if iin:
                     seen_iins.add(iin)
-                city = sign_report.clean_city(row[5]) if len(row) > 5 else ""
                 values.append((department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id,
                                period, iin, city))
             if values:
@@ -2560,6 +2606,12 @@ class DialListService:
                 new = sum(1 for r in inserted if r[0])
                 counts["rows_new"] += new
                 counts["rows_duplicate"] += len(inserted) - new
+            if attach:
+                attached = execute_values(cur, self._ATTACH_PHONE_SQL, attach,
+                                          template="(%s, %s, %s, %s, %s::uuid, %s::integer, %s::date, %s)",
+                                          page_size=1000, fetch=True)
+                counts["rows_new"] += len(attached)
+                counts["rows_duplicate"] += len(attach) - len(attached)
             cur.execute("""
                 UPDATE dial_list_lead_batches
                 SET rows_new = %s, rows_duplicate = %s, rows_invalid = %s, rows_bad_iin = %s WHERE id = %s
@@ -2569,9 +2621,9 @@ class DialListService:
         return counts
 
     # Город по ИИН (владелец, 19.10.2026): список «ИИН — город» (СМЗ-ИП за месяц) проставляет город
-    # водителям базы месяца для отчёта «Подписание водителей по городам». Водителей, которых в базе
-    # нет, список не добавляет: для обзвона нужны номер и ФИО. updated_at не трогается — город не
-    # событие журнала; строка без смены города не переписывается.
+    # водителям базы месяца для отчёта «Подписание водителей по городам» (и задаёт его состав —
+    # import_cities). updated_at не трогается — город не событие журнала; строка без смены города не
+    # переписывается.
     _CITIES_SQL = """
         UPDATE dial_list_leads l SET city = v.city
         FROM (VALUES %s) AS v(department_id, period, iin, city)
@@ -2581,49 +2633,77 @@ class DialListService:
     """
 
     def import_cities(self, department_id, rows, period=None):
-        """rows — из common.leads_file.parse_city_list: (row_number, ИИН как в файле, город).
-        period — база какого месяца (date); пусто — обзваниваемый. Возвращает счёт: rows_total,
-        matched (ИИН есть в базе), updated (город поменялся), not_in_base, bad_iin, no_city,
-        duplicates (ИИН второй раз — берётся первый город)."""
+        """Список водителей месяца с городами («Города по ИИН», например СМЗ-ИП) — rows из
+        common.leads_file.parse_city_list: (row_number, ИИН как в файле, город[, ФИО]). period — база какого
+        месяца (date); пусто — обзваниваемый.
+
+        Владелец, 21.10.2026: «отчёт строго по списку». Поэтому список (1) заменяет состав отчёта месяца
+        (dial_list_report_roster): водители базы, которых в нём нет, в отчёт не входят, но обзваниваются как
+        раньше; (2) проставляет город водителям базы; (3) водителей списка, которых в базе нет, добавляет
+        без номера — только для отчёта (REPORT_ONLY_*): обзванивать их некуда, Sapar проверяет по ИИН.
+
+        Возвращает счёт: rows_total, matched (ИИН есть в базе), updated (город поменялся), added_report_only,
+        not_in_report (водители базы не из списка), bad_iin, no_city (город пуст — в отчёте «Город не указан»),
+        duplicates (ИИН второй раз — берётся первая строка)."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
         if is_tez(settings):
             raise DialListError("Города по ИИН — только у удалённого КЦ: в базе автообзвона нет ИИН", 400)
         period = period or settings["_period"]
-        counts = {"rows_total": len(rows), "matched": 0, "updated": 0, "not_in_base": 0, "bad_iin": 0,
-                  "no_city": 0, "duplicates": 0, "period": period.isoformat()}
+        counts = {"rows_total": len(rows), "matched": 0, "updated": 0, "added_report_only": 0,
+                  "not_in_report": 0, "bad_iin": 0, "no_city": 0, "duplicates": 0, "period": period.isoformat()}
         wanted = {}
-        for _row_number, iin_raw, city_raw in rows:
-            iin = clean_iin(iin_raw)
+        for row in rows:
+            iin = clean_iin(row[1])
             if not iin:
                 counts["bad_iin"] += 1
-                continue
-            city = sign_report.clean_city(city_raw)
-            if not city:
-                counts["no_city"] += 1
                 continue
             if iin in wanted:
                 counts["duplicates"] += 1
                 continue
-            wanted[iin] = city
-        if wanted:
-            with self.db._get_cursor() as cur:
-                cur.execute("""
-                    SELECT iin FROM dial_list_leads
-                    WHERE department_id = %s AND period = %s AND iin <> '' AND iin = ANY(%s)
-                """, (department_id, period, list(wanted)))
-                present = {row[0] for row in cur.fetchall()}
-                values = [(department_id, period, iin, city) for iin, city in wanted.items() if iin in present]
-                if values:
-                    updated = execute_values(cur, self._CITIES_SQL, values,
-                                             template="(%s::integer, %s::date, %s, %s)", page_size=1000,
-                                             fetch=True)
-                    counts["updated"] = len(updated)
-            counts["matched"] = len(present)
-            counts["not_in_base"] = len(wanted) - len(present)
-        log.info("dial_list: города по ИИН, отдел %s, база %s: строк %d, в базе %d, обновлено %d, нет в базе %d, "
-                 "с ошибкой ИИН %d, без города %d, повторов %d", department_id, counts["period"], counts["rows_total"],
-                 counts["matched"], counts["updated"], counts["not_in_base"], counts["bad_iin"], counts["no_city"],
+            city = sign_report.clean_city(row[2])
+            if not city:
+                counts["no_city"] += 1
+            wanted[iin] = (city, str(row[3] if len(row) > 3 else "").strip()[:255])
+        if not wanted:
+            # Пустой список не должен молча вернуть в отчёт всю базу: состав месяца не трогаем.
+            raise DialListError("В файле нет ни одного верного ИИН — список не загружен")
+        with self.db._get_cursor() as cur:
+            cur.execute("DELETE FROM dial_list_report_roster WHERE department_id = %s AND period = %s",
+                        (department_id, period))
+            execute_values(cur, """
+                INSERT INTO dial_list_report_roster (department_id, period, iin, city) VALUES %s
+            """, [(department_id, period, iin, city) for iin, (city, _fio) in wanted.items()],
+                template="(%s::integer, %s::date, %s, %s)", page_size=1000)
+            cur.execute("SELECT iin FROM dial_list_leads WHERE department_id = %s AND period = %s",
+                        (department_id, period))
+            base_iins = [row[0] or "" for row in cur.fetchall()]
+            present = {iin for iin in base_iins if iin in wanted}
+            values = [(department_id, period, iin, wanted[iin][0]) for iin in present if wanted[iin][0]]
+            if values:
+                updated = execute_values(cur, self._CITIES_SQL, values,
+                                         template="(%s::integer, %s::date, %s, %s)", page_size=1000, fetch=True)
+                counts["updated"] = len(updated)
+            missing = [(department_id, report_only_phone(iin), fio, period, iin, city, "excluded", REPORT_ONLY_NOTE)
+                       for iin, (city, fio) in wanted.items() if iin not in present]
+            if missing:
+                added = execute_values(cur, """
+                    INSERT INTO dial_list_leads (department_id, phone_norm, full_name, period, iin, city, status, note)
+                    VALUES %s
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                """, missing, template="(%s::integer, %s, %s, %s::date, %s, %s, %s, %s)", page_size=1000,
+                    fetch=True)
+                counts["added_report_only"] = len(added)
+        counts["matched"] = len(present)
+        counts["not_in_report"] = sum(1 for iin in base_iins if iin not in wanted)
+        if counts["added_report_only"]:
+            # Добавленных проверить сразу: в отчёте они должны быть со статусом, а не «ещё не проверяли».
+            self.request_sign_check("города по ИИН")
+        log.info("dial_list: список месяца (города по ИИН), отдел %s, база %s: строк %d, в базе %d, город обновлён %d, "
+                 "добавлено без номера %d, не в отчёте %d, с ошибкой ИИН %d, без города %d, повторов %d",
+                 department_id, counts["period"], counts["rows_total"], counts["matched"], counts["updated"],
+                 counts["added_report_only"], counts["not_in_report"], counts["bad_iin"], counts["no_city"],
                  counts["duplicates"])
         return counts
 
@@ -3793,11 +3873,15 @@ class DialListService:
         lead_id = str(lead_id)
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT department_id, status, signed_at, sign_status FROM dial_list_leads WHERE id = %s FOR UPDATE
+                SELECT department_id, status, signed_at, sign_status, phone_norm FROM dial_list_leads
+                WHERE id = %s FOR UPDATE
             """, (lead_id,))
             row = cur.fetchone()
             if not row:
                 raise DialListError("Водитель не найден в журнале", 404)
+            if is_report_only_phone(row[4]):
+                raise DialListError("У водителя нет номера — звонить некуда: он в базе только для отчёта "
+                                    "о подписании. Номер добавит обычная загрузка базы", 409)
             tez = self._department_profile(cur, row[0]) == PROFILE_TEZ
             if row[2] is not None or row[3] == signing.PROCESSING:
                 # Правило владельца 29.09.2026: подписавший в список не возвращается. «На

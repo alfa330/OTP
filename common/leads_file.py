@@ -143,24 +143,26 @@ def _looks_like_iin(value):
 
 
 def parse_city_list(raw_bytes, file_ext, max_rows=None):
-    """Список «ИИН — город» (например, СМЗ-ИП за месяц) → [(row_number, ИИН как в файле, город)].
+    """Список «ИИН — город» (например, СМЗ-ИП за месяц) → [(row_number, ИИН как в файле, город, ФИО)].
 
     Город — колонка с шапкой из CITY_HEADERS (обязательна). ИИН — колонка с шапкой из
     IIN_HEADERS, а нет такой — та, где ИИН больше всего (сводная таблица Excel подписывает её
-    «Названия строк»). Остальные колонки (статусы по датам и прочее) не читаются."""
+    «Названия строк»). ФИО — необязательная колонка с шапкой из FIO_HEADERS ('' — нет). Остальные
+    колонки (статусы по датам и прочее) не читаются."""
     limit = int(max_rows) if max_rows is not None else MAX_LEAD_ROWS
     raw_rows = _read_rows(raw_bytes, file_ext)
     header = [_norm_header(c) for c in raw_rows[0]]
     city_idx = next((idx for idx, name in enumerate(header) if name in CITY_HEADERS), None)
     if city_idx is None:
         raise ValueError(CITY_MISSING_MESSAGE)
+    fio_idx = next((idx for idx, name in enumerate(header) if name in FIO_HEADERS), None)
     iin_idx = next((idx for idx, name in enumerate(header) if name in IIN_HEADERS), None)
     data = raw_rows[1:]
     if iin_idx is None:
         sample = data[:200]
         width = max((len(r) for r in raw_rows), default=0)
         scores = [(sum(1 for r in sample if idx < len(r) and _looks_like_iin(r[idx])), idx)
-                  for idx in range(width) if idx != city_idx]
+                  for idx in range(width) if idx not in (city_idx, fio_idx)]
         best = max(scores, default=(0, None))
         if not sample or best[0] * 2 < len(sample):
             raise ValueError(IIN_COLUMN_MISSING_MESSAGE)
@@ -169,11 +171,12 @@ def parse_city_list(raw_bytes, file_ext, max_rows=None):
     for offset, raw in enumerate(data, start=2):
         iin_raw = _iin_cell(raw[iin_idx]) if iin_idx < len(raw) else ''
         city = str(raw[city_idx] or '').strip() if city_idx < len(raw) else ''
+        fio = str(raw[fio_idx] or '').strip() if fio_idx is not None and fio_idx < len(raw) else ''
         if not iin_raw and not city:
             continue
         if len(rows) >= limit:
             raise ValueError(f'В файле больше {limit} строк с данными. Разделите его на несколько файлов.')
-        rows.append((offset, iin_raw, city))
+        rows.append((offset, iin_raw, city, fio))
     if not rows:
         raise ValueError('В файле не нашлось ни одной строки с данными')
     return rows

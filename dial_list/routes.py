@@ -163,10 +163,12 @@
                                                              бот, selected — выбор отдела с итогом последней
                                                              отправки; PUT {chat_ids}
     GET     /api/dial_list/departments/<id>/sign_report/preview  та же картинка на сейчас (PNG)
-    POST    /api/dial_list/departments/<id>/leads/cities     города водителей базы по ИИН: multipart file
-                                                             (колонки «ИИН» и «Город»; без шапки ИИН — колонка,
-                                                             где ИИН больше всего), period=YYYY-MM; счёт строк,
-                                                             нет в базе — только числом
+    POST    /api/dial_list/departments/<id>/leads/cities     список водителей месяца с городами (СМЗ-ИП):
+                                                             multipart file (колонки «ИИН» и «Город», ФИО — по
+                                                             желанию; без шапки ИИН — колонка, где ИИН больше
+                                                             всего), period=YYYY-MM. Задаёт состав отчёта о
+                                                             подписании, ставит города, водителей не из базы
+                                                             добавляет без номера (только для отчёта); счёт строк
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка; у итога subtypes —
                                                              его типы (в PUT ключа нет — типы не трогаются)
     GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
@@ -784,9 +786,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def leads_cities(department_id):
-        """Города водителей по ИИН из списка (file: .xlsx/.csv с колонками «ИИН» и «Город», period=YYYY-MM;
-        пусто — обзваниваемый месяц): для отчёта «Подписание водителей по городам». Водителей, которых
-        нет в базе, не добавляет — только считает."""
+        """Список водителей месяца с городами (file: .xlsx/.csv с колонками «ИИН» и «Город», ФИО — по желанию;
+        period=YYYY-MM, пусто — обзваниваемый месяц) для отчёта «Подписание водителей по городам»: задаёт
+        состав отчёта, ставит города, водителей не из базы добавляет без номера (svc.import_cities)."""
         _manager(department_id)
         file_storage = request.files.get('file')
         if not file_storage:

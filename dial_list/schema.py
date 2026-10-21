@@ -44,6 +44,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_sign_report_chats    в какие Telegram-группы отдел шлёт картинку
                                    «Подписание водителей по городам» (10:00 и 19:00)
                                    и чем кончилась последняя отправка.
+    dial_list_report_roster        состав этого отчёта: список водителей месяца
+                                   (СМЗ-ИП), загруженный кнопкой «Города по ИИН».
 
 Профиль отдела (dial_list_department_settings.profile, 15.10.2026): 'remote_cc' —
 удалённый КЦ, как было; 'tez' — автообзвон Тез КЦ на том же движке: база без ИИН,
@@ -483,6 +485,19 @@ DDL = [
         last_sent_at TIMESTAMP WITH TIME ZONE,
         last_error TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (department_id, chat_id)
+    )
+    """,
+    # Состав отчёта о подписании (владелец, 21.10.2026: «отчёт строго по списку»): последний загруженный
+    # кнопкой «Города по ИИН» список водителей месяца (СМЗ-ИП). Есть строки у месяца — в отчёт входят только
+    # водители списка; нет — вся база, как раньше. Загрузка заменяет список месяца целиком.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_report_roster (
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        period DATE NOT NULL,
+        iin VARCHAR(12) NOT NULL,
+        city VARCHAR(64) NOT NULL DEFAULT '',
+        uploaded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (department_id, period, iin)
     )
     """,
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.

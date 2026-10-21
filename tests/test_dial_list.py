@@ -2795,14 +2795,26 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         self.assertEqual(res['stages']['sign_wait'], 'На проверке у Яндекса')
 
     def test_requeue_refuses_processing_like_signed(self):
-        for row in ((self.DEP, 'in_progress', None, 'processing'), (self.DEP, 'done', self.NOW, 'signed')):
-            cur = _RoutedCursor([('sign_status FROM dial_list_leads WHERE id = %s FOR UPDATE', {'one': row})])
+        for row in ((self.DEP, 'in_progress', None, 'processing', '77011234567'),
+                    (self.DEP, 'done', self.NOW, 'signed', '77011234567')):
+            cur = _RoutedCursor([('sign_status, phone_norm FROM dial_list_leads', {'one': row})])
             svc = dial_service.DialListService(db=_routed_db(cur))
             with self.assertRaises(dial_service.DialListError) as ctx:
                 svc.requeue_lead('lead-1', 5)
             self.assertEqual((str(ctx.exception), ctx.exception.status),
                              ("Водитель уже подписал документы — звонить ему незачем", 409))
             self.assertEqual(_writes(sql for sql, _ in cur.executed), [])
+
+    def test_requeue_refuses_driver_without_phone(self):
+        # Водитель списка месяца без номера (только для отчёта, 21.10.2026) в список не возвращается.
+        row = (self.DEP, 'excluded', None, 'unsigned', dial_service.report_only_phone(self.IIN))
+        cur = _RoutedCursor([('sign_status, phone_norm FROM dial_list_leads', {'one': row})])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.requeue_lead('lead-1', 5)
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn('нет номера', str(ctx.exception))
+        self.assertEqual(_writes(sql for sql, _ in cur.executed), [])
 
     def test_due_rule(self):
         due, now = dial_service.sign_check_due, self.NOW

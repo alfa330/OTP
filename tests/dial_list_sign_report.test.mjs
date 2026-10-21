@@ -67,13 +67,15 @@ test('расписание — из ответа сервера', () => {
     assert.equal(scheduleText([]), '');
 });
 
-test('итог загрузки городов — одной фразой, только ненулевое', () => {
+test('итог загрузки списка — одной фразой, только ненулевое', () => {
     assert.equal(
-        citiesSummary({ matched: 21060, updated: 21060, not_in_base: 2711, bad_iin: 0, no_city: 0 }, 'Октябрь 2026'),
-        'Октябрь 2026: город у 21060 водителей, нет в базе 2711',
+        citiesSummary({ matched: 23766, updated: 4, added_report_only: 5, not_in_report: 5, bad_iin: 0, no_city: 0 },
+            'Октябрь 2026'),
+        'Октябрь 2026: город у 23766 водителей, изменился у 4, без номера добавлено 5 — только для отчёта, '
+            + 'не из списка 5 — в отчёт не входят',
     );
     assert.equal(
-        citiesSummary({ matched: 3, updated: 1, not_in_base: 0, bad_iin: 2, no_city: 1 }),
+        citiesSummary({ matched: 3, updated: 1, added_report_only: 0, not_in_report: 0, bad_iin: 2, no_city: 1 }),
         'город у 3 водителей, изменился у 1, с ошибкой в ИИН 2, без города 1',
     );
     const panel = read('../src/components/sip/DialListSettings.jsx');

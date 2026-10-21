@@ -55,13 +55,14 @@ export const lastSentLine = (selected = [], now = new Date()) => {
     return `Последний отчёт ушёл ${fmtSentAt(times[times.length - 1].toISOString(), now)}`;
 };
 
-/* Итог загрузки городов по ИИН одной фразой (monthText — «Октябрь 2026»): скольким водителям базы
-   город проставлен и сколько строк списка мимо базы — их список не добавляет: для обзвона нужны
-   номер и ФИО. */
+/* Итог загрузки списка месяца («Города по ИИН») одной фразой (monthText — «Октябрь 2026»): скольким
+   водителям базы проставлен город, кого из списка добавили без номера (только для отчёта) и сколько
+   водителей базы не из списка — в отчёт они не входят (владелец, 21.10.2026: «отчёт строго по списку»). */
 export const citiesSummary = (data = {}, monthText = '') => {
     const parts = [`город у ${data.matched ?? 0} водителей`];
     if ((data.updated ?? 0) !== (data.matched ?? 0)) parts.push(`изменился у ${data.updated ?? 0}`);
-    if (data.not_in_base) parts.push(`нет в базе ${data.not_in_base}`);
+    if (data.added_report_only) parts.push(`без номера добавлено ${data.added_report_only} — только для отчёта`);
+    if (data.not_in_report) parts.push(`не из списка ${data.not_in_report} — в отчёт не входят`);
     if (data.bad_iin) parts.push(`с ошибкой в ИИН ${data.bad_iin}`);
     if (data.no_city) parts.push(`без города ${data.no_city}`);
     return monthText ? `${monthText}: ${parts.join(', ')}` : parts.join(', ');

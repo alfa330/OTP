@@ -278,47 +278,99 @@ def test_tez_rows_are_ignored_by_sender(db):
     assert sent == []
 
 
-def test_cities_by_iin(db):
+def test_city_list_defines_report_population(db):
+    """Владелец, 21.10.2026: «отчёт строго по списку». Список месяца («Города по ИИН») задаёт состав
+    отчёта: водители базы не из списка в отчёт не входят, водители списка не из базы добавляются без
+    номера (только для отчёта); города проставляются по ИИН."""
     with db._get_cursor() as cur:
-        for n, (city, department, period) in enumerate([
-                ('', RCC, date(2026, 10, 1)), ('Тараз', RCC, date(2026, 10, 1)), ('', RCC, date(2026, 10, 1)),
-                ('', RCC, date(2026, 9, 1)), ('', TEZ, date(2026, 10, 1))], start=1):
+        for n, (iin, city, department, period) in enumerate([
+                ('900101300007', '', RCC, date(2026, 10, 1)), ('050312500771', 'Тараз', RCC, date(2026, 10, 1)),
+                ('990101300013', '', RCC, date(2026, 10, 1)), ('990101300023', '', RCC, date(2026, 10, 1)),
+                ('900101300007', '', RCC, date(2026, 9, 1)), ('900101300007', '', TEZ, date(2026, 10, 1))],
+                start=1):
             cur.execute("""
                 INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin, period, city, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, TIMESTAMPTZ '2026-10-01 00:00+05')
-            """, (department, '77020000%03d' % n, 'Водитель %d' % n, ('900101300007', '050312500771',
-                                                                       '990101300013', '900101300007',
-                                                                       '900101300007')[n - 1], period, city))
+            """, (department, '77020000%03d' % n, 'Водитель %d' % n, iin, period, city))
     svc = dial_service.DialListService(db)
+    checks = []
+    svc.request_sign_check = lambda reason='': checks.append(reason)
     counts = svc.import_cities(RCC, [
-        (2, '900101300007', 'Астана'),
-        (3, '50312500771', 'Тараз'),          # ведущий ноль потерян в Excel — тот же водитель, город тот же
-        (4, '900101300007', 'Шымкент'),       # повтор ИИН — берётся первый город
-        (5, '123', 'Актау'),                  # ошибка в ИИН
-        (6, '990101300013', ''),              # без города
-        (7, '880101300000', 'Актобе'),        # такого водителя в базе нет
+        (2, '900101300007', 'Астана', ''),
+        (3, '50312500771', 'Тараз', ''),          # ведущий ноль потерян в Excel — тот же водитель, город тот же
+        (4, '900101300007', 'Шымкент', ''),       # повтор ИИН — берётся первая строка
+        (5, '123', 'Актау', ''),                  # ошибка в ИИН
+        (6, '990101300013', '', ''),              # без города — в списке, в отчёте «Город не указан»
+        (7, '880101300000', 'Актобе', 'Иванова Айгерим'),   # в базе нет — добавится без номера
     ])
-    assert counts == {'rows_total': 6, 'matched': 2, 'updated': 1, 'not_in_base': 1, 'bad_iin': 1, 'no_city': 1,
-                      'duplicates': 1, 'period': '2026-10-01'}
+    assert counts == {'rows_total': 6, 'matched': 3, 'updated': 1, 'added_report_only': 1, 'not_in_report': 1,
+                      'bad_iin': 1, 'no_city': 1, 'duplicates': 1, 'period': '2026-10-01'}
+    assert checks == ['города по ИИН']           # добавленного без номера Sapar проверит сразу
     with db._get_cursor() as cur:
-        cur.execute("SELECT department_id, period, iin, city, updated_at = TIMESTAMPTZ '2026-10-01 00:00+05' "
-                    "FROM dial_list_leads ORDER BY phone_norm")
+        cur.execute("SELECT department_id, period, iin, city, phone_norm, full_name, status, note, "
+                    "updated_at = TIMESTAMPTZ '2026-10-01 00:00+05' FROM dial_list_leads ORDER BY phone_norm")
         rows = cur.fetchall()
     assert [(r[0], r[1].isoformat(), r[2], r[3]) for r in rows] == [
         (RCC, '2026-10-01', '900101300007', 'Астана'),
         (RCC, '2026-10-01', '050312500771', 'Тараз'),
         (RCC, '2026-10-01', '990101300013', ''),
+        (RCC, '2026-10-01', '990101300023', ''),      # не из списка — в обзвоне, город не тронут
         (RCC, '2026-09-01', '900101300007', ''),      # база другого месяца — не тронута
         (TEZ, '2026-10-01', '900101300007', ''),      # другой отдел — не тронут
+        (RCC, '2026-10-01', '880101300000', 'Актобе'),
     ]
-    assert all(r[4] for r in rows)                    # город не событие журнала: updated_at прежний
-    # Повтор того же списка ничего не переписывает; отдел автообзвона — отказ.
-    assert svc.import_cities(RCC, [(2, '900101300007', 'Астана')])['updated'] == 0
-    with pytest.raises(dial_service.DialListError) as tez:
-        svc.import_cities(TEZ, [(2, '900101300007', 'Астана')])
-    assert tez.value.status == 400
+    assert all(r[8] for r in rows[:6])                # город не событие журнала: updated_at прежний
+    added = rows[6]
+    assert (added[4], added[5], added[6], added[7]) == (dial_service.report_only_phone('880101300000'),
+                                                        'Иванова Айгерим', 'excluded', dial_service.REPORT_ONLY_NOTE)
     report = svc.sign_report_data(RCC)
-    assert [(c['city'], c['total']) for c in report['cities']] == [('Астана', 1), ('Тараз', 1), ('Город не указан', 1)]
+    assert [(c['city'], c['total']) for c in report['cities']] == [
+        ('Актобе', 1), ('Астана', 1), ('Тараз', 1), ('Город не указан', 1)]
+    assert report['totals']['total'] == 4            # водитель не из списка в отчёт не вошёл
+    # Тот же список ещё раз — ничего не переписывает и не добавляет; список заменяется целиком.
+    again = svc.import_cities(RCC, [(2, '900101300007', 'Астана', ''), (3, '880101300000', 'Актобе', '')])
+    assert (again['matched'], again['updated'], again['added_report_only'], again['not_in_report']) == (2, 0, 0, 3)
+    assert svc.sign_report_data(RCC)['totals']['total'] == 2
+    # Файл без единого верного ИИН состав не трогает; автообзвон Тез — отказ.
+    with pytest.raises(dial_service.DialListError):
+        svc.import_cities(RCC, [(2, '123', 'Астана', '')])
+    assert svc.sign_report_data(RCC)['totals']['total'] == 2
+    with pytest.raises(dial_service.DialListError) as tez:
+        svc.import_cities(TEZ, [(2, '900101300007', 'Астана', '')])
+    assert tez.value.status == 400
+
+
+def test_report_only_driver_is_not_dialed_until_a_phone_comes(db):
+    svc = dial_service.DialListService(db)
+    svc.request_sign_check = lambda reason='': None
+    svc.import_leads(RCC, 2, 'база.xlsx', [(2, 'Иванов Иван', '87011234501', '77011234501', '900101300007', '')],
+                     period=date(2026, 10, 1))
+    svc.import_cities(RCC, [(2, '900101300007', 'Астана', ''), (3, '880101300000', 'Актобе', ''),
+                            (4, '990101300013', 'Тараз', '')], period=date(2026, 10, 1))
+    with db._get_cursor() as cur:
+        cur.execute("SELECT id, iin FROM dial_list_leads WHERE phone_norm LIKE 'iin:%%'")
+        placeholders = {r[1]: str(r[0]) for r in cur.fetchall()}
+    assert set(placeholders) == {'880101300000', '990101300013'}
+    with pytest.raises(dial_service.DialListError) as refused:
+        svc.requeue_lead(placeholders['880101300000'], actor_id=2)
+    assert refused.value.status == 409 and 'нет номера' in str(refused.value)
+    # Номер пришёл обычной загрузкой базы — строка та же, только теперь с номером и в обзвоне. Номер,
+    # занятый другим водителем базы, к строке не цепляется.
+    counts = svc.import_leads(RCC, 2, 'добор.xlsx', [
+        (2, 'Петров Пётр', '87011234502', '77011234502', '880101300000', 'Актобе'),
+        (3, 'Сидоров Сидор', '87011234501', '77011234501', '990101300013', ''),
+    ], period=date(2026, 10, 1))
+    assert (counts['rows_new'], counts['rows_duplicate']) == (1, 1)
+    with db._get_cursor() as cur:
+        cur.execute("SELECT id, phone_norm, full_name, status, note, city FROM dial_list_leads WHERE iin = %s",
+                    ('880101300000',))
+        row = cur.fetchone()
+        cur.execute("SELECT phone_norm, status FROM dial_list_leads WHERE iin = %s", ('990101300013',))
+        still = cur.fetchone()
+    assert (str(row[0]), row[1], row[2], row[3], row[4], row[5]) == (
+        placeholders['880101300000'], '77011234502', 'Петров Пётр', 'new', '', 'Актобе')
+    assert still == (dial_service.report_only_phone('990101300013'), 'excluded')
+    assert svc.sign_report_data(RCC)['totals']['total'] == 3
 
 
 def test_base_upload_keeps_and_updates_city(db):
