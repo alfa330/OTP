@@ -7,6 +7,7 @@ import {
   MAX_BLOCKS,
   SETTINGS_LIMITS,
   TARIFF_LABELS,
+  THRESHOLD_ORDER_ISSUE,
   blocksWord,
   conditionGroups,
   daysWord,
@@ -19,11 +20,14 @@ import {
   officePlace,
   parseCount,
   plural,
+  settingsDirty,
   settingsIssues,
+  stepCount,
   stockStatus,
   tariffLabel,
   verdictBasis,
   verdictHeadline,
+  visibleIssues,
 } from '../src/components/water/waterMeta.js';
 
 test('plural follows Russian rules', () => {
@@ -180,4 +184,51 @@ test('settings limits cover every number of the program', () => {
     'activity_blocks', 'buy_threshold', 'cooldown_days', 'low_threshold', 'min_trips', 'welcome_blocks']);
   assert.deepEqual(SETTINGS_LIMITS.welcome_blocks, [1, 50]);
   assert.equal(SETTINGS_LIMITS.low_threshold[1], MAX_BLOCKS);
+});
+
+test('stepper steps within the server limits', () => {
+  assert.equal(stepCount('10', 1, [0, 1000]), 11);
+  assert.equal(stepCount(10, -1, [0, 1000]), 9);
+  assert.equal(stepCount('50', 1, [1, 50]), 50);   // на пределе — стоит
+  assert.equal(stepCount('1', -1, [1, 50]), 1);
+  assert.equal(stepCount('', 1, [1, 50]), 1);      // от пустого — нижний предел
+  assert.equal(stepCount('', -1, [0, 365]), 0);
+  assert.equal(stepCount('60', -1, [1, 50]), 50);  // набранное вне пределов прижимается
+});
+
+test('an edit is a different value, not a different string', () => {
+  const loaded = { min_trips: 10, cooldown_days: 7, welcome_blocks: 1, activity_blocks: 1,
+    low_threshold: 20, buy_threshold: 10, tariffs: ['business', 'ultimate'], notify_user_ids: [11, 12] };
+  assert.equal(settingsDirty({ ...loaded }, loaded), false);
+  assert.equal(settingsDirty({ ...loaded, min_trips: '10' }, loaded), false);
+  assert.equal(settingsDirty({ ...loaded, min_trips: '010' }, loaded), false);
+  assert.equal(settingsDirty({ ...loaded, tariffs: ['ultimate', 'business'] }, loaded), false);
+  assert.equal(settingsDirty({ ...loaded, notify_user_ids: ['12', '11'] }, loaded), false);
+  assert.equal(settingsDirty({ ...loaded, min_trips: '11' }, loaded), true);
+  assert.equal(settingsDirty({ ...loaded, min_trips: '' }, loaded), true);
+  assert.equal(settingsDirty({ ...loaded, tariffs: ['business'] }, loaded), true);
+  assert.equal(settingsDirty({ ...loaded, notify_user_ids: [] }, loaded), true);
+  assert.equal(settingsDirty(null, loaded), false);
+});
+
+test('while typing, only the cleared field and the threshold order keep quiet', () => {
+  const draft = { min_trips: '', cooldown_days: 7, welcome_blocks: '60', activity_blocks: 1,
+    low_threshold: '1', buy_threshold: 10, tariffs: ['business'] };
+  const issues = settingsIssues(draft);
+  assert.equal(issues.buy_threshold, THRESHOLD_ORDER_ISSUE);
+  // Ничего не в работе — видно всё.
+  assert.deepEqual(visibleIssues(issues, draft, null), issues);
+  // Стёртое поле в работе молчит, чужие ошибки видны.
+  const typingTrips = visibleIssues(issues, draft, 'min_trips');
+  assert.equal(typingTrips.min_trips, undefined);
+  assert.equal(typingTrips.welcome_blocks, 'От 1 до 50');
+  assert.equal(typingTrips.buy_threshold, THRESHOLD_ORDER_ISSUE);
+  // «60» в работе — ошибка видна сразу: поле не пустое.
+  assert.equal(visibleIssues(issues, draft, 'welcome_blocks').welcome_blocks, 'От 1 до 50');
+  // Набирают «низкий» — порядок порогов молчит, и так же у самой закупки.
+  assert.equal(visibleIssues(issues, draft, 'low_threshold').buy_threshold, undefined);
+  assert.equal(visibleIssues(issues, draft, 'buy_threshold').buy_threshold, undefined);
+  // Предел у закупки — не порядок: виден и в работе.
+  const big = { ...draft, buy_threshold: '200000' };
+  assert.match(visibleIssues(settingsIssues(big), big, 'buy_threshold').buy_threshold, /^От 0 до /);
 });

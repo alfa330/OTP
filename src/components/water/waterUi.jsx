@@ -1,4 +1,5 @@
 import React from 'react';
+import { Minus, Plus } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
 
 /*
@@ -68,6 +69,33 @@ export const wPill = '2xl:px-2.5 2xl:py-1 2xl:text-[13px]';
 
 /* Значки lucide: размер приходит атрибутами (size), класс их перекрывает. */
 export const wIcon = '2xl:size-[18px]';
+
+/* Степпер раздела «− N +», как UIStepper: кнопки по краям, число посередине —
+   в «Выдаче» по нему только шагают, в «Настройках» его можно и набрать (тогда
+   внутри поле). Один на раздел: два своих расходились размерами (разбор
+   21.10.2026). Рост — как у поля и кнопки в том же ряду: 40 px на телефоне,
+   41 на компьютере, 48 на большом экране. Кольцо — только пока в поле
+   набирают: щелчок мышью по «+» его не зажигает (focus-within зажигал), а у
+   самих кнопок своё кольцо — с клавиатуры. */
+const STEP_BUTTON = 'grid h-9 w-9 place-items-center rounded-[10px] text-slate-600 transition hover:bg-white '
+    + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:pointer-events-none '
+    + 'disabled:opacity-30 xl:size-[37px] 2xl:size-11';
+
+export const WaterStepper = ({ label, onStep, downDisabled = false, upDisabled = false, invalid = false, children }) => (
+    <div className={`inline-flex shrink-0 items-center rounded-xl bg-slate-100 p-0.5 transition ${invalid
+        ? 'ring-2 ring-rose-300'
+        : 'has-[input:focus]:ring-2 has-[input:focus]:ring-blue-500/60'}`}>
+        <button type="button" className={STEP_BUTTON} aria-label={`${label}: меньше`}
+                disabled={downDisabled} onClick={() => onStep(-1)}>
+            <Minus size={15} className={wIcon} />
+        </button>
+        {children}
+        <button type="button" className={STEP_BUTTON} aria-label={`${label}: больше`}
+                disabled={upDisabled} onClick={() => onStep(1)}>
+            <Plus size={15} className={wIcon} />
+        </button>
+    </div>
+);
 
 /* Вкладки раздела и переключатель внутри карточки — тот же IosSegmented;
    кнопки в нём свои, размер им задаётся через потомков контейнера. Полоса

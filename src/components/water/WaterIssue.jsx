@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, Minus, Plus, RotateCcw, X } from 'lucide-react';
+import { Check, Loader2, RotateCcw, X } from 'lucide-react';
 import { IosToggle, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { driverAccountUrl, extractAccountId, fmtDate, fmtDateTime, fmtPhone } from '../parcels/parcelMeta';
@@ -8,7 +8,7 @@ import {
     blocksWord, defaultOfficeId, kindLabel, nextIssueLine, readLastOffice, rememberOffice,
     stockStatus, tariffLabel, verdictBasis, verdictHeadline,
 } from './waterMeta';
-import { T, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill } from './waterUi';
+import { T, WaterStepper, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill } from './waterUi';
 
 /*
  * «Выдача» — экран у стойки фронт-офиса.
@@ -113,25 +113,6 @@ const DriverCard = ({ driver, programTariffs }) => {
 /* Плашка на месте списка офисов (загрузка, сбой, «офисов нет») — ростом с поле
    рядом: 41 px на компьютере (с xl), 48 px на большом экране. */
 const NOTE = `px-4 py-3 text-[13px] xl:py-2.5 2xl:px-5 2xl:py-3 ${T.body}`;
-
-const STEP = 'grid h-9 w-9 place-items-center rounded-[10px] text-slate-600 transition hover:bg-white '
-    + 'disabled:opacity-30 xl:size-[37px] 2xl:size-11';
-
-const Stepper = ({ value, max, onChange }) => (
-    <div className="inline-flex items-center rounded-xl bg-slate-100 p-0.5">
-        <button type="button" aria-label="Меньше" disabled={value <= 1}
-                onClick={() => onChange(Math.max(1, value - 1))}
-                className={STEP}>
-            <Minus size={15} className={wIcon} />
-        </button>
-        <span className="min-w-[2.5rem] text-center text-[15px] font-semibold tabular-nums text-slate-900 2xl:px-1.5 2xl:text-[18px]">{value}</span>
-        <button type="button" aria-label="Больше" disabled={value >= max}
-                onClick={() => onChange(Math.min(max, value + 1))}
-                className={STEP}>
-            <Plus size={15} className={wIcon} />
-        </button>
-    </div>
-);
 
 const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOfficeUpdated, showToast }) => {
     const canIssue = Boolean(capabilities?.can_issue);
@@ -415,7 +396,12 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
 
                                 {showIssue && (
                                     <div className="flex flex-wrap items-center gap-3 2xl:gap-4">
-                                        {blocksMax > 1 && <Stepper value={blocks} max={blocksMax} onChange={setBlocks} />}
+                                        {blocksMax > 1 && (
+                                            <WaterStepper label="Блоков к выдаче" downDisabled={blocks <= 1} upDisabled={blocks >= blocksMax}
+                                                          onStep={(delta) => setBlocks((value) => Math.min(blocksMax, Math.max(1, value + delta)))}>
+                                                <span className="min-w-[2.5rem] text-center text-[15px] font-semibold tabular-nums text-slate-900 2xl:px-1.5 2xl:text-[18px]">{blocks}</span>
+                                            </WaterStepper>
+                                        )}
                                         <button type="button" className={`${wBtnPrimary} flex-1 sm:flex-none 2xl:!px-8`}
                                                 onClick={issue}
                                                 disabled={issuing || checking || !office || accountId !== driver.account_id

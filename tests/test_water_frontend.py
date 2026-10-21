@@ -249,11 +249,11 @@ class PanelTests(unittest.TestCase):
         stock = _read(water / 'WaterStock.jsx')
         self.assertEqual(stock.count('<CountInput '), 4)  # поступление/пересчёт, два порога, офис в учёт
         settings = _read(water / 'WaterSettings.jsx')
-        self.assertIn('const { rejected, inputProps, setValue } = useCountInput(onChange);', settings)
+        self.assertRegex(settings, r'const \{ rejected, inputProps, setValue, clearRejected \} = useCountInput\(onChange\);')
         self.assertIn('<input id={id} {...inputProps} value={value}', settings)
         count = _read(water / 'CountInput.jsx')
         # Шаг степпера — годное число: «Только цифры» гаснет вместе с ним.
-        self.assertIn('const setValue = (value) => {\n        setRejected(false);\n        onChange(String(value));', count)
+        self.assertRegex(count, r'const setValue = \(value\) => \{\s*setRejected\(false\);\s*onChange\(String\(value\)\);')
         handler = count.split('const handleChange = (event) => {')[1].split('\n    };')[0]
         self.assertLess(handler.index('if (!isCountDraft(next)) {'), handler.index('onChange(next);'))
         self.assertIn('setRejected(true);\n            return;', handler)
@@ -345,9 +345,11 @@ class LargeScreenTests(unittest.TestCase):
         # переключатели раскладки (таблица на компьютере — карточки на телефоне,
         # ряд поиска, сетка фильтров, поля рамки раздела).
         low = sorted(re.findall(r'(?<![\w-])(?:sm|md|lg):[^\s`\'"]+', ' '.join(self.screens.values()) + self.ui))
+        # sm:grid-cols-3 — плитки тарифов в «Настройках» по три с 640 px: по две у
+        # телефона боком и на планшете выходили полосами по 400 px (21.10.2026).
         self.assertEqual(low, ['lg:grid-cols-3', 'md:block', 'md:block', 'md:hidden', 'md:hidden',
-                               'sm:flex-1', 'sm:flex-none', 'sm:flex-row', 'sm:grid-cols-2', 'sm:items-center',
-                               'sm:left-auto', 'sm:px-5', 'sm:py-6', 'sm:right-0', 'sm:w-auto'])
+                               'sm:flex-1', 'sm:flex-none', 'sm:flex-row', 'sm:grid-cols-2', 'sm:grid-cols-3',
+                               'sm:items-center', 'sm:left-auto', 'sm:px-5', 'sm:py-6', 'sm:right-0', 'sm:w-auto'])
 
     def test_base_classes_are_carried_over_untouched(self):
         """Классы без префикса в шкале — те, что стояли в разметке до правки:
@@ -519,12 +521,12 @@ class SettingsLayoutTests(unittest.TestCase):
         """Карточка группы — во всю ширину раздела, строки в ней с xl — в две
         равные колонки: края и середины карточек совпадают. Колонок групп разной
         высоты больше нет."""
-        self.assertEqual(self.settings.count('grid xl:grid-cols-2`}>'), 2)  # «Право на воду», пороги
+        self.assertEqual(len(re.findall(r'\bgrid xl:grid-cols-2\b', self.settings)), 2)  # «Право на воду», пороги
         self.assertNotIn('row-span', self.settings)
         self.assertNotIn('xl:grid-cols-3', self.settings)
         # Список получателей встаёт под правую колонку — вровень с порогами над ним.
-        self.assertIn('<div className="min-w-0 xl:w-1/2 xl:pl-5 2xl:pl-6">', self.settings)
-        self.assertIn("const CELL = 'min-w-0 px-4 xl:px-5 2xl:px-6';", self.settings)
+        before_select = self.settings[:self.settings.index('<CustomSelect')][-200:]
+        self.assertIn('xl:w-1/2', before_select)
 
     def test_rows_keep_the_field_beside_the_label_on_a_phone(self):
         """Оболочка телефона переносит ряды с justify-between, и поле падало под
@@ -537,8 +539,9 @@ class SettingsLayoutTests(unittest.TestCase):
     def test_hints_live_under_the_i(self):
         """Пояснение — под «i» у подписи, а не строкой под полем; строкой под
         подписью бывает только то, что надо исправить."""
-        self.assertIn('<InfoHint side="left" text={hint} className="ml-1.5 align-middle" />', self.settings)
-        self.assertIn('{issue && <div className={ISSUE}>{issue}</div>}', self.settings)
+        hints = [tag for tag in _jsx_tags(self.settings, 'InfoHint') if 'text={hint}' in tag]
+        self.assertEqual(len(hints), 1)  # у подписи строки — за последним словом
+        self.assertRegex(self.settings, r'\{issue && <div id=\{issueId\} className=\{ISSUE\}>\{issue\}</div>\}')
         self.assertNotIn('<WaterGroup', self.settings)  # у неё пояснение — строкой под карточкой
 
     def test_tab_opens_ready_instead_of_rebuilding(self):
@@ -548,10 +551,70 @@ class SettingsLayoutTests(unittest.TestCase):
         panel = _read(PANEL)
         self.assertIn('                    preview={settings}\n', panel)
         self.assertIn('const view = draft || preview;', self.settings)
-        self.assertIn('if (ready) setDraft((prev) => ({ ...prev, [name]: value }));', self.settings)
+        self.assertIn('const locked = !ready || saving;', self.settings)
+        self.assertIn('if (!locked) setDraft((prev) => ({ ...prev, [name]: value }));', self.settings)
         self.assertIn("if (!ready || invalid || saving) return;", self.settings)
         # Список получателей до ответа — пустой, а не «никто»: неверное хуже пустого.
         self.assertIn("const nobody = !ready ? '\\u00a0' : heads.length", self.settings)
+
+    def test_editing_waits_while_saving(self):
+        """Ответ на сохранение заменяет черновик — правка, сделанная, пока шло
+        сохранение, пропадала молча (разбор 21.10.2026). Пока идёт сохранение,
+        строки не нажимаются."""
+        self.assertRegex(self.settings, r"\$\{locked \? 'pointer-events-none' : ''\}")
+        self.assertIn('aria-busy={locked || undefined}', self.settings)
+
+    def test_screen_takes_its_rules_from_pure_functions(self):
+        """Правка/не правка, шаг степпера и какие ошибки видны при наборе — чистые
+        функции waterMeta (их гоняет node --test), экран только зовёт их."""
+        for call in ('settingsIssues(view)', 'visibleIssues(issues, view, focused)',
+                     'settingsDirty(draft, loaded)', 'stepCount(value, delta, [min, max])'):
+            self.assertIn(call, self.settings)
+        cancel = self.settings.index('Отменить')
+        self.assertIn('{dirty && (', self.settings[cancel - 300:cancel])
+        # На пределе кнопка шага гаснет; после «Отменить» и сохранения строки
+        # пересоздаются — «Только цифры» и «поле в работе» уходят с черновиком.
+        self.assertIn('downDisabled={known && number <= min} upDisabled={known && number >= max}', self.settings)
+        self.assertIn('key={`${field.name}-${generation}`}', self.settings)
+        # Свой код тарифа (не из справочника) остаётся плиткой и после снятия —
+        # список берётся и из сохранённого, а не только из черновика.
+        extra = self.settings.split('const extra = ')[1].split(';')[0]
+        self.assertIn('loaded?.tariffs', extra)
+        self.assertIn('view.tariffs', extra)
+
+    def test_one_stepper_for_the_section(self):
+        """Степпер раздела один — в шкале waterUi.jsx: два своих расходились
+        размерами. Кольцо — только пока в поле набирают, не после щелчка по «+»."""
+        ui = _read(WATER / 'waterUi.jsx')
+        self.assertIn('export const WaterStepper = (', ui)
+        self.assertIn('has-[input:focus]:ring-2', ui)
+        self.assertNotIn('focus-within:', ui)
+        for name in ('WaterIssue.jsx', 'WaterSettings.jsx'):
+            source = _read(WATER / name)
+            self.assertIn('<WaterStepper', source, name)
+            self.assertNotRegex(source, r'const (STEP|Stepper) =', name)
+
+    def test_hints_say_what_the_server_does(self):
+        """Подсказки — как работает сервер: сообщение о закупке уходит один раз,
+        на пересечении порога (water/notify.py), а без доступных получателей —
+        главе фронт-офисов (queries.notify_recipients); 0 выключает условие, как
+        и пишет вкладка «Условия»."""
+        hint = re.search(r"const RECIPIENTS_HINT = ((?:\s*\+?\s*'[^']*')+);", self.settings).group(1)
+        hint = ''.join(re.findall(r"'([^']*)'", hint))
+        self.assertIn('один раз', hint)
+        self.assertIn('ни у кого из выбранных нет Telegram', hint)
+        # «Глава фронт-офисов — …» в пустом списке — только тот, у кого есть Telegram.
+        self.assertIn('headIds.includes(person.id) && person.has_telegram', self.settings)
+        buy = self.settings.split("{ name: 'buy_threshold'")[1].split('},')[0]
+        self.assertNotIn('Telegram', buy)
+        trips = self.settings.split("{ name: 'min_trips'")[1].split('},')[0]
+        self.assertIn('за последние 7 дней', trips)  # окно CRM — как в вердикте сервера
+        self.assertIn("'за последние 7 дней'", _read(ROOT / 'water' / 'rules.py'))
+        self.assertIn('0 — поездки не требуются', self.settings)
+        self.assertIn('0 — без ограничения по дням', self.settings)
+        meta = _read(META)
+        self.assertIn("'Не требуются'", meta)
+        self.assertIn("'Без ограничения по дням'", meta)
 
     def test_selected_tariff_is_soft_blue_not_black(self):
         """Выбор — мягкая голубая заливка с галочкой (16.10.2026: чёрный выбор

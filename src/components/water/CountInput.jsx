@@ -32,9 +32,12 @@ export const useCountInput = (onChange) => {
         setRejected(false);
         onChange(String(value));
     };
+    // Ушёл из поля — «Только цифры» гаснет: значение в поле прежнее и годное.
+    const clearRejected = () => setRejected(false);
     return {
         rejected,
         setValue,
+        clearRejected,
         inputProps: {
             inputMode: 'numeric',
             pattern: '[0-9]*',

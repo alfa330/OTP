@@ -152,6 +152,8 @@ export const SETTINGS_LIMITS = {
     buy_threshold: [0, MAX_BLOCKS],
 };
 
+export const THRESHOLD_ORDER_ISSUE = 'Не больше порога «Низкий остаток»';
+
 /* Что исправить в черновике настроек: { поле: 'что сделать' }, пусто — можно
    сохранять. Текст стоит под подписью строки, поэтому короткий. Порядок
    порогов — то же правило, что у сервера: закупка не выше «низкого». */
@@ -167,10 +169,47 @@ export const settingsIssues = (draft) => {
         }
     });
     if (!issues.low_threshold && !issues.buy_threshold && values.buy_threshold > values.low_threshold) {
-        issues.buy_threshold = 'Не больше порога «Низкий остаток»';
+        issues.buy_threshold = THRESHOLD_ORDER_ISSUE;
     }
     if (!(draft?.tariffs || []).length) issues.tariffs = 'Отметьте хотя бы один тариф';
     return issues;
+};
+
+/* Какие из ошибок видны, пока человек набирает в поле focused. Стёртое поле
+   молчит до ухода из него — человек стёр, чтобы набрать новое. Порядок порогов
+   молчит, пока набирают любой из двух: на первой цифре «15» порог «низкий» ещё
+   1, и закупка 10 вспыхивала бы красным. Остальное («От 1 до 50») видно сразу. */
+export const visibleIssues = (issues, draft, focused) => {
+    const shown = { ...issues };
+    if (focused && parseCount(draft?.[focused]) === null) delete shown[focused];
+    if ((focused === 'low_threshold' || focused === 'buy_threshold')
+        && shown.buy_threshold === THRESHOLD_ORDER_ISSUE) {
+        delete shown.buy_threshold;
+    }
+    return shown;
+};
+
+/* Шаг степпера: от пустого или негодного значения — нижний предел, дальше —
+   ±1 в пределах [min, max]. */
+export const stepCount = (value, delta, [min, max]) => {
+    const current = parseCount(value);
+    if (!Number.isInteger(current)) return min;
+    return Math.min(max, Math.max(min, current + delta));
+};
+
+const sameSet = (a, b) => {
+    const left = [...new Set((a || []).map(String))].sort();
+    const right = [...new Set((b || []).map(String))].sort();
+    return left.length === right.length && left.every((item, index) => item === right[index]);
+};
+
+/* Есть ли в черновике правка: сравниваются значения, а не строки. Набранное
+   «10» поверх 10 — не правка, и тариф, снятый и отмеченный снова, — тоже. */
+export const settingsDirty = (draft, loaded) => {
+    if (!draft || !loaded) return false;
+    return Object.keys(SETTINGS_LIMITS).some((name) => parseCount(draft[name]) !== parseCount(loaded[name]))
+        || !sameSet(draft.tariffs, loaded.tariffs)
+        || !sameSet(draft.notify_user_ids, loaded.notify_user_ids);
 };
 
 /* Условия получения воды словами — вкладка «Условия» у тех, кто программу

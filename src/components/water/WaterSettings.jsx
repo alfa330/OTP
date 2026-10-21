@@ -1,13 +1,15 @@
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, Minus, Plus } from 'lucide-react';
+import { Check, Loader2 } from 'lucide-react';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import { iosCard } from '../ui/ios';
 import { fmtDateTime } from '../parcels/parcelMeta';
 import { COUNT_HINT, useCountInput } from './CountInput';
-import { KNOWN_TARIFFS, SETTINGS_LIMITS, parseCount, settingsIssues, tariffLabel } from './waterMeta';
-import { T, wBtnPrimary, wBtnSecondary, wIcon, wLabel } from './waterUi';
+import {
+    KNOWN_TARIFFS, SETTINGS_LIMITS, parseCount, settingsDirty, settingsIssues, stepCount, tariffLabel, visibleIssues,
+} from './waterMeta';
+import { T, WaterStepper, wBtnPrimary, wBtnSecondary, wIcon, wLabel } from './waterUi';
 
 /*
  * «Настройки» — условия программы и пороги остатка (ТЗ 3.2, 6, 7).
@@ -27,7 +29,8 @@ import { T, wBtnPrimary, wBtnSecondary, wIcon, wLabel } from './waterUi';
  *   — группа — карточка во всю ширину раздела, в ней строки «подпись слева —
  *     значение справа» с тонкими разделителями; с xl строки идут в две равные
  *     колонки, поэтому края и середины всех карточек совпадают;
- *   — числа — степпером «− 10 +», набрать с клавиатуры тоже можно;
+ *   — числа — степпером раздела «− 10 +» (WaterStepper, тот же, что в
+ *     «Выдаче»), набрать с клавиатуры тоже можно;
  *   — пояснение — под «i» у подписи; под подписью бывает только то, что надо
  *     исправить, красным;
  *   — тарифы — ровная сетка одинаковых плиток; выбранная — мягко-голубая с
@@ -36,9 +39,10 @@ import { T, wBtnPrimary, wBtnSecondary, wIcon, wLabel } from './waterUi';
 
 const PROGRAM_FIELDS = [
     { name: 'min_trips', label: 'Поездок для выдачи за активность',
-      hint: 'Считаются поездки с прошлой выдачи, а в первый раз — за последние 7 дней' },
+      hint: 'Считаются поездки с прошлой выдачи, а в первый раз — за последние 7 дней. 0 — поездки не требуются' },
     { name: 'cooldown_days', label: 'Дней между выдачами',
-      hint: 'Следующая выдача за активность — не раньше, чем через столько дней после прошлой' },
+      hint: 'Следующая выдача за активность — не раньше, чем через столько дней после прошлой. '
+          + '0 — без ограничения по дням' },
     { name: 'welcome_blocks', label: 'Блоков в приветственной выдаче' },
     { name: 'activity_blocks', label: 'Блоков за активность' },
 ];
@@ -47,11 +51,16 @@ const THRESHOLD_FIELDS = [
     { name: 'low_threshold', label: 'Низкий остаток',
       hint: 'Когда в офисе остаётся столько блоков или меньше, он помечается «Низкий остаток»' },
     { name: 'buy_threshold', label: 'Требуется закупка',
-      hint: 'Когда в офисе остаётся столько блоков или меньше, он помечается «Требуется закупка», '
-          + 'а получателям ниже уходит сообщение в Telegram' },
+      hint: 'Когда в офисе остаётся столько блоков или меньше, он помечается «Требуется закупка»' },
 ];
 
 const NUMBER_NAMES = [...PROGRAM_FIELDS, ...THRESHOLD_FIELDS].map((field) => field.name);
+
+/* Когда и кому — как в water/notify.py и queries.notify_recipients: один раз
+   на пересечении порога (следующие выдачи ниже него молчат); выбранным, у кого
+   есть Telegram, а нет таких — главе фронт-офисов. */
+const RECIPIENTS_HINT = 'Сообщение уходит один раз — когда остаток офиса опускается до порога «Требуется закупка». '
+    + 'Если никто не выбран или ни у кого из выбранных нет Telegram, его получает глава фронт-офисов';
 
 /* Оболочка телефона переводит ряды с justify-between в перенос, и поле падало
    под подпись к левому краю (снимок 390×844 до правки). Перебивается только
@@ -74,9 +83,6 @@ const rowEdge = (index) => [
     index === 1 ? 'xl:border-t-0' : '',
 ].join(' ');
 
-const STEP = 'grid size-8 place-items-center rounded-[9px] text-slate-600 transition hover:bg-white '
-    + 'active:scale-95 disabled:pointer-events-none disabled:opacity-30 xl:size-9 2xl:size-10 2xl:rounded-[11px]';
-
 /* На телефоне плиток две в ряд, и «Личный водитель» кеглем 13,5 обрезался
    многоточием на пару пикселей — там кегль 13. */
 const TILE = 'flex min-h-[44px] items-center justify-between gap-1.5 rounded-xl px-3 py-2 text-left '
@@ -88,14 +94,14 @@ const TILE = 'flex min-h-[44px] items-center justify-between gap-1.5 rounded-xl 
 const TEXT_INSET = 'px-4 xl:px-5 2xl:px-6';
 const LABEL_INSET = 'px-3 xl:px-4 2xl:px-5';
 
-const Section = ({ title, info, issue, children }) => (
+const Section = ({ title, info, issue, issueId, children }) => (
     <section className="space-y-1.5 2xl:space-y-2">
         <div className={`flex items-center gap-1.5 ${LABEL_INSET}`}>
             <span className={wLabel}>{title}</span>
             {info && <InfoHint side="left" text={info} />}
         </div>
         {children}
-        {issue && <div className={`${TEXT_INSET} ${ISSUE}`}>{issue}</div>}
+        {issue && <div id={issueId} className={`${TEXT_INSET} ${ISSUE}`}>{issue}</div>}
     </section>
 );
 
@@ -103,7 +109,7 @@ const Section = ({ title, info, issue, children }) => (
    отдельным флекс-элементом она на телефоне падала третьей строкой под
    подпись в две строки. Сама «i» — вне <label>: нажатие на неё открывает
    подсказку, а не ставит курсор в поле. */
-const RowLabel = ({ htmlFor, label, hint, issue }) => {
+const RowLabel = ({ htmlFor, label, hint, issue, issueId }) => {
     const words = label.split(' ');
     const last = words.pop();
     return (
@@ -119,45 +125,38 @@ const RowLabel = ({ htmlFor, label, hint, issue }) => {
                     </>
                 ) : <label htmlFor={htmlFor}>{label}</label>}
             </div>
-            {issue && <div className={ISSUE}>{issue}</div>}
+            {issue && <div id={issueId} className={ISSUE}>{issue}</div>}
         </div>
     );
 };
 
-/* Степпер как UIStepper: «−» и «+» по краям, число посередине можно набрать —
-   только цифрами (CountInput). Ширина числа одна у всех, поэтому степперы
-   стоят ровным столбиком. */
-const NumberRow = ({ field, value, issue, onChange }) => {
+/* Число набирается только цифрами (CountInput), шагает степпером в пределах
+   сервера. Ширина числа одна у всех — степперы стоят ровным столбиком; её
+   хватает на шесть цифр (порог до 100 000). Какое поле в работе, знает экран:
+   от этого зависят ошибки и соседней строки. */
+const NumberRow = ({ field, value, issue, onChange, onFocusChange }) => {
     const id = useId();
-    const [editing, setEditing] = useState(false);
-    const { rejected, inputProps, setValue } = useCountInput(onChange);
+    const { rejected, inputProps, setValue, clearRejected } = useCountInput(onChange);
     const [min, max] = SETTINGS_LIMITS[field.name];
     const number = parseCount(value);
     const known = Number.isInteger(number);
-    const step = (delta) => setValue(known ? Math.min(max, Math.max(min, number + delta)) : min);
-    // Пока поле в работе, «Укажите число» не загорается: человек стёр, чтобы набрать новое.
-    const shown = rejected ? COUNT_HINT : (editing ? '' : issue);
+    const shown = rejected ? COUNT_HINT : issue;
     const invalid = Boolean(shown);
+    const issueId = `${id}-issue`;
     return (
         <>
-            <RowLabel htmlFor={id} label={field.label} hint={field.hint} issue={shown} />
-            <div className={`inline-flex shrink-0 items-center rounded-xl bg-slate-100 p-0.5 transition ${
-                invalid ? 'ring-2 ring-rose-300' : 'focus-within:ring-2 focus-within:ring-blue-500/60'}`}>
-                <button type="button" className={STEP} aria-label={`${field.label}: меньше`}
-                        disabled={known && number <= min} onClick={() => step(-1)}>
-                    <Minus size={15} strokeWidth={2.4} className={wIcon} />
-                </button>
+            <RowLabel htmlFor={id} label={field.label} hint={field.hint} issue={shown} issueId={issueId} />
+            <WaterStepper label={field.label} invalid={invalid}
+                          downDisabled={known && number <= min} upDisabled={known && number >= max}
+                          onStep={(delta) => setValue(stepCount(value, delta, [min, max]))}>
                 <input id={id} {...inputProps} value={value}
                        aria-invalid={invalid || undefined}
-                       onFocus={(event) => { setEditing(true); event.target.select(); }}
-                       onBlur={() => setEditing(false)}
-                       className={`w-14 border-0 bg-transparent p-0 text-center text-[15px] font-semibold tabular-nums focus:outline-none focus:ring-0 xl:w-16 2xl:w-20 2xl:text-[17px] ${
+                       aria-describedby={invalid ? issueId : undefined}
+                       onFocus={(event) => { onFocusChange(true); event.target.select(); }}
+                       onBlur={() => { clearRejected(); onFocusChange(false); }}
+                       className={`w-16 border-0 bg-transparent p-0 text-center text-[15px] font-semibold tabular-nums focus:outline-none focus:ring-0 2xl:w-20 2xl:text-[18px] ${
                            invalid ? 'text-rose-600' : 'text-slate-900'}`} />
-                <button type="button" className={STEP} aria-label={`${field.label}: больше`}
-                        disabled={known && number >= max} onClick={() => step(1)}>
-                    <Plus size={15} strokeWidth={2.4} className={wIcon} />
-                </button>
-            </div>
+            </WaterStepper>
         </>
     );
 };
@@ -172,7 +171,10 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
     // Новое поколение полей после сохранения и отмены: «Только цифры» и
     // «поле в работе» живут в самих строках и уходят вместе с черновиком.
     const [generation, setGeneration] = useState(0);
+    // Поле, в котором сейчас набирают: пока оно в работе, часть ошибок молчит.
+    const [focused, setFocused] = useState(null);
     const recipientsId = useId();
+    const tariffsIssueId = useId();
 
     useEffect(() => {
         axios.get(`${apiBaseUrl}/api/water/settings`, { headers: headers() })
@@ -186,12 +188,6 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
             .catch((requestError) => setError(requestError?.response?.data?.error || 'Не удалось загрузить настройки'));
     }, [apiBaseUrl, headers]);
 
-    const shownTariffs = (draft || preview)?.tariffs;
-    const tariffs = useMemo(() => {
-        const extra = (shownTariffs || []).filter((code) => !KNOWN_TARIFFS.includes(code));
-        return [...KNOWN_TARIFFS, ...extra];
-    }, [shownTariffs]);
-
     if (error) return <div className={`text-[13px] text-rose-600 ${T.body}`}>{error}</div>;
 
     /* Пока едут настройки, вкладка сразу рисуется готовой — по условиям из
@@ -203,6 +199,9 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
        получателей стоит пустым — не «никто», чтобы не показать неверного. */
     const view = draft || preview;
     const ready = Boolean(draft);
+    // Пока идёт сохранение, править тоже нельзя: ответ сервера заменяет
+    // черновик, и правка, сделанная в эти полсекунды, молча пропадала бы.
+    const locked = !ready || saving;
     if (!view) {
         return (
             <div className={`flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500 ${T.body}`}>
@@ -212,28 +211,31 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
     }
 
     const set = (name, value) => {
-        if (ready) setDraft((prev) => ({ ...prev, [name]: value }));
+        if (!locked) setDraft((prev) => ({ ...prev, [name]: value }));
     };
     const parsed = Object.fromEntries(NUMBER_NAMES.map((name) => [name, parseCount(view[name])]));
     const issues = settingsIssues(view);
     const invalid = Object.keys(issues).length > 0;
-    // Сравниваем значения, а не строки: набранное «10» поверх 10 — не правка,
-    // и тариф, снятый и отмеченный снова, — тоже.
-    const sameSet = (a, b) => JSON.stringify([...(a || [])].map(String).sort())
-        === JSON.stringify([...(b || [])].map(String).sort());
-    const dirty = ready && (NUMBER_NAMES.some((name) => parsed[name] !== parseCount(loaded[name]))
-        || !sameSet(draft.tariffs, loaded.tariffs)
-        || !sameSet(draft.notify_user_ids, loaded.notify_user_ids));
+    const shownIssues = visibleIssues(issues, view, focused);
+    const dirty = ready && settingsDirty(draft, loaded);
 
+    // Свой код тарифа (не из справочника) остаётся плиткой и после снятия —
+    // иначе его не отметить снова.
+    const extra = [...new Set([...(loaded?.tariffs || []), ...(preview?.tariffs || []), ...(view.tariffs || [])])]
+        .filter((code) => !KNOWN_TARIFFS.includes(code));
+    const tariffs = [...KNOWN_TARIFFS, ...extra];
     const chosen = view.tariffs || [];
     const toggleTariff = (code) => set('tariffs', chosen.includes(code)
         ? chosen.filter((item) => item !== code)
         : [...chosen, code]);
 
-    const reset = () => {
-        setDraft(loaded);
+    // Строки пересоздаются (generation), и поле, бывшее в работе, — тоже.
+    const renew = (settings) => {
+        setDraft(settings);
+        setFocused(null);
         setGeneration((value) => value + 1);
     };
+    const reset = () => renew(loaded);
 
     const save = async () => {
         if (!ready || invalid || saving) return;
@@ -244,8 +246,7 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
             }, { headers: headers() });
             const settings = response.data?.settings || draft;
             setLoaded(settings);
-            setDraft(settings);
-            setGeneration((value) => value + 1);
+            renew(settings);
             onSaved?.(settings);
             showToast?.('Настройки сохранены', 'success');
         } catch (requestError) {
@@ -256,8 +257,10 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
     };
 
     const recipients = ready ? (draft.notify_user_ids || []) : [];
-    const heads = candidates.filter((person) => headIds.includes(person.id));
-    // До ответа — неразрывный пробел: пустое поле того же роста.
+    // Никто не выбран — пишем главе фронт-офисов, но только тому, у кого есть
+    // Telegram (queries.notify_recipients). До ответа — неразрывный пробел:
+    // пустое поле того же роста.
+    const heads = candidates.filter((person) => headIds.includes(person.id) && person.has_telegram);
     const nobody = !ready ? '\u00a0' : heads.length
         ? `Глава фронт-офисов — ${heads.map((person) => person.name).join(', ')}`
         : 'Никто — сообщение не уйдёт';
@@ -266,8 +269,9 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
     const numberCell = (field, index) => (
         <div key={`${field.name}-${generation}`} className={CELL}>
             <div className={`${ROW} ${rowEdge(index)}`} style={NOWRAP}>
-                <NumberRow field={field} value={view[field.name] ?? ''} issue={issues[field.name]}
-                           onChange={(value) => set(field.name, value)} />
+                <NumberRow field={field} value={view[field.name] ?? ''} issue={shownIssues[field.name]}
+                           onChange={(value) => set(field.name, value)}
+                           onFocusChange={(on) => setFocused((current) => (on ? field.name : (current === field.name ? null : current)))} />
             </div>
         </div>
     );
@@ -275,22 +279,27 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
     return (
         /* Ниже xl — одна колонка, как список настроек на телефоне. С xl
            карточки во всю ширину раздела, строки в них — в две колонки. */
-        <div className={`max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7 ${ready ? '' : 'pointer-events-none'}`}
-             aria-busy={!ready || undefined}>
+        <div className={`max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7 ${locked ? 'pointer-events-none' : ''}`}
+             aria-busy={locked || undefined}>
             <Section title="Право на воду">
                 <div className={`${iosCard} grid xl:grid-cols-2`}>
                     {PROGRAM_FIELDS.map(numberCell)}
                 </div>
             </Section>
 
-            <Section title="Тарифы программы" issue={issues.tariffs}
+            <Section title="Тарифы программы" issue={issues.tariffs} issueId={tariffsIssueId}
                      info="Вода положена водителю, у машины которого есть хотя бы один из отмеченных тарифов">
-                {/* С xl края плиток стоят там же, где текст строк в карточках выше и ниже. */}
-                <div className={`${iosCard} grid grid-cols-2 gap-2 p-3 xl:grid-cols-4 xl:gap-2.5 xl:p-5 2xl:grid-cols-6 2xl:gap-3 2xl:p-6`}>
+                {/* Две плитки в ряд на телефоне, три — с 640 px (телефон боком,
+                    планшет: по две выходили полосами в 400 px), четыре с xl, шесть
+                    на большом экране. С xl края плиток стоят там же, где текст
+                    строк в карточках выше и ниже. */}
+                <div role="group" aria-label="Тарифы программы" aria-describedby={issues.tariffs ? tariffsIssueId : undefined}
+                     className={`${iosCard} grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 xl:grid-cols-4 xl:gap-2.5 xl:p-5 2xl:grid-cols-6 2xl:gap-3 2xl:p-6`}>
                     {tariffs.map((code) => {
                         const on = chosen.includes(code);
                         return (
                             <button key={code} type="button" onClick={() => toggleTariff(code)} aria-pressed={on} style={NOWRAP}
+                                    title={tariffLabel(code)}
                                     className={`${TILE} ${on
                                         ? 'bg-blue-50 text-blue-700 ring-blue-200'
                                         : 'bg-white text-slate-700 ring-slate-200/80 hover:bg-slate-50'}`}>
@@ -317,7 +326,7 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
                     <div className={`${CELL} xl:col-span-2`}>
                         <div className="flex flex-col gap-2 border-t border-slate-100 py-3 xl:flex-row xl:items-center xl:justify-between xl:gap-4 xl:py-3.5 2xl:py-4">
                             <RowLabel htmlFor={recipientsId} label="Кому писать о закупке в Telegram"
-                                      hint="Сообщение уходит, когда остаток офиса опускается до порога «Требуется закупка». Пока никто не выбран, его получает глава фронт-офисов. Кому не привязан Telegram, сообщение не придёт" />
+                                      hint={RECIPIENTS_HINT} />
                             <div className="min-w-0 xl:w-1/2 xl:pl-5 2xl:pl-6">
                                 <CustomSelect
                                     id={recipientsId}
