@@ -162,7 +162,7 @@ const NumberRow = ({ field, value, issue, onChange }) => {
     );
 };
 
-const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
+const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast }) => {
     const [loaded, setLoaded] = useState(null);
     const [draft, setDraft] = useState(null);
     const [candidates, setCandidates] = useState([]);
@@ -186,13 +186,24 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
             .catch((requestError) => setError(requestError?.response?.data?.error || 'Не удалось загрузить настройки'));
     }, [apiBaseUrl, headers]);
 
+    const shownTariffs = (draft || preview)?.tariffs;
     const tariffs = useMemo(() => {
-        const extra = (draft?.tariffs || []).filter((code) => !KNOWN_TARIFFS.includes(code));
+        const extra = (shownTariffs || []).filter((code) => !KNOWN_TARIFFS.includes(code));
         return [...KNOWN_TARIFFS, ...extra];
-    }, [draft?.tariffs]);
+    }, [shownTariffs]);
 
     if (error) return <div className={`text-[13px] text-rose-600 ${T.body}`}>{error}</div>;
-    if (!draft) {
+
+    /* Пока едут настройки, вкладка сразу рисуется готовой — по условиям из
+       /ping, которые панель уже знает: числа и тарифы те же, недостаёт только
+       списка получателей. Раньше она открывалась строкой «Загружаем
+       настройки…» и через 0,4 с перестраивалась в форму (замер 21.10.2026);
+       такие перестройки владелец называет «микро пролаг» (13.10.2026). Править
+       можно только настоящий черновик: до ответа строки не нажимаются, а поле
+       получателей стоит пустым — не «никто», чтобы не показать неверного. */
+    const view = draft || preview;
+    const ready = Boolean(draft);
+    if (!view) {
         return (
             <div className={`flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500 ${T.body}`}>
                 <Loader2 size={15} className={`animate-spin ${wIcon}`} /> Загружаем настройки…
@@ -200,21 +211,24 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
         );
     }
 
-    const set = (name, value) => setDraft((prev) => ({ ...prev, [name]: value }));
-    const parsed = Object.fromEntries(NUMBER_NAMES.map((name) => [name, parseCount(draft[name])]));
-    const issues = settingsIssues(draft);
+    const set = (name, value) => {
+        if (ready) setDraft((prev) => ({ ...prev, [name]: value }));
+    };
+    const parsed = Object.fromEntries(NUMBER_NAMES.map((name) => [name, parseCount(view[name])]));
+    const issues = settingsIssues(view);
     const invalid = Object.keys(issues).length > 0;
     // Сравниваем значения, а не строки: набранное «10» поверх 10 — не правка,
     // и тариф, снятый и отмеченный снова, — тоже.
     const sameSet = (a, b) => JSON.stringify([...(a || [])].map(String).sort())
         === JSON.stringify([...(b || [])].map(String).sort());
-    const dirty = NUMBER_NAMES.some((name) => parsed[name] !== parseCount(loaded[name]))
+    const dirty = ready && (NUMBER_NAMES.some((name) => parsed[name] !== parseCount(loaded[name]))
         || !sameSet(draft.tariffs, loaded.tariffs)
-        || !sameSet(draft.notify_user_ids, loaded.notify_user_ids);
+        || !sameSet(draft.notify_user_ids, loaded.notify_user_ids));
 
-    const toggleTariff = (code) => set('tariffs', (draft.tariffs || []).includes(code)
-        ? draft.tariffs.filter((item) => item !== code)
-        : [...(draft.tariffs || []), code]);
+    const chosen = view.tariffs || [];
+    const toggleTariff = (code) => set('tariffs', chosen.includes(code)
+        ? chosen.filter((item) => item !== code)
+        : [...chosen, code]);
 
     const reset = () => {
         setDraft(loaded);
@@ -222,7 +236,7 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
     };
 
     const save = async () => {
-        if (invalid || saving) return;
+        if (!ready || invalid || saving) return;
         setSaving(true);
         try {
             const response = await axios.put(`${apiBaseUrl}/api/water/settings`, {
@@ -241,16 +255,18 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
         }
     };
 
-    const recipients = draft.notify_user_ids || [];
+    const recipients = ready ? (draft.notify_user_ids || []) : [];
     const heads = candidates.filter((person) => headIds.includes(person.id));
-    const nobody = heads.length
+    // До ответа — неразрывный пробел: пустое поле того же роста.
+    const nobody = !ready ? '\u00a0' : heads.length
         ? `Глава фронт-офисов — ${heads.map((person) => person.name).join(', ')}`
         : 'Никто — сообщение не уйдёт';
+    const stamp = loaded || preview;
 
     const numberCell = (field, index) => (
         <div key={`${field.name}-${generation}`} className={CELL}>
             <div className={`${ROW} ${rowEdge(index)}`} style={NOWRAP}>
-                <NumberRow field={field} value={draft[field.name] ?? ''} issue={issues[field.name]}
+                <NumberRow field={field} value={view[field.name] ?? ''} issue={issues[field.name]}
                            onChange={(value) => set(field.name, value)} />
             </div>
         </div>
@@ -259,7 +275,8 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
     return (
         /* Ниже xl — одна колонка, как список настроек на телефоне. С xl
            карточки во всю ширину раздела, строки в них — в две колонки. */
-        <div className="max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7">
+        <div className={`max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7 ${ready ? '' : 'pointer-events-none'}`}
+             aria-busy={!ready || undefined}>
             <Section title="Право на воду">
                 <div className={`${iosCard} grid xl:grid-cols-2`}>
                     {PROGRAM_FIELDS.map(numberCell)}
@@ -271,7 +288,7 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
                 {/* С xl края плиток стоят там же, где текст строк в карточках выше и ниже. */}
                 <div className={`${iosCard} grid grid-cols-2 gap-2 p-3 xl:grid-cols-4 xl:gap-2.5 xl:p-5 2xl:grid-cols-6 2xl:gap-3 2xl:p-6`}>
                     {tariffs.map((code) => {
-                        const on = (draft.tariffs || []).includes(code);
+                        const on = chosen.includes(code);
                         return (
                             <button key={code} type="button" onClick={() => toggleTariff(code)} aria-pressed={on} style={NOWRAP}
                                     className={`${TILE} ${on
@@ -335,7 +352,7 @@ const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
             {/* Как в настройках macOS: кто и когда менял — слева, действие — справа. */}
             <div className="flex flex-col-reverse gap-3 pt-1 xl:flex-row xl:items-center xl:justify-between">
                 <span className={`${TEXT_INSET} text-[12px] text-slate-400 ${T.sub}`}>
-                    {loaded?.updated_by_name && `Изменил ${loaded.updated_by_name}, ${fmtDateTime(loaded.updated_at)}`}
+                    {stamp?.updated_by_name && `Изменил ${stamp.updated_by_name}, ${fmtDateTime(stamp.updated_at)}`}
                 </span>
                 <div className="flex gap-2 2xl:gap-3">
                     {dirty && (

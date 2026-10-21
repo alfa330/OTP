@@ -176,6 +176,7 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                 <WaterSettings
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}
+                    preview={settings}
                     onSaved={(saved) => { setSettings(saved); loadOffices(); }}
                     showToast={showToast}
                 />

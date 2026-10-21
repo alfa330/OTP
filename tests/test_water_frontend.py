@@ -541,6 +541,18 @@ class SettingsLayoutTests(unittest.TestCase):
         self.assertIn('{issue && <div className={ISSUE}>{issue}</div>}', self.settings)
         self.assertNotIn('<WaterGroup', self.settings)  # у неё пояснение — строкой под карточкой
 
+    def test_tab_opens_ready_instead_of_rebuilding(self):
+        """Вкладка открывается сразу формой по условиям из /ping, а не строкой
+        «Загружаем настройки…» с перестройкой через 0,4 с (замер 21.10.2026).
+        Править можно только настоящий черновик."""
+        panel = _read(PANEL)
+        self.assertIn('                    preview={settings}\n', panel)
+        self.assertIn('const view = draft || preview;', self.settings)
+        self.assertIn('if (ready) setDraft((prev) => ({ ...prev, [name]: value }));', self.settings)
+        self.assertIn("if (!ready || invalid || saving) return;", self.settings)
+        # Список получателей до ответа — пустой, а не «никто»: неверное хуже пустого.
+        self.assertIn("const nobody = !ready ? '\\u00a0' : heads.length", self.settings)
+
     def test_selected_tariff_is_soft_blue_not_black(self):
         """Выбор — мягкая голубая заливка с галочкой (16.10.2026: чёрный выбор
         «выглядит плохо»)."""
