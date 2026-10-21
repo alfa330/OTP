@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   EXPORT_MAX_DAYS,
   KIND_LABELS,
+  MAX_BLOCKS,
+  SETTINGS_LIMITS,
   TARIFF_LABELS,
   blocksWord,
   conditionGroups,
@@ -17,6 +19,7 @@ import {
   officePlace,
   parseCount,
   plural,
+  settingsIssues,
   stockStatus,
   tariffLabel,
   verdictBasis,
@@ -152,4 +155,29 @@ test('office place reads city and address', () => {
   assert.equal(officePlace({ city: 'Астана', address: '  ' }), 'Астана');
   assert.equal(officePlace({ city: '', address: 'Сарыарка 31' }), 'Сарыарка 31');
   assert.equal(officePlace(null), '');
+});
+
+test('settings issues name what to fix at the field', () => {
+  const ok = { min_trips: '10', cooldown_days: 7, welcome_blocks: 1, activity_blocks: '1',
+    low_threshold: 20, buy_threshold: 10, tariffs: ['business'] };
+  assert.deepEqual(settingsIssues(ok), {});
+  assert.deepEqual(settingsIssues({ ...ok, min_trips: '' }), { min_trips: 'Укажите число' });
+  assert.deepEqual(settingsIssues({ ...ok, activity_blocks: '0' }), { activity_blocks: 'От 1 до 50' });
+  assert.deepEqual(settingsIssues({ ...ok, cooldown_days: '366' }), { cooldown_days: 'От 0 до 365' });
+  assert.deepEqual(settingsIssues({ ...ok, buy_threshold: '25' }),
+    { buy_threshold: 'Не больше порога «Низкий остаток»' });
+  // Равные пороги — можно: у обоих «столько или меньше», как у сервера.
+  assert.deepEqual(settingsIssues({ ...ok, buy_threshold: 20 }), {});
+  assert.deepEqual(settingsIssues({ ...ok, tariffs: [] }), { tariffs: 'Отметьте хотя бы один тариф' });
+  // Порог вне пределов — своя строка, а не «порядок порогов» в соседнем поле.
+  const huge = settingsIssues({ ...ok, low_threshold: '200000' });
+  assert.equal(huge.low_threshold, `От 0 до ${MAX_BLOCKS.toLocaleString('ru-RU')}`);
+  assert.equal(huge.buy_threshold, undefined);
+});
+
+test('settings limits cover every number of the program', () => {
+  assert.deepEqual(Object.keys(SETTINGS_LIMITS).sort(), [
+    'activity_blocks', 'buy_threshold', 'cooldown_days', 'low_threshold', 'min_trips', 'welcome_blocks']);
+  assert.deepEqual(SETTINGS_LIMITS.welcome_blocks, [1, 50]);
+  assert.equal(SETTINGS_LIMITS.low_threshold[1], MAX_BLOCKS);
 });

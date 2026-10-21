@@ -138,6 +138,41 @@ export const isCountDraft = (value) => {
     return text.length <= COUNT_MAX_DIGITS && /^\d*$/.test(text);
 };
 
+/* Пределы чисел программы — двойник _SETTINGS_LIMITS и _MAX_BLOCKS в
+   water/routes.py (их сверяет pytest). Степпер за них не шагает, а набранное
+   вне их подсвечивается у самого поля: сервер такое всё равно не примет. */
+export const MAX_BLOCKS = 100000;
+
+export const SETTINGS_LIMITS = {
+    min_trips: [0, 1000],
+    cooldown_days: [0, 365],
+    welcome_blocks: [1, 50],
+    activity_blocks: [1, 50],
+    low_threshold: [0, MAX_BLOCKS],
+    buy_threshold: [0, MAX_BLOCKS],
+};
+
+/* Что исправить в черновике настроек: { поле: 'что сделать' }, пусто — можно
+   сохранять. Текст стоит под подписью строки, поэтому короткий. Порядок
+   порогов — то же правило, что у сервера: закупка не выше «низкого». */
+export const settingsIssues = (draft) => {
+    const issues = {};
+    const values = {};
+    Object.entries(SETTINGS_LIMITS).forEach(([name, [low, high]]) => {
+        const value = parseCount(draft?.[name]);
+        values[name] = value;
+        if (value === null) issues[name] = 'Укажите число';
+        else if (!Number.isInteger(value) || value < low || value > high) {
+            issues[name] = `От ${low} до ${high.toLocaleString('ru-RU')}`;
+        }
+    });
+    if (!issues.low_threshold && !issues.buy_threshold && values.buy_threshold > values.low_threshold) {
+        issues.buy_threshold = 'Не больше порога «Низкий остаток»';
+    }
+    if (!(draft?.tariffs || []).length) issues.tariffs = 'Отметьте хотя бы один тариф';
+    return issues;
+};
+
 /* Условия получения воды словами — вкладка «Условия» у тех, кто программу
    не настраивает (колл-центр, офисники). Числа и тарифы — из настроек, а не из
    кода: поменял руководитель порог — тут же поменялся и текст. */

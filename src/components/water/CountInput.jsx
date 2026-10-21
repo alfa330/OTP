@@ -26,8 +26,15 @@ export const useCountInput = (onChange) => {
         setRejected(false);
         onChange(next);
     };
+    /* Число не из клавиатуры (шаг степпера): оно заведомо годное, и прежнее
+       «Только цифры» гаснет вместе с ним. */
+    const setValue = (value) => {
+        setRejected(false);
+        onChange(String(value));
+    };
     return {
         rejected,
+        setValue,
         inputProps: {
             inputMode: 'numeric',
             pattern: '[0-9]*',

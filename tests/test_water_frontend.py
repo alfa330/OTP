@@ -15,7 +15,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from water import access, notify, report, rules, schema
+from water import access, notify, report, routes, rules, schema
 
 ROOT = Path(__file__).resolve().parents[1]
 PARCELS_VIEW = ROOT / 'src' / 'components' / 'parcels' / 'ParcelsView.jsx'
@@ -186,6 +186,22 @@ class LabelMirrorTests(unittest.TestCase):
         self.assertEqual(schema.DEFAULT_TARIFFS, ('business', 'ultimate'))
         self.assertIn("""'["business", "ultimate"]'""", ' '.join(schema._STATEMENTS))
 
+    def test_settings_limits_match_the_server(self):
+        """Степпер «Настроек» не шагает за пределы, а набранное вне их краснеет у
+        поля — пределы те же, что у сервера: разойдись они, степпер довёл бы до
+        числа, которое сохранение отвергнет."""
+        max_blocks = int(re.search(r'export const MAX_BLOCKS = (\d+);', self.meta).group(1))
+        self.assertEqual(max_blocks, routes._MAX_BLOCKS)
+        block = self.meta.split('export const SETTINGS_LIMITS = {')[1].split('};')[0]
+        front = {name: (int(low), max_blocks if high == 'MAX_BLOCKS' else int(high))
+                 for name, low, high in re.findall(r'(\w+): \[(\d+), (\w+)\]', block)}
+        self.assertEqual(front, {name: (low, high) for name, (low, high, _message)
+                                 in routes._SETTINGS_LIMITS.items()})
+        # Каждое число программы на экране — строка со степпером, и наоборот.
+        settings = _read(WATER / 'WaterSettings.jsx')
+        shown = re.findall(r"\{ name: '(\w+)', label:", settings)
+        self.assertEqual(sorted(shown), sorted(routes._SETTINGS_LIMITS))
+
 
 class PanelTests(unittest.TestCase):
     """Вкладки по правам (01.10.2026): журнал и настройки — руководителю,
@@ -233,9 +249,11 @@ class PanelTests(unittest.TestCase):
         stock = _read(water / 'WaterStock.jsx')
         self.assertEqual(stock.count('<CountInput '), 4)  # поступление/пересчёт, два порога, офис в учёт
         settings = _read(water / 'WaterSettings.jsx')
-        self.assertIn('const { rejected, inputProps } = useCountInput(onChange);', settings)
-        self.assertIn('<input className={NUMBER_INPUT} {...inputProps} value={value} />', settings)
+        self.assertIn('const { rejected, inputProps, setValue } = useCountInput(onChange);', settings)
+        self.assertIn('<input id={id} {...inputProps} value={value}', settings)
         count = _read(water / 'CountInput.jsx')
+        # Шаг степпера — годное число: «Только цифры» гаснет вместе с ним.
+        self.assertIn('const setValue = (value) => {\n        setRejected(false);\n        onChange(String(value));', count)
         handler = count.split('const handleChange = (event) => {')[1].split('\n    };')[0]
         self.assertLess(handler.index('if (!isCountDraft(next)) {'), handler.index('onChange(next);'))
         self.assertIn('setRejected(true);\n            return;', handler)
@@ -400,13 +418,14 @@ class LargeScreenTests(unittest.TestCase):
         sheet = stock[stock.index('<IosModal open={open} onClose={onClose} title={<ModalTitle>{office.name}'):]
         sheet = sheet[:sheet.index('</IosModal>')]
         self.assertEqual(re.findall(r'order-(\d)', sheet), ['1', '2', '4', '3'])  # остаток, форма, «В учёте» | движения
-        # Сеток без префикса в экранах не прибавилось (на телефоне это были бы колонки):
-        # прежняя одна — два порога в карточке офиса.
+        # Сеток без префикса в экранах (на телефоне это колонки) две: два порога в
+        # карточке офиса и плитки тарифов в «Настройках» — по две в ряд на телефоне
+        # (21.10.2026, вид «Настроек» как список iOS).
         for name, source in self.screens.items():
             source = re.sub(r'/\*[\s\S]*?\*/', '', source)  # в комментариях подстрока названа словами
             self.assertNotIn('grid-cols-[', source, name)
             bare = re.findall(r'(?<![\w:-])grid-cols-\d+', source)
-            self.assertEqual(bare, ['grid-cols-2'] if name == 'WaterStock.jsx' else [], name)
+            self.assertEqual(bare, ['grid-cols-2'] if name in ('WaterStock.jsx', 'WaterSettings.jsx') else [], name)
 
     def test_screens_take_shared_classes_through_the_scale(self):
         """Поле, кнопка и подпись приходят из waterUi.jsx, а не из ui/ios напрямую:
@@ -485,6 +504,48 @@ class LargeScreenTests(unittest.TestCase):
         """Порог большого экрана в расчётах раздела — 1536 px, то есть 2xl из
         набора Tailwind по умолчанию. Свой `screens` в конфиге сдвинул бы его молча."""
         self.assertNotIn('screens', _read(ROOT / 'tailwind.config.cjs'))
+
+
+class SettingsLayoutTests(unittest.TestCase):
+    """«Настройки» — список настроек iOS/macOS (владелец 21.10.2026: «выглядит всё
+    криво и не симметрично, сделай аккуратно и удобно»). Было: группы сеткой из
+    трёх колонок разной высоты, пояснения строками под полями, на телефоне поле
+    падало под подпись, выбранный тариф — чёрной заливкой."""
+
+    def setUp(self):
+        self.settings = _read(WATER / 'WaterSettings.jsx')
+
+    def test_groups_are_full_width_cards_with_equal_columns(self):
+        """Карточка группы — во всю ширину раздела, строки в ней с xl — в две
+        равные колонки: края и середины карточек совпадают. Колонок групп разной
+        высоты больше нет."""
+        self.assertEqual(self.settings.count('grid xl:grid-cols-2`}>'), 2)  # «Право на воду», пороги
+        self.assertNotIn('row-span', self.settings)
+        self.assertNotIn('xl:grid-cols-3', self.settings)
+        # Список получателей встаёт под правую колонку — вровень с порогами над ним.
+        self.assertIn('<div className="min-w-0 xl:w-1/2 xl:pl-5 2xl:pl-6">', self.settings)
+        self.assertIn("const CELL = 'min-w-0 px-4 xl:px-5 2xl:px-6';", self.settings)
+
+    def test_rows_keep_the_field_beside_the_label_on_a_phone(self):
+        """Оболочка телефона переносит ряды с justify-between, и поле падало под
+        подпись к левому краю (снимок 390×844). Перебивается только инлайном."""
+        self.assertIn("const NOWRAP = { flexWrap: 'nowrap' };", self.settings)
+        self.assertEqual(self.settings.count('style={NOWRAP}'), 2)  # строка числа и плитка тарифа
+        code = re.sub(r'/\*[\s\S]*?\*/', '', self.settings)  # в комментарии класс назван словами
+        self.assertNotIn('flex-nowrap', code)
+
+    def test_hints_live_under_the_i(self):
+        """Пояснение — под «i» у подписи, а не строкой под полем; строкой под
+        подписью бывает только то, что надо исправить."""
+        self.assertIn('<InfoHint side="left" text={hint} className="ml-1.5 align-middle" />', self.settings)
+        self.assertIn('{issue && <div className={ISSUE}>{issue}</div>}', self.settings)
+        self.assertNotIn('<WaterGroup', self.settings)  # у неё пояснение — строкой под карточкой
+
+    def test_selected_tariff_is_soft_blue_not_black(self):
+        """Выбор — мягкая голубая заливка с галочкой (16.10.2026: чёрный выбор
+        «выглядит плохо»)."""
+        self.assertIn("? 'bg-blue-50 text-blue-700 ring-blue-200'", self.settings)
+        self.assertNotIn('bg-slate-900', self.settings)
 
 
 class JournalCancelTests(unittest.TestCase):
