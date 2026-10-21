@@ -32,9 +32,10 @@ STAGING_PREFIX = 'wazzup/pilot/uploads/'
 # without a query (checked 21.10.2026). So it downloads from this API while it
 # answers the send; the link outlives that only for the vendor's own retries.
 LINK_MINUTES = 30
-# Encoded length of the link's last segment: the link stays within ~200
-# characters, not the 900–1200 of a signed URL.
-LINK_NAME_LIMIT = 100
+# Encoded length of the link's last segment. A Cyrillic letter takes six, so
+# this keeps ~48 of them (100 cut «Проверка вложения» on the first live send);
+# the link stays under ~400 characters, a third of a refused signed URL.
+LINK_NAME_LIMIT = 300
 _LINK_TOKEN = re.compile(r'[A-Za-z0-9_-]{43}')
 _slots = threading.BoundedSemaphore(2)
 _cleanup_lock = threading.Lock()
@@ -382,28 +383,34 @@ def register_upload_routes(bp, actor, require_api_key, preflight, db, excluded_c
         row = None
         if _LINK_TOKEN.fullmatch(token):
             with db._get_cursor() as cursor:
-                cursor.execute("SELECT bucket,blob_path,content_type FROM wazzup_pilot_uploads "
+                cursor.execute("SELECT bucket,blob_path,content_type,file_size FROM wazzup_pilot_uploads "
                                "WHERE account='op' AND link_hash=%s AND link_expires_at > now() "
                                "AND deleted_at IS NULL", (_link_digest(token),))
                 row = cursor.fetchone()
         if not row:
             return Response('Not found', status=404, content_type='text/plain')
-        bucket, path, mime = row
-        try:
-            data = gcs['client']().bucket(bucket).blob(path).download_as_bytes(timeout=20)
-        except Exception as error:
-            gone = getattr(error, 'code', None) == 404
-            logging.warning('Wazzup pilot file fetch failed status=%d error_type=%s',
-                            404 if gone else 503, type(error).__name__)
-            return Response('Not found' if gone else 'Unavailable', status=404 if gone else 503,
-                            content_type='text/plain')
+        bucket, path, mime, size = row
+        if request.method == 'HEAD':
+            # Wazzup (node-fetch) asks HEAD before GET. The size is known, so
+            # the storage round trip (~250 ms of the send) is skipped.
+            response = Response(content_type=mime)
+            response.headers['Content-Length'] = str(size)
+        else:
+            try:
+                response = Response(gcs['client']().bucket(bucket).blob(path).download_as_bytes(timeout=20),
+                                    content_type=mime)
+            except Exception as error:
+                gone = getattr(error, 'code', None) == 404
+                logging.warning('Wazzup pilot file fetch failed status=%d error_type=%s',
+                                404 if gone else 503, type(error).__name__)
+                return Response('Not found' if gone else 'Unavailable', status=404 if gone else 503,
+                                content_type='text/plain')
         logging.info('Wazzup pilot file fetch method=%s size=%d duration_ms=%d agent=%s', request.method,
-                     len(data), round((time.monotonic() - started) * 1000),
+                     size, round((time.monotonic() - started) * 1000),
                      (request.headers.get('User-Agent') or '-')[:80])
         # The monolith stamps no-store on every /api/ answer. The link Wazzup
         # accepted was an ordinary cacheable file; the key already expires.
         g.allow_public_cache = True
-        response = Response(data, content_type=mime)
         response.headers['Cache-Control'] = 'private, max-age=300'
         return response
 

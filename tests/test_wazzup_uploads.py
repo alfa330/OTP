@@ -79,10 +79,10 @@ class UploadCursor(MemoryCursor):
                 if item['id'] == identifier:
                     item['link_hash'] = digest
                     item['link_expires_at'] = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-        elif sql.startswith('SELECT bucket,blob_path,content_type FROM wazzup_pilot_uploads'):
+        elif sql.startswith('SELECT bucket,blob_path,content_type,file_size FROM wazzup_pilot_uploads'):
             item = next((v for v in self.db.uploads.values() if v.get('link_hash') == values[0]
                          and v['link_expires_at'] > datetime.now(timezone.utc) and not v['deleted_at']), None)
-            self.row = (item['bucket'], item['blob_path'], item['content_type']) if item else None
+            self.row = (item['bucket'], item['blob_path'], item['content_type'], item['file_size']) if item else None
         else:
             raise AssertionError('Unexpected upload SQL: ' + sql)
 
@@ -372,7 +372,12 @@ def test_file_link_needs_no_session_and_dies_with_its_key(fixture):
     assert served.headers['Content-Type'] == 'image/png'
     # The refused storage URLs answered no-store, the accepted link a cacheable file.
     assert served.headers['Cache-Control'] == 'private, max-age=300'
-    assert stranger.head(path).status_code == 200
+    # Wazzup (node-fetch) asks HEAD before GET: answered from the row, without storage.
+    downloads = len(storage.downloads)
+    head = stranger.head(path)
+    assert head.status_code == 200 and not head.data and len(storage.downloads) == downloads
+    assert head.headers['Content-Length'] == str(len(image())) and head.headers['Content-Type'] == 'image/png'
+    assert head.headers['Cache-Control'] == 'private, max-age=300'
     # The name is only for Wazzup; the token alone opens the file.
     assert stranger.get(path.rsplit('/', 1)[0] + '/other-name.png?filename=x').status_code == 200
     token = path.split('/')[-2]
@@ -404,6 +409,12 @@ def test_file_link_reports_storage_failure_without_the_key(fixture, monkeypatch,
 @pytest.mark.parametrize('filename,expected', [
     ('photo.png', 'photo.png'),
     ('Договор аренды.pdf', quote('Договор аренды.pdf', safe='')),
+    # The first live send (21.10.2026) arrived as «Проверка вложени.pdf»: the
+    # limit counted six characters per Cyrillic letter and kept only 16 of them.
+    ('Проверка вложения.pdf', quote('Проверка вложения.pdf', safe='')),
+    ('Снимок экрана 2026-09-25 202046.png', quote('Снимок экрана 2026-09-25 202046.png', safe='')),
+    ('Путевой лист водителя такси за октябрь 2026.xlsx',
+     quote('Путевой лист водителя такси за октябрь 2026.xlsx', safe='')),
     ('a/b?c#d.pdf', quote('a/b?c#d.pdf', safe='')),
     ('.pdf', 'file.pdf'),
 ])
@@ -414,7 +425,7 @@ def test_link_name_keeps_the_original_name_in_one_segment(filename, expected):
 def test_link_name_cuts_a_long_name_and_keeps_the_extension():
     name = uploads.link_name('Очень длинное имя документа ' * 10 + '.xlsx')
     assert len(name) <= uploads.LINK_NAME_LIMIT and name.endswith('.xlsx') and '/' not in name
-    assert uploads.link_name('a' * 300 + '.pdf') == 'a' * 96 + '.pdf'
+    assert uploads.link_name('a' * 400 + '.pdf') == 'a' * 296 + '.pdf'
 
 
 def test_link_origin_prefers_render_public_address(monkeypatch):
