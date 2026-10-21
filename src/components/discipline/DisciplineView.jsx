@@ -3,7 +3,7 @@ import { BarChart3, ClipboardList, LayoutGrid, Plus, Settings2, ShieldAlert } fr
 import { APPLE_FONT, IosModal, IosSegmented } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { apiCode, apiError, createDisciplineApi } from './disciplineApi';
-import { dBtnPrimary, dTabs, EmptyState, LoadingRows, T } from './disciplineUi';
+import { dBtnPrimary, DepartmentPicker, dTabs, EmptyState, LoadingRows, T } from './disciplineUi';
 import SummaryPanel from './SummaryPanel';
 import JournalPanel from './JournalPanel';
 import ControlsPanel from './ControlsPanel';
@@ -265,12 +265,12 @@ const DisciplineView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
                             </div>
                         )}
                         {departments.length > 1 && !['settings'].includes(activeTab) && (
-                            <IosSegmented
+                            <DepartmentPicker
+                                mobile={mobile}
                                 value={departmentId || 0}
                                 onChange={(value) => setDepartmentId(value || null)}
                                 options={[{ value: 0, label: 'Все отделы' },
                                     ...departments.map((d) => ({ value: d.id, label: d.name }))]}
-                                ariaLabel="Отдел"
                             />
                         )}
                     </div>

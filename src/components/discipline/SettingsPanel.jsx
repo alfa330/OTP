@@ -1,25 +1,27 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, FileText, Plus, Trash2 } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { ArrowRight, Check, CheckCircle2, FileText, Plus, Trash2 } from 'lucide-react';
 import { IosHint, IosModal, IosSegmented, IosToggle } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { apiError } from './disciplineApi';
+import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    AttachButton, Chip, dBtnPrimary, dBtnSecondary, dInput, EmptyState, Field, Group, INVALID_RING,
+    AttachButton, Chip, dBtnPrimary, dBtnSecondary, DepartmentPicker, dInput, EmptyState, Field, Group, INVALID_RING,
     LoadingRows, Spinner, T,
 } from './disciplineUi';
-import { filesProblem, fmtDateTime, ordinalWord, stepTitle } from './disciplineRules';
+import { filesProblem, fmtDateTime, ladderName, ladderProblems, ordinalWord, stepTitle } from './disciplineRules';
 
 /*
  * «Настройки и справочники» (ТЗ п. 4.5, 5, 7, 12) — только руководителю.
  * Всё здесь меняется без разработчика: типы нарушений, меры, лестница, окно
  * подсчёта, сроки и каналы уведомлений, шаблон акта.
  *
- * Лестница — список ступеней. Два готовых варианта: «Как в ТЗ» (объяснительные,
- * акт на третьем — по умолчанию, по нему написаны критерии приёмки) и «Как на
- * образце» (так нарисовал заказчик: тренинг, объяснительные №1–3, акт на
- * четвёртом). За последней ступенью повторяется последняя. Лестница и окно
- * действуют на нарушения, зафиксированные после сохранения: прошлые записи
- * считаются по правилам своего дня.
+ * Лестницы — у отдела свои, с названиями; действует одна. По умолчанию одна,
+ * «Основная»: объяснительная, объяснительная, объяснительная + акт. Глава отдела
+ * (и выше) называет лестницы сам, заводит новые и выбирает действующую
+ * (владелец, 21.10.2026). За последней ступенью повторяется последняя.
+ * Действующая лестница и окно действуют на нарушения, зафиксированные после
+ * сохранения: прошлые записи считаются по правилам своего дня; название на
+ * счёт не влияет.
  *
  * Несохранённые правки держатся у каждого отдела свои: правка справочника,
  * переход в другой отдел или на другую вкладку раздела их не стирает — до
@@ -34,7 +36,6 @@ const LIMIT_LABELS = {
     explanation_days: 'Срок объяснительной',
 };
 
-const LADDER_EQ = (a, b) => a.length === b.length && a.every((step, i) => step === b[i]);
 
 const TemplateHint = 'Метки, которые подставит система: {{НОМЕР_АКТА}}, {{ДАТА}}, {{ФИО}}, {{ДОЛЖНОСТЬ}}, {{ОТДЕЛ}}, '
     + '{{ГРУППА}}, {{ДАТА_ПРИЁМА}}, {{НАРУШЕНИЯ}}, {{ОБЪЯСНИТЕЛЬНЫЕ}}, {{РЕШЕНИЕ}}, {{СОСТАВИЛ}}. Без шаблона '
@@ -128,7 +129,128 @@ const DictionaryEditor = ({ kind, item, catalog, departmentId, api, toast, onClo
     );
 };
 
+/* id новой лестницы — латиница и цифры, как ждёт сервер (catalog._LADDER_ID). */
+const newLadderId = () => `l${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+/* Лестницы отдела: плашки с названиями (выбранная — мягкой голубой заливкой с
+   галочкой, у действующей — «действует»), под ними название и ступени
+   выбранной. Новая лестница — копия выбранной: её называют и правят. Удалить
+   можно любую, кроме действующей; всё — в черновике до «Сохранить настройки». */
+const LadderLibrary = ({ draft, setDraft, catalog, pickedId, onPick, problems, onNameChange }) => {
+    const ladders = draft.ladders || [];
+    const activeId = draft.active_ladder;
+    const picked = ladders.find((l) => l.id === pickedId) || ladders.find((l) => l.id === activeId) || ladders[0];
+    const nameRef = useRef(null);
+    const [fresh, setFresh] = useState(null);
+    useEffect(() => {
+        if (fresh && picked?.id === fresh) nameRef.current?.focus();
+    }, [fresh, picked?.id]);
+    if (!picked) return null;
+    const limits = catalog.ladders || {};
+    const maxSteps = limits.max_steps || 10;
+    const setLadders = (update) => setDraft((d) => ({ ...d, ladders: update(d.ladders || []) }));
+    const patch = (change) => setLadders((list) => list.map((l) => (l.id === picked.id ? { ...l, ...change } : l)));
+    const setSteps = (steps) => patch({ steps });
+    const add = () => {
+        const id = newLadderId();
+        setLadders((list) => [...list, { id, name: '', steps: [...picked.steps] }]);
+        onPick(id);
+        setFresh(id);
+    };
+    const remove = () => {
+        setLadders((list) => list.filter((l) => l.id !== picked.id));
+        onPick(activeId);
+    };
+    const isActive = picked.id === activeId;
+    const error = problems?.[picked.id] || null;
+    return (
+        <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Лестницы отдела">
+                {ladders.map((ladder) => {
+                    const on = ladder.id === picked.id;
+                    return (
+                        <button key={ladder.id} type="button" role="tab" aria-selected={on} onClick={() => onPick(ladder.id)}
+                                className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium transition active:scale-[0.97] ${T.sub} ${
+                                    on ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'bg-slate-100 text-slate-700 hover:bg-slate-200/60'} ${
+                                    problems?.[ladder.id] ? INVALID_RING : ''}`}>
+                            {on ? <Check size={14} className="shrink-0 text-blue-600" /> : null}
+                            <span className="truncate">{ladderName(ladder.name) || 'Без названия'}</span>
+                            {ladder.id === activeId ? (
+                                <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-px text-[11px] font-semibold text-emerald-700">действует</span>
+                            ) : null}
+                        </button>
+                    );
+                })}
+                {ladders.length < (limits.max || 10) ? (
+                    <button type="button" onClick={add}
+                            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[13px] font-medium text-blue-600 transition hover:bg-blue-50 active:scale-[0.97] ${T.sub}`}>
+                        <Plus size={14} />
+                        Новая лестница
+                    </button>
+                ) : null}
+            </div>
+            <Field label="Название" error={error} anchor="ladder_name">
+                <input ref={nameRef} className={`${dInput} ${error ? INVALID_RING : ''}`} value={picked.name}
+                       maxLength={limits.name_max || 60} placeholder="Например, Основная"
+                       onChange={(e) => { patch({ name: e.target.value }); onNameChange?.(picked.id); }} />
+            </Field>
+            <ol className="space-y-2">
+                {picked.steps.map((step, index) => (
+                    <li key={index} className="flex items-center gap-2">
+                        {/* На телефоне подпись уже и без стрелки: иначе «Объяснительная + акт» обрезается. */}
+                        <span className={`w-[76px] shrink-0 text-[13px] text-slate-600 sm:w-[118px] ${T.sub}`}>
+                            {ordinalWord(index + 1).replace(/^./, (c) => c.toUpperCase())}
+                        </span>
+                        <ArrowRight size={14} className="hidden shrink-0 text-slate-300 sm:block" />
+                        <div className="min-w-0 flex-1">
+                            <CustomSelect variant="ios" value={step} ariaLabel={`Ступень ${index + 1}`}
+                                          options={catalog.steps}
+                                          onChange={(value) => setSteps(picked.steps.map((s, i) => (i === index ? value : s)))} />
+                        </div>
+                        <button type="button" aria-label="Убрать ступень" disabled={picked.steps.length <= 1}
+                                onClick={() => setSteps(picked.steps.filter((_, i) => i !== index))}
+                                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-rose-600 disabled:opacity-30">
+                            <Trash2 size={15} />
+                        </button>
+                    </li>
+                ))}
+            </ol>
+            {picked.steps.length < maxSteps && (
+                <button type="button" className={`${dBtnSecondary} !py-2`}
+                        onClick={() => setSteps([...picked.steps, picked.steps[picked.steps.length - 1] || 'explanation'])}>
+                    <Plus size={15} />
+                    Ступень
+                </button>
+            )}
+            <div className={`rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] text-slate-600 ${T.sub}`}>
+                {picked.steps.map((step, i) => `${i + 1}-е — ${stepTitle(step).toLowerCase()}`).join(' · ')}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+                {isActive ? (
+                    <span className={`inline-flex items-center gap-1.5 text-[12.5px] text-emerald-700 ${T.sub}`}>
+                        <CheckCircle2 size={15} className="shrink-0" />
+                        По этой лестнице считаются нарушения
+                    </span>
+                ) : (
+                    <>
+                        <button type="button" className={`${dBtnSecondary} !py-2`}
+                                onClick={() => setDraft((d) => ({ ...d, active_ladder: picked.id }))}>
+                            Сделать действующей
+                        </button>
+                        <button type="button" onClick={remove}
+                                className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium text-rose-600 transition hover:bg-rose-50 ${T.sub}`}>
+                            <Trash2 size={15} />
+                            Удалить лестницу
+                        </button>
+                    </>
+                )}
+            </div>
+        </div>
+    );
+};
+
 const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
+    const mobile = useIsMobileShell();
     const [departmentId, setDepartmentId] = useState(departments[0]?.id || null);
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
@@ -140,6 +262,9 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
     const [templateBusy, setTemplateBusy] = useState(false);
     const [templateError, setTemplateError] = useState(null);
     const [editor, setEditor] = useState(null);
+    // Какую лестницу отдела открыли для правки (по умолчанию — действующую).
+    const [ladderPick, setLadderPick] = useState({});
+    const pickLadder = (id) => setLadderPick((prev) => ({ ...prev, [departmentId]: id }));
     const departmentNow = useRef(departmentId);
     departmentNow.current = departmentId;
 
@@ -183,18 +308,13 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
         setErrors((prev) => ({ ...prev, [key]: null }));
     };
 
-    const presets = data?.catalog?.presets || [];
-    const presetValue = useMemo(() => {
-        if (!draft) return 'custom';
-        const found = presets.find((p) => LADDER_EQ(p.ladder, draft.ladder));
-        return found ? found.value : 'custom';
-    }, [draft, presets]);
     const dirty = data && draft && JSON.stringify(draft) !== JSON.stringify(data.settings);
 
-    const setLadder = (ladder) => setDraft((d) => ({ ...d, ladder }));
     const limits = data?.catalog?.limits || {};
     const validate = () => {
         const next = {};
+        const ladderIssues = ladderProblems(draft.ladders, data?.catalog?.ladders?.name_max);
+        if (Object.keys(ladderIssues).length) next.ladders = ladderIssues;
         Object.entries(limits).forEach(([key, range]) => {
             if (key === 'period_days' && draft.period_kind !== 'rolling') return;
             const [low, high] = range;
@@ -208,6 +328,12 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
     const save = async () => {
         const next = validate();
         setErrors(next);
+        if (next.ladders) {
+            // Подвести к первой лестнице без названия (или с занятым): открыть её и показать поле.
+            pickLadder((draft.ladders || []).find((l) => next.ladders[l.id])?.id);
+            requestAnimationFrame(() => document.querySelector('[data-field="ladder_name"]')
+                ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+        }
         if (Object.keys(next).length) return;
         setSaving(true);
         try {
@@ -245,53 +371,23 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
     return (
         <div className="space-y-5 xl:space-y-6">
             {departments.length > 1 && (
-                <IosSegmented value={departmentId} onChange={setDepartmentId} slide ariaLabel="Отдел"
-                              options={departments.map((d) => ({ value: d.id, label: d.name }))} />
+                <DepartmentPicker mobile={mobile} value={departmentId} onChange={setDepartmentId}
+                                  options={departments.map((d) => ({ value: d.id, label: d.name }))} />
             )}
             {error ? <Group><EmptyState title={error} /></Group> : !data || !draft ? <LoadingRows rows={8} /> : (
                 <>
                     <div className="grid gap-5 xl:grid-cols-2 xl:gap-6">
                         <Group title="Лестница эскалации"
-                               right={<IosHint align="right" text="Номер нарушения считается в окне подсчёта; за последней ступенью повторяется последняя. Новая лестница действует на нарушения, зафиксированные после сохранения: у прежних записей номер, ступень и акт остаются как были." />}>
-                            <div className="space-y-4">
-                                <IosSegmented value={presetValue} stretch slide ariaLabel="Готовые варианты"
-                                              onChange={(value) => {
-                                                  const preset = presets.find((p) => p.value === value);
-                                                  if (preset) setLadder([...preset.ladder]);
-                                              }}
-                                              options={[...presets.map((p) => ({ value: p.value, label: p.label })),
-                                                  { value: 'custom', label: 'Своя' }]} />
-                                <ol className="space-y-2">
-                                    {draft.ladder.map((step, index) => (
-                                        <li key={index} className="flex items-center gap-2">
-                                            <span className={`w-[118px] shrink-0 text-[13px] text-slate-600 ${T.sub}`}>
-                                                {ordinalWord(index + 1).replace(/^./, (c) => c.toUpperCase())}
-                                            </span>
-                                            <ArrowRight size={14} className="shrink-0 text-slate-300" />
-                                            <div className="min-w-0 flex-1">
-                                                <CustomSelect variant="ios" value={step} ariaLabel={`Ступень ${index + 1}`}
-                                                              options={data.catalog.steps}
-                                                              onChange={(value) => setLadder(draft.ladder.map((s, i) => (i === index ? value : s)))} />
-                                            </div>
-                                            <button type="button" aria-label="Убрать ступень" disabled={draft.ladder.length <= 1}
-                                                    onClick={() => setLadder(draft.ladder.filter((_, i) => i !== index))}
-                                                    className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-rose-600 disabled:opacity-30">
-                                                <Trash2 size={15} />
-                                            </button>
-                                        </li>
-                                    ))}
-                                </ol>
-                                {draft.ladder.length < 10 && (
-                                    <button type="button" className={`${dBtnSecondary} !py-2`}
-                                            onClick={() => setLadder([...draft.ladder, draft.ladder[draft.ladder.length - 1] || 'explanation'])}>
-                                        <Plus size={15} />
-                                        Ступень
-                                    </button>
-                                )}
-                                <div className={`rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] text-slate-600 ${T.sub}`}>
-                                    {draft.ladder.map((step, i) => `${i + 1}-е — ${stepTitle(step).toLowerCase()}`).join(' · ')}
-                                </div>
-                            </div>
+                               right={<IosHint align="right" text="По действующей лестнице считаются номер и ступень новых нарушений; за последней ступенью повторяется последняя. Новая действующая лестница или новые ступени действуют на нарушения, зафиксированные после сохранения: у прежних записей номер, ступень и акт остаются как были. Название на счёт не влияет." />}>
+                            <LadderLibrary draft={draft} setDraft={setDraft} catalog={data.catalog}
+                                           pickedId={ladderPick[departmentId]} onPick={pickLadder}
+                                           problems={errors.ladders}
+                                           onNameChange={(id) => setErrors((prev) => {
+                                               if (!prev.ladders?.[id]) return prev;
+                                               const ladders = { ...prev.ladders };
+                                               delete ladders[id];
+                                               return { ...prev, ladders: Object.keys(ladders).length ? ladders : undefined };
+                                           })} />
                         </Group>
 
                         <Group title="Период и сроки">

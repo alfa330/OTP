@@ -406,7 +406,8 @@ CHANGE_LABELS = {
     'report': 'Отчёт', 'rows': 'Строк', 'title': 'Название', 'severity': 'Тяжесть', 'is_other': '«Иное»',
     'is_archived': 'В архиве', 'needs_approval': 'Требует утверждения', 'finance': 'Финансовый эффект',
     'value_kind': 'Чем выражена', 'period_kind': 'Окно подсчёта', 'period_days': 'Длина окна, дней',
-    'ladder': 'Лестница', 'control_days': 'Контроль после акта, дней', 'explanation_days': 'Срок объяснительной',
+    'active_ladder': 'Действующая лестница', 'ladder': 'Лестница', 'ladders': 'Лестницы отдела',
+    'control_days': 'Контроль после акта, дней', 'explanation_days': 'Срок объяснительной',
     'telegram': 'Telegram', 'version': None, 'sha256': None, 'training_id': None, 'file_id': None,
     'type_id': None, 'approved_by': None, 'composed_by': None, 'decision_measure_id': None,
 }
@@ -429,6 +430,9 @@ def _human(key, value):
         return _VALUE_LABELS[key][value]
     if key == 'ladder' and isinstance(value, list):
         return ', '.join(catalog.STEP_LABELS.get(step, step).lower() for step in value)
+    if key == 'ladders' and isinstance(value, list):
+        return ' · '.join('%s: %s' % (item.get('name'), _human('ladder', item.get('steps') or []))
+                          for item in value if isinstance(item, dict))
     if key == 'telegram' and isinstance(value, dict):
         events = dict((code, label) for code, label, _who, _d in catalog.NOTIFY_EVENTS)
         return ', '.join(events.get(code, code) for code, on in value.items() if on) or 'выключен'

@@ -834,8 +834,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'finance': [{'value': k, 'label': v} for k, v in catalog.FINANCE_KINDS],
                 'value_kinds': [{'value': k, 'label': v} for k, v in catalog.VALUE_KINDS],
                 'steps': [{'value': k, 'label': catalog.STEP_LABELS[k]} for k in catalog.STEP_ACTIONS],
-                'presets': [{'value': code, 'label': label, 'ladder': list(ladder)}
-                            for code, label, ladder in catalog.LADDER_PRESETS],
+                'ladders': {'max': catalog.MAX_LADDERS, 'name_max': catalog.LADDER_NAME_MAX,
+                            'max_steps': catalog.MAX_LADDER},
                 'period_kinds': [{'value': k, 'label': v} for k, v in catalog.PERIOD_KINDS],
                 'events': [{'value': code, 'label': label, 'who': who} for code, label, who, _d in
                            catalog.NOTIFY_EVENTS],
@@ -851,6 +851,13 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             before = queries.get_settings(cursor, department_id)
             after = catalog.normalize_settings(payload.get('settings') or {}, base=before)
             diff = {key: [before.get(key), after.get(key)] for key in after if before.get(key) != after.get(key)}
+            # В журнал — действующая лестница по названию, а не по id; правка лестниц
+            # видна целиком в «Лестницах отдела», ступени действующей не дублируем.
+            if 'active_ladder' in diff:
+                diff['active_ladder'] = [(catalog.active_ladder(before) or {}).get('name'),
+                                         (catalog.active_ladder(after) or {}).get('name')]
+            if 'ladders' in diff:
+                diff.pop('ladder', None)
             if diff:
                 service.save_counting_change(cursor, department_id, before, after, now=service.now_almaty(),
                                              user_id=ctx['user_id'])

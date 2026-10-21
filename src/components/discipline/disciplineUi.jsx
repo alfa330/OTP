@@ -1,6 +1,7 @@
 import React from 'react';
 import { ChevronRight, FileText, Image as ImageIcon, Loader2, Paperclip, Video } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint } from '../ui/ios';
+import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint, IosSegmented } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import {
     fileSizeText, fmtDateTime, fmtShort as fmtShortDate, fmtTime as fmtClock, PLATE_TONES, stepChip, STATE_LABELS,
     STATE_TONES, TONE_CHIP,
@@ -38,6 +39,18 @@ export const INVALID_RING = 'ring-2 ring-rose-400/80';
 
 /* Группа: заголовок, справа — чип или действие, пояснение — под «i» у
    заголовка (правило портала), а не строкой под карточкой. */
+/* Выбор отдела (у супер-админа и главы нескольких отделов). На компьютере —
+   сегменты; на телефоне длинные названия («СЗоВ — Служба заботы о водителях»)
+   в сегменты не влезали и обрезались по краям — там выпадающий список
+   портала. */
+export const DepartmentPicker = ({ value, onChange, options, mobile, className = '' }) => (mobile ? (
+    <div className={`w-full ${className}`}>
+        <CustomSelect variant="ios" value={value} options={options} onChange={onChange} ariaLabel="Отдел" />
+    </div>
+) : (
+    <IosSegmented value={value} onChange={onChange} slide ariaLabel="Отдел" options={options} className={className} />
+));
+
 export const Group = ({ title, right = null, hint = null, children, className = '', cardClassName = '' }) => (
     <section className={`space-y-1.5 2xl:space-y-2 ${className}`}>
         {(title || right || hint) && (

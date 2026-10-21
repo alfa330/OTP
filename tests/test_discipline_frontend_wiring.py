@@ -173,5 +173,38 @@ class TimeFieldsTests(unittest.TestCase):
         self.assertIn("data-anchor={col.isAnchor(item) ? '1' : undefined}", picker)
 
 
+
+class LadderSettingsTests(unittest.TestCase):
+    """Владелец, 21.10.2026: лестница по умолчанию — как в ТЗ, но без подписи
+    «как в ТЗ»; лестницы называют и заводят свои (глава отдела и выше)."""
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+
+    def test_no_tz_labels_in_section(self):
+        for path in sorted(self.DIR.glob('*.js*')):
+            text = path.read_text(encoding='utf-8')
+            for label in ('Как в ТЗ', 'Как на образце'):
+                self.assertNotIn(label, text, path.name)
+
+    def test_settings_edit_named_ladders(self):
+        panel = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn('<LadderLibrary draft={draft}', panel)
+        for text in ('Новая лестница', 'Сделать действующей', 'Удалить лестницу', 'label="Название"'):
+            self.assertIn(text, panel)
+        self.assertNotIn('presets', panel)
+        # Проверка названий до отправки — та же, что на сервере.
+        self.assertIn('ladderProblems(draft.ladders, data?.catalog?.ladders?.name_max)', panel)
+
+    def test_department_picker_is_a_dropdown_on_phone(self):
+        # Длинные названия отделов в сегменты телефона не влезали — там выпадающий список.
+        ui = (self.DIR / 'disciplineUi.jsx').read_text(encoding='utf-8')
+        self.assertIn('export const DepartmentPicker = ({ value, onChange, options, mobile, className = \'\' }) => (mobile ? (', ui)
+        self.assertIn('<CustomSelect variant="ios" value={value} options={options} onChange={onChange} ariaLabel="Отдел" />', ui)
+        for name in ('DisciplineView.jsx', 'SettingsPanel.jsx'):
+            text = (self.DIR / name).read_text(encoding='utf-8')
+            self.assertIn('<DepartmentPicker', text, name)
+            self.assertIn('mobile={mobile}', text, name)
+            self.assertNotIn('ariaLabel="Отдел"', text, name)
+
+
 if __name__ == '__main__':
     unittest.main()

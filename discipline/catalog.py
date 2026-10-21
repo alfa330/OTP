@@ -8,14 +8,12 @@
 
 Ключевые решения:
 
-* **Лестница — данные, а не код.** В постановке два разных порядка: на
-  скриншоте заказчика «тренинг → объясн. №1 → №2 → №3 + акт», в тексте ТЗ
-  «объяснительная → объяснительная → объяснительная + акт». ТЗ при этом прямо
-  требует, чтобы лестницу менял руководитель без разработки, поэтому лестница —
-  список шагов в настройках отдела, а по умолчанию стоит порядок со скриншота
-  (его заказчик нарисовал сам, и он совпадает с практикой: «Дисциплинарный
-  тренинг» в «Тренингах» уже ведут). Порядок из текста ТЗ — второй готовый
-  вариант в настройках.
+* **Лестница — данные, а не код.** ТЗ требует, чтобы лестницу менял
+  руководитель без разработки, поэтому у отдела — свои лестницы с названиями,
+  и действует одна из них. По умолчанию одна, «Основная»: объяснительная,
+  объяснительная, объяснительная + акт (п. 7.3 ТЗ, по ней написаны критерии
+  приёмки). Название и ступени глава отдела меняет сам и заводит свои
+  лестницы (владелец, 21.10.2026).
 * **Номер нарушения и шаг лестницы не хранятся, а считаются.** ТЗ п. 7.2:
   «при отмене записи счётчик пересчитывается автоматически, а порядковые номера
   последующих нарушений сдвигаются». Храни номер в строке — его пришлось бы
@@ -28,6 +26,7 @@
   статуса, противоречащего её же полям.
 """
 
+import re
 from datetime import datetime, timedelta
 
 SECTION_DEPARTMENT_CODES = ('szov', 'op', 'tez')
@@ -106,19 +105,28 @@ STEP_LABELS = {
 }
 EXPLANATION_STEPS = (STEP_EXPLANATION, STEP_ACT)
 
-# Как в тексте ТЗ п. 7.3: объяснительная, объяснительная, объяснительная + акт.
-# По ней написаны критерии приёмки 2–4 (красная плашка при двух нарушениях,
-# третье не закрыть без акта), поэтому она — по умолчанию.
+# Порядок п. 7.3 ТЗ: объяснительная, объяснительная, объяснительная + акт. По
+# нему написаны критерии приёмки 2–4 (красная плашка при двух нарушениях,
+# третье не закрыть без акта), поэтому он — у лестницы по умолчанию.
 LADDER_TZ = (STEP_EXPLANATION, STEP_EXPLANATION, STEP_ACT)
-# Как на скриншоте заказчика: 1-е — тренинг, 2–4-е — объяснительные №1–3,
-# на 4-м акт. За последней ступенью повторяется последняя.
+# Порядок со скриншота заказчика: 1-е — тренинг, 2–4-е — объяснительные №1–3,
+# на 4-м акт. Готовым вариантом не предлагается (лестницу руководитель
+# собирает сам); остаётся образцом другой лестницы для тестов.
 LADDER_SAMPLE = (STEP_TRAINING, STEP_EXPLANATION, STEP_EXPLANATION, STEP_ACT)
-LADDER_PRESETS = (
-    ('tz', 'Как в ТЗ', LADDER_TZ),
-    ('sample', 'Как на образце', LADDER_SAMPLE),
-)
 DEFAULT_LADDER = LADDER_TZ
 MAX_LADDER = 10
+
+# Лестницы отдела: у каждой название, действует одна. По умолчанию одна —
+# «Основная» с порядком ТЗ. Подписи «как в ТЗ» в интерфейсе нет: название
+# руководитель даёт сам и заводит свои лестницы (владелец, 21.10.2026: «не
+# нужно её подписывать как в ТЗ, нужно, чтобы можно было подписывать, так же
+# создавать свою лестницу»). Переименование счёт не трогает; ступени и выбор
+# действующей — это правила счёта (COUNTING_KEYS ниже), они версионируются.
+DEFAULT_LADDER_ID = 'main'
+DEFAULT_LADDER_NAME = 'Основная'
+MAX_LADDERS = 10
+LADDER_NAME_MAX = 60
+_LADDER_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
 
 PERIOD_ROLLING = 'rolling'
 PERIOD_MONTH = 'month'
@@ -150,6 +158,8 @@ DEFAULT_SETTINGS = {
     'period_kind': PERIOD_ROLLING,
     'period_days': 30,
     'ladder': list(DEFAULT_LADDER),
+    'ladders': [{'id': DEFAULT_LADDER_ID, 'name': DEFAULT_LADDER_NAME, 'steps': list(DEFAULT_LADDER)}],
+    'active_ladder': DEFAULT_LADDER_ID,
     'control_days': 30,
     'explanation_days': 2,
     'telegram': {code: default for code, _label, _who, default in NOTIFY_EVENTS},
@@ -275,6 +285,57 @@ def normalize_ladder(raw):
     return steps
 
 
+def _ladder_name(raw):
+    name = ' '.join(str(raw or '').split())
+    if not name:
+        raise SettingsError('Назовите лестницу')
+    if len(name) > LADDER_NAME_MAX:
+        raise SettingsError('Название лестницы — не длиннее %d символов' % LADDER_NAME_MAX)
+    return name
+
+
+def normalize_ladders(raw, active):
+    """Лестницы отдела и действующая. Каждая — {id, name, steps}: id даёт тот,
+    кто её завёл (форма), имя — непустое и не повторяется в отделе."""
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise SettingsError('У отдела должна быть хотя бы одна лестница')
+    if len(raw) > MAX_LADDERS:
+        raise SettingsError('Лестниц — не больше %d' % MAX_LADDERS)
+    ladders, ids, names = [], set(), set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SettingsError('Лестница передана неверно')
+        ladder_id = str(item.get('id') or '').strip().lower()
+        if not _LADDER_ID.match(ladder_id) or ladder_id in ids:
+            raise SettingsError('Лестница передана неверно')
+        name = _ladder_name(item.get('name'))
+        if name.casefold() in names:
+            raise SettingsError('Лестница «%s» уже есть — назовите эту иначе' % name)
+        ladders.append({'id': ladder_id, 'name': name, 'steps': normalize_ladder(item.get('steps'))})
+        ids.add(ladder_id)
+        names.add(name.casefold())
+    active = str(active or '').strip().lower()
+    if active not in ids:
+        raise SettingsError('Выберите, какая лестница действует')
+    return ladders, active
+
+
+def _stored_ladders(source):
+    """Лестницы из сохранённых настроек. Настройки до названных лестниц (одна
+    «ladder») становятся одной «Основной» с теми же ступенями."""
+    if source.get('ladders'):
+        return normalize_ladders(source.get('ladders'), source.get('active_ladder'))
+    steps = normalize_ladder(source.get('ladder') or list(DEFAULT_LADDER))
+    return [{'id': DEFAULT_LADDER_ID, 'name': DEFAULT_LADDER_NAME, 'steps': steps}], DEFAULT_LADDER_ID
+
+
+def active_ladder(settings):
+    """Действующая лестница отдела: {id, name, steps}."""
+    ladders = (settings or {}).get('ladders') or []
+    active = (settings or {}).get('active_ladder')
+    return next((ladder for ladder in ladders if ladder.get('id') == active), ladders[0] if ladders else None)
+
+
 def _int_in(raw, key):
     low, high = LIMITS[key]
     label = LIMIT_LABELS.get(key, 'Значение')
@@ -292,10 +353,13 @@ def normalize_settings(raw, base=None):
     присланное проверяется. Неизвестные ключи отбрасываются."""
     source = dict(base or DEFAULT_SETTINGS)
     raw = raw or {}
+    ladders, active = _stored_ladders(source)
     result = {
         'period_kind': source.get('period_kind') or PERIOD_ROLLING,
         'period_days': int(source.get('period_days') or 30),
-        'ladder': list(source.get('ladder') or DEFAULT_LADDER),
+        'ladder': [],
+        'ladders': ladders,
+        'active_ladder': active,
         'control_days': int(source.get('control_days') or 30),
         'explanation_days': int(source.get('explanation_days') or 2),
         'telegram': dict(DEFAULT_SETTINGS['telegram']),
@@ -310,8 +374,18 @@ def normalize_settings(raw, base=None):
     for key in ('period_days', 'control_days', 'explanation_days'):
         if key in raw:
             result[key] = _int_in(raw.get(key), key)
-    if 'ladder' in raw:
-        result['ladder'] = normalize_ladder(raw.get('ladder'))
+    if 'ladders' in raw:
+        result['ladders'], result['active_ladder'] = normalize_ladders(
+            raw.get('ladders'), raw.get('active_ladder', result['active_ladder']))
+    elif 'active_ladder' in raw:
+        result['ladders'], result['active_ladder'] = normalize_ladders(result['ladders'], raw.get('active_ladder'))
+    if 'ladder' in raw and 'ladders' not in raw:
+        # Прежняя форма — ступени действующей лестницы.
+        steps = normalize_ladder(raw.get('ladder'))
+        result['ladders'] = [dict(item, steps=steps) if item['id'] == result['active_ladder'] else item
+                             for item in result['ladders']]
+    # Счёт читает ступени из «ladder» — это всегда ступени действующей лестницы.
+    result['ladder'] = list(active_ladder(result)['steps'])
     if 'telegram' in raw:
         telegram = raw.get('telegram') or {}
         if not isinstance(telegram, dict):

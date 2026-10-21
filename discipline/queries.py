@@ -299,8 +299,14 @@ def get_settings(cursor, department_id):
                    (int(department_id),))
     row = cursor.fetchone()
     stored = row[0] if row and isinstance(row[0], dict) else {}
+    base = dict(catalog.DEFAULT_SETTINGS, **stored)
+    if 'ladders' not in stored and stored.get('ladder'):
+        # Сохранено до названных лестниц: своя «ladder» отдела станет «Основной»,
+        # а не уступит место лестнице по умолчанию.
+        base.pop('ladders')
+        base.pop('active_ladder')
     try:
-        return catalog.normalize_settings({}, base=dict(catalog.DEFAULT_SETTINGS, **stored))
+        return catalog.normalize_settings({}, base=base)
     except catalog.SettingsError:
         return catalog.normalize_settings({})
 

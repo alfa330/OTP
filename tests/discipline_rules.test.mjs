@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
     daysLeftText, fmtDateTime, fmtMoney, groupSummary, groupTone, hasTimecode, isFullMoment, isOvernight, joinMoment,
-    joinShift, joinTimecodes, momentProblem, ordinalWord, pluralViolations, shiftParts, shiftProblem, splitMoment,
+    joinShift, joinTimecodes, ladderName, ladderProblems, momentProblem, ordinalWord, pluralViolations, shiftParts, shiftProblem, splitMoment,
     stepChip, stepTitle, timecodeRows, timecodesProblem,
 } from '../src/components/discipline/disciplineRules.js';
 
@@ -102,3 +102,21 @@ test('тайм-код записи экрана — фрагменты «с … 
     assert.equal(timecodesProblem('видео 10:15'), 'Тайм-код — время на записи экрана, например 14:32–14:41');
     assert.equal(timecodesProblem('10:00, 10:01, 10:02, 10:03, 10:04, 10:05'), 'Не больше 5 фрагментов записи');
 });
+
+test('лестницы отдела: название обязательно и не повторяется', () => {
+    assert.equal(ladderName('  Строгая   лестница '), 'Строгая лестница');
+    const ladders = [
+        { id: 'main', name: 'Основная' },
+        { id: 'l1', name: '  ' },
+        { id: 'l2', name: 'основная' },
+        { id: 'l3', name: 'x'.repeat(61) },
+        { id: 'l4', name: 'Мягкая' },
+    ];
+    assert.deepEqual(ladderProblems(ladders, 60), {
+        l1: 'Назовите лестницу',
+        l2: 'Лестница «основная» уже есть — назовите эту иначе',
+        l3: 'Название — не длиннее 60 символов',
+    });
+    assert.deepEqual(ladderProblems([{ id: 'main', name: 'Основная' }]), {});
+});
+

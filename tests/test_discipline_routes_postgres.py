@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from discipline import catalog, report
 from tests.test_discipline_postgres import (  # noqa: F401 — фикстура db
     ADMIN, HEAD_SZOV, OP_A, OP_B, SUPER, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, section_open_for_all,
     use_sample_ladder)
@@ -471,4 +472,46 @@ def test_rollout_only_super_admins(client, db, monkeypatch):
     # Флаг снят — те же люди снова по правилам ТЗ.
     monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', False)
     assert client.get('/api/discipline/ping', headers=h(SV_A)).status_code == 200
+
+
+def test_department_ladders_through_the_route(client, db):
+    """Глава отдела называет лестницы и заводит свои; действует одна. Новая
+    действующая — новая версия правил счёта, переименование — нет. СВ настроек
+    не видит и не меняет."""
+    url = '/api/discipline/settings'
+    got = client.get(url + '?department_id=%d' % SZOV, headers=h(HEAD_SZOV)).get_json()
+    assert [(l['name'], l['steps']) for l in got['settings']['ladders']] == [('Основная', list(catalog.LADDER_TZ))]
+    assert 'presets' not in got['catalog'] and got['catalog']['ladders']['max'] == catalog.MAX_LADDERS
+    assert client.get(url + '?department_id=%d' % SZOV, headers=h(SV_A)).status_code == 403
+
+    ladders = got['settings']['ladders'] + [{'id': 'l7', 'name': 'Строгая', 'steps': ['explanation', 'act']}]
+    saved = client.put(url, headers=h(HEAD_SZOV), json={'department_id': SZOV,
+                                                        'settings': {'ladders': ladders, 'active_ladder': 'l7'}})
+    assert saved.status_code == 200, saved.get_json()
+    assert saved.get_json()['settings']['ladder'] == ['explanation', 'act']
+    refused = client.put(url, headers=h(SV_A), json={'department_id': SZOV, 'settings': {'active_ladder': 'main'}})
+    assert refused.status_code == 403
+    duplicate = client.put(url, headers=h(HEAD_SZOV), json={'department_id': SZOV, 'settings': {
+        'ladders': ladders + [{'id': 'l8', 'name': 'строгая', 'steps': ['act']}], 'active_ladder': 'l7'}})
+    assert duplicate.status_code == 400 and 'уже есть' in duplicate.get_json()['error']
+
+    renamed = [dict(l, name='Жёсткая') if l['id'] == 'l7' else l for l in ladders]
+    assert client.put(url, headers=h(HEAD_SZOV), json={'department_id': SZOV, 'settings': {
+        'ladders': renamed, 'active_ladder': 'l7'}}).status_code == 200
+    with db.cursor() as cur:
+        cur.execute('SELECT rules FROM discipline_counting_rules WHERE department_id = %s ORDER BY valid_from', (SZOV,))
+        assert [row[0]['ladder'] for row in cur.fetchall()] == [list(catalog.LADDER_TZ), ['explanation', 'act']]
+        cur.execute("SELECT changes FROM discipline_audit WHERE action = 'settings_update' ORDER BY id")
+        texts = [report.changes_text(row[0]) for row in cur.fetchall()]
+    assert texts[0].startswith('Действующая лестница: Основная → Строгая; Лестницы отдела: Основная: ')
+    assert 'Жёсткая: объяснительная, объяснительная + акт' in texts[1]
+
+
+def test_settings_saved_before_named_ladders_keep_their_ladder(client, db):
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO discipline_settings (department_id, settings) VALUES (%s, %s::jsonb)",
+                    (SZOV, '{"ladder": ["training", "explanation", "explanation", "act"], "period_days": 30}'))
+    got = client.get('/api/discipline/settings?department_id=%d' % SZOV, headers=h(HEAD_SZOV)).get_json()
+    assert got['settings']['ladders'] == [{'id': 'main', 'name': 'Основная', 'steps': list(catalog.LADDER_SAMPLE)}]
+    assert got['settings']['ladder'] == list(catalog.LADDER_SAMPLE)
 

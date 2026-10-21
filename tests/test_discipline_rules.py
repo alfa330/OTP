@@ -41,7 +41,9 @@ class LadderTests(unittest.TestCase):
         # Критерии приёмки 2–4 написаны под текст ТЗ п. 7.3: акт на третьем.
         self.assertEqual(catalog.DEFAULT_LADDER, ('explanation', 'explanation', 'act'))
         self.assertEqual(TZ['ladder'], ['explanation', 'explanation', 'act'])
-        self.assertEqual(catalog.LADDER_PRESETS[0][0], 'tz')
+        # В интерфейсе она без подписи «как в ТЗ» — «Основная», имя меняет руководитель.
+        self.assertEqual(catalog.DEFAULT_SETTINGS['ladders'],
+                         [{'id': 'main', 'name': 'Основная', 'steps': ['explanation', 'explanation', 'act']}])
 
     def test_sample_ladder_titles(self):
         # Скриншот заказчика: тренинг → объясн. №1 → №2 → №3 + акт.
@@ -326,4 +328,51 @@ class SuperAdminRolloutTests(unittest.TestCase):
             self.assertTrue(access.can_open_section(ctx('super_admin', department_id=None)))
             for who in (ctx('admin', headed=[1]), ctx('sv', groups=[5]), ctx('operator'), ctx('trainee'), ctx('admin')):
                 self.assertFalse(access.can_open_section(who), who['role'])
+
+
+class LadderLibraryTests(unittest.TestCase):
+    """Лестницы отдела с названиями (владелец, 21.10.2026): по умолчанию одна
+    «Основная» с порядком ТЗ, без подписи «как в ТЗ»; свои лестницы заводит
+    руководитель, действует одна."""
+
+    def test_default_is_one_named_ladder_in_tz_order(self):
+        settings = catalog.normalize_settings({})
+        self.assertEqual(settings['ladders'], [{'id': 'main', 'name': 'Основная', 'steps': list(catalog.LADDER_TZ)}])
+        self.assertEqual((settings['active_ladder'], settings['ladder']), ('main', list(catalog.LADDER_TZ)))
+        self.assertFalse(hasattr(catalog, 'LADDER_PRESETS'))
+
+    def test_new_ladder_becomes_active_and_drives_counting(self):
+        base = catalog.normalize_settings({})
+        settings = catalog.normalize_settings({'ladders': base['ladders'] + [
+            {'id': 'l1', 'name': '  Строгая  ', 'steps': ['explanation', 'act']}], 'active_ladder': 'l1'}, base=base)
+        self.assertEqual([l['name'] for l in settings['ladders']], ['Основная', 'Строгая'])
+        self.assertEqual(settings['ladder'], ['explanation', 'act'])
+        self.assertEqual(catalog.counting_rules(settings)['ladder'], ['explanation', 'act'])
+        renamed = catalog.normalize_settings({'ladders': [dict(l, name='Новое имя') if l['id'] == 'l1' else l
+                                                          for l in settings['ladders']]}, base=settings)
+        # Переименование — не правило счёта.
+        self.assertEqual(catalog.counting_rules(renamed), catalog.counting_rules(settings))
+
+    def test_names_are_required_and_unique(self):
+        base = catalog.normalize_settings({})
+        bad = (
+            {'ladders': [{'id': 'main', 'name': ' ', 'steps': ['act']}], 'active_ladder': 'main'},
+            {'ladders': [{'id': 'a', 'name': 'Мягкая', 'steps': ['act']}, {'id': 'b', 'name': 'мягкая', 'steps': ['act']}],
+             'active_ladder': 'a'},
+            {'ladders': [{'id': 'a', 'name': 'X' * 61, 'steps': ['act']}], 'active_ladder': 'a'},
+            {'ladders': [{'id': 'a', 'name': 'Мягкая', 'steps': ['act']}], 'active_ladder': 'нет такой'},
+            {'ladders': [{'id': 'A B', 'name': 'Мягкая', 'steps': ['act']}], 'active_ladder': 'A B'},
+            {'ladders': []},
+        )
+        for raw in bad:
+            with self.assertRaises(catalog.SettingsError, msg=str(raw)):
+                catalog.normalize_settings(raw, base=base)
+
+    def test_legacy_forms_keep_working(self):
+        # Сохранено до названных лестниц: своя лестница отдела становится «Основной».
+        stored = catalog.normalize_settings({}, base={'ladder': list(catalog.LADDER_SAMPLE)})
+        self.assertEqual(stored['ladders'], [{'id': 'main', 'name': 'Основная', 'steps': list(catalog.LADDER_SAMPLE)}])
+        # Прежняя форма запроса — ступени действующей лестницы.
+        legacy = catalog.normalize_settings({'ladder': ['training', 'act']}, base=stored)
+        self.assertEqual((legacy['ladder'], legacy['ladders'][0]['steps']), (['training', 'act'], ['training', 'act']))
 

@@ -350,6 +350,26 @@ export const ROW_STATES_BESIDE_STEP = ['measure_required', 'measure_pending', 'm
 
 export const DESCRIPTION_MIN = 30;
 
+/* Лестницы отдела: у каждой название, действует одна (catalog.normalize_ladders
+   на сервере). Здесь — та же проверка названий до отправки, чтобы подсветить
+   поле: пустое, длиннее предела или уже занятое (без учёта регистра).
+   Ответ — { [id лестницы]: что не так }. */
+export const ladderName = (value) => String(value || '').split(/\s+/).filter(Boolean).join(' ');
+
+export const ladderProblems = (ladders, nameMax = 60) => {
+    const problems = {};
+    const taken = new Set();
+    (ladders || []).forEach((ladder) => {
+        const name = ladderName(ladder?.name);
+        if (!name) { problems[ladder.id] = 'Назовите лестницу'; return; }
+        if (name.length > nameMax) { problems[ladder.id] = `Название — не длиннее ${nameMax} символов`; return; }
+        const key = name.toLocaleLowerCase('ru');
+        if (taken.has(key)) problems[ladder.id] = `Лестница «${name}» уже есть — назовите эту иначе`;
+        taken.add(key);
+    });
+    return problems;
+};
+
 /* Основание и причина контроля одной строкой. Причина испытательного срока по
    умолчанию повторяет основание — тогда показываем его один раз. */
 export const controlReason = (row) => {
