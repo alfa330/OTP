@@ -26,7 +26,16 @@
     минус заказы того дня до выдачи (`orders.today` в снимке CRM, который
     выдача хранит целиком). Снимка нет или выдача была на другом аккаунте того
     же человека — день выдачи не считаем вовсе: лучше недосчитать, чем
-    засчитать поездки, сделанные до выдачи.
+    засчитать поездки, сделанные до выдачи (и в отказе так и пишем).
+
+Время заказа — `booked_at`: по нему CRM задаёт и окно «7 дней», и
+`orders.today` (проверено 21.10.2026 на 4782 заказах из 48 снимков выдач).
+Счёт по списку сравнивает время заказа с моментом выдачи, и задержка CRM ему
+не мешает. Счёт за даты вычитает `orders.today` снимка, а о части заказов CRM
+узнаёт с опозданием: в 4 выдачах из 18 она позже узнала ещё об одном заказе,
+сделанном до выдачи, и тогда за даты выходит на поездку больше. Точнее по
+данным CRM не посчитать; путь редкий — выдача больше недели назад и меньше
+20 поездок за последнюю неделю.
 
 Разницу счётчика `total` не берём: это не «всё время», а окно около полугода,
 из которого старые заказы выпадают каждый день. 21.10.2026 водитель Астаны
@@ -265,24 +274,32 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None,
         if state['wait_reason']:
             reasons.append(state['wait_reason'])
         trips, basis, request = state['trips'], state['basis'], state['request']
-        if request is not None and _answers(period, request):
+        partial = False
+        if request is not None and answers(period, request):
             count = as_count(period.get('count'))
-            if count is not None:
-                trips, basis = max(0, count - request['subtract']), BASIS_SINCE_LAST
+            # Заказов за даты меньше, чем было до выдачи по её же снимку, —
+            # данные CRM противоречат друг другу: такое число не засчитываем.
+            if count is not None and count >= request['subtract']:
+                trips, basis = count - request['subtract'], BASIS_SINCE_LAST
+                partial = request['partial']
         verdict['trips'] = trips
         verdict['trips_basis'] = basis
         need = verdict['min_trips']
         if need:
             if trips is None:
-                if request is not None:
+                if state['wait_reason']:
+                    pass  # отказ по дням ясен и без числа поездок
+                elif last:
                     reasons.append('CRM не отдала число поездок с прошлой выдачи — право не '
                                    'проверить. Попробуйте ещё раз через минуту')
-                elif not state['wait_reason']:
+                else:
                     reasons.append('CRM не отдала число поездок за неделю — право не проверить')
             elif trips < need:
                 window = 'с прошлой выдачи' if basis == BASIS_SINCE_LAST else 'за последние 7 дней'
-                reasons.append('Менее %d %s %s — сейчас %d' % (
-                    need, plural(need, 'поездки', 'поездок', 'поездок'), window, trips))
+                reasons.append('Менее %d %s %s — сейчас %d%s' % (
+                    need, plural(need, 'поездки', 'поездок', 'поездок'), window, trips,
+                    # Число без дня выдачи — нижняя граница, а не точный счёт.
+                    ', не считая дня прошлой выдачи' if partial else ''))
 
     if stock is not None:
         if stock <= 0:
@@ -363,14 +380,17 @@ def _activity(driver, last, settings, today):
     before = as_count(last.get('orders_today')) if same_account else None
     first_day = last_day if before is not None else last_day + timedelta(days=1)
     if first_day > today:
-        state.update(trips=0, basis=BASIS_SINCE_LAST)
+        # Выдача сегодня, а заказов этого дня до неё не знаем (другой аккаунт,
+        # снимок без today): счесть нечем — «нет данных», а не выдуманный ноль.
         return state
     state['request'] = {'issue_id': last.get('id'), 'date_from': first_day.isoformat(),
-                        'date_to': today.isoformat(), 'subtract': before or 0}
+                        'date_to': today.isoformat(), 'subtract': before or 0,
+                        'partial': before is None}
     return state
 
 
-def _answers(period, request):
+def answers(period, request):
+    """Ответ CRM за даты годится, только если он на этот самый запрос."""
     return isinstance(period, dict) and all(period.get(key) == value
                                             for key, value in request.items())
 

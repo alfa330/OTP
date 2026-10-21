@@ -280,7 +280,7 @@ class PeriodRequestTests(unittest.TestCase):
         self.history = [issue(days_ago=10, orders_today=3)]
         self.drv = driver(total=500, week=12, times=orders_between(NOW - timedelta(days=7), NOW, 12))
         self.request = {'issue_id': 1, 'date_from': '2026-09-20', 'date_to': '2026-09-30',
-                        'subtract': 3}
+                        'subtract': 3, 'partial': False}
 
     def test_request_is_from_the_issue_day_to_today(self):
         self.assertEqual(rules.period_request(self.drv, self.history, SETTINGS, today=TODAY),
@@ -313,9 +313,13 @@ class PeriodRequestTests(unittest.TestCase):
                 period = dict(self.request, count=40, **{key: value})
                 self.assertIsNone(evaluate(self.drv, self.history, period=period)['trips'])
 
-    def test_count_below_the_trips_before_the_issue_is_zero(self):
+    def test_count_below_the_trips_before_the_issue_is_no_data_not_zero(self):
+        """За даты CRM отдала меньше заказов, чем было до выдачи по её же
+        снимку: данные противоречат друг другу — «сейчас 0» было бы выдумкой."""
         verdict = evaluate(self.drv, self.history, period=dict(self.request, count=1))
-        self.assertEqual(verdict['trips'], 0)
+        self.assertIsNone(verdict['trips'])
+        self.assertIn('CRM не отдала число поездок с прошлой выдачи', verdict['reasons'][0])
+        self.assertEqual(evaluate(self.drv, self.history, period=dict(self.request, count=3))['trips'], 0)
 
     def test_unknown_trips_before_the_issue_skip_the_issue_day(self):
         """Снимок без `orders.today`: заказы дня выдачи до и после неё не
@@ -323,13 +327,36 @@ class PeriodRequestTests(unittest.TestCase):
         поездки, сделанные до выдачи."""
         history = [issue(days_ago=10, orders_today=None)]
         self.assertEqual(rules.period_request(self.drv, history, SETTINGS, today=TODAY),
-                         dict(self.request, date_from='2026-09-21', subtract=0))
+                         dict(self.request, date_from='2026-09-21', subtract=0, partial=True))
 
     def test_other_account_skips_the_issue_day(self):
         """`orders.today` в снимке — заказы ДРУГОГО аккаунта, вычитать их нельзя."""
         history = [issue(days_ago=10, orders_today=3, account='b' * 32)]
-        self.assertEqual(rules.period_request(self.drv, history, SETTINGS, today=TODAY),
-                         dict(self.request, date_from='2026-09-21', subtract=0))
+        request = rules.period_request(self.drv, history, SETTINGS, today=TODAY)
+        self.assertEqual(request, dict(self.request, date_from='2026-09-21', subtract=0, partial=True))
+        self.assertTrue(evaluate(self.drv, history, period=dict(request, count=20))['allowed'])
+
+    def test_count_without_the_issue_day_says_so_in_the_refusal(self):
+        """Без дня выдачи число — нижняя граница: в отказе это сказано, а не
+        выдано за точный счёт."""
+        history = [issue(days_ago=10, orders_today=3, account='b' * 32)]
+        request = rules.period_request(self.drv, history, SETTINGS, today=TODAY)
+        verdict = evaluate(self.drv, history, period=dict(request, count=16))
+        self.assertEqual(verdict['reasons'], [
+            'Менее 20 поездок с прошлой выдачи — сейчас 16, не считая дня прошлой выдачи'])
+
+    def test_issue_today_with_unknown_trips_before_it_is_no_data(self):
+        """Перерыв 0 дней, выдача сегодня на другом аккаунте, списка заказов в
+        ответе нет: заказы после неё не посчитать — «нет данных», а не ноль."""
+        history = [dict(issue(account='b' * 32), created_at=datetime(2026, 9, 30, 8, 0))]
+        drv = driver(total=500, week=30)
+        settings = {'cooldown_days': 0}
+        self.assertIsNone(rules.period_request(drv, history, dict(SETTINGS, **settings), today=TODAY))
+        verdict = evaluate(drv, history, settings=settings)
+        self.assertIsNone(verdict['trips'])
+        self.assertEqual(verdict['reasons'], [
+            'CRM не отдала число поездок с прошлой выдачи — право не проверить. '
+            'Попробуйте ещё раз через минуту'])
 
     def test_old_crm_answer_without_the_list_asks_for_the_period(self):
         """Ответ CRM без списка заказов: поездок после выдачи не видно и на
@@ -338,7 +365,7 @@ class PeriodRequestTests(unittest.TestCase):
         drv = driver(total=500, week=40)
         self.assertEqual(rules.period_request(drv, history, SETTINGS, today=TODAY),
                          {'issue_id': 1, 'date_from': '2026-09-23', 'date_to': '2026-09-30',
-                          'subtract': 5})
+                          'subtract': 5, 'partial': False})
 
     def test_truncated_list_is_complete_only_from_its_oldest_order(self):
         history = [issue(days_ago=7)]
@@ -350,6 +377,29 @@ class PeriodRequestTests(unittest.TestCase):
         self.assertIsNone(rules.period_request(drv, history, SETTINGS, today=TODAY))
         self.assertEqual(evaluate(drv, history)['trips'],
                          sum(1 for moment in early if moment > history[0]['created_at']))
+
+    def test_truncated_list_without_readable_times_is_not_counted_as_zero(self):
+        history = [issue(days_ago=7)]
+        drv = driver(total=5000, week=640, times=[], truncated=True)
+        drv['order_times'] = ['вчера', '', 'нет']
+        self.assertIsNotNone(rules.period_request(drv, history, SETTINGS, today=TODAY))
+        self.assertIsNone(evaluate(drv, history)['trips'])
+
+    def test_issue_exactly_at_the_window_start_is_counted_from_the_list(self):
+        history = [issue(days_ago=7)]
+        since = history[0]['created_at']
+        drv = driver(total=500, week=21, times=orders_between(since, NOW, 21), window_from=since)
+        self.assertIsNone(rules.period_request(drv, history, SETTINGS, today=TODAY))
+        self.assertEqual((evaluate(drv, history)['trips'], evaluate(drv, history)['trips_basis']),
+                         (21, rules.BASIS_SINCE_LAST))
+
+    def test_exactly_the_threshold_in_the_week_after_an_old_issue_needs_no_request(self):
+        history = [issue(days_ago=10)]
+        drv = driver(total=500, week=20, times=orders_between(NOW - timedelta(days=7), NOW, 20))
+        self.assertIsNone(rules.period_request(drv, history, SETTINGS, today=TODAY))
+        verdict = evaluate(drv, history)
+        self.assertTrue(verdict['allowed'])
+        self.assertEqual((verdict['trips'], verdict['trips_basis']), (20, rules.BASIS_WEEK))
 
     def test_no_request_while_the_days_have_not_passed(self):
         """Отказ по дням ясен и без CRM: ни запроса, ни причины «CRM не отдала»."""

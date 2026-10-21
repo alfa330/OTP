@@ -292,9 +292,14 @@ class _Base(unittest.TestCase):
         # в этот момент курсорами базы (запрос обязан идти вне транзакции).
         self.period_count = None
         self.period_calls = []
+        # Что успело случиться, пока CRM отвечала: выдача соседнего офиса,
+        # отмена — между пред-чтением истории и замком.
+        self.period_hook = None
 
         def count_orders(account_id, date_from, date_to):
             self.period_calls.append((account_id, date_from, date_to, self.db.open))
+            if self.period_hook:
+                self.period_hook()
             if isinstance(self.period_count, Exception):
                 raise self.period_count
             return self.period_count
@@ -580,6 +585,61 @@ class TripsSinceLastIssueTests(_Base):
         response = self.issue(water_office_id=self.office_id)
         self.assertEqual(response.status_code, 409)
         self.assertIn('менее 20 поездок с прошлой выдачи — сейчас 19', response.get_json()['error'])
+
+    def seed(self, issue_id, created_at, orders_today=3):
+        item = dict(self.store.issues[0], id=issue_id, created_at=created_at, orders_today=orders_today)
+        self.store.issues.append(item)
+        return item
+
+    def test_neighbour_issue_while_crm_answers_is_seen_under_the_lock(self):
+        """Соседний офис выдал воду, пока CRM считала поездки: под замком
+        история читается заново — второй выдачи нет, остаток цел."""
+        self.period_count = 24
+        self.period_hook = lambda: self.seed(2, NOW)
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_NOT_ELIGIBLE')
+        self.assertIn('прошло 0 дней из 7', response.get_json()['error'])
+        self.assertEqual(len(self.store.issues), 2)
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 50)
+
+    def test_cancel_while_crm_answers_asks_to_check_again(self):
+        """Руководитель отменил прошлую выдачу, пока CRM считала поездки с
+        неё: ответ был на другой вопрос. Не «CRM не отдала», а «проверьте ещё
+        раз» — и без вердикта, чтобы экран проверил водителя заново."""
+        self.seed(2, datetime(2026, 9, 10, 12, 0))
+        self.period_count = 24
+
+        def cancel():
+            self.store.issues[0]['canceled_at'] = NOW
+        self.period_hook = cancel
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 409)
+        body = response.get_json()
+        self.assertEqual(body['code'], 'WATER_VERDICT_CHANGED')
+        self.assertNotIn('verdict', body)
+        self.assertEqual(len(self.store.issues), 2)
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 50)
+
+    def test_cancel_before_the_lock_without_a_crm_request(self):
+        """Пред-чтение посчитало по списку (выдача внутри окна), а под замком
+        её уже отменили и нужна CRM за даты, которой не спрашивали."""
+        listed = self.seed(2, datetime(2026, 9, 23, 12, 30))
+        original = self.store.person_history
+        calls = []
+
+        def history(cursor, account_id, iin=None, limit=20):
+            rows = original(cursor, account_id, iin, limit)
+            if not calls:
+                calls.append(1)
+                listed['canceled_at'] = NOW
+            return rows
+        with mock.patch.object(water_queries, 'person_history', history):
+            response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(self.period_calls, [])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_VERDICT_CHANGED')
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 50)
 
     def test_full_week_needs_no_request(self):
         self.crm['orders'] = dict(self.crm['orders'], week=25)

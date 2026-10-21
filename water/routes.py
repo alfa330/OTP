@@ -492,6 +492,14 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                     return _bad('Офис не найден в учёте', 'WATER_OFFICE_NOT_FOUND', 404)
                 queries.lock_driver(cursor, found['account_id'], found.get('iin'))
                 history = queries.person_history(cursor, found['account_id'], found.get('iin'))
+                # История сменилась после пред-чтения (соседний офис выдал,
+                # руководитель отменил выдачу) — ответ CRM за даты был на другой
+                # вопрос. Отказ «CRM не отдала» был бы неправдой: экран сам
+                # проверит водителя заново (ответ без вердикта).
+                request = rules.period_request(found, history, settings, today=today)
+                if request and not rules.answers(period, request):
+                    return jsonify({"error": "Условия изменились — проверьте водителя ещё раз",
+                                    "code": "WATER_VERDICT_CHANGED"}), 409
                 verdict = rules.evaluate(found, history, settings, today=today,
                                          stock=office['stock'], fk_confirmed=fk_confirmed,
                                          period=period)
