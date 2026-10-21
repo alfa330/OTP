@@ -46,7 +46,7 @@ _DASHBOARD_DEFAULT_DAYS = 30
 def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                           resolve_requester, sensitive_access_granted,
                           excel_text_warning=None, send_telegram=None, web_app_base_url=None,
-                          driver_lookup=None):
+                          driver_lookup=None, orders_counter=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool, ключ QR-подтверждения общий с
@@ -58,8 +58,12 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     driver_lookup — поиск водителя в CRM; подменяется в тестах, по умолчанию
     water.driver.lookup.
+
+    orders_counter — заказы водителя за даты из CRM; подменяется в тестах, по
+    умолчанию water.driver.orders_count.
     """
     lookup_driver = driver_lookup or water_driver.lookup
+    count_orders = orders_counter or water_driver.orders_count
     bp = Blueprint('water', __name__, url_prefix='/api/water')
 
     def water_route(rule, methods=('GET',), need=None):
@@ -393,6 +397,26 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
             message = _CRM_MESSAGES.get(exc.code, exc.message)
             return None, (jsonify({"error": message, "code": exc.code}), exc.status)
 
+    def _period(found, history, settings, today):
+        """Поездки с прошлой выдачи, которых нет в списке заказов за 7 дней, —
+        запросом CRM за даты (нужен ли он, решает rules.period_request).
+
+        Только вне транзакции: держать замок офиса и соединение базы, пока
+        отвечает чужой сервис, нельзя. Отказ CRM — не ошибка ответа, а причина
+        в вердикте: карточка водителя уже есть, не хватает одного числа.
+        """
+        request = rules.period_request(found, history, settings, today=today)
+        if not request:
+            return None
+        try:
+            count = count_orders(found['account_id'], request['date_from'], request['date_to'])
+        except water_driver.DriverLookupError as exc:
+            logging.warning('water: поездки водителя %s за %s–%s не получены: %s',
+                            found['account_id'], request['date_from'], request['date_to'],
+                            exc.code)
+            count = None
+        return dict(request, count=count)
+
     @water_route('/check', methods=('POST',))
     def water_check(ctx):
         """ID водителя → его данные из CRM и вердикт «положена ли вода».
@@ -415,8 +439,10 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 if not office or not office['is_active']:
                     return _bad('Офис не найден в учёте', 'WATER_OFFICE_NOT_FOUND', 404)
             history = queries.person_history(cursor, found['account_id'], found.get('iin'))
-        verdict = rules.evaluate(found, history, settings, today=queries.today_almaty(),
-                                 stock=office['stock'] if office else None)
+        today = queries.today_almaty()
+        verdict = rules.evaluate(found, history, settings, today=today,
+                                 stock=office['stock'] if office else None,
+                                 period=_period(found, history, settings, today))
         return jsonify({
             "driver": water_driver.public(found),
             "verdict": verdict,
@@ -447,20 +473,28 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if error:
             return error
 
+        # Поездки, которые CRM считает только за даты, спрашиваем до
+        # транзакции (_period). Под замком история читается заново: успей она
+        # смениться — ответ на прежний запрос вердикт не примет.
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            settings = queries.get_settings(cursor)
+            history = queries.person_history(cursor, found['account_id'], found.get('iin'))
+        today = queries.today_almaty()
+        period = _period(found, history, settings, today)
+
         outbox = []
         try:
             with db._get_cursor() as cursor:
-                if not schema.schema_is_ready(cursor):
-                    return _not_ready()
-                settings = queries.get_settings(cursor)
                 office = queries.read_office(cursor, water_office_id, settings, for_update=True)
                 if not office or not office['is_active']:
                     return _bad('Офис не найден в учёте', 'WATER_OFFICE_NOT_FOUND', 404)
                 queries.lock_driver(cursor, found['account_id'], found.get('iin'))
                 history = queries.person_history(cursor, found['account_id'], found.get('iin'))
-                today = queries.today_almaty()
                 verdict = rules.evaluate(found, history, settings, today=today,
-                                         stock=office['stock'], fk_confirmed=fk_confirmed)
+                                         stock=office['stock'], fk_confirmed=fk_confirmed,
+                                         period=period)
                 if not verdict['allowed']:
                     return jsonify({
                         "error": 'Выдать воду нельзя: %s' % '; '.join(
@@ -494,7 +528,7 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                              blocks=count, actor=_actor(ctx))
                 office = queries.read_office(cursor, water_office_id, settings)
                 _queue_buy_alert(cursor, office, before, office['stock'], settings, outbox)
-                after_history = [dict(issue, orders_total=(found.get('orders') or {}).get('total'),
+                after_history = [dict(issue, orders_today=(found.get('orders') or {}).get('today'),
                                       driver_account_id=found['account_id'])] + history
                 verdict_after = rules.evaluate(found, after_history, settings, today=today,
                                                stock=office['stock'], fk_confirmed=fk_confirmed)

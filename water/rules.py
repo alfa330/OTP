@@ -15,12 +15,27 @@
     только когда пройдёт 7 дней». Тарифы программы — те же.
   * В офисе должна быть вода.
 
-Откуда число поездок. CRM отдаёт заказы только окнами (сегодня, 7 дней,
-30 дней, всё время), поездок «с даты» у неё нет. Поэтому при каждой выдаче в
-журнал пишется показание счётчика «всё время», и поездки с прошлой выдачи —
-это разница показаний. Если прошлой выдачи не было (или она была на другом
-аккаунте того же человека — у другого парка свой счётчик), берём окно CRM
-«за последние 7 дней»: это и есть «20 заказов в неделю» из ТЗ.
+Откуда число поездок. «20 поездок с прошлой выдачи» — заказы, сделанные
+ПОСЛЕ момента прошлой выдачи:
+
+  * выдача внутри окна CRM «7 дней» (обычный визит на седьмой день) — считаем
+    заказы списка `last_7_days`, сделанные позже неё;
+  * выдача раньше окна — окно целиком лежит после неё, и счётчик недели уже
+    нижняя граница: хватает его — выдаём без лишнего запроса;
+  * не хватает — спрашиваем у CRM заказы за даты: со дня выдачи по сегодня
+    минус заказы того дня до выдачи (`orders.today` в снимке CRM, который
+    выдача хранит целиком). Снимка нет или выдача была на другом аккаунте того
+    же человека — день выдачи не считаем вовсе: лучше недосчитать, чем
+    засчитать поездки, сделанные до выдачи.
+
+Разницу счётчика `total` не берём: это не «всё время», а окно около полугода,
+из которого старые заказы выпадают каждый день. 21.10.2026 водитель Астаны
+сделал после выдачи 173 поездки, а счётчик вырос на 6 (3945 → 3951) — и ему
+отказали; неделей раньше выдача прошла лишь потому, что счётчик упал
+(4010 → 3945) и сработал запасной путь «окно 7 дней».
+
+Если прошлой выдачи не было, берём окно CRM «за последние 7 дней»: это и есть
+«20 заказов в неделю» из ТЗ.
 
 Приветственный блок тоже выдача: неделя и поездки после него считаются так
 же, как после блока за активность.
@@ -30,7 +45,10 @@
 человек за стойкой, и так же это видно в журнале (там даты, а не часы).
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+# Время раздела и CRM — местное, Алматы (UTC+5 круглый год с 2024 года).
+_ALMATY = timezone(timedelta(hours=5))
 
 BASIS_NEW = 'new'
 BASIS_SINCE_LAST = 'since_last'
@@ -96,6 +114,42 @@ def day_of(value):
         return None
 
 
+def moment_of(value):
+    """Момент из datetime, date или строки («2026-10-14 16:36:32», ISO).
+
+    И база раздела, и CRM пишут местное время без пояса — так и сравниваем.
+    Значение с поясом приводим к Алматы, негодное — None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(_ALMATY).replace(tzinfo=None)
+    return moment
+
+
+def as_count(value):
+    """Неотрицательное целое или None: счётчик из снимка CRM бывает чем угодно."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
 def tariff_label(code, labels=None):
     return (labels or TARIFF_LABELS).get(code) or code
 
@@ -124,14 +178,14 @@ def _program_label(settings):
     return ', '.join(tariff_label(code) for code in codes) or 'не заданы'
 
 
-def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None):
+def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None, period=None):
     """Положена ли вода. Возвращает словарь-вердикт.
 
     driver   — карточка из water.driver.normalize: tariffs, orders.total,
-               orders.week, account_id;
+               orders.week, orders.window_from, order_times, account_id;
     history  — прошлые выдачи ЭТОГО человека (по аккаунту или ИИН), новые
                первыми: kind, blocks, created_at, driver_account_id,
-               orders_total, office_name;
+               orders_today, office_name;
     settings — min_trips, cooldown_days, welcome_blocks, activity_blocks,
                tariffs;
     stock    — остаток выбранного офиса; None — офис не выбран (колл-центр
@@ -139,6 +193,8 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None)
     fk_confirmed — подтвердил ли сотрудник ФК, когда CRM его не знает. None —
                предпросмотр (проверка без выдачи): подтверждение ещё впереди,
                и отказом это не считается; False на выдаче — отказ.
+    period   — ответ CRM на period_request: тот же словарь плюс `count`
+               (None — CRM не ответила). Ответ на другой запрос не годится.
 
     reasons — причины отказа человеческими фразами, в том порядке, в каком их
     стоит читать. Пустой список = можно выдавать.
@@ -146,7 +202,6 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None)
     history = list(history or [])
     orders = driver.get('orders') or {}
     total = orders.get('total')
-    week = orders.get('week')
     program = [str(code) for code in (settings.get('tariffs') or [])]
     tariffs = [str(code) for code in (driver.get('tariffs') or [])]
     matched = [code for code in tariffs if code in program]
@@ -205,32 +260,25 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None)
             if fk_confirmed is False:
                 reasons.append('Подтвердите, что водитель прошёл ФК')
     else:
-        cooldown = verdict['cooldown_days']
-        trips, basis = week, BASIS_WEEK
-        if last:
-            last_day = day_of(last.get('created_at'))
-            if last_day and cooldown:
-                next_day = last_day + timedelta(days=cooldown)
-                verdict['next_date'] = next_day.isoformat()
-                if today < next_day:
-                    passed = max(0, (today - last_day).days)
-                    # «прошёл 1 день», но «прошло 3 дня» — глагол по числу.
-                    verb = 'прошёл' if plural(passed, 1, 2, 5) == 1 else 'прошло'
-                    reasons.append('С прошлой выдачи %s %s из %d — следующая с %s' % (
-                        verb, days_word(passed), cooldown, next_day.strftime('%d.%m.%Y')))
-            base = last.get('orders_total')
-            same_account = (last.get('driver_account_id') or '') == (driver.get('account_id') or '')
-            # Счётчик другого аккаунта (другой парк) с этим не сравнить, а
-            # уменьшившийся счётчик значит, что CRM пересчитала историю, — в
-            # обоих случаях честнее окно «7 дней», чем отрицательная разница.
-            if same_account and base is not None and total >= base:
-                trips, basis = total - base, BASIS_SINCE_LAST
+        state = _activity(driver, last, settings, today)
+        verdict['next_date'] = state['next_date']
+        if state['wait_reason']:
+            reasons.append(state['wait_reason'])
+        trips, basis, request = state['trips'], state['basis'], state['request']
+        if request is not None and _answers(period, request):
+            count = as_count(period.get('count'))
+            if count is not None:
+                trips, basis = max(0, count - request['subtract']), BASIS_SINCE_LAST
         verdict['trips'] = trips
         verdict['trips_basis'] = basis
         need = verdict['min_trips']
         if need:
             if trips is None:
-                reasons.append('CRM не отдала число поездок за неделю — право не проверить')
+                if request is not None:
+                    reasons.append('CRM не отдала число поездок с прошлой выдачи — право не '
+                                   'проверить. Попробуйте ещё раз через минуту')
+                elif not state['wait_reason']:
+                    reasons.append('CRM не отдала число поездок за неделю — право не проверить')
             elif trips < need:
                 window = 'с прошлой выдачи' if basis == BASIS_SINCE_LAST else 'за последние 7 дней'
                 reasons.append('Менее %d %s %s — сейчас %d' % (
@@ -244,6 +292,87 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None)
     verdict['blocks_max'] = blocks if not reasons else 0
     verdict['allowed'] = not reasons and blocks > 0
     return verdict
+
+
+def period_request(driver, history, settings, *, today):
+    """Запрос заказов CRM за даты, без которого вердикту не посчитать
+    поездки с прошлой выдачи, — или None, если он не нужен.
+
+    Сеть — забота роутов: они спрашивают CRM и передают ответ в evaluate
+    (`period`), а сама проверка остаётся чистой.
+    """
+    history = list(history or [])
+    total = (driver.get('orders') or {}).get('total')
+    if not history or not total:
+        return None
+    return _activity(driver, history[0], settings, today)['request']
+
+
+def _activity(driver, last, settings, today):
+    """Выдача за активность: срок с прошлой выдачи и засчитываемые поездки.
+
+    trips None при запросе request — поездки посчитает только CRM за даты.
+    Пока не прошли дни, запроса нет: отказ ясен и без него.
+    """
+    orders = driver.get('orders') or {}
+    week = orders.get('week')
+    need = int(settings.get('min_trips') or 0)
+    cooldown = int(settings.get('cooldown_days') or 0)
+    state = {'next_date': None, 'wait_reason': None, 'trips': week, 'basis': BASIS_WEEK,
+             'request': None}
+    last_day = day_of(last.get('created_at')) if last else None
+    since = moment_of(last.get('created_at')) if last else None
+    if last_day is None or since is None:
+        return state
+
+    if cooldown:
+        next_day = last_day + timedelta(days=cooldown)
+        state['next_date'] = next_day.isoformat()
+        if today < next_day:
+            passed = max(0, (today - last_day).days)
+            # «прошёл 1 день», но «прошло 3 дня» — глагол по числу.
+            verb = 'прошёл' if plural(passed, 1, 2, 5) == 1 else 'прошло'
+            state['wait_reason'] = 'С прошлой выдачи %s %s из %d — следующая с %s' % (
+                verb, days_word(passed), cooldown, next_day.strftime('%d.%m.%Y'))
+
+    window_from = moment_of(orders.get('window_from'))
+    times = driver.get('order_times')
+    if times is not None and window_from is not None:
+        moments = [moment for moment in map(moment_of, times) if moment is not None]
+        start = window_from
+        if orders.get('week_truncated'):
+            # Список обрезан на 500 свежих заказах — полон он только от
+            # самого старого из них.
+            start = min(moments) if moments else None
+        if start is not None and start <= since:
+            state.update(trips=sum(1 for moment in moments if moment > since),
+                         basis=BASIS_SINCE_LAST)
+            return state
+    # Выдача раньше окна: всё окно — после неё, счётчик недели — нижняя
+    # граница поездок. Хватает её — запрашивать точное число незачем.
+    if (week is not None and window_from is not None and since < window_from
+            and week >= need):
+        return state
+    if not need:
+        return state
+    state.update(trips=None, basis=None)
+    if state['wait_reason']:
+        return state
+
+    same_account = (last.get('driver_account_id') or '') == (driver.get('account_id') or '')
+    before = as_count(last.get('orders_today')) if same_account else None
+    first_day = last_day if before is not None else last_day + timedelta(days=1)
+    if first_day > today:
+        state.update(trips=0, basis=BASIS_SINCE_LAST)
+        return state
+    state['request'] = {'issue_id': last.get('id'), 'date_from': first_day.isoformat(),
+                        'date_to': today.isoformat(), 'subtract': before or 0}
+    return state
+
+
+def _answers(period, request):
+    return isinstance(period, dict) and all(period.get(key) == value
+                                            for key, value in request.items())
 
 
 def issue_brief(item):

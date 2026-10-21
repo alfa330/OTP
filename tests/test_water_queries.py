@@ -14,11 +14,11 @@ from water import queries
 ACCOUNT = 'b' * 32
 
 
-def row(kind, days_ago, account=ACCOUNT):
+def row(kind, days_ago, account=ACCOUNT, orders_today=4):
     at = datetime(2026, 9, 30, 12, 0) - timedelta(days=days_ago)
     # _HISTORY_COLUMNS: id, kind, blocks, created_at, driver_account_id,
-    # orders_total, office_name, city, issued_by_name
-    return (days_ago, kind, 1, at, account, 100, 'Офис', 'Алматы', 'Сотрудник')
+    # orders_total, office_name, city, issued_by_name, orders_today
+    return (days_ago, kind, 1, at, account, 100, 'Офис', 'Алматы', 'Сотрудник', orders_today)
 
 
 class ScriptedCursor:
@@ -64,6 +64,28 @@ class PersonHistoryTests(unittest.TestCase):
         cursor = ScriptedCursor([row('activity', 3)], [])
         history = queries.person_history(cursor, ACCOUNT, None)
         self.assertEqual(len(history), 1)
+
+
+class TripsBeforeTheIssueTests(unittest.TestCase):
+    """Заказы дня выдачи до неё — `orders.today` из снимка CRM, который выдача
+    хранит целиком (rules.py: без него поездки того же дня после выдачи от
+    сделанных до неё не отличить)."""
+
+    def test_both_queries_read_it_from_the_snapshot(self):
+        cursor = ScriptedCursor([row('activity', 3)], [row('welcome', 200)])
+        history = queries.person_history(cursor, ACCOUNT, '900101300123')
+        for sql, _params in cursor.sql:
+            self.assertIn("driver_info -> 'orders' -> 'today'", sql)
+        self.assertEqual([item['orders_today'] for item in history], [4, 4])
+
+    def test_odd_snapshot_value_is_unknown_not_zero(self):
+        """Ноль значил бы «до выдачи заказов не было», и поездки того дня до
+        неё засчитались бы ей."""
+        for value, expected in ((7, 7), ('7', 7), (0, 0), (None, None), (-1, None),
+                                (True, None), ('много', None), ({'n': 1}, None)):
+            cursor = ScriptedCursor([row('activity', 3, orders_today=value), row('welcome', 9)])
+            with self.subTest(value=value):
+                self.assertEqual(queries.person_history(cursor, ACCOUNT)[0]['orders_today'], expected)
 
 
 class CanceledIssuesTests(unittest.TestCase):

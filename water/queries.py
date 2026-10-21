@@ -291,7 +291,18 @@ def lock_driver(cursor, account_id, iin=None):
 
 
 _HISTORY_COLUMNS = ('id', 'kind', 'blocks', 'created_at', 'driver_account_id', 'orders_total',
-                    'office_name', 'city', 'issued_by_name')
+                    'office_name', 'city', 'issued_by_name', 'orders_today')
+# orders_today — заказов за день выдачи к её моменту, из снимка CRM, который
+# выдача хранит целиком: без него поездки после выдачи, сделанные в тот же
+# день, от сделанных до неё не отличить (rules.py). Отдельной колонки нет —
+# снимок есть у каждой выдачи с первого дня.
+_HISTORY_SELECT = ', '.join(_HISTORY_COLUMNS[:-1] + ("driver_info -> 'orders' -> 'today'",))
+
+
+def _history_row(row):
+    item = dict(zip(_HISTORY_COLUMNS, row))
+    item['orders_today'] = rules.as_count(item['orders_today'])
+    return item
 
 
 def person_history(cursor, account_id, iin=None, limit=20):
@@ -312,9 +323,9 @@ def person_history(cursor, account_id, iin=None, limit=20):
            AND canceled_at IS NULL
          ORDER BY created_at DESC, id DESC
          LIMIT %%(limit)s
-        """ % ', '.join(_HISTORY_COLUMNS),
+        """ % _HISTORY_SELECT,
         {'account': str(account_id or ''), 'iin': str(iin or ''), 'limit': int(limit)})
-    rows = [dict(zip(_HISTORY_COLUMNS, row)) for row in cursor.fetchall()]
+    rows = [_history_row(row) for row in cursor.fetchall()]
     # Приветственный ищется БЕЗ окна последних выдач. Иначе через полгода
     # еженедельных блоков он уходил за LIMIT, и новый аккаунт того же человека
     # в другом парке снова получал «можно выдать приветственный» — экран
@@ -329,12 +340,12 @@ def person_history(cursor, account_id, iin=None, limit=20):
                     OR (%%(iin)s <> '' AND driver_iin = %%(iin)s))
              ORDER BY created_at, id
              LIMIT 1
-            """ % ', '.join(_HISTORY_COLUMNS),
+            """ % _HISTORY_SELECT,
             {'account': str(account_id or ''), 'iin': str(iin or '')})
         welcome = cursor.fetchone()
         if welcome:
             # Он старше всего окна (иначе попал бы в него) — значит, в конец.
-            rows.append(dict(zip(_HISTORY_COLUMNS, welcome)))
+            rows.append(_history_row(welcome))
     return rows
 
 

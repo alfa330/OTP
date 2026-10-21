@@ -232,14 +232,18 @@ class FakeDb:
     def __init__(self):
         self.commits = 0
         self.rollbacks = 0
+        self.open = 0
 
     @contextmanager
     def _get_cursor(self):
+        self.open += 1
         try:
             yield object()
         except Exception:
             self.rollbacks += 1
             raise
+        finally:
+            self.open -= 1
         self.commits += 1
 
 
@@ -284,6 +288,17 @@ class _Base(unittest.TestCase):
                 raise water_routes.water_driver.DriverLookupError('Вставьте ссылку', code='bad_account_id', status=400)
             return dict(self.crm, orders=dict(self.crm['orders']))
 
+        # Заказы за даты из CRM: число или исключение; вызовы — с открытыми
+        # в этот момент курсорами базы (запрос обязан идти вне транзакции).
+        self.period_count = None
+        self.period_calls = []
+
+        def count_orders(account_id, date_from, date_to):
+            self.period_calls.append((account_id, date_from, date_to, self.db.open))
+            if isinstance(self.period_count, Exception):
+                raise self.period_count
+            return self.period_count
+
         def send(chat_id, text, parse_mode=None, reply_markup=None):
             self.sent.append((chat_id, text, reply_markup))
 
@@ -301,6 +316,7 @@ class _Base(unittest.TestCase):
             send_telegram=send,
             web_app_base_url='https://example.invalid/OTP',
             driver_lookup=lookup,
+            orders_counter=count_orders,
         ))
         app.config['TESTING'] = True
         self.client = app.test_client()
@@ -505,6 +521,87 @@ class IssueTests(_Base):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()['code'], 'WATER_WELCOME_TAKEN')
         self.assertEqual(self.db.rollbacks, 1)
+
+
+class TripsSinceLastIssueTests(_Base):
+    """Поездки с прошлой выдачи (21.10.2026): по заказам с временем, а не по
+    разнице счётчика `total` CRM — тот оказался окном около полугода."""
+
+    LAST = datetime(2026, 9, 20, 12, 0)  # 10 дней назад: раньше окна «7 дней»
+
+    def setUp(self):
+        super().setUp()
+        self.office_id = self.store.add(stock=50)
+        self.store.issues.append({
+            'id': 1, 'water_office_id': self.office_id, 'kind': 'activity', 'blocks': 1,
+            'driver_account_id': ACCOUNT, 'driver_iin': '900101300123', 'orders_today': 3,
+            'office_name': 'Офис Алматы №1', 'city': 'Алматы', 'created_at': self.LAST,
+        })
+        window_from = NOW - timedelta(days=7)
+        times = [(window_from + timedelta(hours=10 * n)).strftime('%Y-%m-%d %H:%M:%S')
+                 for n in range(1, 13)]
+        self.crm = dict(crm_driver(total=3951, week=12),
+                        order_times=times)
+        self.crm['orders'] = dict(self.crm['orders'],
+                                  window_from=window_from.strftime('%Y-%m-%d %H:%M:%S'))
+
+    def test_check_asks_crm_for_the_days_since_the_issue(self):
+        self.period_count = 24
+        body = self.client.post('/api/water/check', json={'link': ACCOUNT}).get_json()
+        self.assertEqual(self.period_calls, [(ACCOUNT, '2026-09-20', '2026-09-30', 0)])
+        self.assertTrue(body['verdict']['allowed'], body['verdict'])
+        self.assertEqual(body['verdict']['trips'], 21)
+        self.assertEqual(body['verdict']['trips_basis'], 'since_last')
+        self.assertNotIn('order_times', body['driver'])
+
+    def test_issue_asks_crm_outside_the_transaction_and_writes_the_count(self):
+        self.period_count = 24
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(len(self.period_calls), 1)
+        self.assertEqual(self.period_calls[0][3], 0)
+        written = self.store.issues[-1]
+        self.assertEqual((written['orders_counted'], written['orders_basis']), (21, 'since_last'))
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 49)
+
+    def test_crm_silence_refuses_with_a_retry_and_writes_nothing(self):
+        self.period_count = water_routes.water_driver.DriverLookupError(
+            'CRM не ответила', code='crm_unavailable', status=502)
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 409)
+        body = response.get_json()
+        self.assertEqual(body['code'], 'WATER_NOT_ELIGIBLE')
+        self.assertIn('CRM не отдала число поездок с прошлой выдачи', body['error'])
+        self.assertEqual(len(self.store.issues), 1)
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 50)
+
+    def test_too_few_trips_since_the_issue_is_refused_with_the_number(self):
+        self.period_count = 22
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('менее 20 поездок с прошлой выдачи — сейчас 19', response.get_json()['error'])
+
+    def test_full_week_needs_no_request(self):
+        self.crm['orders'] = dict(self.crm['orders'], week=25)
+        self.crm['order_times'] = self.crm['order_times'] * 3
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.period_calls, [])
+
+    def test_issue_inside_the_week_is_counted_from_the_list(self):
+        """Случай 21.10.2026: выдача на седьмой день, все её поездки — в списке
+        заказов CRM за 7 дней; запрос за даты не нужен."""
+        self.store.issues[0]['created_at'] = datetime(2026, 9, 23, 12, 0)
+        window_from = datetime(2026, 9, 23, 11, 0)
+        self.crm['orders'] = dict(self.crm['orders'], week=173,
+                                  window_from=window_from.strftime('%Y-%m-%d %H:%M:%S'))
+        self.crm['order_times'] = [
+            (datetime(2026, 9, 23, 12, 10) + timedelta(minutes=55 * n)).strftime('%Y-%m-%d %H:%M:%S')
+            for n in range(173)]
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.period_calls, [])
+        self.assertEqual(self.store.issues[-1]['orders_counted'], 173)
 
 
 class FkTests(_Base):

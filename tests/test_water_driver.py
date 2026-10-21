@@ -10,6 +10,8 @@
 import unittest
 from datetime import date
 
+import requests
+
 from water import driver as water_driver
 from water import rules
 
@@ -114,6 +116,126 @@ class WeekByTariffTests(unittest.TestCase):
                 self.assertFalse(water_driver.normalize(data)['orders']['week_truncated'])
 
 
+class OrderTimesTests(unittest.TestCase):
+    """Время заказов за 7 дней — по нему считаются поездки после прошлой выдачи."""
+
+    def test_booked_time_of_every_order_and_the_window_start(self):
+        found = water_driver.normalize(crm(['business', 'econom']))
+        self.assertEqual(found['order_times'], ['2026-09-30 11:40:19'] * 2)
+        self.assertEqual(found['orders']['window_from'], '2026-09-24 12:00:48')
+
+    def test_end_time_when_the_booking_time_is_missing(self):
+        data = crm(['business'] * 2)
+        data['orders']['last_7_days']['items'][0]['booked_at'] = None
+        found = water_driver.normalize(data)
+        self.assertEqual(found['order_times'], ['2026-09-30 12:05:00', '2026-09-30 11:40:19'])
+
+    def test_orders_without_time_or_garbage_are_skipped(self):
+        data = crm(['business'])
+        data['orders']['last_7_days']['items'] += [None, 'business', {'category': 'econom'}]
+        self.assertEqual(water_driver.normalize(data)['order_times'], ['2026-09-30 11:40:19'])
+
+    def test_no_list_means_no_data_not_zero_trips(self):
+        found = water_driver.normalize(crm(['econom'] * 4, last_7_days=False))
+        self.assertIsNone(found['order_times'])
+        self.assertIsNone(found['orders']['window_from'])
+        data = crm(['business'])
+        data['orders'] = None
+        self.assertIsNone(water_driver.normalize(data)['order_times'])
+
+    def test_empty_week_is_an_empty_list(self):
+        self.assertEqual(water_driver.normalize(crm([]))['order_times'], [])
+
+
+class _Response:
+    def __init__(self, status=200, payload=None, text=None):
+        self.status_code = status
+        self._payload = payload
+        self._text = text
+
+    def json(self):
+        if self._text is not None:
+            raise ValueError('not json')
+        return self._payload
+
+
+class _Session:
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.calls = []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.calls.append({'url': url, 'json': json, 'headers': headers, 'timeout': timeout})
+        if self.error:
+            raise self.error
+        return self.response
+
+
+class OrdersCountTests(unittest.TestCase):
+    """`POST /api/partners/orders` — заказы аккаунта за календарные даты."""
+
+    CONFIG = {'url': 'https://backend.yataxi.kz/api/partners/driver-info', 'token': 't0ken'}
+
+    def count(self, session, account=ACCOUNT, config=None):
+        return water_driver.orders_count(account, '2026-10-14', '2026-10-21',
+                                         config=config or self.CONFIG, session=session)
+
+    def ok(self, data):
+        return _Session(_Response(payload={'from': '2026-10-14', 'to': '2026-10-21', 'data': data}))
+
+    def test_count_of_the_account_and_the_request_form(self):
+        session = self.ok({ACCOUNT: {'orders_count': 182, 'first_order_at': '2026-10-14 10:58:11',
+                                     'last_order_at': '2026-10-21 10:26:38'}})
+        self.assertEqual(self.count(session, account=ACCOUNT.upper()), 182)
+        call = session.calls[0]
+        self.assertEqual(call['url'], 'https://backend.yataxi.kz/api/partners/orders')
+        self.assertEqual(call['json'], {'account_ids': [ACCOUNT], 'from': '2026-10-14',
+                                        'to': '2026-10-21'})
+        self.assertEqual(call['headers']['X-Integration-Token'], 't0ken')
+        self.assertTrue(call['timeout'])
+
+    def test_zero_is_a_real_answer(self):
+        self.assertEqual(self.count(self.ok({ACCOUNT: {'orders_count': 0}})), 0)
+
+    def test_key_is_matched_without_case(self):
+        self.assertEqual(self.count(self.ok({ACCOUNT.upper(): {'orders_count': '7'}})), 7)
+
+    def test_stand_stub_gets_the_request_too(self):
+        """Стенд подменяет CRM одной CRM_DRIVER_INFO_URL — запрос за даты идёт туда же."""
+        session = self.ok({ACCOUNT: {'orders_count': 1}})
+        self.count(session, config={'url': 'http://127.0.0.1:5103/api/partners/driver-info/',
+                                    'token': 'stand'})
+        self.assertEqual(session.calls[0]['url'], 'http://127.0.0.1:5103/api/partners/orders')
+
+    def test_failures_are_errors_not_zero(self):
+        cases = (
+            ('crm_unavailable', _Session(error=requests.ConnectionError('down'))),
+            ('crm_unavailable', _Session(_Response(503, {'error': 'orders_unavailable'}))),
+            ('crm_error', _Session(_Response(422, {'message': 'bad dates'}))),
+            ('crm_error', _Session(_Response(401, {'error': 'unauthorized'}))),
+            ('crm_bad_payload', _Session(_Response(200, text='<html>'))),
+            ('crm_bad_payload', self.ok({})),
+            ('crm_bad_payload', self.ok({'d' * 32: {'orders_count': 5}})),
+            ('crm_bad_payload', self.ok({ACCOUNT: {'orders_count': None}})),
+            ('crm_bad_payload', self.ok({ACCOUNT: {'orders_count': -1}})),
+            ('crm_bad_payload', self.ok({ACCOUNT: 5})),
+            ('crm_bad_payload', _Session(_Response(200, ['data']))),
+        )
+        for code, session in cases:
+            with self.subTest(code=code, response=session.response):
+                with self.assertRaises(water_driver.DriverLookupError) as caught:
+                    self.count(session)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_without_a_token_nothing_is_sent(self):
+        session = self.ok({ACCOUNT: {'orders_count': 1}})
+        with self.assertRaises(water_driver.DriverLookupError) as caught:
+            self.count(session, config={'url': self.CONFIG['url'], 'token': ''})
+        self.assertEqual(caught.exception.code, 'not_configured')
+        self.assertEqual(session.calls, [])
+
+
 class PublicCardTests(unittest.TestCase):
     def test_breakdown_goes_to_the_screen_but_the_order_list_does_not(self):
         found = water_driver.normalize(crm(['business'] * 2 + ['econom']))
@@ -123,6 +245,10 @@ class PublicCardTests(unittest.TestCase):
         self.assertNotIn('info', card)
         self.assertNotIn('iin', card)
         self.assertNotIn('order-0', repr(card))
+        # Время заказов — серверу для счёта поездок, на экран не едет.
+        self.assertIn('order_times', found)
+        self.assertNotIn('order_times', card)
+        self.assertNotIn('2026-09-30 11:40:19', repr(card))
 
 
 class RuleIsUnchangedTests(unittest.TestCase):
