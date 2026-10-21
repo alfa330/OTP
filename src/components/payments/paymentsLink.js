@@ -53,7 +53,7 @@ const BOARD_TAB_PREFIX = 'board:';
 export const PAYMENTS_DEFAULT_DICTIONARY = 'counterparties';
 export const PAYMENTS_DICTIONARY_KEYS = [
     'counterparties', 'contracts', 'legal_entities', 'counterparty_accounts', 'cards', 'templates',
-    'limits', 'routes', 'mailings', 'categories', 'asset_categories', 'projects', 'settings',
+    'limits', 'routes', 'counterparty_emails', 'mailings', 'categories', 'asset_categories', 'projects', 'settings',
 ];
 
 /** Вкладка раздела по метке адреса: 'approval' → 'board:approval'. '' — такой вкладки нет. */

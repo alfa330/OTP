@@ -1,20 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, FileSignature, FileText, FolderKanban, Gauge, Landmark,
-    Loader2, Mail, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
+    AtSign, Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, FileSignature, FileText, FolderKanban, Gauge,
+    Landmark, Loader2, Mail, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
 } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
+import CompanyMailbox from './CompanyMailbox';
 import FixedPaymentsPanel from './FixedPaymentsPanel';
 import RequisitesMailings from './RequisitesMailings';
 import SupplierLetters from './SupplierLetters';
 import {
     CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
-    DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel, fmtDate, fmtMoney,
-    mailingPill, mailingWhen, pageRange, parseAmount,
+    DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, addressLetterState, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel,
+    fmtDate, fmtMoney, mailingPill, mailingWhen, pageRange, parseAmount, parseEmails,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormInput, FormSelect,
@@ -59,8 +60,9 @@ const SECTIONS = [
     { value: 'templates', label: 'Регулярные платежи', icon: CalendarClock, group: 'pay', need: (caps) => caps.is_admin || caps.sees_all_requests, about: 'Аренда, связь, лицензии: поставщик, договор и реквизиты подставляются в заявку сами.' },
     { value: 'limits', label: 'Лимиты согласования', icon: Gauge, group: 'approval', about: 'Кто, до какой суммы и по каким поставщикам утверждает заявки.' },
     { value: 'routes', label: 'Маршруты согласования', icon: Route, group: 'approval', about: 'Кто утверждает, когда ни один лимит не подошёл, и нужен ли этап руководителя.' },
-    // Не справочник ТЗ, а журнал: письма поставщикам о смене реквизитов наших компаний (20.10.2026).
-    // В списке — после восьми справочников п. 13, в меню — в конце своей группы «Поставщики и платежи».
+    // Не справочники ТЗ: адреса поставщиков (21.10.2026) и журнал писем им о смене реквизитов наших
+    // компаний (20.10.2026). В списке — после восьми справочников п. 13, в меню — в конце своей группы.
+    { value: 'counterparty_emails', label: 'Почта поставщиков', icon: AtSign, group: 'pay', about: 'Адреса поставщиков для писем о смене наших реквизитов: контактное лицо и чем кончилось последнее письмо.' },
     { value: 'mailings', label: 'Письма поставщикам', icon: Mail, group: 'pay', need: 'is_admin', about: 'Письма о смене реквизитов наших компаний: кому ушли, кому нет и само письмо.' },
     { value: 'categories', label: 'Категории закупа', icon: Tags, group: 'lists', about: 'По категориям группируются затраты и выбирается согласующий.' },
     { value: 'asset_categories', label: 'Категории имущества', icon: Boxes, group: 'lists', about: 'Виды имущества для постановки на учёт: техника, мебель, оборудование.' },
@@ -112,6 +114,11 @@ const toDraft = (name, row = {}) => {
                 emails: (row.emails || []).join(', '),
                 category_id: row.category_id ?? null, responsible_user_id: row.responsible_user_id ?? null,
                 approver_user_id: row.approver_user_id ?? null, approval_limit: orBlank(row.approval_limit),
+            };
+        case 'counterparty_emails':
+            return {
+                id: row.id ?? null, counterparty_id: row.counterparty_id ?? null, email: row.email || '',
+                contact_name: row.contact_name || '', note: row.note || '',
             };
         case 'counterparty_accounts':
             return {
@@ -170,6 +177,16 @@ const toPayload = (name, draft) => {
     return payload;
 };
 
+/* Строка «Почты поставщиков»: поставщик и ровно один адрес. */
+export const emailRowIssues = (draft) => {
+    const issues = {};
+    if (!draft?.counterparty_id) issues.counterparty_id = 'Выберите поставщика, чей это адрес';
+    const { emails, bad } = parseEmails(draft?.email);
+    if (bad) issues.email = `«${bad.slice(0, 80)}» — не похоже на адрес почты`;
+    else if (emails.length !== 1) issues.email = emails.length ? 'Один адрес — одна строка' : 'Укажите адрес почты';
+    return issues;
+};
+
 const conditionsLine = (row) => [
     row.legal_entity_name, row.department_name, row.category_name,
     nameOf(PAYMENT_METHOD_OPTIONS, row.payment_method), nameOf(REQUEST_KIND_OPTIONS, row.request_kind),
@@ -179,6 +196,7 @@ const conditionsLine = (row) => [
 const rowText = (row) => [
     row.name, row.legal_name, row.bin, row.number, row.counterparty_name, row.legal_entity_name, row.holder_name,
     row.owner_name, row.delegate_name, row.approver_name, row.iik, row.bank_name, row.subject, ...(row.emails || []),
+    row.email, row.contact_name,
 ].filter(Boolean).join(' ').toLowerCase();
 
 /* Письмо поставщикам о смене реквизитов компании — меткой в строке, пока оно ждёт,
@@ -186,6 +204,15 @@ const rowText = (row) => [
 const MailPill = ({ state, ready }) => {
     const pill = mailingPill(state, { ready });
     return pill ? <TonePill tone={pill.tone}>{pill.label}</TonePill> : null;
+};
+
+/* Уйдёт ли письмо компании: своя почта подключена и не сообщала о беде (21.10.2026). */
+export const mailboxReady = (row) => Boolean(row?.mailbox) && !row.mailbox.problem;
+
+/* «Почта поставщиков»: чем кончилось последнее письмо на адрес. */
+const LetterPill = ({ last }) => {
+    const state = addressLetterState(last);
+    return <TonePill tone={state.tone}>{state.label}</TonePill>;
 };
 
 const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
@@ -199,7 +226,7 @@ const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
    названия (категории, проекты) колонок не имеют — у них null, они стоят списком.
    `tools` — то, что нужно ячейкам с действиями: чтение номера карты и тост. */
 const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · ');
-export const dictionaryColumns = (name, { loadCardNumber, showToast, mailReady = true, mailWide = false } = {}) => {
+export const dictionaryColumns = (name, { loadCardNumber, showToast, mailWide = false } = {}) => {
     switch (name) {
         case 'counterparties':
             return [
@@ -233,7 +260,16 @@ export const dictionaryColumns = (name, { loadCardNumber, showToast, mailReady =
                 { key: 'account', label: 'Счёт', width: mailWide ? 216 : 256, cell: (row) => (row.iik ? { main: row.iik, mono: true, sub: row.bank_name } : { main: 'не указан', muted: true }) },
                 // Метка письма и «Скопировать реквизиты» — в одну строку: пока у кого-то метка есть,
                 // колонка шире, а счёт уже; меток нет — таблица прежней ширины.
-                { key: 'state', label: '', width: mailWide ? 360 : 232, align: 'right', cell: (row) => <><MailPill state={row.mailing} ready={mailReady} /><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></> },
+                { key: 'state', label: '', width: mailWide ? 360 : 232, align: 'right', cell: (row) => <><MailPill state={row.mailing} ready={mailboxReady(row)} /><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></> },
+            ];
+        case 'counterparty_emails':
+            return [
+                { key: 'email', label: 'Адрес', cell: (row) => ({ main: row.email, strong: true, sub: row.contact_name }) },
+                {
+                    key: 'party', label: 'Поставщик', width: 232,
+                    cell: (row) => ({ main: row.counterparty_name, sub: [row.counterparty_active ? '' : 'поставщик скрыт', row.note].filter(Boolean).join(' · ') }),
+                },
+                { key: 'letter', label: 'Последнее письмо', width: 188, align: 'right', cell: (row) => <LetterPill last={row.last_letter} /> },
             ];
         case 'counterparty_accounts':
             return [
@@ -384,11 +420,15 @@ const PaymentsDictionaries = ({
 
     const [rows, setRows] = useState([]);
     const [canEdit, setCanEdit] = useState(false);
-    // Почта для писем поставщикам: подключена ли и сколько адресов (только «Реквизиты компаний»).
-    const [mailInfo, setMailInfo] = useState(null);
     // Что не так в поле «Почта» поставщика — после первой попытки сохранить; отказ сервера — там же.
     const [emailsTried, setEmailsTried] = useState(false);
     const [emailsRefused, setEmailsRefused] = useState('');
+    // «Почта поставщиков»: чего не хватает в строке — после первой попытки сохранить; отказ сервера — там же.
+    const [fieldTried, setFieldTried] = useState(false);
+    const [fieldRefused, setFieldRefused] = useState({});
+    // Почта для писем в окне компании: недоподключённую «Сохранить» подключает сам (CompanyMailbox).
+    const mailboxControl = useRef(null);
+    const [mailboxKey, setMailboxKey] = useState(0);
     const [loading, setLoading] = useState(false);
     const [filter, setFilter] = useState('');
     const [editing, setEditing] = useState(null);   // строка справочника; {} — новая запись
@@ -415,7 +455,6 @@ const PaymentsDictionaries = ({
             if (ticketRef.current !== ticket) return;
             setRows(response.data?.items || []);
             setCanEdit(Boolean(response.data?.can_edit));
-            setMailInfo(response.data?.mail || null);
         } catch (err) {
             if (ticketRef.current === ticket) toastRef.current?.(errorText(err, 'Не удалось загрузить справочник'), 'error');
         } finally {
@@ -425,7 +464,7 @@ const PaymentsDictionaries = ({
 
     /* Строки предыдущего справочника сбрасываются ДО загрузки нового: иначе
        один кадр строки поставщиков рисуются отрисовщиком лимитов. */
-    useEffect(() => { setRows([]); setFilter(''); setCanEdit(false); setMailInfo(null); load(); }, [load]);
+    useEffect(() => { setRows([]); setFilter(''); setCanEdit(false); load(); }, [load]);
 
     const categoryRoots = useMemo(() => (name === 'categories' ? rows : dictionaries?.categories || []).filter((item) => !item.parent_id), [rows, name, dictionaries]);
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
@@ -441,6 +480,8 @@ const PaymentsDictionaries = ({
         setContractFile(null);
         setEmailsTried(false);
         setEmailsRefused('');
+        setFieldTried(false);
+        setFieldRefused({});
         setEditing(row || {});
         setDraft(toDraft(name, row || {}));
     };
@@ -452,19 +493,39 @@ const PaymentsDictionaries = ({
         if (!mailing) return 'Сохранено';
         if (mailing.status === 'reverted') return 'Сохранено. Реквизиты как прежде — письмо поставщикам не уйдёт';
         if (!mailing.recipients?.addresses) return 'Сохранено. Письмо о новых реквизитах некому отправить: у поставщиков нет почты';
-        if (!mailing.ready) return 'Сохранено. Письмо поставщикам уйдёт, когда подключат почту';
+        if (!mailing.ready) return 'Сохранено. Письмо поставщикам уйдёт, когда у компании заработает почта для писем';
         return `Сохранено. Письмо поставщикам уйдёт ${mailingWhen(mailing.send_after)}`;
     };
 
     // Поле «Почта» стоит в начале окна: долистали до «Сохранить» — подвести к нему.
     const revealEmails = (event) => requestAnimationFrame(() => revealAnchor(
         document.querySelector('[data-issue-anchor="supplier-emails"]'), { focus: fromKeyboard(event) }));
+    const revealField = (anchor, event) => requestAnimationFrame(() => revealAnchor(
+        document.querySelector(`[data-issue-anchor="${anchor}"]`), { focus: fromKeyboard(event) }));
+    // «Почта поставщиков»: что не так в строке — своё и то, что ответил сервер.
+    const fieldIssues = name === 'counterparty_emails' ? { ...emailRowIssues(draft), ...fieldRefused } : {};
 
     const save = async (event) => {
         if (name === 'counterparties' && emailsIssue(draft.emails)) {
             setEmailsTried(true);
             revealEmails(event);
             return;
+        }
+        if (name === 'counterparty_emails') {
+            const issues = emailRowIssues(draft);
+            if (issues.counterparty_id || issues.email) {
+                setFieldTried(true);
+                revealField(issues.counterparty_id ? 'email-counterparty' : 'email-address', event);
+                return;
+            }
+        }
+        // В окне компании набрали почту для писем, но не нажали «Подключить» — подключаем
+        // сейчас: иначе пароль пропал бы вместе с окном. Не подключилась — окно остаётся.
+        if (name === 'legal_entities' && mailboxControl.current?.dirty()) {
+            setSaving(true);
+            const connected = await mailboxControl.current.connect(event);
+            setSaving(false);
+            if (!connected) return;
         }
         setSaving(true);
         setError('');
@@ -490,6 +551,11 @@ const PaymentsDictionaries = ({
                 setEmailsRefused(String(err.response.data.error || '').replace(/^Почта: /, ''));
                 setEmailsTried(true);
                 revealEmails(event);
+            } else if (name === 'counterparty_emails' && ['email', 'counterparty_id'].includes(err?.response?.data?.field)) {
+                const field = err.response.data.field;
+                setFieldRefused({ [field]: String(err.response.data.error || '').replace(/^Адрес: /, '') });
+                setFieldTried(true);
+                revealField(field === 'email' ? 'email-address' : 'email-counterparty', event);
             } else {
                 setError(errorText(err, 'Не удалось сохранить'));
             }
@@ -566,7 +632,13 @@ const PaymentsDictionaries = ({
                     sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.iik && `ИИК ${row.iik}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · '),
                     side: <><CopyButton text={row.requisites_text} label="Скопировать реквизиты" /><Hidden active={row.is_active} /></>,
                     // На узком экране метка письма — под названием: справа ей рядом с кнопкой не уместиться.
-                    note: <MailPill state={row.mailing} ready={mailInfo?.ready !== false} />,
+                    note: <MailPill state={row.mailing} ready={mailboxReady(row)} />,
+                };
+            case 'counterparty_emails':
+                return {
+                    title: row.email,
+                    sub: [row.counterparty_name, row.contact_name, row.counterparty_active ? '' : 'поставщик скрыт'].filter(Boolean).join(' · '),
+                    side: <LetterPill last={row.last_letter} />,
                 };
             case 'counterparties':
                 return {
@@ -779,6 +851,21 @@ const PaymentsDictionaries = ({
                     </>
                 );
             }
+            case 'counterparty_emails':
+                return (
+                    <>
+                        <Field label="Поставщик" required optionalMark={false} anchor="email-counterparty" issue={fieldTried ? (fieldIssues.counterparty_id || '') : ''}>
+                            <FormSelect value={draft.counterparty_id} onChange={(v) => { setFieldRefused({}); set('counterparty_id', v); }} options={counterpartyOptions} placeholder="Выберите поставщика" searchable ariaLabel="Поставщик" />
+                        </Field>
+                        <Field label="Адрес почты" required optionalMark={false} anchor="email-address" issue={fieldTried ? (fieldIssues.email || '') : ''}
+                            hint="На этот адрес уходят письма о смене реквизитов наших компаний. Один адрес — одна строка.">
+                            <FormInput value={draft.email ?? ''} onChange={(event) => { setFieldRefused({}); set('email', event.target.value); }} inputMode="email"
+                                autoComplete="off" spellCheck={false} placeholder="buh@supplier.kz" maxLength={254} />
+                        </Field>
+                        <Field label="Контактное лицо" hint="Кто читает эту почту: имя, должность.">{text('contact_name', { maxLength: 200, placeholder: 'Айгерим, бухгалтер' })}</Field>
+                        <Field label="Примечание">{text('note', { maxLength: 1000 })}</Field>
+                    </>
+                );
             case 'counterparty_accounts':
                 return (
                     <>
@@ -950,9 +1037,8 @@ const PaymentsDictionaries = ({
 
     /* Таблица встаёт, только когда помещается в поле целиком (useFits): его ширину решают меню
        портала и левый список, а не одно окно. Не помещается — записи идут карточками. */
-    const mailReady = mailInfo?.ready !== false;
-    const mailWide = name === 'legal_entities' && rows.some((row) => mailingPill(row.mailing, { ready: mailReady }));
-    const columns = dictionaryColumns(name, { loadCardNumber, showToast, mailReady, mailWide });
+    const mailWide = name === 'legal_entities' && rows.some((row) => mailingPill(row.mailing, { ready: mailboxReady(row) }));
+    const columns = dictionaryColumns(name, { loadCardNumber, showToast, mailWide });
     const [paneRef, fits] = useFits(dictionaryTableMin(columns));
     const asTable = Boolean(columns && fits);
 
@@ -981,7 +1067,7 @@ const PaymentsDictionaries = ({
             );
             // Метка письма компании — своей строкой под записью: рядом с кнопкой справа
             // на телефоне ей не хватало места, и она обрезалась.
-            if (inner || !info.note || !mailingPill(entry.mailing, { ready: mailInfo?.ready !== false })) return row;
+            if (inner || !info.note || !mailingPill(entry.mailing, { ready: mailboxReady(entry) })) return row;
             return (
                 <React.Fragment key={entry.id}>
                     {row}
@@ -1191,9 +1277,14 @@ const PaymentsDictionaries = ({
                         </Field>
                     )}
                 </fieldset>
-                {/* Письма поставщикам о смене реквизитов — тому, кто реквизиты правит. */}
+                {/* Почта для писем и письма поставщикам о смене реквизитов — тому, кто реквизиты правит. */}
                 {editing && !isNew && canEdit && name === 'legal_entities' && (
-                    <RequisitesMailings apiBaseUrl={apiBaseUrl} headers={headers} entity={editing} draft={draft} showToast={showToast} onChanged={load} />
+                    <CompanyMailbox key={editing.id} apiBaseUrl={apiBaseUrl} headers={headers} entity={editing} showToast={showToast}
+                        controlRef={mailboxControl} onChanged={() => { setMailboxKey((value) => value + 1); load(); }} />
+                )}
+                {editing && !isNew && canEdit && name === 'legal_entities' && (
+                    <RequisitesMailings apiBaseUrl={apiBaseUrl} headers={headers} entity={editing} draft={draft} showToast={showToast} onChanged={load}
+                        mailboxKey={mailboxKey} />
                 )}
                 </div>
             </IosModal>

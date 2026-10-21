@@ -4,18 +4,10 @@
 автомат рассылка по эмайлом при изменении реквизитов». Что пишем и кому —
 requisites_mail.py; здесь только адреса и сама отправка.
 
-Отправляет корпоративный ящик по SMTP (решение владельца 20.10.2026). Адрес и
-пароль приложения лежат в окружении Render, в коде их нет:
-
-    PAYMENTS_SMTP_HOST       smtp.gmail.com, smtp.yandex.ru, smtp.mail.ru …
-    PAYMENTS_SMTP_PORT       465 — SSL (по умолчанию), 587 — STARTTLS
-    PAYMENTS_SMTP_USER       логин ящика, обычно сам адрес
-    PAYMENTS_SMTP_PASSWORD   пароль приложения (не пароль от входа в почту)
-    PAYMENTS_MAIL_FROM       от кого, если не совпадает с логином
-    PAYMENTS_MAIL_REPLY_TO   куда отвечать, если не на ящик отправителя
-    PAYMENTS_SMTP_SECURITY   ssl | starttls | none; none — только 127.0.0.1 (стенд)
-
-Render на платном тарифе выпускает наружу порты 465 и 587, порт 25 закрыт всегда.
+Отправляет почта самой компании по SMTP: у каждой нашей компании свой ящик
+(решение владельца 21.10.2026), его подключают в окне компании — payments/mailbox.py
+(адрес, пароль приложения, сервер). Render на платном тарифе выпускает наружу
+порты 465 и 587, порт 25 закрыт всегда.
 
 Ошибки отправки делятся на четыре вида (MailError.kind), от вида зависит, что
 делать дальше:
@@ -26,14 +18,15 @@ Render на платном тарифе выпускает наружу порт
                  паузу, а этому адресу засчитывается попытка (иначе отказ, который
                  на деле про адрес, крутил бы паузы вечно);
     transport  — не войти в ящик или ящик не пускает отправителя: виновата
-                 настройка — письма ждут, попытки не тратятся.
+                 настройка — письма ждут, попытки не тратятся. Чем именно —
+                 MailError.reason: login (логин или пароль), connect (нет связи с
+                 сервером), sender (ящик не разрешает этот адрес отправителя).
 
 Сервер отправки (smtp.gmail.com, smtp.yandex.ru) принимает письма на чужие
 домены, не проверяя адрес: «такого ящика нет» придёт позже письмом-отказом в
 сам ящик. Поэтому «отправлено» здесь значит «принял сервер отправки».
 """
 
-import os
 import re
 import smtplib
 import socket
@@ -62,7 +55,7 @@ _EMAIL_RE = re.compile(
 # понимается по-разному, а форма (paymentsMeta.parseEmails) обязана решать так же.
 _INVISIBLE_RE = re.compile('[\u200b\u200c\u200d\u2060\ufeff\u00ad]')
 _SPLIT_RE = re.compile('[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000,;]+')
-_LOCAL_HOSTS = ('127.0.0.1', 'localhost', '::1')
+LOCAL_HOSTS = ('127.0.0.1', 'localhost', '::1')
 
 # Отказ, в котором виноват сам ящик, а не адрес: суточный лимит отправки,
 # частота, подозрение на спам. Такой ответ приходит и на RCPT, и на DATA с кодом
@@ -84,9 +77,10 @@ class EmailError(ValueError):
 
 
 class MailError(Exception):
-    def __init__(self, kind, message):
+    def __init__(self, kind, message, reason=None):
         super().__init__(message)
         self.kind = kind
+        self.reason = reason
 
 
 def _tokens(value):
@@ -139,55 +133,18 @@ def find_emails(text):
     return result[:MAX_EMAILS]
 
 
-def _env(env, name):
-    return str(env.get(name) or '').strip()
-
-
-def config(env=None):
-    """Настройка ящика из окружения либо None — почта не подключена."""
-    env = os.environ if env is None else env
-    host = _env(env, 'PAYMENTS_SMTP_HOST')
-    user = _env(env, 'PAYMENTS_SMTP_USER')
-    password = str(env.get('PAYMENTS_SMTP_PASSWORD') or '')
-    sender = _env(env, 'PAYMENTS_MAIL_FROM') or user
-    if not host or not sender or bool(user) != bool(password):
-        return None
-    try:
-        port = int(_env(env, 'PAYMENTS_SMTP_PORT') or 465)
-    except ValueError:
-        return None
-    security = _env(env, 'PAYMENTS_SMTP_SECURITY').lower() or ('ssl' if port == 465 else 'starttls')
-    if security not in ('ssl', 'starttls', 'none'):
-        return None
-    # Без шифрования пароль и письма шли бы по сети открытым текстом: такое
-    # разрешено только почтовому серверу на этой же машине (стенд).
-    if security == 'none' and host not in _LOCAL_HOSTS:
-        return None
-    if not user and security != 'none':
-        return None
-    _name, address = parseaddr(sender)
-    if not address or not _EMAIL_RE.fullmatch(address.lower()):
-        return None
-    return Config(host=host, port=port, user=user, password=password, sender=sender,
-                  reply_to=_env(env, 'PAYMENTS_MAIL_REPLY_TO') or None, security=security)
-
-
-def ready(env=None):
-    return config(env) is not None
-
-
-def sender_of(cfg, display_name=None):
-    """(имя, адрес) отправителя, как их увидит поставщик; без почты — адреса нет."""
-    if cfg is None:
-        return display_name or '', None
-    own_name, address = parseaddr(cfg.sender)
-    return own_name or display_name or '', address
+def one_email(value):
+    """Ровно один адрес (строка справочника, почта компании): в нижнем регистре,
+    без «mailto:» и невидимого. Пусто, не адрес или несколько — EmailError."""
+    found = parse_emails(value)
+    if len(found) != 1:
+        raise EmailError('Укажите один адрес почты' if found else 'Укажите адрес почты')
+    return found[0]
 
 
 def build_message(cfg, *, to, subject, text, html, display_name=None):
     """Письмо: текст и HTML одним сообщением. Имя отправителя — название нашей
-    компании (у разных компаний свои письма), если в PAYMENTS_MAIL_FROM не
-    задано своё."""
+    компании: письмо уходит с её ящика (mailbox.py) и подписано ею."""
     own_name, address = parseaddr(cfg.sender)
     local, _at, domain = address.partition('@')
     message = EmailMessage()
@@ -252,12 +209,13 @@ class Transport:
                 self.smtp.login(cfg.user, cfg.password)
         except smtplib.SMTPAuthenticationError as exc:
             self.close()
-            raise MailError('transport', 'Почта не приняла логин или пароль приложения (%s)' % _reply_text(exc))
+            raise MailError('transport', 'Почта не приняла логин или пароль приложения (%s)' % _reply_text(exc),
+                            reason='login')
         except (smtplib.SMTPException, OSError) as exc:
             self.close()
             raise MailError('transport', 'Нет связи с почтовым сервером %s:%s — %s'
                             % (cfg.host, cfg.port, _reply_text(exc) if isinstance(exc, smtplib.SMTPException)
-                               else exc.__class__.__name__))
+                               else exc.__class__.__name__), reason='connect')
         return self
 
     def __exit__(self, *_exc):
@@ -308,7 +266,8 @@ class Transport:
             raise MailError(refusal_kind(code, detail), 'Сервер не принял адрес: %s %s' % (code, detail[:300]))
         except smtplib.SMTPSenderRefused as exc:
             self._drop_if_closed()
-            raise MailError('transport', 'Ящик не пускает отправителя %s (%s)' % (exc.sender, _reply_text(exc)))
+            raise MailError('transport', 'Ящик не пускает отправителя %s (%s)' % (exc.sender, _reply_text(exc)),
+                            reason='sender')
         except smtplib.SMTPResponseException as exc:
             self._drop_if_closed()
             reply = _reply_text(exc)

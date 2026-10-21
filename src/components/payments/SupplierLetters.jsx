@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Loader2 } from 'lucide-react';
-import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
+import { Check, Loader2, Search } from 'lucide-react';
+import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import {
-    DICTIONARY_PAGE_SIZE, LETTER_FORMS, changedLine, fmtDateTime, letterDay, letterInitials, letterMoment, letterTime,
-    mailingSummary, minutesWord, plural, recipientState,
+    DICTIONARY_PAGE_SIZE, HINTS, LETTER_FORMS, changedLine, excludedLine, fmtDateTime, letterDay, letterInitials, letterMoment,
+    letterTime, mailingSummary, minutesWord, plural, recipientState, recipientsChosen, recipientsLine, toggleRecipient,
+    allRecipients, waitingMailboxLine,
 } from './paymentsMeta';
-import { Bone, GroupDivider, NoticeBox, Pager, TonePill, errorText } from './paymentsUi';
+import { Bone, FieldHint, GroupDivider, NoticeBox, Pager, TonePill, errorText } from './paymentsUi';
 
 /*
  * «Письма поставщикам» — письма о смене реквизитов наших компаний внутри раздела
@@ -67,6 +68,8 @@ const toLine = (item, recipients) => {
     // Кому письмо адресовано — по алфавиту, как в «Почте»; убранные и отданные новому письму — не адресаты.
     const list = (item?.recipients || []).filter((recipient) => recipient.status !== 'removed' && recipient.status !== 'superseded')
         .slice().sort((a, b) => a.email.localeCompare(b.email));
+    // Ждущее письмо: адресов ещё нет — кому оно уйдёт по галочкам.
+    if (!list.length && item?.candidates) return recipientsLine(item.candidates);
     if (!list.length) {
         const addresses = recipients?.addresses || 0;
         return addresses ? `поставщикам с почтой — ${plural(addresses, ['адрес', 'адреса', 'адресов'])}` : 'адресов пока нет';
@@ -136,6 +139,71 @@ export const RecipientList = ({ item, recipients }) => {
     );
 };
 
+const PICKER_SEARCH_FROM = 9;
+
+/* Галочки «Кому» у ждущего письма (решение владельца 21.10.2026): по умолчанию отмечены
+   все поставщики с почтой; снятому письмо не уйдёт. `onChange` получает поставщиков,
+   которым не отправлять, — так их и хранит сервер (excluded_counterparty_ids). Пока
+   запрос идёт, галочки не нажимаются: ответы не должны лечь не в том порядке. */
+export const RecipientPicker = ({ candidates, busy = false, onChange }) => {
+    const [query, setQuery] = useState('');
+    const list = candidates || [];
+    if (!list.length) {
+        return (
+            <div className={`${iosCard} px-4 py-3.5 text-[13px] leading-relaxed text-slate-600`} data-recipient-picker="empty">
+                Ни у одного поставщика нет почты — письмо некому отправить. Адреса ведутся в «Почте поставщиков».
+            </div>
+        );
+    }
+    const allOn = list.every((item) => item.send);
+    const needle = query.trim().toLowerCase();
+    const shown = needle
+        ? list.filter((item) => `${item.name} ${(item.emails || []).join(' ')}`.toLowerCase().includes(needle))
+        : list;
+    const toggle = (item) => onChange?.(toggleRecipient(list, item.id));
+    return (
+        <div className="space-y-2" data-recipient-picker="ready">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
+                <span className="flex items-center gap-1.5 text-[12.5px] text-slate-600">
+                    <span data-recipient-summary>{recipientsLine(list)}</span>
+                    <FieldHint hint={HINTS.recipientsPick} />
+                </span>
+                <button type="button" disabled={busy} onClick={() => onChange?.(allRecipients(list, !allOn))}
+                    className="rounded-md px-1.5 py-0.5 text-[12.5px] font-medium text-blue-600 transition hover:bg-blue-50 disabled:opacity-50">
+                    {allOn ? 'Снять всех' : 'Отметить всех'}
+                </button>
+            </div>
+            {list.length >= PICKER_SEARCH_FROM && (
+                <label className="relative block">
+                    <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                    <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти поставщика или адрес"
+                        aria-label="Найти поставщика" className={`${iosInput} !py-2 pl-9 text-[13px]`} />
+                </label>
+            )}
+            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`} role="group" aria-label="Кому отправить письмо">
+                {shown.map((item) => (
+                    <button key={item.id} type="button" role="checkbox" aria-checked={item.send} disabled={busy} onClick={() => toggle(item)}
+                        className="flex w-full items-start gap-3 px-4 py-2.5 text-left transition hover:bg-[#f6f6f4] active:scale-[0.995] disabled:cursor-progress"
+                        data-candidate={item.id} data-candidate-send={item.send ? 'yes' : 'no'}>
+                        <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border-2 transition ${item.send ? 'border-[#2563eb] bg-[#2563eb] text-white' : 'border-slate-300 bg-white'}`} aria-hidden="true">
+                            {item.send && <Check size={12} strokeWidth={3} />}
+                        </span>
+                        {/* basis-0: оболочка телефона переносит ряды с gap — без него текст уезжал бы под галочку. */}
+                        <span className="min-w-0 grow basis-0">
+                            <span className="flex items-center gap-2">
+                                <span className={`min-w-0 truncate text-[13.5px] ${item.send ? 'text-slate-900' : 'text-slate-500'}`}>{item.name}</span>
+                                {!item.is_active && <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[11px] text-slate-600">скрыт</span>}
+                            </span>
+                            <span className="block truncate text-[12px] text-slate-500">{(item.emails || []).join(', ')}</span>
+                        </span>
+                    </button>
+                ))}
+                {!shown.length && <div className="px-4 py-3 text-[12.5px] text-slate-500">Никого не нашли</div>}
+            </div>
+        </div>
+    );
+};
+
 const LetterSkeleton = () => (
     <div className={`${iosCard} overflow-hidden`} aria-hidden="true">
         <div className="flex gap-3 px-4 py-3.5">
@@ -155,6 +223,7 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
     const [reply, setReply] = useState(null);
     const [tab, setTab] = useState('letter');
     const [busy, setBusy] = useState(false);
+    const [picking, setPicking] = useState(false);
     const [confirm, setConfirm] = useState(false);
     const [frameHeight, setFrameHeight] = useState(0);
     const toastRef = useRef(showToast);
@@ -209,11 +278,35 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
         }
     };
 
+    /* Галочки «Кому»: видно сразу, запрос — следом; не вышло — тост и то, что на деле. */
+    const pick = async (excluded) => {
+        if (!item) return;
+        ticketRef.current += 1;
+        setReply((prev) => (prev?.item ? {
+            ...prev,
+            item: { ...prev.item, candidates: (prev.item.candidates || []).map((candidate) => ({ ...candidate, send: !excluded.includes(candidate.id) })) },
+        } : prev));
+        setPicking(true);
+        try {
+            await axios.post(
+                `${apiBaseUrl}/api/payments/dictionaries/legal_entities/${item.legal_entity_id}/mailings/${item.id}/recipients`,
+                { excluded }, { headers: headers() });
+            onChanged?.();
+        } catch (err) {
+            toastRef.current?.(errorText(err, 'Не удалось изменить, кому уходит письмо'), 'error');
+        } finally {
+            setPicking(false);
+            load({ quiet: true });
+        }
+    };
+
     const ready = reply?.mail?.ready !== false;
     const failed = (item?.recipients || []).filter((recipient) => recipient.status === 'failed' && !recipient.next_attempt_at);
     const pending = item?.status === 'pending';
     const canRetry = item?.status === 'done' && item?.latest && failed.length > 0;
-    const count = (item?.recipients || []).filter((recipient) => recipient.status !== 'superseded').length;
+    const count = pending && item?.candidates
+        ? recipientsChosen(item.candidates).chosen
+        : (item?.recipients || []).filter((recipient) => recipient.status !== 'superseded').length;
     return (
         <IosModal
             open={Boolean(mailingId)}
@@ -262,7 +355,16 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
                 {item && tab === 'letter' && (
                     <LetterView item={item} sender={reply?.sender} recipients={reply?.mail?.recipients} onHeight={setFrameHeight} />
                 )}
-                {item && tab === 'recipients' && <RecipientList item={item} recipients={reply?.mail?.recipients} />}
+                {item && tab === 'recipients' && (pending && item.candidates
+                    ? <RecipientPicker candidates={item.candidates} busy={picking} onChange={pick} />
+                    : (
+                        <>
+                            <RecipientList item={item} recipients={reply?.mail?.recipients} />
+                            {excludedLine(item.excluded_names) && (
+                                <div className="px-1 text-[12.5px] leading-snug text-slate-500" data-excluded-names>{excludedLine(item.excluded_names)}</div>
+                            )}
+                        </>
+                    ))}
             </div>
         </IosModal>
     );
@@ -291,7 +393,7 @@ export const LetterRow = ({ item, onOpen }) => {
                 </span>
                 <span className="block truncate text-[12px] text-slate-500">
                     {/* Красным — только то, что не ушло; автор правки — серым. */}
-                    <span className={failed ? 'text-rose-700' : undefined}>{mailingSummary(item)}</span>
+                    <span className={failed ? 'text-rose-700' : undefined}>{mailingSummary(item, { ready: item.mail_ready !== false })}</span>
                     {(item.updated_by_name || item.created_by_name) && ` · ${item.updated_by_name || item.created_by_name}`}
                 </span>
             </span>
@@ -351,8 +453,9 @@ const SupplierLetters = ({ apiBaseUrl, headers, showToast }) => {
 
     return (
         <div className="space-y-2" data-supplier-letters>
-            {reply?.mail && reply.mail.ready === false && (
-                <NoticeBox tone="amber" text="Почта для писем пока не подключена — письма ждут и уйдут, когда её подключат." />
+            {/* Почта — у каждой компании своя: над журналом — чьи письма её ждут. */}
+            {waitingMailboxLine(reply?.waiting_mailbox) && (
+                <NoticeBox tone="amber" text={waitingMailboxLine(reply.waiting_mailbox)} />
             )}
             {!reply && loading && (
                 <div className="space-y-1.5" aria-hidden="true">

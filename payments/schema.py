@@ -926,6 +926,55 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mail_recipients_open "
     "ON payment_requisites_mail_recipients (mailing_id) WHERE status IN ('queued', 'sending', 'failed')",
 
+    # Решения владельца 21.10.2026 (ответы на вопросы с вариантами):
+    #   * «Почта поставщиков» — отдельный справочник: адрес, поставщик, контактное лицо.
+    #     Строки — здесь; payment_counterparties.emails остаётся их копией в том же
+    #     порядке (directory.sync_counterparty_emails пишет её в той же транзакции):
+    #     по ней собираются адресаты писем, и прежняя версия кода, если к ней вернутся,
+    #     увидит те же адреса;
+    #   * кому уходит письмо, выбирают галочками в окне письма, пока оно ждёт: снятые
+    #     поставщики — в excluded_counterparty_ids;
+    #   * у каждой нашей компании своя почта для писем (payments/mailbox.py), пароль —
+    #     зашифрованным.
+    """
+    CREATE TABLE IF NOT EXISTS payment_counterparty_emails (
+        id               SERIAL PRIMARY KEY,
+        counterparty_id  INTEGER NOT NULL REFERENCES payment_counterparties(id) ON DELETE CASCADE,
+        email            VARCHAR(254) NOT NULL,
+        contact_name     VARCHAR(200),
+        note             TEXT,
+        position         SMALLINT NOT NULL DEFAULT 0,
+        created_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        created_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        UNIQUE (counterparty_id, email)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payment_counterparty_emails_email ON payment_counterparty_emails (email)",
+    # Справочник показывает у адреса, чем кончилось последнее письмо на него.
+    "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mail_recipients_email "
+    "ON payment_requisites_mail_recipients (email, id DESC)",
+    "ALTER TABLE payment_requisites_mailings ADD COLUMN IF NOT EXISTS excluded_counterparty_ids INTEGER[] "
+    "NOT NULL DEFAULT '{}'",
+    """
+    CREATE TABLE IF NOT EXISTS payment_entity_mailboxes (
+        legal_entity_id  INTEGER PRIMARY KEY REFERENCES payment_legal_entities(id) ON DELETE CASCADE,
+        address          VARCHAR(254) NOT NULL,
+        provider         VARCHAR(32),
+        host             VARCHAR(253) NOT NULL,
+        port             INTEGER NOT NULL,
+        security         VARCHAR(16) NOT NULL CHECK (security IN ('ssl', 'starttls', 'none')),
+        login            VARCHAR(254) NOT NULL,
+        password_enc     TEXT NOT NULL,
+        checked_at       TIMESTAMP,
+        problem          TEXT,
+        problem_at       TIMESTAMP,
+        updated_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by_name  VARCHAR(200)
+    )
+    """,
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
@@ -986,6 +1035,7 @@ TABLES = (
     'payment_notifications', 'payment_request_observers',
     # Почта поставщиков: письма о смене реквизитов
     'payment_requisites_mailings', 'payment_requisites_mail_recipients',
+    'payment_counterparty_emails', 'payment_entity_mailboxes',
 )
 
 
@@ -1015,6 +1065,18 @@ def init_payments_schema(cursor):
         cursor.execute("ROLLBACK TO SAVEPOINT payments_contact_emails")
         import logging
         logging.exception('Оплата счетов: почта из «Контакта» не перенесена')
+    # Адреса из поля «Почта» — строками справочника «Почта поставщиков». На каждом
+    # старте: адрес, записанный прежней версией кода (пока шла выкладка), тоже
+    # станет строкой. Удалённый из справочника адрес уходит и из поля — не вернётся.
+    cursor.execute("SAVEPOINT payments_counterparty_emails")
+    try:
+        from . import directory
+        directory.adopt_email_array(cursor)
+        cursor.execute("RELEASE SAVEPOINT payments_counterparty_emails")
+    except Exception:  # noqa: BLE001
+        cursor.execute("ROLLBACK TO SAVEPOINT payments_counterparty_emails")
+        import logging
+        logging.exception('Оплата счетов: адреса поставщиков не перенесены в «Почту поставщиков»')
     # Заявки первой версии (12 шагов) переводятся на этапы и подзадачи. Под
     # своим SAVEPOINT: сбой переноса не должен оставить раздел без схемы —
     # непереведённую заявку перенос подберёт при следующем старте.

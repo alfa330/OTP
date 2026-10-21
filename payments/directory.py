@@ -174,12 +174,14 @@ def upsert_legal_entity(cursor, *, entity_id=None, fields, actor_id=None):
 
 # ─── Поставщики (п. 13.1) ────────────────────────────────────────────────────
 
-# `emails` — адреса для писем о смене наших реквизитов (requisites_mail.py).
+# `emails` — адреса для писем о смене наших реквизитов (requisites_mail.py): копия
+# строк справочника «Почта поставщиков» в их порядке. Пишет её только
+# sync_counterparty_emails — сама карточка поле не трогает.
 _COUNTERPARTY_FIELDS = ('id', 'name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
                         'emails', 'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
                         'note', 'is_active')
 _COUNTERPARTY_WRITE = ('name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
-                       'emails', 'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
+                       'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
                        'note', 'is_active')
 _COUNTERPARTY_SQL = """
     SELECT %s, cat.name, resp.name, appr.name,
@@ -225,8 +227,8 @@ def read_counterparty(cursor, counterparty_id):
 
 
 def upsert_counterparty(cursor, *, counterparty_id=None, fields, actor_id=None):
-    # Поставщик, заведённый одним названием из заявки, почты не знает: пустой список, не NULL.
-    values = [fields.get(col) if col != 'emails' else list(fields.get('emails') or []) for col in _COUNTERPARTY_WRITE]
+    # Почту не пишет: адреса — строки «Почты поставщиков» (replace_counterparty_emails).
+    values = [fields.get(col) for col in _COUNTERPARTY_WRITE]
     if counterparty_id:
         cursor.execute(
             "UPDATE payment_counterparties SET %s WHERE id = %%s RETURNING id"
@@ -254,6 +256,146 @@ def find_or_create_counterparty(cursor, name, actor_id=None):
     created = upsert_counterparty(cursor, fields={'name': name, 'vat_payer': False, 'is_active': True},
                                   actor_id=actor_id)
     return created, True
+
+
+# ─── Почта поставщиков (решение владельца 21.10.2026) ────────────────────────
+#
+# Отдельный справочник адресов: адрес, поставщик, контактное лицо, примечание и
+# чем кончилось последнее письмо на адрес. Поле «Почта» в карточке поставщика
+# показывает и правит те же адреса (replace_counterparty_emails).
+
+_EMAIL_FIELDS = ('id', 'counterparty_id', 'email', 'contact_name', 'note', 'position', 'created_at', 'updated_at')
+_EMAIL_SQL = """
+    SELECT %s, cp.name, cp.is_active,
+           last.status, last.sent_at, last.last_error, last.next_attempt_at, last.updated_at
+      FROM payment_counterparty_emails e
+      JOIN payment_counterparties cp ON cp.id = e.counterparty_id
+      LEFT JOIN LATERAL (
+            SELECT r.status, r.sent_at, r.last_error, r.next_attempt_at, r.updated_at
+              FROM payment_requisites_mail_recipients r
+             WHERE r.email = e.email AND r.status NOT IN ('superseded', 'removed')
+             ORDER BY r.id DESC LIMIT 1) last ON TRUE
+""" % columns('e', _EMAIL_FIELDS)
+
+
+def _email_row(row):
+    item = row_map(_EMAIL_FIELDS, row[:len(_EMAIL_FIELDS)])
+    extra = row[len(_EMAIL_FIELDS):]
+    item['counterparty_name'], item['counterparty_active'] = extra[0], bool(extra[1])
+    # Последнее письмо на этот адрес — о смене реквизитов любой нашей компании.
+    item['last_letter'] = ({'status': extra[2], 'sent_at': extra[3], 'last_error': extra[4],
+                            'next_attempt_at': extra[5], 'updated_at': extra[6]} if extra[2] else None)
+    return item
+
+
+def list_counterparty_emails(cursor, counterparty_id=None, query=None):
+    clauses, params = [], []
+    if counterparty_id:
+        clauses.append('e.counterparty_id = %s')
+        params.append(int(counterparty_id))
+    if query:
+        clauses.append("(e.email ILIKE %s OR cp.name ILIKE %s OR COALESCE(e.contact_name, '') ILIKE %s)")
+        like = like_pattern(query)
+        params += [like, like, like]
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    cursor.execute(_EMAIL_SQL + where + ' ORDER BY lower(cp.name), e.position, e.id', params)
+    return [_email_row(row) for row in cursor.fetchall()]
+
+
+def read_counterparty_email(cursor, email_id):
+    if not email_id:
+        return None
+    cursor.execute(_EMAIL_SQL + ' WHERE e.id = %s', (int(email_id),))
+    row = cursor.fetchone()
+    return _email_row(row) if row else None
+
+
+def find_counterparty_email(cursor, counterparty_id, email, exclude_id=None):
+    """id строки с тем же адресом у того же поставщика либо None."""
+    cursor.execute("SELECT id FROM payment_counterparty_emails WHERE counterparty_id = %s AND email = %s AND id <> %s",
+                   (int(counterparty_id), email, int(exclude_id or 0)))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def count_counterparty_emails(cursor, counterparty_id, exclude_id=None):
+    cursor.execute("SELECT COUNT(*) FROM payment_counterparty_emails WHERE counterparty_id = %s AND id <> %s",
+                   (int(counterparty_id), int(exclude_id or 0)))
+    return int(cursor.fetchone()[0] or 0)
+
+
+def sync_counterparty_emails(cursor, counterparty_id):
+    """Копия адресов поставщика (payment_counterparties.emails) — по строкам справочника."""
+    cursor.execute(
+        "UPDATE payment_counterparties SET emails = ARRAY(SELECT email FROM payment_counterparty_emails "
+        " WHERE counterparty_id = %s ORDER BY position, id) WHERE id = %s",
+        (int(counterparty_id), int(counterparty_id)))
+
+
+def upsert_counterparty_email(cursor, *, email_id=None, fields, actor_id=None):
+    """Строка справочника. Адрес перенесли к другому поставщику — встаёт у него
+    последним, копия адресов обновляется у обоих."""
+    counterparty_id = int(fields['counterparty_id'])
+    values = (counterparty_id, fields['email'], fields.get('contact_name'), fields.get('note'))
+    previous = None
+    if email_id:
+        cursor.execute("SELECT counterparty_id FROM payment_counterparty_emails WHERE id = %s FOR UPDATE",
+                       (int(email_id),))
+        found = cursor.fetchone()
+        if not found:
+            return None
+        previous = found[0]
+        cursor.execute(
+            "UPDATE payment_counterparty_emails SET counterparty_id = %%s, email = %%s, contact_name = %%s, "
+            "       note = %%s, updated_at = %s, "
+            "       position = CASE WHEN counterparty_id = %%s THEN position ELSE (SELECT COALESCE(MAX(position) + 1, 0) "
+            "                  FROM payment_counterparty_emails WHERE counterparty_id = %%s) END "
+            " WHERE id = %%s RETURNING id" % NOW_SQL,
+            values + (counterparty_id, counterparty_id, int(email_id)))
+    else:
+        cursor.execute(
+            "INSERT INTO payment_counterparty_emails (counterparty_id, email, contact_name, note, position, created_by) "
+            "VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position) + 1, 0) FROM payment_counterparty_emails "
+            "        WHERE counterparty_id = %s), %s) RETURNING id",
+            values + (counterparty_id, actor_id))
+    row = cursor.fetchone()
+    sync_counterparty_emails(cursor, counterparty_id)
+    if previous and previous != counterparty_id:
+        sync_counterparty_emails(cursor, previous)
+    return row[0] if row else None
+
+
+def delete_counterparty_email(cursor, email_id):
+    cursor.execute("DELETE FROM payment_counterparty_emails WHERE id = %s RETURNING counterparty_id", (int(email_id),))
+    row = cursor.fetchone()
+    if row:
+        sync_counterparty_emails(cursor, row[0])
+    return 1 if row else 0
+
+
+def replace_counterparty_emails(cursor, counterparty_id, emails, actor_id=None):
+    """Поле «Почта» в карточке поставщика: адреса — этим списком и в этом порядке.
+    Контактное лицо и примечание остаются у адресов, которые остались."""
+    counterparty_id = int(counterparty_id)
+    emails = list(emails or [])
+    cursor.execute("DELETE FROM payment_counterparty_emails WHERE counterparty_id = %s AND NOT (email = ANY(%s::text[]))",
+                   (counterparty_id, emails))
+    for position, email in enumerate(emails):
+        cursor.execute(
+            "INSERT INTO payment_counterparty_emails (counterparty_id, email, position, created_by) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (counterparty_id, email) DO UPDATE SET position = EXCLUDED.position",
+            (counterparty_id, email, position, actor_id))
+    sync_counterparty_emails(cursor, counterparty_id)
+
+
+def adopt_email_array(cursor):
+    """Адреса из поля «Почта», у которых нет строки справочника, — строками (на каждом старте)."""
+    cursor.execute(
+        "INSERT INTO payment_counterparty_emails (counterparty_id, email, position) "
+        "SELECT cp.id, e.email, (e.ord - 1)::smallint FROM payment_counterparties cp, "
+        "       unnest(cp.emails) WITH ORDINALITY AS e(email, ord) "
+        "ON CONFLICT (counterparty_id, email) DO NOTHING")
+    return cursor.rowcount
 
 
 # ─── Банковские реквизиты поставщиков (п. 13) ────────────────────────────────
@@ -719,7 +861,7 @@ _DELETABLE = {
     'legal_entities': 'payment_legal_entities', 'counterparties': 'payment_counterparties',
     'counterparty_accounts': 'payment_counterparty_accounts', 'contracts': 'payment_contracts',
     'cards': 'payment_cards', 'limits': 'payment_approval_orders', 'routes': 'payment_approval_routes',
-    'asset_categories': 'payment_asset_categories',
+    'asset_categories': 'payment_asset_categories', 'counterparty_emails': 'payment_counterparty_emails',
 }
 DICTIONARIES = tuple(_DELETABLE)
 
@@ -817,6 +959,9 @@ def usage(cursor, dictionary, row_id):
 
 def delete_row(cursor, dictionary, row_id):
     """Удаление строки справочника. Таблица — только из белого списка."""
+    if dictionary == 'counterparty_emails':
+        # Адрес уходит и из копии в карточке поставщика — по ней собираются адресаты писем.
+        return delete_counterparty_email(cursor, row_id)
     cursor.execute("DELETE FROM %s WHERE id = %%s" % _DELETABLE[dictionary], (int(row_id),))
     return cursor.rowcount
 

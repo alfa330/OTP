@@ -12,7 +12,7 @@ from io import BytesIO
 
 from flask import request, send_file
 
-from . import access, cards, directory, files, fixed, mail, queries, requisites_mail, schema, workflow
+from . import access, cards, directory, files, fixed, mail, mailbox, queries, requisites_mail, schema, workflow
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   digits, jsonify, party_kind, payload as _payload)
 
@@ -31,6 +31,8 @@ _READERS = {
     'cards': lambda cursor, args: directory.list_cards(cursor, include_inactive=True),
     'limits': lambda cursor, args: directory.list_limits(cursor),
     'routes': lambda cursor, args: directory.list_routes(cursor),
+    'counterparty_emails': lambda cursor, args: directory.list_counterparty_emails(
+        cursor, counterparty_id=as_int(args.get('counterparty_id')), query=args.get('q')),
 }
 
 
@@ -56,11 +58,21 @@ def _emails(value):
         raise ApiError('Почта: %s' % exc, code='PAYMENTS_EMAIL_INVALID', extra={'field': 'emails'})
 
 
-def _mail_info(recipients):
-    """Почта для писем поставщикам: подключена ли, кому уйдёт и сколько ждать."""
-    return {'ready': mail.ready(), 'recipients': recipients,
-            'delay_minutes': requisites_mail.SEND_DELAY_MINUTES,
+def _mail_info(recipients, ready=None):
+    """Письма поставщикам: кому уйдёт и сколько ждать; `ready` — у компании работает
+    своя почта (у списка компаний — у каждой своя, в её строке)."""
+    info = {'recipients': recipients, 'delay_minutes': requisites_mail.SEND_DELAY_MINUTES,
             'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}
+    if ready is not None:
+        info['ready'] = bool(ready)
+    return info
+
+
+def _mailbox_error(exc):
+    extra = {'field': exc.field} if exc.field else {}
+    if exc.help_url:
+        extra['help_url'] = exc.help_url
+    return ApiError(str(exc), code=exc.code, status=400, extra=extra)
 
 
 def _user(cursor, value, field):
@@ -128,17 +140,18 @@ def register(api):
         with db._get_cursor() as cursor:
             rows = _READERS[name](cursor, request.args)
             can_edit = access.can_save_dictionary(ctx, name, row_id=1, roles=ctx['roles'])
-            # Письма поставщикам о смене реквизитов видит тот, кто реквизиты правит.
-            mailing = (requisites_mail.states(cursor), requisites_mail.recipients_overview(cursor)) \
-                if name == 'legal_entities' and can_edit else None
+            # Письма поставщикам о смене реквизитов и почту компании видит тот, кто реквизиты правит.
+            mailing = (requisites_mail.states(cursor), requisites_mail.recipients_overview(cursor),
+                       mailbox.views(cursor)) if name == 'legal_entities' and can_edit else None
         body = {'items': rows, 'can_edit': can_edit}
         if name == 'legal_entities':
             for entity in rows:
                 entity['requisites_text'] = directory.requisites_text(entity)
                 if mailing:
-                    (latest, counts), _recipients = mailing
+                    (latest, counts), _recipients, boxes = mailing
                     entity['mailing'] = latest.get(entity['id'])
                     entity['mailings_count'] = counts.get(entity['id'], 0)
+                    entity['mailbox'] = boxes.get(entity['id'])
             if mailing:
                 body['mail'] = _mail_info(mailing[1])
         return jsonify(body)
@@ -176,11 +189,8 @@ def register(api):
         category_id = as_int(data.get('category_id'), 'category_id')
         # Окно, открытое до появления поля «Почта» (старая вкладка браузера), почту не
         # присылает — и не должно стирать её записью карточки.
-        if 'emails' in data or not row_id:
-            emails = _emails(data.get('emails'))
-        else:
-            emails = (directory.read_counterparty(cursor, row_id) or {}).get('emails') or []
-        return directory.upsert_counterparty(cursor, counterparty_id=row_id, fields={
+        emails = _emails(data.get('emails')) if 'emails' in data or not row_id else None
+        saved = directory.upsert_counterparty(cursor, counterparty_id=row_id, fields={
             'name': as_text(data.get('name'), 'Наименование', required=True, limit=200),
             'legal_name': as_text(data.get('legal_name'), 'Юридическое наименование', limit=300),
             'bin': digits(data.get('bin')) or None,
@@ -188,7 +198,6 @@ def register(api):
             'vat_payer': as_bool(data.get('vat_payer')),
             'requisites': as_text(data.get('requisites'), 'Прочие реквизиты', limit=4000),
             'contact': as_text(data.get('contact'), 'Контакт', limit=1000),
-            'emails': emails,
             'category_id': category_id,
             'responsible_user_id': _user(cursor, data.get('responsible_user_id'), 'Ответственный'),
             # П. 13.1 и п. 6: согласующий поставщика и лимит, в пределах
@@ -197,6 +206,32 @@ def register(api):
             'approval_limit': as_money(data.get('approval_limit'), 'Лимит согласования'),
             'note': as_text(data.get('note'), 'Примечание', limit=2000),
             'is_active': as_bool(data.get('is_active', True)),
+        }, actor_id=ctx['user_id'])
+        if saved and emails is not None:
+            # Поле «Почта» — те же адреса, что в «Почте поставщиков»: список целиком.
+            directory.replace_counterparty_emails(cursor, saved, emails, actor_id=ctx['user_id'])
+        return saved
+
+    def _save_counterparty_email(cursor, data, row_id, ctx):
+        """Строка «Почты поставщиков»: поставщик, адрес, контактное лицо."""
+        counterparty_id = as_int(data.get('counterparty_id'), 'counterparty_id')
+        if not counterparty_id or not directory.read_counterparty(cursor, counterparty_id):
+            raise ApiError('Выберите поставщика, чей это адрес', extra={'field': 'counterparty_id'})
+        try:
+            email = mail.one_email(data.get('email'))
+        except mail.EmailError as exc:
+            raise ApiError('Адрес: %s' % exc, code='PAYMENTS_EMAIL_INVALID', extra={'field': 'email'})
+        if directory.find_counterparty_email(cursor, counterparty_id, email, exclude_id=row_id):
+            raise ApiError('Этот адрес у поставщика уже есть', code='PAYMENTS_DUPLICATE', status=409,
+                           extra={'field': 'email'})
+        if directory.count_counterparty_emails(cursor, counterparty_id, exclude_id=row_id) >= mail.MAX_EMAILS:
+            raise ApiError('У поставщика уже %s адресов — больше не нужно: письмо и так дойдёт' % mail.MAX_EMAILS,
+                           code='PAYMENTS_EMAIL_INVALID', extra={'field': 'email'})
+        return directory.upsert_counterparty_email(cursor, email_id=row_id, fields={
+            'counterparty_id': counterparty_id,
+            'email': email,
+            'contact_name': as_text(data.get('contact_name'), 'Контактное лицо', limit=200),
+            'note': as_text(data.get('note'), 'Примечание', limit=1000),
         }, actor_id=ctx['user_id'])
 
     def _save_account(cursor, data, row_id, ctx):
@@ -341,7 +376,7 @@ def register(api):
     _SAVERS = {
         'legal_entities': _save_legal_entity, 'counterparties': _save_counterparty,
         'counterparty_accounts': _save_account, 'contracts': _save_contract, 'cards': _save_card,
-        'limits': _save_limit, 'routes': _save_route,
+        'limits': _save_limit, 'routes': _save_route, 'counterparty_emails': _save_counterparty_email,
     }
 
     @route('/dictionaries/<name>', methods=('POST',))
@@ -456,15 +491,20 @@ def register(api):
         if not access.can_save_dictionary(ctx, 'legal_entities', 1, ctx['roles']):
             raise ApiError('Письма поставщикам ведёт администратор раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
 
+    def _sender(cursor, entity_id, name):
+        """От кого письмо компании: её название и адрес её почты (None — не подключена)."""
+        box = mailbox.view(mailbox.read(cursor, entity_id))
+        return box, {'name': ' '.join(str(name or '').split()), 'address': (box or {}).get('address')}
+
     def _mailing_reply(cursor, entity_id):
         items, total = requisites_mail.history(cursor, entity_id)
         entity = directory.read_legal_entity(cursor, entity_id)
-        name, address = mail.sender_of(mail.config(), (entity or {}).get('name'))
+        box, sender = _sender(cursor, entity_id, (entity or {}).get('name'))
         return {'items': items, 'total': total,
                 # С чем форма сверяет правку: реквизиты, которые знают поставщики.
                 'known': requisites_mail.known_now(cursor, entity_id, entity),
-                'sender': {'name': name, 'address': address},
-                'mail': _mail_info(requisites_mail.recipients_overview(cursor))}
+                'sender': sender, 'mailbox': box,
+                'mail': _mail_info(requisites_mail.recipients_overview(cursor), ready=mailbox.works(box))}
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings')
     def entity_mailings(ctx, entity_id):
@@ -494,6 +534,105 @@ def register(api):
     def entity_mailing_retry(ctx, entity_id, mailing_id):
         return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.retry)
 
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/recipients', methods=('POST',))
+    def entity_mailing_recipients(ctx, entity_id, mailing_id):
+        """Галочки «Кому» у ждущего письма: `excluded` — поставщики, которым его не отправлять."""
+        excluded = _payload().get('excluded')
+        if excluded is None:
+            excluded = []
+        if not isinstance(excluded, list):
+            raise ApiError('Кому не отправлять — списком поставщиков')
+        ids = [as_int(item, 'Поставщик') for item in excluded]
+        return _mailing_action(ctx, entity_id, mailing_id, lambda cursor, entity, mailing, actor: (
+            requisites_mail.set_recipients(cursor, entity, mailing, actor, [item for item in ids if item])))
+
+    # ── Почта для писем компании (решение владельца 21.10.2026) ─────────────
+
+    def _mailbox_reply(cursor, entity_id):
+        return {'status': 'success', 'mailbox': mailbox.view(mailbox.read(cursor, entity_id))}
+
+    def _entity_or_404(cursor, entity_id):
+        entity = directory.read_legal_entity(cursor, entity_id)
+        if not entity:
+            raise ApiError('Компания не найдена', status=404)
+        return entity
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox')
+    def entity_mailbox(ctx, entity_id):
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            _entity_or_404(cursor, entity_id)
+            return jsonify(_mailbox_reply(cursor, entity_id))
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox/detect', methods=('POST',))
+    def entity_mailbox_detect(ctx, entity_id):
+        """Какая это почта и где взять пароль приложения — пока человек вводит адрес."""
+        _mailing_guard(ctx)
+        try:
+            return jsonify(mailbox.detect(_payload().get('address')))
+        except mailbox.MailboxError as exc:
+            raise _mailbox_error(exc)
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox', methods=('POST',))
+    def entity_mailbox_connect(ctx, entity_id):
+        """«Подключить»: пробное письмо на этот же адрес — и только потом записать.
+        С почтовым сервером говорим вне транзакции: вход и письмо — до 30 секунд."""
+        _mailing_guard(ctx)
+        data = _payload()
+        with db._get_cursor() as cursor:
+            entity = _entity_or_404(cursor, entity_id)
+            current = mailbox.read(cursor, entity_id)
+        try:
+            settings = mailbox.prepare(data, current=current, allow_local=mailbox.local_allowed())
+            mailbox.verify(settings, entity.get('name'))
+        except mailbox.MailboxError as exc:
+            raise _mailbox_error(exc)
+        with db._get_cursor() as cursor:
+            _entity_or_404(cursor, entity_id)
+            try:
+                mailbox.save(cursor, entity_id, settings, _actor(ctx))
+            except mailbox.MailboxError as exc:     # нечем зашифровать пароль
+                raise _mailbox_error(exc)
+            return jsonify(_mailbox_reply(cursor, entity_id))
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox/check', methods=('POST',))
+    def entity_mailbox_check(ctx, entity_id):
+        """«Проверить»: пробное письмо с сохранённой почты. Не вышло из-за пароля или
+        отправителя — беда записывается, планировщик в ящик не стучится."""
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            entity = _entity_or_404(cursor, entity_id)
+            row = mailbox.read(cursor, entity_id)
+        if not row:
+            raise ApiError('Почта для писем у компании не подключена', code='PAYMENTS_MAILBOX_MISSING', status=404)
+        settings = mailbox.settings_of(row)
+        failure = None
+        if settings is None:
+            failure = mailbox.MailboxError(mailbox.UNREADABLE, field='password', code='PAYMENTS_MAILBOX_PASSWORD')
+        else:
+            try:
+                mailbox.verify(settings, entity.get('name'))
+            except mailbox.MailboxError as exc:
+                failure = exc
+        with db._get_cursor() as cursor:
+            if failure is None:
+                mailbox.note_ok(cursor, entity_id)
+            elif failure.code in ('PAYMENTS_MAILBOX_LOGIN', 'PAYMENTS_MAILBOX_SENDER', 'PAYMENTS_MAILBOX_PASSWORD'):
+                mailbox.note_problem(cursor, entity_id, str(failure))
+        if failure is not None:
+            raise _mailbox_error(failure)
+        with db._get_cursor() as cursor:
+            return jsonify(_mailbox_reply(cursor, entity_id))
+
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox', methods=('DELETE',))
+    def entity_mailbox_remove(ctx, entity_id):
+        """«Отключить»: письма компании будут ждать новую почту."""
+        _mailing_guard(ctx)
+        with db._get_cursor() as cursor:
+            _entity_or_404(cursor, entity_id)
+            mailbox.remove(cursor, entity_id)
+        return jsonify({'status': 'success', 'mailbox': None})
+
     # ── «Письма поставщикам»: все письма раздела и одно письмо целиком ──────
 
     @route('/mailings')
@@ -504,7 +643,10 @@ def register(api):
         with db._get_cursor() as cursor:
             items, total = requisites_mail.journal(cursor, limit=limit, offset=offset)
             info = _mail_info(requisites_mail.recipients_overview(cursor))
-        return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset, 'mail': info})
+            waiting = requisites_mail.waiting_for_mailbox(cursor)
+        return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset, 'mail': info,
+                        # Чьи письма ждут почту компании — у них её нет или она не пускает.
+                        'waiting_mailbox': waiting})
 
     @route('/mailings/<int:mailing_id>')
     def mailing_detail(ctx, mailing_id):
@@ -514,9 +656,10 @@ def register(api):
                 item = requisites_mail.detail(cursor, mailing_id)
             except requisites_mail.MailingError as exc:
                 raise ApiError(str(exc), code=exc.code, status=exc.status)
-        name, address = mail.sender_of(mail.config(), item.get('legal_entity_name'))
-        return jsonify({'item': item, 'sender': {'name': name, 'address': address},
-                        'mail': {'ready': mail.ready(), 'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}})
+            box, sender = _sender(cursor, item['legal_entity_id'], item.get('legal_entity_name'))
+        return jsonify({'item': item, 'sender': sender, 'mailbox': box,
+                        'mail': {'ready': mailbox.works(box),
+                                 'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}})
 
     @route('/dictionaries/cards/<int:card_id>/number')
     def card_number(ctx, card_id):

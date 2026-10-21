@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Loader2, Mail } from 'lucide-react';
 import { iosBtnSecondary, iosCard } from '../ui/ios';
-import { HINTS, changedLine, mailNotice, mailingSummary, minutesWord, plural, requisitesChanged } from './paymentsMeta';
+import {
+    HINTS, changedLine, excludedLine, mailNotice, mailingSummary, minutesWord, plural, recipientsChosen, recipientsLine,
+    requisitesChanged,
+} from './paymentsMeta';
 import { Bone, FieldHint, Fold, NoticeBox, errorText } from './paymentsUi';
-import { LetterView } from './SupplierLetters';
+import { LetterView, RecipientPicker } from './SupplierLetters';
 
 /*
  * Письма поставщикам о смене реквизитов компании — в окне записи «Реквизиты
@@ -16,7 +19,8 @@ import { LetterView } from './SupplierLetters';
  *     адресов его получат и у кого почты нет; вернул реквизиты к тем, что знают
  *     поставщики, — строка говорит, что письма не будет. Правка не реквизитов
  *     (примечание, «скрыта») строки не вызывает;
- *   — письмо ждёт своих десяти минут: когда уйдёт и «Не отправлять»;
+ *   — письмо ждёт своих десяти минут: когда уйдёт, «Не отправлять» и «Кому» —
+ *     галочки по поставщикам с почтой (решение владельца 21.10.2026);
  *   — письма, которые уже ушли: чем кончилось, кому не ушло и почему,
  *     «Отправить ещё раз» (только у последнего письма — у старого поставщик
  *     получил бы старые реквизиты поверх новых) и сам текст письма.
@@ -57,9 +61,10 @@ const MailingSkeleton = () => (
     </div>
 );
 
-export const MailingCard = ({ item, ready, busy, pauseMinutes = 10, sender, recipients, onCancel, onRetry }) => {
+export const MailingCard = ({ item, ready, busy, picking = false, pauseMinutes = 10, sender, recipients, onCancel, onRetry, onPick }) => {
     const [confirm, setConfirm] = useState(false);
     const [showLetter, setShowLetter] = useState(false);
+    const [showRecipients, setShowRecipients] = useState(false);
     const [frameHeight, setFrameHeight] = useState(0);
     const problems = (item.recipients || []).filter((recipient) => (
         (recipient.status === 'failed' && !recipient.next_attempt_at) || recipient.status === 'removed'));
@@ -107,7 +112,21 @@ export const MailingCard = ({ item, ready, busy, pauseMinutes = 10, sender, reci
                         ))}
                     </ul>
                 )}
+                {excludedLine(item.excluded_names) && (
+                    <div className="break-words text-[12.5px] leading-snug text-slate-500" data-excluded-names>{excludedLine(item.excluded_names)}</div>
+                )}
             </div>
+            {pending && item.candidates && (
+                <div className="border-t border-slate-100" data-mailing-recipients>
+                    {/* Кому уйдёт письмо — галочки, пока оно ждёт. */}
+                    <Fold id={`recipients-${item.id}`} title="Кому" summary={recipientsLine(item.candidates)} open={showRecipients}
+                        onToggle={() => setShowRecipients((value) => !value)} sizeKey={item.candidates.length}>
+                        <div className="bg-slate-50/60 p-2">
+                            <RecipientPicker candidates={item.candidates} busy={picking} onChange={(excluded) => onPick?.(item, excluded)} />
+                        </div>
+                    </Fold>
+                </div>
+            )}
             {(item.letter?.html || item.letter?.text) && (
                 <div className="border-t border-slate-100">
                     {/* Письмо — то же, что видит поставщик (как в «Письмах поставщикам»), раскрывается по высоте. */}
@@ -125,9 +144,10 @@ export const MailingCard = ({ item, ready, busy, pauseMinutes = 10, sender, reci
     );
 };
 
-const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onChanged }) => {
+const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onChanged, mailboxKey }) => {
     const [data, setData] = useState(null);
     const [busy, setBusy] = useState(false);
+    const [picking, setPicking] = useState(false);
     const [older, setOlder] = useState(false);
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
@@ -148,10 +168,11 @@ const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onC
         }
     }, [base, entityId, headers]);
 
+    // mailboxKey — почту компании подключили или отключили: «письмо ждёт почту» перечитывается.
     useEffect(() => {
         reload();
         return () => { ticketRef.current += 1; };
-    }, [reload]);
+    }, [reload, mailboxKey]);
 
     const items = data?.items || [];
     const live = items.some((item) => item.status === 'pending' || item.status === 'sending');
@@ -182,6 +203,27 @@ const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onC
         }
     }, [base, headers, onChanged, reload]);
 
+    /* Галочки «Кому»: видно сразу, ответ сервера — следом (он же и есть правда). */
+    const pick = useCallback(async (item, excluded) => {
+        ticketRef.current += 1;
+        setData((prev) => (prev ? {
+            ...prev,
+            items: (prev.items || []).map((entry) => (entry.id === item.id ? {
+                ...entry, candidates: (entry.candidates || []).map((candidate) => ({ ...candidate, send: !excluded.includes(candidate.id) })),
+            } : entry)),
+        } : prev));
+        setPicking(true);
+        try {
+            const response = await axios.post(`${base}/${item.id}/recipients`, { excluded }, { headers: headers() });
+            setData(response.data || null);
+        } catch (err) {
+            toastRef.current?.(errorText(err, 'Не удалось изменить, кому уходит письмо'), 'error');
+            reload({ quiet: true });
+        } finally {
+            setPicking(false);
+        }
+    }, [base, headers, reload]);
+
     if (!entityId) return null;
     if (!data) {
         // Письма есть — заготовка в их рост, чтобы ответ сервера не раздвигал окно.
@@ -201,6 +243,11 @@ const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onC
     if (!changed.length && !items.length) return null;
 
     const reverting = changed.length > 0 && data.known && !requisitesChanged(data.known, draft).length;
+    // Письмо уже ждёт — получат те, кто отмечен в его «Кому», а не все поставщики с почтой.
+    const chosen = waiting?.candidates
+        ? { ...mail.recipients, addresses: recipientsChosen(waiting.candidates).addresses,
+            excluded: waiting.candidates.filter((candidate) => !candidate.send).length }
+        : mail.recipients;
     const recent = items.slice(0, SHOWN);
     const earlier = items.slice(SHOWN);
     const card = (item) => (
@@ -209,9 +256,11 @@ const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onC
             item={item}
             ready={ready}
             busy={busy}
+            picking={picking}
             pauseMinutes={mail.pause_minutes || 10}
             sender={data.sender}
             recipients={mail.recipients}
+            onPick={pick}
             onCancel={(target, after) => act(target, 'cancel', () => 'Письмо не уйдёт', after)}
             onRetry={(target) => act(target, 'retry', (reply) => (reply.queued
                 ? `Письмо уйдёт ещё раз: ${plural(reply.queued, ['адрес', 'адреса', 'адресов'])}`
@@ -224,7 +273,7 @@ const RequisitesMailings = ({ apiBaseUrl, headers, entity, draft, showToast, onC
             {changed.length > 0 && (
                 <NoticeBox tone="blue" text="">
                     <span data-mailing-notice={reverting ? 'reverting' : 'letter'}>
-                        {mailNotice({ recipients: mail.recipients, delayMinutes: mail.delay_minutes || 10, ready, waiting: Boolean(waiting), reverting })}
+                        {mailNotice({ recipients: chosen, delayMinutes: mail.delay_minutes || 10, ready, waiting: Boolean(waiting), reverting })}
                     </span>
                 </NoticeBox>
             )}

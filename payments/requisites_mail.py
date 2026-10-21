@@ -10,8 +10,15 @@
   * письмо уходит через SEND_DELAY_MINUTES после сохранения. Правка в эти минуты
     не рождает второе письмо — попадает в то же (уходят последние реквизиты), и
     отсчёт начинается заново; «Не отправлять» отменяет письмо; реквизиты вернули
-    к тем, что знают поставщики, — письма нет вовсе;
-  * отправляет корпоративный ящик по SMTP (mail.py).
+    к тем, что знают поставщики, — письма нет вовсе.
+Решения 21.10.2026 (тоже ответы на вопросы с вариантами):
+  * кому уходит письмо, выбирают галочками в его окне, пока оно ждёт: по умолчанию
+    отмечены все поставщики с почтой, снятые — в excluded_counterparty_ids. Хранится
+    «кого не отправлять», а не «кому»: поставщик, которому почту дописали, пока
+    письмо ждало, получит его, как и раньше;
+  * адреса ведутся отдельным справочником «Почта поставщиков» (directory.py);
+  * письмо уходит с почты самой компании (mailbox.py); компании без своей почты
+    письма ждут.
 
 Как устроено.
   * Рассылка — строка payment_requisites_mailings: «как было» и «как стало» —
@@ -24,27 +31,31 @@
     письма — поставщик увидит всё, чего не знал. Ожидающее письмо у компании одно —
     уникальный частичный индекс.
   * Получатель — адрес, а не поставщик: письмо одинаковое для всех, и адрес,
-    записанный у двух поставщиков, получает его один раз. Адреса собираются, когда
-    письмо забирают в отправку, — уже после входа в ящик: почта, добавленная
-    поставщику за десять минут или за дни, пока ящик не пускал, письмо получит.
+    записанный у двух поставщиков, получает его один раз (и тогда, когда одного из
+    двух сняли галочкой: второму письмо нужно). Адреса собираются, когда письмо
+    забирают в отправку, — уже после входа в ящик: почта, добавленная поставщику за
+    десять минут или за дни, пока ящик не пускал, письмо получит.
   * Новое письмо компании гасит недошедшие адреса её прежних писем (superseded):
     иначе повтор старого письма мог прийти поставщику ПОСЛЕ нового, и последними у
     него оказались бы старые реквизиты. По той же причине «Отправить ещё раз» есть
     только у последнего письма компании.
   * Отправку ведёт планировщик раз в минуту (bot_schedule2:
-    payments_requisites_mail_job) в общем пуле потоков бота (4 потока). Худший
-    случай удержания потока — вход (до двух тайм-аутов mail.TIMEOUT_SECONDS) плюс
-    RUN_BUDGET_SECONDS: перед каждым письмом тайм-аут сокета урезается до остатка
-    бюджета. Не больше RUN_MAX_LETTERS писем за прогон — ящик не ловит всплеск.
+    payments_requisites_mail_job) в общем пуле потоков бота (4 потока): компания за
+    компанией, у каждой — свой ящик. Худший случай удержания потока — RUN_BUDGET_SECONDS
+    плюс вход в ящик (до двух тайм-аутов mail.TIMEOUT_SECONDS): к следующей компании
+    прогон переходит, только пока бюджет не кончился, а перед каждым письмом тайм-аут
+    сокета урезается до остатка бюджета. Не больше RUN_MAX_LETTERS писем за прогон —
+    ящик не ловит всплеск.
     «sending» пишется и фиксируется ДО обращения к серверу: упади процесс посреди
     отправки, сторож через STUCK_MINUTES признает попытку неудачной и повторит.
   * Повторы: временный отказ (сеть, 4xx) — ещё две попытки, через 5 и 30 минут;
     сервер не принял адрес (5xx) — сразу «не ушло». Ящик упёрся в лимит или
-    фильтр — прогон встаёт на паузу TRANSPORT_PAUSE_SECONDS, текущему адресу
-    засчитывается попытка. Не войти в ящик — виновата настройка: попытки не
-    тратятся, прогоны ждут ту же паузу, текст ошибки виден в карточке компании.
-    Три отказа в адресе подряд в одном прогоне — тоже похоже на ящик: эти три
-    уходят на повтор, прогон встаёт на паузу.
+    фильтр — этот ящик встаёт на паузу TRANSPORT_PAUSE_SECONDS (письма других
+    компаний идут), текущему адресу засчитывается попытка. Не войти в ящик —
+    виновата настройка: попытки не тратятся, текст ошибки виден в окне компании;
+    отказ в пароле или в отправителе ящик помечает (mailbox.note_problem) — до
+    нового пароля в него не стучимся. Три отказа в адресе подряд в одном прогоне —
+    тоже похоже на ящик: эти три уходят на повтор, ящик встаёт на паузу.
 """
 
 import html as _html
@@ -53,7 +64,7 @@ import time
 
 from psycopg2.extras import Json
 
-from . import directory, mail
+from . import directory, mail, mailbox
 from .sqlutil import NOW_SQL, row_map
 
 # Поля реквизитов — в том же порядке, что в «Скопировать реквизиты»
@@ -83,8 +94,8 @@ STUCK_ERROR = 'Отправка прервалась — неизвестно, �
 STREAK_ERROR = 'Почтовый сервер отклонил несколько адресов подряд — похоже, ящик упёрся в лимит или фильтр'
 CONTACT_EMAILS_MARK = 'contact_emails_adopted'
 
-# До какого момента не стучаться в почту после отказа ящика (на процесс).
-_PAUSE = {'until': 0.0}
+# Ящик (mailbox.pause_key) → до какого момента в него не стучаться после отказа (на процесс).
+_PAUSE = {}
 
 
 # ─── Снимок реквизитов и что изменилось ──────────────────────────────────────
@@ -262,25 +273,49 @@ def after_entity_saved(cursor, entity_id, before_row, after_row, actor):
 
 def summary(cursor, mailing_id):
     """Коротко о письме — для тоста после сохранения."""
-    cursor.execute("SELECT id, status, send_after FROM payment_requisites_mailings WHERE id = %s", (int(mailing_id),))
+    cursor.execute("SELECT id, status, send_after, legal_entity_id, excluded_counterparty_ids "
+                   "FROM payment_requisites_mailings WHERE id = %s", (int(mailing_id),))
     row = cursor.fetchone()
     if not row:
         return None
-    return {'id': row[0], 'status': row[1], 'send_after': row[2], 'recipients': recipients_overview(cursor),
-            'ready': mail.ready()}
+    return {'id': row[0], 'status': row[1], 'send_after': row[2], 'recipients': recipients_overview(cursor, row[4]),
+            'ready': mailbox.ready(cursor, row[3])}
 
 
-def recipients_overview(cursor):
-    """Сколько адресов получат письмо, если отправить сейчас, и у кого почты нет."""
+def recipients_overview(cursor, excluded=()):
+    """Сколько адресов получат письмо, если отправить сейчас, у кого почты нет и скольких
+    поставщиков с почтой сняли галочкой (`excluded`)."""
+    excluded = [int(item) for item in excluded or ()]
     cursor.execute(
-        "SELECT (SELECT COUNT(DISTINCT e.email) FROM payment_counterparties cp, unnest(cp.emails) AS e(email)), "
-        "       (SELECT COUNT(*) FROM payment_counterparties WHERE cardinality(emails) > 0), "
+        "SELECT (SELECT COUNT(DISTINCT e.email) FROM payment_counterparties cp, unnest(cp.emails) AS e(email) "
+        "         WHERE NOT (cp.id = ANY(%s::int[]))), "
+        "       (SELECT COUNT(*) FROM payment_counterparties WHERE cardinality(emails) > 0 "
+        "           AND NOT (id = ANY(%s::int[]))), "
         "       (SELECT COUNT(*) FROM payment_counterparties WHERE cardinality(emails) = 0), "
         "       ARRAY(SELECT name FROM payment_counterparties WHERE cardinality(emails) = 0 "
-        "             ORDER BY lower(name) LIMIT %s)", (WITHOUT_EMAIL_NAMES,))
-    addresses, suppliers, without, names = cursor.fetchone()
+        "             ORDER BY lower(name) LIMIT %s), "
+        "       (SELECT COUNT(*) FROM payment_counterparties WHERE cardinality(emails) > 0 AND id = ANY(%s::int[]))",
+        (excluded, excluded, WITHOUT_EMAIL_NAMES, excluded))
+    addresses, suppliers, without, names, skipped = cursor.fetchone()
     return {'addresses': int(addresses or 0), 'suppliers': int(suppliers or 0),
-            'without_email': int(without or 0), 'without_names': list(names or [])}
+            'without_email': int(without or 0), 'without_names': list(names or []), 'excluded': int(skipped or 0)}
+
+
+def candidates(cursor, excluded=()):
+    """Галочки «Кому» у ждущего письма: все поставщики с почтой, отмечены — кроме снятых."""
+    skipped = {int(item) for item in excluded or ()}
+    cursor.execute("SELECT id, name, is_active, emails FROM payment_counterparties WHERE cardinality(emails) > 0 "
+                   "ORDER BY lower(name), id")
+    return [{'id': row[0], 'name': row[1], 'is_active': bool(row[2]), 'emails': list(row[3] or []),
+             'send': row[0] not in skipped} for row in cursor.fetchall()]
+
+
+def _names(cursor, counterparty_ids):
+    ids = [int(item) for item in counterparty_ids or ()]
+    if not ids:
+        return []
+    cursor.execute("SELECT name FROM payment_counterparties WHERE id = ANY(%s::int[]) ORDER BY lower(name)", (ids,))
+    return [row[0] for row in cursor.fetchall()]
 
 
 # ─── Почта из поля «Контакт» ─────────────────────────────────────────────────
@@ -342,12 +377,30 @@ def cancel(cursor, entity_id, mailing_id, actor):
         ((actor or {}).get('id'), (actor or {}).get('name'), int(mailing_id)))
 
 
-def _current_addresses(cursor):
-    """Адрес → (номера поставщиков, названия) по всем поставщикам с почтой."""
+def _current_addresses(cursor, excluded=()):
+    """Адрес → (номера поставщиков, названия) по поставщикам с почтой, кроме снятых галочкой."""
     cursor.execute(
         "SELECT e.email, array_agg(cp.id ORDER BY lower(cp.name), cp.id), array_agg(cp.name ORDER BY lower(cp.name), cp.id) "
-        "  FROM payment_counterparties cp, unnest(cp.emails) AS e(email) GROUP BY e.email")
+        "  FROM payment_counterparties cp, unnest(cp.emails) AS e(email) "
+        " WHERE NOT (cp.id = ANY(%s::int[])) GROUP BY e.email", ([int(item) for item in excluded or ()],))
     return {row[0]: (list(row[1]), list(row[2])) for row in cursor.fetchall()}
+
+
+def set_recipients(cursor, entity_id, mailing_id, actor, excluded):
+    """Галочки «Кому» у ждущего письма: снятым поставщикам оно не уйдёт. Письмо,
+    которое уже уходит, не переадресовать. Автор правки реквизитов остаётся прежним:
+    им подписано письмо в карточке, а не тем, кто ставил галочки."""
+    status = _status(cursor, entity_id, mailing_id, lock=True)
+    if status != 'pending':
+        raise MailingError('Письмо уже уходит — получателей не поменять' if status == 'sending'
+                           else _STATE_WORDS.get(status, 'Письмо уже не ждёт отправки'))
+    ids = sorted({int(item) for item in excluded or ()})
+    if ids:
+        cursor.execute("SELECT id FROM payment_counterparties WHERE id = ANY(%s::int[]) ORDER BY id", (ids,))
+        ids = [row[0] for row in cursor.fetchall()]
+    cursor.execute("UPDATE payment_requisites_mailings SET excluded_counterparty_ids = %s::int[] WHERE id = %s",
+                   (ids, int(mailing_id)))
+    return {'excluded': len(ids)}
 
 
 def retry(cursor, entity_id, mailing_id, actor):
@@ -371,7 +424,9 @@ def retry(cursor, entity_id, mailing_id, actor):
     failed = cursor.fetchall()
     if not failed:
         raise MailingError('Недоставленных писем нет')
-    current = _current_addresses(cursor)
+    # Снятым галочкой поставщикам и повтор не уходит.
+    cursor.execute("SELECT excluded_counterparty_ids FROM payment_requisites_mailings WHERE id = %s", (int(mailing_id),))
+    current = _current_addresses(cursor, cursor.fetchone()[0])
     queued, removed, orphaned = 0, 0, set()
     for recipient_id, email, counterparty_ids in failed:
         if email in current:
@@ -409,7 +464,7 @@ def retry(cursor, entity_id, mailing_id, actor):
 
 _MAILING_FIELDS = ('id', 'legal_entity_id', 'status', 'before_data', 'after_data', 'send_after', 'created_at',
                    'created_by_name', 'updated_at', 'updated_by_name', 'started_at', 'finished_at', 'cancelled_at',
-                   'cancelled_by_name', 'last_error')
+                   'cancelled_by_name', 'last_error', 'excluded_counterparty_ids')
 _RECIPIENT_FIELDS = ('mailing_id', 'email', 'counterparty_names', 'status', 'attempts', 'next_attempt_at',
                      'last_error', 'sent_at')
 _ORDER = {'failed': 0, 'removed': 1, 'sending': 2, 'queued': 3, 'superseded': 4, 'sent': 5}
@@ -463,7 +518,18 @@ def history(cursor, entity_id, limit=HISTORY_LIMIT):
         item['latest'] = item['id'] == latest
         subject, text, body = letter(before, after)
         item['letter'] = {'subject': subject, 'text': text, 'html': body}
+        _choice(cursor, item)
     return items, total
+
+
+def _choice(cursor, item):
+    """Кому письмо: у ждущего — галочки по всем поставщикам с почтой, у ушедшего — кого сняли."""
+    excluded = list(item.pop('excluded_counterparty_ids', None) or [])
+    item['excluded'] = excluded
+    if item['status'] == 'pending':
+        item['candidates'] = candidates(cursor, excluded)
+    else:
+        item['excluded_names'] = _names(cursor, excluded)
 
 
 def states(cursor):
@@ -488,6 +554,8 @@ def states(cursor):
 
 _JOURNAL_SQL = (
     "SELECT %s, le.name, "
+    # Уйдёт ли письмо: у компании подключена почта и не сообщала о беде.
+    "       bool_or(mb.legal_entity_id IS NOT NULL AND mb.problem IS NULL), "
     "       COUNT(r.id) FILTER (WHERE r.status = 'sent'), "
     "       COUNT(r.id) FILTER (WHERE r.status = 'failed' AND r.next_attempt_at IS NULL), "
     "       COUNT(r.id) FILTER (WHERE r.status IN ('queued', 'sending') "
@@ -499,6 +567,7 @@ _JOURNAL_SQL = (
     "       COUNT(*) OVER () "
     "  FROM payment_requisites_mailings m "
     "  JOIN payment_legal_entities le ON le.id = m.legal_entity_id "
+    "  LEFT JOIN payment_entity_mailboxes mb ON mb.legal_entity_id = m.legal_entity_id "
     "  LEFT JOIN payment_requisites_mail_recipients r ON r.mailing_id = m.id "
     "%%s GROUP BY m.id, le.name ORDER BY m.id DESC" % ', '.join('m.' + field for field in _MAILING_FIELDS))
 
@@ -506,9 +575,10 @@ _JOURNAL_SQL = (
 def _journal_row(row):
     width = len(_MAILING_FIELDS)
     item = row_map(_MAILING_FIELDS, row[:width])
-    name, sent, failed, waiting, removed, superseded, latest, total = row[width:width + 8]
+    name, ready, sent, failed, waiting, removed, superseded, latest, total = row[width:width + 9]
     before, after = item.pop('before_data') or {}, item.pop('after_data') or {}
     item['legal_entity_name'] = name
+    item['mail_ready'] = bool(ready)
     item['counts'] = {'total': int(sent or 0) + int(failed or 0) + int(waiting or 0), 'sent': int(sent or 0),
                       'failed': int(failed or 0), 'waiting': int(waiting or 0), 'removed': int(removed or 0),
                       'superseded': int(superseded or 0)}
@@ -525,8 +595,21 @@ def journal(cursor, limit=20, offset=0):
     for row in cursor.fetchall():
         item, (before, after), total = _journal_row(row)
         item['subject'] = letter(before, after)[0]
+        item.pop('excluded_counterparty_ids', None)
         items.append(item)
     return items, total
+
+
+def waiting_for_mailbox(cursor):
+    """Компании, чьи письма ждут почту: не подключена или сообщила о беде (экран «Письма поставщикам»)."""
+    cursor.execute(
+        "SELECT DISTINCT le.id, le.name, mb.legal_entity_id IS NOT NULL, mb.problem "
+        "  FROM payment_requisites_mailings m "
+        "  JOIN payment_legal_entities le ON le.id = m.legal_entity_id "
+        "  LEFT JOIN payment_entity_mailboxes mb ON mb.legal_entity_id = m.legal_entity_id "
+        " WHERE m.status IN ('pending', 'sending') AND (mb.legal_entity_id IS NULL OR mb.problem IS NOT NULL) "
+        " ORDER BY le.name")
+    return [{'id': row[0], 'name': row[1], 'connected': bool(row[2]), 'problem': row[3]} for row in cursor.fetchall()]
 
 
 def detail(cursor, mailing_id):
@@ -548,6 +631,7 @@ def detail(cursor, mailing_id):
     item['recipients'] = recipients
     subject, text, body = letter(before, after)
     item['letter'] = {'subject': subject, 'text': text, 'html': body}
+    _choice(cursor, item)
     return item
 
 
@@ -558,39 +642,43 @@ _DUE_RECIPIENT = ("(r.status = 'queued' OR (r.status = 'failed' AND r.next_attem
 
 
 def _due_mailings(cursor):
-    """Письма, у которых сейчас есть работа: пришёл срок или адрес ждёт отправки."""
+    """Письма, у которых сейчас есть работа: пришёл срок или адрес ждёт отправки —
+    парами (письмо, компания), по порядку писем."""
     cursor.execute(
-        "SELECT id FROM payment_requisites_mailings WHERE status = 'pending' AND send_after <= %s "
-        "UNION SELECT DISTINCT r.mailing_id FROM payment_requisites_mail_recipients r "
+        "SELECT id, legal_entity_id FROM payment_requisites_mailings WHERE status = 'pending' AND send_after <= %s "
+        "UNION SELECT DISTINCT m.id, m.legal_entity_id FROM payment_requisites_mail_recipients r "
         "  JOIN payment_requisites_mailings m ON m.id = r.mailing_id "
-        " WHERE m.status = 'sending' AND %s" % (NOW_SQL, _DUE_RECIPIENT))
-    return [row[0] for row in cursor.fetchall()]
+        " WHERE m.status = 'sending' AND %s ORDER BY 1" % (NOW_SQL, _DUE_RECIPIENT))
+    return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
-def _claim_due(cursor):
-    """Пришёл срок — письмо переходит в отправку, адресаты собираются сейчас.
-    Недошедшие адреса прежних писем той же компании гасятся: их возьмёт новое."""
+def _claim_due(cursor, entity_id):
+    """Пришёл срок — письмо компании переходит в отправку, адресаты собираются сейчас:
+    поставщики с почтой, кроме снятых галочкой. Недошедшие адреса прежних писем той
+    же компании гасятся: их возьмёт новое (а снятым устаревшие реквизиты и подавно не нужны)."""
     cursor.execute(
         "UPDATE payment_requisites_mailings SET status = 'sending', started_at = %s, updated_at = %s "
         " WHERE id IN (SELECT id FROM payment_requisites_mailings "
-        "               WHERE status = 'pending' AND send_after <= %s "
+        "               WHERE status = 'pending' AND send_after <= %s AND legal_entity_id = %%s "
         "               ORDER BY send_after LIMIT %%s FOR UPDATE SKIP LOCKED) "
-        "RETURNING id, legal_entity_id" % (NOW_SQL, NOW_SQL, NOW_SQL), (CLAIM_LIMIT,))
-    claimed = cursor.fetchall()
-    for mailing_id, entity_id in claimed:
+        "RETURNING id" % (NOW_SQL, NOW_SQL, NOW_SQL), (int(entity_id), CLAIM_LIMIT))
+    claimed = [row[0] for row in cursor.fetchall()]
+    for mailing_id in claimed:
         cursor.execute(
             "INSERT INTO payment_requisites_mail_recipients (mailing_id, email, counterparty_ids, counterparty_names) "
-            "SELECT %s, e.email, array_agg(cp.id ORDER BY lower(cp.name), cp.id), "
+            "SELECT m.id, e.email, array_agg(cp.id ORDER BY lower(cp.name), cp.id), "
             "       array_agg(cp.name ORDER BY lower(cp.name), cp.id) "
-            "  FROM payment_counterparties cp, unnest(cp.emails) AS e(email) GROUP BY e.email "
+            "  FROM payment_requisites_mailings m, payment_counterparties cp, unnest(cp.emails) AS e(email) "
+            " WHERE m.id = %s AND NOT (cp.id = ANY(m.excluded_counterparty_ids)) "
+            " GROUP BY m.id, e.email "
             "ON CONFLICT (mailing_id, email) DO NOTHING", (mailing_id,))
         cursor.execute(
             "UPDATE payment_requisites_mail_recipients r SET status = 'superseded', next_attempt_at = NULL, "
             "       updated_at = %s "
             "  FROM payment_requisites_mailings m "
             " WHERE r.mailing_id = m.id AND m.legal_entity_id = %%s AND m.id < %%s "
-            "   AND r.status IN ('queued', 'failed')" % NOW_SQL, (entity_id, mailing_id))
-    return [mailing_id for mailing_id, _entity in claimed]
+            "   AND r.status IN ('queued', 'failed')" % NOW_SQL, (int(entity_id), mailing_id))
+    return claimed
 
 
 def _reap_stuck(cursor):
@@ -601,11 +689,12 @@ def _reap_stuck(cursor):
         (STUCK_ERROR, MAX_ATTEMPTS, STUCK_MINUTES))
 
 
-def _due(cursor, limit):
+def _due(cursor, limit, entity_id):
     cursor.execute(
         "SELECT r.id, r.mailing_id, r.email FROM payment_requisites_mail_recipients r "
         "  JOIN payment_requisites_mailings m ON m.id = r.mailing_id "
-        " WHERE m.status = 'sending' AND %s ORDER BY r.mailing_id, r.id LIMIT %%s" % _DUE_RECIPIENT, (int(limit),))
+        " WHERE m.status = 'sending' AND m.legal_entity_id = %%s AND %s ORDER BY r.mailing_id, r.id LIMIT %%s"
+        % _DUE_RECIPIENT, (int(entity_id), int(limit)))
     return [{'id': row[0], 'mailing_id': row[1], 'email': row[2]} for row in cursor.fetchall()]
 
 
@@ -687,31 +776,16 @@ def _note_error(db, mailing_ids, error):
                        "AND status IN ('pending', 'sending')", (str(error)[:1000], list(mailing_ids)))
 
 
-def run(db, *, env=None, transport=None, clock=time.monotonic):
-    """Один прогон планировщика: забрать письма, которым пора, и отправить, что успеем.
-
-    Почта не подключена — ничего не трогаем: письма ждут, а когда ящик подключат,
-    уйдут с адресами, какие будут у поставщиков на тот момент. Сначала вход в ящик,
-    потом сбор адресов: пока ящик не пускает, ожидающее письмо остаётся ожидающим."""
-    cfg = mail.config(env)
-    if cfg is None:
-        return {'ready': False}
-    if clock() < _PAUSE['until']:
-        return {'ready': True, 'paused': True}
-    with db._get_cursor() as cursor:
-        _reap_stuck(cursor)
-        finished = _finish(cursor)
-        waiting = _due_mailings(cursor)
-    if not waiting:
-        return {'ready': True, 'idle': True, 'finished': finished}
-    result = {'ready': True, 'claimed': 0, 'sent': 0, 'failed': 0, 'finished': finished}
-    started = clock()
+def _send_from(db, entity_id, mailing_ids, settings, *, transport, clock, started, limit):
+    """Письма одной компании — с её ящика. {'claimed', 'sent', 'failed', 'attempts'[, 'error']}."""
+    cfg = mailbox.config(settings)
+    outcome = {'claimed': 0, 'sent': 0, 'failed': 0, 'attempts': 0}
     letters = {}
     try:
         with (transport or mail.Transport)(cfg) as smtp:
             with db._get_cursor() as cursor:
-                result['claimed'] = len(_claim_due(cursor))
-                due = _due(cursor, RUN_MAX_LETTERS)
+                outcome['claimed'] = len(_claim_due(cursor, entity_id))
+                due = _due(cursor, limit, entity_id)
                 letters = _letters(cursor, {item['mailing_id'] for item in due}) if due else {}
             streak = []
             for item in due:
@@ -729,6 +803,7 @@ def run(db, *, env=None, transport=None, clock=time.monotonic):
                     attempt = _take(cursor, item['id'])
                 if attempt is None:
                     continue
+                outcome['attempts'] += 1
                 try:
                     message_id = smtp.send(message)
                 except mail.MailError as exc:
@@ -739,10 +814,10 @@ def run(db, *, env=None, transport=None, clock=time.monotonic):
                             _failed(cursor, item['id'], attempt, exc)
                     if exc.kind in ('transport', 'throttled'):
                         raise
-                    result['failed'] += 1
+                    outcome['failed'] += 1
                     streak = streak + [(item['id'], attempt)] if exc.kind == 'permanent' else []
                     if len(streak) >= REFUSALS_IN_A_ROW:
-                        # Три адреса подряд — скорее ящик, чем адреса: им повтор, прогону пауза.
+                        # Три адреса подряд — скорее ящик, чем адреса: им повтор, ящику пауза.
                         with db._get_cursor() as cursor:
                             for recipient_id, tried in streak:
                                 _retry_later(cursor, recipient_id, tried)
@@ -750,14 +825,61 @@ def run(db, *, env=None, transport=None, clock=time.monotonic):
                     continue
                 with db._get_cursor() as cursor:
                     _sent(cursor, item['id'], item['mailing_id'], message_id)
-                result['sent'] += 1
+                    if not outcome['sent']:
+                        mailbox.note_ok(cursor, entity_id)
+                outcome['sent'] += 1
                 streak = []
     except mail.MailError as exc:
         # Ящик не пускает, упёрся в лимит или фильтр: дело в нём, а не в адресах.
-        _PAUSE['until'] = clock() + TRANSPORT_PAUSE_SECONDS
-        logging.warning('Оплата счетов: письма о реквизитах не отправлены — %s', exc)
-        _note_error(db, set(waiting) | set(letters), exc)
-        result['error'] = str(exc)
+        _PAUSE[mailbox.pause_key(settings)] = clock() + TRANSPORT_PAUSE_SECONDS
+        logging.warning('Оплата счетов: письма о реквизитах компании %s не отправлены — %s', entity_id, exc)
+        _note_error(db, set(mailing_ids) | set(letters), exc)
+        if exc.kind == 'transport' and exc.reason in ('login', 'sender'):
+            # Пароль или отправитель — сам ящик не починится: ждать человека, а не стучаться.
+            with db._get_cursor() as cursor:
+                mailbox.note_problem(cursor, entity_id, str(exc))
+        outcome['error'] = str(exc)
+    return outcome
+
+
+def run(db, *, transport=None, clock=time.monotonic):
+    """Один прогон планировщика: письма, которым пора, уходят с почты своей компании.
+
+    У компании нет почты или почта сообщила о беде — её письма не трогаем: ждут, а
+    когда почту подключат или починят, уйдут с адресами, какие будут у поставщиков на
+    тот момент. Сначала вход в ящик, потом сбор адресов: пока ящик не пускает,
+    ожидающее письмо остаётся ожидающим."""
+    with db._get_cursor() as cursor:
+        _reap_stuck(cursor)
+        finished = _finish(cursor)
+        waiting = _due_mailings(cursor)
+        boxes = mailbox.outboxes(cursor, [entity_id for _mailing, entity_id in waiting]) if waiting else {}
+    if not waiting:
+        return {'idle': True, 'finished': finished}
+    result = {'claimed': 0, 'sent': 0, 'failed': 0, 'finished': finished, 'without_mailbox': 0, 'paused': 0}
+    by_entity = {}
+    for mailing_id, entity_id in waiting:
+        by_entity.setdefault(entity_id, []).append(mailing_id)
+    started = clock()
+    letters_left = RUN_MAX_LETTERS
+    for entity_id, mailing_ids in by_entity.items():
+        settings = boxes.get(entity_id)
+        if settings is None:
+            result['without_mailbox'] += 1
+            continue
+        if clock() < _PAUSE.get(mailbox.pause_key(settings), 0.0):
+            result['paused'] += 1
+            continue
+        if letters_left <= 0 or RUN_BUDGET_SECONDS - (clock() - started) < LETTER_MIN_SECONDS:
+            break   # остальным компаниям — следующий прогон
+        outcome = _send_from(db, entity_id, mailing_ids, settings, transport=transport, clock=clock,
+                             started=started, limit=letters_left)
+        for name in ('claimed', 'sent', 'failed'):
+            result[name] += outcome[name]
+        letters_left -= outcome['attempts']
+        if outcome.get('error'):
+            result.setdefault('errors', {})[entity_id] = outcome['error']
+            result['error'] = outcome['error']   # последняя — для журнала планировщика
     with db._get_cursor() as cursor:
         result['finished'] += _finish(cursor)
     return result

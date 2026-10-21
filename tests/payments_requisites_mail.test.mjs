@@ -145,7 +145,7 @@ test('строка перед сохранением: уйдёт ли письм
     assert.deepEqual([1, 2, 5, 21].map(minutesWord), ['1 минуту', '2 минуты', '5 минут', '21 минуту']);
     assert.match(mailNotice({ recipients: { addresses: 0, without_email: 3 } }), /ни у одного поставщика не указана почта — письмо некому отправить\.$/);
     assert.match(mailNotice({ recipients, ready: false }),
-        /^После сохранения письмо о новых реквизитах уйдёт поставщикам, когда подключат почту: сейчас она не подключена\./,
+        /^После сохранения письмо о новых реквизитах уйдёт поставщикам, когда у компании заработает почта для писем: сейчас с неё отправлять нельзя\./,
         'без почты строка не обещает «через 10 минут»');
     assert.doesNotMatch(mailNotice({ recipients, ready: false }), /через 10 минут/);
     assert.equal(mailNotice({ recipients, reverting: true }), 'Реквизиты вернутся к тем, что знают поставщики, — письма не будет.');
@@ -229,16 +229,19 @@ test('блок писем: заготовка в рост, пока истори
 
 test('компании: метка письма в строке; колонка шире, только пока метка есть', async () => {
     const { dictionaryColumns, dictionaryTableMin } = await bundle('src/components/payments/PaymentsDictionaries.jsx', 'dictionaries');
-    const plain = dictionaryColumns('legal_entities', { mailReady: true });
-    const wide = dictionaryColumns('legal_entities', { mailReady: true, mailWide: true });
+    const plain = dictionaryColumns('legal_entities');
+    const wide = dictionaryColumns('legal_entities', { mailWide: true });
     assert.equal(dictionaryTableMin(plain), 720, 'без меток — прежняя ширина таблицы');
     assert.ok(dictionaryTableMin(wide) <= 820);
     const state = wide.find((column) => column.key === 'state');
-    const row = { id: 1, name: 'ТОО «Наша»', requisites_text: 'реквизиты', is_active: true };
+    const row = { id: 1, name: 'ТОО «Наша»', requisites_text: 'реквизиты', is_active: true, mailbox: { address: 'buh@company.kz', problem: null } };
     assert.match(renderToStaticMarkup(state.cell({ ...row, mailing: { status: 'done', failed: 1 } })), /письмо не ушло: 1/);
     assert.doesNotMatch(renderToStaticMarkup(state.cell({ ...row, mailing: { status: 'done', failed: 0 } })), /письмо/);
-    assert.match(renderToStaticMarkup(dictionaryColumns('legal_entities', { mailReady: false, mailWide: true }).find((c) => c.key === 'state')
-        .cell({ ...row, mailing: { status: 'pending', send_after: FUTURE } })), /письмо ждёт почту/);
+    // Почта — у каждой компании своя: нет её или она не пускает — письмо этой компании ждёт.
+    assert.match(renderToStaticMarkup(state.cell({ ...row, mailbox: null, mailing: { status: 'pending', send_after: FUTURE } })), /письмо ждёт почту/);
+    assert.match(renderToStaticMarkup(state.cell({ ...row, mailbox: { address: 'buh@company.kz', problem: 'не пускает' },
+        mailing: { status: 'pending', send_after: FUTURE } })), /письмо ждёт почту/);
+    assert.match(renderToStaticMarkup(state.cell({ ...row, mailing: { status: 'pending', send_after: FUTURE } })), /письмо (в|\d)/);
 
     const [name] = dictionaryColumns('counterparties');
     assert.equal(name.cell({ name: 'ТОО «Ромашка»', kind: 'too', bin: '123456789012', vat_payer: true, emails: ['buh@romashka.kz', 'info@romashka.kz'] }).sub,
@@ -353,4 +356,144 @@ test('экран «Письма поставщикам»: только адми�
     const dict = source('src/components/payments/PaymentsDictionaries.jsx');
     assert.match(dict, /\{name === 'mailings' && <SupplierLetters apiBaseUrl=\{apiBaseUrl\} headers=\{headers\} showToast=\{showToast\} \/>\}/);
     assert.match(dict, /const OWN_SCREENS = \['settings', 'templates', 'mailings'\];/);
+});
+
+// ── 21.10.2026: почта у каждой компании, галочки «Кому», «Почта поставщиков» ──
+
+test('почта компании, «Почта поставщиков» и журнал: подписи словами', async () => {
+    const { addressLetterState, excludedLine, mailboxLine, serverLine, waitingMailboxLine } = await import('../src/components/payments/paymentsMeta.js');
+    assert.equal(mailboxLine({ label: 'Gmail', checked_at: '2026-10-20T11:40:00' }, TODAY), 'Gmail · проверено в 11:40');
+    assert.equal(mailboxLine({ host: 'smtp.hoster.kz', port: 587, checked_at: '2026-10-18T09:05:00' }, TODAY),
+        'smtp.hoster.kz:587 · проверено 18.10 в 09:05');
+    assert.equal(mailboxLine({ label: 'Яндекс' }, TODAY), 'Яндекс');
+    assert.equal(mailboxLine(null), '');
+    assert.equal(serverLine({ label: 'Яндекс', host: 'smtp.yandex.ru' }), 'Яндекс · smtp.yandex.ru');
+    assert.equal(serverLine(null), '');
+    assert.deepEqual(addressLetterState(null), { tone: 'neutral', label: 'писем не было' });
+    assert.deepEqual(addressLetterState({ status: 'sent', sent_at: '2026-10-20T16:43:00' }, TODAY), { tone: 'done', label: 'ушло в 16:43' });
+    assert.deepEqual(addressLetterState({ status: 'sent', sent_at: '2026-10-18T16:43:00' }, TODAY), { tone: 'done', label: 'ушло 18.10 в 16:43' });
+    assert.deepEqual(addressLetterState({ status: 'failed' }, TODAY), { tone: 'overdue', label: 'не дошло' });
+    assert.deepEqual(addressLetterState({ status: 'failed', next_attempt_at: '2026-10-20T16:48:00' }, TODAY), { tone: 'blocked', label: 'повтор в 16:48' });
+    assert.deepEqual(addressLetterState({ status: 'queued' }, TODAY), { tone: 'current', label: 'письмо уходит' });
+    assert.equal(excludedLine(['ТОО «Икс»', 'ТОО «Игрек»']), 'Не отправляли: ТОО «Икс», ТОО «Игрек»');
+    assert.equal(excludedLine([]), '');
+    assert.equal(waitingMailboxLine([]), '');
+    assert.equal(waitingMailboxLine([{ name: 'ТОО «Гамма»', connected: false }, { name: 'ТОО «Альфа»', connected: true }]),
+        'Письма ждут почту: у ТОО «Гамма» она не подключена. Почта ТОО «Альфа» не пускает — введите пароль заново. '
+        + 'Почту подключают в «Реквизитах компаний», в окне компании — блок «Почта для писем».');
+});
+
+const CANDIDATES = [
+    { id: 1, name: 'ТОО «Зет»', is_active: true, emails: ['shared@group.kz'], send: true },
+    { id: 2, name: 'ТОО «Игрек»', is_active: true, emails: ['y@y.kz', 'shared@group.kz'], send: false },
+    { id: 3, name: 'ТОО «Икс»', is_active: false, emails: ['x@x.kz'], send: true },
+];
+
+test('«Кому»: сколько поставщиков отмечено и сколько адресов получат', async () => {
+    const { recipientsChosen, recipientsLine } = await import('../src/components/payments/paymentsMeta.js');
+    assert.deepEqual(recipientsChosen(CANDIDATES), { chosen: 2, total: 3, addresses: 2 }, 'общий адрес — один раз');
+    assert.equal(recipientsLine(CANDIDATES), '2 из 3 поставщиков · 2 адреса');
+    assert.equal(recipientsLine(CANDIDATES.map((item) => ({ ...item, send: true }))), 'все 3 поставщика · 3 адреса');
+    assert.equal(recipientsLine([{ ...CANDIDATES[0] }]), '1 поставщик · 1 адрес');
+    assert.equal(recipientsLine(CANDIDATES.map((item) => ({ ...item, send: false }))), 'никому — письмо не уйдёт');
+    assert.equal(recipientsLine([]), 'ни у одного поставщика нет почты');
+    assert.equal(recipientsLine([{ ...CANDIDATES[0], send: true }, { ...CANDIDATES[1], send: false }, ...Array.from({ length: 19 }, (_, index) => (
+        { id: 10 + index, name: `П${index}`, emails: [`p${index}@x.kz`], send: false }))]), '1 из 21 поставщика · 1 адрес');
+    const { allRecipients, toggleRecipient } = await import('../src/components/payments/paymentsMeta.js');
+    assert.deepEqual(toggleRecipient(CANDIDATES, 1), [2, 1], 'сняли отмеченного — его не отправлять');
+    assert.deepEqual(toggleRecipient(CANDIDATES, 2), [], 'отметили снятого — отправлять всем');
+    assert.deepEqual(toggleRecipient(CANDIDATES, 99), [2], 'нет такого — ничего не меняется');
+    assert.deepEqual(allRecipients(CANDIDATES, true), []);
+    assert.deepEqual(allRecipients(CANDIDATES, false), [1, 2, 3]);
+    assert.match(mailNotice({ recipients: { addresses: 0, without_email: 0, excluded: 3 } }),
+        /Но все поставщики с почтой сняты в «Кому» — письмо некому отправить\.$/);
+});
+
+test('галочки «Кому» в разметке: отмечен — синий кружок с галочкой, снят — пустой', async () => {
+    const { RecipientPicker } = await bundle('src/components/payments/SupplierLetters.jsx', 'letters');
+    const html = renderToStaticMarkup(h(RecipientPicker, { candidates: CANDIDATES, onChange: () => {} }));
+    assert.equal((html.match(/role="checkbox" aria-checked="true"/g) || []).length, 2);
+    assert.equal((html.match(/role="checkbox" aria-checked="false"/g) || []).length, 1);
+    assert.match(html, /aria-checked="true"[^>]*data-candidate="1" data-candidate-send="yes"/);
+    assert.match(html, /border-\[#2563eb\] bg-\[#2563eb\] text-white/, 'отмеченное — синим, как выбор на сайте, а не чёрным');
+    assert.match(html, />скрыт<\/span>/, 'скрытый поставщик — тоже в списке (решение 20.10: «никого не пропустим»)');
+    assert.match(html, />y@y\.kz, shared@group\.kz<\/span>/);
+    assert.match(html, />Отметить всех<\/button>/);
+    assert.match(html, /data-recipient-summary="true">2 из 3 поставщиков · 2 адреса</);
+    assert.doesNotMatch(html, /Найти поставщика/, 'поиск — только у длинного списка');
+    const all = renderToStaticMarkup(h(RecipientPicker, { candidates: CANDIDATES.map((item) => ({ ...item, send: true })) }));
+    assert.match(all, />Снять всех<\/button>/);
+    const many = Array.from({ length: 9 }, (_, index) => ({ id: index + 1, name: `ТОО «П${index}»`, is_active: true, emails: [`p${index}@x.kz`], send: true }));
+    assert.match(renderToStaticMarkup(h(RecipientPicker, { candidates: many })), /placeholder="Найти поставщика или адрес"/);
+    assert.match(renderToStaticMarkup(h(RecipientPicker, { candidates: [] })), /Ни у одного поставщика нет почты/);
+    assert.match(renderToStaticMarkup(h(RecipientPicker, { candidates: CANDIDATES, busy: true })), /disabled=""/, 'пока запрос идёт — не нажимаются');
+});
+
+test('блок «Почта для писем»: подключена, не пускает, не подключена', async () => {
+    const { default: CompanyMailbox } = await bundle('src/components/payments/CompanyMailbox.jsx', 'mailbox');
+    const props = (mailbox) => ({ apiBaseUrl: '', headers: () => ({}), entity: { id: 3, name: 'ТОО «Наша»', mailbox }, showToast: () => {} });
+    const box = { address: 'buh@company.kz', label: 'Gmail', host: 'smtp.gmail.com', port: 465, manual: false, checked_at: '2026-10-20T11:40:00', problem: null };
+    const ready = renderToStaticMarkup(h(CompanyMailbox, props(box)));
+    assert.match(ready, /data-company-mailbox="ready"/);
+    assert.match(ready, /data-mailbox-address="true">buh@company\.kz</);
+    assert.match(ready, />подключена</);
+    for (const label of ['Отключить', 'Изменить', 'Проверить']) assert.match(ready, new RegExp(`> ?${label}</button>`));
+    assert.doesNotMatch(ready, /type="password"/, 'у подключённой почты пароль не спрашивается и не показывается');
+    const broken = renderToStaticMarkup(h(CompanyMailbox, props({ ...box, problem: 'Почта не приняла логин или пароль приложения (535)' })));
+    assert.match(broken, /data-company-mailbox="problem"/);
+    assert.match(broken, />не пускает</);
+    assert.match(broken, /Почта не приняла логин или пароль приложения \(535\)\. Письма компании ждут — введите пароль заново\./);
+    assert.match(broken, />Ввести пароль<\/button>/);
+    const empty = renderToStaticMarkup(h(CompanyMailbox, props(null)));
+    assert.match(empty, /data-company-mailbox="edit"/);
+    assert.match(empty, /Пока почта не подключена, письма ждут\./);
+    assert.match(empty, /type="password" name="mailbox-app-password" autoComplete="new-password"/i, 'браузер не подставит сюда пароль от портала');
+    assert.match(empty, /data-mailbox-connect="true">Подключить</);
+    assert.match(empty, /Проверим: отправим пробное письмо на этот адрес\./);
+    assert.doesNotMatch(empty, />Отмена</, 'нечего отменять — почты ещё нет');
+    assert.equal(renderToStaticMarkup(h(CompanyMailbox, { ...props(null), entity: { id: null } })), '');
+    const source_ = source('src/components/payments/CompanyMailbox.jsx');
+    assert.match(source_, /target="_blank" rel="noopener noreferrer"/, 'ссылка на пароль приложения — в новой вкладке');
+});
+
+test('карточка ждущего письма: «Кому» с галочками; у ушедшего — кого не отправляли', async () => {
+    const { MailingCard } = await bundle('src/components/payments/RequisitesMailings.jsx', 'mailings');
+    const pending = renderToStaticMarkup(h(MailingCard, {
+        item: { id: 1, status: 'pending', send_after: FUTURE, changed: ['ИИК'], counts: {}, recipients: [], candidates: CANDIDATES },
+        ready: true, onCancel: () => {}, onRetry: () => {}, onPick: () => {},
+    }));
+    assert.match(pending, /data-mailing-recipients/);
+    assert.match(pending, />Кому</);
+    assert.match(pending, /2 из 3 поставщиков · 2 адреса/);
+    const done = renderToStaticMarkup(h(MailingCard, {
+        item: { id: 2, status: 'done', counts: { total: 1, sent: 1 }, recipients: [], excluded_names: ['ТОО «Игрек»'] },
+        ready: true, onCancel: () => {}, onRetry: () => {},
+    }));
+    assert.match(done, /data-excluded-names="true">Не отправляли: ТОО «Игрек»</);
+    assert.doesNotMatch(done, /data-mailing-recipients/, 'ушедшему письму галочки не нужны');
+});
+
+test('«Почта поставщиков»: колонки, проверка строки, место в меню', async () => {
+    const { dictionaryColumns, dictionarySections, emailRowIssues } = await bundle('src/components/payments/PaymentsDictionaries.jsx', 'dictionaries');
+    const columns = dictionaryColumns('counterparty_emails');
+    assert.deepEqual(columns.map((column) => column.key), ['email', 'party', 'letter']);
+    const row = { id: 1, email: 'buh@supplier.kz', contact_name: 'Айгерим, бухгалтер', counterparty_name: 'ТОО «Поставщик»',
+        counterparty_active: false, note: 'с 2025', last_letter: { status: 'sent', sent_at: '2026-10-18T16:43:00' } };
+    assert.deepEqual(columns[0].cell(row), { main: 'buh@supplier.kz', strong: true, sub: 'Айгерим, бухгалтер' });
+    assert.deepEqual(columns[1].cell(row), { main: 'ТОО «Поставщик»', sub: 'поставщик скрыт · с 2025' });
+    assert.match(renderToStaticMarkup(columns[2].cell(row)), /ушло 18\.10 в 16:43/);
+    assert.match(renderToStaticMarkup(columns[2].cell({ ...row, last_letter: null })), /писем не было/);
+    assert.deepEqual(emailRowIssues({}), { counterparty_id: 'Выберите поставщика, чей это адрес', email: 'Укажите адрес почты' });
+    assert.deepEqual(emailRowIssues({ counterparty_id: 7, email: ' Buh@Supplier.KZ ' }), {});
+    assert.deepEqual(emailRowIssues({ counterparty_id: 7, email: 'a@x.kz, b@x.kz' }), { email: 'Один адрес — одна строка' });
+    assert.deepEqual(emailRowIssues({ counterparty_id: 7, email: 'buh@supplier' }), { email: '«buh@supplier» — не похоже на адрес почты' });
+    const section = dictionarySections({ is_admin: false }).find((item) => item.value === 'counterparty_emails');
+    assert.equal(section.label, 'Почта поставщиков', 'справочник читает любой участник, как и поставщиков');
+    const dict = source('src/components/payments/PaymentsDictionaries.jsx');
+    // «Сохранить» с набранной, но не подключённой почтой компании подключает её раньше записи реквизитов.
+    const start = dict.indexOf('const save = async (event) => {', dict.indexOf('const savedText = '));
+    const save = dict.slice(start, dict.indexOf('const remove = async () => {', start));
+    assert.ok(save.indexOf('mailboxControl.current?.dirty()') !== -1 && save.indexOf('mailboxControl.current?.dirty()') < save.indexOf('axios.post'));
+    assert.match(dict, /<CompanyMailbox key=\{editing\.id\}/);
+    assert.ok(dict.indexOf('<CompanyMailbox ') < dict.indexOf('<RequisitesMailings '), 'почта — над письмами');
 });
