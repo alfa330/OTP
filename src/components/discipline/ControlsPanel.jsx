@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Search, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { Plus, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { IosModal, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -8,6 +8,7 @@ import {
     Chip, dBtnPrimary, dBtnSecondary, dInput, EmptyState, Field, Group, INVALID_RING, LoadingRows, T,
 } from './disciplineUi';
 import { controlReason, daysLeftText, fmtDate, fmtDateTime, pluralViolations, shiftIsoDays, todayIso } from './disciplineRules';
+import { OperatorPicker, useOperatorSearch } from './OperatorPicker';
 
 /*
  * «Особый контроль» (ТЗ п. 4.4 и 10): полный список с историей — кто, когда,
@@ -112,7 +113,6 @@ const DecisionPanel = ({ row, api, toast, measures, onDone }) => {
 
 const NewControlForm = ({ open, api, toast, onClose, onCreated }) => {
     const [query, setQuery] = useState('');
-    const [results, setResults] = useState([]);
     const [operator, setOperator] = useState(null);
     const [source, setSource] = useState('manual');
     const [reason, setReason] = useState('');
@@ -127,14 +127,7 @@ const NewControlForm = ({ open, api, toast, onClose, onCreated }) => {
         setEnd(shiftIsoDays(todayIso(), 30)); setErrors({});
     }, [open]);
 
-    useEffect(() => {
-        if (!open || operator) return undefined;
-        let alive = true;
-        const timer = setTimeout(() => {
-            api.searchOperators(query).then((data) => { if (alive) setResults(data.items || []); }).catch(() => {});
-        }, 200);
-        return () => { alive = false; clearTimeout(timer); };
-    }, [api, open, query, operator]);
+    const search = useOperatorSearch(api, open, !operator, query);
 
     const save = async () => {
         const next = {};
@@ -158,6 +151,7 @@ const NewControlForm = ({ open, api, toast, onClose, onCreated }) => {
 
     return (
         <IosModal open={open} onClose={onClose} title="Поставить на особый контроль" maxWidth="max-w-lg"
+                  sizeKey={operator ? 'picked' : 'pick'}
                   footer={(
                       <div className="flex justify-end gap-2">
                           <button type="button" className={dBtnSecondary} onClick={onClose}>Отмена</button>
@@ -172,26 +166,9 @@ const NewControlForm = ({ open, api, toast, onClose, onCreated }) => {
                             <button type="button" aria-label="Другой" onClick={() => setOperator(null)}><X size={15} /></button>
                         </div>
                     ) : (
-                        <div className="space-y-2">
-                            <label className="relative block">
-                                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                <input className={`${dInput} pl-9 ${errors.operator ? INVALID_RING : ''}`} placeholder="ФИО"
-                                       value={query} onChange={(e) => setQuery(e.target.value)} />
-                            </label>
-                            {results.length > 0 && (
-                                <ul className="max-h-[220px] divide-y divide-slate-100 overflow-y-auto rounded-xl ring-1 ring-slate-200/70">
-                                    {results.map((person) => (
-                                        <li key={person.id}>
-                                            <button type="button" className="w-full px-3.5 py-2.5 text-left hover:bg-slate-50"
-                                                    onClick={() => { setOperator(person); setErrors((e) => ({ ...e, operator: null })); }}>
-                                                <span className="block text-[13.5px] font-medium text-slate-900">{person.name}</span>
-                                                <span className="block text-[12px] text-slate-500">{[person.group_name, person.department_name].filter(Boolean).join(' · ')}</span>
-                                            </button>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </div>
+                        <OperatorPicker query={query} onQuery={setQuery} {...search} invalid={!!errors.operator}
+                                        listClassName="h-[220px]"
+                                        onPick={(person) => { setOperator(person); setErrors((e) => ({ ...e, operator: null })); }} />
                     )}
                 </Field>
                 <Field label="Основание"
@@ -232,71 +209,74 @@ const ControlsPanel = ({ api, toast, departmentId, version, reload, openOperator
     const rows = useMemo(() => (data?.items || []).filter((row) => !departmentId || row.department_id === departmentId
         || row.department_id == null), [data, departmentId]);
 
+    /* Окно — рядом со столбиком, а не в нём: ребёнку space-y достаётся margin-top,
+       и затемнение начиналось на 16 px ниже края экрана — светлая полоса над окном. */
     return (
-        <div className="space-y-3 xl:space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <IosSegmented value={state} onChange={setState} slide ariaLabel="Какие показать"
-                              options={[{ value: 'active', label: 'Действующие' }, { value: 'closed', label: 'Завершённые' }]} />
-                {caps.can_controls && (
-                    <button type="button" className={dBtnSecondary} onClick={() => setCreateOpen(true)}>
-                        <Plus size={15} />
-                        Поставить на контроль
-                    </button>
+        <>
+            <div className="space-y-3 xl:space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                    <IosSegmented value={state} onChange={setState} slide ariaLabel="Какие показать"
+                                  options={[{ value: 'active', label: 'Действующие' }, { value: 'closed', label: 'Завершённые' }]} />
+                    {caps.can_controls && (
+                        <button type="button" className={dBtnSecondary} onClick={() => setCreateOpen(true)}>
+                            <Plus size={15} />
+                            Поставить на контроль
+                        </button>
+                    )}
+                </div>
+
+                {error ? <Group><EmptyState title={error} /></Group> : !data ? <LoadingRows rows={5} /> : !rows.length ? (
+                    <Group>
+                        <EmptyState icon={state === 'active' ? ShieldCheck : ShieldAlert}
+                                    title={state === 'active' ? 'На особом контроле никого нет' : 'Завершённых периодов нет'} />
+                    </Group>
+                ) : (
+                    <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+                        <ul className="divide-y divide-slate-100">
+                            {rows.map((row) => (
+                                <li key={row.id} className={ROW_TONES[row.tone] || ''}>
+                                    <div className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto] sm:items-center sm:gap-4 xl:px-5 2xl:py-4">
+                                        <button type="button" className="min-w-0 text-left" onClick={() => openOperator(row.operator_id)}>
+                                            <span className={`block truncate text-[13.5px] font-semibold text-slate-900 hover:text-blue-700 ${T.body}`}>{row.operator_name}</span>
+                                            <span className={`block truncate text-[12px] text-slate-500 ${T.note}`}>
+                                                {[row.group_name, row.direction_name].filter(Boolean).join(' · ') || 'Без группы'}
+                                            </span>
+                                        </button>
+                                        <span className="min-w-0">
+                                            <span className={`block text-[12.5px] text-slate-700 ${T.sub}`}>
+                                                {controlReason(row)}
+                                            </span>
+                                            <span className={`block text-[12px] tabular-nums text-slate-500 ${T.note}`}>
+                                                {fmtDate(row.start_date)} – {fmtDate(row.end_date)}
+                                                {row.responsible_name ? ` · ответственный: ${row.responsible_name}` : ''}
+                                                {row.decided_at ? ` · ${row.decision_label} ${fmtDateTime(row.decided_at)}${row.decision_detail ? ` — ${row.decision_detail}` : ''}` : ''}
+                                            </span>
+                                        </span>
+                                        <span className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+                                            {row.violations > 0 && <Chip tone="red">{row.violations} {pluralViolations(row.violations)}</Chip>}
+                                            {!row.decided_at && <Chip tone={row.tone === 'normal' ? 'slate' : 'amber'}>{daysLeftText(row.days_left)}</Chip>}
+                                            {row.can_decide && deciding !== row.id && (
+                                                <button type="button" className={`${dBtnSecondary} !px-3 !py-1.5`} onClick={() => setDeciding(row.id)}>
+                                                    Решение
+                                                </button>
+                                            )}
+                                        </span>
+                                    </div>
+                                    {deciding === row.id && (
+                                        <div className="px-4 pb-3 xl:px-5">
+                                            <DecisionPanel row={row} api={api} toast={toast} measures={data.measures || []}
+                                                           onDone={(changed = true) => { setDeciding(null); if (changed) reload(); }} />
+                                        </div>
+                                    )}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
                 )}
             </div>
-
-            {error ? <Group><EmptyState title={error} /></Group> : !data ? <LoadingRows rows={5} /> : !rows.length ? (
-                <Group>
-                    <EmptyState icon={state === 'active' ? ShieldCheck : ShieldAlert}
-                                title={state === 'active' ? 'На особом контроле никого нет' : 'Завершённых периодов нет'} />
-                </Group>
-            ) : (
-                <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
-                    <ul className="divide-y divide-slate-100">
-                        {rows.map((row) => (
-                            <li key={row.id} className={ROW_TONES[row.tone] || ''}>
-                                <div className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto] sm:items-center sm:gap-4 xl:px-5 2xl:py-4">
-                                    <button type="button" className="min-w-0 text-left" onClick={() => openOperator(row.operator_id)}>
-                                        <span className={`block truncate text-[13.5px] font-semibold text-slate-900 hover:text-blue-700 ${T.body}`}>{row.operator_name}</span>
-                                        <span className={`block truncate text-[12px] text-slate-500 ${T.note}`}>
-                                            {[row.group_name, row.direction_name].filter(Boolean).join(' · ') || 'Без группы'}
-                                        </span>
-                                    </button>
-                                    <span className="min-w-0">
-                                        <span className={`block text-[12.5px] text-slate-700 ${T.sub}`}>
-                                            {controlReason(row)}
-                                        </span>
-                                        <span className={`block text-[12px] tabular-nums text-slate-500 ${T.note}`}>
-                                            {fmtDate(row.start_date)} – {fmtDate(row.end_date)}
-                                            {row.responsible_name ? ` · ответственный: ${row.responsible_name}` : ''}
-                                            {row.decided_at ? ` · ${row.decision_label} ${fmtDateTime(row.decided_at)}${row.decision_detail ? ` — ${row.decision_detail}` : ''}` : ''}
-                                        </span>
-                                    </span>
-                                    <span className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-                                        {row.violations > 0 && <Chip tone="red">{row.violations} {pluralViolations(row.violations)}</Chip>}
-                                        {!row.decided_at && <Chip tone={row.tone === 'normal' ? 'slate' : 'amber'}>{daysLeftText(row.days_left)}</Chip>}
-                                        {row.can_decide && deciding !== row.id && (
-                                            <button type="button" className={`${dBtnSecondary} !px-3 !py-1.5`} onClick={() => setDeciding(row.id)}>
-                                                Решение
-                                            </button>
-                                        )}
-                                    </span>
-                                </div>
-                                {deciding === row.id && (
-                                    <div className="px-4 pb-3 xl:px-5">
-                                        <DecisionPanel row={row} api={api} toast={toast} measures={data.measures || []}
-                                                       onDone={(changed = true) => { setDeciding(null); if (changed) reload(); }} />
-                                    </div>
-                                )}
-                            </li>
-                        ))}
-                    </ul>
-                </div>
-            )}
-
-            <NewControlForm open={createOpen} api={api} toast={toast} onClose={() => setCreateOpen(false)}
-                            onCreated={() => { setCreateOpen(false); reload(); }} />
-        </div>
+                <NewControlForm open={createOpen} api={api} toast={toast} onClose={() => setCreateOpen(false)}
+                                onCreated={() => { setCreateOpen(false); reload(); }} />
+        </>
     );
 };
 

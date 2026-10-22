@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, ChevronRight, Download, Paperclip, Search, SlidersHorizontal } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronRight, Download, Paperclip, SlidersHorizontal } from 'lucide-react';
 import { IosSegmented, IosToggle } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
 import { apiError, saveBlob } from './disciplineApi';
 import {
-    Chip, dBtnSecondary, dInput, dLabel, EmptyState, Group, LoadingRows, RecordRow, StateBadge, StepChip, T,
+    Chip, dBtnSecondary, dLabel, EmptyState, Group, LoadingRows, RecordRow, SearchField, StateBadge, StepChip, T,
 } from './disciplineUi';
 import {
     fmtDateTime, fmtShort, groupSummary, groupTone, ROW_STATES_BESIDE_STEP, shiftIsoDays, STATE_LABELS, todayIso,
@@ -161,11 +161,8 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
     return (
         <div className="space-y-3 xl:space-y-4">
             <div className="flex flex-wrap items-center gap-2">
-                <label className="relative min-w-[220px] flex-1">
-                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input className={`${dInput} pl-9`} placeholder="ФИО или номер записи" value={searchDraft}
-                           onChange={(e) => setSearchDraft(e.target.value)} />
-                </label>
+                <SearchField className="min-w-[220px] flex-1" placeholder="ФИО или номер записи" value={searchDraft}
+                             onChange={(e) => setSearchDraft(e.target.value)} />
                 <IosDateRangePicker roomy from={filters.date_from} to={filters.date_to} max={todayIso()} presets={DATE_PRESETS}
                                     onChange={({ from, to }) => setFilters((prev) => ({ ...prev, date_from: from || defaultFrom(),
                                         date_to: to || todayIso() }))} />

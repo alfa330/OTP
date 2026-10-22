@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight, FileText, Image as ImageIcon, Loader2, Paperclip, Video } from 'lucide-react';
+import { ChevronRight, FileText, Image as ImageIcon, Loader2, Paperclip, Search, Video } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import {
@@ -36,6 +36,17 @@ export const dTabs = 'xl:[&>button]:px-4 xl:[&>button]:py-[7px] xl:[&>button]:te
     + '2xl:rounded-[13px] 2xl:p-1 2xl:[&>button]:rounded-[10px] 2xl:[&>button]:px-6 2xl:[&>button]:py-2 '
     + '2xl:[&>button]:text-[15px] 2xl:[&>button]:leading-6';
 export const INVALID_RING = 'ring-2 ring-rose-400/80';
+
+/* Поле поиска с лупой. У dInput на большом экране свой отступ 2xl:px-4, и
+   простой pl-9 он перебивал (правило ступени стоит в CSS позже): лупа ложилась
+   на первые буквы «ФИО или логин» (скриншот владельца 22.10.2026). Отступ под
+   лупу задан и на этой ступени, лупа там под кегль 16 px — как в «Учёте воды». */
+export const SearchField = ({ className = '', invalid = false, ...input }) => (
+    <label className={`relative block ${className}`}>
+        <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 2xl:left-4 2xl:size-[18px]" />
+        <input {...input} className={`${dInput} pl-9 2xl:pl-12 ${invalid ? INVALID_RING : ''}`} />
+    </label>
+);
 
 /* Группа: заголовок, справа — чип или действие, пояснение — под «i» у
    заголовка (правило портала), а не строкой под карточкой. */

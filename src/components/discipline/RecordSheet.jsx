@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Download, FileSignature, Lock, Search, ShieldAlert, X } from 'lucide-react';
+import { AlertTriangle, Download, FileSignature, Lock, ShieldAlert, X } from 'lucide-react';
 import { IosMenu } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -7,7 +7,7 @@ import { IosTimePicker } from '../ui/TimePicker';
 import { apiCode, apiError, saveBlob } from './disciplineApi';
 import {
     ACCEPT_ACT, ACCEPT_DOCS, ACCEPT_EVIDENCE, AttachButton, Chip, dBtnDanger, dBtnPrimary, dBtnSecondary, dInput,
-    EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, Spinner, StateBadge, StepChip, T,
+    EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, SearchField, Spinner, StateBadge, StepChip, T,
 } from './disciplineUi';
 import {
     CARD_STATES_BESIDE_STEP, DESCRIPTION_MIN, filesProblem, fmtDate, fmtDateTime, fmtMoney, FILE_LIMITS,
@@ -260,11 +260,8 @@ const ExplanationSection = ({ item, api, toast, reload, onOpenFile }) => {
                                         ))}
                                     </div>
                                 )}
-                                <label className="relative block">
-                                    <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                    <input className={`${dInput} pl-8 ${errors.witnesses ? INVALID_RING : ''}`} placeholder="Найти сотрудника"
-                                           value={query} onChange={(e) => setQuery(e.target.value)} />
-                                </label>
+                                <SearchField invalid={!!errors.witnesses} placeholder="Найти сотрудника"
+                                             value={query} onChange={(e) => setQuery(e.target.value)} />
                                 {found.length > 0 && (
                                     <ul className="max-h-[180px] divide-y divide-slate-100 overflow-y-auto rounded-xl bg-white ring-1 ring-slate-200/70">
                                         {found.filter((p) => p.id !== item.operator_id && !witnesses.some((w) => w.id === p.id)).map((p) => (

@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, UserRound, X } from 'lucide-react';
+import { UserRound, X } from 'lucide-react';
 import { IosHint, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { apiCode, apiError } from './disciplineApi';
 import {
     ACCEPT_EVIDENCE, AttachButton, dBtnPrimary, dBtnSecondary, dInput, Field, INVALID_RING, Plate, Spinner, T,
 } from './disciplineUi';
+import { OperatorPicker, useOperatorSearch } from './OperatorPicker';
 import {
     DESCRIPTION_MIN, DRAFT_INTERVAL_MS, draftKey, fileSizeText, filesProblem, hasTimecode, isFullMoment,
     localInputValue, momentProblem, shiftProblem, splitMoment, timecodesProblem,
@@ -107,8 +108,6 @@ const RecordForm = ({ open, api, toast, userId = null, initialOperator = null, o
     const [form, setForm] = useState(EMPTY);
     const [files, setFiles] = useState([]);
     const [query, setQuery] = useState('');
-    const [results, setResults] = useState([]);
-    const [searching, setSearching] = useState(false);
     const [context, setContext] = useState(null);
     const [contextLoading, setContextLoading] = useState(false);
     const [plateOpen, setPlateOpen] = useState(false);
@@ -152,7 +151,6 @@ const RecordForm = ({ open, api, toast, userId = null, initialOperator = null, o
         setFiles([]);
         setErrors({});
         setQuery('');
-        setResults([]);
         setContext(null);
         setPlateOpen(false);
         setForceMeasure(false);
@@ -205,18 +203,7 @@ const RecordForm = ({ open, api, toast, userId = null, initialOperator = null, o
     }, [open, form, saveDraft]);
 
     // Поиск сотрудника.
-    useEffect(() => {
-        if (!open || form.operator) return undefined;
-        let alive = true;
-        const timer = setTimeout(() => {
-            setSearching(true);
-            api.searchOperators(query)
-                .then((data) => { if (alive) setResults(data.items || []); })
-                .catch(() => { if (alive) setResults([]); })
-                .finally(() => { if (alive) setSearching(false); });
-        }, 200);
-        return () => { alive = false; clearTimeout(timer); };
-    }, [api, open, query, form.operator]);
+    const search = useOperatorSearch(api, open, !form.operator, query);
 
     // Плашка и подстановки — по человеку, моменту и весу типа. Момент — только
     // полный: дата без времени серверу ничего не скажет.
@@ -410,45 +397,14 @@ const RecordForm = ({ open, api, toast, userId = null, initialOperator = null, o
                                     <X size={15} />
                                 </button>
                             </div>
-                            {contextLoading && !context ? <div className="h-[60px] animate-pulse rounded-2xl bg-slate-100" /> : (
+                            {contextLoading && !context ? <div className="h-[60px] animate-pulse rounded-2xl bg-slate-200/70" /> : (
                                 <Plate plate={context?.plate} previous={context?.previous || []} expanded={plateOpen}
                                        onToggle={() => setPlateOpen((v) => !v)} />
                             )}
                         </div>
                     ) : (
-                        <div className="space-y-2">
-                            <label className="relative block">
-                                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                <input autoFocus className={`${dInput} pl-9 ${errors.operator ? INVALID_RING : ''}`}
-                                       placeholder="ФИО или логин" value={query} onChange={(e) => setQuery(e.target.value)} />
-                            </label>
-                            <div className="max-h-[300px] overflow-y-auto rounded-xl ring-1 ring-slate-200/70">
-                                {searching && !results.length ? (
-                                    <div className="flex items-center justify-center py-6"><Spinner /></div>
-                                ) : results.length ? (
-                                    <ul className="divide-y divide-slate-100">
-                                        {results.map((person) => (
-                                            <li key={person.id}>
-                                                <button type="button" onClick={() => pickOperator(person)}
-                                                        className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left hover:bg-slate-50 active:bg-slate-100">
-                                                    <span className="min-w-0 flex-1">
-                                                        <span className={`block truncate text-[13.5px] font-medium text-slate-900 ${T.body}`}>{person.name}</span>
-                                                        <span className={`block truncate text-[12px] text-slate-500 ${T.note}`}>
-                                                            {[person.group_name, person.department_name].filter(Boolean).join(' · ')}
-                                                            {person.role === 'trainee' ? ' · стажёр' : ''}
-                                                        </span>
-                                                    </span>
-                                                </button>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                ) : (
-                                    <div className={`px-4 py-6 text-center text-[12.5px] text-slate-500 ${T.sub}`}>
-                                        {query ? 'Никого не нашли среди ваших сотрудников' : 'Начните вводить ФИО'}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
+                        <OperatorPicker query={query} onQuery={setQuery} {...search} onPick={pickOperator}
+                                        invalid={!!errors.operator} autoFocus />
                     )}
                 </Field>
 

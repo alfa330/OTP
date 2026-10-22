@@ -174,6 +174,46 @@ class TimeFieldsTests(unittest.TestCase):
 
 
 
+class SearchFieldTests(unittest.TestCase):
+    """Владелец, 22.10.2026, скриншот формы нарушения на большом экране: лупа
+    лежала на первых буквах «ФИО или логин» (2xl:px-4 из dInput перебивал
+    pl-9), а окно прыгало, пока приходил и менялся список сотрудников.
+    Поведение списка — tests/discipline_operator_picker_render.test.mjs."""
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+
+    def test_every_search_goes_through_search_field(self):
+        for path in sorted(self.DIR.glob('*.jsx')):
+            if path.name == 'disciplineUi.jsx':
+                continue
+            text = path.read_text(encoding='utf-8')
+            self.assertNotIn('<Search ', text, path.name)
+            self.assertNotRegex(text, r'\$\{dInput\} pl-\d', path.name)
+
+    def test_operator_pickers_share_one_component(self):
+        for name in ('RecordForm.jsx', 'ControlsPanel.jsx'):
+            text = (self.DIR / name).read_text(encoding='utf-8')
+            self.assertIn('<OperatorPicker', text, name)
+            self.assertIn('useOperatorSearch(api, open, !', text, name)
+            self.assertNotIn('api.searchOperators', text, name)
+        # Окно особого контроля доезжает до нового роста при выборе человека.
+        controls = (self.DIR / 'ControlsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn("sizeKey={operator ? 'picked' : 'pick'}", controls)
+
+    def test_windows_start_at_the_top_edge(self):
+        """Окно не лежит в столбике space-y: ребёнку space-y достаётся margin-top,
+        и затемнение начиналось на 16–24 px ниже края экрана — светлая полоса над
+        окном (замер на стенде 22.10.2026). Окно — сосед столбика во фрагменте."""
+        for name, window in (('ControlsPanel.jsx', '<NewControlForm'), ('SettingsPanel.jsx', '<DictionaryEditor')):
+            text = (self.DIR / name).read_text(encoding='utf-8')
+            body = text[text.rindex('\n    return (\n'):]  # возврат самой панели — она последняя в файле
+            self.assertTrue(body.startswith('\n    return (\n        <>\n            <div className="space-y-'), name)
+            self.assertGreater(body.index(window), body.index('\n            </div>\n'), name)
+        # Форма нарушения и окно записи — дети корня раздела, у него нет space-y.
+        view = (self.DIR / 'DisciplineView.jsx').read_text(encoding='utf-8')
+        root = re.search(r'return \(\s*<div className="(mx-auto w-full max-w-\[1180px\][^"]*)"', view)
+        self.assertNotIn('space-y-', root.group(1))
+
+
 class LadderSettingsTests(unittest.TestCase):
     """Владелец, 21.10.2026: лестница по умолчанию — как в ТЗ, но без подписи
     «как в ТЗ»; лестницы называют и заводят свои (глава отдела и выше)."""

@@ -446,7 +446,7 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
 
 /**
  * iOS-модалка: затемнение + backdrop-blur, закруглённый контейнер,
- * липкие хедер и (опц.) футер с размытием.
+ * хедер и (опц.) футер по краям прокручиваемого тела.
  *
  * `onBack` — второй уровень ВНУТРИ окна, как в «Настройках» iOS: шеврон слева
  * от заголовка вместо второй модалки поверх первой. Вложенная модалка на этом
@@ -594,8 +594,15 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
         >
             <div ref={panelRef} className={embedded ? 'flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-slate-50'
                 : `otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl${panelMotion}`}>
+                {/* Шапка и подвал — без backdrop-blur: тело окна прокручивается
+                    МЕЖДУ ними, под ними только своё же полотно, и размывать
+                    нечего. Размытие же у скруглённых углов захватывало то, что
+                    снаружи окна, — затемнённую страницу, — и в углах шапки и
+                    подвала проступали бледные дуги (скриншот владельца
+                    22.10.2026, «Дисциплина»). Цвет прежний: белый 80 % поверх
+                    полотна. */}
                 <div className={embedded ? 'relative flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/80 px-3 py-2'
-                    : 'otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5'}>
+                    : 'otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 sm:px-5 sm:py-3.5'}>
                     {/* Шеврон «назад» слева — на телефоне он и закрывает экран:
                         крестик в правом углу читается как «отменить», а уход с
                         экрана в мессенджере делают именно им. Внутренний onBack
@@ -649,7 +656,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                     но и ряд действий над записью — на телефоне он не влезал в
                     строку и выдавливал главную кнопку за край. */}
                 {shown.footer && (
-                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-5">
+                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-5">
                         {shown.footer}
                     </div>
                 )}
