@@ -303,7 +303,9 @@ def init_parcels_schema(cursor):
     cursor.execute("SAVEPOINT parcels_trgm")
     try:
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT parcels_trgm")
         trigram_ready = False
     else:

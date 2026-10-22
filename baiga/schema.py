@@ -229,7 +229,9 @@ def init_baiga_schema(cursor):
     try:
         for statement in _TRGM_STATEMENTS:
             cursor.execute(statement)
-    except Exception:  # noqa: BLE001 — без индекса поиск просто медленнее
+    except Exception as exc:  # noqa: BLE001 — без индекса поиск просто медленнее
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT baiga_trgm")
     else:
         cursor.execute("RELEASE SAVEPOINT baiga_trgm")

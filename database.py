@@ -75,6 +75,10 @@ def _env_float(name, default, minimum=None):
     return value
 
 
+def _is_schema_lock_conflict(error):
+    return getattr(error, 'pgcode', None) in ('55P03', '40P01')
+
+
 # Global connection pool. Keep a warm floor so the first browser burst does not
 # pay for creating PostgreSQL connections one by one on the request path.
 MIN_CONN = _env_int('POSTGRES_POOL_MIN_CONN', 16, minimum=1)
@@ -1508,6 +1512,7 @@ class Database:
     SCHEMA_INIT_LOCK_KEY = 915904137
     SCHEMA_INIT_LOCK_TIMEOUT_SEC = 120
     SCHEMA_INIT_RETRY_ATTEMPTS = 6
+    SCHEMA_DDL_LOCK_TIMEOUT_MS = 2000
     SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE = 915904138
     SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE = 915904139
     TEZ_LEAD_PERIOD_LOCK_NAMESPACE = 915904140
@@ -1596,17 +1601,19 @@ class Database:
                 return
             except psycopg2.Error as exc:
                 last_error = exc
-                # 40P01 = deadlock_detected; OperationalError/InterfaceError = транзиентный
-                # обрыв соединения (например, кратковременный рестарт/блип managed-Postgres
-                # во время деплоя — «server closed the connection unexpectedly» / SSL EOF).
-                is_deadlock = getattr(exc, "pgcode", None) == '40P01'
-                is_transient_conn = isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
-                if (is_deadlock or is_transient_conn) and attempt < attempts:
+                # LockNotAvailable/DeadlockDetected тоже OperationalError, но соединение
+                # исправно. Конфликт требует отката всей миграции и паузы, а не сброса пула.
+                is_lock_conflict = _is_schema_lock_conflict(exc)
+                is_transient_conn = (
+                    isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+                    and not is_lock_conflict
+                )
+                if (is_lock_conflict or is_transient_conn) and attempt < attempts:
                     if is_transient_conn:
                         # Пул мог частично создаться с «протухшими» соединениями —
                         # сбрасываем, чтобы следующая попытка построила его заново.
                         self._reset_pool_after_transient_error()
-                    delay = min(5.0, (1.0 if is_transient_conn else 0.4) * attempt)
+                    delay = min(5.0, float(attempt))
                     logging.warning(
                         "Transient error during DB init (%s, attempt %s/%s). Retrying in %.1fs",
                         getattr(exc, "pgcode", None) or type(exc).__name__,
@@ -1636,6 +1643,12 @@ class Database:
 
     def _init_db(self):
         with self._get_cursor() as cursor:
+            # Даже ALTER ... IF NOT EXISTS запрашивает AccessExclusiveLock. Если импорт
+            # держит читающую транзакцию, ожидающий ALTER ставит за собой авторизацию
+            # пользователей и заполняет пул. Ограничение действует только в этой транзакции;
+            # при конфликте _init_db_with_retry повторяет её после полного отката.
+            cursor.execute("SELECT set_config('lock_timeout', %s, true)",
+                           (f'{self.SCHEMA_DDL_LOCK_TIMEOUT_MS}ms',))
             # Departments table (created first so users/directions can reference it)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS departments (
@@ -1668,9 +1681,15 @@ class Database:
             # внешние связки, включая ИИ-оценку, не отвязываются при правках);
             # архивные строки хранят шкалу критериев «как была» для старых оценок.
             cursor.execute("""
-                ALTER TABLE directions
-                ADD COLUMN IF NOT EXISTS canonical_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
+                SELECT 1 FROM pg_attribute
+                WHERE attrelid = 'directions'::regclass
+                  AND attname = 'canonical_id' AND NOT attisdropped
             """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE directions
+                    ADD COLUMN IF NOT EXISTS canonical_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
+                """)
             # Бекфилл для исторических цепочек версий (старый механизм создавал новую
             # строку на каждую правку): каждой неактивной версии проставляется ссылка
             # на активное продолжение её цепочки, если оно существует.
@@ -5387,6 +5406,8 @@ class Database:
                 """)
                 cursor.execute("RELEASE SAVEPOINT sp_szov_broadcast_direction")
             except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_szov_broadcast_direction")
                 logging.error("Отбивка табло: направление получателей не применилось: %s",
                               exc, exc_info=True)
@@ -5448,6 +5469,8 @@ class Database:
                 """)
                 cursor.execute("RELEASE SAVEPOINT sp_wallboard_snapshot_direction")
             except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_wallboard_snapshot_direction")
                 logging.error("Табло: направление снимка не применилось: %s", exc, exc_info=True)
             # Выходы на перерыв мимо графика (задача #114). Пишем ТОЛЬКО нарушения: перерыв,
@@ -7165,6 +7188,8 @@ class Database:
                 self._backfill_groups_from_supervisors_tx(cursor)
                 cursor.execute("RELEASE SAVEPOINT sp_groups_backfill")
             except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_groups_backfill")
                 logging.error("groups backfill skipped due to error: %s", exc, exc_info=True)
 
@@ -7174,6 +7199,8 @@ class Database:
                 self._backfill_null_group_id_tx(cursor)
                 cursor.execute("RELEASE SAVEPOINT sp_null_group_backfill")
             except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
                 logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
 
@@ -7186,6 +7213,8 @@ class Database:
                 self._backfill_task_accepted_reads_tx(cursor)
                 cursor.execute("RELEASE SAVEPOINT sp_bell_notify")
             except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_bell_notify")
                 logging.error("bell notify triggers skipped: %s", exc, exc_info=True)
 
@@ -8139,7 +8168,9 @@ class Database:
         try:
             from wiki.schema import init_wiki_schema
             init_wiki_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT wiki_schema")
             logging.exception(
                 "Схема раздела «Вики» не применилась — раздел будет недоступен, "
@@ -8160,7 +8191,9 @@ class Database:
         try:
             from news.schema import init_news_schema
             init_news_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT news_schema")
             logging.exception(
                 "Схема раздела «Новости» не применилась — окно новости "
@@ -8177,6 +8210,8 @@ class Database:
             from news.schema import backfill_space_ids
             filled = backfill_space_ids(cursor)
         except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT news_spaces_backfill")
             logging.error("Пространства новостям не проставлены: %s", exc, exc_info=True)
         else:
@@ -8202,7 +8237,9 @@ class Database:
         try:
             from crm.schema import init_crm_schema
             init_crm_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT crm_schema")
             logging.exception(
                 "Схема раздела «Обращения» не применилась — раздел будет недоступен, "
@@ -8226,7 +8263,9 @@ class Database:
         try:
             from complaints.schema import init_complaints_schema
             init_complaints_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT complaints_schema")
             logging.exception(
                 "Схема раздела «Жалобы» не применилась — раздел будет недоступен, "
@@ -8249,7 +8288,9 @@ class Database:
         try:
             from discipline.schema import init_discipline_schema
             init_discipline_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT discipline_schema")
             logging.exception(
                 "Схема раздела «Дисциплина» не применилась — раздел будет недоступен, "
@@ -8273,7 +8314,9 @@ class Database:
         try:
             from payments.schema import init_payments_schema
             init_payments_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT payments_schema")
             logging.exception(
                 "Схема раздела «Оплата счетов» не применилась — раздел будет недоступен, "
@@ -8303,7 +8346,9 @@ class Database:
         try:
             from parcels.schema import init_parcels_schema
             init_parcels_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT parcels_schema")
             logging.exception(
                 "Схема раздела «Посылки» не применилась — раздел будет недоступен, "
@@ -8332,7 +8377,9 @@ class Database:
         try:
             from driver_chats.schema import init_driver_chats_schema
             init_driver_chats_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT driver_chats_schema")
             logging.exception(
                 "Схема раздела «Чаты водителей» не применилась — раздел будет "
@@ -8362,7 +8409,9 @@ class Database:
         try:
             from sign_links.schema import init_sign_links_schema
             init_sign_links_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT sign_links_schema")
             logging.exception(
                 "Схема раздела «Ссылка на подписание» не применилась — раздел будет "
@@ -8405,7 +8454,9 @@ class Database:
         try:
             from olx_amo.schema import init_olx_amo_schema
             init_olx_amo_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT olx_amo_schema")
             logging.exception(
                 "Схема раздела «Лиды OLX» не применилась — раздел будет недоступен, "
@@ -8432,7 +8483,9 @@ class Database:
         try:
             from olx_ads.schema import init_olx_ads_schema
             init_olx_ads_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT olx_ads_schema")
             logging.exception(
                 "Схема раздела «Объявления OLX» не применилась — раздел будет "
@@ -8455,7 +8508,9 @@ class Database:
         try:
             from voice_trainer.schema import init_trainer_schema
             init_trainer_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT trainer_schema")
             logging.exception(
                 "Схема раздела «Тренажёр» не применилась — раздел будет недоступен, "
@@ -8479,7 +8534,9 @@ class Database:
         try:
             from oktell_guard.schema import init_oktell_guard_schema
             init_oktell_guard_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT oktell_guard_schema")
             logging.exception(
                 "Схема раздела «Ограничитель Перезвона» не применилась — раздел будет "
@@ -8500,7 +8557,9 @@ class Database:
         try:
             from fleet_edm.schema import init_fleet_edm_schema
             init_fleet_edm_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT fleet_edm_schema")
             logging.exception(
                 "Схема раздела «Провайдер ЭДО» не применилась — раздел будет "
@@ -8524,7 +8583,9 @@ class Database:
         try:
             from driver_mailings.schema import init_driver_mailings_schema
             init_driver_mailings_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT driver_mailings_schema")
             logging.exception(
                 "Схема раздела «Рассылки» не применилась — раздел будет "
@@ -8548,7 +8609,9 @@ class Database:
         try:
             from cdr.schema import init_cdr_schema
             init_cdr_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT cdr_schema")
             logging.exception(
                 "Схема раздела «Касания» не применилась — раздел будет недоступен, "
@@ -8567,7 +8630,9 @@ class Database:
         try:
             from pbx.schema import init_pbx_schema
             init_pbx_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT pbx_schema")
             logging.exception(
                 "Схема раздела «АТС» не применилась — раздел будет недоступен, "
@@ -8589,7 +8654,9 @@ class Database:
         try:
             from dial_list.schema import init_dial_list_schema
             init_dial_list_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT dial_list_schema")
             logging.exception(
                 "Схема раздела «Обзвон из телефона» не применилась — раздел будет "
@@ -8617,7 +8684,9 @@ class Database:
         try:
             from op_funnel.schema import init_op_funnel_schema
             init_op_funnel_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT op_funnel_schema")
             logging.exception(
                 "Схема раздела «Воронка ОП» не применилась — раздел будет недоступен, "
@@ -8640,7 +8709,9 @@ class Database:
         try:
             from wazzup.workspace_schema import init_wazzup_workspace_schema
             init_wazzup_workspace_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT wazzup_workspace_schema")
             logging.exception(
                 "Схема рабочего места «Чатов ОП» не применилась — верификаторам раздел "
@@ -8666,7 +8737,9 @@ class Database:
         try:
             from call_qa.marketing.schema import init_qa_marketing_schema
             init_qa_marketing_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT qa_marketing_schema")
             logging.exception(
                 "Схема «Маркетингового мониторинга» не применилась — раздел «ИИ-оценка» "
@@ -8695,7 +8768,9 @@ class Database:
         try:
             from trainings.schema import init_trainings_schema
             init_trainings_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT trainings_schema")
             logging.exception(
                 "Схема раздела «Тренинги» не применилась — корпоративные темы будут "
@@ -8751,7 +8826,9 @@ class Database:
                 ON icore_phone_releases (variant)
                 WHERE is_current;
             """)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT icore_phone_schema")
             logging.exception(
                 "Схема релизов iCORE Phone не применилась — автообновление телефона "
@@ -13765,7 +13842,9 @@ class Database:
         """
         try:
             cursor.execute("DELETE FROM shift_auction_test_lots WHERE remainder_of_lot_id IS NOT NULL")
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             pass
         try:
             cursor.execute("""
@@ -13775,7 +13854,9 @@ class Database:
                   AND l.source_schedule_shift_id IS NOT NULL
             """)
             rows = cursor.fetchall() or []
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             return
         for lot_id, start_time, end_time, plan_id, shift_id in rows:
             try:
@@ -13803,7 +13884,9 @@ class Database:
                             post_claim_end_time = NULL, updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
                     """, (lot_id,))
-            except Exception:
+            except Exception as exc:
+                if _is_schema_lock_conflict(exc):
+                    raise
                 continue
 
     @staticmethod
@@ -65146,7 +65229,9 @@ class Database:
         try:
             from library.schema import init_library_schema
             init_library_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT library_schema")
             logging.exception(
                 "Схема раздела «Библиотека» не применилась — раздел будет недоступен, "
@@ -65170,7 +65255,9 @@ class Database:
         try:
             from water.schema import init_water_schema
             init_water_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT water_schema")
             logging.exception(
                 "Схема раздела «Учёт воды» не применилась — раздел будет недоступен, "
@@ -65194,7 +65281,9 @@ class Database:
         try:
             from thermoboxes.schema import init_thermoboxes_schema
             init_thermoboxes_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT thermoboxes_schema")
             logging.exception(
                 "Схема раздела «Термокороба» не применилась — раздел будет недоступен, "
@@ -65267,7 +65356,9 @@ class Database:
         try:
             from baiga.schema import init_baiga_schema
             init_baiga_schema(cursor)
-        except Exception:
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
             cursor.execute("ROLLBACK TO SAVEPOINT baiga_schema")
             logging.exception(
                 "Схема раздела «Списки Байги» не применилась — раздел будет недоступен, "

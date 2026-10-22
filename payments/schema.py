@@ -1065,7 +1065,9 @@ def init_payments_schema(cursor):
         for sql in _TRGM_STATEMENTS:
             cursor.execute(sql)
         cursor.execute("RELEASE SAVEPOINT payments_trgm")
-    except Exception:  # noqa: BLE001 — без trigram раздел живёт, просто медленнее ищет
+    except Exception as exc:  # noqa: BLE001 — без trigram раздел живёт, просто медленнее ищет
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT payments_trgm")
     # Почта поставщиков, записанная раньше в «Контакт», — в поле «Почта», один раз.
     # Под своим SAVEPOINT: сбой переноса не должен оставить раздел без схемы.
@@ -1074,7 +1076,9 @@ def init_payments_schema(cursor):
         from . import requisites_mail
         requisites_mail.adopt_contact_emails(cursor)
         cursor.execute("RELEASE SAVEPOINT payments_contact_emails")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT payments_contact_emails")
         import logging
         logging.exception('Оплата счетов: почта из «Контакта» не перенесена')
@@ -1086,7 +1090,9 @@ def init_payments_schema(cursor):
         from . import directory
         directory.adopt_email_array(cursor)
         cursor.execute("RELEASE SAVEPOINT payments_counterparty_emails")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT payments_counterparty_emails")
         import logging
         logging.exception('Оплата счетов: адреса поставщиков не перенесены в «Почту поставщиков»')
@@ -1098,7 +1104,9 @@ def init_payments_schema(cursor):
         from . import legacy
         legacy.migrate(cursor)
         cursor.execute("RELEASE SAVEPOINT payments_legacy")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute("ROLLBACK TO SAVEPOINT payments_legacy")
         import logging
         logging.exception('Оплата счетов: перенос заявок первой версии не выполнен')

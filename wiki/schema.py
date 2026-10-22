@@ -2823,7 +2823,9 @@ def init_wiki_schema(cursor):
     try:
         for statement in _QUESTION_STATEMENTS:
             cursor.execute(statement.replace('%(now)s', _NOW))
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_operator_questions')
         import logging
         logging.exception(
@@ -2843,7 +2845,9 @@ def init_wiki_schema(cursor):
     try:
         for statement in _AI_VECTOR_STATEMENTS:
             cursor.execute(statement.replace('%(now)s', _NOW))
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_vector')
         import logging
         logging.warning(
@@ -2915,7 +2919,9 @@ def init_wiki_schema(cursor):
                         """,
                         ([_p[0] for _p in _pairs], [_p[1] for _p in _pairs]),
                     )
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_links_backfill')
         import logging
         logging.warning('Раздел «Вики»: разовая заливка внутренних ссылок не удалась — '
@@ -2932,7 +2938,9 @@ def init_wiki_schema(cursor):
             cursor.execute('DROP INDEX IF EXISTS ' + index_name)
         for statement in _TRIGRAM_STATEMENTS:
             cursor.execute(statement)
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_trgm')
         import logging
         logging.warning(

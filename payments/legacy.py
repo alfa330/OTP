@@ -71,7 +71,9 @@ def migrate(cursor):
             _migrate_one(cursor, request_id)
             cursor.execute('RELEASE SAVEPOINT payments_legacy_one')
             moved += 1
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+                raise
             cursor.execute('ROLLBACK TO SAVEPOINT payments_legacy_one')
             failed.append(request_id)
             logging.exception('Оплата счетов: заявка №%s первой версии не переведена', request_id)
