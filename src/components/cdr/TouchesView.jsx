@@ -17,6 +17,7 @@ import {
     TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
+import LivePanel, { CallButton, usePbxLive } from './LivePanel';
 
 /* Раздел «Касания» — звонки отдела продаж из CDR АТС FreePBX.
  *
@@ -182,6 +183,10 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const [downloading, setDownloading] = useState(false);
 
     const poll = useRef(null);
+
+    /* Живые звонки станции и click-to-call — коннектор АТС (/api/pbx). Опрос идёт только в
+       режиме «Звонки»; раздел без коннектора работает как раньше, панель просто не рисуется. */
+    const pbx = usePbxLive(apiBaseUrl, headers, mode === 'calls', showToast);
 
     useEffect(() => {
         let alive = true;
@@ -509,6 +514,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 </div>
             ) : null}
 
+            <LivePanel pbx={pbx} />
+
             {pending > 0 && !bridgeDown ? (
                 <SyncProgress coverage={coverage} range={range} />
             ) : null}
@@ -663,7 +670,10 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                         </div>
                                     ) : null}
                                 </Td>
-                                <Td className="whitespace-nowrap tabular-nums">{prettyPhone(touch.phone)}</Td>
+                                <Td className="whitespace-nowrap tabular-nums">
+                                    {prettyPhone(touch.phone)}
+                                    <CallButton pbx={pbx} phone={touch.phone} lineNumber={touch.line_number} />
+                                </Td>
                                 <Td>
                                     <div className="truncate max-w-[200px]" title={touch.operator || undefined}>{touch.operator || '—'}</div>
                                     <div className="text-[11.5px] text-slate-400">

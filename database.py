@@ -7130,6 +7130,7 @@ class Database:
             self._init_trainings_schema_tx(cursor)
             self._init_trainer_schema_tx(cursor)
             self._init_cdr_schema_tx(cursor)
+            self._init_pbx_schema_tx(cursor)
             self._init_olx_amo_schema_tx(cursor)
             self._init_olx_ads_schema_tx(cursor)
             self._init_op_funnel_schema_tx(cursor)
@@ -8545,6 +8546,25 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT cdr_schema")
+
+    def _init_pbx_schema_tx(self, cursor):
+        """Схема раздела «АТС» (pbx_calls, pbx_commands, pbx_connector_state) — живые
+        звонки станции от коннектора и команды ей. Под SAVEPOINT, как соседи: упавший
+        раздел не роняет старт приложения, его ручки отвечают 503 словами."""
+        import logging
+
+        cursor.execute("SAVEPOINT pbx_schema")
+        try:
+            from pbx.schema import init_pbx_schema
+            init_pbx_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT pbx_schema")
+            logging.exception(
+                "Схема раздела «АТС» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT pbx_schema")
 
     def _init_dial_list_schema_tx(self, cursor):
         """Схема раздела «Обзвон из телефона» (таблицы dial_list_*).

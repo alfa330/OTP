@@ -68207,6 +68207,24 @@ try:
 except Exception:
     logging.exception("Раздел «Касания»: Blueprint НЕ подключён")
 
+# --- АТС: живые звонки станции и команды ей (коннектор cdr_bridge/pbx_connector.py) ----------
+# Коннектор сидит на AMI станции внутри корпоративной сети и присылает состояние звонков в
+# момент, когда они происходят (/api/pbx/agent/sync, подпись тем же ключом, что у моста);
+# отсюда забирает команды: позвонить с телефона оператора, положить трубку, подключить
+# супервайзера к разговору. Портал к станции не ходит.
+try:
+    from pbx.routes import build_pbx_blueprint  # noqa: E402
+
+    app.register_blueprint(build_pbx_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «АТС»: Blueprint подключён на /api/pbx")
+except Exception:
+    logging.exception("Раздел «АТС»: Blueprint НЕ подключён")
+
 # --- Табло ОП: отдел продаж на FreePBX -----------------------------------------------------
 # Аналог табло СЗоВ по «Линии», но портал к станции не ходит: цифры дня — из касаний,
 # которые мост досылает живым хвостом (cdr_bridge/live.py), люди и статусы — из событий
