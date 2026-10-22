@@ -575,7 +575,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
 
             {tab === 'touches' && data ? (
                 <TouchesTable touches={touches} total={total} page={page} pageCount={pageCount}
-                              onPage={setPage} />
+                              onPage={setPage} pbx={pbx} />
             ) : null}
             {tab === 'operators' && data ? <OperatorsTable rows={stats?.operators || []} /> : null}
             {tab === 'daily' && data ? <DailyTable rows={stats?.daily || []} /> : null}
@@ -629,7 +629,7 @@ function SyncProgress({ coverage, range }) {
     );
 }
 
-function TouchesTable({ touches, total, page, pageCount, onPage }) {
+function TouchesTable({ touches, total, page, pageCount, onPage, pbx }) {
     if (!touches.length) {
         return (
             <div className={`${iosCard} mt-3 px-4 py-10 text-center text-[13px] text-slate-500`}>
