@@ -753,6 +753,7 @@ class RouteTests(unittest.TestCase):
         self.client = app.test_client()
 
     def _build_blueprint(self, **kwargs):
+        kwargs.setdefault('live_loader', lambda: ([], False))
         self.bp = op_routes.build_op_wallboard_blueprint(**kwargs)
         return self.bp
 

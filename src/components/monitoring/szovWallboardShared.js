@@ -613,7 +613,7 @@ const isTabVisible = () => {
 
 export function createSnapshotFeed({ path, pollIntervalMs }) {
     const store = {
-        state: { snapshot: null, error: null, loading: true },
+        state: { snapshot: null, error: null, loading: true, receivedAt: 0 },
         listeners: new Set(),
         source: { apiBaseUrl: '', buildHeaders: null },
         timer: null,
@@ -657,7 +657,7 @@ export function createSnapshotFeed({ path, pollIntervalMs }) {
             }
             const data = await response.json();
             store.lastFetchAt = Date.now();
-            patchState({ snapshot: data, error: null });
+            patchState({ snapshot: data, error: null, receivedAt: store.lastFetchAt });
         } catch (requestError) {
             if (requestError?.name === 'AbortError') return;
             // Пока есть последний снимок — экран на стене не гасим, просто помечаем расхождение.
@@ -707,7 +707,8 @@ export function createSnapshotFeed({ path, pollIntervalMs }) {
     };
 
     /**
-     * Снимок: {snapshot, error, loading, refresh}.
+     * Снимок: {snapshot, error, loading, refresh, receivedAt} — receivedAt: когда снимок пришёл
+     * (Date.now()), общий для всех подписчиков; по нему тикают часы табло.
      *
      * Источник (адрес API и сборщик заголовков) обновляем в рендере, а не в эффекте: первый
      * запрос уходит из subscribe, то есть ДО эффектов, и без адреса он бы просто не состоялся.
@@ -716,7 +717,8 @@ export function createSnapshotFeed({ path, pollIntervalMs }) {
         store.source = { apiBaseUrl, buildHeaders: withAccessTokenHeader };
         const state = useSyncExternalStore(subscribeSnapshot, getStoreState, getStoreState);
         const refresh = useCallback(() => { fetchSnapshot({ silent: true }); }, []);
-        return { snapshot: state.snapshot, error: state.error, loading: state.loading, refresh };
+        return { snapshot: state.snapshot, error: state.error, loading: state.loading, refresh,
+                 receivedAt: state.receivedAt };
     };
 }
 

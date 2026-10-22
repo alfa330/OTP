@@ -517,11 +517,16 @@ def build_people(people, live_statuses, status_entry, by_ext, resolve_name):
     return rows
 
 
+def effective_status_key(row):
+    """Статус строки на экране: живой звонок станции (коннектор АТС) главнее статуса телефона."""
+    return (row.get('live') or {}).get('status_key') or row['status_key']
+
+
 def count_now(people_rows):
     counts = defaultdict(int)
     for row in people_rows:
         if row.get('in_roster'):
-            counts[row['status_key']] += 1
+            counts[effective_status_key(row)] += 1
     return {
         'operators_total': sum(1 for r in people_rows if r.get('in_roster')),
         'operators_online': sum(counts[k] for k in ONLINE_STATUS_KEYS),
@@ -535,11 +540,161 @@ def count_now(people_rows):
     }
 
 
+# ── Живые звонки станции (коннектор АТС, 22.10.2026) ─────────────────────────────────────────
+#
+# Статусы людей приходят из iCORE Phone, но о звонке лучше всех знает сама станция: коннектор АТС
+# (cdr_bridge/pbx_connector.py) видит его в момент, когда он идёт. Поэтому поверх статуса
+# телефона кладётся «живой» статус станции — только туда, где станция знает больше:
+#   * разговор — «В разговоре» (с момента ответа), даже если телефон ещё не прислал «занят»;
+#   * исходящий набор и заявка автообзвона, которой досталась линия оператора, — «Соединение»
+#     (с начала набора): оператор занят, клиент ещё не ответил.
+# Обратно не действует: нет звонка на станции — статус телефона остаётся как есть (телефон мог
+# быть на другой линии, а отбой станции опережает «готов» телефона на секунду).
+# «Звонит» оператору не показывается: очередь предлагает звонок нескольким, и строки мигали бы.
+#
+# «В очереди» — входящие (не автообзвон: его заявки ждут ОПЕРАТОРА, а не ответа), вставшие в
+# очередь и ещё не принятые; «ждут дольше всех» — от входа в очередь самого раннего. Коннектор не
+# на связи — этих цифр нет вовсе (None → «—»): ноль соврал бы, что очередь пуста.
+
+LIVE_TALKING = {'status_key': 'talking', 'status_label': 'В разговоре'}
+LIVE_CONNECTING = {'status_key': 'connecting', 'status_label': 'Соединение'}
+_LIVE_RANK = {'talking': 2, 'connecting': 1}
+_DIALING_DIRECTIONS = ('out', 'autodial', 'internal')
+
+
+def _wall(value):
+    """Время станции «YYYY-MM-DDTHH:MM:SS» → datetime или None."""
+    text = str(value or '')[:19]
+    if len(text) != 19:
+        return None
+    try:
+        return datetime.strptime(text.replace(' ', 'T'), '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        return None
+
+
+def live_overlay(calls):
+    """{внутренний номер: живой статус} по идущим звонкам станции."""
+    out = {}
+    for call in calls or []:
+        state = call.get('state')
+        if state == 'ended':
+            continue
+        if state == 'talking':
+            base, exts = LIVE_TALKING, (call.get('ext'), call.get('peer_ext'))
+            since = call.get('answered_at') or call.get('started_at')
+        elif call.get('direction') in _DIALING_DIRECTIONS and call.get('ext'):
+            base, exts = LIVE_CONNECTING, (call.get('ext'),)
+            since = call.get('ringing_at') or call.get('started_at')
+        else:
+            continue
+        for ext in exts:
+            ext = str(ext or '')
+            if not ext:
+                continue
+            entry = dict(base, since=str(since or '')[:19], direction=call.get('direction') or '')
+            known = out.get(ext)
+            if known is None or _LIVE_RANK[entry['status_key']] > _LIVE_RANK[known['status_key']] \
+                    or (entry['status_key'] == known['status_key'] and entry['since'] < known['since']):
+                out[ext] = entry
+    return out
+
+
+def apply_live(rows, overlay):
+    """Живой статус строкам списка (по внутреннему номеру); без звонка — None."""
+    for row in rows:
+        row['live'] = overlay.get(str(row.get('ext') or '')) if row.get('ext') else None
+    return rows
+
+
+def waiting_calls(calls):
+    """Входящие в очереди прямо сейчас: встали в очередь, не приняты, не закончились."""
+    return [call for call in calls or []
+            if call.get('direction') == 'in' and call.get('state') in ('queued', 'ringing')
+            and not call.get('answered_at') and call.get('queued_at')]
+
+
+def queue_fields(waiting, now, online):
+    """«В очереди» и «ждут дольше всех»: число, секунды и момент входа самого раннего (по нему
+    экран тикает сам, не дожидаясь следующего кадра)."""
+    if not online:
+        return {'queue': None, 'queue_max_wait_seconds': None, 'queue_since': None}
+    entries = sorted(str(call.get('queued_at'))[:19] for call in waiting)
+    since = entries[0] if entries else None
+    moment = _wall(since)
+    wait = int(max(0, (now - moment).total_seconds())) if moment else 0
+    return {'queue': len(waiting), 'queue_max_wait_seconds': wait, 'queue_since': since}
+
+
+def _group_queue_fields(waiting, queue_groups, group_id, now, online):
+    """Очередь группы: ждущие в очередях, хозяин которых — эта группа (то же правило, что у
+    потерянных без оператора, `touch_group`)."""
+    own = [call for call in waiting
+           if (queue_groups or {}).get(_touch_queue(call.get('queue'))) == group_id]
+    return queue_fields(own, now, online)
+
+
+def live_patch(payload, calls, online, now):
+    """Живые поля снимка по текущим звонкам: то, что поток табло шлёт между снимками.
+
+    Считается из того же снимка (статусы телефонов на момент снимка) и тех же правил, что и сам
+    снимок (`assemble`), — поэтому кадр потока и следующий снимок не расходятся ни в одной цифре.
+    Возвращает {'at', 'online', 'operators': {ключ строки: живой статус|None}, 'now', 'groups_now'}."""
+    rows = [dict(row) for row in (payload or {}).get('operators') or []]
+    overlay = live_overlay(calls) if online else {}
+    apply_live(rows, overlay)
+    waiting = waiting_calls(calls) if online else []
+    now_block = count_now(rows)
+    now_block.update(queue_fields(waiting, now, online))
+    queue_groups = (payload or {}).get('queue_groups') or {}
+    groups_now = {}
+    for group in (payload or {}).get('groups') or []:
+        block = count_now([row for row in rows if row.get('group_id') == group['id']])
+        block.update(_group_queue_fields(waiting, queue_groups, group['id'], now, online))
+        groups_now[str(group['id'])] = block
+    return {
+        'at': now.strftime('%Y-%m-%dT%H:%M:%S'),
+        'online': bool(online),
+        'operators': {row_key(row): {field: row.get(field) for field in LIVE_ROW_FIELDS} for row in rows},
+        'now': now_block,
+        'groups_now': groups_now,
+    }
+
+
+# Поля строки, которые меняются между снимками: живой статус станции и статус телефона (его
+# смену поток подставляет сразу, не дожидаясь снимка, — см. `set_status`).
+LIVE_ROW_FIELDS = ('live', 'status_key', 'status_label', 'status_weight', 'status_seconds', 'status_at')
+
+
+def set_status(payload, operator_id, entry, live):
+    """Новый статус телефона одного человека — прямо в снимок, без пересчёта дня: «сейчас»
+    отдела и групп пересчитываются из строк. Возвращает, нашлась ли строка."""
+    found = False
+    for row in (payload or {}).get('operators') or []:
+        if row.get('id') == operator_id:
+            row.update(status_fields(entry, live))
+            found = True
+    if not found:
+        return False
+    rows = payload['operators']
+    queue = {key: payload.get('now', {}).get(key) for key in ('queue', 'queue_max_wait_seconds', 'queue_since')}
+    payload['now'] = dict(count_now(rows), **queue)
+    for group in payload.get('groups') or []:
+        group_queue = {key: group.get('now', {}).get(key) for key in ('queue', 'queue_max_wait_seconds', 'queue_since')}
+        group['now'] = dict(count_now([row for row in rows if row.get('group_id') == group['id']]), **group_queue)
+    return True
+
+
+def row_key(row):
+    """Ключ строки списка — тот же, что у экрана: id человека или внутренний номер «ничьей» строки."""
+    return str(row['id']) if row.get('id') is not None else 'ext:%s' % (row.get('ext') or '')
+
+
 def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
              bridge_state, now, sl_seconds=DEFAULT_SL_SECONDS,
              ar_min_percent=DEFAULT_AR_MIN_PERCENT, ar_max_percent=DEFAULT_AR_MAX_PERCENT,
              announce_seconds=None, memberships=None, queue_owners=None, phone_events=None,
-             lead_speed=None):
+             lead_speed=None, live_calls=None, live_online=False):
     """Снимок целиком. `bridge_state` — строка `cdr_agent_state` (live_at, last_seen_at);
     `announce_seconds` — {очередь: длина автоинформатора}, по которой касаниям уже поставлен
     `queued_at` (отдаётся в снимке для прозрачности: видно, от чего отсчитано ожидание).
@@ -549,13 +704,23 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
     разрезы по группам и время входа (ТЗ #339). Без них снимок прежний.
 
     `lead_speed` — готовый блок «Принятие лида в работу» (`lead_speed.take_speed` + группы
-    «Основы» и возраст снимка сделок); None — сделки не прочитались, на экране прочерк."""
+    «Основы» и возраст снимка сделок); None — сделки не прочитались, на экране прочерк.
+
+    `live_calls` — идущие звонки станции от коннектора АТС, `live_online` — на связи ли он
+    (см. `live_overlay` и `queue_fields`); без них «сейчас» — по одним статусам телефонов."""
     parts = aggregate(touches, sl_seconds)
     rows = build_people(people, live_statuses, status_entry, parts['by_ext'], resolve_name)
     catalog = group_catalog(memberships)
     attach_groups(rows, memberships, catalog)
     attach_entry_times(rows, phone_events, day, status_entry)
+    apply_live(rows, live_overlay(live_calls) if live_online else {})
     groups = group_breakdown(touches, rows, people, memberships, catalog, queue_owners, sl_seconds)
+    queue_groups = {str(queue): group_id for queue, group_id in (queue_owners or {}).items()}
+    waiting = waiting_calls(live_calls) if live_online else []
+    now_block = count_now(rows)
+    now_block.update(queue_fields(waiting, now, live_online))
+    for group in groups:
+        group['now'].update(_group_queue_fields(waiting, queue_groups, group['id'], now, live_online))
     live_at = _parse(bridge_state.get('live_at')) if bridge_state else None
     live_age = int((now - live_at).total_seconds()) if live_at else None
     return {
@@ -567,10 +732,12 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'ar_max_percent': ar_max_percent,
         'totals': parts['totals'],
         'hourly': parts['hourly'],
-        'now': count_now(rows),
+        'now': now_block,
         'operators': rows,
         'groups': groups,
+        'queue_groups': queue_groups,
         'lead_speed': lead_speed,
+        'live': {'online': bool(live_online), 'at': now.strftime('%Y-%m-%dT%H:%M:%S')},
         'bridge': {
             'connected': bool(bridge_state and bridge_state.get('connected')),
             'last_seen_at': _local_stamp((bridge_state or {}).get('last_seen_at')),

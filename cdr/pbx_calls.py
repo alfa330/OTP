@@ -18,36 +18,52 @@
 Все каналы одного звонка связаны `Linkedid` — это uniqueid ПЕРВОГО канала звонка; тот же
 `linkedid`, что в CDR и в журнале очередей, поэтому живой звонок потом сходится с касанием.
 
-* **Входящий**: первый канал — транк `PJSIP/<имя линии>-<hex>` (контекст `from-trunk`/
-  `ext-did…`, `CallerIDNum` — номер клиента, `Exten` — набранный номер парка, DID). Дальше
-  `QueueCallerJoin` (очередь), `AgentCalled` на каждого оператора, которому звонят
-  (`Interface: Local/6726@from-queue/n`), `AgentConnect` (снял трубку: `MemberName`,
-  `HoldTime` — ожидание), `BridgeEnter` канала оператора `PJSIP/6726-<hex>`, `Hangup`.
-  Кто положил трубку — `AgentComplete.Reason` (`caller`/`agent`), а без очереди —
-  `HangupRequest`: его получает канал той стороны, которая отбилась сама (BYE от телефона
-  или от оператора связи), второму каналу мост шлёт `SoftHangupRequest`. Порядок самих
-  `Hangup` ничего не значит: когда трубку кладёт оператор, первым отбивается транк
-  (снято на станции 22.10.2026).
+* **Входящий**: первый канал — транк `PJSIP/<имя линии>-<hex>` (контекст `from-pstn`,
+  `CallerIDNum` — номер клиента, `Exten` — набранный номер парка, DID). Дальше
+  `QueueCallerJoin` (очередь), `AgentCalled` — очередь предлагает звонок оператору
+  (`Interface: Local/6726@from-queue/n`); телефон при этом звонит, только если у звонка
+  появился его канал `PJSIP/6726-<hex>` (занятому очередь «предлагает» каждые 2 с, а Local
+  сразу уходит в BUSY, телефон не набирается). `AgentConnect` (снял трубку: `MemberName`,
+  `HoldTime` — ожидание), `BridgeEnter` канала оператора, `Hangup`.
 * **Исходящий**: первый канал — оператор `PJSIP/6726-<hex>` в `from-internal`, `Exten` —
-  набор `3333*77XXXXXXXXX`: четыре цифры префикса выбирают исходящий маршрут (линию парка),
-  после звёздочки номер. `DialBegin` → транк, `DialEnd` с `DialStatus: ANSWER` — клиент
-  снял трубку, `BridgeEnter`, `Hangup`.
-* **Заявка автообзвона**: первый канал `Local/<очередь>@ext-to-queue-…;1`, дальше как у
-  исходящего через транк, а ответивший клиент попадает в очередь к операторам.
-* **Внутренний** (оператор оператору): первый канал оператора, `Exten` — внутренний номер.
+  набор `3333*+77XXXXXXXXX`: четыре цифры префикса выбирают исходящий маршрут (линию парка),
+  после звёздочки номер. `DialBegin` → транк (набор целиком — в `DestCallerIDNum`),
+  `DialEnd` с `DialStatus: ANSWER` — клиент снял трубку, `BridgeEnter`, `Hangup`.
+* **Заявка автообзвона**: первый канал `Local/<очередь>@ext-to-queue-…;1`, вторая половина
+  (`;2`) встаёт в очередь с номером клиента в `CallerIDNum` и ЖДЁТ СВОБОДНОГО ОПЕРАТОРА
+  (у занятого телефон «BUSY» каждые 5 с — заявка висит и ночью до ~15 мин). Нашёлся —
+  `AgentConnect`, телефон оператора снимает трубку сам, и только ПОТОМ `;1` набирает клиента
+  через транк. Ответ клиента — `DialEnd ANSWER`/`BridgeEnter` транка; до него оператор
+  слушает гудки. Сверено с CDR 22.10.2026: 31 заявка из 31 без ответа клиента, а первая
+  версия этого модуля по `AgentConnect` писала им «ответил».
+* **Внутренний** (оператор оператору): первый канал оператора, `Exten` — внутренний номер;
+  ответивший коллега — `peer_ext`, оба в разговоре.
+
+Кто положил трубку — `AgentComplete.Reason` (`caller`/`agent`), а без очереди —
+`HangupRequest`: его получает канал той стороны, которая отбилась сама (BYE от телефона или
+от оператора связи), второму каналу мост шлёт `SoftHangupRequest`. Порядок самих `Hangup`
+ничего не значит: когда трубку кладёт оператор, первым отбивается транк. Сверено с журналом
+очередей и CEL на 187 разговорах из 187 (22.10.2026, 12:16–15:20).
 
 Границы, проведённые осознанно
 ------------------------------
-* Звонок кончается, когда отбился его первый канал ИЛИ не осталось ни одного канала: у
-  автообзвона первый канал (Local;1) живёт, пока клиент в очереди; у входящего транк — пока
-  клиент на линии.
+* Звонок кончается, когда отбился его первый канал ИЛИ не осталось ни одного канала. Кроме
+  первого Local (заявка автообзвона): после ответа клиента станция сводит пару Local накоротко,
+  Local-каналы отбиваются, а разговор продолжается — такой звонок кончается с последним каналом.
+* Восстановление из списка каналов при входе в AMI (`seed`) помечает звонок `partial`: точных
+  моментов (вход в очередь, ответ) список не знает, и портал не даёт им затереть известное.
+* Канал, известный до запроса списка и в списке отсутствующий, — закончился без события
+  (`reconcile`): коннектор сверяется со станцией раз в несколько минут.
 * Сторона отбоя ставится только у состоявшегося разговора: отбой телефона оператора, который
   просто звонил (очередь сняла вызов, причина 26 «ответили в другом месте»), — не его решение.
+* У заявки автообзвона операторам не «звонит»: их телефоны снимают трубку сами, а занятый
+  получает попытку раз в пять секунд — это не звонок человеку, а шум.
 * Переводы и конференции не разбираются: такой звонок остаётся за тем, кто его принял.
-  В сутках ОП их единицы ([[freepbx-outgoing-hangup-side-cel]]), ради них усложнять нечего.
+* Изменение без нового смысла (то же состояние, тот же оператор) наружу не выходит: `feed`
+  сравнивает отпечаток звонка до и после события. Иначе каждая попытка дозвона до занятого
+  оператора была бы запросом к порталу и строкой на табло.
 * Законченные звонки держатся KEEP_ENDED_SECONDS: портал успевает их получить и показать
-  «только что закончился», робот пропущенных — увидеть ответ клиенту; потом они уходят, а
-  правдой становится CDR.
+  «только что закончился»; потом они уходят, а правдой становится CDR.
 """
 
 import re
@@ -56,7 +72,7 @@ from datetime import datetime
 from cdr import touches as touches_mod
 
 __all__ = ['CallTracker', 'WANTED_EVENTS', 'EVENT_MASK', 'STATES', 'parse_dial', 'dial_string',
-           'ext_of_channel', 'ext_of_interface', 'channel_kind']
+           'ext_of_channel', 'ext_of_interface', 'channel_kind', 'CALL_FIELDS']
 
 # Классы событий AMI, которые коннектор просит у станции при входе (`Events: …`): звонки и
 # очереди. Класс `reporting` (RTCP на каждый пакет статистики), `dialplan` (VarSet, Newexten —
@@ -79,6 +95,13 @@ DIRECTION_IN = 'in'
 DIRECTION_OUT = 'out'
 DIRECTION_INTERNAL = 'internal'
 DIRECTION_AUTODIAL = 'autodial'
+DIRECTIONS = ('', DIRECTION_IN, DIRECTION_OUT, DIRECTION_INTERNAL, DIRECTION_AUTODIAL)
+
+# Поля записи звонка — в этом порядке их знает и портал (pbx/queries.py).
+CALL_FIELDS = ('linkedid', 'direction', 'phone', 'did', 'queue', 'ext', 'peer_ext', 'ringing',
+               'state', 'started_at', 'queued_at', 'ringing_at', 'answered_at', 'ended_at',
+               'wait_seconds', 'hangup_cause', 'hangup_side', 'dial_prefix', 'dial_status',
+               'channel', 'agent_channel', 'recording_file', 'origin', 'command_id', 'seq')
 
 # Сколько держать законченный звонок после отбоя.
 KEEP_ENDED_SECONDS = 300
@@ -87,11 +110,12 @@ KEEP_ENDED_SECONDS = 300
 # `PJSIP/<имя линии>-<hex>`, и имя линии содержит буквы или знаки (`+77…_jana`, `yVnnduj2_70…`).
 _EXT_CHANNEL_RE = re.compile(r'^PJSIP/(\d{3,5})-[0-9a-fA-F]+$')
 _PJSIP_RE = re.compile(r'^PJSIP/')
-# `Local/6726@from-queue-00001a36;1`, `Local/3016@ext-to-queue-00001a34;1`.
+# `Local/6726@from-queue-00001a36;1`, `Local/3016@ext-to-queue-00001a34;1`, `Local/6726@from-queue/n`.
 _LOCAL_RE = re.compile(r'^Local/([^@/]+)@(.+?)(?:-[0-9a-fA-F]{6,})?(?:;[12])?(?:/n)?$')
 # Набор исходящего: четыре цифры префикса маршрута, звёздочка, номер (с плюсом или без).
 _DIAL_RE = re.compile(r'^(\d{4})\*(\+?\d{7,15})$')
-_EXT_RE = re.compile(r'^\d{3,5}$')
+EXT_RE = re.compile(r'^\d{3,5}$')
+_EXT_RE = EXT_RE
 _QUEUE_RE = re.compile(r'^3\d{3}$')
 
 KIND_EXT, KIND_TRUNK, KIND_LOCAL, KIND_OTHER = 'ext', 'trunk', 'local', 'other'
@@ -161,6 +185,19 @@ def _stamp(moment):
     return moment.strftime('%Y-%m-%dT%H:%M:%S')
 
 
+def _duration_seconds(value):
+    """`00:01:23` → 83; мусор → 0."""
+    parts = str(value or '').split(':')
+    try:
+        parts = [int(part) for part in parts]
+    except ValueError:
+        return 0
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return max(0, seconds)
+
+
 def _int(value):
     try:
         return int(str(value).strip())
@@ -176,6 +213,7 @@ def _new_call(linkedid, started_at):
         'did': '',
         'queue': '',
         'ext': '',
+        'peer_ext': '',
         'ringing': [],
         'state': 'new',
         'started_at': started_at,
@@ -197,6 +235,12 @@ def _new_call(linkedid, started_at):
     }
 
 
+def fingerprint(call):
+    """Всё, что видно снаружи, кроме порядкового номера: по нему решается, изменился ли звонок."""
+    return tuple(tuple(sorted(set(call[f]))) if f == 'ringing' else call[f]
+                 for f in CALL_FIELDS if f != 'seq')
+
+
 class CallTracker:
     """Состояние звонков станции. `feed(событие)` → список изменившихся звонков (копии).
 
@@ -208,6 +252,7 @@ class CallTracker:
         self._now = now or datetime.now
         self.keep_ended_seconds = keep_ended_seconds
         self.calls = {}        # linkedid → звонок
+        self._prints = {}      # linkedid → отпечаток, ушедший наружу последним
         self._channels = {}    # uniqueid → {'name', 'linkedid', 'kind'}
         self._seq = 0
         self._at = None
@@ -218,7 +263,7 @@ class CallTracker:
     # ── снаружи ──────────────────────────────────────────────────────────────
 
     def feed(self, event, at=None):
-        """Одно событие AMI → список изменившихся звонков (снимки). Чужие события — [].
+        """Одно событие AMI → список изменившихся звонков (снимки). Чужие и пустые события — [].
 
         `at` — момент события, если он известен точнее «сейчас»: так при входе на станцию
         каналы, живущие уже минуту, получают настоящее начало (CoreShowChannels.Duration)."""
@@ -228,17 +273,10 @@ class CallTracker:
             return []
         self._at = at
         try:
-            changed = handler(event)
+            touched = handler(event) or []
         finally:
             self._at = None
-        if not changed:
-            return []
-        out = []
-        for call in changed:
-            self._seq += 1
-            call['seq'] = self._seq
-            out.append(self.snapshot_of(call))
-        return out
+        return self._emit(touched)
 
     def live(self):
         """Все звонки, которые ещё помним: идущие и только что законченные."""
@@ -258,6 +296,7 @@ class CallTracker:
             if (moment - ended).total_seconds() >= self.keep_ended_seconds:
                 gone.append(linkedid)
                 del self.calls[linkedid]
+                self._prints.pop(linkedid, None)
         # Каналы законченных звонков уже сняты в Hangup; здесь — на случай потерянного события.
         for uniqueid, channel in list(self._channels.items()):
             if channel['linkedid'] in gone:
@@ -268,12 +307,101 @@ class CallTracker:
         """Запомнить наш Originate: ответ придёт событием OriginateResponse с этим ActionID."""
         self._pending_originates[str(action_id)] = command_id
 
+    def forget_originate(self, action_id):
+        """Станция отказала сразу — OriginateResponse не будет, ждать нечего."""
+        self._pending_originates.pop(str(action_id), None)
+
+    def seed(self, items, now=None, skip_uniqueids=()):
+        """Состояние из списка каналов станции (CoreShowChannels) — при входе в AMI.
+
+        Список — это каналы, а не события: очереди, набора и ответа в нём нет. Поэтому по
+        каналам восстанавливается то, что из них следует: клиент на транке в контексте очереди
+        без моста — ждёт в очереди; канал оператора с транком в том же звонке — исходящий с
+        набором из CallerIDNum транка; каналы в мосту — разговор. Время начала — по Duration.
+        Точные моменты (вход в очередь, ответ) из списка не узнать, поэтому такие звонки
+        помечены `partial`: портал не даст им затереть то, что уже знает о звонке.
+
+        skip_uniqueids — каналы, отбой которых пришёл, пока список выдавался: их не воскрешаем.
+        Каналы, уже известные по живым событиям, не перезаписываются. Возвращает изменения."""
+        from datetime import timedelta
+        moment = now or self._now()
+        skip = {str(uid) for uid in skip_uniqueids or ()}
+        rows = [dict(item) for item in items or []
+                if str(item.get('Uniqueid') or '') and str(item.get('Uniqueid')) not in skip]
+        rows.sort(key=lambda item: (item.get('Uniqueid') != item.get('Linkedid'), str(item.get('Uniqueid'))))
+        starts = {}
+        touched = []
+        for item in rows:
+            uniqueid = str(item['Uniqueid'])
+            if uniqueid in self._channels:
+                continue
+            started = moment - timedelta(seconds=_duration_seconds(item.get('Duration')))
+            starts[uniqueid] = started
+            self._at = started
+            try:
+                touched += self._on_newchannel(dict(item, Event='Newchannel')) or []
+            finally:
+                self._at = None
+        groups = {}
+        for item in rows:
+            groups.setdefault(str(item.get('Linkedid') or item['Uniqueid']), []).append(item)
+        for linkedid, group in groups.items():
+            call = self.calls.get(linkedid)
+            if call is None:
+                continue
+            call['partial'] = True
+            first = next((item for item in group if str(item['Uniqueid']) == linkedid), None)
+            trunks = [item for item in group if channel_kind(item.get('Channel')) == KIND_TRUNK
+                      and str(item['Uniqueid']) != linkedid]
+            if first is not None and channel_kind(first.get('Channel')) in (KIND_EXT, KIND_LOCAL) \
+                    and trunks and not call['phone']:
+                trunk = trunks[0]
+                self._at = starts.get(str(trunk['Uniqueid']))
+                try:
+                    touched += self._on_dialbegin({
+                        'Linkedid': linkedid, 'Uniqueid': first['Uniqueid'], 'Exten': first.get('Exten'),
+                        'DestChannel': trunk.get('Channel'),
+                        'DestCallerIDNum': trunk.get('CallerIDNum') or trunk.get('Exten')}) or []
+                finally:
+                    self._at = None
+            if first is not None and channel_kind(first.get('Channel')) == KIND_TRUNK \
+                    and first.get('Context') == 'ext-queues' and not first.get('BridgeId') \
+                    and _QUEUE_RE.match(str(first.get('Exten') or '')):
+                self._at = starts.get(linkedid)
+                try:
+                    touched += self._on_queuecallerjoin({'Linkedid': linkedid, 'Uniqueid': linkedid,
+                                                         'Queue': first.get('Exten')}) or []
+                finally:
+                    self._at = None
+            for item in group:
+                if item.get('BridgeId') and channel_kind(item.get('Channel')) in (KIND_EXT, KIND_TRUNK):
+                    touched += self._on_bridgeenter(dict(item, Event='BridgeEnter')) or []
+        return self._emit(touched)
+
+    def reconcile(self, live_uniqueids, known_before):
+        """Сверка со списком каналов станции: канал, известный ДО запроса списка и в списке
+        отсутствующий, — закончился, а его отбой потерялся (переподключение, обрыв). Ему
+        проигрывается Hangup — иначе звонок висел бы «идущим» до перезапуска коннектора, а
+        каждый снимок подтверждал бы его порталу. Возвращает изменения."""
+        live = {str(uid) for uid in live_uniqueids or ()}
+        touched = []
+        for uniqueid in [uid for uid in known_before if uid not in live]:
+            channel = self._channels.get(uniqueid)
+            if channel is None:
+                continue
+            touched += self._on_hangup({'Event': 'Hangup', 'Uniqueid': uniqueid, 'Linkedid': channel['linkedid'],
+                                        'Channel': channel['name']}) or []
+        return self._emit(touched)
+
+    def channel_ids(self):
+        return set(self._channels)
+
     def set_recording(self, linkedid, filename):
         call = self.calls.get(linkedid)
         if not call or not filename or call['recording_file'] == filename:
             return []
         call['recording_file'] = str(filename)[:200]
-        return self._bump([call])
+        return self._emit([call])
 
     @staticmethod
     def snapshot_of(call):
@@ -283,9 +411,18 @@ class CallTracker:
 
     # ── внутреннее ───────────────────────────────────────────────────────────
 
-    def _bump(self, calls):
-        out = []
-        for call in calls:
+    def _emit(self, touched):
+        """Звонки, у которых изменилось видимое снаружи, — с новым порядковым номером."""
+        out, seen = [], set()
+        for call in touched:
+            linkedid = call['linkedid']
+            if linkedid in seen:
+                continue
+            seen.add(linkedid)
+            print_ = fingerprint(call)
+            if self._prints.get(linkedid) == print_:
+                continue
+            self._prints[linkedid] = print_
             self._seq += 1
             call['seq'] = self._seq
             out.append(self.snapshot_of(call))
@@ -308,35 +445,58 @@ class CallTracker:
         return [c for c in self._channels.values() if c['linkedid'] == linkedid]
 
     @staticmethod
-    def _ring(call, ext, now_stamp):
-        if ext and ext not in call['ringing']:
+    def _offered(call):
+        """Звонок, у которого «звонит» оператору человек: входящий и внутренний. Заявке
+        автообзвона телефоны снимают трубку сами, исходящий звонит клиенту, а не оператору."""
+        return call['direction'] in (DIRECTION_IN, DIRECTION_INTERNAL, '')
+
+    def _ring(self, call, ext):
+        if not ext or ext in (call['ext'], call['peer_ext']) or not self._offered(call):
+            return False
+        if ext not in call['ringing']:
             call['ringing'].append(ext)
-        if ext and not call['ringing_at']:
-            call['ringing_at'] = now_stamp
-        if call['state'] in ('new', 'queued', 'ringing'):
+        if not call['ringing_at']:
+            call['ringing_at'] = self._stamp_now()
+        if call['state'] in ('new', 'queued', 'ringing') and not call['answered_at']:
             call['state'] = 'ringing'
+        return True
 
     @staticmethod
     def _unring(call, ext):
         if ext in call['ringing']:
             call['ringing'].remove(ext)
-        if call['state'] == 'ringing' and not call['ringing']:
+        if call['state'] == 'ringing' and not call['ringing'] and not call['answered_at'] \
+                and call['direction'] in (DIRECTION_IN, DIRECTION_INTERNAL, ''):
             # Телефоны замолчали, а звонок жив: клиент ждёт в очереди или снова слушает IVR.
             call['state'] = 'queued' if call['queue'] else 'new'
 
     def _answered(self, call, ext='', agent_channel=''):
+        """Разговор начался: ext — кто снял трубку (у входящего), пусто — у исходящего клиент
+        ответил оператору-инициатору."""
         now_stamp = self._stamp_now()
         if ext:
-            call['ext'] = ext
-            if ext in call['ringing']:
-                call['ringing'].remove(ext)
-        if agent_channel:
+            if call['direction'] == DIRECTION_INTERNAL and call['ext'] and ext != call['ext']:
+                call['peer_ext'] = ext
+            else:
+                call['ext'] = ext
+        if agent_channel and not (call['direction'] == DIRECTION_INTERNAL and call['agent_channel']):
             call['agent_channel'] = agent_channel
         if not call['answered_at']:
             call['answered_at'] = now_stamp
         call['ringing'] = []
         if call['state'] != 'ended':
             call['state'] = 'talking'
+
+    def _reserve(self, call, ext, agent_channel=''):
+        """Заявка автообзвона нашла оператора: его телефон уже на линии, клиента сейчас наберут.
+        Это «соединение», а не разговор: ответа клиента ещё нет."""
+        if ext:
+            call['ext'] = ext
+        if agent_channel:
+            call['agent_channel'] = agent_channel
+        call['ringing'] = []
+        if call['state'] in ('new', 'queued') and not call['answered_at']:
+            call['state'] = 'ringing'
 
     # ── события ──────────────────────────────────────────────────────────────
 
@@ -383,13 +543,10 @@ class CallTracker:
                     call['direction'] = DIRECTION_AUTODIAL
                     call['queue'] = local_exten
             return [call]
-        if kind == KIND_EXT:
+        if kind == KIND_EXT and call['state'] != 'ended':
             # Телефон оператора в чужом звонке — ему звонят (очередь или прямой вызов).
-            ext = ext_of_channel(name)
-            if call['state'] != 'ended' and ext != call['ext']:
-                self._ring(call, ext, self._stamp_now())
-                return [call]
-        return [call] if created else []
+            self._ring(call, ext_of_channel(name))
+        return [call]
 
     def _on_newstate(self, event):
         call = self._call_of(event, create=False)
@@ -399,14 +556,13 @@ class CallTracker:
         state = _int(event.get('ChannelState'))
         kind = channel_kind(name)
         if state == 5 and kind == KIND_EXT:   # Ringing — телефон оператора звонит
-            ext = ext_of_channel(name)
-            if ext and ext != call['ext'] and ext not in call['ringing']:
-                self._ring(call, ext, self._stamp_now())
-                return [call]
+            self._ring(call, ext_of_channel(name))
+            return [call]
         if state == 5 and kind == KIND_TRUNK and call['direction'] in (DIRECTION_OUT, DIRECTION_AUTODIAL) \
-                and call['state'] in ('new', 'ringing') and not call['ringing_at']:
+                and not call['answered_at'] and not call['ringing_at']:
             call['ringing_at'] = self._stamp_now()
-            call['state'] = 'ringing'
+            if call['state'] in ('new', 'queued'):
+                call['state'] = 'ringing'
             return [call]
         return []
 
@@ -416,10 +572,9 @@ class CallTracker:
             return []
         dest = str(event.get('DestChannel') or '')
         dest_kind = channel_kind(dest)
-        changed = False
         if dest_kind == KIND_TRUNK:
             # Набор в сторону клиента: исходящий оператора или заявка автообзвона.
-            if not call['direction'] or call['direction'] == DIRECTION_INTERNAL:
+            if call['direction'] in ('', DIRECTION_INTERNAL):
                 call['direction'] = DIRECTION_OUT
             # Набор целиком (`3333*+77…`) станция показывает в DestCallerIDNum транка (а у
             # заявки автообзвона — в Exten); DialString — `+77…@<транк>` без префикса.
@@ -431,16 +586,18 @@ class CallTracker:
                     or touches_mod.norm_phone(str(event.get('DialString') or '').split('@')[0])
             call['phone'] = call['phone'] or phone
             call['dial_prefix'] = call['dial_prefix'] or prefix
-            if call['state'] in ('new',):
-                call['state'] = 'ringing'
+            if not call['answered_at']:
                 call['ringing_at'] = call['ringing_at'] or self._stamp_now()
-            changed = True
-        elif dest_kind in (KIND_EXT, KIND_LOCAL):
-            ext = ext_of_channel(dest) if dest_kind == KIND_EXT else ext_of_interface(dest)
-            if ext and ext != call['ext']:
-                self._ring(call, ext, self._stamp_now())
-                changed = True
-        return [call] if changed else []
+                if call['state'] in ('new', 'queued'):
+                    call['state'] = 'ringing'
+            return [call]
+        if dest_kind == KIND_EXT:
+            # Звонит именно телефон. Набор плеча очереди `Local/<ext>@from-queue` — ещё не звонок:
+            # к занятому оператору очередь пробует каждые 2 с, и Local сразу уходит в BUSY, так и
+            # не набрав телефон (снято 22.10.2026) — это не «звонит» и не изменение звонка.
+            self._ring(call, ext_of_channel(dest))
+            return [call]
+        return []
 
     def _on_dialend(self, event):
         call = self._call_of(event, create=False)
@@ -452,14 +609,17 @@ class CallTracker:
         if dest_kind == KIND_EXT:
             ext = ext_of_channel(dest)
             if status == 'ANSWER':
-                self._answered(call, ext, dest)
+                if call['direction'] == DIRECTION_AUTODIAL:
+                    self._reserve(call, ext, dest)
+                else:
+                    self._answered(call, ext, dest)
             else:
                 self._unring(call, ext)
             return [call]
         if dest_kind == KIND_TRUNK:
             if status == 'ANSWER':
                 self._answered(call)
-            else:
+            elif status:
                 call['dial_status'] = status[:16]
             return [call]
         if dest_kind == KIND_LOCAL and status != 'ANSWER':
@@ -476,15 +636,22 @@ class CallTracker:
         kind = channel_kind(name)
         if kind == KIND_EXT:
             ext = ext_of_channel(name)
-            if call['direction'] in (DIRECTION_OUT, DIRECTION_INTERNAL) and name == call['channel']:
-                # Оператор-инициатор вошёл в мост — клиент ответил.
+            if call['direction'] == DIRECTION_AUTODIAL:
+                # Телефон оператора снял трубку сам — клиента ещё только наберут.
+                self._reserve(call, ext, name)
+            elif call['direction'] in (DIRECTION_OUT, DIRECTION_INTERNAL) and name == call['channel']:
+                # Оператор-инициатор вошёл в мост — клиент (или коллега) ответил.
                 self._answered(call)
             else:
                 self._answered(call, ext, name)
             return [call]
-        if kind == KIND_TRUNK and call['direction'] == DIRECTION_IN and call['ext']:
-            self._answered(call)
-            return [call]
+        if kind == KIND_TRUNK:
+            if call['direction'] in (DIRECTION_OUT, DIRECTION_AUTODIAL):
+                self._answered(call)       # клиент ответил
+                return [call]
+            if call['direction'] == DIRECTION_IN and call['ext']:
+                self._answered(call)
+                return [call]
         return []
 
     def _on_queuecallerjoin(self, event):
@@ -493,11 +660,11 @@ class CallTracker:
             return []
         call['queue'] = str(event.get('Queue') or '')[:8]
         call['queued_at'] = call['queued_at'] or self._stamp_now()
-        if not call['answered_at']:
+        if call['direction'] == DIRECTION_AUTODIAL and not call['phone']:
+            # Заявка встаёт в очередь с номером клиента: его наберут, когда найдётся оператор.
+            call['phone'] = touches_mod.norm_phone(event.get('CallerIDNum'))
+        if not call['answered_at'] and call['state'] in ('new', 'queued', 'ringing'):
             call['state'] = 'ringing' if call['ringing'] else 'queued'
-        if call['direction'] == DIRECTION_AUTODIAL:
-            # Клиент автообзвона ответил и встал в очередь к операторам.
-            call['answered_at'] = call['answered_at'] or call['queued_at']
         return [call]
 
     def _on_queuecallerleave(self, event):
@@ -511,14 +678,10 @@ class CallTracker:
         return [call]
 
     def _on_agentcalled(self, event):
-        call = self._call_of(event, create=False)
-        if call is None or call['state'] == 'ended':
-            return []
-        ext = ext_of_interface(event.get('Interface')) or ext_of_channel(event.get('DestChannel'))
-        if not ext:
-            return []
-        self._ring(call, ext, self._stamp_now())
-        return [call]
+        """Очередь предлагает звонок оператору — это ещё не звонок телефона: занятому очередь
+        «предлагает» каждые 2 с, и телефон при этом не набирается вовсе. «Звонит» ставится по
+        каналу самого телефона (Newchannel/Newstate PJSIP/<ext>, DialBegin на него)."""
+        return []
 
     def _on_agentringnoanswer(self, event):
         call = self._call_of(event, create=False)
@@ -535,15 +698,18 @@ class CallTracker:
         if call is None or call['state'] == 'ended':
             return []
         ext = ext_of_interface(event.get('Interface')) or ext_of_channel(event.get('DestChannel'))
-        self._answered(call, ext)
         wait = _int(event.get('HoldTime'))
+        if call['direction'] == DIRECTION_AUTODIAL:
+            self._reserve(call, ext)
+            return [call]
+        self._answered(call, ext)
         if wait is not None:
             call['wait_seconds'] = wait
         return [call]
 
     def _on_agentcomplete(self, event):
         call = self._call_of(event, create=False)
-        if call is None:
+        if call is None or not call['answered_at']:
             return []
         reason = str(event.get('Reason') or '').lower()
         side = {'caller': 'client', 'agent': 'operator'}.get(reason, '')
@@ -559,7 +725,9 @@ class CallTracker:
             return []
         name = str(event.get('Channel') or '')
         kind = channel_kind(name)
-        if kind == KIND_EXT and name in (call['agent_channel'], call['channel']):
+        operator_channels = {call['agent_channel'], call['channel']} - {''}
+        if kind == KIND_EXT and (name in operator_channels
+                                 or ext_of_channel(name) in (call['ext'], call['peer_ext'])):
             call['hangup_side'] = 'operator'
         elif kind == KIND_TRUNK:
             call['hangup_side'] = 'client'
@@ -574,29 +742,30 @@ class CallTracker:
         if call is None:
             return []
         name = str(event.get('Channel') or (channel or {}).get('name') or '')
-        kind = channel_kind(name)
-        changed = False
-        if kind == KIND_EXT and call['state'] != 'ended':
+        if channel_kind(name) == KIND_EXT and call['state'] != 'ended':
             ext = ext_of_channel(name)
             if ext in call['ringing']:
-                call['ringing'].remove(ext)
-                changed = True
+                self._unring(call, ext)
         remaining = self._channels_of(call['linkedid'])
-        if call['state'] != 'ended' and (uniqueid == call['linkedid'] or not remaining):
+        cause = _int(event.get('Cause'))
+        first_gone = uniqueid == call['linkedid']
+        if first_gone and channel_kind(call['channel']) == KIND_LOCAL \
+                and any(c['kind'] in (KIND_EXT, KIND_TRUNK) for c in remaining):
+            # Первый канал заявки автообзвона — Local. Когда клиент ответил, станция сводит пару
+            # Local накоротко (LocalOptimization: Yes у ext-to-queue): Local-каналы отбиваются, а
+            # клиент на транке и оператор продолжают разговор в одном мосту с тем же linkedid.
+            first_gone = False
+        if call['state'] != 'ended' and (first_gone or not remaining):
             call['state'] = 'ended'
             call['ended_at'] = self._stamp_now()
             call['ringing'] = []
-            cause = _int(event.get('Cause'))
             if cause is not None:
                 call['hangup_cause'] = cause
-            changed = True
-        elif uniqueid == call['linkedid'] or not remaining:
+        elif call['state'] == 'ended' and cause is not None and call['hangup_cause'] in (None, 0) \
+                and (first_gone or not remaining):
             # Повторный отбой уже законченного звонка (дошли хвосты каналов) — причина точнее.
-            cause = _int(event.get('Cause'))
-            if cause is not None and call['hangup_cause'] in (None, 0):
-                call['hangup_cause'] = cause
-                changed = True
-        return [call] if changed else []
+            call['hangup_cause'] = cause
+        return [call]
 
     def _on_originateresponse(self, event):
         action_id = str(event.get('ActionID') or '')

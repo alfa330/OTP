@@ -13,6 +13,8 @@ Flask поднят своим приложением с фальшивыми з�
 import json
 import os
 import sys
+import threading
+import time
 import unittest
 from contextlib import contextmanager
 from unittest import mock
@@ -23,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr import directory as directory_mod  # noqa: E402
 from cdr_bridge import signing  # noqa: E402
-from pbx import queries, routes as pbx_routes  # noqa: E402
+from pbx import queries, realtime as pbx_realtime, routes as pbx_routes  # noqa: E402
 
 PRIVATE_B64, PUBLIC_B64, KEY_ID = signing.generate()
 
@@ -38,8 +40,12 @@ OPERATOR = {'user_id': 7, 'name': 'Оператор', 'role': 'operator', 'depar
 
 
 class _FakeCursor:
+    def __init__(self):
+        self.notified = []
+
     def execute(self, sql, params=None):
-        pass
+        if 'pg_notify' in str(sql):
+            self.notified.append(json.loads(params[1]))
 
     def fetchone(self):
         return None
@@ -96,10 +102,11 @@ class Recorder:
     # коннектор
     def connector_seen(self, cursor, **kwargs):
         self.seen.append(kwargs)
+        return True
 
     def upsert_calls(self, cursor, calls):
         self.stored.extend(calls)
-        return len(calls)
+        return [c['linkedid'] for c in calls]
 
     def close_missing(self, cursor, known, now=None):
         self.closed = list(known)
@@ -160,6 +167,9 @@ class PbxRoutesTests(unittest.TestCase):
                      'enqueue_command', 'command'):
             patches.append(mock.patch.object(queries, name, getattr(self.recorder, name)))
         patches.append(mock.patch.object(pbx_routes.schema, 'schema_is_ready', lambda cursor: True))
+        patches.append(mock.patch.object(pbx_routes, '_schema_ready', {'ok': False}))
+        # Слушатель реалтайма в тестах ручек не поднимается: хаб наполняет сам тест.
+        patches.append(mock.patch.object(pbx_routes.realtime, 'ensure_listener', lambda *a, **k: None))
         patches.append(mock.patch.object(pbx_routes.cdr_config, 'agent_keys_raw', lambda: PUBLIC_B64))
         patches.append(mock.patch.object(pbx_routes.cdr_queries, 'load_directory',
                                          lambda cursor: self.recorder.directory))
@@ -171,10 +181,14 @@ class PbxRoutesTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         app = Flask(__name__)
+        self.db = _FakeDb()
+        self.hub = pbx_realtime.Hub()
+        self.hub.ready = True
         app.register_blueprint(pbx_routes.build_pbx_blueprint(
-            db=_FakeDb(), require_api_key=lambda fn: fn,
+            db=self.db, require_api_key=lambda fn: fn,
             build_cors_preflight_response=lambda: ('', 204),
-            resolve_requester=lambda: (self.recorder.ctx['user_id'], None, None)))
+            resolve_requester=lambda: (self.recorder.ctx['user_id'], None, None),
+            listen_connect=lambda: None, hub=self.hub))
         app.config['TESTING'] = True
         self.client = app.test_client()
         self.signer = signing.Signer(signing.load_private_key(PRIVATE_B64))
@@ -212,6 +226,9 @@ class PbxRoutesTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(body['commands'], [{'id': 3, 'kind': 'originate', 'ext': '6600', 'dial': '3333*77015550001'}])
         self.assertEqual(body['stored'], 2)
+        kinds = [n['k'] for n in self.db.cursor.notified]
+        self.assertEqual(kinds, ['conn', 'calls'], 'зрителям — что коннектор жив и что звонки изменились')
+        self.assertTrue(self.db.cursor.notified[0]['ami'])
         self.assertEqual([c['linkedid'] for c in self.recorder.stored], ['1.100', '3.1'])
         self.assertEqual(self.recorder.stored[0]['phone'], '7015550001')
         self.assertEqual(self.recorder.stored[0]['hangup_side'], '', 'чужое слово в стороне отбоя — пусто')
@@ -367,3 +384,113 @@ class CleanCallTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PbxStreamTests(PbxRoutesTests.__bases__[0]):
+    """Живые каналы: канал команд коннектора и поток браузера."""
+
+    setUp = PbxRoutesTests.setUp
+    sync = PbxRoutesTests.sync
+
+    def read_frames(self, response, count, limit=50, events_only=False):
+        frames, buffer = [], ''
+        iterator = iter(response.response)
+        for _ in range(limit):
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                break
+            buffer += chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+            while '\n\n' in buffer:
+                frame, buffer = buffer.split('\n\n', 1)
+                if events_only and frame.startswith(':'):
+                    continue
+                frames.append(frame)
+            if len(frames) >= count:
+                break
+        return frames
+
+    def test_sync_with_a_live_channel_gets_no_commands(self):
+        self.recorder.commands_to_claim = [{'id': 3, 'kind': 'hangup', 'channel': 'PJSIP/6726-1'}]
+        response = self.sync({'stream': True, 'events': []})
+        self.assertEqual(response.get_json()['commands'], [])
+        self.assertEqual(self.recorder.commands_to_claim, [{'id': 3, 'kind': 'hangup', 'channel': 'PJSIP/6726-1'}],
+                         'команды остаются каналу — их не раздают дважды')
+
+    def test_agent_stream_needs_a_signature_and_delivers_commands_at_once(self):
+        self.assertEqual(self.client.post('/api/pbx/agent/stream', data=b'{}').status_code, 401)
+        self.recorder.commands_to_claim = [{'id': 7, 'kind': 'originate', 'ext': '6726', 'dial': '3333*77015550001'}]
+        body = json.dumps({'hostname': 'otp-gw', 'version': 'pbx/2.0.0'}).encode()
+        headers = {'Content-Type': 'application/json'}
+        headers.update(self.signer.headers('POST', '/api/pbx/agent/stream', body))
+        with mock.patch.object(pbx_routes, 'AGENT_HEARTBEAT_SECONDS', 0.2):
+            response = self.client.post('/api/pbx/agent/stream', data=body, headers=headers, buffered=False)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, 'text/event-stream')
+            frames = self.read_frames(response, 4)
+            self.assertTrue(frames[0].startswith(': connected'))
+            self.assertTrue(frames[1].startswith(': ping'))
+            self.assertTrue(frames[2].startswith(': ping'), 'перед выдачей — байт в канал: обрыв виден до «sent»')
+            self.assertEqual(frames[3].split('\n')[0], 'event: command')
+            self.assertEqual(json.loads(frames[3].split('data: ', 1)[1])['id'], 7)
+            self.assertEqual(self.hub.stream_count('agent'), 1)
+            self.assertTrue(self.recorder.seen[0]['stream'], 'пульс канала отмечает коннектор живым')
+            # Новый канал вытесняет прежний этого процесса.
+            self.hub.new_agent_stream()
+            rest = self.read_frames(response, 1, events_only=True)
+            self.assertIn('event: bye', rest[-1])
+            self.assertIn('superseded', rest[-1])
+            response.close()
+        self.assertEqual(self.hub.stream_count('agent'), 0, 'место канала возвращено')
+
+    def test_agent_stream_wakes_up_on_a_new_command(self):
+        body = b'{}'
+        headers = {'Content-Type': 'application/json'}
+        headers.update(self.signer.headers('POST', '/api/pbx/agent/stream', body))
+        with mock.patch.object(pbx_routes, 'AGENT_HEARTBEAT_SECONDS', 30):
+            response = self.client.post('/api/pbx/agent/stream', data=body, headers=headers, buffered=False)
+            self.read_frames(response, 2)                     # connected + ping
+            self.recorder.commands_to_claim = [{'id': 9, 'kind': 'hangup', 'channel': 'PJSIP/6726-1'}]
+            threading.Timer(0.1, self.hub.poke_commands).start()
+            started = time.monotonic()
+            frames = self.read_frames(response, 1, events_only=True)
+            self.assertLess(time.monotonic() - started, 5, 'команда уходит по тычку, а не по пульсу')
+            self.assertIn('"id":9', frames[0])
+            response.close()
+
+    def test_browser_stream_sends_state_then_changes(self):
+        self.hub.load_full([dict(talking_call(), rev=5, started_at='2026-10-22T12:00:00')],
+                           {'seen': time.time(), 'ami': True}, 5)
+        with mock.patch.object(pbx_routes, 'STREAM_HEARTBEAT_SECONDS', 0.2):
+            response = self.client.get('/api/pbx/stream', buffered=False)
+            self.assertEqual(response.status_code, 200)
+            frames = self.read_frames(response, 1)
+            self.assertTrue(frames[0].startswith('event: state'))
+            state = json.loads(frames[0].split('data: ', 1)[1])
+            self.assertEqual([c['linkedid'] for c in state['calls']], ['1.100'])
+            self.assertEqual(state['calls'][0]['operator'], 'Оператор Один')
+            self.assertNotIn('agent_channel', state['calls'][0])
+            self.assertTrue(state['connector']['online'])
+            self.assertEqual(state['me']['ext'], '6600')
+            self.hub.apply_calls([dict(talking_call(), rev=6, state='ended', ended_at='2026-10-22T12:00:40',
+                                       hangup_side='client')])
+            frames = self.read_frames(response, 1)
+            self.assertTrue(frames[0].startswith('event: calls'))
+            changed = json.loads(frames[0].split('data: ', 1)[1])['calls'][0]
+            self.assertEqual((changed['state'], changed['hangup_side'], changed['rev']), ('ended', 'client', 6))
+            response.close()
+        self.assertEqual(self.hub.stream_count('browser'), 0)
+
+    def test_browser_stream_is_refused_beyond_its_limit_and_outside_the_perimeter(self):
+        self.recorder.ctx = OPERATOR
+        self.assertEqual(self.client.get('/api/pbx/stream').status_code, 403)
+        self.recorder.ctx = ADMIN
+        for _ in range(10):
+            self.assertTrue(self.hub.acquire('browser', 10))
+        response = self.client.get('/api/pbx/stream')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get('Retry-After'), '120')
+
+    def test_commands_poke_the_channel(self):
+        self.client.post('/api/pbx/call', json={'phone': '7015550001', 'prefix': '3333'})
+        self.assertIn({'k': 'cmd'}, self.db.cursor.notified)

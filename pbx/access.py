@@ -45,7 +45,8 @@ def is_own_call(call, my_ext):
     """Звонок — мой: я в разговоре, мне звонит телефон или я его набрал."""
     if not my_ext or not call:
         return False
-    return my_ext == str(call.get('ext') or '') or my_ext in (call.get('ringing') or [])
+    return (my_ext in (str(call.get('ext') or ''), str(call.get('peer_ext') or ''))
+            or my_ext in (call.get('ringing') or []))
 
 
 def can_hangup(ctx, call, my_ext):

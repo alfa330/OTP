@@ -9,17 +9,24 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosBadg
 import CustomSelect from '../ui/CustomSelect';
 import { prettyPhone } from './touchMeta';
 import {
-    callClock, callSubtitle, connectorStatus, DIRECTION_LABEL, endedNote, pickLine, sortCalls,
-    STATE_LABEL, stateTone, wallSeconds,
+    callClock, callSubtitle, connectorStatus, DIRECTION_LABEL, endedNote, mergeLiveCalls, pickLine,
+    reconcileLiveCalls, sortCalls, STATE_LABEL, stateTone, visibleCalls, wallSeconds,
 } from './liveMeta';
+import { runSseStream } from '../common/sseClient';
 
 /* Панель «Сейчас на линии» раздела «Касания» — живые звонки станции от коннектора АТС
- * (cdr_bridge/pbx_connector.py → /api/pbx/live) и три действия: позвонить клиенту со своего
- * телефона, положить трубку, подключиться к разговору оператора.
+ * (cdr_bridge/pbx_connector.py) и три действия: позвонить клиенту со своего телефона, положить
+ * трубку, подключиться к разговору оператора.
  *
- * Опрос раз в две секунды и только пока вкладка видна: коннектор шлёт порталу изменения с
- * той же частотой, чаще спрашивать нечего. Часы звонков тикают на клиенте от времени сервера
- * (поле now в ответе), чтобы не зависеть ни от часов браузера, ни от его пояса.
+ * Реальное время без опроса: поток /api/pbx/stream отдаёт первым кадром всё состояние (`state`),
+ * дальше — каждое изменение звонка (`calls`) в момент, когда оно случилось на станции, и смену
+ * связи коннектора (`connector`). Поток держит только видимая вкладка: скрытая отдаёт место на
+ * сервере (каждый поток занимает нить waitress). Поток недоступен — мест нет, канал выключен,
+ * сеть режет долгие ответы — панель возвращается к опросу /api/pbx/live раз в две секунды.
+ * Ответ опроса, запрошенный до того, как поток ожил, отбрасывается: поток уже знает больше.
+ *
+ * Часы звонков тикают на клиенте от времени сервера (поле now в кадрах), чтобы не зависеть ни
+ * от часов браузера, ни от его пояса.
  *
  * Звонок с портала — это Originate на станции: сначала звонит ВАШ телефон, вы снимаете
  * трубку, и станция набирает клиента. Поэтому у кнопки нет «идёт набор» — есть «ваш телефон
@@ -43,41 +50,111 @@ export function usePbxLive(apiBaseUrl, headers, enabled, showToast) {
     const [closed, setClosed] = useState(false);
     const [dialog, setDialog] = useState(null);
     const [lastPrefix, setLastPrefix] = useState('');
+    const [streamState, setStreamState] = useState('idle');
     const [, setTick] = useState(0);
     const fetchedAt = useRef(0);
     const serverNow = useRef(null);
     const watchers = useRef({});
+    const streamLive = useRef(false);
+    // Растёт каждый раз, когда поток оживает: ответ опроса из прошлой эпохи опоздал.
+    const streamEpoch = useRef(0);
+    const hasData = useRef(false);
+    hasData.current = Boolean(data);
 
-    const load = useCallback(() => axios.get(`${base}/live`, { headers: headers() })
-        .then((response) => {
-            fetchedAt.current = Date.now();
-            serverNow.current = wallSeconds(response.data?.now);
-            setData(response.data);
-        })
-        .catch((exc) => {
-            if (exc?.response?.status === 403) setClosed(true);
-            // Остальное — молча: панель вспомогательная, раздел работает и без неё.
-        }), [base, headers]);
+    const anchor = useCallback((now) => {
+        const seconds = wallSeconds(now);
+        if (seconds === null) return;
+        fetchedAt.current = Date.now();
+        serverNow.current = seconds;
+    }, []);
 
+    /* Опрос — только пока поток не живой: его ответ собран раньше последних кадров потока и
+       целиком откатил бы их. */
+    const load = useCallback(() => {
+        if (streamLive.current) return Promise.resolve();
+        const epoch = streamEpoch.current;
+        return axios.get(`${base}/live`, { headers: headers() })
+            .then((response) => {
+                if (streamLive.current || epoch !== streamEpoch.current) return;
+                anchor(response.data?.now);
+                setData((prev) => ({ ...response.data, calls: reconcileLiveCalls(prev?.calls, response.data?.calls) }));
+            })
+            .catch((exc) => {
+                if (exc?.response?.status === 403) setClosed(true);
+                // Остальное — молча: панель вспомогательная, раздел работает и без неё.
+            });
+    }, [anchor, base, headers]);
+
+    /* Живой поток: только у видимой вкладки. */
     useEffect(() => {
-        if (!enabled || closed) return undefined;
+        if (!enabled || closed || typeof document === 'undefined') return undefined;
+        let stream = null;
+        const onEvent = (event, payload) => {
+            if (!payload) return;
+            if (payload.now) anchor(payload.now);
+            if (event === 'state') {
+                setData({ connector: payload.connector, calls: payload.calls || [], me: payload.me,
+                          lines: payload.lines || [], now: payload.now });
+            } else if (event === 'calls') {
+                setData((prev) => (prev ? { ...prev, calls: mergeLiveCalls(prev.calls, payload.calls) } : prev));
+            } else if (event === 'connector') {
+                setData((prev) => (prev ? { ...prev, connector: payload.connector } : prev));
+            }
+        };
+        const open = () => {
+            if (stream || document.visibilityState !== 'visible') return;
+            stream = runSseStream({
+                url: `${base}/stream`, getHeaders: headers, onEvent,
+                onState: (state) => {
+                    if (state === 'denied') setClosed(true);
+                    if (state === 'live' && !streamLive.current) streamEpoch.current += 1;
+                    streamLive.current = state === 'live';
+                    setStreamState(state);
+                },
+            });
+        };
+        const shut = () => {
+            stream?.close();
+            stream = null;
+        };
+        const onVisibility = () => (document.visibilityState === 'visible' ? open() : shut());
+        open();
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibility);
+            shut();
+        };
+    }, [anchor, base, closed, enabled, headers]);
+
+    /* Запасной опрос — пока поток не живой (поднимается, мест нет, выключен, обрыв). Данные уже
+       есть — первый запрос через паузу: поток переподключается раз в 10 минут и обычно оживает
+       раньше, чем запрос понадобится. */
+    useEffect(() => {
+        if (!enabled || closed || streamState === 'live') return undefined;
         let timer = null;
-        const start = () => {
-            clearInterval(timer);
-            if (document.visibilityState !== 'visible') return;
+        const tick = () => {
             load();
-            timer = setInterval(load, POLL_MS);
+            timer = setTimeout(tick, POLL_MS);
+        };
+        const start = () => {
+            clearTimeout(timer);
+            if (document.visibilityState !== 'visible') return;
+            timer = setTimeout(tick, hasData.current ? POLL_MS : 0);
         };
         start();
         document.addEventListener('visibilitychange', start);
         return () => {
-            clearInterval(timer);
+            clearTimeout(timer);
             document.removeEventListener('visibilitychange', start);
         };
-    }, [enabled, closed, load]);
+    }, [enabled, closed, load, streamState]);
 
-    const calls = useMemo(() => sortCalls(data?.calls), [data]);
-    const active = calls.some((call) => call.state !== 'ended');
+    const nowIso = serverNow.current === null ? ''
+        : isoFromSeconds(serverNow.current + Math.floor((Date.now() - fetchedAt.current) / 1000));
+
+    const calls = useMemo(() => sortCalls(visibleCalls(data?.calls, nowIso)), [data, nowIso]);
+    // Тикают и законченные: через 90 с после отбоя строка уходит сама.
+    const active = calls.length > 0;
 
     useEffect(() => {
         if (!active) return undefined;
@@ -88,9 +165,6 @@ export function usePbxLive(apiBaseUrl, headers, enabled, showToast) {
     useEffect(() => () => {
         Object.values(watchers.current).forEach(clearInterval);
     }, []);
-
-    const nowIso = serverNow.current === null ? ''
-        : isoFromSeconds(serverNow.current + Math.floor((Date.now() - fetchedAt.current) / 1000));
 
     /* Следим за командой до итога: станция отвечает не сразу (телефон звонит до 30 с). */
     const watchCommand = useCallback((commandId, onDone) => {

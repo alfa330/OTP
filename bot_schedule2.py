@@ -32297,6 +32297,7 @@ def operator_status_event_endpoint():
         _icore_phone_kick_after_status_event(
             requester_id, status_key, data.get('state_note'), event_at_value,
             data.get('client_event_id'), result)
+        _op_wallboard_poke_status(requester_id)
         return jsonify({"status": "success", "result": result}), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
@@ -68161,6 +68162,19 @@ def _record_icore_phone_idle_kick(user_id, event_at, client_event_id):
         )
 
 
+def _op_wallboard_poke_status(user_id):
+    """Хвост /api/operator/status_event: «Табло ОП» показывает статус человека сразу, а не со
+    следующим снимком. Тычок без содержимого (pbx/realtime.py): поток табло сам проверит, стоит
+    ли человек на стене, и одним запросом возьмёт его новый статус. Сбой тычка ответ телефону не
+    портит — стена догонит следующим снимком."""
+    try:
+        from pbx import realtime as pbx_realtime
+        with db._get_cursor() as cursor:
+            pbx_realtime.notify(cursor, 'board', why='status', op=int(user_id), ts=round(time.time(), 3))
+    except Exception:  # noqa: BLE001
+        logging.warning('Табло ОП: тычок о статусе сотрудника %s не ушёл', user_id, exc_info=True)
+
+
 def _icore_phone_kick_after_status_event(user_id, status_key, state_note, event_at,
                                          client_event_id, result):
     """Хвост /api/operator/status_event: выброс в «Офлайн» — ещё и в отчёт раздела.
@@ -68278,6 +68292,11 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Своё соединение для LISTEN pbx_live — вне общего пула, как у колокола и чатов: на нём
+        # слушатель реалтайма живёт всё время работы процесса (pbx/realtime.py).
+        listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+        # Потоки «Сейчас на линии» в «Касаниях»: каждый занимает нить waitress.
+        stream_limit=_env_int('PBX_STREAM_LIMIT', 10, minimum=2, maximum=40),
     ))
     logging.info("Раздел «АТС»: Blueprint подключён на /api/pbx")
 except Exception:
@@ -68340,6 +68359,10 @@ try:
             'waiting_max_seconds': 60 * _env_int('OP_CHAT_WALLBOARD_WAITING_MAX_MINUTES', 60,
                                                  minimum=5, maximum=360),
         },
+        # «Сейчас» в реальном времени (коннектор АТС): тот же слушатель pbx_live, что у раздела
+        # «АТС», и свой потолок потоков — стена и экраны СВ.
+        listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+        live_stream_limit=_env_int('OP_WALLBOARD_LIVE_STREAM_LIMIT', 10, minimum=2, maximum=40),
     )
     # Снимок из того же кэша — отбивке (op_broadcast_job): картинка в Telegram обязана
     # совпадать с экраном, а второй запрос к базе ради этого не нужен.

@@ -278,31 +278,117 @@ def test_originate_failure_does_not_create_a_call():
     assert tracker.feed(ev('OriginateResponse', ActionID='foreign', Response='Success', Uniqueid='9.9')) == []
 
 
-def test_autodial_request_becomes_autodial_call_with_client_phone():
+AUTO_LID = '1792000003.50'
+AUTO_REQ = 'Local/3016@ext-to-queue-00001a34;2'
+
+
+def autodial_request(tracker, clock):
+    """Заявка автообзвона в том порядке, в каком её отдаёт станция (снято 22.10.2026): заявка
+    встаёт в очередь с номером клиента и ждёт оператора; занятому телефон «BUSY» раз в 5 с."""
+    tracker.feed(ev('Newchannel', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID,
+                    Linkedid=AUTO_LID, Context='ext-to-queue', Exten='3016'))
+    tracker.feed(ev('Newchannel', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1', Linkedid=AUTO_LID,
+                    Context='ext-to-queue', Exten='3016'))
+    tracker.feed(ev('QueueCallerJoin', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1', Linkedid=AUTO_LID,
+                    Queue='3016', CallerIDNum='+77015550004', Position='1', Count='1'))
+
+
+def test_autodial_request_waits_for_an_operator_and_is_not_answered_by_joining_the_queue():
     clock = Clock()
     tracker = pbx_calls.CallTracker(now=clock)
-    lid = '1792000003.50'
-    tracker.feed(ev('Newchannel', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=lid, Linkedid=lid,
-                    Context='ext-to-queue', Exten='3016'))
-    tracker.feed(ev('Newchannel', Channel='Local/3016@ext-to-queue-00001a34;2', Uniqueid=lid + '1',
-                    Linkedid=lid, Context='ext-to-queue', Exten='3016'))
-    tracker.feed(ev('DialBegin', Channel='Local/3016@ext-to-queue-00001a34;2', Uniqueid=lid + '1',
-                    Linkedid=lid, Context='outbound-allroutes', Exten='7778*77015550004',
-                    DestChannel='PJSIP/+77475550078-00001a88', DestUniqueid=lid + '2',
-                    DestCallerIDNum='77015550004'))
+    autodial_request(tracker, clock)
     call = tracker.live()[0]
     assert call['direction'] == 'autodial'
     assert call['queue'] == '3016'
-    assert call['phone'] == '7015550004'
-    assert call['dial_prefix'] == '7778'
-    assert call['state'] == 'ringing'
-    tracker.feed(ev('DialEnd', Channel='Local/3016@ext-to-queue-00001a34;2', Uniqueid=lid + '1', Linkedid=lid,
-                    DestChannel='PJSIP/+77475550078-00001a88', DialStatus='ANSWER'))
-    tracker.feed(ev('QueueCallerJoin', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=lid,
-                    Linkedid=lid, Queue='3016', Position='1', Count='1'))
+    assert call['phone'] == '7015550004', 'номер клиента приходит с заявкой'
+    assert call['state'] == 'queued'
+    assert call['answered_at'] == '', 'встать в очередь — не значит, что клиент ответил'
+    # Занятый оператор: попытка раз в пять секунд — не звонок человеку и не изменение звонка.
+    for _ in range(3):
+        clock.tick(5)
+        assert tracker.feed(ev('AgentCalled', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1', Linkedid=AUTO_LID,
+                               Queue='3016', Interface='Local/6726@from-queue/n',
+                               DestChannel='Local/6726@from-queue-00001a8a;1')) == []
+        assert tracker.feed(ev('AgentRingNoAnswer', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1',
+                               Linkedid=AUTO_LID, Queue='3016', Interface='Local/6726@from-queue/n')) == []
+    assert tracker.live()[0]['ringing'] == []
+
+
+def reserve_and_dial(tracker, clock):
+    clock.tick(30)
+    tracker.feed(ev('AgentConnect', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1', Linkedid=AUTO_LID, Queue='3016',
+                    Interface='Local/6728@from-queue/n', MemberName='Operator_Three', HoldTime='30'))
+    tracker.feed(ev('BridgeEnter', Channel='PJSIP/6728-00002001', Uniqueid=AUTO_LID + '3', Linkedid=AUTO_LID))
     call = tracker.live()[0]
-    assert call['answered_at'] != ''
-    assert call['state'] in ('talking', 'queued')
+    assert call['ext'] == '6728'
+    assert call['agent_channel'] == 'PJSIP/6728-00002001'
+    assert call['state'] == 'ringing', 'оператор на линии, клиента набирают — это ещё не разговор'
+    assert call['answered_at'] == ''
+    clock.tick(1)
+    tracker.feed(ev('DialBegin', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID,
+                    Linkedid=AUTO_LID, Exten='7778*77015550004',
+                    DestChannel='PJSIP/+77475550078-00001a88', DestUniqueid=AUTO_LID + '4',
+                    DestCallerIDNum='7778*77015550004'))
+    call = tracker.live()[0]
+    assert call['dial_prefix'] == '7778'
+    assert call['ringing_at'] == '2026-10-22T12:00:31'
+    assert call['answered_at'] == ''
+
+
+def test_autodial_operator_is_reserved_first_then_the_client_is_dialled():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    autodial_request(tracker, clock)
+    reserve_and_dial(tracker, clock)
+
+
+def test_autodial_client_did_not_answer():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    autodial_request(tracker, clock)
+    reserve_and_dial(tracker, clock)
+    clock.tick(25)
+    tracker.feed(ev('DialEnd', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID, Linkedid=AUTO_LID,
+                    DestChannel='PJSIP/+77475550078-00001a88', DialStatus='CANCEL'))
+    tracker.feed(ev('HangupRequest', Channel='PJSIP/6728-00002001', Uniqueid=AUTO_LID + '3', Linkedid=AUTO_LID))
+    ended = tracker.feed(ev('Hangup', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID,
+                            Linkedid=AUTO_LID, Cause='16'))
+    call = ended[0]
+    assert call['state'] == 'ended'
+    assert call['answered_at'] == ''
+    assert call['dial_status'] == 'CANCEL'
+    assert call['hangup_side'] == '', 'разговора не было — и стороны отбоя нет'
+
+
+def test_autodial_client_answers_and_hangs_up():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    autodial_request(tracker, clock)
+    reserve_and_dial(tracker, clock)
+    clock.tick(8)
+    tracker.feed(ev('DialEnd', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID, Linkedid=AUTO_LID,
+                    DestChannel='PJSIP/+77475550078-00001a88', DialStatus='ANSWER'))
+    tracker.feed(ev('BridgeEnter', Channel='PJSIP/+77475550078-00001a88', Uniqueid=AUTO_LID + '4', Linkedid=AUTO_LID))
+    call = tracker.live()[0]
+    assert call['state'] == 'talking'
+    assert call['answered_at'] == '2026-10-22T12:00:39'
+    assert call['ext'] == '6728'
+    clock.tick(60)
+    tracker.feed(ev('HangupRequest', Channel='PJSIP/+77475550078-00001a88', Uniqueid=AUTO_LID + '4',
+                    Linkedid=AUTO_LID))
+    assert tracker.live()[0]['hangup_side'] == 'client'
+
+
+def test_the_same_event_twice_is_not_a_change():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    incoming_to_queue(tracker, clock)
+    again = ev('AgentConnect', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Queue='3034',
+               Interface='Local/6726@from-queue/n', MemberName='Operator_One', HoldTime='5')
+    assert tracker.feed(again) == []
+    before = tracker.live()[0]['seq']
+    assert tracker.feed(ev('BridgeEnter', Channel=TRUNK, Uniqueid=LID, Linkedid=LID)) == []
+    assert tracker.live()[0]['seq'] == before
 
 
 def test_internal_call_between_operators():
@@ -321,6 +407,17 @@ def test_internal_call_between_operators():
     assert call['ext'] == '6715'
     assert call['ringing'] == ['6726']
     assert call['did'] == '6726'
+    clock.tick(4)
+    tracker.feed(ev('DialEnd', Channel='PJSIP/6715-00003001', Uniqueid=lid, Linkedid=lid,
+                    DestChannel='PJSIP/6726-00003002', DialStatus='ANSWER'))
+    tracker.feed(ev('BridgeEnter', Channel='PJSIP/6726-00003002', Uniqueid=lid + '1', Linkedid=lid))
+    tracker.feed(ev('BridgeEnter', Channel='PJSIP/6715-00003001', Uniqueid=lid, Linkedid=lid))
+    call = tracker.live()[0]
+    assert call['state'] == 'talking'
+    assert (call['ext'], call['peer_ext']) == ('6715', '6726'), 'в разговоре оба'
+    assert call['agent_channel'] == 'PJSIP/6715-00003001'
+    tracker.feed(ev('HangupRequest', Channel='PJSIP/6726-00003002', Uniqueid=lid + '1', Linkedid=lid))
+    assert tracker.live()[0]['hangup_side'] == 'operator'
 
 
 def test_expire_forgets_ended_calls_after_the_keep_window():
@@ -411,3 +508,113 @@ def test_bootstrap_snapshot_of_a_queued_call_knows_the_queue_not_a_fake_did():
     assert call['did'] == ''
     assert call['started_at'] == '2026-10-22T11:58:30'
     assert call['direction'] == 'in'
+
+
+def test_queue_attempts_to_a_busy_operator_change_nothing():
+    """Снято 22.10.2026: к занятому оператору очередь «предлагает» звонок каждые 2 с, Local сразу
+    уходит в BUSY, телефон не набирается. Ни «звонит», ни изменения звонка — ни одной пачки."""
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    tracker.feed(ev('Newchannel', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Context='from-pstn',
+                    Exten='7475550000', CallerIDNum=CLIENT))
+    tracker.feed(ev('QueueCallerJoin', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Queue='3034'))
+    for attempt in range(3):
+        clock.tick(2)
+        local = 'Local/6726@from-queue-00001a8%d' % attempt
+        first, second = '%s.%d1' % (LID, attempt), '%s.%d2' % (LID, attempt)
+        assert tracker.feed(ev('Newchannel', Channel=local + ';1', Uniqueid=first,
+                               Linkedid=LID, Context='from-queue', Exten='6726')) == []
+        assert tracker.feed(ev('Newchannel', Channel=local + ';2', Uniqueid=second,
+                               Linkedid=LID, Context='from-queue', Exten='6726')) == []
+        assert tracker.feed(ev('AgentCalled', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Queue='3034',
+                               Interface='Local/6726@from-queue/n', DestChannel=local + ';1')) == []
+        assert tracker.feed(ev('DialBegin', Channel=TRUNK, Uniqueid=LID, Linkedid=LID,
+                               DestChannel=local + ';1', DialString='Local/6726@from-queue/n')) == []
+        assert tracker.feed(ev('AgentRingNoAnswer', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Queue='3034',
+                               Interface='Local/6726@from-queue/n', RingTime='0')) == []
+        assert tracker.feed(ev('Hangup', Channel=local + ';1', Uniqueid=first, Linkedid=LID, Cause='0')) == []
+        assert tracker.feed(ev('Hangup', Channel=local + ';2', Uniqueid=second, Linkedid=LID, Cause='17')) == []
+    call = tracker.live()[0]
+    assert (call['state'], call['ringing'], call['ringing_at']) == ('queued', [], '')
+
+
+def test_answered_autodial_survives_the_local_optimization():
+    """После ответа клиента станция сводит пару Local накоротко: Local-каналы (и первый канал
+    звонка) отбиваются, а клиент и оператор говорят дальше с тем же linkedid."""
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    autodial_request(tracker, clock)
+    reserve_and_dial(tracker, clock)
+    tracker.feed(ev('Newchannel', Channel='PJSIP/6728-00002001', Uniqueid=AUTO_LID + '3', Linkedid=AUTO_LID,
+                    Context='from-internal', Exten='s'))
+    tracker.feed(ev('Newchannel', Channel='PJSIP/+77475550078-00001a88', Uniqueid=AUTO_LID + '4',
+                    Linkedid=AUTO_LID, Context='from-internal', Exten='s'))
+    clock.tick(8)
+    tracker.feed(ev('DialEnd', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID, Linkedid=AUTO_LID,
+                    DestChannel='PJSIP/+77475550078-00001a88', DialStatus='ANSWER'))
+    # Оптимизация Local: оба Local отбиваются, первым — первый канал звонка.
+    tracker.feed(ev('Hangup', Channel='Local/3016@ext-to-queue-00001a34;1', Uniqueid=AUTO_LID,
+                    Linkedid=AUTO_LID, Cause='16'))
+    tracker.feed(ev('Hangup', Channel=AUTO_REQ, Uniqueid=AUTO_LID + '1', Linkedid=AUTO_LID, Cause='16'))
+    assert tracker.live()[0]['state'] == 'talking', 'разговор продолжается после ухода Local'
+    clock.tick(40)
+    tracker.feed(ev('HangupRequest', Channel='PJSIP/+77475550078-00001a88', Uniqueid=AUTO_LID + '4',
+                    Linkedid=AUTO_LID))
+    tracker.feed(ev('Hangup', Channel='PJSIP/+77475550078-00001a88', Uniqueid=AUTO_LID + '4',
+                    Linkedid=AUTO_LID, Cause='16'))
+    assert tracker.live()[0]['state'] == 'talking', 'у оператора канал ещё жив'
+    ended = tracker.feed(ev('Hangup', Channel='PJSIP/6728-00002001', Uniqueid=AUTO_LID + '3',
+                            Linkedid=AUTO_LID, Cause='16'))
+    assert (ended[0]['state'], ended[0]['hangup_side']) == ('ended', 'client')
+    assert ended[0]['ended_at'] == '2026-10-22T12:01:19'
+
+
+def test_seed_restores_a_waiting_caller_and_an_outgoing_talk_and_marks_them_partial():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    items = [
+        # Клиент ждёт в очереди 3034 полторы минуты (моста нет).
+        {'Channel': TRUNK, 'Uniqueid': LID, 'Linkedid': LID, 'Context': 'ext-queues', 'Exten': '3034',
+         'CallerIDNum': CLIENT, 'Duration': '00:01:30', 'BridgeId': ''},
+        # Исходящий разговор: канал оператора в macro-dialout-trunk (Exten 's') и транк с набором.
+        {'Channel': 'PJSIP/6737-000016c2', 'Uniqueid': '9.1', 'Linkedid': '9.1', 'Context': 'macro-dialout-trunk',
+         'Exten': 's', 'CallerIDNum': '6737', 'Duration': '00:00:50', 'BridgeId': 'b9'},
+        {'Channel': 'PJSIP/77475550033_itaxi_OS-000016c3', 'Uniqueid': '9.2', 'Linkedid': '9.1',
+         'Context': 'from-trunk-to-header', 'Exten': '', 'CallerIDNum': '3333*+77015550005',
+         'Duration': '00:00:49', 'BridgeId': 'b9'},
+        # Отбился, пока список выдавался, — не воскрешаем.
+        {'Channel': 'PJSIP/+77475550000_jana-0000ffff', 'Uniqueid': '8.1', 'Linkedid': '8.1',
+         'Context': 'ext-queues', 'Exten': '3034', 'CallerIDNum': '+77015550009', 'Duration': '00:00:10'},
+    ]
+    changed = tracker.seed(items, now=T0, skip_uniqueids={'8.1'})
+    calls = {c['linkedid']: c for c in changed}
+    assert set(calls) == {LID, '9.1'}
+    waiting = calls[LID]
+    assert (waiting['state'], waiting['queue'], waiting['queued_at'], waiting['did']) == \
+        ('queued', '3034', '2026-10-22T11:58:30', '')
+    assert waiting['partial'] is True
+    talk = calls['9.1']
+    assert (talk['direction'], talk['phone'], talk['dial_prefix'], talk['ext'], talk['state']) == \
+        ('out', '7015550005', '3333', '6737', 'talking')
+    assert talk['started_at'] == '2026-10-22T11:59:10'
+    assert talk['partial'] is True
+    assert pbx_calls.CallTracker(now=clock).seed([], now=T0) == []
+
+
+def test_reconcile_closes_calls_whose_hangup_was_lost():
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    incoming_to_queue(tracker, clock)
+    known = tracker.channel_ids()
+    # Станция говорит: из каналов звонка жив только канал оператора (отбой транка потерян).
+    still = {LID + '6'}
+    changed = tracker.reconcile(still, known)
+    assert changed and changed[0]['state'] == 'ended'
+    assert tracker.reconcile(still, known) == [], 'повторная сверка ничего не меняет'
+
+
+def test_forget_originate_drops_the_pending_entry():
+    tracker = pbx_calls.CallTracker(now=Clock())
+    tracker.expect_originate('otp-cmd-3', 3)
+    tracker.forget_originate('otp-cmd-3')
+    assert tracker.feed(ev('OriginateResponse', ActionID='otp-cmd-3', Response='Success', Uniqueid='1.1')) == []

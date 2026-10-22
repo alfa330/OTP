@@ -2,13 +2,19 @@
 """Ручки раздела «АТС».
 
 Коннектор (без логина портала, подпись Ed25519 — cdr/agent_auth.py, ключи CDR_AGENT_KEYS):
-    POST /api/pbx/agent/sync   {agent_id, hostname, version, ami: {connected, host, error,
-                                events_total}, snapshot, events: [звонки], results: [итоги],
-                                lines?: {префикс: {number, name}}}
-                               → {status, commands: [{id, kind, …}]}
+    POST /api/pbx/agent/sync     {agent_id, hostname, version, ami: {connected, host, error,
+                                  events_total}, snapshot, stream, events: [звонки],
+                                  results: [итоги], lines?: {префикс: {number, name}}}
+                                 → {status, stored, commands}
+                                 Коннектор шлёт пачку СРАЗУ по изменению на станции (и пульс раз
+                                 в 15 с). Команды в ответе — только если у него нет канала команд
+                                 (`stream: false`): это запасной путь, а не основной.
+    POST /api/pbx/agent/stream   канал команд: SSE, держится открытым; команда уходит коннектору
+                                 в момент постановки (тычок NOTIFY), без опроса.
 
 Люди (cookie/JWT портала, периметр «Касаний»):
-    GET  /api/pbx/live                 состояние коннектора, живые звонки, мои права, линии
+    GET  /api/pbx/stream               SSE: живые звонки и коннектор, изменения — сразу
+    GET  /api/pbx/live                 то же одним ответом (запасной путь, если поток недоступен)
     POST /api/pbx/call                 {phone, prefix?, line_number?, linkedid?} → {command_id}
     POST /api/pbx/hangup               {linkedid} → {command_id}
     POST /api/pbx/spy                  {linkedid, mode: listen|whisper|barge} → {command_id}
@@ -20,33 +26,72 @@
 """
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request
 
 from cdr import (agent_auth, config as cdr_config, directory as directory_mod, lines as lines_mod,
                  pbx_calls, queries as cdr_queries, touches as touches_mod)
 
-from . import access, queries, schema
+from . import access, queries, realtime, schema
 
 log = logging.getLogger(__name__)
 
-MAX_EVENTS = 500
+# Пачка изменений коннектора — до 500 звонков, полный снимок — до 2000 (идущие и законченные за
+# минуту; cdr_bridge/pbx_connector.py MAX_SNAPSHOT_CALLS).
+MAX_EVENTS = 2000
 MAX_RESULTS = 200
 MAX_LINES = 200
-# Коннектор молчит дольше — раздел считает его отвалившимся (при тишине он шлёт пульс раз в
-# две секунды, так что минута — это десятки пропущенных пульсов, а не задержка сети).
-CONNECTOR_SILENT_SECONDS = 60
+CONNECTOR_SILENT_SECONDS = realtime.CONNECTOR_SILENT_SECONDS
 # Законченные звонки держатся на экране столько секунд: человек видит «только что
 # закончился» и чем кончилось, потом строка уходит сама.
 ENDED_VISIBLE_SECONDS = 90
 LINE_PARKS_WINDOW_DAYS = 60
 SPY_MODES = ('listen', 'whisper', 'barge')
 
+# Канал команд коннектора: пульс (он же «коннектор жив» и страховка от потерянного тычка) и
+# предел жизни соединения — после него коннектор переподключается сам, а нить waitress не
+# висит сутками на соединении, которое могло умереть без единого байта.
+AGENT_HEARTBEAT_SECONDS = 15
+AGENT_STREAM_MAX_SECONDS = 600
+# Поток браузера: пульс SSE-комментарием и тот же предел жизни (переподключение заодно
+# освежает справочник имён и линий потока).
+STREAM_HEARTBEAT_SECONDS = 20
+STREAM_MAX_SECONDS = 600
 
-def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester):
+_ALMATY = timezone(timedelta(hours=5))
+_schema_ready = {'ok': False}
+
+
+def _stream_response(generate, release):
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    # Место возвращается на закрытии ответа — надёжнее finally в генераторе: у ни разу не
+    # прочитанного генератора finally не выполнится, и место утекло бы.
+    response.call_on_close(release)
+    return response
+
+
+def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester,
+                        listen_connect=None, stream_limit=10, agent_stream_limit=2, hub=None):
+    """listen_connect() → новое соединение Postgres для LISTEN (вне пула). Без него живых
+    потоков нет: ручки потоков отвечают 503, коннектор и браузер остаются на запасном опросе."""
     bp = Blueprint('pbx', __name__, url_prefix='/api/pbx')
+    live_hub = hub or realtime.hub
+
+    def _ready(cursor):
+        if not _schema_ready['ok']:
+            _schema_ready['ok'] = schema.schema_is_ready(cursor)
+        return _schema_ready['ok']
+
+    def _start_listener():
+        if listen_connect is None:
+            return False
+        realtime.ensure_listener(listen_connect, live_hub)
+        return True
 
     # ── каркас роута моста ───────────────────────────────────────────────────
 
@@ -79,6 +124,13 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
                 g.pbx_agent_key = key_id
                 try:
                     payload = request.get_json(silent=True) or {}
+                    if not _schema_ready['ok']:
+                        # Соединение из пула — только пока схема не подтверждена: коннектор
+                        # приходит раз в несколько секунд, и каждый раз занимать его незачем.
+                        with db._get_cursor() as cursor:
+                            if not _ready(cursor):
+                                return jsonify({"error": "Раздел «АТС» не развернулся: нет таблиц",
+                                                "code": "PBX_SCHEMA_MISSING"}), 503
                     return handler(payload)
                 except ValueError as exc:
                     return jsonify({"error": str(exc)}), 400
@@ -106,7 +158,7 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
                         message, status = error
                         return jsonify({"error": message}), status
                     with db._get_cursor() as cursor:
-                        if not schema.schema_is_ready(cursor):
+                        if not _ready(cursor):
                             return jsonify({"error": "Раздел «АТС» не развернулся: нет таблиц.",
                                             "code": "PBX_SCHEMA_MISSING"}), 503
                         ctx = queries.load_access_context(cursor, requester_id)
@@ -142,13 +194,16 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
             raise ValueError('Поле lines — словарь не больше %d линий' % MAX_LINES)
         ami = payload.get('ami') if isinstance(payload.get('ami'), dict) else {}
         snapshot = bool(payload.get('snapshot'))
+        # У коннектора есть живой канал команд — в ответе на пачку команды ему не нужны:
+        # раздай их здесь, и команда ушла бы дважды разными путями (сюда и в канал).
+        has_stream = bool(payload.get('stream'))
         calls = [call for call in (queries.clean_call(item) for item in events) if call]
+        version = str(payload.get('version') or '')[:40] or None
         with db._get_cursor() as cursor:
             queries.connector_seen(
                 cursor, hostname=str(payload.get('hostname') or '')[:120] or None,
-                version=str(payload.get('version') or '')[:40] or None,
-                agent_key=g.get('pbx_agent_key'), ami=ami, snapshot=snapshot)
-            stored = queries.upsert_calls(cursor, calls)
+                version=version, agent_key=g.get('pbx_agent_key'), ami=ami, snapshot=snapshot)
+            changed = queries.upsert_calls(cursor, calls)
             closed = queries.close_missing(cursor, [c['linkedid'] for c in calls]) if snapshot else 0
             for call in calls:
                 # Звонок, набранный отсюда: команде — её linkedid, чтобы кнопка знала, что дальше.
@@ -166,14 +221,79 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
                                        str(result.get('linkedid') or '')[:64] or None)
             if lines is not None:
                 queries.save_lines(cursor, _clean_lines(lines))
-            commands = queries.claim_commands(cursor)
+            commands = [] if has_stream else queries.claim_commands(cursor)
+            # Тычки уходят при коммите — вместе с тем, о чём сообщают.
+            realtime.notify(cursor, 'conn', seen=time.time(), ami=bool(ami.get('connected')),
+                            err=(str(ami.get('error'))[:200] if ami.get('error') else None), ver=version)
+            if changed or closed:
+                realtime.notify(cursor, 'calls')
             if not calls and not commands and queries.cleanup_due(cursor):
                 removed = queries.drop_expired(cursor)
                 if removed:
                     log.info('АТС: убрано %d старых строк', removed)
         if closed:
             log.info('АТС: по снимку закрыто %d звонков без события отбоя', closed)
-        return jsonify({'status': 'ok', 'stored': stored, 'commands': commands})
+        return jsonify({'status': 'ok', 'stored': len(changed), 'commands': commands})
+
+    @agent_route('/agent/stream')
+    def agent_stream(payload):
+        """Канал команд коннектора. Команды уходят в момент постановки; пульс раз в
+        AGENT_HEARTBEAT_SECONDS отмечает коннектор живым и подбирает команду, чей тычок мог
+        потеряться (слушатель переподключался)."""
+        if not _start_listener():
+            return jsonify({"error": "Живой канал выключен на сервере", "code": "PBX_STREAM_OFF"}), 503
+        if not live_hub.acquire('agent', agent_stream_limit):
+            response = jsonify({"error": "Канал команд уже занят", "code": "PBX_STREAM_BUSY"})
+            response.headers['Retry-After'] = '15'
+            return response, 503
+        generation = live_hub.new_agent_stream()
+        agent_key = g.get('pbx_agent_key')
+        hostname = str(payload.get('hostname') or '')[:120] or None
+        version = str(payload.get('version') or '')[:40] or None
+
+        def beat():
+            with db._get_cursor() as cursor:
+                queries.connector_seen(cursor, hostname=hostname, version=version,
+                                       agent_key=agent_key, stream=True)
+                realtime.notify(cursor, 'conn', seen=time.time(), stream=time.time())
+
+        def claim():
+            with db._get_cursor() as cursor:
+                return queries.claim_commands(cursor)
+
+        def generate():
+            cmd_cursor = live_hub.current_cmd_seq()
+            deadline = time.monotonic() + AGENT_STREAM_MAX_SECONDS
+            next_beat = 0.0
+            claim_now = True
+            yield ': connected %d\n\n' % int(time.time())
+            while True:
+                now = time.monotonic()
+                if now >= next_beat:
+                    beat()
+                    next_beat = now + AGENT_HEARTBEAT_SECONDS
+                    yield ': ping %d\n\n' % int(time.time())
+                    claim_now = True
+                if claim_now:
+                    claim_now = False
+                    # Сначала байт в канал, потом выдача: соединение, которое коннектор уже
+                    # закрыл, waitress обнаружит на этой записи — и команда останется в очереди
+                    # для живого канала, а не уйдёт «отправленной» в никуда.
+                    yield ': ping %d\n\n' % int(time.time())
+                    for command in claim():
+                        yield realtime.sse('command', command)
+                if now >= deadline:
+                    yield realtime.sse('bye', {'reason': 'lifetime'})
+                    return
+                timeout = max(0.0, min(next_beat, deadline) - time.monotonic())
+                woke, cmd_cursor, alive = live_hub.wait_commands(cmd_cursor, generation, timeout)
+                if not alive:
+                    yield realtime.sse('bye', {'reason': 'superseded'})
+                    return
+                if woke:
+                    claim_now = True
+
+        return _stream_response(generate, lambda: live_hub.release('agent'))
 
     # ── люди ─────────────────────────────────────────────────────────────────
 
@@ -207,8 +327,88 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
             'calls': [_call_view(call, resolve, known, my_ext) for call in calls],
             'me': access.capabilities(ctx, my_ext),
             'lines': _line_options(state.get('lines'), known),
-            'now': cdr_queries.now_almaty().strftime('%Y-%m-%dT%H:%M:%S'),
+            'now': _local_now(),
         })
+
+    @pbx_route('/stream')
+    def stream(ctx, my_ext):
+        """Живой поток раздела: первым кадром `state` (то же, что /live), дальше `calls` —
+        изменившиеся звонки — и `connector`, когда коннектор теряет или находит станцию."""
+        if not _start_listener():
+            return jsonify({"error": "Живой канал выключен на сервере", "code": "PBX_STREAM_OFF"}), 503
+        if not live_hub.acquire('browser', stream_limit):
+            response = jsonify({"status": "busy"})
+            response.headers['Retry-After'] = '120'
+            return response, 503
+        try:
+            realtime.wait_ready(live_hub, timeout=5.0)
+            with db._get_cursor() as cursor:
+                state = queries.connector_state(cursor)
+                resolve = _resolver(cursor)
+                known = _known_lines(cursor)
+        except Exception:
+            live_hub.release('browser')
+            raise
+        me = access.capabilities(ctx, my_ext)
+        lines = _line_options(state.get('lines'), known)
+
+        def views(calls):
+            return [_call_view(call, resolve, known, my_ext) for call in calls]
+
+        def visible(calls):
+            edge = (datetime.now(_ALMATY).replace(tzinfo=None)
+                    - timedelta(seconds=ENDED_VISIBLE_SECONDS)).strftime('%Y-%m-%dT%H:%M:%S')
+            return [c for c in calls if c.get('state') != 'ended' or str(c.get('ended_at') or '') >= edge]
+
+        def generate():
+            cursor_seq, calls, _ = live_hub.snapshot()
+            connector = live_hub.connector_view()
+            yield realtime.sse('state', {'connector': connector, 'calls': views(visible(calls)),
+                                         'me': me, 'lines': lines, 'now': _local_now()})
+            last_write = time.monotonic()
+            deadline = time.monotonic() + STREAM_MAX_SECONDS
+            while time.monotonic() < deadline:
+                # Пульс — по времени с последней записи, а не «если событий не было»: тычки о
+                # статусах телефонов приходят со всей компании каждые несколько секунд, и без
+                # этого поток мог бы минутами молчать — браузер счёл бы соединение мёртвым.
+                if time.monotonic() - last_write >= STREAM_HEARTBEAT_SECONDS:
+                    yield ': ping %d\n\n' % int(time.time())
+                    last_write = time.monotonic()
+                timeout = max(0.05, STREAM_HEARTBEAT_SECONDS - (time.monotonic() - last_write))
+                events, cursor_seq = live_hub.wait(cursor_seq, timeout)
+                fresh, reset, unavailable = {}, False, False
+                for event in events:
+                    kind = event.get('kind')
+                    if kind == 'calls':
+                        for call in event.get('calls') or []:
+                            fresh[call['linkedid']] = call
+                    elif kind == 'reset':
+                        reset = True
+                    elif kind == 'unavailable':
+                        unavailable = True
+                if reset:
+                    _seq, calls, _ = live_hub.snapshot()
+                    yield realtime.sse('state', {'connector': live_hub.connector_view(),
+                                                 'calls': views(visible(calls)), 'me': me,
+                                                 'lines': lines, 'now': _local_now()})
+                    last_write = time.monotonic()
+                    connector = live_hub.connector_view()
+                    continue
+                if unavailable:
+                    # Слушатель потерял базу: показывать «тишину» вместо данных нельзя.
+                    yield realtime.sse('unavailable', {'now': _local_now()})
+                    last_write = time.monotonic()
+                if fresh:
+                    yield realtime.sse('calls', {'calls': views(fresh.values()), 'now': _local_now()})
+                    last_write = time.monotonic()
+                current = live_hub.connector_view()
+                if current != connector:
+                    connector = current
+                    yield realtime.sse('connector', {'connector': connector, 'now': _local_now()})
+                    last_write = time.monotonic()
+            yield realtime.sse('bye', {'reason': 'lifetime'})
+
+        return _stream_response(generate, lambda: live_hub.release('browser'))
 
     @pbx_route('/call', methods=('POST',))
     def call(ctx, my_ext):
@@ -235,6 +435,7 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
             command_id = queries.enqueue_command(cursor, 'originate', {
                 'ext': my_ext, 'dial': dial, 'caller_name': _pretty_phone(phone),
             }, requested_by=ctx['user_id'])
+            realtime.notify(cursor, 'cmd')
         log.info('АТС: пользователь %s звонит с %s на …%s через %s (команда %d)',
                  ctx['user_id'], my_ext, phone[-4:], prefix, command_id)
         return jsonify({'status': 'queued', 'command_id': command_id, 'dial': dial})
@@ -273,6 +474,7 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
                 return jsonify({"error": "У звонка ещё нет канала, который можно отбить"}), 409
             command_id = queries.enqueue_command(cursor, 'hangup', {'channel': channel},
                                                  requested_by=ctx['user_id'], linkedid=linkedid)
+            realtime.notify(cursor, 'cmd')
         return jsonify({'status': 'queued', 'command_id': command_id})
 
     @pbx_route('/spy', methods=('POST',))
@@ -290,11 +492,12 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
             target = queries.call_by_linkedid(cursor, linkedid)
             if not target or target['state'] != 'talking' or not target['agent_channel']:
                 return jsonify({"error": "Подключиться можно только к идущему разговору"}), 409
-            if pbx_calls.ext_of_channel(target['agent_channel']) == my_ext:
+            if pbx_calls.ext_of_channel(target['agent_channel']) == my_ext or my_ext == target.get('peer_ext'):
                 return jsonify({"error": "Это ваш собственный разговор"}), 409
             command_id = queries.enqueue_command(cursor, 'spy', {
                 'ext': my_ext, 'target_channel': target['agent_channel'], 'mode': mode,
             }, requested_by=ctx['user_id'], linkedid=linkedid)
+            realtime.notify(cursor, 'cmd')
         log.info('АТС: пользователь %s подключается (%s) к звонку %s с %s (команда %d)',
                  ctx['user_id'], mode, linkedid, my_ext, command_id)
         return jsonify({'status': 'queued', 'command_id': command_id})
@@ -315,6 +518,10 @@ def build_pbx_blueprint(*, db, require_api_key, build_cors_preflight_response, r
 
 # ── представления ────────────────────────────────────────────────────────────
 
+def _local_now():
+    return datetime.now(_ALMATY).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%S')
+
+
 def _connector_alive(state, now=None):
     """«На связи» — здоровался не дольше CONNECTOR_SILENT_SECONDS назад. last_seen_at —
     ISO с поясом (TIMESTAMPTZ, сессия Postgres в UTC), сравниваем в абсолютном времени."""
@@ -327,17 +534,24 @@ def _connector_alive(state, now=None):
         return False
     if parsed.tzinfo is not None:
         # now_almaty() — наивное время Алматы (UTC+5); приводим отметку к нему же.
-        parsed = parsed.astimezone(timezone(timedelta(hours=5))).replace(tzinfo=None)
+        parsed = parsed.astimezone(_ALMATY).replace(tzinfo=None)
     moment = now or cdr_queries.now_almaty()
     return (moment - parsed).total_seconds() <= CONNECTOR_SILENT_SECONDS
 
 
 def _connector_view(state):
+    """Состояние коннектора для экрана — та же форма, что Hub.connector_view() в потоке."""
     state = dict(state or {})
-    state.pop('lines', None)
-    state['connected'] = _connector_alive(state)
-    state['online'] = state['connected'] and bool(state.get('ami_connected'))
-    return state
+    connected = _connector_alive(state)
+    stream_at = state.get('stream_at')
+    return {
+        'connected': connected,
+        'ami_connected': bool(state.get('ami_connected')),
+        'online': connected and bool(state.get('ami_connected')),
+        'stream': bool(stream_at) and _connector_alive({'last_seen_at': stream_at}),
+        'ami_error': state.get('ami_error') or None,
+        'version': state.get('version') or None,
+    }
 
 
 def _pretty_phone(digits):
@@ -349,14 +563,17 @@ def _pretty_phone(digits):
 
 def _call_view(call, resolve, known, my_ext):
     """Звонок для экрана: номер клиента, оператор по справочнику, парк линии, мои ли."""
-    out = dict(call)
-    out.pop('channel', None)
-    out.pop('seq', None)
+    out = {key: call.get(key) for key in (
+        'linkedid', 'direction', 'phone', 'did', 'queue', 'ext', 'peer_ext', 'ringing', 'state',
+        'started_at', 'queued_at', 'ringing_at', 'answered_at', 'ended_at', 'wait_seconds',
+        'hangup_cause', 'hangup_side', 'dial_prefix', 'dial_status', 'recording_file', 'origin',
+        'command_id', 'rev')}
+    out['ringing'] = list(call.get('ringing') or [])
     out['has_agent_channel'] = bool(call.get('agent_channel'))
-    out.pop('agent_channel', None)
     when = call.get('started_at')
     out['operator'] = resolve(call['ext'], when)[0] if call.get('ext') else ''
-    out['ringing_operators'] = [resolve(ext, when)[0] for ext in call.get('ringing') or []]
+    out['peer_operator'] = resolve(call['peer_ext'], when)[0] if call.get('peer_ext') else ''
+    out['ringing_operators'] = [resolve(ext, when)[0] for ext in out['ringing']]
     number = touches_mod.norm_phone(call.get('did')) if call.get('direction') == pbx_calls.DIRECTION_IN else ''
     queue = call.get('queue') or (known.get(number) if number else '')
     out['park'] = lines_mod.park_of_queue(queue) if queue else ''

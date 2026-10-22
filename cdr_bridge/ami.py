@@ -181,7 +181,11 @@ class Ami:
 
     def _dispatch(self, message):
         action_id = message.get('ActionID')
-        if action_id and 'Response' in message:
+        # Ответ на действие — сообщение БЕЗ поля Event. У события OriginateResponse есть и
+        # ActionID нашего Originate, и поле Response («Success»/«Failure»): приди оно раньше,
+        # чем вызывающий снял ожидание, оно подменило бы ответ и не дошло бы до обработчика —
+        # итог команды потерял бы причину отказа.
+        if action_id and 'Response' in message and 'Event' not in message:
             with self._waiters_lock:
                 waiter = self._waiters.get(action_id)
             if waiter is not None:
@@ -199,6 +203,8 @@ class Ami:
                 waiter = self._waiters.get(action_id)
             if waiter is not None and 'items' in waiter:
                 if message.get('EventList') == 'Complete':
+                    # Список дошёл целиком: только такому вызывающий может верить как полному.
+                    waiter['complete'] = True
                     waiter['event'].set()
                 else:
                     waiter['items'].append(message)
@@ -239,6 +245,8 @@ class Ami:
         reply = dict(waiter['reply'] or {})
         if 'items' in waiter:
             reply['_items'] = waiter['items']
+            # Обрыв посреди списка отпускает ожидание с частью элементов — это не «весь список».
+            reply['_complete'] = bool(waiter.get('complete'))
         return reply
 
     def ping(self):

@@ -6,6 +6,7 @@
                                          верификатор со стены «Чата» — &direction=chat)
     GET /api/op_wallboard/chat_snapshot  направление «Чат»: чаты верификаторов в Wazzup (#367)
     GET /api/op_wallboard/chat_export    то же за период файлом .xlsx (?date_from=&date_to=)
+    GET /api/op_wallboard/live           SSE «сейчас» в реальном времени (коннектор АТС, 22.10.2026)
 
 Доступ — как у табло Тез КЦ и СЗоВ: глобальные админы, глава отдела продаж и его
 супервайзеры. Граница отдела строгая. Зависимости приходят аргументами фабрики:
@@ -15,16 +16,30 @@
 Момент ответа (SL, ожидание, разговор) берётся не из CDR, а из событий iCORE Phone за
 сутки — см. `snapshot.attach_answer_moments` и докстринг `snapshot`. «Принятие лида в
 работу» — из снимка сделок «Воронки ОП» и звонков по их телефонам, см. `lead_speed`.
+
+Реальное время (поток /live)
+----------------------------
+Снимок дня тяжёлый (касания, события телефонов, группы) и считается раз в TTL на всех. Всё,
+что меняется ежесекундно, едет поверх него потоком, без опроса:
+  * звонок станции изменился (коннектор АТС → pbx/realtime.py) — кадр `live`: живые статусы
+    людей, «сейчас» отдела и групп, очередь — `snapshot.live_patch` от того же снимка;
+  * человек сменил статус в телефоне — его строка обновляется в снимке одним запросом
+    (`snapshot.set_status`) и уходит кадром `live`;
+  * мост прислал новые касания — кэш снимка сбрасывается и поток говорит `refresh`: экран
+    перечитывает снимок сразу, а не через свой опрос.
+Поток недоступен (лимит мест, нет слушателя) — экран живёт на опросе снимка, как раньше.
 """
 
+import json
 import logging
 import threading
 import time
+from collections import deque
 from io import BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, request, send_file
 
 from cdr import directory as directory_mod, leads as cdr_leads_mod, queries, touches as touches_mod
 from test_numbers import keys as test_keys
@@ -36,6 +51,20 @@ log = logging.getLogger(__name__)
 DEPARTMENT_CODE = 'op'
 _DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в никогда
 _ALMATY = ZoneInfo('Asia/Almaty')
+
+# Поток «сейчас»: пульс SSE-комментарием, предел жизни соединения (переподключение заодно
+# освежает снимок у зрителя) и не чаще чем раз в столько секунд «перечитай снимок»: мост
+# присылает касания раз в 20 с, а пересчёт дня — самое тяжёлое, что делает табло.
+LIVE_HEARTBEAT_SECONDS = 20
+LIVE_STREAM_MAX_SECONDS = 600
+LIVE_REFRESH_MIN_SECONDS = 5
+# Сколько помнить смену статуса, чтобы доприменить её к пересчитанному снимку: дольше любого
+# пересчёта (секунды) и опроса снимка (10 с).
+RECENT_STATUS_SECONDS = 120
+
+
+def _local_now():
+    return datetime.now(_ALMATY).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%S')
 
 
 def load_phone_events(cursor, operator_ids, day, lookback_hours=0):
@@ -367,11 +396,24 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                                  ar_max_percent=snapshot_mod.DEFAULT_AR_MAX_PERCENT,
                                  chat_ttl_seconds=10, chat_messages_ttl_seconds=30, chat_stale_max_seconds=600,
                                  chat_settings=None, chat_export_max_days=chat_export_mod.MAX_DAYS,
-                                 lead_ttl_seconds=60):
+                                 lead_ttl_seconds=60, listen_connect=None, live_stream_limit=10,
+                                 live_hub=None, live_loader=None):
+    """`live_loader()` → (идущие звонки станции, на связи ли коннектор) для сборки снимка;
+    по умолчанию — из таблиц раздела «АТС» (pbx/). Подменяется в тестах."""
     bp = Blueprint('op_wallboard', __name__, url_prefix='/api/op_wallboard')
     cache = {'ts': 0.0, 'payload': None}
     lock = threading.Lock()
     label = 'Табло ОП'
+    from pbx import realtime as pbx_realtime
+    hub = live_hub or pbx_realtime.hub
+    live_schema = {'ok': False}
+    # Смены статуса, уже подставленные в снимок: каждый поток видит то же событие, а запрос в
+    # базу за ним нужен один.
+    applied_status = deque(maxlen=500)
+    # Последняя смена статуса каждого человека за пару минут: доприменяется к снимку, который
+    # пересчитывался, пока она приходила (см. _current_payload).
+    recent_status = {}
+    status_lock = threading.Lock()
 
     def _resolve_name():
         """ФИО по внутреннему номеру — из справочника раздела «Касания». Справочник
@@ -549,6 +591,24 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         block.update(group_ids=group_ids, synced_age_seconds=None)
         return block
 
+    def _live_calls():
+        """(идущие звонки станции, на связи ли коннектор) — своей транзакцией: сбой чтения
+        таблиц АТС не должен обрывать транзакцию снимка. Нет схемы или ошибка — ([], False),
+        и «сейчас» считается по одним статусам телефонов, как до коннектора."""
+        try:
+            from pbx import queries as pbx_queries, routes as pbx_routes, schema as pbx_schema
+            with db._get_cursor() as cursor:
+                if not live_schema['ok']:
+                    live_schema['ok'] = pbx_schema.schema_is_ready(cursor)
+                    if not live_schema['ok']:
+                        return [], False
+                state = pbx_queries.connector_state(cursor)
+                online = pbx_routes._connector_alive(state) and bool(state.get('ami_connected'))
+                return (pbx_queries.active_calls(cursor) if online else []), online
+        except Exception:  # noqa: BLE001
+            log.exception('%s: живые звонки станции не прочитались', label)
+            return [], False
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
@@ -579,13 +639,15 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         except Exception:  # noqa: BLE001
             log.exception('%s: принятие лида в работу не посчиталось', label)
             lead_speed = None
+        live_calls, live_online = (live_loader or _live_calls)()
         return snapshot_mod.assemble(
             day=day, touches=touches, people=people, live_statuses=statuses,
             status_entry=status_entry, resolve_name=_resolve_name(),
             bridge_state=bridge_state, now=now, sl_seconds=sl_seconds,
             ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent,
             announce_seconds=announce_seconds, memberships=memberships,
-            queue_owners=queue_owners, phone_events=phone_events, lead_speed=lead_speed)
+            queue_owners=queue_owners, phone_events=phone_events, lead_speed=lead_speed,
+            live_calls=live_calls, live_online=live_online)
 
     def _snapshot():
         """Снимок из общего кэша — один на всех зрителей и на отбивку. Бросает, если
@@ -618,7 +680,159 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             # а не пятисоткой — на стене разница между «портал упал» и «касаний ещё нет».
             log.warning('%s: снимок недоступен: %s', label, exc)
             return jsonify({"error": str(exc)[:200]}), 503
+        # Время сервера в момент ответа: по нему экран ведёт часы статусов и очереди, не
+        # завися ни от часов браузера, ни от его пояса (снимок мог лечь в кэш секунды назад).
+        payload = dict(payload, served_at=_local_now())
         return jsonify(payload)
+
+    # ── реальное время ───────────────────────────────────────────────────────
+
+    def _current_payload():
+        """Снимок из кэша — с доприменёнными сменами статуса, которые новее его чтения.
+
+        Пересчёт снимка читает статусы в начале и кладёт результат через секунды; смена статуса
+        в это окно попала бы в старый снимок и пропала бы с новым. Поэтому последние смены
+        помнятся (recent_status) и доприменяются к снимку, если в его строке статус старше."""
+        payload = cache.get('payload')
+        if payload is None:
+            return None
+        with status_lock:
+            edge = time.monotonic() - RECENT_STATUS_SECONDS
+            for operator_id, item in list(recent_status.items()):
+                if item['at'] < edge:
+                    del recent_status[operator_id]
+                    continue
+                row = next((r for r in payload.get('operators') or [] if r.get('id') == operator_id), None)
+                if row is not None and str(item['live'].get('event_at') or '') > str(row.get('status_at') or ''):
+                    snapshot_mod.set_status(payload, operator_id, item['entry'], item['live'])
+        return payload
+
+    def _make_patch(payload):
+        online = hub.connector_view()['online']
+        calls = hub.active_calls() if online else []
+        return snapshot_mod.live_patch(payload, calls, online,
+                                       datetime.now(_ALMATY).replace(tzinfo=None))
+
+    def _patch_key(patch):
+        """Сравнение кадров без того, что тикает само (момент и секунды ожидания)."""
+        def strip(block):
+            return {k: v for k, v in (block or {}).items() if k != 'queue_max_wait_seconds'}
+        return json.dumps({'operators': patch['operators'], 'now': strip(patch['now']),
+                           'groups_now': {k: strip(v) for k, v in patch['groups_now'].items()},
+                           'online': patch['online']}, sort_keys=True, ensure_ascii=False)
+
+    def _apply_status(event):
+        """Смена статуса телефона человека со стены — в снимок, одним запросом на событие."""
+        payload = _current_payload()
+        operator_id = event.get('operator_id')
+        if payload is None or operator_id is None:
+            return False
+        if not any(row.get('id') == operator_id for row in payload.get('operators') or []):
+            return False
+        marker = (operator_id, event.get('ts'))
+        with status_lock:
+            if marker in applied_status:
+                return True
+            applied_status.append(marker)
+            try:
+                live = (live_statuses([operator_id]) or {}).get(operator_id) or {}
+            except Exception:  # noqa: BLE001
+                log.exception('%s: статус сотрудника %s не прочитался', label, operator_id)
+                return False
+            entry = status_entry(live.get('status_key'))
+            snapshot_mod.set_status(payload, operator_id, entry, live)
+            recent_status[operator_id] = {'at': time.monotonic(), 'entry': entry, 'live': live}
+        return True
+
+    def _invalidate():
+        """Перечитать снимок при следующем запросе. Только просрочить, а не обнулить отметку:
+        с нулём пропала бы отдача прежнего снимка, пока новый считается или если он упал, —
+        стены и отбивка получили бы 503 вместо «данные на минуту старше»."""
+        if cache.get('ts'):
+            cache['ts'] = min(cache['ts'], time.time() - ttl_seconds)
+
+    @bp.route('/live', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    def api_live():
+        """SSE: кадр `live` сразу и при каждом изменении, `refresh` — пора перечитать снимок."""
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        _, refusal = guard()
+        if refusal is not None:
+            return refusal
+        if listen_connect is None:
+            return jsonify({"error": "Живой канал выключен на сервере", "code": "OP_LIVE_OFF"}), 503
+        if not hub.acquire('wallboard', live_stream_limit):
+            response = jsonify({"status": "busy"})
+            response.headers['Retry-After'] = '120'
+            return response, 503
+        try:
+            pbx_realtime.ensure_listener(listen_connect, hub)
+            pbx_realtime.wait_ready(hub, timeout=5.0)
+            _snapshot()
+        except Exception as exc:  # noqa: BLE001
+            hub.release('wallboard')
+            log.warning('%s: живой канал не открылся: %s', label, exc)
+            return jsonify({"error": str(exc)[:200]}), 503
+
+        def generate():
+            cursor_seq = hub.current_seq()
+            last_key = None
+            # Пока слушатель не прочитал базу (или потерял её), в памяти процесса нет ни звонков,
+            # ни отметки коннектора: кадр из пустоты стёр бы живые статусы и написал бы «коннектор не
+            # на связи». Такой кадр не шлём — экран живёт снимком, а кадр придёт по событию reset.
+            if hub.ready:
+                patch = _make_patch(_current_payload())
+                last_key = _patch_key(patch)
+                yield pbx_realtime.sse('live', patch)
+            else:
+                yield ': connected %d\n\n' % int(time.time())
+            last_write = time.monotonic()
+            deadline = time.monotonic() + LIVE_STREAM_MAX_SECONDS
+            last_refresh = 0.0
+            refresh_pending = False
+            while time.monotonic() < deadline:
+                # Пульс — по времени с последней записи, а не «если событий не было»: тычки о
+                # статусах телефонов приходят со всей компании каждые несколько секунд, и поток,
+                # у которого кадр не меняется, иначе молчал бы минутами — браузер рвёт такое
+                # соединение через минуту, а брошенный поток держал бы место до конца своей жизни.
+                if time.monotonic() - last_write >= LIVE_HEARTBEAT_SECONDS:
+                    yield ': ping %d\n\n' % int(time.time())
+                    last_write = time.monotonic()
+                timeout = max(0.05, LIVE_HEARTBEAT_SECONDS - (time.monotonic() - last_write))
+                if refresh_pending:
+                    # Отложенная перечитка: касания пришли раньше конца паузы — дождаться её.
+                    timeout = min(timeout, max(0.05, last_refresh + LIVE_REFRESH_MIN_SECONDS - time.monotonic()))
+                events, cursor_seq = hub.wait(cursor_seq, timeout)
+                for event in events:
+                    if event.get('kind') != 'board':
+                        continue
+                    if event.get('why') == 'touches':
+                        refresh_pending = True
+                    elif event.get('why') == 'status':
+                        _apply_status(event)
+                if refresh_pending and time.monotonic() - last_refresh >= LIVE_REFRESH_MIN_SECONDS:
+                    refresh_pending = False
+                    last_refresh = time.monotonic()
+                    _invalidate()
+                    yield pbx_realtime.sse('refresh', {'at': _local_now()})
+                    last_write = time.monotonic()
+                payload = _current_payload()
+                if payload is None or not hub.ready:
+                    continue
+                patch = _make_patch(payload)
+                key = _patch_key(patch)
+                if key != last_key:
+                    last_key = key
+                    yield pbx_realtime.sse('live', patch)
+                    last_write = time.monotonic()
+            yield pbx_realtime.sse('bye', {'reason': 'lifetime'})
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.call_on_close(lambda: hub.release('wallboard'))
+        return response
 
     @bp.route('/journal', methods=['GET', 'OPTIONS'])
     @require_api_key

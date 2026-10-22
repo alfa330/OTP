@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import {
     arTone,
     chatReplyTone,
@@ -11,6 +12,8 @@ import {
     slTone,
 } from './szovWallboardShared';
 import { opLeadSyncStaleSeconds } from './opWallboardLeads';
+import { applyOpLivePatch, opQueueTone, opQueueWait, wallStamp, withOpClock } from './opWallboardLive';
+import { runSseStream } from '../common/sseClient';
 
 /*
  * Общая начинка «Табло ОП» — отдел продаж на телефонии FreePBX.
@@ -19,8 +22,10 @@ import { opLeadSyncStaleSeconds } from './opWallboardLeads';
  *   - цифры дня (входящие, принято, потеряно, AR, SL, разговор) приезжают из касаний,
  *     которые мост внутри корпоративной сети досылает каждые двадцать секунд;
  *   - люди и их статусы — из событий iCORE Phone, как на табло Тез КЦ;
- *   - «в очереди сейчас» здесь НЕТ: CDR узнаёт о звонке после его завершения, а живые
- *     ручки станции роняли её в августе 2026. Плитка появится вместе с доступом к AMI.
+ *   - «сейчас» — в реальном времени (с 22.10.2026): коннектор АТС сидит на AMI станции, и поток
+ *     /api/op_wallboard/live приносит кадр при каждом изменении — кто говорит, у кого соединение,
+ *     сколько ждут в очереди; смена статуса в телефоне приходит тем же потоком. Касания моста
+ *     будят перечитку снимка сразу (кадр `refresh`), опрос остаётся страховкой.
  *
  * Механика опроса — из szovWallboardShared импортом (`createSnapshotFeed`): таймер и
  * запрос на весь фронт живут в одном месте. Пороги AR/SL те же, что у СЗоВ (arTone/slTone),
@@ -31,11 +36,97 @@ import { opLeadSyncStaleSeconds } from './opWallboardLeads';
 export const OP_POLL_INTERVAL_MS = 10000;
 
 export const OP_WALLBOARD_SNAPSHOT_PATH = '/api/op_wallboard/snapshot';
+export const OP_WALLBOARD_LIVE_PATH = '/api/op_wallboard/live';
 
-export const useOpWallboardSnapshot = createSnapshotFeed({
+const useBaseOpWallboardSnapshot = createSnapshotFeed({
     path: OP_WALLBOARD_SNAPSHOT_PATH,
     pollIntervalMs: OP_POLL_INTERVAL_MS,
 });
+
+/*
+ * Живой поток — один на страницу, как и опрос снимка: стена и виджет «поверх окон» живут в одном
+ * JS-контексте и делят его. Подписчиков нет — соединение закрыто и место на сервере свободно.
+ */
+const liveStore = {
+    state: { patch: null, receivedMs: 0, status: 'idle' },
+    listeners: new Set(),
+    subscribers: 0,
+    stream: null,
+    source: { apiBaseUrl: '', buildHeaders: null },
+    refresh: null,
+    refreshTimer: null,
+};
+
+const patchLive = (next) => {
+    liveStore.state = { ...liveStore.state, ...next };
+    liveStore.listeners.forEach((listener) => listener());
+};
+
+const scheduleSnapshotRefresh = () => {
+    if (liveStore.refreshTimer || typeof window === 'undefined') return;
+    // Разброс: «перечитай» приходит всем стенам разом, а пересчёт снимка — самое тяжёлое на сервере.
+    liveStore.refreshTimer = window.setTimeout(() => {
+        liveStore.refreshTimer = null;
+        liveStore.refresh?.();
+    }, 300 + Math.random() * 700);
+};
+
+const startLive = () => {
+    const { apiBaseUrl, buildHeaders } = liveStore.source;
+    if (!apiBaseUrl || liveStore.stream || typeof fetch === 'undefined') return;
+    liveStore.stream = runSseStream({
+        url: `${apiBaseUrl}${OP_WALLBOARD_LIVE_PATH}`,
+        getHeaders: () => (buildHeaders ? buildHeaders({}) : {}),
+        onEvent: (event, payload) => {
+            if (event === 'live' && payload) patchLive({ patch: payload, receivedMs: Date.now() });
+            else if (event === 'refresh') scheduleSnapshotRefresh();
+        },
+        onState: (status) => patchLive({ status }),
+    });
+};
+
+const stopLive = () => {
+    liveStore.stream?.close();
+    liveStore.stream = null;
+};
+
+const subscribeLive = (listener) => {
+    liveStore.listeners.add(listener);
+    liveStore.subscribers += 1;
+    if (liveStore.subscribers === 1) startLive();
+    return () => {
+        liveStore.listeners.delete(listener);
+        liveStore.subscribers = Math.max(0, liveStore.subscribers - 1);
+        if (liveStore.subscribers === 0) stopLive();
+    };
+};
+
+const getLiveState = () => liveStore.state;
+
+/*
+ * Снимок табло вместе с живым слоем: {snapshot, error, loading, refresh, liveStatus}. Снимок
+ * пересобирается раз в секунду с новым `clock_now` — по нему тикают статусы людей и очередь.
+ */
+export const useOpWallboardSnapshot = ({ apiBaseUrl, withAccessTokenHeader }) => {
+    const base = useBaseOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
+    liveStore.source = { apiBaseUrl, buildHeaders: withAccessTokenHeader };
+    liveStore.refresh = base.refresh;
+    const live = useSyncExternalStore(subscribeLive, getLiveState, getLiveState);
+    // Момент получения — из общего хранилища: виджет, открытый позже стены, тикает так же.
+    const snapshotReceivedMs = base.receivedAt || 0;
+    const merged = useMemo(
+        () => applyOpLivePatch(base.snapshot, live.patch, { snapshotReceivedMs, patchReceivedMs: live.receivedMs }),
+        [base.snapshot, live.patch, live.receivedMs, snapshotReceivedMs],
+    );
+    const [tick, setTick] = useState(() => Date.now());
+    useEffect(() => {
+        if (!merged || typeof window === 'undefined') return undefined;
+        const timer = window.setInterval(() => setTick(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+    }, [Boolean(merged)]); // eslint-disable-line react-hooks/exhaustive-deps
+    const snapshot = useMemo(() => withOpClock(merged, Math.max(tick, Date.now())), [merged, tick]);
+    return { ...base, snapshot, liveStatus: live.status };
+};
 
 /*
  * Ноль вместо «нет данных» на стене читается как «всё хорошо, звонков нет». Показателю,
@@ -86,7 +177,16 @@ export const OP_STATUS_STYLE = {
     other: { label: null, chip: 'bg-slate-100 text-slate-600' },
 };
 
+/*
+ * Чип статуса. Живой звонок станции (`row.live`, коннектор АТС) главнее статуса телефона: станция
+ * знает о разговоре в секунду ответа, а телефон присылает «занят» как получится. Цвета те же —
+ * «В разговоре» и «Соединение» уже есть в словаре, новых оттенков на стене не появляется.
+ */
 export const opStatusChip = (row) => {
+    if (row?.live?.status_key) {
+        const style = OP_STATUS_STYLE[row.live.status_key] || OP_STATUS_STYLE.other;
+        return { label: row.live.status_label || style.label || '—', className: style.chip, muted: false };
+    }
     const style = OP_STATUS_STYLE[row?.status_key] || OP_STATUS_STYLE.other;
     return {
         label: row?.status_label || style.label || '—',
@@ -200,6 +300,19 @@ export const OP_METRICS = [
         read: (s) => ({ value: formatSeconds(s.lead_speed?.avg_seconds) }),
     },
     {
+        // В реальном времени с коннектором АТС (22.10.2026): входящие, вставшие в очередь и ещё не
+        // принятые. Заявки автообзвона сюда не входят — они ждут оператора, а не ответа клиенту.
+        // Цвет — то же правило, что у табло СЗоВ: одна величина на двух стенах горит одинаково.
+        key: 'op_queue', group: 'now', label: 'В очереди',
+        hint: (s) => (s?.live?.online === false ? 'Коннектор АТС не на связи' : 'Ждут ответа оператора'),
+        read: (s) => ({ value: formatCount(s.now?.queue), tone: opQueueTone(s.now) }),
+    },
+    {
+        key: 'op_queue_wait', group: 'now', label: 'Ждут дольше всех',
+        hint: 'Самый долгий звонок в очереди, от входа в неё',
+        read: (s) => ({ value: formatSeconds(opQueueWait(s)) }),
+    },
+    {
         key: 'op_online', group: 'now', label: 'Онлайн',
         // Со статусами групп ОП (ТЗ 05.10.2026) сервер считает онлайн шире: набор номера
         // («Соединение») и «Автодозвон» — тоже на линии. Без этого оператор Основы на время
@@ -260,6 +373,10 @@ export const opFreshnessNotice = (snapshot) => {
     if (age > OP_LIVE_WARN_SECONDS) {
         return `Данные моста устарели: последнее обновление ${formatDuration(age)} назад`;
     }
+    // Итоги дня на месте, но «сейчас» без станции: очередь — прочерк, люди — по телефонам.
+    if (snapshot?.live && snapshot.live.online === false) {
+        return 'Коннектор АТС не на связи — «сейчас» по статусам телефонов, очереди не видно';
+    }
     return null;
 };
 
@@ -274,8 +391,14 @@ export const opLeadSyncNotice = (snapshot) => {
         : `Сделки amoCRM не обновлялись ${formatDuration(age)} — «Принятие лида» считается по старому списку`;
 };
 
-/** Отметка времени для шапки: по последнему живому приращению моста, а не по снимку. */
+/*
+ * Отметка времени для шапки. Коннектор АТС на связи — «сейчас» живое, и часы идут по серверу
+ * каждую секунду; иначе — по последнему живому приращению моста, а не по снимку.
+ */
 export const opClockLabel = (snapshot) => {
+    if (snapshot?.live?.online && Number.isFinite(snapshot?.clock_now)) {
+        return `данные на ${formatClock(wallStamp(snapshot.clock_now))}`;
+    }
     const at = snapshot?.bridge?.live_at || snapshot?.captured_at;
     return at ? `данные на ${formatClock(at)}` : null;
 };
@@ -298,6 +421,7 @@ export const OP_METRIC_GROUPS = [
 
 // По умолчанию — то же, что крупными плитками на стене: кто на линии и сколько потеряли.
 export const DEFAULT_OP_WIDGET_METRICS = [
+    'op_queue',
     'op_online',
     'op_talking',
     'op_free',

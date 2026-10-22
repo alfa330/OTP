@@ -104,6 +104,38 @@ export const sortCalls = (calls) => [...(calls || [])].sort((a, b) => {
     return String(b.started_at || '').localeCompare(String(a.started_at || ''));
 });
 
+/* Изменения из потока поверх известных звонков: по linkedid, новее — по ревизии сервера (rev).
+   Кадр мог прийти дважды (переподключение) — старая ревизия не затирает новую. */
+export const mergeLiveCalls = (known, incoming) => {
+    const byId = new Map((known || []).map((call) => [call.linkedid, call]));
+    (incoming || []).forEach((call) => {
+        const current = byId.get(call.linkedid);
+        if (!current || Number(call.rev || 0) >= Number(current.rev || 0)) byId.set(call.linkedid, call);
+    });
+    return [...byId.values()];
+};
+
+/* Ответ опроса /live — весь список на момент запроса: набор звонков берём из него (ушедшие из окна
+   пропадают), но звонок, который поток уже прислал новее, ответом не откатываем. */
+export const reconcileLiveCalls = (known, snapshot) => {
+    const byId = new Map((known || []).map((call) => [call.linkedid, call]));
+    return (snapshot || []).map((call) => {
+        const current = byId.get(call.linkedid);
+        return current && Number(current.rev || 0) > Number(call.rev || 0) ? current : call;
+    });
+};
+
+/* Законченный звонок виден на экране keepSeconds после отбоя, дальше уходит сам. */
+export const visibleCalls = (calls, nowIso, keepSeconds = 90) => {
+    const now = wallSeconds(nowIso);
+    if (now === null) return calls || [];
+    return (calls || []).filter((call) => {
+        if (call.state !== 'ended') return true;
+        const ended = wallSeconds(call.ended_at || call.started_at);
+        return ended !== null && now - ended <= keepSeconds;
+    });
+};
+
 /* Линия для перезвона: по номеру линии звонка, иначе — последняя выбранная. */
 export const pickLine = (lines, lineNumber, lastPrefix) => {
     const list = lines || [];

@@ -73,3 +73,41 @@ test('линия для перезвона: по номеру линии, ина
     assert.equal(pickLine(lines, '', '9999'), '');
     assert.equal(pickLine([lines[0]], '', ''), '3333');
 });
+
+test('изменения из потока: новее по ревизии, повтор кадра не откатывает', async () => {
+    const { mergeLiveCalls } = await import('../src/components/cdr/liveMeta.js');
+    const known = [{ linkedid: 'a', state: 'talking', rev: 5 }, { linkedid: 'b', state: 'queued', rev: 2 }];
+    const merged = mergeLiveCalls(known, [
+        { linkedid: 'a', state: 'ringing', rev: 4 },           // старый кадр после переподключения
+        { linkedid: 'b', state: 'ended', rev: 6 },
+        { linkedid: 'c', state: 'new', rev: 7 },
+    ]);
+    const byId = Object.fromEntries(merged.map((call) => [call.linkedid, call.state]));
+    assert.deepEqual(byId, { a: 'talking', b: 'ended', c: 'new' });
+});
+
+test('ответ опроса: набор из ответа, но присланное потоком новее не откатывается', async () => {
+    const { reconcileLiveCalls } = await import('../src/components/cdr/liveMeta.js');
+    const known = [
+        { linkedid: 'a', state: 'talking', rev: 9 },            // поток прислал позже, чем собран ответ
+        { linkedid: 'b', state: 'queued', rev: 2 },             // в ответе его уже нет — ушёл из окна
+    ];
+    const result = reconcileLiveCalls(known, [
+        { linkedid: 'a', state: 'ringing', rev: 8 },
+        { linkedid: 'c', state: 'new', rev: 3 },
+    ]);
+    const byId = Object.fromEntries(result.map((call) => [call.linkedid, call.state]));
+    assert.deepEqual(byId, { a: 'talking', c: 'new' });
+    assert.deepEqual(reconcileLiveCalls(null, [{ linkedid: 'x', rev: 1 }]).map((c) => c.linkedid), ['x']);
+});
+
+test('законченный звонок уходит через 90 с после отбоя', async () => {
+    const { visibleCalls } = await import('../src/components/cdr/liveMeta.js');
+    const calls = [
+        { linkedid: 'a', state: 'ended', ended_at: '2026-10-22T12:00:00' },
+        { linkedid: 'b', state: 'ended', ended_at: '2026-10-22T12:01:00' },
+        { linkedid: 'c', state: 'talking', started_at: '2026-10-22T11:00:00' },
+    ];
+    assert.deepEqual(visibleCalls(calls, '2026-10-22T12:01:31').map((c) => c.linkedid), ['b', 'c']);
+    assert.equal(visibleCalls(calls, '').length, 3, 'без часов сервера — ничего не прячем');
+});

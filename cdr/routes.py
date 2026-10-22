@@ -956,6 +956,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.replace_day_touches(cursor, day_value, clean)
             queries.mark_day_done(cursor, day_value, rows_fetched, len(clean), complete)
             queries.agent_seen(cursor, days_sent=1, rows_read=rows_fetched)
+            if not complete:
+                _poke_wallboard(cursor)
         log.info('Касания: мост прислал %s — строк CDR %d, касаний %d',
                  day_value, rows_fetched, len(clean))
         _share_call_end_parties(day_value)
@@ -1020,6 +1022,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.agent_seen(cursor, live=True, agent_key=g.get('cdr_agent_key'))
             if queue_calls is not None:
                 queries.save_queue_calls(cursor, queue_calls)
+            if (stored or dropped) and day_value == today:
+                _poke_wallboard(cursor)
         return jsonify({'status': 'ok', 'stored': stored, 'removed': dropped})
 
     @agent_route('/agent/directory')
@@ -1099,6 +1103,13 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
 
 # ── помощники ────────────────────────────────────────────────────────────────
+
+def _poke_wallboard(cursor):
+    """Касания сегодняшних суток изменились — «Табло ОП» перечитает снимок сразу (тычок уходит
+    при коммите той же транзакции, см. pbx/realtime.py), а не на своём опросе."""
+    from pbx import realtime as pbx_realtime
+    pbx_realtime.notify(cursor, 'board', why='touches')
+
 
 def _settled_days(states, day_from, day_to, today):
     """Сколько суток периода в порядке. То же правило, что у прогресса, — иначе

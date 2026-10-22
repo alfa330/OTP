@@ -10,6 +10,7 @@ import { BroadcastControls, ChatExportControls, WidgetButton } from './SzovWallb
 import OpStatusJournalPanel from './OpStatusJournal';
 import OpChatWallboardBody from './OpChatWallboard';
 import { OP_GROUP_ALL, opEntryTime, opGroupOptions, opGroupView, opHourRange, opSelectedGroup } from './opWallboardGroups';
+import { opStatusElapsed } from './opWallboardLive';
 import {
     OP_METRIC_MAP,
     OP_WALLBOARD_VIEWS,
@@ -136,7 +137,8 @@ const HourlyLegend = () => (
  * сворачиваются в одну строку с числом: развернуть можно одним нажатием.
  */
 const isIdleRow = (row) => (
-    row.in_roster !== false && row.status_key === 'unknown' && !row.answered && !row.missed && !row.outgoing
+    row.in_roster !== false && row.status_key === 'unknown' && !row.live
+    && !row.answered && !row.missed && !row.outgoing
 );
 
 /*
@@ -205,6 +207,7 @@ const OperatorsTable = ({ snapshot, scale = 1, showGroup = false, selectedId = n
                     <tbody className="divide-y divide-slate-100">
                         {shown.map((row) => {
                             const chip = opStatusChip(row);
+                            const elapsed = opStatusElapsed(row, snapshot);
                             const entry = opEntryTime(row.entry_at, snapshot?.day);
                             const canOpen = row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal);
                             const selected = canOpen && row.id === selectedId;
@@ -234,7 +237,7 @@ const OperatorsTable = ({ snapshot, scale = 1, showGroup = false, selectedId = n
                                     <td className="px-3 py-2.5">
                                         <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[0.92em] font-medium ${chip.className}`}>
                                             {chip.label}
-                                            {row.status_seconds ? <span className="font-normal tabular-nums opacity-70">{formatSeconds(row.status_seconds)}</span> : null}
+                                            {elapsed ? <span className="font-normal tabular-nums opacity-70">{formatSeconds(elapsed)}</span> : null}
                                         </span>
                                     </td>
                                     <td className={`px-3 py-2.5 tabular-nums ${entry.time === '—' ? 'text-slate-300' : ''}`}>
@@ -267,7 +270,11 @@ function OpWallboardBody({ snapshot, hourRange = null, scale = 1, showGroup = fa
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
-                <Grid>
+                {/* Шесть плиток — два ряда по три: сначала линия (очередь — то, на что смотрят
+                    первым), потом люди. С коннектором АТС всё это живое, без ожидания опроса. */}
+                <Grid cols={3}>
+                    <MetricKeyTile metricKey="op_queue" snapshot={snapshot} scale={scale} />
+                    <MetricKeyTile metricKey="op_queue_wait" snapshot={snapshot} scale={scale} />
                     <MetricKeyTile metricKey="op_online" snapshot={snapshot} scale={scale} />
                     <MetricKeyTile metricKey="op_talking" snapshot={snapshot} scale={scale} />
                     <MetricKeyTile metricKey="op_free" snapshot={snapshot} scale={scale} />

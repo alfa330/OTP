@@ -13,10 +13,17 @@
 портить сверенные касания недописанными строками. Ключ общий — `linkedid` станции, по нему
 живой звонок потом сходится с касанием (и с записью, которую приносит мост).
 
+Лента изменений: `rev`
+----------------------
+Каждое изменение строки звонка получает новый номер из последовательности `pbx_calls_rev_seq`.
+Слушатель реалтайма (pbx/realtime.py) по NOTIFY читает «всё, что новее моего rev», — одним
+запросом по индексу на процесс, а не по запросу на каждого подключённого зрителя. Номер
+коннектора (`seq`) для этого не годится: после перезапуска коннектора он начинается заново.
+
 Что хранится и сколько
 ----------------------
-`pbx_calls` — все звонки, которые видел коннектор, с их последним состоянием; законченные
-старше PBX_CALLS_RETENTION_DAYS убираются (это кэш живого состояния, история — в касаниях).
+`pbx_calls` — звонки, которые видел коннектор, с последним состоянием; старше
+PBX_CALLS_RETENTION_DAYS убираются: это кэш живого состояния, история — в касаниях.
 `pbx_commands` — очередь команд станции: queued → sent (коннектор забрал) → accepted
 (станция приняла: телефон звонит) → done | failed; queued дольше COMMAND_TTL_SECONDS без
 коннектора становится expired, чтобы телефон не зазвонил через полчаса после нажатия.
@@ -24,7 +31,7 @@
 подставляется при чтении из справочника «Касаний» (cdr_operators).
 """
 
-PBX_CALLS_RETENTION_DAYS = 7
+PBX_CALLS_RETENTION_DAYS = 3
 PBX_COMMANDS_RETENTION_DAYS = 30
 # Команда, которую коннектор не забрал за это время, протухает: нажали «позвонить», коннектор
 # лежал — через полчаса телефон звонить не должен.
@@ -102,14 +109,35 @@ CREATE INDEX IF NOT EXISTS idx_pbx_commands_open ON pbx_commands(created_at)
     WHERE status IN ('queued', 'sent', 'accepted');
 """
 
+# Таблицы могли быть созданы первой версией (22.10.2026, коннектор 1.0.0): CREATE TABLE IF NOT
+# EXISTS колонок не добавляет, поэтому новые — отдельными идемпотентными инструкциями.
+PBX_SCHEMA_MIGRATIONS = (
+    # Лента изменений для реалтайма (pbx/realtime.py).
+    "CREATE SEQUENCE IF NOT EXISTS pbx_calls_rev_seq",
+    "ALTER TABLE pbx_calls ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS idx_pbx_calls_rev ON pbx_calls(rev)",
+    # Второй участник внутреннего звонка: в разговоре оба оператора.
+    "ALTER TABLE pbx_calls ADD COLUMN IF NOT EXISTS peer_ext VARCHAR(8) NOT NULL DEFAULT ''",
+    # Живой канал команд коннектора (POST /api/pbx/agent/stream): когда он последний раз был жив.
+    "ALTER TABLE pbx_connector_state ADD COLUMN IF NOT EXISTS stream_at TIMESTAMPTZ",
+)
+
 
 def init_pbx_schema(cursor):
     """Создаёт таблицы раздела. Курсор приходит снаружи: схема всех разделов разворачивается
     одной транзакцией."""
     cursor.execute(PBX_SCHEMA_SQL)
+    for statement in PBX_SCHEMA_MIGRATIONS:
+        cursor.execute(statement)
 
 
 def schema_is_ready(cursor):
-    cursor.execute("SELECT to_regclass('public.pbx_calls')")
+    """Есть ли таблицы раздела вместе с колонками этой версии. Нужна ручкам: без колонки `rev`
+    запись звонков упала бы пятисоткой, а так раздел отвечает 503 словами."""
+    cursor.execute("""
+        SELECT to_regclass('public.pbx_calls') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'pbx_calls' AND column_name = 'rev')
+    """)
     row = cursor.fetchone()
     return bool(row and row[0])
