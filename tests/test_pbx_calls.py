@@ -398,3 +398,16 @@ def test_ext_of_interface():
     assert pbx_calls.ext_of_interface('PJSIP/6726-00001a98') == '6726'
     assert pbx_calls.ext_of_interface('Local/3016@ext-to-queue-00001a34;1') == '3016'
     assert pbx_calls.ext_of_interface('') == ''
+
+
+def test_bootstrap_snapshot_of_a_queued_call_knows_the_queue_not_a_fake_did():
+    """CoreShowChannels при входе: транк клиента уже в очереди, Exten = номер очереди."""
+    clock = Clock()
+    tracker = pbx_calls.CallTracker(now=clock)
+    tracker.feed(ev('Newchannel', Channel=TRUNK, Uniqueid=LID, Linkedid=LID, Context='ext-queues',
+                    Exten='3034', CallerIDNum=CLIENT), at=datetime(2026, 10, 22, 11, 58, 30))
+    call = tracker.live()[0]
+    assert call['queue'] == '3034'
+    assert call['did'] == ''
+    assert call['started_at'] == '2026-10-22T11:58:30'
+    assert call['direction'] == 'in'

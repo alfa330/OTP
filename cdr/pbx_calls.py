@@ -360,7 +360,12 @@ class CallTracker:
             if kind == KIND_TRUNK:
                 call['direction'] = DIRECTION_IN
                 call['phone'] = touches_mod.norm_phone(event.get('CallerIDNum'))
-                call['did'] = exten if exten.isdigit() or exten.startswith('+') else ''
+                if _QUEUE_RE.match(exten):
+                    # Снимок CoreShowChannels при входе: клиент уже в очереди, и Exten транка —
+                    # её номер (контекст ext-queues), а не DID. DID четырёхзначным не бывает.
+                    call['queue'] = exten
+                else:
+                    call['did'] = exten if exten.isdigit() or exten.startswith('+') else ''
             elif kind == KIND_EXT:
                 call['agent_channel'] = name
                 call['ext'] = ext_of_channel(name)
