@@ -454,6 +454,10 @@ test('карточку двигают между рабочими колонка
   assert.equal(canDropTo(board, { ...card, subtask: { state: 'waiting' } }, 'checking'), false);
   assert.equal(canDropTo(board, { ...card, column: 'paid', subtask: { state: 'done' } }, 'checking'), false);
   assert.equal(canDropTo(null, card, 'checking'), false);
+  // «Уточнение компании»: компанию выбирают в окне заявки — ни из колонки, ни в колонку не перетаскивают.
+  const clarifying = { column: 'entity', can_act: true, subtask: { kind: 'entity_clarify', state: 'open' } };
+  assert.equal(canDropTo(board, clarifying, 'new'), false);
+  assert.equal(canDropTo(board, card, 'entity'), false);
 });
 
 /* ── Фильтры (п. 19) ───────────────────────────────────────────────────────── */

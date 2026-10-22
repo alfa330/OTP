@@ -85,7 +85,9 @@ class SpecificationListsTests(unittest.TestCase):
         columns = {board['code']: [label for _key, label in board['columns']] for board in wf.BOARDS}
         self.assertEqual(columns['approval'], [
             'Новые', 'На рассмотрении', 'Требуется уточнение', 'Согласовано', 'Отклонено'])
+        # Первая колонка бухгалтерии — сверх ТЗ: заявки, где компанию выбирает она (22.10.2026).
         self.assertEqual(columns['accounting'], [
+            'Уточнение компании',
             'Новые счета', 'Проверка', 'Требуется уточнение', 'Готово к оплате', 'На оплате', 'Оплачено',
             'Ожидаются закрывающие документы', 'Закрыто'])
         self.assertEqual(columns['finance'], [
@@ -513,7 +515,11 @@ class EntityStepTests(unittest.TestCase):
 
     def test_the_step_is_accountings_and_has_one_action(self):
         step = wf.subtask('entity_clarify')
-        self.assertEqual((step['title'], step['role'], step['board']), ('Уточнение компании', 'accounting', None))
+        self.assertEqual((step['title'], step['role'], step['board']), ('Уточнение компании', 'accounting', 'accounting'))
+        accounting = wf.board('accounting')
+        self.assertIn('entity_clarify', accounting['kinds'])
+        self.assertEqual(accounting['columns'][0], ('entity', 'Уточнение компании'))
+        self.assertNotIn('entity', accounting['work'], 'компанию выбирают в окне заявки, а не перетаскиванием')
         positions = {item['kind']: item['position'] for item in wf.SUBTASKS}
         self.assertLess(positions['initiation'], positions['entity_clarify'])
         self.assertLess(positions['entity_clarify'], positions['manager_approval'])
@@ -858,6 +864,33 @@ class BoardColumnTests(unittest.TestCase):
         # Заявка с картой тоже приходит в бухгалтерию — за закрывающими документами.
         card = [self.task('card_topup', 'done'), self.task('closing_docs', 'open', 'awaiting')]
         self.assertEqual(self.column('accounting', card), 'awaiting_docs')
+
+    def test_accounting_board_shows_the_company_clarification(self):
+        """Заявка без компании ждёт бухгалтерию ещё до согласования — она на доске первой
+        колонкой (жалоба владельца 22.10.2026: заявки там не было, только в «Моих задачах»)."""
+        waiting = [self.task('entity_clarify', 'open', 'new'), self.task('manager_approval', 'pending'),
+                   self.task('approval', 'pending'), self.task('invoice_payment', 'pending'),
+                   self.task('closing_docs', 'pending')]
+        self.assertEqual(self.column('accounting', waiting), 'entity')
+        # Та же заявка с картой: оплату ведёт финансовый отдел, а компанию — всё равно бухгалтерия.
+        by_card = [self.task('entity_clarify', 'open', 'new'), self.task('approval', 'pending'),
+                   self.task('card_topup', 'pending'), self.task('closing_docs', 'pending')]
+        self.assertEqual(self.column('accounting', by_card), 'entity')
+        self.assertIsNone(self.column('finance', by_card), 'финансовому отделу до согласования делать нечего')
+        self.assertIsNone(self.column('approval', by_card), 'до выбора компании согласовывать нечего')
+        # Компанию выбрали — заявка ушла на согласование и с доски бухгалтерии пропала до счёта.
+        waiting[0] = self.task('entity_clarify', 'done')
+        waiting[1] = self.task('manager_approval', 'open', 'new')
+        self.assertIsNone(self.column('accounting', waiting))
+        by_card[0] = self.task('entity_clarify', 'done')
+        by_card[2] = self.task('card_topup', 'open', 'new')
+        self.assertIsNone(self.column('accounting', by_card))
+        # Дальше — обычный путь счёта: выбор компании позади, колонка — по счёту.
+        waiting[1], waiting[2] = self.task('manager_approval', 'done'), self.task('approval', 'done')
+        waiting[3] = self.task('invoice_payment', 'open', 'checking')
+        self.assertEqual(self.column('accounting', waiting), 'checking')
+        # Инициатор отменил заявку, пока бухгалтерия выбирала компанию, — по ней больше никто ничего не ждёт.
+        self.assertIsNone(self.column('accounting', [self.task('entity_clarify', 'open', 'new')], status='cancelled'))
 
     def test_finance_board(self):
         self.assertIsNone(self.column('finance', [self.task('card_topup', 'pending')]),

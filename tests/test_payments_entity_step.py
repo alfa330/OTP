@@ -471,6 +471,98 @@ class ActRouteTests(unittest.TestCase):
         act.assert_not_called()
 
 
+class AccountingBoardTests(unittest.TestCase):
+    """GET /boards/accounting: заявка без компании стоит у бухгалтерии первой колонкой.
+
+    Жалоба владельца 22.10.2026: отправил заявку без компании, она ушла бухгалтерии («Мои
+    задачи», колокол), а на доске «Бухгалтерия» её не было — этап шёл без доски.
+    """
+
+    def board(self, pairs, *, viewer=ACCOUNTANT['id'], query=''):
+        queries = mock.MagicMock()
+        queries.load_access_context.return_value = {'user_id': viewer, 'name': 'Смотрящий', 'role': 'operator'}
+        queries.roles_of_user.return_value = {'accounting'} if viewer == ACCOUNTANT['id'] else set()
+        queries.is_manager_somewhere.return_value = False
+        queries.board_requests.return_value = pairs
+        queries.role_member_ids.return_value = {'accounting': {ACCOUNTANT['id']}}
+        queries.duplicate_request_ids.return_value = set()
+        queries.avatar_refs.return_value = {}
+        allowed = access.SECTION_ALLOWED_USER_IDS + (ACCOUNTANT['id'],)
+        for patcher in (mock.patch.object(routes, 'queries', queries),
+                        mock.patch.object(access, 'SECTION_ALLOWED_USER_IDS', allowed)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app = Flask(__name__)
+        app.register_blueprint(routes.build_payments_blueprint(
+            db=mock.MagicMock(), require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (viewer, None, None)))
+        response = app.test_client().get('/api/payments/boards/accounting' + query)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        return response.get_json()
+
+    @staticmethod
+    def full(items):
+        """Подзадачи, как их отдаёт queries.subtasks_for_requests: с названием и подписью роли."""
+        for item in items:
+            item.setdefault('title', wf.subtask_title(item['kind']))
+            item.setdefault('role_label', wf.ROLE_LABELS[item['role_code']])
+        return items
+
+    def pairs(self):
+        clarifying = [entity_subtask('open'), step(wf.KIND_MANAGER, 8, 'Руководитель'), step(wf.KIND_APPROVAL, None, None),
+                      step(wf.KIND_INVOICE, None, None), step(wf.KIND_CLOSING, None, None)]
+        # Компанию уже выбрали — заявка у руководителя; бухгалтерии до счёта делать нечего.
+        approving = [entity_subtask('done'), step(wf.KIND_MANAGER, 8, 'Руководитель', state='open'),
+                     step(wf.KIND_APPROVAL, None, None), step(wf.KIND_INVOICE, None, None),
+                     step(wf.KIND_CLOSING, None, None)]
+        # Обычный согласованный счёт рядом — его колонка не меняется.
+        invoice = [step(wf.KIND_INVOICE, None, None, state='open')]
+        invoice[0]['status'] = 'new'
+        return [(purchase_row(), self.full(clarifying)),
+                (purchase_row(id=502, legal_entity_id=2, legal_entity_name=NORTH['name']), self.full(approving)),
+                (purchase_row(id=503, stage='payment', legal_entity_id=2, legal_entity_name=NORTH['name']),
+                 self.full(invoice))]
+
+    def test_request_without_company_is_the_first_column(self):
+        body = self.board(self.pairs())
+        first = body['columns'][0]
+        self.assertEqual((first['key'], first['label'], first['count']), ('entity', 'Уточнение компании', 1))
+        card = first['cards'][0]
+        self.assertEqual(card['id'], REQUEST_ID)
+        self.assertIsNone(card['legal_entity_name'])
+        self.assertEqual((card['subtask']['kind'], card['subtask']['assignee_name']), (wf.KIND_ENTITY, 'Бухгалтерия'))
+        self.assertTrue(card['can_act'], 'бухгалтер выбирает компанию из карточки')
+        placed = {card['id']: column['key'] for column in body['columns'] for card in column['cards']}
+        self.assertEqual(placed, {REQUEST_ID: 'entity', 503: 'new'}, 'выбранная компания уводит заявку с доски до счёта')
+        self.assertEqual(sum(column['count'] for column in body['columns']), 2)
+
+    def test_admin_sees_it_too(self):
+        body = self.board(self.pairs(), viewer=ADMIN)
+        self.assertEqual([card['id'] for card in body['columns'][0]['cards']], [REQUEST_ID])
+        self.assertTrue(body['columns'][0]['cards'][0]['can_act'])
+
+    def test_empty_column_says_what_lands_in_it(self):
+        body = self.board([])
+        self.assertEqual(body['columns'][0]['key'], 'entity')
+        self.assertEqual(body['columns'][0]['caption'], 'Инициатор не указал компанию')
+        self.assertEqual(body['columns'][0]['cards'], [])
+
+    def test_column_window_lists_the_column(self):
+        """«Посмотреть ещё»: окно колонки листает её отдельно, как остальные."""
+        body = self.board(self.pairs(), query='?column=entity&limit=20&offset=0')
+        self.assertEqual([column['key'] for column in body['columns']], ['entity'])
+        self.assertEqual([card['id'] for card in body['columns'][0]['cards']], [REQUEST_ID])
+
+    def test_the_query_picks_such_requests(self):
+        from payments import queries
+        cursor = mock.MagicMock()
+        cursor.fetchall.return_value = []
+        queries.board_requests(cursor, 'accounting')
+        _sql, params = cursor.execute.call_args[0]
+        self.assertIn(wf.KIND_ENTITY, params['kinds'])
+
+
 class RoutePreviewTests(unittest.TestCase):
     """GET /route-preview: форма заявки показывает, что первой будет бухгалтерия."""
 
