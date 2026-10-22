@@ -326,11 +326,21 @@ export const pullParamsFromFilters = (filters) => {
     return params;
 };
 
-/** Люди, подходящие под уже выбранные направление и группу — для селектора и подтяжки. */
-export const operatorsMatching = (operators, filters) => {
+/** id направлений-шкал без своих людей (filter-options: scale_only) — строками. */
+export const scaleOnlyDirectionIds = (directions) => new Set(
+    (directions || []).filter((d) => d && d.scale_only).map((d) => String(d.id)));
+
+/** Люди, подходящие под уже выбранные направление и группу — для селектора и подтяжки.
+ *
+ * Шкала без своих людей (scale_only: ею размечены звонки обзвона, а операторы числятся
+ * в «Основе») людей не сужает: иначе выбор такой шкалы оставлял бы пустой список
+ * сотрудников при живых оценках. */
+export const operatorsMatching = (operators, filters, scaleOnlyIds) => {
     const f = filters || EMPTY_FILTERS;
+    const byDirection = isSet(f.direction_id)
+        && !(scaleOnlyIds && scaleOnlyIds.has(String(f.direction_id)));
     return (operators || []).filter((person) => {
-        if (isSet(f.direction_id)
+        if (byDirection
             && String(person.direction_id) !== String(f.direction_id)) return false;
         if (isSet(f.group_id)) {
             if (f.group_id === NO_GROUP) return person.group_id == null;

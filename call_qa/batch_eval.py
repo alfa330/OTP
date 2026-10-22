@@ -733,15 +733,14 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             if not rec:
                 continue
             # Шкала переписки может лежать на ДРУГОМ направлении: техменеджеры
-            # ТЭЗ числятся на «ТП линия», а чат оценивается по «ТП чат». Ровно
-            # это делает _evaluate_and_cache при открытии карточки. Без той же
-            # подмены батч подписывал прогон шкалой ЛИНИИ, а карточка считала
-            # отпечаток по шкале ЧАТА — другой scale_hash и другая ревизия, так
-            # что совпасть они не могли никогда: каждый батчевый разбор ТЭЗ
-            # открывался бы с пометкой «оценка устарела».
-            criteria_direction_id = call["direction_id"]
-            if subject_kind in config.CHAT_SUBJECT_KINDS:
-                criteria_direction_id = subjects_mod.criteria_direction_id(criteria_direction_id)
+            # ТЭЗ числятся на «ТП линия», а чат оценивается по «ТП чат». Шкалу
+            # выбирает та же функция, что у _evaluate_and_cache при открытии
+            # карточки (subjects.scale_direction_id). Без той же подмены батч
+            # подписывал прогон шкалой ЛИНИИ, а карточка считала отпечаток по шкале
+            # ЧАТА — другой scale_hash и другая ревизия, так что совпасть они не
+            # могли никогда: каждый батчевый разбор ТЭЗ открывался бы с пометкой
+            # «оценка устарела».
+            criteria_direction_id = subjects_mod.scale_direction_id({**call, "kind": subject_kind})
             info = get_dir(criteria_direction_id)
             snapshot = info["snapshot"]
             # Отдел — часть промпта, а значит и отпечатка. Считаем ОДИН раз и

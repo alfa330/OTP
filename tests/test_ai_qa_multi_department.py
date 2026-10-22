@@ -494,8 +494,11 @@ class PromptTests(unittest.TestCase):
         """prompt_hash считался от промпта ЗВОНКА для любого субъекта — прогон
         переписки был подписан чужим промптом."""
         api_source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8")
+        # Указания направления — часть системного промпта, и отпечаток считает их от
+        # того же словаря направления, что уходит в модель (build_eval_body).
         self.assertIn("prompt_hash=content_hash(evaluator.build_system(\n"
-                      "            transcript_criteria, subject_kind, department))",
+                      "            transcript_criteria, subject_kind, department, "
+                      "guidance=direction.get(\"guidance\")))",
                       api_source)
 
 
@@ -625,12 +628,24 @@ class ChatApiThresholdTests(unittest.TestCase):
         self.assertIsNone(subjects.criteria_direction_id(None))
 
     def test_evaluation_uses_the_criteria_direction_for_chats(self):
+        """Шкалу выбирает ОДНА функция — оценка, очередь, «Моя оценка» и пакет."""
         api_source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8")
-        self.assertIn("if subject_kind in config.CHAT_SUBJECT_KINDS:\n"
-                      "        # Шкала переписки может лежать на ДРУГОМ направлении",
-                      api_source)
-        self.assertIn("direction_id = subjects_mod.criteria_direction_id(direction_id)",
-                      api_source)
+        self.assertIn("direction_id = subjects_mod.scale_direction_id(subject)", api_source)
+        from call_qa import config, subjects
+        chat = next(iter(config.CHAT_SUBJECT_KINDS))
+        # Переписка ТЭЗ — по чатовой карте, как и раньше.
+        self.assertEqual(subjects.scale_direction_id({"kind": chat, "direction_id": 83}), 84)
+        self.assertEqual(subjects.scale_direction_id({"kind": chat, "direction_id": 69}), 69)
+        # Звонок — по направлению; карта на звонки не действует.
+        self.assertEqual(subjects.scale_direction_id(
+            {"kind": config.SUBJECT_IMPORTED_CALL, "direction_id": 83}), 83)
+        # Своя шкала звонка обзвона важнее направления оператора и не зависит от него.
+        self.assertEqual(subjects.scale_direction_id(
+            {"kind": config.SUBJECT_IMPORTED_CALL, "direction_id": 70, "qa_direction_id": 90}), 90)
+        self.assertEqual(subjects.scale_direction_id(
+            {"kind": config.SUBJECT_IMPORTED_CALL, "direction_id": None, "qa_direction_id": 90}), 90)
+        self.assertIsNone(subjects.scale_direction_id(
+            {"kind": config.SUBJECT_IMPORTED_CALL, "direction_id": None}))
 
 
 class DepartmentScopeTests(unittest.TestCase):
@@ -1277,9 +1292,8 @@ class BatchChatStageTests(unittest.TestCase):
         """У ТЭЗ оператор числится на «ТП линия», а чат оценивается по «ТП чат».
         Без подмены батч подписывал прогон шкалой линии, а карточка считала
         отпечаток по шкале чата — совпасть они не могли никогда."""
-        self.assertIn("subjects_mod.criteria_direction_id(criteria_direction_id)",
+        self.assertIn('criteria_direction_id = subjects_mod.scale_direction_id({**call, "kind": subject_kind})',
                       self.source)
-        self.assertIn("if subject_kind in config.CHAT_SUBJECT_KINDS:", self.source)
         self.assertIn("info = get_dir(criteria_direction_id)", self.source)
 
     def test_imported_call_is_refused_rather_than_silently_wrong(self):

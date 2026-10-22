@@ -155,14 +155,39 @@ def intro_for(subject_kind: str, department=None) -> str:
     return intro
 
 
+# Заголовок блока указаний направления (criteria.load_direction → «guidance»). Текст
+# фиксированный: он входит в prompt_hash, и любая его правка пометила бы устаревшими
+# все оценки направлений, где указания заданы.
+_GUIDANCE_HEADER = ("УКАЗАНИЯ ПО ЭТОМУ НАПРАВЛЕНИЮ (при расхождении с общими ПРАВИЛАМИ "
+                    "выше действуют они):")
+
+
+def _guidance_text(guidance) -> str:
+    """Указания направления в том виде, в каком они уходят в промпт: переводы
+    строк единые (из textarea приходят и \\r\\n), пустое — значит указаний нет."""
+    return str(guidance or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def build_system(criteria: list[dict], subject_kind: str = config.SUBJECT_CALL,
-                 department=None) -> str:
+                 department=None, guidance=None) -> str:
+    """Системный промпт оценщика: шаблон + вступление субъекта и отдела + критерии.
+
+    guidance — указания направления (правила шкалы, справка по процессу). Блок
+    дописывается ПОСЛЕ полного шаблона и только когда указания есть: без них текст
+    байт в байт прежний, а значит прежние и prompt_hash, и отпечатки уже сделанных
+    оценок всех остальных направлений (эталон звонка ОП — в тестах)."""
     template = open(_PROMPT, encoding="utf-8").read()
-    return (template
-            # rstrip: шаблон уже содержит пустую строку перед «ПРАВИЛА:», и
-            # лишний перевод строки изменил бы prompt_hash звонка.
-            .replace("{{INTRO}}", intro_for(subject_kind, department).rstrip("\n"))
-            .replace("{{CRITERIA}}", _criteria_block(criteria)))
+    system = (template
+              # rstrip: шаблон уже содержит пустую строку перед «ПРАВИЛА:», и
+              # лишний перевод строки изменил бы prompt_hash звонка.
+              .replace("{{INTRO}}", intro_for(subject_kind, department).rstrip("\n"))
+              .replace("{{CRITERIA}}", _criteria_block(criteria)))
+    text = _guidance_text(guidance)
+    if not text:
+        return system
+    # Прежний текст остаётся префиксом как есть: блок отделён пустой строкой.
+    separator = "\n" if system.endswith("\n") else "\n\n"
+    return f"{system}{separator}{_GUIDANCE_HEADER}\n{text}\n"
 
 
 def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) -> tuple[str, dict]:
@@ -286,8 +311,13 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
            if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
             f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}\n\nОцени по всем перечисленным критериям.")
+    # Указания направления — в системный блок, как и критерии: это правила шкалы, а не
+    # данные звонка, и GLM кэширует системный блок сам. Тот же текст обязан получить
+    # отпечаток (api._evaluation_identity), иначе каждая такая оценка — «устарела».
     return llm.build_body(model=model,
-                          system=build_system(criteria, subject_kind, department), user=user,
+                          system=build_system(criteria, subject_kind, department,
+                                              guidance=(direction or {}).get("guidance")),
+                          user=user,
                           schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True,
                           cache_ttl=cache_ttl)
 

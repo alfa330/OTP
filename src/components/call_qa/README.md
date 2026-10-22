@@ -316,6 +316,15 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
   → `{ proposal: { rule, situation, not_covered, note_to_reviewer } }` (подсказка; сохраняет человек).
 - `GET /api/ai-qa/stats` → метрики дашборда.
 - `GET/POST /api/ai-qa/criteria-config?direction_id=` ↔ `criterion_config`.
+- `GET /api/ai-qa/direction-guidance?direction_id=` → `{ direction_id, guidance, updated_at,
+  updated_by, max_length, can_edit }`; `PUT` ← `{ direction_id, guidance }` (пустой текст удаляет)
+  ↔ `qa_direction_guidance`. Указания для ИИ уходят блоком в конец системного промпта и входят
+  в prompt_hash: сохранение помечает оценки направления устаревшими. Пишут глава отдела и
+  админы, СВ — 403. Блок «Указания для ИИ» во вкладке «Критерии».
+- Шкала звонка из АТС: `imported_calls.qa_direction_id` (звонки обзвона оцениваются по своей
+  шкале, оператор остаётся в основном направлении). Видимость — по направлению оператора,
+  фильтр «Направление» и подписи — по шкале; `filter-options` помечает такие шкалы
+  `scale_only` (людей не сужают).
 - `GET /api/ai-qa/adjudications`, `PUT/DELETE /api/ai-qa/adjudications/:id`,
   `POST /api/ai-qa/adjudications/:id/reindex`, `GET/PUT /api/ai-qa/rag-rollout`.
   Строка каталога несёт `corrected_after_count` (сколько раз ИИ исправляли по критерию

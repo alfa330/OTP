@@ -53,8 +53,26 @@ def scale_fingerprint(direction_id: int, name: str, criteria: list[dict]) -> str
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _read_guidance(cur, canonical_id: int) -> str:
+    """Указания направления для ИИ (qa_direction_guidance) или ''.
+
+    Таблицу разворачивает старт приложения (call_qa.rag.migrate). Пока её нет —
+    42P01, — указаний просто нет: необязательная таблица не должна ронять оценку,
+    так же переживает её отсутствие criterion_config.load_config."""
+    try:
+        cur.execute("SELECT guidance FROM qa_direction_guidance WHERE direction_id=%s",
+                    (int(canonical_id),))
+        row = cur.fetchone()
+    except Exception as exc:
+        if (getattr(exc, "pgcode", None) or getattr(exc, "sqlstate", None)) == "42P01":
+            return ""
+        raise
+    return str(row[0] or "") if row else ""
+
+
 def load_direction(direction_id: int) -> dict:
-    """Возвращает {id, name, criteria: [{idx, name, value/description, weight, is_critical, deficiency}]}.
+    """Возвращает {id, name, criteria: [{idx, name, value/description, weight, is_critical, deficiency}],
+    guidance}.
 
     ``id`` — канонический (стабильный) id направления: для архивной версии шкалы
     это id живой строки (directions.canonical_id). Все производные идентичности
@@ -65,7 +83,11 @@ def load_direction(direction_id: int) -> dict:
     ИИ оценивает по ТЕКУЩЕЙ мониторинговой шкале, даже если звонок привязан к
     архивной строке (старой версии критериев). Так батч и интерактив всегда
     подтягивают актуальные критерии/веса. ``row_id`` — строка, из которой
-    реально загружены критерии (после редиректа на каноническую)."""
+    реально загружены критерии (после редиректа на каноническую).
+
+    ``guidance`` — указания для ИИ на уровне направления (правила шкалы, справка
+    по процессу), '' — их нет. В scale_hash они не входят: шкала та же, меняется
+    промпт, и это уже ловит prompt_hash отпечатка (evaluator.build_system)."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
     cur.execute("SELECT id, name, criteria, canonical_id FROM directions WHERE id=%s", (direction_id,))
@@ -81,7 +103,10 @@ def load_direction(direction_id: int) -> dict:
         crow = cur.fetchone()
         if crow is not None and crow[1] is not None:
             name, raw, row_id = crow[0], (crow[1] or []), canonical_id
-    cur.close(); conn.close()
+    try:
+        guidance = _read_guidance(cur, canonical_id)
+    finally:
+        cur.close(); conn.close()
     crits = []
     name_counts = {}
     for i, c in enumerate(raw):
@@ -99,4 +124,5 @@ def load_direction(direction_id: int) -> dict:
             "deficiency": c.get("deficiency"),
         })
     return {"id": canonical_id, "row_id": row_id, "name": name, "criteria": crits,
-            "scale_hash": scale_fingerprint(canonical_id, name, crits)}
+            "scale_hash": scale_fingerprint(canonical_id, name, crits),
+            "guidance": guidance}

@@ -1523,3 +1523,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_qa_exclusions_active
     ON ai_qa_exclusions (subject_kind, call_id) WHERE restored_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_ai_qa_exclusions_department
     ON ai_qa_exclusions (department_code, excluded_at DESC) WHERE restored_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Указания для ИИ на уровне направления (call_qa.evaluation.criteria.load_direction)
+-- ---------------------------------------------------------------------------
+-- Правила шкалы и справка по процессу, которые не помещаются в описание одного
+-- критерия: когда ставить N/A, что такое подписание АВР и т. п. Видит только ИИ —
+-- текст дописывается блоком в конец системного промпта (evaluator.build_system),
+-- в журнал и мониторинговую шкалу он не попадает. Строки нет — промпт байт в байт
+-- прежний. Ключ — КАНОНИЧЕСКИЙ id направления: архивная версия шкалы читает
+-- указания живой строки, как и критерии. Текст входит в prompt_hash, поэтому
+-- правка помечает оценки направления устаревшими — пересчёт кнопкой «Переоценить».
+CREATE TABLE IF NOT EXISTS qa_direction_guidance (
+    direction_id integer PRIMARY KEY,
+    guidance     text NOT NULL,
+    updated_by   integer,
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);

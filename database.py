@@ -2327,6 +2327,11 @@ class Database:
                 ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS audio_path TEXT;
                 ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS call_end_party VARCHAR(16);
                 ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS call_end_party_checked_at TIMESTAMP WITH TIME ZONE;
+                -- Шкала ИИ-оценки, заданная самому звонку (call_qa.subjects.scale_direction_id):
+                -- звонки обзвона оцениваются по своей мониторинговой шкале, а оператор остаётся
+                -- в основном направлении — видимость и отдел по-прежнему считаются по нему.
+                -- NULL — шкала оператора, как было всегда.
+                ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS qa_direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
@@ -2337,6 +2342,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_end_party_backfill
                     ON imported_calls(call_end_party_checked_at, external_id)
                     WHERE call_end_party = 'unknown';
+                -- Частичный: размечена малая доля звонков, а спрашивают «есть ли у
+                -- направления размеченные звонки» (скоуп СВ, справочник фильтров).
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_qa_direction
+                    ON imported_calls(qa_direction_id)
+                    WHERE qa_direction_id IS NOT NULL;
             """)
             # Старые записи imported_calls — это телефонные звонки. До появления этого поля
             # источник не сохранялся, поэтому сначала честно отмечаем их как неизвестные;
@@ -18631,6 +18641,29 @@ class Database:
             """, {"sv": supervisor_id, "dept": department_id})
             return [int(row[0]) for row in (cursor.fetchall() or [])]
 
+    def get_department_scale_direction_ids(self, department_id):
+        """Живые направления отдела, по которым размечены звонки из АТС
+        (imported_calls.qa_direction_id) — шкалы без своих операторов.
+
+        Скоупу СВ в «ИИ-оценке» их не дают группы: операторы обзвона остаются в
+        основном направлении, и без этого списка СВ не открыл бы по такой шкале ни
+        фильтр, ни разборы, ни настройку критериев. Один EXISTS на направление — по
+        частичному индексу idx_imported_calls_qa_direction."""
+        if department_id is None:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT d.id
+                  FROM directions d
+                 WHERE d.department_id = %s
+                   AND d.is_active = TRUE
+                   AND d.canonical_id IS NULL
+                   AND EXISTS (SELECT 1 FROM imported_calls ic
+                                WHERE ic.qa_direction_id = d.id)
+                 ORDER BY d.id
+            """, (int(department_id),))
+            return [int(row[0]) for row in (cursor.fetchall() or [])]
+
     def get_user_sip_number(self, user_id):
         """users.sip_number (внутренний номер = internalNumber в Binotel) или None."""
         if not user_id:
@@ -29866,7 +29899,7 @@ class Database:
 
     def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
                                   datetime_raw, phone, duration_sec, notes=None, audio_path=None,
-                                  call_end_party=None, status=None):
+                                  call_end_party=None, status=None, qa_direction_id=None):
         """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
         такой звонок уже импортирован (ON CONFLICT (external_id, month)).
@@ -29876,6 +29909,10 @@ class Database:
 
         status — только для ежедневной выборки «ИИ-оценки» ('ai_sample'): такая строка
         субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает.
+
+        qa_direction_id — шкала ИИ-оценки этого звонка, если она не совпадает с
+        направлением оператора (звонки обзвона, см. subjects.scale_direction_id). Уже
+        лежащую строку конфликт не трогает: пометку ей ставят отдельным UPDATE.
 
         Звонок с номером из «Реестра тестовых номеров» (test_numbers) в пул не кладётся
         вовсе — None, как у дубля: и для журнала, и для ИИ это не работа с водителем.
@@ -29891,14 +29928,15 @@ class Database:
                 INSERT INTO imported_calls
                 (external_id, operator_name, operator_id, month, datetime_raw,
                  phone_number, phone_normalized, duration_sec, status, imported_at, notes,
-                 audio_path, call_end_party)
+                 audio_path, call_end_party, qa_direction_id)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s)
+                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s, %s)
                 ON CONFLICT (external_id, month) DO NOTHING
                 RETURNING id
             """, (external_id, operator_name, operator_id, month, parsed_dt,
                   phone, phone_norm, duration_sec, status or 'not_evaluated', notes, audio_path,
-                  _normalize_call_end_party(call_end_party) or 'unknown'))
+                  _normalize_call_end_party(call_end_party) or 'unknown',
+                  int(qa_direction_id) if qa_direction_id is not None else None))
             row = cur.fetchone()
         return int(row[0]) if row else None
 

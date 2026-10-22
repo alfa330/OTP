@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, hasActiveFilters, filtersToParams,
     filtersKey, clampScore, activeFilterChips, pullParamsFromFilters, operatorsMatching,
+    scaleOnlyDirectionIds,
 } from '../src/components/call_qa/filters.js';
 
 /**
@@ -165,6 +166,27 @@ test('список сотрудников сужается уже выбранн
         .map((person) => person.id), [1, 3]);
     assert.deepEqual(operatorsMatching(people, { ...EMPTY_FILTERS, group_id: NO_GROUP })
         .map((person) => person.id), [2]);
+});
+
+test('шкала без своих людей (scale_only) список сотрудников не сужает', () => {
+    // Звонки обзвона оцениваются по своей шкале, а операторы числятся в «Основе»:
+    // выбор такой шкалы не должен оставлять пустой список сотрудников.
+    const people = [
+        { id: 1, name: 'А', direction_id: 70, group_id: 3 },
+        { id: 2, name: 'Б', direction_id: 70, group_id: null },
+    ];
+    const scaleOnly = scaleOnlyDirectionIds([
+        { id: 70, name: 'Основа' }, { id: 90, name: 'Обзвон — подписание АВР', scale_only: true },
+    ]);
+    assert.deepEqual([...scaleOnly], ['90']);
+    assert.deepEqual(operatorsMatching(people, { ...EMPTY_FILTERS, direction_id: 90 }, scaleOnly)
+        .map((person) => person.id), [1, 2]);
+    // Группа по-прежнему сужает.
+    assert.deepEqual(operatorsMatching(people, { ...EMPTY_FILTERS, direction_id: 90, group_id: 3 }, scaleOnly)
+        .map((person) => person.id), [1]);
+    // Без пометки — прежнее поведение.
+    assert.deepEqual(operatorsMatching(people, { ...EMPTY_FILTERS, direction_id: 90 })
+        .map((person) => person.id), []);
 });
 
 test('фронт и бэкенд знают ОДИН набор фильтров', () => {

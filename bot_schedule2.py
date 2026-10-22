@@ -6056,7 +6056,16 @@ def _ai_qa_direction_scope(requester_id):
         dept_id = db.get_user_department_id(requester_id)
         if dept_id is None:
             return []
-        return db.get_supervisor_direction_ids(requester_id, department_id=int(dept_id))
+        ids = list(db.get_supervisor_direction_ids(requester_id, department_id=int(dept_id)))
+        if not ids:
+            return ids
+        # Шкалы отдела без своих операторов: звонки обзвона размечены своей шкалой
+        # (imported_calls.qa_direction_id), а операторы остаются в «Основе» — группы СВ
+        # такую шкалу не дают, и без неё ему закрыты фильтр по ней, «Сформулировать с
+        # ИИ», «похожие разборы» и критерии. Видимость самих звонков это не расширяет:
+        # она по направлению оператора (call_qa.api._SCOPE_SQL).
+        ids += [i for i in db.get_department_scale_direction_ids(int(dept_id)) if i not in ids]
+        return ids
     except Exception:
         logging.exception("ai-qa: не удалось вычислить направления СВ %s", requester_id)
         return []
@@ -6796,6 +6805,46 @@ def api_ai_qa_criteria_config():
     except Exception as error:
         logging.exception("ai-qa criteria-config failed")
         return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/direction-guidance', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_direction_guidance():
+    """Указания направления для ИИ (call_qa.api.direction_guidance_*): правила шкалы и
+    справка по процессу, которые уходят блоком в конец системного промпта оценщика.
+
+    Права — как у классификации критериев: прочитать может тот, кому открыто
+    направление; изменить — глава отдела и администраторы. Сохранение меняет все
+    будущие оценки направления, а сделанные помечает устаревшими."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import direction_guidance_get, direction_guidance_set, direction_in_scope
+        scope = _ai_qa_direction_scope(requester_id)
+        body = (request.get_json(silent=True) or {}) if request.method == 'PUT' else {}
+        raw_id = request.args.get('direction_id') if request.method == 'GET' else body.get('direction_id')
+        try:
+            direction_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "direction_id обязателен"}), 400
+        if not direction_in_scope(direction_id, scope) or \
+                not _ai_qa_direction_department_allowed(requester_id, direction_id):
+            return jsonify({"error": "направление вне вашего доступа"}), 403
+        if request.method == 'GET':
+            return jsonify({"status": "success", **direction_guidance_get(direction_id),
+                            "can_edit": scope is None}), 200
+        if scope is not None:
+            return jsonify({"error": "изменение указаний для ИИ недоступно супервайзеру"}), 403
+        result = direction_guidance_set(direction_id, body.get('guidance'), requester_id)
+        return jsonify({"status": "success", **result, "can_edit": True}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa direction-guidance failed")
+        return jsonify({"error": "не удалось обработать указания для ИИ"}), 500
 
 
 @app.route('/api/ai-qa/adjudications', methods=['GET', 'OPTIONS'])
@@ -8098,8 +8147,15 @@ def _ai_qa_department_operator_candidates(requester_id, department, limit=1, fil
         pick_sql = ""
         filters = filters or {}
         if filters.get('direction_id') is not None:
-            pick_sql += " AND COALESCE(d.canonical_id, d.id) = %s"
-            params.append(int(filters['direction_id']))
+            # Шкала без своих людей (ею размечены звонки обзвона, imported_calls.
+            # qa_direction_id, а операторы числятся в «Основе») круг людей не сужает:
+            # иначе «Из АТС» под такой шкалой всегда отвечала бы «нет кандидатов».
+            pick_sql += (" AND (COALESCE(d.canonical_id, d.id) = %s OR NOT EXISTS ("
+                         "SELECT 1 FROM users su JOIN directions sd ON sd.id = su.direction_id"
+                         " WHERE COALESCE(sd.canonical_id, sd.id) = %s"
+                         " AND COALESCE(su.role, '') = 'operator'"
+                         " AND COALESCE(su.status, '') NOT IN ('fired', 'dismissal')))")
+            params.extend([int(filters['direction_id'])] * 2)
         group_id = filters.get('group_id')
         if group_id is not None:
             membership = ("gom.operator_id = u.id AND gom.start_date <= CURRENT_DATE"
@@ -9110,11 +9166,13 @@ def api_ai_qa_human_review():
             return jsonify({"error": "субъект вне вашего отдела"}), 403
 
         subject = _qa_subjects.load(subject_kind, call_id)
-        direction_id = subject.get('direction_id')
+        # Шкала — та же, что у оценки ИИ (subjects.scale_direction_id): у звонка обзвона
+        # она своя (imported_calls.qa_direction_id), у переписки ТЭЗ — по чатовой карте.
+        # Со шкалой оператора «Моя оценка» отвечала бы 409 scale_changed на каждую
+        # карточку обзвона, а в журнал ушла бы позиционно на чужие критерии.
+        direction_id = _qa_subjects.scale_direction_id(subject)
         if direction_id is None:
             return jsonify({"error": "у субъекта нет направления — нет мониторинговой шкалы"}), 400
-        if subject_kind in call_qa_config.CHAT_SUBJECT_KINDS:
-            direction_id = _qa_subjects.criteria_direction_id(direction_id)
         direction = _qa_criteria.load_direction(int(direction_id))
         criteria = direction['criteria']
         if body.get('direction_id') not in (None, '') and int(body['direction_id']) != int(direction['id']):

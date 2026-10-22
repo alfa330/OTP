@@ -293,7 +293,10 @@ const CriterionReview = memo(function CriterionReview({
                 <div className="min-w-0 text-[13.5px] font-medium leading-snug text-slate-800">
                     {c.name}
                     {c.description ? (
-                        <span className="ml-1.5 inline-flex align-[-3px]"><IosHint label="Описание критерия" text={c.description} /></span>
+                        /* Описание шкалы — строки «вариант, вес, описание» (вставка из
+                           Excel МШ): без pre-line варианты слипались бы в один абзац. */
+                        <span className="ml-1.5 inline-flex align-[-3px]"><IosHint label="Описание критерия"
+                            text={<span className="block whitespace-pre-line">{c.description}</span>} /></span>
                     ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">

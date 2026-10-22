@@ -27,6 +27,7 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 from .. import config
+from ..subjects import journal_same_scale_sql
 
 FAMILY_CALLS = "calls"
 FAMILY_CHATS = "chats"
@@ -296,7 +297,8 @@ def attach_details(cur, talks, *, with_transcripts=True, with_notes=False) -> No
 # Строка журнала, которая считается оценкой человека у субъекта, — по тем же
 # связям, что карточка (api._HUMAN_REVIEW_SQL), только пачкой на вид субъекта. У
 # звонка журнала — хвост цепочки переоценок, у звонка из АТС — строка с его
-# imported_call_id, у переписки — строка, привязанная к снапшоту.
+# imported_call_id (у звонка со своей шкалой — только строка той же шкалы: вердикты
+# сверяются по позиции критерия), у переписки — строка, привязанная к снапшоту.
 _JOURNAL_BATCH_SQL = {
     config.SUBJECT_CALL: """
         WITH RECURSIVE chain AS (
@@ -312,7 +314,9 @@ _JOURNAL_BATCH_SQL = {
     config.SUBJECT_IMPORTED_CALL: """
         SELECT DISTINCT ON (c.imported_call_id) c.imported_call_id, c.scores, c.score, c.comment, c.criterion_comments
           FROM calls c
+          JOIN imported_calls ic ON ic.id = c.imported_call_id
          WHERE c.imported_call_id = ANY(%s) AND COALESCE(c.is_draft, FALSE) = FALSE
+           AND """ + journal_same_scale_sql("c", "ic") + """
          ORDER BY c.imported_call_id, c.created_at DESC""",
     config.SUBJECT_C2D_SNAPSHOT: """
         SELECT DISTINCT ON (c.c2d_snapshot_id) c.c2d_snapshot_id, c.scores, c.score, c.comment, c.criterion_comments

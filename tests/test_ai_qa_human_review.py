@@ -218,7 +218,10 @@ class ApiWiringTests(unittest.TestCase):
         self.assertIn("_ai_qa_guard()", body)
         self.assertIn("call_in_scope(call_id, scope, subject_kind)", body)
         self.assertIn("_ai_qa_direction_department_allowed(", body)
-        self.assertIn("criteria_direction_id(direction_id)", body)
+        # Шкала — той же функцией, что у оценки ИИ: своя шкала звонка обзвона и
+        # чатовая карта ТЭЗ (иначе 409 scale_changed на каждой такой карточке).
+        self.assertIn("_qa_subjects.scale_direction_id(subject)", body)
+        self.assertNotIn("subject.get('direction_id')", body)
         self.assertIn('"scale_changed"', body)
         # В журнал — только с правами журнала. Обёртка раздела отдаёт проверку
         # общей функции всем, кроме поимённого наблюдателя (его отдел — только ОП).

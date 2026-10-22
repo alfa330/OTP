@@ -241,6 +241,7 @@ _SUBJECT_JOIN = """
                         ON d.id = COALESCE(c.direction_id, ue.direction_id,
                                            ui.direction_id, us.direction_id,
                                            ua.direction_id)
+                 LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
 """
 # Номер разговора по виду субъекта — чтобы разговоры с номерами «Реестра тестовых
 # номеров» (test_numbers) не попадали ни в один список, счётчик и сводку раздела.
@@ -280,6 +281,17 @@ _SUBJECT_PRESENT = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT 
 _SUBJECT_EXISTS = _SUBJECT_PRESENT + " AND " + _SUBJECT_NOT_EXCLUDED
 _SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
                       " us.direction_id, ua.direction_id)")
+# Направление ШКАЛЫ субъекта — для фильтра «Направление», подписей и пометки
+# «устарела». Отличается от _SUBJECT_DIRECTION только у звонка из АТС со своей
+# шкалой (imported_calls.qa_direction_id, звонки обзвона): оператор там остаётся в
+# основном направлении. Скоуп и отдел по-прежнему считаются по _SUBJECT_DIRECTION —
+# иначе СВ «Основы» потерял бы звонки своих операторов (в его скоупе шкалы нет).
+# Чатовая карта ТЭЗ сюда не входит: её поверх кладёт subjects.scale_direction_id.
+_SUBJECT_SCALE_DIRECTION = ("COALESCE(ic.qa_direction_id, c.direction_id, ue.direction_id,"
+                            " ui.direction_id, us.direction_id, ua.direction_id)")
+# Подпись направления в строках и днях списков — по шкале, по которой оценён разговор:
+# без неё критерии обзвона стояли бы под подписью «Основа».
+_SUBJECT_DIRECTION_NAME = "COALESCE(dq.name, d.name)"
 # У звонка из АТС оператор может быть не привязан к учётной записи — тогда
 # остаётся только имя из АТС (так же поступает выборка random_call).
 _SUBJECT_OPERATOR = ("COALESCE(uc.name, ue.name, COALESCE(ui.name, ic.operator_name),"
@@ -289,10 +301,14 @@ _SUBJECT_OPERATOR = ("COALESCE(uc.name, ue.name, COALESCE(ui.name, ic.operator_n
 # в очереди сразу видно расхождение ИИ и человека; у переписки СЗоВ/ТЭЗ связь
 # идёт через снапшот. NULL здесь значит «человек ещё не оценивал», и фронт это
 # уже умеет показывать (так ведут себя эпизоды Верификаторов с самого начала).
+# У звонка из АТС со своей шкалой в расчёт идёт только строка журнала той же
+# шкалы (subjects.journal_same_scale_sql): балл по «Основе» рядом с баллом ИИ по
+# шкале обзвона сравнивал бы несравнимое.
 _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                  (SELECT hc.score FROM calls hc
                    WHERE rc.subject_kind = 'imported_call' AND hc.imported_call_id = ic.id
                      AND COALESCE(hc.is_draft, FALSE) = FALSE
+                     AND """ + subjects_mod.journal_same_scale_sql("hc", "ic") + """
                    ORDER BY hc.created_at DESC LIMIT 1),
                  (SELECT hc.score FROM calls hc
                    WHERE rc.subject_kind = 'c2d_snapshot' AND hc.c2d_snapshot_id = cs.id
@@ -628,7 +644,11 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
         family = [i for i in _scope_family(cur, [direction_id]) if i in allowed]
         if not family:
             return None, ()
-        sql += f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+        # Фильтр — по шкале, по которой оценён разговор: выбранная шкала обзвона
+        # иначе давала бы пусто (операторы обзвона числятся в «Основе»), а «Основа»
+        # подмешивала бы звонки, оценённые по чужой шкале. Видимость решает не он, а
+        # скоуп (_direction_predicate) — тот остаётся по направлению оператора.
+        sql += f" AND {_SUBJECT_SCALE_DIRECTION} = ANY(%s)"
         params.append(family)
 
     group_id = filters.get('group_id')
@@ -753,10 +773,14 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                   ORDER BY r.created_at DESC, r.id::text DESC
                   LIMIT 1
              ) run ON true"""
+    # Подпись и направление строки (позиция 8 — по нему _flag_stale_evaluations
+    # строит ожидаемый отпечаток) — по ШКАЛЕ: у звонка обзвона это его шкала, а
+    # не «Основа» оператора, иначе каждая его оценка числилась бы устаревшей.
     cur.execute(
-        f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {human_col},
+        f"""SELECT rc.call_id, {_SUBJECT_DIRECTION_NAME}, {_SUBJECT_OPERATOR},
+                  {_SUBJECT_DATETIME}, {human_col},
                   {criteria_col}, rc.payload->'asr_mean_conf', rc.created_at,
-                  {_SUBJECT_DIRECTION}, {run_cols}, rc.subject_kind, rc.payload->'media',
+                  {_SUBJECT_SCALE_DIRECTION}, {run_cols}, rc.subject_kind, rc.payload->'media',
                   rc.payload->'ai_score', {breakdown_col}, {_SUBJECT_DAY},
                   {_SUBJECT_OPERATOR_ID}, {end_col}"""
         + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
@@ -1223,11 +1247,13 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
         direction_id, run_fp = item.get("_direction_id"), item.get("_run_fp")
         if not (run_fp and transcript_identity and direction_id):
             continue
-        # Направление в строке очереди — направление ОПЕРАТОРА, а оценка шла по
-        # чатовой шкале отдела (у ТЭЗ это другое направление). Считаем ожидаемый
-        # отпечаток по тому же направлению, что и _evaluate_and_cache.
-        if (item.get("subject") or config.SUBJECT_CALL) in config.CHAT_SUBJECT_KINDS:
-            direction_id = subjects_mod.criteria_direction_id(direction_id)
+        # Ожидаемый отпечаток — по той же шкале, что берёт _evaluate_and_cache
+        # (subjects.scale_direction_id). Своя шкала звонка из АТС уже подставлена в
+        # SQL (_SUBJECT_SCALE_DIRECTION) и конечна; у переписки в строке направление
+        # ОПЕРАТОРА, и поверх него действует чатовая карта (ТЭЗ: линия → «ТП чат»).
+        # Пометки шкалы у переписки не бывает, поэтому карта на неё не ложится.
+        direction_id = subjects_mod.scale_direction_id(
+            {"kind": item.get("subject") or config.SUBJECT_CALL, "direction_id": direction_id})
         try:
             if direction_id not in contexts:
                 try:
@@ -1506,7 +1532,11 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
     (call_end.py) он складывает с ним здесь, в одном месте для карточки, теневого
     прогона, пакета и очереди. Сам транскрипт-отпечаток остаётся в компонентах
     (source_transcript_hash) — по нему очередь пересчитывает ожидаемый отпечаток,
-    когда сторона стала известна уже после оценки."""
+    когда сторона стала известна уже после оценки.
+
+    Указания направления (direction['guidance']) — часть системного промпта, и
+    отпечаток считает их от того же словаря направления, что уходит в модель
+    (build_eval_body): правка указаний помечает оценки направления устаревшими."""
     party = (call_end.normalise_call_end_party(call_end_party)
              if subject_kind in config.AUDIO_SUBJECT_KINDS else "unknown")
     transcript_criteria = [c for c in direction["criteria"] if c.get("eval_source") == cc.TRANSCRIPT]
@@ -1522,7 +1552,7 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
         transcript_hash=call_end.identity(transcript_hash, party), model=config.CLAUDE_MODEL,
         model_config=model_config,
         prompt_hash=content_hash(evaluator.build_system(
-            transcript_criteria, subject_kind, department)),
+            transcript_criteria, subject_kind, department, guidance=direction.get("guidance"))),
         output_schema_hash=content_hash(evaluator._OUTPUT_SCHEMA),
         scale_hash=direction["scale_hash"],
         criterion_config_hash=content_hash(criterion_cfg),
@@ -1625,7 +1655,11 @@ def _human_display_verdict(v):
 # Где лежит человеческая оценка ЭТОГО субъекта. Ни у одного субъекта, кроме
 # звонка журнала, id не равен calls.id — читать calls «по id субъекта» значит
 # показать чужой звонок. Связь у каждого своя:
-#   imported_call — calls.imported_call_id (звонок оценили после подтяжки);
+#   imported_call — calls.imported_call_id (звонок оценили после подтяжки); у
+#                   звонка со своей шкалой — только строка той же шкалы
+#                   (subjects.journal_same_scale_sql): оценка по «Основе» легла
+#                   бы позиционно на критерии обзвона, а «Моя оценка» в журнал
+#                   стала бы переоценкой чужой строки;
 #   wz_episode / ca_episode — через снапшот переписки по ключу эпизода;
 #   c2d_snapshot  — calls.c2d_snapshot_id прямо на этот снапшот.
 #
@@ -1664,8 +1698,10 @@ _HUMAN_REVIEW_SQL = {
     config.SUBJECT_IMPORTED_CALL:
         f"""SELECT {_JOURNAL_ROW_COLUMNS}
              FROM calls c
+             JOIN imported_calls ic ON ic.id = c.imported_call_id
              LEFT JOIN users ju ON ju.id = c.evaluator_id
             WHERE c.imported_call_id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+              AND {subjects_mod.journal_same_scale_sql('c', 'ic')}
             ORDER BY c.created_at DESC LIMIT 1""",
     config.SUBJECT_WZ_EPISODE:
         f"""SELECT {_JOURNAL_ROW_COLUMNS}
@@ -2558,15 +2594,15 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
     кэш/переоценка → прогон модели → immutable-запись → карточка."""
     subject = subjects_mod.load(subject_kind, call_id)
     subjects_mod.require_evaluable(subject)
-    direction_id = subject["direction_id"]
+    # Шкала может лежать НЕ на направлении оператора: у звонка обзвона она задана
+    # самой строке (imported_calls.qa_direction_id), у переписки ТЭЗ — чатовой
+    # картой («ТП линия» → «ТП чат», как у человеческой оценки «Случайного чата»).
+    # Правило одно на карточку, очередь, «Мою оценку» и пакет — иначе они расходятся
+    # в пометке «устарела» и в 409 scale_changed. «Нет направления» — только когда
+    # нет и шкалы: своя шкала звонка не зависит от того, заведён ли оператор.
+    direction_id = subjects_mod.scale_direction_id(subject)
     if direction_id is None:
         raise ValueError("у субъекта нет направления — нет мониторинговой шкалы")
-    if subject_kind in config.CHAT_SUBJECT_KINDS:
-        # Шкала переписки может лежать на ДРУГОМ направлении: техменеджеры ТЭЗ
-        # числятся на «ТП линия», а чат оценивается по «ТП чат». То же делает
-        # человеческая оценка «Случайного чата» (CHATAPP_CHAT_DIRECTION_MAP),
-        # поэтому оценки ИИ и человека попадают на одну шкалу и сравнимы.
-        direction_id = subjects_mod.criteria_direction_id(direction_id)
     source = _SOURCE_RESOLVERS[subject_kind](
         subject, model, may_transcribe=lambda: _will_evaluate(call_id, subject_kind, refresh))
     # До кэша оценок, а не только до модели: готовая оценка секундной записи тоже не
@@ -2767,7 +2803,10 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
 
     payload = {
         "id": subject["id"], "subject_kind": subject_kind,
-        "direction_id": direction_id, "direction": subject.get("direction"),
+        # Подпись — направления ШКАЛЫ, если звонок оценён по своей: по payload->>'direction'
+        # дашборд группирует критерии, и критерии обзвона иначе встали бы под «Основой».
+        "direction_id": direction_id,
+        "direction": subject.get("qa_direction") or subject.get("direction"),
         "operator": subject.get("operator") or "—", "datetime": subject.get("datetime"),
         "human_score": subject.get("human_score"),
         "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
@@ -3008,6 +3047,86 @@ def criteria_config_set(direction_id: int, items: list[dict]) -> int:
     finally:
         conn.close()
     return len(requested)
+
+
+# ── Указания направления для ИИ (qa_direction_guidance) ───────────────────────
+#
+# Правила шкалы и справка по процессу, которые не помещаются в описание одного
+# критерия. Уходят блоком в конец системного промпта (evaluator.build_system) и
+# входят в prompt_hash: сохранение помечает оценки направления устаревшими, пересчёт —
+# кнопкой «Переоценить». Предел длины — чтобы справка оставалась справкой: GLM
+# кэширует системный блок, но каждая тысяча знаков всё равно едет в каждую оценку.
+GUIDANCE_MAX_CHARS = 12000
+
+
+def _canonical_direction_id(cur, direction_id) -> int:
+    """Живая строка направления: указания, как и критерии, хранятся у неё, а архивная
+    версия шкалы читает их оттуда (criteria.load_direction)."""
+    cur.execute("SELECT COALESCE(canonical_id, id) FROM directions WHERE id = %s",
+                (int(direction_id),))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"направление {direction_id} не найдено")
+    return int(row[0])
+
+
+def direction_guidance_get(direction_id: int) -> dict:
+    """{direction_id, guidance, updated_at, updated_by, max_length}; указаний нет —
+    guidance ''. Таблицы ещё нет (42P01) — тоже «указаний нет», как в load_direction."""
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        canonical = _canonical_direction_id(cur, direction_id)
+        try:
+            cur.execute(
+                f"""SELECT g.guidance, TO_CHAR({_local('g.updated_at')}, 'DD.MM.YYYY HH24:MI'),
+                           u.name
+                      FROM qa_direction_guidance g
+                      LEFT JOIN users u ON u.id = g.updated_by
+                     WHERE g.direction_id = %s""", (canonical,))
+            row = cur.fetchone()
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) != "42P01":
+                raise
+            row = None
+        cur.close()
+    finally:
+        conn.close()
+    return {"direction_id": canonical, "guidance": (row[0] or "") if row else "",
+            "updated_at": row[1] if row else None, "updated_by": row[2] if row else None,
+            "max_length": GUIDANCE_MAX_CHARS}
+
+
+def direction_guidance_set(direction_id: int, guidance, user_id) -> dict:
+    """Сохраняет указания направления; пустой текст их удаляет. Возвращает то же, что
+    direction_guidance_get.
+
+    Текст хранится в том виде, в каком уйдёт в промпт (evaluator._guidance_text:
+    единые переводы строк, без пустых краёв): иначе пробел в конце менял бы
+    prompt_hash, не меняя ничего для человека."""
+    if guidance is not None and not isinstance(guidance, str):
+        raise ValueError("guidance: ожидается текст")
+    text = evaluator._guidance_text(guidance)
+    if len(text) > GUIDANCE_MAX_CHARS:
+        raise ValueError(f"указания длиннее {GUIDANCE_MAX_CHARS} знаков — сократите текст")
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            canonical = _canonical_direction_id(cur, direction_id)
+            if text:
+                cur.execute(
+                    """INSERT INTO qa_direction_guidance (direction_id, guidance, updated_by, updated_at)
+                       VALUES (%s, %s, %s, now())
+                       ON CONFLICT (direction_id) DO UPDATE SET
+                         guidance = EXCLUDED.guidance, updated_by = EXCLUDED.updated_by,
+                         updated_at = now()""",
+                    (canonical, text, int(user_id) if user_id is not None else None))
+            else:
+                cur.execute("DELETE FROM qa_direction_guidance WHERE direction_id = %s",
+                            (canonical,))
+    finally:
+        conn.close()
+    return direction_guidance_get(canonical)
 
 
 def _rules_of_deals_predicate(cur, marketing):
@@ -4987,12 +5106,15 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
         # Условие наличия записи вынесено параметром: последним делом тем же
         # запросом проверяется ОБРАТНОЕ (звонки без записи), и вырезать условие
         # из готовой строки было бы миной — молча сломается от любой правки SQL.
-        imported = """SELECT ic.id, d.name, COALESCE(u.name, ic.operator_name),
+        # Круг звонков — по направлению оператора (это видимость), а подпись и
+        # отбор панели по направлению — по шкале звонка: у звонка обзвона она своя.
+        imported = """SELECT ic.id, COALESCE(dq.name, d.name), COALESCE(u.name, ic.operator_name),
                              TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC',
                                      'DD.MM HH24:MI')
                         FROM imported_calls ic
                         JOIN users u ON u.id = ic.operator_id
                         LEFT JOIN directions d ON d.id = u.direction_id
+                        LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
                        WHERE u.direction_id = ANY(%s)
                          AND COALESCE(ic.status, '') <> 'evaluated'
                          AND NOT EXISTS (SELECT 1 FROM calls c
@@ -5011,7 +5133,7 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
         imported_pick, imported_pick_params = _pick_filters_predicate(
             filters, operator_col="ic.operator_id",
             day_expr="(ic.datetime_raw AT TIME ZONE 'UTC')::date",
-            direction_expr="COALESCE(d.canonical_id, d.id)")
+            direction_expr="COALESCE(dq.canonical_id, dq.id, d.canonical_id, d.id)")
         imported = imported + imported_pick
         # Запись короче нижней границы карточка не оценит (subjects.require_recording_length),
         # и предлагать такой звонок — тупик: вместо оценки человек получит отказ. Длину
@@ -5207,16 +5329,21 @@ def _find_imported_calls(cur, family, suffix, operator_id, date_from, date_to, l
         phone_col=f"COALESCE(ic.phone_normalized, {_DIGITS_SQL.format(col='ic.phone_number')})",
         operator_col="ic.operator_id", day_expr=f"{when}::date", suffix=suffix,
         operator_id=operator_id, date_from=date_from, date_to=date_to)
+    # Подпись — шкала звонка, балл человека — строка журнала той же шкалы: у звонка
+    # обзвона оценка по «Основе» рядом с баллом ИИ по его шкале ничего не значит.
     cur.execute(
-        f"""SELECT ic.id, COALESCE(u.name, ic.operator_name), ic.operator_id, d.name,
+        f"""SELECT ic.id, COALESCE(u.name, ic.operator_name), ic.operator_id,
+                   COALESCE(dq.name, d.name),
                    TO_CHAR({when}, 'DD.MM.YYYY HH24:MI'), {when} AS ts,
                    ic.phone_number, hc.score, ai.ai, ic.audio_path, ic.duration_sec
               FROM imported_calls ic
               JOIN users u ON u.id = ic.operator_id
               LEFT JOIN directions d ON d.id = u.direction_id
+              LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
               LEFT JOIN LATERAL (
                   SELECT c.score FROM calls c
                    WHERE c.imported_call_id = ic.id AND COALESCE(c.is_draft, FALSE) = FALSE
+                     AND {subjects_mod.journal_same_scale_sql('c', 'ic')}
                    ORDER BY c.created_at DESC LIMIT 1
               ) hc ON TRUE
               {_find_ai_lateral(config.SUBJECT_IMPORTED_CALL, 'ic.id')}
@@ -5806,6 +5933,20 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
                   AND COALESCE(d.is_active, TRUE)
                 ORDER BY d.name""", (family,))
         directions = [{"id": int(r[0]), "name": r[1] or "—"} for r in cur.fetchall()]
+        # Какими из них размечены звонки из АТС (imported_calls.qa_direction_id) — по
+        # частичному индексу, одна проба на направление. Нужно пометке scale_only ниже.
+        marked: set[int] = set()
+        if directions:
+            cur.execute(
+                """SELECT d.id
+                     FROM directions d
+                    WHERE d.id = ANY(%s)
+                      AND EXISTS (SELECT 1 FROM imported_calls ic
+                                   WHERE ic.qa_direction_id IN (
+                                       SELECT x.id FROM directions x
+                                        WHERE x.id = d.id OR x.canonical_id = d.id))""",
+                ([item["id"] for item in directions],))
+            marked = {int(r[0]) for r in cur.fetchall()}
 
         cur.execute(
             f"""SELECT u.id, u.name, COALESCE(d.canonical_id, d.id), d.name,
@@ -5875,6 +6016,17 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
                                                  "operators": 0, "evaluations": 0})
             entry["operators"] += 1
             entry["evaluations"] += person["evaluations"]
+
+        # scale_only — шкала без своих людей: ею размечены звонки, а действующих
+        # операторов на направлении нет (операторы обзвона остаются в «Основе»). Фронт
+        # по этой пометке не сужает список сотрудников направлением и не шлёт его в
+        # «Из АТС»: иначе выбор такой шкалы давал бы пустой список людей и «нет
+        # кандидатов», хотя её звонки в списках есть.
+        staffed = {int(row[2]) for row in people
+                   if row[2] is not None and row[7] == 'operator'
+                   and row[6] not in ('fired', 'dismissal')}
+        for item in directions:
+            item["scale_only"] = item["id"] in marked and item["id"] not in staffed
         return {"directions": directions,
                 "groups": sorted(groups.values(), key=lambda g: g["name"]),
                 "operators": operators}
@@ -5964,7 +6116,7 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
         # Сделка в строке — только тем, кому открыт модуль маркетинга.
         deal_join = _marketing_join(cur, filters, need_columns=with_deals)
         cur.execute(
-            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
+            f"""SELECT rc.call_id, {_SUBJECT_DIRECTION_NAME}, {_SUBJECT_OPERATOR},
                       TO_CHAR({_local('rc.created_at')},'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
                       rc.payload->>'ai_score' AS ai, rc.subject_kind,
                       {_SUBJECT_DATETIME}"""
@@ -6073,7 +6225,7 @@ def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=N
                                {_SUBJECT_AI_SCORE} AS ai, {_SUBJECT_HUMAN_SCORE} AS human,
                                {_SUBJECT_CRITICAL} AS critical,
                                COALESCE({_SUBJECT_OPERATOR_ID}::text, {_SUBJECT_OPERATOR}) AS who,
-                               d.name AS direction
+                               {_SUBJECT_DIRECTION_NAME} AS direction
                           FROM {_LATEST_EVALUATIONS}"""
             + _SUBJECT_JOIN + _marketing_join(cur, filters) + _EVAL_META_JOIN
             + where_sql + """) t
@@ -6146,7 +6298,7 @@ def evaluations_day(day: str, limit: int = 50, offset: int = 0, allowed_directio
             day_sql, day_params = f" AND {_SUBJECT_DAY} = %s", (day,)
         deal_join = _marketing_join(cur, filters, need_columns=with_deals)
         cur.execute(
-            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME},
+            f"""SELECT rc.call_id, {_SUBJECT_DIRECTION_NAME}, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME},
                        {_SUBJECT_HUMAN_SCORE}, rc.payload->>'ai_score', rc.subject_kind,
                        {_CRITERIA_FOR_REASONS}, rc.payload->'asr_mean_conf', rc.payload->'media',
                        rc.payload->'score_breakdown'->'unchecked_weight', m.review_outcome,
@@ -6265,7 +6417,8 @@ def excluded_list(limit: int = 50, offset: int = 0, allowed_direction_ids=None, 
                     where_params)
         facets = cur.fetchall()
         cur.execute(
-            f"""SELECT rc.call_id, rc.subject_kind, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME},
+            f"""SELECT rc.call_id, rc.subject_kind, {_SUBJECT_DIRECTION_NAME}, {_SUBJECT_OPERATOR},
+                       {_SUBJECT_DATETIME},
                        {_SUBJECT_DAY}, {_SUBJECT_AI_SCORE},
                        ex.id, ex.category_id, cat.title, ex.category_source, ex.reason,
                        eu.name, TO_CHAR(ex.excluded_at AT TIME ZONE 'Asia/Almaty', 'DD.MM HH24:MI'),
@@ -6565,7 +6718,8 @@ def _rag_observability(cur) -> dict:
 # перечислять надо ВСЕ: вид, забытый здесь, просто не попадает в согласие
 # ИИ↔человек — молча, без ошибки. Так и было со звонками из АТС и
 # перепиской СЗоВ/ТЭЗ: оценка человека появлялась позже, но в метрику
-# не входила никогда.
+# не входила никогда. Сверка позиционная (scores[idx]), поэтому у звонка из
+# АТС со своей шкалой берётся только строка журнала той же шкалы.
 _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
                                            hc2d.scores, hca.scores, hrv.scores), t.direction
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
@@ -6602,6 +6756,7 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                      SELECT hcalls.scores FROM calls hcalls
                       WHERE ic.id IS NOT NULL AND hcalls.imported_call_id = ic.id
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                        AND """ + subjects_mod.journal_same_scale_sql("hcalls", "ic") + """
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) himp ON true
                  LEFT JOIN LATERAL (

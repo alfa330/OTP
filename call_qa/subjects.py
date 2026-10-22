@@ -202,6 +202,51 @@ def criteria_direction_id(direction_id):
     return config.CHAT_CRITERIA_DIRECTION_MAP.get(int(direction_id), int(direction_id))
 
 
+def scale_direction_id(subject: dict) -> int | None:
+    """По чьей мониторинговой шкале оценивается субъект — ОДНО правило для карточки,
+    пометки «устарела» в очереди, «Моей оценки» и пакетного прогона.
+
+    1) Шкала, заданная самому разговору (imported_calls.qa_direction_id): звонки
+       обзвона оцениваются по своей шкале, а оператор остаётся в основном
+       направлении. Пометка конечная — чатовая карта поверх неё не действует.
+    2) Переписка — чатовая карта по направлению оператора (ТЭЗ: «ТП линия» →
+       «ТП чат», criteria_direction_id).
+    3) Иначе — направление субъекта.
+
+    Место, выбравшее шкалу в обход этой функции, расходится с остальными молча:
+    карточка показывает «оценка устарела», «Моя оценка» отвечает 409
+    scale_changed, а «Переоценить» уводит оценку на чужую шкалу. Видимость и отдел
+    этой функцией не решаются — они остаются по направлению оператора
+    (direction_id субъекта, api._SCOPE_SQL)."""
+    marked = subject.get("qa_direction_id")
+    if marked is not None:
+        return int(marked)
+    direction_id = subject.get("direction_id")
+    if direction_id is None:
+        return None
+    if subject.get("kind") in config.CHAT_SUBJECT_KINDS:
+        return criteria_direction_id(direction_id)
+    return int(direction_id)
+
+
+def journal_same_scale_sql(journal: str, imported: str) -> str:
+    """SQL-условие: строка журнала `journal` (calls) поставлена по той же семье
+    шкалы, что задана звонку из АТС `imported` (imported_calls.qa_direction_id).
+
+    Журнальная строка, связанная со звонком (calls.imported_call_id), может быть
+    оценкой по ДРУГОЙ шкале — по «Основе», пока звонок обзвона оценивается по своей.
+    Вердикты такой строки лежат позиционно (scores[idx]) и легли бы на чужие
+    критерии без единой ошибки, а согласие ИИ и человека стало бы мусором. Семья —
+    сама шкала и её архивные версии (canonical_id): после правки критериев оценки
+    журнала перевешиваются на архивную строку. У звонка без пометки условие
+    пропускает всё — как и было."""
+    return (f"({imported}.qa_direction_id IS NULL OR EXISTS ("
+            f"SELECT 1 FROM directions jd"
+            f" JOIN directions qd ON qd.id = {imported}.qa_direction_id"
+            f" WHERE jd.id = {journal}.direction_id"
+            f" AND COALESCE(jd.canonical_id, jd.id) = COALESCE(qd.canonical_id, qd.id)))")
+
+
 # ── загрузка субъекта ────────────────────────────────────────────────────────
 
 def load(subject_kind, subject_id: int) -> dict:
@@ -305,7 +350,13 @@ def _load_imported_call(imported_call_id: int) -> dict:
     `imported_calls` наполняет кнопка «Случайный звонок» журнала (СЗоВ — Oktell,
     Тез КЦ — Binotel): запись уже лежит в GCS, а человеческой оценки может не
     быть вовсе. Направления у строки нет — как и у эпизода чата, оно берётся у
-    оператора (users.direction_id)."""
+    оператора (users.direction_id).
+
+    Шкалу оценки строка может задать сама (qa_direction_id, ключи qa_direction_id
+    и qa_direction): так звонки обзвона оцениваются по своей шкале, пока оператор
+    числится в основном направлении. direction_id при этом остаётся направлением
+    ОПЕРАТОРА — на нём держатся видимость и отдел; шкалу выбирает
+    scale_direction_id."""
     conn = config.connect_ro()
     try:
         cur = conn.cursor()
@@ -315,10 +366,12 @@ def _load_imported_call(imported_call_id: int) -> dict:
                       TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'DD.MM.YYYY, HH24:MI'),
                       ic.audio_path, ic.operator_id, ic.phone_number, ic.duration_sec,
                       ic.status, dep.code, hc.score, ic.call_end_party,
+                      ic.qa_direction_id, dq.name,
                       """ + test_keys.sql_is_test('ic.phone_number') + """
                  FROM imported_calls ic
                  LEFT JOIN users u ON u.id = ic.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
+                 LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
                  -- Отдел берём у НАПРАВЛЕНИЯ, а не у users.department_id:
                  -- отдел входит в prompt_hash, а пометку «устарела» очередь
                  -- считает по отделу направления (_direction_identity_context).
@@ -332,6 +385,7 @@ def _load_imported_call(imported_call_id: int) -> dict:
                      SELECT c.score FROM calls c
                       WHERE c.imported_call_id = ic.id
                         AND COALESCE(c.is_draft, FALSE) = FALSE
+                        AND """ + journal_same_scale_sql("c", "ic") + """
                       ORDER BY c.created_at DESC LIMIT 1
                  ) hc ON TRUE
                 WHERE ic.id = %s""", (imported_call_id,))
@@ -353,7 +407,9 @@ def _load_imported_call(imported_call_id: int) -> dict:
             "department_code": config.normalise_department_code(row[10]),
             "human_score": row[11],
             "call_end_party": normalise_call_end_party(row[12]),
-            "is_test_number": bool(row[13]) if len(row) > 13 else False}
+            "qa_direction_id": int(row[13]) if row[13] is not None else None,
+            "qa_direction": row[14],
+            "is_test_number": bool(row[15]) if len(row) > 15 else False}
 
 
 def _load_c2d_snapshot(snapshot_id: int) -> dict:

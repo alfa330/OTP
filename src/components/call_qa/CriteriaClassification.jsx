@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Sparkles, Server, User2, ShieldAlert, Save, Info, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
-import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { Sparkles, Server, User2, ShieldAlert, Save, Info, Loader2, AlertCircle, RefreshCw, ChevronDown } from 'lucide-react';
+import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosInput, IosBadge, IosHint } from '../ui/ios';
 
 /* Классификация критериев по источнику. Реальные данные: GET/POST /api/ai-qa/criteria-config. */
 
@@ -38,6 +38,97 @@ function SourcePicker({ value, onChange, disabled = false }) {
     );
 }
 
+/* Указания направления для ИИ (GET/PUT /api/ai-qa/direction-guidance): правила шкалы
+   и справка по процессу, которые ИИ читает в каждой оценке направления. Свёрнуты по
+   умолчанию — нужны редко, а место на экране занимают много. Менять может глава
+   отдела и администраторы (can_edit от сервера), остальным — только чтение. */
+function GuidancePanel({ apiBaseUrl, headers, directionId, showToast, onDirtyChange }) {
+    const [open, setOpen] = useState(false);
+    const [data, setData] = useState(null);      // null — ещё не пришло
+    const [draft, setDraft] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState(null);
+
+    useEffect(() => {
+        setData(null); setErr(null); setDraft('');
+        if (!apiBaseUrl || directionId == null) return undefined;
+        const controller = new AbortController();
+        axios.get(`${apiBaseUrl}/api/ai-qa/direction-guidance`, {
+            params: { direction_id: directionId }, headers: headers(), signal: controller.signal,
+        })
+            .then((r) => { setData(r.data || {}); setDraft(r.data?.guidance || ''); })
+            .catch((error) => {
+                if (!axios.isCancel(error)) setErr(error?.response?.data?.error || 'Не удалось загрузить указания');
+            });
+        return () => controller.abort();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiBaseUrl, directionId]);
+
+    const saved = data?.guidance || '';
+    const max = data?.max_length || 12000;
+    // Сервер хранит текст без пустых краёв — сравниваем так же, иначе пробел в
+    // конце вечно держал бы «не сохранено».
+    const dirty = !!data && draft.trim() !== saved.trim();
+    useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+
+    const save = () => {
+        if (!apiBaseUrl || busy || !dirty) return;
+        if (draft.trim().length > max) { showToast?.(`Не больше ${max} знаков`, 'error'); return; }
+        setBusy(true);
+        axios.put(`${apiBaseUrl}/api/ai-qa/direction-guidance`,
+            { direction_id: directionId, guidance: draft }, { headers: headers() })
+            .then((r) => {
+                setData(r.data || {}); setDraft(r.data?.guidance || '');
+                showToast?.('Указания сохранены', 'success');
+            })
+            .catch((error) => showToast?.(error?.response?.data?.error || 'Не удалось сохранить', 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const status = data == null ? '' : saved ? `${saved.length} зн.` : 'не заданы';
+    return (
+        <div className={`${iosCard} p-3.5`}>
+            <div className="flex items-center gap-2">
+                <span className="text-[13.5px] font-semibold text-slate-800">Указания для ИИ</span>
+                <IosHint label="Что такое указания для ИИ"
+                    text="Правила шкалы и справка по процессу, которые ИИ читает в каждой оценке этого направления. Люди их не видят. После сохранения прежние оценки направления помечаются устаревшими — пересчёт кнопкой «Переоценить»." />
+                <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+                    className="ml-auto flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] font-medium text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+                    {status}
+                    <ChevronDown size={15} className={`transition ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
+                </button>
+            </div>
+            {open && (
+                err ? (
+                    <p className="mt-3 text-[12.5px] text-rose-600" role="alert">{err}</p>
+                ) : data == null ? (
+                    <div className="mt-3 flex items-center gap-2 text-[12.5px] text-slate-500" role="status">
+                        <Loader2 size={15} className="animate-spin" aria-hidden="true" />Загрузка…
+                    </div>
+                ) : data.can_edit ? (
+                    <div className="mt-3 space-y-2">
+                        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} disabled={busy}
+                            rows={12} maxLength={max} placeholder="Указаний нет — ИИ оценивает только по описаниям критериев."
+                            aria-label="Указания для ИИ"
+                            className={`${iosInput} min-h-[220px] resize-y text-[13px] leading-relaxed`} />
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-[12px] text-slate-400">{draft.trim().length} / {max}</span>
+                            <button type="button" onClick={save} disabled={!dirty || busy} className={iosBtnPrimary}>
+                                {busy ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                                {busy ? 'Сохраняю…' : 'Сохранить указания'}
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="mt-3 whitespace-pre-line text-[13px] leading-relaxed text-slate-700">
+                        {saved || 'Указаний нет — ИИ оценивает только по описаниям критериев.'}
+                    </div>
+                )
+            )}
+        </div>
+    );
+}
+
 export default function CriteriaClassification(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, directions, department,
             onInteractionChange } = props;
@@ -64,6 +155,7 @@ export default function CriteriaClassification(props) {
     const [rows, setRows] = useState(null);   // null = загрузка
     const [err, setErr] = useState(null);
     const [dirty, setDirty] = useState(false);
+    const [guidanceDirty, setGuidanceDirty] = useState(false);
     const [saving, setSaving] = useState(false);
     const requestRef = useRef({ id: 0, controller: null });
 
@@ -72,7 +164,7 @@ export default function CriteriaClassification(props) {
             showToast?.('Дождитесь завершения сохранения', 'error');
             return;
         }
-        if (!force && id !== dir && dirty &&
+        if (!force && id !== dir && (dirty || guidanceDirty) &&
             !window.confirm('Сменить направление? Несохранённые изменения будут потеряны.')) return;
         requestRef.current.controller?.abort();
         const controller = new AbortController();
@@ -122,8 +214,8 @@ export default function CriteriaClassification(props) {
     useEffect(() => () => requestRef.current.controller?.abort(), []);
 
     useEffect(() => {
-        onInteractionChange?.({ editing: dirty, busy: saving });
-    }, [dirty, saving, onInteractionChange]);
+        onInteractionChange?.({ editing: dirty || guidanceDirty, busy: saving });
+    }, [dirty, guidanceDirty, saving, onInteractionChange]);
 
     useEffect(() => () => onInteractionChange?.({ editing: false, busy: false }), [onInteractionChange]);
 
@@ -172,6 +264,11 @@ export default function CriteriaClassification(props) {
                 <Info size={14} className="mt-0.5 shrink-0" />
                 «По данным» — критерий проверяется не по разговору, а по информации в рабочей системе.
             </p>
+
+            {dir != null && (
+                <GuidancePanel key={dir} apiBaseUrl={apiBaseUrl} headers={headers} directionId={dir}
+                    showToast={showToast} onDirtyChange={setGuidanceDirty} />
+            )}
 
             {rows === null ? (
                 <div className={`${iosCard} flex items-center justify-center gap-2 px-6 py-12 text-slate-500`} role="status">

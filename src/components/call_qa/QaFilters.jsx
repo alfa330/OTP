@@ -10,7 +10,7 @@ import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, activeFilterChips, operatorsMatching,
     clampScore, reasonsAllowed, filtersToParams, countMarketingFilters, clearMarketing,
-    MARKETING_CHIP_KEYS, NONE_BUCKET,
+    MARKETING_CHIP_KEYS, NONE_BUCKET, scaleOnlyDirectionIds,
 } from './filters';
 
 /* Панель фильтров раздела «ИИ-оценка»: период, направление, группа, сотрудник,
@@ -335,9 +335,10 @@ export default function QaFilters(props) {
        полусотни фамилий, половина которых не относится к отобранному, — это не
        фильтр, а поиск иголки. Рядом с именем стоит число его оценок: по нему
        видно, кого вообще есть смысл выбирать. */
+    const scaleOnlyIds = scaleOnlyDirectionIds(directions);
     const operatorOptions = [
         { value: null, label: 'Все сотрудники' },
-        ...operatorsMatching(operators, value).map((person) => ({
+        ...operatorsMatching(operators, value, scaleOnlyIds).map((person) => ({
             value: person.id,
             label: `${person.name}${person.evaluations ? ` · ${person.evaluations}` : ''}`
                 + (person.fired ? ' · уволен' : ''),
@@ -532,8 +533,16 @@ export default function QaFilters(props) {
                             value={value.direction_id}
                             /* Сотрудник принадлежит направлению и группе: оставить
                                его выбранным после смены верхнего уровня — значит
-                               показать пустой список при заполненной панели. */
-                            onChange={(next) => set({ direction_id: next || null, operator_id: null })}
+                               показать пустой список при заполненной панели. Но если он
+                               подходит и под новое направление (шкала обзвона людей не
+                               сужает), сброс только мешал бы смотреть его же по двум шкалам. */
+                            onChange={(next) => {
+                                const direction = next || null;
+                                const keep = value.operator_id != null && operatorsMatching(
+                                    operators, { ...value, direction_id: direction }, scaleOnlyIds)
+                                    .some((person) => String(person.id) === String(value.operator_id));
+                                set({ direction_id: direction, operator_id: keep ? value.operator_id : null });
+                            }}
                             options={directionOptions}
                             placeholder="Все направления"
                             variant="ios"
