@@ -87,9 +87,12 @@ export const callSubtitle = (call) => {
     return DIRECTION_LABEL[call.direction] || '';
 };
 
-/* Пилюля состояния коннектора: онлайн — только когда он на связи И видит станцию. */
+/* Пилюля состояния коннектора: онлайн — только когда он на связи И видит станцию. «Не подключён» —
+   коннектор ни разу не выходил на связь: сервер не знает ни связи, ни версии. Отметки «когда видели»
+   в состоянии нет намеренно — она менялась бы с каждым пульсом и будила бы поток всех зрителей
+   (pbx/realtime.py, connector_view); last_seen_at — форма портала до 2.0.0. */
 export const connectorStatus = (connector) => {
-    if (!connector || !connector.last_seen_at) {
+    if (!connector || (!connector.connected && !connector.version && !connector.last_seen_at)) {
         return { tone: 'slate', label: 'коннектор не подключён', online: false };
     }
     if (!connector.connected) return { tone: 'amber', label: 'коннектор не на связи', online: false };

@@ -50,6 +50,13 @@ test('вторая строка: оператор, иначе кому звон�
 test('состояние коннектора: онлайн только на связи и со станцией', () => {
     assert.equal(connectorStatus(null).online, false);
     assert.equal(connectorStatus({ last_seen_at: 'x', connected: false }).label, 'коннектор не на связи');
+    // Форма сервера с 2.0.0 (pbx/routes._connector_view, Hub.connector_view): без last_seen_at.
+    const fresh = { connected: true, ami_connected: true, online: true, stream: true, ami_error: null, version: 'pbx/2.0.0' };
+    assert.equal(connectorStatus(fresh).label, 'на связи');
+    assert.equal(connectorStatus({ ...fresh, connected: false, online: false }).label, 'коннектор не на связи');
+    assert.equal(connectorStatus({ ...fresh, ami_connected: false, online: false }).label, 'станция недоступна');
+    assert.equal(connectorStatus({ connected: false, ami_connected: false, online: false, stream: false,
+                                   ami_error: null, version: null }).label, 'коннектор не подключён');
     assert.equal(connectorStatus({ last_seen_at: 'x', connected: true, ami_connected: false }).label, 'станция недоступна');
     assert.deepEqual(connectorStatus({ last_seen_at: 'x', connected: true, ami_connected: true }),
         { tone: 'green', label: 'на связи', online: true });
