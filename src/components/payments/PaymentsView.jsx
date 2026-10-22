@@ -99,6 +99,11 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         const count = entry.desk?.total ?? (entry.ping || entry.shell)?.counters?.desk;
         return count === undefined || count === null ? null : Number(count) || 0;
     });
+    // Своих заявок, которые идут у других, — по нему «Мои заявки» на столе стоят заготовкой, пока стол не пришёл.
+    const [ownCount, setOwnCount] = useState(() => {
+        const count = entry.desk?.mine?.total ?? (entry.ping || entry.shell)?.counters?.own;
+        return count === undefined || count === null ? null : Number(count) || 0;
+    });
 
     const [items, setItems] = useState(entry.registry?.items || []);
     const [total, setTotal] = useState(entry.registry?.total || 0);
@@ -129,6 +134,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             setPing(response.data);
             rememberPing(userId, response.data);
             setDeskCount(Number(response.data?.counters?.desk) || 0);
+            setOwnCount(Number(response.data?.counters?.own) || 0);
             setPingError('');
             setPingOk(true);
         } catch (error) {
@@ -241,6 +247,17 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
         setDictionary(value);
         setHeldLink(null);
     }, []);
+
+    /* «Все» над «Моими заявками» на столе — реестр, где инициатор он сам: и в работе, и
+       закрытые. Отбор стоит чипом «Инициатор» — его щелчком снимают, как любой другой. */
+    const meId = Number(ping?.me?.id ?? userId) || null;
+    const showOwnRequests = useCallback(() => {
+        setSearch('');
+        setQuery('');
+        setState('all');
+        setFilters({ ...EMPTY_FILTERS, initiator_id: meId });
+        changeTab('requests');
+    }, [meId, changeTab]);
 
     /* ОТКРЫТОЕ — В АДРЕСНОЙ СТРОКЕ: вкладка, справочник, карточка имущества и заявка. Это и есть
        ссылка, которую копируют из строки браузера, и по ней же перезагрузка возвращает туда, где
@@ -617,8 +634,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         soonDays={soonDays}
                         onOpen={setOpenedId}
                         onCount={setDeskCount}
+                        onShowOwn={meId ? showOwnRequests : null}
                         memoryKey={userId}
                         expected={deskCount}
+                        expectedOwn={ownCount}
                     />
                 </div>
             )}

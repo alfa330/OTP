@@ -422,7 +422,8 @@ test('раздел узнаёт, кто его смотрит, от портал
     assert.ok(view.includes('rememberPing(userId, response.data);'));
     assert.ok(view.includes("remember(userId, 'dictionaries', response.data);"));
     assert.ok(view.includes("remember(userId, 'users', list);"));
-    assert.ok(source('src/components/payments/PaymentsDesk.jsx').includes("if (pageNumber === 1) remember(memoryKey, 'desk', { tasks: list, total: count });"));
+    // Стол — целиком, с «Моими заявками»: они тоже встают с первого кадра повторного входа.
+    assert.ok(source('src/components/payments/PaymentsDesk.jsx').includes("if (pageNumber === 1) remember(memoryKey, 'desk', answer);"));
     // Форма «Создать заявку» ждёт полного ответа: из него она берёт самого человека и его подразделение.
     assert.ok(view.includes('if (!ping) { setCreateWanted(true); return; }'));
     // Список участников — только по полному ответу: по одной оболочке роли выглядели бы пустыми

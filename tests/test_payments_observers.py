@@ -506,6 +506,7 @@ class ObserverRoutesTests(_RoutesBase):
     def test_meta_carries_the_limit(self):
         self.queries.role_members.return_value = {}
         self.queries.desk_count.return_value = 0
+        self.queries.own_open_count.return_value = 0
         self.queries.is_manager_somewhere.return_value = False
         with mock.patch.object(routes.schema, 'schema_ready', return_value=True):
             body = self.client.get('/api/payments/ping').get_json()

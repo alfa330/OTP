@@ -1211,6 +1211,40 @@ def desk_count(cursor, user_id, roles, approves_own=False):
     return int(cursor.fetchone()[0] or 0)
 
 
+# «Мои заявки» на рабочем столе: заявки человека, которые он отправил, которые ещё идут и
+# которые сейчас у других — где каждая и у кого. Не входят:
+#   * черновик — маршрута у него ещё нет, а сам он стоит в задачах («Отправьте заявку…»);
+#   * заявка, по которой ждут самого человека (вернули, чек, получение, закрывающие
+#     документы, своя на утверждении у администратора), — она уже стоит в задачах стола
+#     тем же условием, что и они (_WAITS_FOR_ME_SQL, docs_wanted_ids), и второй раз на том
+#     же экране её не повторяем.
+_OWN_SQL = (
+    "r.initiator_id = %(user_id)s AND r.status = 'active' AND r.submitted_at IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM payment_subtasks s WHERE s.request_id = r.id AND " + _WAITS_FOR_ME_SQL + ") "
+    "AND NOT (r.closing_docs_status = 'none' AND EXISTS (SELECT 1 FROM payment_subtasks c "
+    "WHERE c.request_id = r.id AND c.kind = %(closing)s AND c.state = 'open'))")
+
+
+def own_requests(cursor, user_id, roles, approves_own=False, *, limit):
+    """Свои заявки, которые идут у других, новые сверху: (сколько всего, первые `limit`)."""
+    params = _desk_params(user_id, roles, approves_own)
+    params['limit'] = int(limit)
+    cursor.execute(
+        _REQUEST_SQL.replace('SELECT ', 'SELECT COUNT(*) OVER () AS total, ', 1)
+        + ' WHERE ' + _OWN_SQL + ' ORDER BY r.id DESC LIMIT %(limit)s', params)
+    rows = cursor.fetchall()
+    total = int(rows[0][0]) if rows else 0
+    return total, [_request_row(row[1:]) for row in rows]
+
+
+def own_open_count(cursor, user_id, roles, approves_own=False):
+    """Сколько своих заявок идёт у других — по этому числу «Мои заявки» на рабочем столе
+    стоят заготовкой точного роста, пока сами заявки не пришли."""
+    cursor.execute("SELECT COUNT(*) FROM payment_requests r WHERE " + _OWN_SQL,
+                   _desk_params(user_id, roles, approves_own))
+    return int(cursor.fetchone()[0] or 0)
+
+
 def docs_wanted_ids(cursor, user_id):
     """Заявки инициатора, по которым бухгалтерия ждёт закрывающие документы,
     а он их ещё не приложил (п. 17: «необходимость приложить закрывающие документы»)."""

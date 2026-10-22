@@ -45,6 +45,10 @@ BOARD_PAGE_DEFAULT = 20
 BOARD_PAGE_MAX = 100
 # «Мои задачи» — страницами. Без `limit` стол отдаётся целиком, до этого предела.
 DESK_PAGE_MAX = 200
+# Сколько своих заявок стоит на рабочем столе в «Моих заявках»: на узком экране блок стоит
+# над задачами и не должен уводить их вниз. Остальные — во вкладке «Заявки» («Все» над
+# блоком). Столько же строк у заготовки блока (OWN_SKELETON_MAX в paymentsMeta.js).
+OWN_ON_DESK = 5
 # Сколько не пробовать подписывать фото после неудачной подписи (_avatar_urls).
 PHOTO_RETRY_SECONDS = 120
 
@@ -691,6 +695,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             settings = directory.get_settings(cursor) if ready else dict(workflow.SETTINGS_DEFAULTS)
             desk = (queries.desk_count(cursor, ctx['user_id'], ctx['roles'], access.can_act_for_anyone(ctx))
                     if ready else 0)
+            own = (queries.own_open_count(cursor, ctx['user_id'], ctx['roles'], access.can_act_for_anyone(ctx))
+                   if ready else 0)
         # Без кого заявка не пройдёт: утверждать и вести оплату счёта некому.
         roles_missing = [workflow.ROLE_LABELS[code] for code in ('approver', 'accounting')
                          if not members.get(code)]
@@ -710,7 +716,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'roles_staffed': {code: bool(members.get(code)) for code in schema.MEMBER_ROLES},
             # Заявки первой версии, которые не удалось перевести на этапы (см. legacy.py).
             'legacy_pending': legacy_pending,
-            'counters': {'desk': desk},
+            # own — свои заявки, которые идут у других: «Мои заявки» на столе встают с первого кадра.
+            'counters': {'desk': desk, 'own': own},
             'settings': settings,
             'meta': _meta(),
         })
@@ -1416,12 +1423,39 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             return 'Ответьте на запрос'
         return 'Отправьте заявку на согласование'
 
+    def _own_card(request_row, subtasks):
+        """Своя заявка на рабочем столе — только то, что показывает её строка: что, сумма и
+        срок, на каком этапе и у кого (п. 9 — подразделение, а не фамилия), ход по этапам."""
+        return {
+            'id': request_row['id'],
+            'expense_name': request_row.get('expense_name'),
+            'counterparty_name': request_row.get('counterparty_name'),
+            'amount': request_row.get('amount'),
+            'refund_amount': request_row.get('refund_amount'),
+            'payment_method': request_row.get('payment_method'),
+            'due_on': request_row.get('due_on'),
+            'paid_on': request_row.get('paid_on'),
+            'status': request_row.get('status'),
+            'stage': request_row.get('stage'),
+            'stage_label': request_row.get('stage_label'),
+            'current_kind': request_row.get('current_kind'),
+            'current_role': request_row.get('current_role'),
+            'current_assignee_name': request_row.get('current_assignee_name'),
+            'lifecycle': workflow.lifecycle(request_row, subtasks),
+        }
+
     @payments_route('/desk')
     def desk(ctx):
         """Персональный рабочий стол (п. 16): только то, по чему от человека ждут действия.
 
         Страницами: `limit` + `offset`, `total` — сколько задач всего. Порядок
         и состав считаются по номерам, а заявки читаются только для страницы.
+
+        `mine` — отправленные заявки самого человека, которые идут у других, новые сверху:
+        этап и у кого заявка сейчас (просьба владельца 22.10.2026 — человек сразу видит
+        свою заявку и её статус, не переходя в «Заявки»). Черновики и заявки, по которым
+        ждут его самого, стоят в задачах (queries._OWN_SQL), — каждая заявка на столе один
+        раз. Отдаётся с каждой страницей стола и обновляется вместе с ним.
         """
         limit = min(max(as_int(request.args.get('limit'), 'limit') or DESK_PAGE_MAX, 1), DESK_PAGE_MAX)
         offset = max(as_int(request.args.get('offset'), 'offset') or 0, 0)
@@ -1436,8 +1470,16 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             docs_by_id = {item['id']: item for item in queries.requests_by_ids(cursor, docs_ids)}
             docs = [docs_by_id[request_id] for request_id in docs_ids if request_id in docs_by_id]
             members = queries.role_member_ids(cursor)
+            own_total, own_rows = queries.own_requests(
+                cursor, ctx['user_id'], ctx['roles'], access.can_act_for_anyone(ctx), limit=OWN_ON_DESK)
+            own_subtasks = queries.subtasks_for_requests(cursor, [row['id'] for row in own_rows])
         tasks = []
         hide_people = not access.sees_department_people(ctx, ctx['roles'])
+        mine = []
+        for request_row in own_rows:
+            if hide_people:
+                privacy.hide_in_row(request_row)
+            mine.append(_own_card(request_row, own_subtasks.get(request_row['id'], [])))
         for request_row, subtask in rows:
             if hide_people:
                 privacy.hide_in_row(request_row)
@@ -1459,7 +1501,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                          'brief': 'Накладная, акт или чек. Оригиналы передайте в бухгалтерию.',
                          'opened_at': None, 'own': True})
             tasks.append(card)
-        return jsonify({'tasks': tasks, 'total': total, 'limit': limit, 'offset': offset})
+        return jsonify({'tasks': tasks, 'total': total, 'limit': limit, 'offset': offset,
+                        'mine': {'items': mine, 'total': own_total}})
 
     # ── Справки ─────────────────────────────────────────────────────────────
 

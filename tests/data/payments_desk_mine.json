@@ -1,0 +1,170 @@
+{
+  "limit": 20,
+  "mine": {
+    "items": [
+      {
+        "amount": 25000,
+        "counterparty_name": "ТОО «Бумага»",
+        "current_assignee_name": "Утвердова Ульяна",
+        "current_kind": "approval",
+        "current_role": "approver",
+        "due_on": "2026-10-30",
+        "expense_name": "Бумага А4",
+        "id": 40,
+        "lifecycle": [
+          {
+            "code": "initiation",
+            "label": "Инициация закупа",
+            "state": "done"
+          },
+          {
+            "code": "approval",
+            "label": "Согласование",
+            "state": "current"
+          },
+          {
+            "code": "payment",
+            "label": "Оплата",
+            "state": "pending"
+          },
+          {
+            "code": "receiving",
+            "label": "Получение",
+            "state": "pending"
+          },
+          {
+            "code": "assets",
+            "label": "Учёт имущества",
+            "state": "skipped"
+          },
+          {
+            "code": "closing",
+            "label": "Закрывающие документы",
+            "state": "pending"
+          },
+          {
+            "code": "closed",
+            "label": "Закрытие",
+            "state": "pending"
+          }
+        ],
+        "paid_on": null,
+        "payment_method": "invoice",
+        "refund_amount": null,
+        "stage": "approval",
+        "stage_label": "Согласование",
+        "status": "active"
+      },
+      {
+        "amount": 45000,
+        "counterparty_name": "ИП Пример",
+        "current_assignee_name": "Бухгалтерия",
+        "current_kind": "invoice_payment",
+        "current_role": "accounting",
+        "due_on": null,
+        "expense_name": "Картриджи",
+        "id": 31,
+        "lifecycle": [
+          {
+            "code": "initiation",
+            "label": "Инициация закупа",
+            "state": "done"
+          },
+          {
+            "code": "approval",
+            "label": "Согласование",
+            "state": "done"
+          },
+          {
+            "code": "payment",
+            "label": "Оплата",
+            "state": "current"
+          },
+          {
+            "code": "receiving",
+            "label": "Получение",
+            "state": "pending"
+          },
+          {
+            "code": "assets",
+            "label": "Учёт имущества",
+            "state": "skipped"
+          },
+          {
+            "code": "closing",
+            "label": "Закрывающие документы",
+            "state": "pending"
+          },
+          {
+            "code": "closed",
+            "label": "Закрытие",
+            "state": "pending"
+          }
+        ],
+        "paid_on": null,
+        "payment_method": "invoice",
+        "refund_amount": 5000,
+        "stage": "payment",
+        "stage_label": "Оплата",
+        "status": "active"
+      }
+    ],
+    "total": 7
+  },
+  "offset": 0,
+  "tasks": [
+    {
+      "amount": 25000,
+      "approved_by_name": null,
+      "brief": null,
+      "can_act": false,
+      "card_holder_name": null,
+      "card_mask": "•••• 4242",
+      "card_recipient": null,
+      "clarify_by_name": null,
+      "clarify_comment": null,
+      "clarify_label": null,
+      "closing_docs_status": null,
+      "column": null,
+      "counterparty_name": "ТОО «Бумага»",
+      "created_at": "2026-10-12T09:30:00",
+      "current_assignee_name": "Инициаторова Ирина",
+      "department_name": "IT-отдел",
+      "due_on": "2026-10-30",
+      "duplicate": false,
+      "expense_name": "Стулья",
+      "id": 55,
+      "initiator_name": "Инициаторова Ирина",
+      "invoice_date": null,
+      "invoice_number": null,
+      "legal_entity_name": null,
+      "opened_at": null,
+      "own": true,
+      "paid_amount": null,
+      "paid_on": "2026-10-14",
+      "payment_method": "invoice",
+      "payment_purpose": null,
+      "request_kind": "purchase",
+      "stage": "receiving",
+      "stage_label": "Получение",
+      "state": "active",
+      "status": "active",
+      "subtask": {
+        "assignee_name": "Инициаторова Ирина",
+        "clarify_comment": null,
+        "clarify_label": null,
+        "done_at": null,
+        "done_by_name": null,
+        "kind": "receiving",
+        "outcome": null,
+        "role_label": "Инициатор",
+        "state": "open",
+        "status": "new",
+        "title": "Получение товара/услуги"
+      },
+      "task": "receiving",
+      "title": "Подтвердите получение"
+    }
+  ],
+  "total": 1
+}

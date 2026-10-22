@@ -1225,6 +1225,70 @@ export const registryWhere = (request) => {
     return [stage, who].filter((part, index, list) => part && part !== '—' && list.indexOf(part) === index).join(' · ');
 };
 
+/* ── «Мои заявки» на рабочем столе ─────────────────────────────────────────────
+   Просьба владельца 22.10.2026: человек сразу, при входе в раздел, видит свою заявку и её
+   текущий статус. Рядом с задачами стола — его отправленные заявки, которые идут у других
+   (`mine` в ответе /desk): этап, полоса хода по этапам и у кого заявка сейчас. Черновики и
+   заявки, по которым ждут его самого, стоят в задачах — каждая заявка на столе один раз;
+   закрытые — во вкладке «Заявки». */
+
+/* Ответ /desk → то, что рисует стол: задачи страницы, их число и свои заявки. Старый сервер
+   `mine` не отдаёт — тогда своих заявок нет, и стол такой же, как до них. */
+export const deskAnswer = (payload) => ({
+    tasks: Array.isArray(payload?.tasks) ? payload.tasks : [],
+    total: Number(payload?.total) || 0,
+    mine: {
+        items: Array.isArray(payload?.mine?.items) ? payload.mine.items : [],
+        total: Number(payload?.mine?.total) || 0,
+    },
+});
+
+/* Где на столе «Мои заявки»: `columns` — колонкой справа от задач (стол широкий), `own-first`
+   — над задачами (узкий: длинный список задач не уводит блок вниз), `stacked` — под задачами
+   (при входе о заявках ничего не было известно — так их появление ничего не сдвигает),
+   `plain` — блока нет. `roomy` — шире ли стол порога колонок; null — ещё не измерен. */
+export const deskLayout = ({ withOwn, ownKnown, roomy }) => {
+    if (!withOwn) return 'plain';
+    if (!ownKnown) return 'stacked';
+    return roomy === true ? 'columns' : 'own-first';
+};
+
+/* Заготовка блока, пока стол не пришёл и помнить нечего: строк — сколько своих заявок обещает
+   счётчик `/ping` (`counters.own`), но не больше, чем блок покажет (OWN_ON_DESK на сервере) —
+   так заготовка ровно того роста, что настоящий блок. Ноль или неизвестно (первый вход на
+   этом устройстве) — заготовки нет. */
+export const OWN_SKELETON_MAX = 5;
+export const ownSkeletonRows = (expected) => {
+    if (expected === null || expected === undefined || expected === '') return 0;
+    const count = Math.trunc(Number(expected));
+    if (!Number.isFinite(count) || count < 0) return 0;
+    return Math.min(OWN_SKELETON_MAX, count);
+};
+
+/* Где своя заявка сейчас — строкой из двух частей: `label` — этап, `who` — у кого она (имя
+   согласующего или подразделение). Имя бухгалтера сюда не приходит: сервер уже заменил его
+   подразделением (п. 9). Подразделение и этап бывают названы одинаково — дважды не пишем. */
+export const ownRequestStatus = (item) => {
+    if (!item) return { label: '', who: '' };
+    // Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
+    const label = item.current_kind === 'entity_clarify' ? 'Уточнение компании' : (item.stage_label || '');
+    const who = responsibleLines(item).name;
+    return { label, who: who === '—' || who === label ? '' : who };
+};
+
+/* Ход заявки для полосы в строке: её этапы (без тех, которых у неё нет — учёт имущества у
+   услуги) и на каком она сейчас. `current` — номер этапа с нуля, −1 — текущего нет. */
+export const stageProgress = (lifecycle) => {
+    const steps = (lifecycle || []).filter((stage) => stage && stage.state !== 'skipped');
+    const current = steps.findIndex((stage) => stage.state === 'current');
+    return { steps, current, total: steps.length, label: current >= 0 ? steps[current].label : '' };
+};
+
+/* Подсказка полосы — этапы словами: пройденные с галочкой, текущий — «сейчас». */
+export const stageProgressTitle = (progress) => (progress?.steps || [])
+    .map((stage) => (stage.state === 'done' ? `${stage.label} ✓` : stage.state === 'current' ? `${stage.label} — сейчас` : stage.label))
+    .join(' → ');
+
 /* Итоговая сумма расхода: сумма − возврат (п. 5 дополнения Дмитриевой). */
 export const netAmount = (request) => {
     const amount = parseAmount(request?.amount);
