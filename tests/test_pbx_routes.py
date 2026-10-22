@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from unittest import mock
 
 from flask import Flask
@@ -363,6 +364,44 @@ class PbxRoutesTests(unittest.TestCase):
         response = self.client.get('/api/pbx/commands/5')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'accepted')
+
+
+class HubCatchUpTests(unittest.TestCase):
+    """Догон с запасом (CATCH_UP_MARGIN) перечитывает уже разосланное. Давно законченный звонок,
+    который память хаба отпустила, не должен возвращаться к зрителям на каждом тычке (прод 22.10:
+    звонок с rev=1 приходил в поток снова через 145 и 153 с после отбоя)."""
+
+    def setUp(self):
+        self.now = [datetime(2026, 10, 22, 12, 0, 20)]
+        self.hub = pbx_realtime.Hub(local_now=lambda: self.now[0])
+
+    def published(self, after):
+        events, _ = self.hub.wait(after, timeout=0)
+        return [call for event in events for call in event.get('calls') or []]
+
+    def test_expired_call_reread_by_catch_up_is_not_published_again(self):
+        old = talking_call(rev=1, state='ended', ended_at='2026-10-22T12:00:15')
+        self.assertEqual(self.hub.apply_calls([old]), 1)
+        self.now[0] += timedelta(seconds=pbx_realtime.ENDED_KEEP_SECONDS + 5)
+        self.hub.expire()
+        after = self.hub.current_seq()
+        fresh = talking_call(linkedid='2.2', rev=2, started_at='2026-10-22T12:02:20')
+        self.assertEqual(self.hub.apply_calls([old, fresh]), 1, 'перечитанный давний звонок — не новость')
+        self.assertEqual([c['linkedid'] for c in self.published(after)], ['2.2'])
+        self.assertEqual(self.hub.rev, 2)
+        after = self.hub.current_seq()
+        self.assertEqual(self.hub.apply_calls([old]), 0)
+        self.assertEqual(self.published(after), [], 'и на следующем тычке тоже')
+
+    def test_known_call_closed_after_the_fact_is_still_published(self):
+        self.hub.apply_calls([talking_call(rev=1)])
+        self.now[0] += timedelta(minutes=10)
+        after = self.hub.current_seq()
+        # Сверка закрыла звонок задним числом: отбой давно за окном, но зрители держат его «в разговоре».
+        closed = talking_call(rev=2, state='ended', ended_at='2026-10-22T12:01:00')
+        self.assertEqual(self.hub.apply_calls([closed]), 1)
+        self.assertEqual([c['state'] for c in self.published(after)], ['ended'])
+        self.assertEqual(self.hub.active_calls(), [])
 
 
 class CleanCallTests(unittest.TestCase):

@@ -98,6 +98,16 @@ def _stamp_seconds(value):
         return None
 
 
+def _out_of_window(call, now):
+    """Звонок вне окна памяти хаба: законченный дольше ENDED_KEEP_SECONDS назад или идущий дольше
+    LIVE_WINDOW (повисший)."""
+    if call.get('state') == 'ended':
+        ended = _stamp_seconds(call.get('ended_at')) or _stamp_seconds(call.get('started_at'))
+        return ended is None or (now - ended).total_seconds() > ENDED_KEEP_SECONDS
+    started = _stamp_seconds(call.get('started_at'))
+    return started is None or now - started > LIVE_WINDOW
+
+
 def _iso_to_epoch(value):
     """ISO с поясом (TIMESTAMPTZ из базы) → unix-время или None."""
     if not value:
@@ -191,14 +201,19 @@ class Hub:
         звонков действительно новее того, что уже было в памяти."""
         fresh = []
         with self.condition:
+            now = self.local_now()
             for call in calls:
                 rev = int(call.get('rev') or 0)
+                self.rev = max(self.rev, rev)
                 known = self.calls.get(call['linkedid'])
                 if known is not None and int(known.get('rev') or 0) >= rev:
                     continue
+                if known is None and _out_of_window(call, now):
+                    # Догон перечитывает с запасом (CATCH_UP_MARGIN), а давно законченный звонок
+                    # память уже отпустила: для зрителей это не новость, а повтор на каждом тычке.
+                    continue
                 self.calls[call['linkedid']] = call
                 fresh.append(call)
-                self.rev = max(self.rev, rev)
             self._expire_locked()
             if fresh:
                 self._publish_locked({'kind': 'calls', 'calls': fresh})
@@ -228,14 +243,8 @@ class Hub:
     def _expire_locked(self):
         now = self.local_now()
         for linkedid, call in list(self.calls.items()):
-            if call.get('state') == 'ended':
-                ended = _stamp_seconds(call.get('ended_at')) or _stamp_seconds(call.get('started_at'))
-                if ended is None or (now - ended).total_seconds() > ENDED_KEEP_SECONDS:
-                    del self.calls[linkedid]
-            else:
-                started = _stamp_seconds(call.get('started_at'))
-                if started is None or now - started > LIVE_WINDOW:
-                    del self.calls[linkedid]
+            if _out_of_window(call, now):
+                del self.calls[linkedid]
 
     def snapshot(self):
         """(курсор, звонки, коннектор) атомарно: поток начинает с этого и дальше берёт события."""
