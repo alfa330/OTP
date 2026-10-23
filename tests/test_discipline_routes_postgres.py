@@ -176,6 +176,11 @@ def test_full_flow(client, db):
     assert client.get('/api/discipline/files/%d' % file_id, headers=h(OP_A)).status_code == 403
     item = client.get('/api/discipline/records/%d' % second, headers=h(SV_A)).get_json()
     assert item['state'] == 'explanation_received'
+    # Без QR оператор открывает и свою объяснительную, и свою карточку: снятый
+    # замок вернуть точечно в одну из этих ручек — тест краснеет (разбор, 23.10.2026).
+    explanation_id = next(f['id'] for f in item['files'] if f['kind'] == 'explanation')
+    assert client.get('/api/discipline/files/%d' % explanation_id, headers=h(OP_A)).status_code == 200
+    assert client.get('/api/discipline/operators/%d' % OP_A, headers=h(OP_A)).status_code == 200
 
     # Тренинг на первой ступени.
     response = client.post('/api/discipline/records/%d/training' % first, headers=h(SV_A), json={

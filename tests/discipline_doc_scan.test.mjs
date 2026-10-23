@@ -13,9 +13,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    applyHomography, buildPdf, createQuadTracker, defaultCorners, detectDocument, documentAspect, enhancePage,
-    homography, insetCorners, isConvexQuad, orderCorners, outputSize, quadArea, SCAN_FILTERS, SCAN_FILTER_HINT, scanFileName,
-    scanFormats, toGray, warpPerspective,
+    applyHomography, buildPdf, createQuadTracker, cropUsable, defaultCorners, detectDocument, documentAspect, enhancePage,
+    homography, insetCorners, isConvexQuad, keepScannedPage, orderCorners, outputSize, quadArea, SCAN_FILTERS,
+    SCAN_FILTER_HINT, SCAN_MAX_SIDE, SCAN_QUALITY_STEPS, scanFileName, scanFormats, scannerBack, scanOutputType, toGray,
+    turnedSize, warpPerspective,
 } from '../src/components/discipline/docScan.js';
 
 /* ── Синтетический кадр ───────────────────────────────────────────────── */
@@ -180,6 +181,10 @@ const SCENES = [
     // рождалась «кромка» во всю ширину, и рамка дотягивалась до неё.
     { name: 'чёрная строка у края кадра', w: 180, h: 320, corners: [[30, 47], [150, 53], [158, 262], [21, 257]],
         texture: 'stripes', base: 95, seed: 29, occlude: (x, y) => (y >= 319 ? [8, 8, 10] : null) },
+    // Белый лист у светлого стола (236 на 215): рамка садилась на первую и
+    // последнюю строку текста и отрезала подпись с датой (разбор, 23.10.2026).
+    { name: 'белый лист у светлого стола (236 на 215)', w: 320, h: 240, corners: [[104, 20], [218, 24], [222, 220], [100, 216]],
+        base: 215, paper: 236, seed: 5 },
     { name: 'клавиатура рядом на светлом столе', w: 320, h: 240, corners: [[60, 20], [170, 24], [174, 220], [56, 216]],
         base: 175, paper: 236, seed: 16, occlude: (x, y) => (x > 200 && x < 310 && y > 40 && y < 200 ? [40, 40, 44] : null) },
 ];
@@ -193,6 +198,21 @@ for (const scene of SCENES) {
         assert.ok(found.coverage > 0.5);
     });
 }
+
+/* Клавиатура во весь кадр: тёмные клавиши со светлыми щелями. */
+const keyboard = (x, y) => {
+    const kx = x % 26;
+    const ky = y % 24;
+    return kx < 22 && ky < 20 ? [48, 50, 56] : [176, 178, 182];
+};
+/* Тетрадный лист в клетку во весь кадр — края листа за кадром. */
+const gridPaper = (cell) => (x, y) => (x % cell < 1 || y % cell < 1 ? [150, 170, 200] : [232, 232, 228]);
+
+test('пёстрый кадр без листа: клавиатура, клетка тетради — рамки нет', () => {
+    for (const occlude of [keyboard, gridPaper(9), gridPaper(14)]) {
+        assert.equal(detectIn({ w: 320, h: 240, corners: null, base: 120, seed: 3, occlude }), null);
+    }
+});
 
 test('на кадре без листа рамки нет', () => {
     for (const seed of [2, 4, 6]) {
@@ -467,17 +487,31 @@ test('PDF: страницы, размер A4 и таблица смещений 
     const text = Buffer.from(pdf).toString('latin1');
     assert.ok(text.startsWith('%PDF-1.4\n'));
     assert.ok(text.trimEnd().endsWith('%%EOF'));
-    // Каждое смещение таблицы указывает ровно на начало своего объекта.
+    // Таблица смещений: ровно 2 + 3·страниц записей «n», каждая строка — 20 байт,
+    // и каждое смещение указывает на начало своего объекта.
     const startxref = Number(text.match(/startxref\n(\d+)\n/)[1]);
-    assert.ok(text.slice(startxref).startsWith('xref\n'));
-    const entries = text.slice(startxref).split('\n').slice(3).filter((line) => / n $/.test(line));
-    entries.forEach((line, index) => {
-        const offset = Number(line.slice(0, 10));
+    const table = text.slice(startxref);
+    assert.ok(table.startsWith('xref\n0 9\n'), table.slice(0, 20));
+    const rows = table.split('trailer')[0].split('\n').slice(2, -1);
+    assert.equal(rows.length, 9);
+    for (const row of rows) assert.equal(Buffer.byteLength(`${row}\n`, 'latin1'), 20, JSON.stringify(row));
+    assert.ok(rows[0].endsWith(' f '));
+    rows.slice(1).forEach((row, index) => {
+        assert.ok(row.endsWith(' n '), row);
+        const offset = Number(row.slice(0, 10));
         assert.ok(text.slice(offset).startsWith(`${index + 1} 0 obj\n`), `объект ${index + 1}`);
     });
+    assert.match(text, /trailer\n<< \/Size 9 \/Root 1 0 R >>/);
+    // /Length каждого потока — ровно его байты.
+    const streams = [...text.matchAll(/\/Length (\d+)[^>]*>>\nstream\n/g)];
+    assert.equal(streams.length, 4);
+    for (const match of streams) {
+        const start = match.index + match[0].length;
+        assert.equal(text.indexOf('\nendstream', start), start + Number(match[1]), `поток в ${start}`);
+    }
     // И разбирает его тот же pdf.js, что показывает файлы в разделе.
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const task = pdfjs.getDocument({ data: pdf, isEvalSupported: false, verbosity: 0 });
+    const task = pdfjs.getDocument({ data: pdf.slice(), isEvalSupported: false, verbosity: 0 });
     const doc = await task.promise;
     assert.equal(doc.numPages, 2);
     const first = (await doc.getPage(1)).view;
@@ -492,11 +526,159 @@ test('куда скан годится: по accept поля', () => {
     assert.deepEqual(scanFormats('.pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf'), { jpeg: true, pdf: true, any: true });
     assert.deepEqual(scanFormats('.docx'), { jpeg: false, pdf: false, any: false });
     assert.deepEqual(scanFormats('.pdf'), { jpeg: false, pdf: true, any: true });
+    assert.deepEqual(scanFormats('image/*'), { jpeg: true, pdf: false, any: true });
+    assert.deepEqual(scanFormats(' application/pdf '), { jpeg: false, pdf: true, any: true });
     assert.deepEqual(scanFormats(''), { jpeg: false, pdf: false, any: false });
 });
 
-test('имя файла скана — без двоеточия', () => {
-    const name = scanFileName(new Date(2026, 9, 23, 7, 5), 'pdf');
-    assert.equal(name, 'Скан 23.10.2026 07-05.pdf');
+test('имя файла скана — без двоеточия, с секундами', () => {
+    const name = scanFileName(new Date(2026, 9, 23, 7, 5, 9), 'pdf');
+    assert.equal(name, 'Скан 23.10.2026 07-05-09.pdf');
     assert.ok(!name.includes(':'));
+    // Исправленная версия через 20 секунд — уже другое имя.
+    assert.notEqual(scanFileName(new Date(2026, 9, 23, 7, 5, 29), 'pdf'), name);
+});
+
+/* ── Решения окна скана ──────────────────────────────────────────────── */
+
+test('одна страница — JPEG, несколько — один PDF', () => {
+    const both = { jpeg: true, pdf: true };
+    assert.equal(scanOutputType(1, both), 'jpeg');
+    assert.equal(scanOutputType(2, both), 'pdf');
+    assert.equal(scanOutputType(3, both), 'pdf', 'три страницы — не JPEG первой');
+    assert.equal(scanOutputType(1, { jpeg: false, pdf: true }), 'pdf');
+});
+
+test('ступени сжатия: качество и размер только убывают, первая — без потерь размера', () => {
+    assert.deepEqual(SCAN_QUALITY_STEPS[0], { quality: 0.85, maxSide: SCAN_MAX_SIDE });
+    for (let i = 1; i < SCAN_QUALITY_STEPS.length; i += 1) {
+        assert.ok(SCAN_QUALITY_STEPS[i].quality < SCAN_QUALITY_STEPS[i - 1].quality);
+        assert.ok(SCAN_QUALITY_STEPS[i].maxSide <= SCAN_QUALITY_STEPS[i - 1].maxSide);
+    }
+    assert.ok(SCAN_QUALITY_STEPS.at(-1).quality >= 0.5, 'ниже 0,5 подпись рассыпается');
+});
+
+test('поворот страницы: 90 и 270 меняют стороны холста', () => {
+    assert.deepEqual(turnedSize(200, 300, 0), { width: 200, height: 300, turn: 0 });
+    assert.deepEqual(turnedSize(200, 300, 90), { width: 300, height: 200, turn: 90 });
+    assert.deepEqual(turnedSize(200, 300, 180), { width: 200, height: 300, turn: 180 });
+    assert.deepEqual(turnedSize(200, 300, 270), { width: 300, height: 200, turn: 270 });
+    assert.deepEqual(turnedSize(200, 300, -90), { width: 300, height: 200, turn: 270 });
+    assert.deepEqual(turnedSize(200, 300, 450), { width: 300, height: 200, turn: 90 });
+});
+
+test('«назад»: шаг за шагом, снятое не теряется без вопроса', () => {
+    assert.equal(scannerBack({ step: 'review', pages: 2, busy: 'save', confirm: false }), 'stay');
+    assert.equal(scannerBack({ step: 'review', pages: 2, busy: '', confirm: true }), 'close-confirm');
+    assert.equal(scannerBack({ step: 'crop', pages: 0, busy: '', confirm: false }), 'leave-crop');
+    assert.equal(scannerBack({ step: 'camera', pages: 1, busy: '', confirm: false }), 'to-review');
+    assert.equal(scannerBack({ step: 'review', pages: 1, busy: '', confirm: false }), 'confirm');
+    assert.equal(scannerBack({ step: 'camera', pages: 0, busy: '', confirm: false }), 'close');
+});
+
+test('рамку можно оставить: выпуклая, из чисел, не щель', () => {
+    assert.ok(cropUsable([[10, 10], [190, 12], [195, 280], [5, 285]], 200, 300));
+    assert.ok(!cropUsable([[10, 10], [195, 280], [190, 12], [5, 285]], 200, 300), 'перекрещенные углы');
+    assert.ok(!cropUsable([[NaN, NaN], [NaN, NaN], [NaN, NaN], [NaN, NaN]], 200, 300), 'NaN');
+    assert.ok(!cropUsable([[0, 0], [200, 0], [200, 0.5], [0, 1]], 200, 300), 'щель');
+    assert.ok(!isConvexQuad([[0, 0], [Infinity, 0], [10, 10], [0, 10]]));
+});
+
+test('«Оставить»: новая страница в конец, правка краёв — новый id, углы по порядку', () => {
+    const shot = { blob: 'b1', url: 'u1', width: 100, height: 140, editing: null,
+        corners: [[90, 10], [10, 10], [10, 130], [90, 130]] }; // против часовой — зеркально
+    const first = keepScannedPage([], shot, 'p1');
+    assert.equal(first.current, 0);
+    assert.equal(first.pages.length, 1);
+    assert.deepEqual(first.pages[0].corners, [[10, 10], [90, 10], [90, 130], [10, 130]], 'страница не зеркальная');
+    assert.equal(first.pages[0].rotation, 0);
+    const second = keepScannedPage(first.pages, { ...shot, blob: 'b2' }, 'p2');
+    assert.equal(second.current, 1);
+    assert.deepEqual(second.pages.map((p) => p.id), ['p1', 'p2']);
+    const turned = second.pages.map((p, i) => (i === 0 ? { ...p, rotation: 90 } : p));
+    const recrop = keepScannedPage(turned, { ...shot, editing: 0, corners: [[12, 14], [88, 12], [90, 128], [10, 126]] }, 'p3');
+    assert.equal(recrop.current, 0);
+    assert.deepEqual(recrop.pages.map((p) => p.id), ['p3', 'p2'], 'новый id — превью из кэша не покажется');
+    assert.deepEqual(recrop.pages[0].corners, [[12, 14], [88, 12], [90, 128], [10, 126]]);
+    assert.equal(recrop.pages[0].rotation, 90, 'поворот страницы сохранился');
+    assert.equal(recrop.pages[0].blob, 'b1', 'снимок тот же');
+});
+
+/* ── Выпрямление и «как скан»: детали ─────────────────────────────────── */
+
+test('выпрямление без сдвига на полпикселя: линейный перепад остаётся линейным', () => {
+    const w = 32;
+    const h = 8;
+    const src = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y += 1) {
+        for (let x = 0; x < w; x += 1) {
+            const i = (y * w + x) * 4;
+            src[i] = x * 8; src[i + 1] = x * 8; src[i + 2] = x * 8; src[i + 3] = 255;
+        }
+    }
+    const same = warpPerspective(src, w, h, [[0, 0], [w, 0], [w, h], [0, h]], w, h);
+    for (let i = 0; i < src.length; i += 1) assert.ok(Math.abs(same[i] - src[i]) <= 1, `копия 1:1, байт ${i}`);
+    // Вдвое крупнее: середина между пикселями — среднее соседей, а не ступенька.
+    const big = warpPerspective(src, w, h, [[0, 0], [w, 0], [w, h], [0, h]], w * 2, h * 2);
+    for (let x = 2; x < w * 2 - 2; x += 1) {
+        const expected = ((x + 0.5) / 2 - 0.5) * 8;
+        assert.ok(Math.abs(big[(4 * w * 2 + x) * 4] - expected) <= 1.5, `x=${x}: ${big[(4 * w * 2 + x) * 4]} против ${expected}`);
+    }
+});
+
+test('размер страницы не раздувается выше снимка', () => {
+    const small = outputSize([[150, 50], [250, 50], [250, 350], [150, 350]], 400, 400, SCAN_MAX_SIDE);
+    assert.ok(Math.max(small.width, small.height) <= 300 * 1.02, JSON.stringify(small));
+});
+
+test('«Цвет»: синий остаётся ярко-синим, тёмная печать не выбеливается, тёмный кадр не вытягивается', () => {
+    const w = 420;
+    const h = 594;
+    const page = new Uint8ClampedArray(w * h * 4);
+    const ink = new Uint8Array(w * h);
+    for (let y = 0; y < h; y += 1) {
+        for (let x = 0; x < w; x += 1) {
+            const i = (y * w + x) * 4;
+            const blue = y % 14 >= 5 && y % 14 <= 7 && x > 30 && x < w - 30;
+            const v = blue ? [40, 62, 160] : [214, 208, 190];
+            ink[y * w + x] = blue ? 1 : 0;
+            page[i] = v[0]; page[i + 1] = v[1]; page[i + 2] = v[2]; page[i + 3] = 255;
+        }
+    }
+    enhancePage(page, w, h, 'color');
+    let gap = Infinity;
+    for (let k = 0; k < w * h; k += 1) if (ink[k]) gap = Math.min(gap, page[k * 4 + 2] - page[k * 4]);
+    assert.ok(gap >= 215, `синий отличается от красного всего на ${gap}`);
+
+    // Серый блок 8×8 клеток (фото на анкете) не становится белым.
+    const W = 480;
+    const H = 680;
+    const block = Math.round(Math.max(W, H) / 40);
+    const photo = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y += 1) {
+        for (let x = 0; x < W; x += 1) {
+            const i = (y * W + x) * 4;
+            const inside = x >= block * 4 && x < block * 12 && y >= block * 6 && y < block * 14;
+            const v = inside ? 70 : 210;
+            photo[i] = v; photo[i + 1] = v; photo[i + 2] = v; photo[i + 3] = 255;
+        }
+    }
+    enhancePage(photo, W, H, 'color');
+    let sum = 0;
+    let n = 0;
+    for (let y = block * 9; y < block * 11; y += 1) {
+        for (let x = block * 7; x < block * 9; x += 1) { sum += photo[(y * W + x) * 4]; n += 1; }
+    }
+    assert.ok(sum / n < 200, `середина серого блока выбелена до ${(sum / n).toFixed(0)}`);
+
+    // Почти чёрный кадр (крышка объектива) остаётся тёмным.
+    const dark = new Uint8ClampedArray(200 * 280 * 4);
+    for (let k = 0; k < 200 * 280; k += 1) {
+        const v = 18 + (k % 5);
+        dark[k * 4] = v; dark[k * 4 + 1] = v; dark[k * 4 + 2] = v; dark[k * 4 + 3] = 255;
+    }
+    enhancePage(dark, 200, 280, 'gray');
+    let total = 0;
+    for (let k = 0; k < 200 * 280; k += 1) total += dark[k * 4];
+    assert.ok(total / (200 * 280) < 40, `тёмный кадр вытянут до ${(total / (200 * 280)).toFixed(0)}`);
 });

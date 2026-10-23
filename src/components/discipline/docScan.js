@@ -55,10 +55,71 @@ export const scanFormats = (accept) => {
 
 const pad2 = (value) => String(value).padStart(2, '0');
 
-/* «Скан 23.10.2026 17-40.pdf» — двоеточие сервер из имени вырезает. */
+/* «Скан 23.10.2026 17-40-05.pdf» — двоеточие сервер из имени вырезает. С
+   секундами: исправленную версию часто снимают в ту же минуту, и в списке
+   файлов записи стояли бы два одинаковых имени. */
 export const scanFileName = (date, ext) => {
     const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
-    return `Скан ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}-${pad2(d.getMinutes())}.${ext}`;
+    const time = `${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
+    return `Скан ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${time}.${ext}`;
+};
+
+/* ── Решения окна скана ───────────────────────────────────────────────── */
+/* Чистые функции, чтобы их стерёг тест: в DocumentScanner.jsx они только
+   вызываются. Без этого «три страницы → JPEG первой» или старая обрезка после
+   «Края» проходили бы мимо всех тестов (разбор, 23.10.2026). */
+
+/* Во что сохранить: одна страница — фото, если поле его примет; иначе и при
+   нескольких страницах — один PDF. */
+export const scanOutputType = (pageCount, formats) => (pageCount === 1 && formats?.jpeg ? 'jpeg' : 'pdf');
+
+/* Ступени сжатия — по очереди, пока файл не уложится в SCAN_TARGET_BYTES. */
+export const SCAN_QUALITY_STEPS = [
+    { quality: 0.85, maxSide: SCAN_MAX_SIDE },
+    { quality: 0.73, maxSide: SCAN_MAX_SIDE },
+    { quality: 0.61, maxSide: 1920 },
+    { quality: 0.5, maxSide: 1536 },
+];
+
+/* Холст страницы после поворота на rotation (кратно 90°). */
+export const turnedSize = (width, height, rotation) => {
+    const turn = ((rotation % 360) + 360) % 360;
+    return turn % 180 ? { width: height, height: width, turn } : { width, height, turn };
+};
+
+/* Что делает «назад» (жест телефона, Esc, «Отмена»/«Назад» в шапке).
+   'stay' — файл собирается, выйти нельзя; 'close-confirm' — убрать вопрос
+   «Удалить скан?»; 'leave-crop' — с шага «края» на камеру (или к страницам,
+   если правили края снятой); 'to-review' — с камеры к снятым страницам;
+   'confirm' — спросить «Удалить скан?»; 'close' — закрыть окно. */
+export const scannerBack = ({ step, pages, busy, confirm }) => {
+    if (busy === 'save') return 'stay';
+    if (confirm) return 'close-confirm';
+    if (step === 'crop') return 'leave-crop';
+    if (step === 'camera' && pages > 0) return 'to-review';
+    if (pages > 0) return 'confirm';
+    return 'close';
+};
+
+/* Рамку можно оставить: выпуклая, из конечных чисел и не щель. */
+export const cropUsable = (corners, width, height) => isConvexQuad(corners)
+    && quadArea(corners) >= width * height * 0.005;
+
+/* Страницы после «Оставить» на шаге «края». Новая — в конец; правка краёв уже
+   снятой — на её место и с НОВЫМ id: превью кэшируются по id, и иначе
+   показывалась бы прежняя обрезка. Углы — по порядку ЛВ, ПВ, ПН, ЛН: рамка,
+   у которой человек поменял местами противоположные углы, выпуклая, но
+   обходится против часовой — страница вышла бы зеркальной. */
+export const keepScannedPage = (pages, shot, id) => {
+    const corners = orderCorners(shot.corners);
+    if (shot.editing !== null && shot.editing !== undefined) {
+        return {
+            pages: pages.map((page, index) => (index === shot.editing ? { ...page, id, corners } : page)),
+            current: shot.editing,
+        };
+    }
+    const page = { id, blob: shot.blob, url: shot.url, width: shot.width, height: shot.height, corners, rotation: 0 };
+    return { pages: [...pages, page], current: pages.length };
 };
 
 /* ── Геометрия ────────────────────────────────────────────────────────── */
@@ -80,6 +141,7 @@ export const orderCorners = (points) => {
 /* Четырёхугольник годится для выпрямления: выпуклый и без вырожденных углов. */
 export const isConvexQuad = (corners) => {
     if (!Array.isArray(corners) || corners.length !== 4) return false;
+    if (!corners.every((p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))) return false;
     let sign = 0;
     for (let i = 0; i < 4; i += 1) {
         const a = corners[i];
@@ -445,7 +507,10 @@ for (let t = 0; t < THETA_BINS; t += 1) {
     SIN[t] = Math.sin((t * Math.PI) / THETA_BINS);
 }
 const VOTE_SPREAD = 6;
-const MAX_LINES = 32;
+/* Сколько прямых идёт в перебор четырёхугольников. Перебор растёт как
+   квадрат числа пар: на пёстром кадре (тетрадь во весь кадр) 32 прямые давали
+   30 мс на кадр поиска, 24 — 13,5 мс (разбор, 23.10.2026). */
+const MAX_LINES = 24;
 const PARALLEL_GAP = 40;
 const MIN_AREA = 0.05;
 
@@ -483,52 +548,81 @@ const sameLine = (a, b, tolerance, reach) => {
    втрое контрастнее: на деревянном столе 32 места списка занимали волокна, и
    сторона листа в него не попадала (стенд, 23.10.2026). */
 const VOTE_FULL = 160;
-const houghLines = (edges, gx, gy, mag, w, h) => {
+const POLAR_BINS = 360;
+const COS360 = new Float64Array(POLAR_BINS);
+const SIN360 = new Float64Array(POLAR_BINS);
+for (let t = 0; t < POLAR_BINS; t += 1) {
+    COS360[t] = Math.cos((t * Math.PI) / 180);
+    SIN360[t] = Math.sin((t * Math.PI) / 180);
+}
+
+/* Голосуют по полному кругу (0–359°), с полярностью: у кромки листа все точки
+   смотрят градиентом в одну сторону (внутри светлее), а у строки текста и
+   полосы на столе — две кромки противоположной полярности на расстоянии пары
+   пикселей. Сложенные по модулю 180°, они набирали вдвое больше кромки листа,
+   и на светлом столе строки занимали весь список прямых, вытесняя слабую
+   кромку (разбор, 23.10.2026). Каждая половина такой пары голосует отдельно.
+
+   И голос точки тонкой тёмной полосы (строка текста, линия тетради или
+   таблицы) режется впятеро: если за тёмной стороной через несколько пикселей
+   снова светло, это не кромка листа — у кромки за тёмной стороной стол. */
+const BAND_PROBE = [3, 5, 8];
+const BAND_VOTE = 0.2;
+const houghLines = (edges, gx, gy, mag, gray, w, h) => {
     const cx = w / 2;
     const cy = h / 2;
     const R = Math.ceil(Math.hypot(cx, cy)) + 1;
     const width = 2 * R + 1;
-    const acc = new Float32Array(THETA_BINS * width);
+    const acc = new Float32Array(POLAR_BINS * width);
     for (let y = 1; y < h - 1; y += 1) {
         for (let x = 1; x < w - 1; x += 1) {
             const i = y * w + x;
             if (!edges[i]) continue;
             let t0 = Math.round((Math.atan2(gy[i], gx[i]) * 180) / Math.PI);
-            t0 = ((t0 % 180) + 180) % 180;
+            t0 = ((t0 % POLAR_BINS) + POLAR_BINS) % POLAR_BINS;
             const px = x - cx;
             const py = y - cy;
-            const vote = Math.min(1, mag[i] / VOTE_FULL);
+            let vote = Math.min(1, mag[i] / VOTE_FULL);
+            // Градиент смотрит от тёмного к светлому: светлая сторона — +u, тёмная — −u.
+            const ux = gx[i] / (mag[i] || 1);
+            const uy = gy[i] / (mag[i] || 1);
+            const bx = Math.round(x + ux * 2);
+            const by = Math.round(y + uy * 2);
+            if (bx >= 0 && by >= 0 && bx < w && by < h) {
+                const bright = gray[by * w + bx];
+                for (const d of BAND_PROBE) {
+                    const fx = Math.round(x - ux * d);
+                    const fy = Math.round(y - uy * d);
+                    if (fx < 0 || fy < 0 || fx >= w || fy >= h) break;
+                    if (gray[fy * w + fx] >= bright - BAND_MARGIN) { vote *= BAND_VOTE; break; }
+                }
+            }
             for (let d = -VOTE_SPREAD; d <= VOTE_SPREAD; d += 1) {
-                let t = t0 + d;
-                if (t < 0) t += 180;
-                else if (t >= 180) t -= 180;
-                const rho = Math.round(px * COS[t] + py * SIN[t]);
+                const t = (t0 + d + POLAR_BINS) % POLAR_BINS;
+                const rho = Math.round(px * COS360[t] + py * SIN360[t]);
                 acc[t * width + rho + R] += vote;
             }
         }
     }
-    const minVotes = Math.max(8, Math.min(w, h) * 0.08);
+    const minVotes = Math.max(6, Math.min(w, h) * 0.05);
     const candidates = [];
-    for (let t = 0; t < THETA_BINS; t += 1) {
+    for (let t = 0; t < POLAR_BINS; t += 1) {
         const base = t * width;
         for (let r = 1; r < width - 1; r += 1) {
             const v = acc[base + r];
             if (v < minVotes) continue;
             let peak = true;
             for (let dt = -1; dt <= 1 && peak; dt += 1) {
-                let tt = t + dt;
-                let mirror = false;
-                if (tt < 0) { tt = THETA_BINS - 1; mirror = true; }
-                else if (tt >= THETA_BINS) { tt = 0; mirror = true; }
+                const tt = (t + dt + POLAR_BINS) % POLAR_BINS;
                 for (let dr = -1; dr <= 1; dr += 1) {
                     if (!dt && !dr) continue;
-                    const rr = mirror ? width - 1 - (r + dr) : r + dr;
-                    if (rr < 0 || rr >= width) continue;
-                    const u = acc[tt * width + rr];
+                    const u = acc[tt * width + r + dr];
                     if (u > v || (u === v && (dt < 0 || (dt === 0 && dr < 0)))) { peak = false; break; }
                 }
             }
-            if (peak) candidates.push({ t, rho: r - R, votes: v });
+            // Дальше — прямая в обычной форме (угол нормали 0–179°): полярность
+            // нужна была только для честного счёта голосов.
+            if (peak) candidates.push(t < 180 ? { t, rho: r - R, votes: v } : { t: t - 180, rho: R - r, votes: v });
         }
     }
     candidates.sort((a, b) => b.votes - a.votes);
@@ -561,7 +655,15 @@ const intersect = (a, b, cx, cy) => {
    стороны одно и то же. Без этого счёт выбирал рамку больше листа: стороны,
    продлённые по столу за угол листа, и сторона по полосе древесины набирали
    «длину» (стенд, 23.10.2026). Точку, где сравнить не с чем, считаем как без
-   контраста. */
+   контраста.
+
+   strength — средний вес по точкам кромки: сторона без контраста «лист
+   светлее стола» (MIN_SIDE_STRENGTH) кандидата отбрасывает — лучше «лист не
+   найден» и рамка по умолчанию, чем уверенная рамка по клавиатуре или клетке
+   тетради (разбор, 23.10.2026). Строки текста сюда почти не доходят: их голоса
+   режутся ещё в houghLines. */
+const BAND_MARGIN = 12;
+const MIN_SIDE_STRENGTH = 0.35;
 const contrastWeight = (contrast) => Math.min(1, Math.max(0.15, (contrast + 10) / 50));
 
 const sideScore = (p, q, support, gray, center, w, h) => {
@@ -581,6 +683,7 @@ const sideScore = (p, q, support, gray, center, w, h) => {
     let hits = 0;
     let valid = 0;
     let weighted = 0;
+    let weights = 0;
     for (let s = 0; s <= steps; s += 1) {
         const fx = p[0] + ((q[0] - p[0]) * s) / steps;
         const fy = p[1] + ((q[1] - p[1]) * s) / steps;
@@ -599,9 +702,17 @@ const sideScore = (p, q, support, gray, center, w, h) => {
         const yo = Math.min(h - 1, Math.max(0, Math.round(fy - ny * offset)));
         const outward = (fx - xo) * nx + (fy - yo) * ny >= 1;
         const known = outward && xi >= 0 && yi >= 0 && xi < w && yi < h;
-        weighted += contrastWeight(known ? gray[yi * w + xi] - gray[yo * w + xo] : 0);
+        const weight = contrastWeight(known ? gray[yi * w + xi] - gray[yo * w + xo] : 0);
+        weighted += weight;
+        weights += weight;
     }
-    return { share: valid ? hits / valid : 0, inside: valid / (steps + 1), len, weighted: (weighted * len) / steps };
+    return {
+        share: valid ? hits / valid : 0,
+        inside: valid / (steps + 1),
+        len,
+        weighted: (weighted * len) / steps,
+        strength: hits ? weights / hits : 0,
+    };
 };
 
 const interiorAngleOk = (corners) => {
@@ -626,7 +737,7 @@ export const detectDocument = (gray, w, h) => {
     const blurred = blur5(gray, w, h);
     const { gx, gy, mag } = sobel(blurred, w, h);
     const edges = cannyEdges(mag, gx, gy, w, h);
-    const lines = houghLines(edges, gx, gy, mag, w, h);
+    const lines = houghLines(edges, gx, gy, mag, blurred, w, h);
     if (lines.length < 4) return null;
     const support = dilate(edges, w, h);
     const cx = w / 2;
@@ -668,7 +779,8 @@ export const detectDocument = (gray, w, h) => {
                 // засчитывается только её видимая часть. Иначе такую сторону
                 // отбрасывало, и рамку достраивало по строке текста внутри листа.
                 const side = sideScore(ring[k], ring[(k + 1) % 4], support, blurred, center, w, h);
-                if (side.len < minSide * 0.15 || side.inside < 0.3 || side.share < 0.3) { ok = false; break; }
+                if (side.len < minSide * 0.15 || side.inside < 0.3 || side.share < 0.3
+                    || side.strength < MIN_SIDE_STRENGTH) { ok = false; break; }
                 total += side.weighted;
                 shares += side.share;
             }
@@ -828,14 +940,16 @@ const paperBackground = (data, w, h) => {
         }
         grid = next;
     }
-    // Нижняя граница фона: иначе почти чёрная клетка «выбеливалась» бы в серое пятно.
+    // Нижняя граница фона — половина бумаги страницы: тень так глубоко не
+    // ложится, а без границы тёмная печать или фото шире клетки «выбеливались»
+    // в серое пятно (усиление до трёх раз; разбор, 23.10.2026).
     const sorted = Array.from(lums).sort((a, b) => a - b);
     const median = sorted[sorted.length >> 1] || 255;
-    const floor = Math.max(24, median * 0.35);
+    const floor = Math.max(24, median * 0.5);
     for (let k = 0; k < grid.length; k += 1) {
         if (grid[k] < floor) grid[k] = floor;
     }
-    return { grid, gw, gh, block };
+    return { grid, gw, gh, block, median };
 };
 
 const lut = (lo, hi, gamma) => {
@@ -850,13 +964,18 @@ const lut = (lo, hi, gamma) => {
 const COLOR_LUT = lut(8, 236, 1.15);
 const GRAY_LUT = lut(20, 226, 1.5);
 const SATURATION = 1.2;
+/* Медиана «бумаги» ниже — это не лист, а тёмный кадр. */
+const DARK_PAGE = 60;
 
 /* Применить фильтр скана к странице (RGBA w×h) на месте и вернуть её же.
    color — фон белый, чернила своего цвета чуть насыщеннее; gray — как
    ксерокопия; photo — без изменений. */
 export const enhancePage = (data, w, h, mode) => {
     if (mode !== 'color' && mode !== 'gray') return data;
-    const { grid, gw, gh, block } = paperBackground(data, w, h);
+    const { grid, gw, gh, block, median } = paperBackground(data, w, h);
+    // Бумаги на снимке нет (крышка объектива, тёмная комната): деление на такой
+    // «фон» вытянуло бы шум в светлую кашу — страница остаётся как снята.
+    if (median < DARK_PAGE) return data;
     const rowR = new Float32Array(gw);
     const rowG = new Float32Array(gw);
     const rowB = new Float32Array(gw);

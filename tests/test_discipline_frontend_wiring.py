@@ -432,10 +432,57 @@ class ScanFileTests(unittest.TestCase):
             name, ext, content_type = files.check(kind, filename=scan['jpgName'], data=jpeg)
             self.assertEqual((name, ext, content_type), (scan['jpgName'], 'jpg', 'image/jpeg'), kind)
         # Имя дойдёт до списка файлов как есть: кириллица и пробелы сохраняются.
-        self.assertEqual(scan['pdfName'], 'Скан 23.10.2026 17-40.pdf')
+        self.assertEqual(scan['pdfName'], 'Скан 23.10.2026 17-40-00.pdf')
 
     def test_template_upload_offers_no_scan(self):
         # Шаблон акта — только DOCX: кнопка остаётся выбором файла (scanFormats ≠ any).
         settings = (ROOT / 'src' / 'components' / 'discipline' / 'SettingsPanel.jsx').read_text(encoding='utf-8')
         self.assertIn('accept=".docx"', settings)
         self.assertEqual(catalog.FILE_KINDS['act_template']['ext'], ('docx',))
+
+
+class ScanWindowWiringTests(unittest.TestCase):
+    """Проводка кнопки и окна скана, которую рендер первого кадра не видит
+    (мутации разбора 23.10.2026 выживали)."""
+
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+    UI = (DIR / 'disciplineUi.jsx').read_text(encoding='utf-8')
+    SCANNER = (DIR / 'DocumentScanner.jsx').read_text(encoding='utf-8')
+
+    def test_scan_reaches_on_files_as_a_list(self):
+        # Обработчики полей ждут массив файлов — как от <input multiple>.
+        self.assertIn('onDone={(file) => { setScanning(false); onFiles([file]); }}', self.UI)
+
+    def test_file_picker_opens_in_the_same_tap(self):
+        # Safari открывает выбор файла только в том же нажатии — без таймеров.
+        self.assertIn("{ key: 'upload', label: 'Загрузить файл', onClick: () => { setSheetOpen(false); pick(); } }", self.UI)
+        self.assertIn("{ key: 'upload', label: 'Загрузить файл', icon: FileUp, onSelect: pick }", self.UI)
+        body = self.UI[self.UI.index('export const AttachButton'):self.UI.index('export const ACCEPT_DOCS')]
+        self.assertNotIn('setTimeout', body)
+
+    def test_focus_returns_to_the_attach_button(self):
+        self.assertIn("returnFocus={() => triggerRef.current?.querySelector('button')?.focus({ preventScroll: true })}", self.UI)
+        self.assertIn('if (returnFocusRef.current) returnFocusRef.current();', self.SCANNER)
+
+    def test_scanner_uses_the_tested_decisions(self):
+        # Решения вынесены в docScan.js и покрыты node-тестом; окно их только зовёт.
+        for call in ("scanOutputType(encoded.length, formats) === 'jpeg'", 'for (const { quality, maxSide } of SCAN_QUALITY_STEPS)',
+                     'keepScannedPage(pages, shot, `p${pageSeq}`)', 'scannerBack({ step, pages: pages.length, busy, confirm: confirmDiscard })',
+                     'cropUsable(shot.corners, shot.width, shot.height)', 'turnedSize(size.width, size.height, page.rotation)'):
+            self.assertIn(call, self.SCANNER)
+
+    def test_white_on_dark_steps_survives_the_dark_layer(self):
+        # Тёмный слой портала перекрашивает .bg-white и .text-slate-900 — у
+        # спуска, «Оставить», вспышки и кнопки в ошибке камеры белый задан иначе.
+        theme = (ROOT / 'src' / 'theme-dark.css').read_text(encoding='utf-8')
+        self.assertIn('html[data-otp-theme="dark"] .bg-white {', theme)
+        for marker in ('rounded-full bg-[#fff] transition active:scale-90',
+                       'rounded-full bg-[#fff] px-5 py-2 text-[15px] font-semibold text-[#0f172a]',
+                       'mt-1 rounded-full bg-[#fff] px-4 py-2 text-[15px] font-semibold text-[#0f172a]',
+                       'absolute inset-0 bg-[#fff] opacity-0'):
+            self.assertIn(marker, self.SCANNER)
+
+    def test_blank_frame_is_not_captured(self):
+        self.assertIn("if (!track || track.readyState !== 'live' || track.muted) {", self.SCANNER)
+        self.assertIn("setCamera({ state: 'error', message: 'Камера не даёт кадр' });", self.SCANNER)
+        self.assertIn('if (frameIsBlank(frame)) {', self.SCANNER)

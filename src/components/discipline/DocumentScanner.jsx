@@ -6,9 +6,9 @@ import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { holdPageScroll } from '../../utils/pageScrollLock';
 import {
-    buildPdf, createQuadTracker, defaultCorners, DETECT_SIDE, detectDocument, enhancePage, insetCorners, isConvexQuad, outputSize,
-    SCAN_DEFAULT_FILTER, SCAN_FILTER_HINT, SCAN_FILTERS, SCAN_MAX_PAGES, SCAN_MAX_SIDE, SCAN_TARGET_BYTES,
-    scaleCorners, scanFileName, toGray, warpPerspective,
+    buildPdf, createQuadTracker, cropUsable, defaultCorners, DETECT_SIDE, detectDocument, enhancePage, insetCorners,
+    keepScannedPage, outputSize, SCAN_DEFAULT_FILTER, SCAN_FILTER_HINT, SCAN_FILTERS, SCAN_MAX_PAGES, SCAN_QUALITY_STEPS,
+    SCAN_TARGET_BYTES, scaleCorners, scanFileName, scannerBack, scanOutputType, toGray, turnedSize, warpPerspective,
 } from './docScan';
 
 /*
@@ -48,7 +48,11 @@ const CAMERA_CONSTRAINTS = {
     height: { ideal: 2160 },
     advanced: [{ focusMode: 'continuous' }],
 };
+/* Живой поиск — не чаще раза в 180 мс и не чаще, чем через четыре своих
+   длительности: на пёстром кадре слабый телефон тратит на поиск 50–100 мс, и
+   при жёстком шаге поиск занял бы весь главный поток. */
 const DETECT_INTERVAL_MS = 180;
+const DETECT_BUDGET = 4;
 /* Камера не ответила за это время — рядом с «Включаю камеру…» появляется
    выход через системную камеру. Ожидание не обрывается: человек мог просто
    ещё не нажать «Разрешить». */
@@ -125,6 +129,20 @@ const findCorners = (canvas, w, h) => {
     return found ? scaleCorners(found.corners, w / dw, h / dh) : null;
 };
 
+/* Кадр пустой — камера «замолчала» (трек остановлен или без кадров, а события
+   ended не было): чёрная страница не должна уйти объяснительной (разбор,
+   23.10.2026). */
+const frameIsBlank = (canvas) => {
+    const probe = makeCanvas(24, 24);
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(canvas, 0, 0, 24, 24);
+    const { data } = ctx.getImageData(0, 0, 24, 24);
+    freeCanvas(probe);
+    let max = 0;
+    for (let i = 0; i < data.length; i += 4) max = Math.max(max, data[i], data[i + 1], data[i + 2]);
+    return max < 16;
+};
+
 const longestSide = (corners) => {
     let best = 1;
     for (let i = 0; i < 4; i += 1) {
@@ -158,10 +176,10 @@ const renderPage = async (page, filter, maxSide) => {
         enhancePage(flat, size.width, size.height, filter);
         const straight = makeCanvas(size.width, size.height);
         straight.getContext('2d').putImageData(new ImageData(flat, size.width, size.height), 0, 0);
-        const turn = ((page.rotation % 360) + 360) % 360;
+        const turned = turnedSize(size.width, size.height, page.rotation);
+        const { turn } = turned;
         if (!turn) return straight;
-        const sideways = turn % 180 !== 0;
-        const out = makeCanvas(sideways ? size.height : size.width, sideways ? size.width : size.height);
+        const out = makeCanvas(turned.width, turned.height);
         const octx = out.getContext('2d');
         octx.translate(out.width / 2, out.height / 2);
         octx.rotate((turn * Math.PI) / 180);
@@ -193,7 +211,7 @@ const CropEditor = ({ shot, onCorners }) => {
     const loupeRef = useRef(null);
     const [scale, setScale] = useState(0);
     const [drag, setDrag] = useState(null);
-    const valid = isConvexQuad(shot.corners);
+    const valid = cropUsable(shot.corners, shot.width, shot.height);
 
     useLayoutEffect(() => {
         const svg = svgRef.current;
@@ -285,11 +303,23 @@ const CropEditor = ({ shot, onCorners }) => {
     const hit = scale ? HANDLE_HIT_PX / scale : 0;
     const path = shot.corners.map((p) => `${p[0]},${p[1]}`).join(' ');
     const outline = valid ? '#3b82f6' : '#f43f5e';
+    /* Лупа — над УГЛОМ, а не над пальцем: угол может упереться в край снимка,
+       пока палец едет дальше. Сверху места нет — сбоку от угла, по ту сторону
+       от середины экрана, как в iOS: внизу её закрыли бы палец и ладонь. */
     let loupeStyle = null;
+    const matrix = drag?.touch && typeof window !== 'undefined' ? svgRef.current?.getScreenCTM() : null;
     if (drag?.touch && typeof window !== 'undefined') {
-        const left = Math.min(window.innerWidth - LOUPE_PX - 8, Math.max(8, drag.client[0] - LOUPE_PX / 2));
-        const above = drag.client[1] - LOUPE_PX - 44;
-        const top = above > 8 ? above : drag.client[1] + 44;
+        const [ix, iy] = shot.corners[drag.index];
+        const sx = matrix ? matrix.a * ix + matrix.c * iy + matrix.e : drag.client[0];
+        const sy = matrix ? matrix.b * ix + matrix.d * iy + matrix.f : drag.client[1];
+        const gap = 44;
+        let left = sx - LOUPE_PX / 2;
+        let top = sy - LOUPE_PX - gap;
+        if (top < 8) {
+            top = Math.min(window.innerHeight - LOUPE_PX - 8, Math.max(8, sy - LOUPE_PX / 2));
+            left = sx < window.innerWidth / 2 ? sx + gap : sx - LOUPE_PX - gap;
+        }
+        left = Math.min(window.innerWidth - LOUPE_PX - 8, Math.max(8, left));
         loupeStyle = { left, top, width: LOUPE_PX, height: LOUPE_PX };
     }
 
@@ -323,8 +353,10 @@ const CropEditor = ({ shot, onCorners }) => {
 /* ── Окно сканера ─────────────────────────────────────────────────────── */
 
 /* formats — что примет поле (scanFormats): несколько страниц только в PDF.
-   onDone(file) — готовый файл; onClose — выйти без файла. */
-const DocumentScanner = ({ formats, onClose, onDone }) => {
+   onDone(file) — готовый файл; onClose — выйти без файла; returnFocus — куда
+   вернуть фокус после окна (кнопка, которая его открыла: пункт меню или листа,
+   на котором был фокус, к этому времени уже снят). */
+const DocumentScanner = ({ formats, onClose, onDone, returnFocus = null }) => {
     const mobile = useIsMobileShell();
     const multi = Boolean(formats?.pdf);
     const [step, setStep] = useState('camera');
@@ -403,6 +435,14 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                 stopCamera();
                 setCamera({ state: 'error', message: 'Камера отключилась' });
             });
+            // Кадры перестали идти (звонок, камеру забрало другое приложение) —
+            // спуск недоступен, пока они не вернутся.
+            track?.addEventListener?.('mute', () => {
+                if (streamRef.current === stream) setCamera((prev) => (prev.state === 'live' ? { state: 'paused', message: '' } : prev));
+            });
+            track?.addEventListener?.('unmute', () => {
+                if (streamRef.current === stream) setCamera((prev) => (prev.state === 'paused' ? { state: 'live', message: '' } : prev));
+            });
             setTorch(track?.getCapabilities?.().torch ? false : null);
             setCamera({ state: 'live', message: '' });
         } catch (err) {
@@ -468,11 +508,16 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
         const canvas = makeCanvas(1, 1);
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         trackerRef.current.reset();
-        let working = false;
-        const timer = setInterval(() => {
+        let timer = 0;
+        let stopped = false;
+        const tick = () => {
+            if (stopped) return;
             const video = videoRef.current;
-            if (working || !video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
-            working = true;
+            const started = performance.now();
+            if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+                timer = setTimeout(tick, DETECT_INTERVAL_MS);
+                return;
+            }
             try {
                 const vw = video.videoWidth;
                 const vh = video.videoHeight;
@@ -489,12 +534,14 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                 setLive(shown ? { corners: scaleCorners(shown, vw / dw, vh / dh), w: vw, h: vh } : null);
             } catch {
                 /* битый кадр — ждём следующий */
-            } finally {
-                working = false;
             }
-        }, DETECT_INTERVAL_MS);
+            const spent = performance.now() - started;
+            timer = setTimeout(tick, Math.max(DETECT_INTERVAL_MS, spent * DETECT_BUDGET));
+        };
+        timer = setTimeout(tick, DETECT_INTERVAL_MS);
         return () => {
-            clearInterval(timer);
+            stopped = true;
+            clearTimeout(timer);
             freeCanvas(canvas);
         };
     }, [step, camera.state]);
@@ -526,14 +573,27 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
     const capture = async () => {
         const video = videoRef.current;
         if (busy || !video?.videoWidth || camera.state !== 'live') return;
+        const track = streamRef.current?.getVideoTracks?.()[0];
+        if (!track || track.readyState !== 'live' || track.muted) {
+            // Трек встал без события (stop() его не шлёт): карточка ошибки с
+            // «Повторить» и запасным путём, а не чёрная страница.
+            stopCamera();
+            setCamera({ state: 'error', message: 'Камера не даёт кадр' });
+            return;
+        }
         setBusy('capture');
         try {
-            try { navigator.vibrate?.(15); } catch { /* вибрации может не быть */ }
-            flash();
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             const frame = makeCanvas(vw, vh);
             frame.getContext('2d').drawImage(video, 0, 0, vw, vh);
+            if (frameIsBlank(frame)) {
+                freeCanvas(frame);
+                setError('Кадр пустой — камера не даёт изображения');
+                return;
+            }
+            try { navigator.vibrate?.(15); } catch { /* вибрации может не быть */ }
+            flash();
             const liveCorners = live && live.w === vw && live.h === vh ? live.corners : null;
             const corners = findCorners(frame, vw, vh) || liveCorners || defaultCorners(vw, vh);
             const blob = await canvasBlob(frame, 'image/jpeg', 0.92);
@@ -573,21 +633,11 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
     /* ── края ── */
 
     const keepShot = () => {
-        if (!shot || !isConvexQuad(shot.corners)) return;
-        if (shot.editing !== null) {
-            // Новый номер страницы — новый ключ превью: иначе после «Края»
-            // показывалась бы прежняя обрезка из кэша.
-            pageSeq += 1;
-            const id = `p${pageSeq}`;
-            setPages((prev) => prev.map((page, index) => (index === shot.editing ? { ...page, id, corners: shot.corners } : page)));
-            setCurrent(shot.editing);
-        } else {
-            pageSeq += 1;
-            const page = { id: `p${pageSeq}`, blob: shot.blob, url: shot.url, width: shot.width, height: shot.height,
-                corners: shot.corners, rotation: 0 };
-            setPages((prev) => [...prev, page]);
-            setCurrent(pages.length);
-        }
+        if (!shot || !cropUsable(shot.corners, shot.width, shot.height)) return;
+        pageSeq += 1;
+        const next = keepScannedPage(pages, shot, `p${pageSeq}`);
+        setPages(next.pages);
+        setCurrent(next.current);
         setShot(null);
         setStep('review');
     };
@@ -655,10 +705,8 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
         setError('');
         await nextFrame();
         try {
-            let quality = 0.85;
-            let maxSide = SCAN_MAX_SIDE;
             let encoded = [];
-            for (let attempt = 0; attempt < 4; attempt += 1) {
+            for (const { quality, maxSide } of SCAN_QUALITY_STEPS) {
                 encoded = [];
                 for (const item of pages) {
                     const canvas = await renderPage(item, filter, maxSide);
@@ -668,12 +716,10 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                     await nextFrame();
                 }
                 if (encoded.reduce((sum, item) => sum + item.blob.size, 0) <= SCAN_TARGET_BYTES) break;
-                quality = Math.max(0.5, quality - 0.12);
-                if (attempt >= 1) maxSide = Math.round(maxSide * 0.8);
             }
             const now = new Date();
             let file;
-            if (encoded.length === 1 && formats?.jpeg) {
+            if (scanOutputType(encoded.length, formats) === 'jpeg') {
                 file = new File([encoded[0].blob], scanFileName(now, 'jpg'), { type: 'image/jpeg' });
             } else {
                 const parts = await Promise.all(encoded.map(async (item) => ({
@@ -695,11 +741,12 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
 
     // false — окно остаётся (шаг назад внутри), иначе — закрыто.
     const goBack = () => {
-        if (busy === 'save') return false;
-        if (confirmDiscard) { setConfirmDiscard(false); return false; }
-        if (step === 'crop') { leaveCrop(); return false; }
-        if (step === 'camera' && pages.length) { setStep('review'); return false; }
-        if (pages.length) { setConfirmDiscard(true); return false; }
+        const action = scannerBack({ step, pages: pages.length, busy, confirm: confirmDiscard });
+        if (action === 'stay') return false;
+        if (action === 'close-confirm') { setConfirmDiscard(false); return false; }
+        if (action === 'leave-crop') { leaveCrop(); return false; }
+        if (action === 'to-review') { setStep('review'); return false; }
+        if (action === 'confirm') { setConfirmDiscard(true); return false; }
         onClose();
         return true;
     };
@@ -724,6 +771,15 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
             if (event.key !== 'Escape') return;
             event.preventDefault();
             event.stopImmediatePropagation();
+            // Закреплённая щелчком подсказка «i» закрывается первым Esc (она
+            // гаснет при потере фокуса), окно — следующим. Подсказку под мышью
+            // не трогаем: она погаснет сама, а Esc не должен «залипать».
+            const hint = rootRef.current?.querySelector('button[aria-expanded="true"]');
+            if (hint && !hint.parentElement?.matches(':hover')) {
+                hint.focus({ preventScroll: true });
+                hint.blur();
+                return;
+            }
             goBackRef.current();
         };
         window.addEventListener('keydown', onKey, true);
@@ -732,11 +788,14 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
 
     useEffect(() => holdPageScroll(true), []);
 
+    const returnFocusRef = useRef(returnFocus);
+    returnFocusRef.current = returnFocus;
     useEffect(() => {
         const opener = document.activeElement;
         rootRef.current?.focus({ preventScroll: true });
         return () => {
-            if (opener && typeof opener.focus === 'function' && document.contains(opener)) opener.focus({ preventScroll: true });
+            if (returnFocusRef.current) returnFocusRef.current();
+            else if (opener && typeof opener.focus === 'function' && document.contains(opener)) opener.focus({ preventScroll: true });
         };
     }, []);
 
@@ -747,14 +806,17 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
         ? `fixed inset-0 z-[10050] flex flex-col outline-none motion-safe:animate-fade-in-soft ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`
         : 'fixed inset-0 z-[10050] flex items-center justify-center bg-slate-900/70 p-6 outline-none backdrop-blur-sm motion-safe:animate-window-dim-in';
     const panel = mobile ? 'contents'
-        : `relative flex h-[min(88vh,820px)] w-[min(980px,94vw)] flex-col overflow-hidden rounded-[28px] shadow-2xl ring-1 ring-white/10 motion-safe:animate-window-in ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`;
+        // overflow-y-auto, а не hidden: подсказка «i» у фильтров меряет место до
+        // ближайшего прокручиваемого предка и с hidden раскрывалась вниз, за край
+        // окна (разбор, 23.10.2026). Прокрутки не бывает — всё помещается.
+        : `relative flex h-[min(88vh,820px)] w-[min(980px,94vw)] flex-col overflow-y-auto rounded-[28px] shadow-2xl ring-1 ring-white/10 motion-safe:animate-window-in ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`;
     const topPad = { paddingTop: 'max(12px, env(safe-area-inset-top))' };
     const bottomPad = { paddingBottom: 'max(18px, env(safe-area-inset-bottom))' };
     const fallbackLabel = mobile ? 'Снять камерой телефона' : 'Выбрать фото';
     const darkButton = 'rounded-full px-3 py-1.5 text-[15px] font-medium text-white/90 transition hover:bg-white/10 active:opacity-60 disabled:opacity-40';
     const lastPreview = pages.length ? previews[previewKey(pages[pages.length - 1], filter)] || pages[pages.length - 1].url : null;
     const currentPreview = page ? previews[previewKey(page, filter)] : null;
-    const cropValid = shot ? isConvexQuad(shot.corners) : false;
+    const cropValid = shot ? cropUsable(shot.corners, shot.width, shot.height) : false;
 
     const cameraStep = (
         <>
@@ -763,7 +825,7 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                 <span className="truncate text-[15px] font-semibold">Скан документа</span>
                 {torch !== null ? (
                     <button type="button" onClick={toggleTorch} aria-label={torch ? 'Выключить фонарик' : 'Включить фонарик'}
-                            className={`grid h-9 w-9 place-items-center rounded-full transition ${torch ? 'bg-amber-300 text-slate-900' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+                            className={`grid h-9 w-9 place-items-center rounded-full transition ${torch ? 'bg-amber-300 text-[#0f172a]' : 'bg-white/10 text-white hover:bg-white/20'}`}>
                         {torch ? <Flashlight size={17} /> : <FlashlightOff size={17} />}
                     </button>
                 ) : <span className="w-[68px]" aria-hidden="true" />}
@@ -790,11 +852,23 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                         <div className="flex flex-col items-center gap-3">
                             <Loader2 size={26} className="animate-spin text-white/70" />
                             <span className="text-[14px] text-white/80">Включаю камеру…</span>
-                            {slow && (
+                            {/* На компьютере выход «выбрать фото» и так есть значком
+                                внизу — вторая такая же кнопка была бы шумом. */}
+                            {slow && mobile && (
                                 <button type="button" className={`${darkButton} mt-1 bg-white/10`} onClick={() => fileRef.current?.click()}>
                                     {fallbackLabel}
                                 </button>
                             )}
+                        </div>
+                    </div>
+                )}
+                {camera.state === 'paused' && (
+                    <div className="absolute inset-0 grid place-items-center px-6 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                            <span className="text-[14px] text-white/85">Камера приостановлена</span>
+                            <button type="button" className={`${darkButton} bg-white/10`} onClick={() => { stopCamera(); startCamera(); }}>
+                                Включить снова
+                            </button>
                         </div>
                     </div>
                 )}
@@ -805,7 +879,7 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                             <span className="text-[14px] leading-snug text-white/85">{camera.message}</span>
                             {/* Нижняя панель (спуск, фото из галереи) на время ошибки
                                 спрятана: все выходы — здесь, по одному разу. */}
-                            <button type="button" className="mt-1 rounded-full bg-white px-4 py-2 text-[15px] font-semibold text-slate-900 transition active:opacity-70"
+                            <button type="button" className="mt-1 rounded-full bg-[#fff] px-4 py-2 text-[15px] font-semibold text-[#0f172a] transition active:opacity-70"
                                     onClick={() => fileRef.current?.click()}>
                                 {fallbackLabel}
                             </button>
@@ -827,14 +901,16 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                         <span className="rounded-full bg-rose-600/90 px-3.5 py-1.5 text-[13px] text-white">{error}</span>
                     </div>
                 )}
-                <div ref={flashRef} className="pointer-events-none absolute inset-0 bg-white opacity-0" aria-hidden="true" />
+                {/* Белое на тёмных шагах — не утилитой bg-white: её перекрашивает
+                    тёмный слой портала (theme-dark.css), а камера тёмная всегда. */}
+                <div ref={flashRef} className="pointer-events-none absolute inset-0 bg-[#fff] opacity-0" aria-hidden="true" />
             </div>
             <div className={`grid grid-cols-3 items-center px-6 pt-4 ${camera.state === 'error' ? 'invisible' : ''}`}
                  style={mobile ? bottomPad : { paddingBottom: 20 }} aria-hidden={camera.state === 'error' || undefined}>
                 <div className="justify-self-start">
                     {lastPreview && (
                         <button type="button" onClick={() => setStep('review')} aria-label={`Снятые страницы: ${pages.length}`}
-                                className="relative block h-14 w-11 overflow-hidden rounded-md bg-white ring-2 ring-white/80">
+                                className="relative block h-14 w-11 overflow-hidden rounded-md bg-[#fff] ring-2 ring-white/80">
                             <img src={lastPreview} alt="" className="h-full w-full object-cover" />
                             <span className="absolute right-0 top-0 grid h-5 min-w-[20px] place-items-center rounded-bl-md bg-blue-600 px-1 text-[11px] font-semibold text-white">
                                 {pages.length}
@@ -844,7 +920,7 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                 </div>
                 <button type="button" onClick={capture} disabled={camera.state !== 'live' || Boolean(busy)} aria-label="Снять страницу"
                         className="grid h-[74px] w-[74px] place-items-center justify-self-center rounded-full border-[4px] border-white/90 transition disabled:opacity-40">
-                    <span className={`block h-[58px] w-[58px] rounded-full bg-white transition active:scale-90 ${busy === 'capture' ? 'scale-90 opacity-70' : ''}`} />
+                    <span className={`block h-[58px] w-[58px] rounded-full bg-[#fff] transition active:scale-90 ${busy === 'capture' ? 'scale-90 opacity-70' : ''}`} />
                 </button>
                 <div className="justify-self-end">
                     <button type="button" onClick={() => galleryRef.current?.click()} aria-label="Выбрать фото документа" disabled={Boolean(busy)}
@@ -874,7 +950,7 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                     {shot.editing !== null ? 'Отмена' : 'Переснять'}
                 </button>
                 <button type="button" onClick={keepShot} disabled={!cropValid}
-                        className="rounded-full bg-white px-5 py-2 text-[15px] font-semibold text-slate-900 transition active:opacity-70 disabled:opacity-40">
+                        className="rounded-full bg-[#fff] px-5 py-2 text-[15px] font-semibold text-[#0f172a] transition active:opacity-70 disabled:opacity-40">
                     {shot.editing !== null ? 'Готово' : 'Оставить'}
                 </button>
             </div>

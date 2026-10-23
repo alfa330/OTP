@@ -235,6 +235,9 @@ export const dLinkEdge = '-ml-2 2xl:-ml-4';
 export const AttachButton = ({ label = 'Приложить файл', accept, multiple = false, onFiles, disabled = false, invalid = false,
     busy = false, edge = true }) => {
     const inputRef = React.useRef(null);
+    // Кнопка, на которую вернуть фокус после сканера: пункт меню или листа,
+    // с которого его открыли, к этому времени уже снят.
+    const triggerRef = React.useRef(null);
     const mobile = useIsMobileShell();
     const formats = React.useMemo(() => scanFormats(accept), [accept]);
     const [sheetOpen, setSheetOpen] = React.useState(false);
@@ -276,7 +279,7 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
                     if (files.length) onFiles(files);
                 }}
             />
-            {trigger}
+            <span ref={triggerRef} className="contents">{trigger}</span>
             {formats.any && mobile && (
                 <MobileActionSheet
                     open={sheetOpen}
@@ -293,6 +296,7 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
                     formats={formats}
                     onClose={() => setScanning(false)}
                     onDone={(file) => { setScanning(false); onFiles([file]); }}
+                    returnFocus={() => triggerRef.current?.querySelector('button')?.focus({ preventScroll: true })}
                 />
             )}
         </>
