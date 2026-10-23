@@ -52,6 +52,15 @@ SCOPE_OWN = 'own'
 # ни до его СВ и главы. Открыть раздел по правилам ТЗ — False здесь и в App.jsx.
 SUPER_ADMIN_ONLY = True
 
+# Поимённо, пока стоит флаг: эти люди входят в раздел по его обычным правилам
+# (оператор — только свои записи и своя объяснительная, за QR как у всех
+# операторов), и колокол им приходит (notify.push). Остальным раздел по-прежнему
+# закрыт, их СВ и главе ничего не уходит. Владелец, 23.10.2026: «открой данный
+# раздел для … как оператору» — 56, оператор СЗоВ. Зеркало —
+# DISCIPLINE_ROLLOUT_USER_IDS в src/App.jsx (пункт меню), списки сверяет тест.
+# Новый id — только по слову владельца; ФИО в код не пишем (репозиторий публичный).
+ROLLOUT_USER_IDS = frozenset({56})
+
 
 def normalize_role(role):
     value = str(role or '').strip().lower()
@@ -111,10 +120,16 @@ def is_operator(ctx):
             and not is_manager(ctx))
 
 
+def in_rollout(ctx):
+    """Человек из поимённого списка выкладки (ROLLOUT_USER_IDS)."""
+    return _me(ctx) in ROLLOUT_USER_IDS
+
+
 def can_open_section(ctx):
     """Пускать ли в раздел вообще. Проверяется на КАЖДОМ роуте: спрятанный пункт
-    меню — не доступ, раздел открывается и прямым адресом ?view=discipline."""
-    if SUPER_ADMIN_ONLY and not is_super_admin(ctx):
+    меню — не доступ, раздел открывается и прямым адресом ?view=discipline.
+    Поимённый список снимает только флаг выкладки — дальше обычные правила."""
+    if SUPER_ADMIN_ONLY and not is_super_admin(ctx) and not in_rollout(ctx):
         return False
     return is_manager(ctx) or is_supervisor(ctx) or is_operator(ctx)
 

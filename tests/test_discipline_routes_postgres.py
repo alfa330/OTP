@@ -791,3 +791,35 @@ def test_act_draft_term_runs_to_the_end_of_a_linked_probation(client):
     days = (end - (now - timedelta(days=1)).date()).days
     assert 'испытательный срок продолжительностью %d %s (до %s)' % (
         days, docx_layout.plural(days, 'день', 'дня', 'дней'), end.strftime('%d.%m.%Y')) in text
+
+
+def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):
+    """Владелец, 23.10.2026: раздел открыт поимённо «как оператору», пока он закрыт
+    остальным. Поимённый входит по обычным правилам (за QR, только свои записи),
+    колокол ему приходит, а его СВ и главе — по-прежнему ничего."""
+    from discipline import access
+    from notifications import sources
+
+    monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', True)
+    monkeypatch.setattr(access, 'ROLLOUT_USER_IDS', frozenset({OP_A}))
+    assert client.get('/api/discipline/ping', headers=h(OP_A)).status_code == 200
+    for user in (SV_A, OP_B, HEAD_SZOV):
+        refused = client.get('/api/discipline/ping', headers=h(user))
+        assert (refused.status_code, refused.get_json()['code']) == (403, 'DISCIPLINE_SECTION_CLOSED'), user
+    mine = _create(client, SUPER, OP_A, datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2))
+    other = _create(client, SUPER, OP_B, datetime.now().replace(second=0, microsecond=0) - timedelta(hours=1))
+    assert (mine.status_code, other.status_code) == (201, 201)
+    with db.cursor() as cur:
+        cur.execute('SELECT DISTINCT user_id FROM discipline_notifications')
+        assert {row[0] for row in cur.fetchall()} == {OP_A}
+        total, rows = sources.discipline(cur, {'user_id': OP_A}, 10)
+        assert total >= 1 and rows
+        assert sources.discipline(cur, {'user_id': SV_A}, 10) == (0, [])
+    # Записи — за QR, как у всех операторов, и только свои.
+    assert client.get('/api/discipline/records', headers=h(OP_A)).get_json()['code'] == 'SENSITIVE_ACCESS_REQUIRED'
+    client.granted['value'] = True
+    items = client.get('/api/discipline/records', headers=h(OP_A)).get_json()['items']
+    assert [item['id'] for item in items] == [mine.get_json()['id']]
+    assert client.get('/api/discipline/records/%d' % other.get_json()['id'], headers=h(OP_A)).status_code == 403
+    blank = client.get('/api/discipline/records/%d/explanation.docx' % mine.get_json()['id'], headers=h(OP_A))
+    assert blank.status_code == 200

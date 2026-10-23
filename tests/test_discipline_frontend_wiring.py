@@ -66,14 +66,18 @@ class AppWiringTests(unittest.TestCase):
         self.assertIn("discipline: ['szov', 'op', 'tez'],", APP)
 
     def test_rollout_flag_matches_server(self):
-        # Пока раздел открыт одним супер-админам — и в меню, и на сервере.
+        # Пока раздел открыт супер-админам и поимённому списку — и в меню, и на сервере.
         match = re.search(r"const DISCIPLINE_SUPER_ADMIN_ONLY = (true|false);", APP)
         self.assertTrue(match)
         self.assertEqual(match.group(1) == 'true', access.SUPER_ADMIN_ONLY)
+        named = re.search(r"const DISCIPLINE_ROLLOUT_USER_IDS = new Set\(\[([0-9, ]*)\]\);", APP)
+        self.assertTrue(named)
+        self.assertEqual({int(x) for x in named.group(1).split(',') if x.strip()}, set(access.ROLLOUT_USER_IDS))
         body = APP[APP.index('const canAccessDisciplineSectionForUser'):APP.index('const isDisciplineOperatorUser')]
-        self.assertLess(body.index("if (role === 'super_admin') return true;"),
-                        body.index('if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;'))
-        self.assertLess(body.index('if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;'), body.index('isDepartmentHead(userLike)'))
+        gate = 'if (DISCIPLINE_SUPER_ADMIN_ONLY && !DISCIPLINE_ROLLOUT_USER_IDS.has(Number(userLike?.id))) return false;'
+        # Поимённый список снимает только флаг — роли проверяются дальше, как у всех.
+        self.assertLess(body.index("if (role === 'super_admin') return true;"), body.index(gate))
+        self.assertLess(body.index(gate), body.index('isDepartmentHead(userLike)'))
 
     def test_admin_without_heading_is_out(self):
         body = APP[APP.index('const canAccessDisciplineSectionForUser'):APP.index('const isDisciplineOperatorUser')]

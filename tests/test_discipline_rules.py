@@ -329,6 +329,22 @@ class SuperAdminRolloutTests(unittest.TestCase):
             for who in (ctx('admin', headed=[1]), ctx('sv', groups=[5]), ctx('operator'), ctx('trainee'), ctx('admin')):
                 self.assertFalse(access.can_open_section(who), who['role'])
 
+    def test_named_operator_enters_by_the_usual_rules(self):
+        """Владелец, 23.10.2026: «открой данный раздел для … как оператору» — 56.
+        Список снимает только флаг выкладки: дальше обычные правила ТЗ."""
+        self.assertEqual(access.ROLLOUT_USER_IDS, frozenset({56}))
+        with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True):
+            operator = ctx('operator', user_id=56)
+            self.assertTrue(access.can_open_section(operator))
+            self.assertEqual(access.scope(operator), access.SCOPE_OWN)
+            # Записи о дисциплине — за QR, как у всех операторов.
+            self.assertTrue(access.requires_sensitive_qr(operator))
+            # Тот же профиль с другим id — закрыто; поимённый вне отделов раздела
+            # или админ без отдела под рукой — тоже: правила ТЗ никто не отменял.
+            for who in (ctx('operator', user_id=57), ctx('operator', user_id=56, department_id=4),
+                        ctx('admin', user_id=56)):
+                self.assertFalse(access.can_open_section(who), who)
+
 
 class LadderLibraryTests(unittest.TestCase):
     """Лестницы отдела с названиями (владелец, 21.10.2026): по умолчанию одна

@@ -2693,11 +2693,15 @@ const DISCIPLINE_DEPARTMENT_CODES = ['szov', 'op', 'tez'];
    SUPER_ADMIN_ONLY в discipline/access.py, тест сверяет оба. Открыть раздел
    по правилам выше — false здесь и там. */
 const DISCIPLINE_SUPER_ADMIN_ONLY = true;
+/* Поимённо, пока стоит флаг: раздел по обычным правилам ТЗ (оператор — свои
+   записи). Владелец, 23.10.2026: 56 — «как оператору». Зеркало ROLLOUT_USER_IDS
+   в discipline/access.py, списки сверяет тест. */
+const DISCIPLINE_ROLLOUT_USER_IDS = new Set([56]);
 
 const canAccessDisciplineSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
-    if (DISCIPLINE_SUPER_ADMIN_ONLY) return false;
+    if (DISCIPLINE_SUPER_ADMIN_ONLY && !DISCIPLINE_ROLLOUT_USER_IDS.has(Number(userLike?.id))) return false;
     const headed = aiQaHeadDepartmentCodesOf(userLike);
     if (isDepartmentHead(userLike) && headed.some((code) => DISCIPLINE_DEPARTMENT_CODES.includes(code))) return true;
     if (role === 'admin') return false;
