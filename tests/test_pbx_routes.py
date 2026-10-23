@@ -183,7 +183,9 @@ class PbxRoutesTests(unittest.TestCase):
             self.addCleanup(patch.stop)
         app = Flask(__name__)
         self.db = _FakeDb()
-        self.hub = pbx_realtime.Hub()
+        # Часы хаба — те же 12:00:30: по настоящим звонок от 22.10 через сутки уже «повисший»
+        # (LIVE_WINDOW), и хаб его не берёт.
+        self.hub = pbx_realtime.Hub(local_now=lambda: datetime(2026, 10, 22, 12, 0, 30))
         self.hub.ready = True
         app.register_blueprint(pbx_routes.build_pbx_blueprint(
             db=self.db, require_api_key=lambda fn: fn,

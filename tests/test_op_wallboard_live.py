@@ -223,7 +223,9 @@ class LiveStreamTests(unittest.TestCase):
             return {i: self.statuses[i] for i in ids if i in self.statuses}
 
         self.fetches = 0
-        self.hub = pbx_realtime.Hub()
+        # Часы хаба — время звонков теста: по настоящим звонок от 22.10 через сутки уже «повисший»
+        # (LIVE_WINDOW), хаб его не берёт, и кадр по звонку не приходит.
+        self.hub = pbx_realtime.Hub(local_now=lambda: NOW)
         self.hub.ready = True
         self.hub.apply_connector({'seen': time.time(), 'ami': True})
         db = _FakeDb()
