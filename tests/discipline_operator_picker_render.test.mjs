@@ -68,8 +68,8 @@ const { IosModal } = await bundle('src/components/ui/ios.jsx', 'ios');
 const never = () => new Promise(() => {});
 const api = { searchOperators: never, operatorContext: never, createRecord: never };
 const PEOPLE = [
-    { id: 1, name: 'Абдеш Мирас Ерболулы', group_name: 'Полатжанкызы Жанис группа Основа', department_name: 'СЗоВ', role: 'operator' },
-    { id: 2, name: 'Абдикасимова Нилуфар', group_name: 'Сабыр Азана группа Чат менеджер', department_name: 'СЗоВ', role: 'trainee' },
+    { id: 1, name: 'Тестов Мирас Ерланұлы', group_name: 'Тестова Айжан группа Основа', department_name: 'СЗоВ', role: 'operator' },
+    { id: 2, name: 'Примерова Нилуфар', group_name: 'Примеров Азат группа Чат менеджер', department_name: 'СЗоВ', role: 'trainee' },
 ];
 
 // Блок списка: обёртка с прокруткой сразу после поля поиска.
@@ -131,11 +131,11 @@ test('во всех состояниях список одной высоты �
 
 test('что стоит в списке в каждом состоянии', () => {
     const rows = picker({ loaded: true, results: PEOPLE });
-    assert.ok(rows.includes('Абдеш Мирас Ерболулы') && rows.includes('Абдикасимова Нилуфар'));
-    assert.ok(rows.includes('Сабыр Азана группа Чат менеджер · СЗоВ · стажёр'));
+    assert.ok(rows.includes('Тестов Мирас Ерланұлы') && rows.includes('Примерова Нилуфар'));
+    assert.ok(rows.includes('Примеров Азат группа Чат менеджер · СЗоВ · стажёр'));
     assert.ok(!rows.includes('aria-busy'));
     // Пока ищется новая строка, прежние результаты стоят на месте.
-    assert.ok(picker({ loaded: true, results: PEOPLE, searching: true }).includes('Абдеш Мирас Ерболулы'));
+    assert.ok(picker({ loaded: true, results: PEOPLE, searching: true }).includes('Тестов Мирас Ерланұлы'));
     assert.ok(picker({ loaded: true, results: [], searching: true, query: 'Абд' }).includes('aria-label="Загрузка"'));
     assert.ok(picker({ loaded: true, results: [], query: 'zzz' }).includes('Никого не нашли среди ваших сотрудников'));
     assert.ok(picker({ loaded: true, results: [] }).includes('Среди ваших сотрудников пока никого нет'));

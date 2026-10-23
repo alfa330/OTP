@@ -31,6 +31,15 @@ def _js_object(name):
     return json.loads(out.stdout)
 
 
+def _js_call(name, *args):
+    """Результат функции disciplineRules.js на аргументах — через node."""
+    script = "import(%s).then((m) => console.log(JSON.stringify(m[%s](...%s))))" % (
+        json.dumps(RULES.as_uri()), json.dumps(name), json.dumps(list(args)))
+    out = subprocess.run(['node', '--input-type=module', '-e', script], capture_output=True, text=True,
+                         check=True, timeout=30)
+    return json.loads(out.stdout)
+
+
 class AppWiringTests(unittest.TestCase):
     def test_lazy_view_and_render_behind_qr_lock(self):
         self.assertIn("const DisciplineView = lazyWithRetry(() => import('./components/discipline/DisciplineView'));", APP)
@@ -212,6 +221,77 @@ class SearchFieldTests(unittest.TestCase):
         view = (self.DIR / 'DisciplineView.jsx').read_text(encoding='utf-8')
         root = re.search(r'return \(\s*<div className="(mx-auto w-full max-w-\[1180px\][^"]*)"', view)
         self.assertNotIn('space-y-', root.group(1))
+
+
+class DocumentTemplatesTests(unittest.TestCase):
+    """Владелец, 23.10.2026: шаблон объяснительной и акт по образцу организации.
+    Бланк скачивают там, где объяснительную загружают; шапка бланка («кому») —
+    настройка отдела, граница на клиенте та же, что на сервере."""
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+
+    def test_blank_download_sits_next_to_explanation_upload(self):
+        api = (self.DIR / 'disciplineApi.js').read_text(encoding='utf-8')
+        self.assertIn('explanationBlank: (id) => blob(`/records/${id}/explanation.docx`),', api)
+        for name in ('RecordSheet.jsx', 'MyRecords.jsx'):
+            text = (self.DIR / name).read_text(encoding='utf-8')
+            self.assertIn('saveBlob(await api.explanationBlank(item.id), `Объяснительная_${item.number}.docx`);',
+                          text, name)
+        # В карточке нарушения — ссылкой и только пока объяснительную ждут: главное
+        # действие секции — загрузка, бланк — подсобное (разбор, 23.10.2026).
+        sheet = (self.DIR / 'RecordSheet.jsx').read_text(encoding='utf-8')
+        self.assertIn('{!done && (\n                                <button type="button" '
+                      'className={`${dLinkAction} ${dLinkEdge}`} onClick={blank} disabled={busy}>', sheet)
+        # Загрузка после ссылки «Бланк» — без сдвига влево, первая в ряду (бланк не нужен) — со сдвигом.
+        self.assertIn('invalid={!!errors.upload}\n                                          edge={Boolean(done)} />',
+                      sheet)
+        self.assertIn('onFiles={upload} disabled={busy} invalid={!!errors.file} edge={false} />', sheet)
+        # Оператор — в блоке «Нужна объяснительная», рядом с загрузкой фото; ряд не
+        # схлопывается на время работы, занятость — у каждой записи своя.
+        mine = (self.DIR / 'MyRecords.jsx').read_text(encoding='utf-8')
+        self.assertLess(mine.index('onClick={() => blank(item)}'), mine.index('label="Загрузить фото или скан"'))
+        self.assertIn("{busy[item.id] === 'blank' ? <Spinner size={14} /> : <Download size={14} />}", mine)
+        self.assertIn("disabled={Boolean(busy[item.id])} busy={busy[item.id] === 'upload'}", mine)
+        self.assertNotIn('<Spinner /> : (', mine)
+
+    def test_link_actions_shift_only_at_the_row_edge(self):
+        """Сдвиг влево — только у первой в ряду: после соседней кнопки ссылка
+        наезжала на неё на 4–8 px (замер разбора на 1920)."""
+        ui = (self.DIR / 'disciplineUi.jsx').read_text(encoding='utf-8')
+        self.assertIn('export const dLinkAction = dBtnGhost;', ui)
+        self.assertIn("export const dLinkEdge = '-ml-2 2xl:-ml-4';", ui)
+        self.assertIn('busy = false, edge = true }) => {', ui)
+        self.assertIn("className={`${dLinkAction} ${edge ? dLinkEdge : ''} ", ui)
+        panel = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn('invalid={!!templateError}\n                                                  edge={false} />', panel)
+
+    def test_settings_edit_addressee_with_server_limits(self):
+        panel = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn("value={draft.explanation_addressee || ''}", panel)
+        self.assertIn('addresseeProblem(draft.explanation_addressee, data?.catalog?.addressee)', panel)
+        # Поле сохраняется общей кнопкой — значит, стоит выше её панели.
+        self.assertLess(panel.index('<Group title="Бланк объяснительной"'), panel.index('{dirty && ('))
+        # Ошибка в «Кому» или сроках — окно само подводит к полю.
+        for anchor in ('period_days', 'control_days', 'explanation_days', 'explanation_addressee'):
+            self.assertIn('anchor="%s"' % anchor, panel)
+        self.assertIn('.map((key) => document.querySelector(`[data-field="${key}"]`)).filter(Boolean)\n'
+                      '                .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0]\n'
+                      "                ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));", panel)
+
+    def test_addressee_is_normalized_like_on_the_server(self):
+        limits = {'max_lines': catalog.ADDRESSEE_MAX_LINES, 'max_chars': catalog.ADDRESSEE_MAX_CHARS}
+        # Разделители строк и управляющие символы приходят вставкой из Word, PDF,
+        # 1С и Excel; длина — в символах (эмодзи — один символ, как в Python).
+        for text in ('  Заказчику:  ИП «Пример» \n\n  Примеровой А. Б. \n', 'а\tб\u00a0в', '', '\n \n',
+                     'одна строка', 'a\x0bb\r\nc\x08d\x85e\ufeff  f', 'a\u2028b\u2029c', 'a\rb', 'x\x1cy\x1dz\x1ew',
+                     'A\x0bB\x0cC\x85D\x1fE', '\ufeffЗаказчику', 'и\x00п', '😀' * catalog.ADDRESSEE_MAX_CHARS):
+            self.assertEqual('\n'.join(_js_call('addresseeLines', text)), catalog.normalize_addressee(text), text)
+            self.assertIsNone(_js_call('addresseeProblem', text, limits), text)
+        for text in ('\n'.join('строка %d' % i for i in range(catalog.ADDRESSEE_MAX_LINES + 1)),
+                     '\r'.join('строка %d' % i for i in range(catalog.ADDRESSEE_MAX_LINES + 1)),
+                     'я' * (catalog.ADDRESSEE_MAX_CHARS + 1), '😀' * (catalog.ADDRESSEE_MAX_CHARS + 1)):
+            with self.assertRaises(catalog.SettingsError):
+                catalog.normalize_addressee(text)
+            self.assertTrue(_js_call('addresseeProblem', text, limits))
 
 
 class LadderSettingsTests(unittest.TestCase):

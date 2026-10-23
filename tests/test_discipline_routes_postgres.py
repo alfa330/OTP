@@ -11,7 +11,7 @@ import io
 import os
 import uuid
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -515,3 +515,279 @@ def test_settings_saved_before_named_ladders_keep_their_ladder(client, db):
     assert got['settings']['ladders'] == [{'id': 'main', 'name': 'Основная', 'steps': list(catalog.LADDER_SAMPLE)}]
     assert got['settings']['ladder'] == list(catalog.LADDER_SAMPLE)
 
+
+
+# ── Документы по шаблонам организации (владелец, 23.10.2026) ────────────────
+
+def _docx_text(data):
+    from docx import Document
+    document = Document(io.BytesIO(data))
+    parts = [p.text for p in document.paragraphs]
+    parts += [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+    for section in document.sections:
+        parts += [p.text for p in section.footer.paragraphs]
+    return '\n'.join(parts)
+
+
+def test_explanation_blank_by_the_organization_template(client):
+    now = datetime.now().replace(second=0, microsecond=0)
+    rid = _create(client, SV_A, OP_A, now - timedelta(hours=3),
+                  description='Спал на рабочем месте с 14:00 до 14:20, видно по камере у окна.').get_json()['id']
+    number = client.get('/api/discipline/records/%d' % rid, headers=h(SV_A)).get_json()['number']
+    url = '/api/discipline/records/%d/explanation.docx' % rid
+
+    # Пока шапки нет — линия, вписать от руки.
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert text.startswith('Заказчику: ______') and '\nот Оператора: Оператор Анна\n' in text
+
+    # Шапка — настройка отдела записи: сервер приводит её к виду и не берёт лишнего.
+    payload = client.get('/api/discipline/settings?department_id=%d' % SZOV, headers=h(HEAD_SZOV)).get_json()
+    assert payload['settings']['explanation_addressee'] == ''
+    assert payload['catalog']['addressee'] == {'max_lines': catalog.ADDRESSEE_MAX_LINES,
+                                               'max_chars': catalog.ADDRESSEE_MAX_CHARS}
+    saved = client.put('/api/discipline/settings', headers=h(HEAD_SZOV), json={
+        'department_id': SZOV, 'settings': {'explanation_addressee': ' Заказчику:  ИП «Пример»\n\n Примеровой А. Б. '}})
+    assert saved.status_code == 200
+    assert saved.get_json()['settings']['explanation_addressee'] == 'Заказчику: ИП «Пример»\nПримеровой А. Б.'
+    too_long = client.put('/api/discipline/settings', headers=h(HEAD_SZOV), json={
+        'department_id': SZOV, 'settings': {'explanation_addressee': 'строка\n' * 5}})
+    assert too_long.status_code == 400 and 'не больше 4 строк' in too_long.get_json()['error']
+    # Шапку меняет руководитель отдела, СВ — нет.
+    assert client.put('/api/discipline/settings', headers=h(SV_A), json={
+        'department_id': SZOV, 'settings': {'explanation_addressee': 'Кому-то'}}).status_code == 403
+
+    blank = client.get(url, headers=h(SV_A))
+    assert blank.status_code == 200
+    assert blank.mimetype == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    assert 'attachment' in blank.headers['Content-Disposition']
+    text = _docx_text(blank.data)
+    assert text.startswith('Заказчику: ИП «Пример»\nПримеровой А. Б.\nот Оператора: Оператор Анна\n')
+    assert 'Запись о нарушении %s от %s: Сон на рабочем месте' % (number, (now - timedelta(hours=3)).strftime(
+        '%d.%m.%Y')) in text
+    # Описание обстоятельств оператору не показывается (ТЗ п. 3) — и в бланке его нет.
+    assert 'видно по камере у окна' not in text
+    # Время файла — UTC (сервер живёт по Алматы, python-docx пишет дату как UTC).
+    from docx import Document
+    created = Document(io.BytesIO(blank.data)).core_properties.created.replace(tzinfo=None)
+    assert abs(created - datetime.now(timezone.utc).replace(tzinfo=None)) < timedelta(minutes=2)
+
+    # Оператор — свой бланк после QR; чужой человек и СВ чужой группы — нет.
+    assert client.get(url, headers=h(OP_A)).get_json()['code'] == 'SENSITIVE_ACCESS_REQUIRED'
+    client.granted['value'] = True
+    assert client.get(url, headers=h(OP_A)).status_code == 200
+    assert client.get(url, headers=h(OP_B)).status_code == 403
+    assert client.get(url, headers=h(SV_B)).status_code == 403
+    # Кто скачивал бланк — в журнале действий (персональные данные, ТЗ п. 14).
+    audit = client.get('/api/discipline/audit', headers=h(HEAD_SZOV)).get_json()['items']
+    rows = [row for row in audit if row['action'] == 'explanation_docx']
+    assert len(rows) == 3 and {row['action_label'] for row in rows} == {'Выгружен бланк объяснительной'}
+    assert {row['actor_name'] for row in rows} == {'Супервайзер Альфа', 'Оператор Анна'}
+    assert any(row['action'] == 'settings_update' and 'Бланк объяснительной: кому' in row['changes_text']
+               for row in audit)
+    # В истории записи скачиваний нет — это чтение, оно только в журнале действий.
+    history = client.get('/api/discipline/records/%d' % rid, headers=h(SV_A)).get_json()['history']
+    assert 'explanation_docx' not in {row['action'] for row in history}
+
+    # Запись закрыта — бланк больше не выдаётся.
+    assert client.post('/api/discipline/records/%d/explanation' % rid, headers=h(SV_A),
+                       data={'file': (io.BytesIO(PDF), 'объяснительная.pdf')},
+                       content_type='multipart/form-data').status_code == 200
+    assert client.post('/api/discipline/records/%d/close' % rid, headers=h(SV_A)).status_code == 200
+    assert client.get(url, headers=h(SV_A)).status_code == 403
+
+
+def test_act_draft_follows_the_organization_sample(client):
+    now = datetime.now().replace(second=0, microsecond=0)
+    descriptions = ('Первое: проспал начало смены и пришёл в 09:40.',
+                    'Второе: ушёл со смены в 17:20 без согласования.',
+                    'Третье: спал на рабочем месте с 14:00 до 14:20, видно по камере')
+    ids = [_create(client, SV_A, OP_A, now - timedelta(days=days), description=text).get_json()['id']
+           for days, text in zip((3, 2, 1), descriptions)]
+    item = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_SZOV)).get_json()
+    act = item['act_full']
+    url = '/api/discipline/acts/%d/draft.docx' % act['id']
+    control = next(c for c in client.get('/api/discipline/controls', headers=h(HEAD_SZOV)).get_json()['items']
+                   if c['operator_id'] == OP_A)
+    end = datetime.strptime(control['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    # Дата черновика — сегодня по Алматы (как у сервера), а не по часам машины с тестами.
+    from discipline import service
+    assert text.startswith('Акт № %s\nо совершении работником дисциплинарного нарушения\nг. Алматы\t%s г.\n' % (
+        act['number'], service.today_almaty().strftime('%d.%m.%Y')))
+    # Составитель — СВ, зафиксировавший нарушение-основание (как в образце организации).
+    assert 'Мною, супервайзером СЗоВ Супервайзер Альфа, составлен настоящий акт о нижеследующем:' in text
+    # Пол — из карточки (у Оператора Анны — женский).
+    assert ('допустила нарушение трудовой дисциплины: сон на рабочем месте. %s.' % descriptions[2]) in text
+    assert 'Это третье нарушение сотрудника за последние 30 дней:' in text
+    numbers = [r['number'] for r in act['records']]
+    assert all('(запись %s), объяснительная не предоставлена' % n in text for n in numbers)
+    # Описания прочих записей периода в акт не идут.
+    assert descriptions[0] not in text and descriptions[1] not in text
+    assert 'принято решение %s и установить испытательный срок продолжительностью 30 дней (до %s)' % (
+        '_' * 34, end) in text
+    assert 'В случае повторного нарушения в течение 30 дней сотруднику' in text
+    assert 'Супервайзер СЗоВ\nПодпись: _______\nФИО: Супервайзер Альфа' in text
+    assert 'С актом ознакомлен сотрудник СЗоВ\nПодпись: _______\nФИО: Оператор Анна' in text
+    # Руководитель — глава отдела акта, пока акт не утверждён.
+    assert 'С актом ознакомлен руководитель СЗоВ\nПодпись: _______\nФИО: Глава Сзовова' in text
+
+    # Глава поставил дату и утвердил решение, черновик скачивает сам — составитель
+    # всё равно СВ: дата в акте не делает главу составителем, иначе одна фамилия
+    # стояла бы в двух строках подписей из трёх.
+    measures = client.get('/api/discipline/controls', headers=h(HEAD_SZOV)).get_json()['measures']
+    reprimand = next(m['id'] for m in measures if m['title'] == 'Выговор')
+    assert client.patch('/api/discipline/acts/%d' % act['id'], headers=h(HEAD_SZOV), json={
+        'composed_on': now.strftime('%Y-%m-%d'), 'decision_measure_id': reprimand, 'approve': True}).status_code == 200
+    text = _docx_text(client.get(url, headers=h(HEAD_SZOV)).data)
+    assert 'Мною, супервайзером СЗоВ Супервайзер Альфа, составлен настоящий акт о нижеследующем:' in text
+    assert 'принято решение применить меру «Выговор» и установить испытательный срок' in text
+    assert 'Супервайзер СЗоВ\nПодпись: _______\nФИО: Супервайзер Альфа' in text
+    assert 'С актом ознакомлен руководитель СЗоВ\nПодпись: _______\nФИО: Глава Сзовова' in text
+    # Скачивания документов — в журнале действий, но не в истории записи.
+    history = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_SZOV)).get_json()['history']
+    assert 'act_docx' not in {row['action'] for row in history}
+    assert any(row['action'] == 'act_docx' for row in
+               client.get('/api/discipline/audit', headers=h(HEAD_SZOV)).get_json()['items'])
+
+    # Свой шаблон отдела главнее стандартного акта.
+    from docx import Document
+    template = Document()
+    template.add_paragraph('Акт {{НОМЕР_АКТА}}: {{ФИО}}, решение — {{РЕШЕНИЕ}}')
+    buffer = io.BytesIO()
+    template.save(buffer)
+    assert client.post('/api/discipline/settings/template', headers=h(HEAD_SZOV),
+                       data={'department_id': str(SZOV), 'file': (io.BytesIO(buffer.getvalue()), 'акт.docx')},
+                       content_type='multipart/form-data').status_code == 200
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert text.strip() == 'Акт %s: Оператор Анна, решение — Выговор' % act['number']
+
+
+def test_act_draft_keeps_the_rules_of_its_day_and_the_approver(client):
+    """После акта отдел сменил окно и срок контроля — акт пишет срок и окно
+    своего дня. Утвердил не глава отдела — в строке руководителя утвердивший."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    ids = [_create(client, SV_A, OP_A, now - timedelta(days=days)).get_json()['id'] for days in (3, 2, 1)]
+    act = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_SZOV)).get_json()['act_full']
+    assert client.put('/api/discipline/settings', headers=h(HEAD_SZOV), json={
+        'department_id': SZOV, 'settings': {'period_kind': 'month', 'control_days': 45}}).status_code == 200
+    measures = client.get('/api/discipline/controls', headers=h(SUPER)).get_json()['measures']
+    reprimand = next(m['id'] for m in measures if m['title'] == 'Выговор' and m['department_id'] == SZOV)
+    assert client.patch('/api/discipline/acts/%d' % act['id'], headers=h(SUPER), json={
+        'composed_on': now.strftime('%Y-%m-%d'), 'decision_measure_id': reprimand, 'approve': True}).status_code == 200
+    text = _docx_text(client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(SV_A)).data)
+    assert 'Это третье нарушение сотрудника за последние 30 дней:' in text
+    assert 'испытательный срок продолжительностью 30 дней' in text and 'в течение 30 дней' in text
+    assert 'Мною, супервайзером СЗоВ Супервайзер Альфа, составлен' in text
+    assert 'С актом ознакомлен руководитель СЗоВ\nПодпись: _______\nФИО: Супер Админов' in text
+
+
+def test_explanation_blank_is_addressed_by_the_department_of_the_record(client, db):
+    from tests.test_discipline_postgres import NOW as T0, create
+    from discipline import queries
+
+    with db.cursor() as cur:
+        rid = create(cur, SV_A, OP_A, T0 - timedelta(hours=2))
+        for department, text in ((SZOV, 'Заказчику: адресат СЗоВ'), (2, 'Заказчику: адресат ОП')):
+            queries.save_settings(cur, department, catalog.normalize_settings({'explanation_addressee': text}), SUPER)
+        # Человека перевели в ОП: запись осталась записью СЗоВ.
+        cur.execute('UPDATE users SET department_id = 2 WHERE id = %s', (OP_A,))
+    text = _docx_text(client.get('/api/discipline/records/%d/explanation.docx' % rid, headers=h(HEAD_SZOV)).data)
+    assert text.startswith('Заказчику: адресат СЗоВ\n') and 'адресат ОП' not in text
+
+
+def test_act_draft_head_with_supervisor_role_writes_as_head(client):
+    """Глава ОП с ролью СВ — руководитель своего отдела: «руководителем Отдела
+    продаж», а не «супервайзером» (название без сокращения склоняется целиком)."""
+    from tests.test_discipline_postgres import HEAD_OP, OP_OP
+
+    now = datetime.now().replace(second=0, microsecond=0)
+    ids = [_create(client, HEAD_OP, OP_OP, now - timedelta(days=days)).get_json()['id'] for days in (3, 2, 1)]
+    act = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_OP)).get_json()['act_full']
+    text = _docx_text(client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(HEAD_OP)).data)
+    assert 'Мною, руководителем Отдела продаж Глава Продаж, составлен настоящий акт о нижеследующем:' in text
+    # Пол в карточке не указан — форма с «(а)».
+    assert 'Сотрудник Оператор Продаж ' in text and ' допустил(а) нарушение трудовой дисциплины' in text
+    assert 'Руководитель Отдела продаж\nПодпись: _______\nФИО: Глава Продаж' in text
+    # Составитель он же руководитель отдела — его строка «ознакомлен» остаётся линией.
+    assert ('С актом ознакомлен руководитель Отдела продаж\nПодпись: _______\nФИО: ____________________'
+            in text)
+
+
+def test_act_draft_refuses_when_its_basis_is_cancelled(client):
+    """Запись-основание отменена — черновик не собирается: документ описал бы
+    другое нарушение (п. 7.2: «проверить основание акта»)."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    ids = [_create(client, SV_A, OP_A, now - timedelta(days=days)).get_json()['id'] for days in (3, 2, 1)]
+    act = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_SZOV)).get_json()['act_full']
+    assert client.post('/api/discipline/records/%d/cancel' % ids[2], headers=h(HEAD_SZOV),
+                       json={'reason': 'Ошибочная запись: не тот оператор'}).status_code == 200
+    response = client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(HEAD_SZOV))
+    assert response.status_code == 409 and response.get_json()['code'] == 'ACT_BASIS_CANCELLED'
+
+
+def test_act_draft_period_list_follows_each_records_step(client, db):
+    """Лестница с тренингом первой ступенью: у первой записи объяснительную не
+    требовали — в списке нарушений акта у неё нет «объяснительная не
+    предоставлена»; проведён тренинг — так и написано."""
+    with db.cursor() as cur:
+        use_sample_ladder(cur)
+    now = datetime.now().replace(second=0, microsecond=0)
+    ids = [_create(client, SV_A, OP_A, now - timedelta(days=days)).get_json()['id'] for days in (4, 3, 2, 1)]
+    act = client.get('/api/discipline/records/%d' % ids[3], headers=h(HEAD_SZOV)).get_json()['act_full']
+    numbers = {r['id']: r['number'] for r in act['records']}
+    url = '/api/discipline/acts/%d/draft.docx' % act['id']
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert 'Это четвёртое нарушение сотрудника за последние 30 дней:' in text
+    assert '(запись %s);' % numbers[ids[0]] in text
+    assert '(запись %s), объяснительная не предоставлена;' % numbers[ids[1]] in text
+    assert client.post('/api/discipline/records/%d/training' % ids[0], headers=h(SV_A), json={
+        'date': (now - timedelta(days=1)).strftime('%Y-%m-%d'), 'start': '10:00', 'end': '10:30'}).status_code == 200
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert '(запись %s), проведён тренинг;' % numbers[ids[0]] in text
+
+
+def test_act_draft_window_and_term_follow_department_settings(client, db):
+    """Окно 45 дней и контроль 40 — в акте эти числа, а не 30 по умолчанию; у акта
+    нет контроля — срок из настроек отдела, без даты окончания."""
+    from discipline import queries
+
+    with db.cursor() as cur:
+        queries.save_settings(cur, SZOV, catalog.normalize_settings({'period_days': 45, 'control_days': 40}),
+                              HEAD_SZOV)
+    now = datetime.now().replace(second=0, microsecond=0)
+    ids = [_create(client, SV_A, OP_A, now - timedelta(days=days)).get_json()['id'] for days in (40, 20, 1)]
+    act = client.get('/api/discipline/records/%d' % ids[2], headers=h(HEAD_SZOV)).get_json()['act_full']
+    url = '/api/discipline/acts/%d/draft.docx' % act['id']
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert 'Это третье нарушение сотрудника за последние 45 дней:' in text
+    assert 'испытательный срок продолжительностью 40 дней (до ' in text and 'в течение 40 дней' in text
+    with db.cursor() as cur:
+        cur.execute('DELETE FROM discipline_controls WHERE act_id = %s', (act['id'],))
+    text = _docx_text(client.get(url, headers=h(SV_A)).data)
+    assert 'испытательный срок продолжительностью 40 дней для контроля соблюдения' in text
+
+
+def test_act_draft_term_runs_to_the_end_of_a_linked_probation(client):
+    """Акт во время испытательного срока привязывается к нему: срок в акте — от
+    дня нарушения до конца этого контроля, а не срок «после акта» из настроек и
+    не от начала испытательного."""
+    from discipline import docx_layout
+
+    now = datetime.now().replace(second=0, microsecond=0)
+    start, end = (now - timedelta(days=10)).date(), (now + timedelta(days=50)).date()
+    assert client.post('/api/discipline/controls', headers=h(HEAD_SZOV), json={
+        'operator_id': OP_A, 'source': 'probation', 'start_date': start.isoformat(),
+        'end_date': end.isoformat()}).status_code in (200, 201)
+    # Справочник мер отдела — из контекста оператора (он же заводит справочники по умолчанию).
+    measures = client.get('/api/discipline/operator-context?operator_id=%d' % OP_A,
+                          headers=h(SV_A)).get_json()['measures']
+    oral = next(m['id'] for m in measures if m['title'] == 'Устное замечание')
+    created = [_create(client, SV_A, OP_A, now - timedelta(days=days), measure_id=str(oral)) for days in (3, 2, 1)]
+    assert all(r.status_code == 201 for r in created), [r.get_json() for r in created]
+    act = client.get('/api/discipline/records/%d' % created[2].get_json()['id'],
+                     headers=h(HEAD_SZOV)).get_json()['act_full']
+    text = _docx_text(client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(SV_A)).data)
+    days = (end - (now - timedelta(days=1)).date()).days
+    assert 'испытательный срок продолжительностью %d %s (до %s)' % (
+        days, docx_layout.plural(days, 'день', 'дня', 'дней'), end.strftime('%d.%m.%Y')) in text

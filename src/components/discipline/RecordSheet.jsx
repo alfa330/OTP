@@ -7,7 +7,8 @@ import { IosTimePicker } from '../ui/TimePicker';
 import { apiCode, apiError, saveBlob } from './disciplineApi';
 import {
     ACCEPT_ACT, ACCEPT_DOCS, ACCEPT_EVIDENCE, AttachButton, Chip, dBtnDanger, dBtnPrimary, dBtnSecondary, dInput,
-    EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, SearchField, Spinner, StateBadge, StepChip, T,
+    dLinkAction, dLinkEdge, EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, SearchField, Spinner,
+    StateBadge, StepChip, T,
 } from './disciplineUi';
 import {
     CARD_STATES_BESIDE_STEP, DESCRIPTION_MIN, filesProblem, fmtDate, fmtDateTime, fmtMoney, FILE_LIMITS,
@@ -177,6 +178,17 @@ const ExplanationSection = ({ item, api, toast, reload, onOpenFile }) => {
             setBusy(false);
         }
     };
+    /* Бланк по шаблону организации: ФИО уже вписано, внизу — номер записи. */
+    const blank = async () => {
+        setBusy(true);
+        try {
+            saveBlob(await api.explanationBlank(item.id), `Объяснительная_${item.number}.docx`);
+        } catch (err) {
+            toast(apiError(err, 'Бланк не собрался'), 'error');
+        } finally {
+            setBusy(false);
+        }
+    };
 
     const saveRefusal = async () => {
         const next = {};
@@ -215,8 +227,17 @@ const ExplanationSection = ({ item, api, toast, reload, onOpenFile }) => {
                 {!item.refused_at && perms.can_upload_explanation && (
                     <div className="space-y-1">
                         <div className="flex flex-wrap items-center gap-3">
+                            {/* Бланк — подсобное действие секции, поэтому ссылка, а не
+                                залитая кнопка: главное здесь — загрузить объяснительную. */}
+                            {!done && (
+                                <button type="button" className={`${dLinkAction} ${dLinkEdge}`} onClick={blank} disabled={busy}>
+                                    <Download size={14} />
+                                    Бланк
+                                </button>
+                            )}
                             <AttachButton label={item.explanation_received_at ? 'Загрузить исправленную версию' : 'Загрузить объяснительную'}
-                                          accept={ACCEPT_DOCS} onFiles={upload} disabled={busy} invalid={!!errors.upload} />
+                                          accept={ACCEPT_DOCS} onFiles={upload} disabled={busy} invalid={!!errors.upload}
+                                          edge={Boolean(done)} />
                             {!done && perms.can_work && !refusalOpen && (
                                 <button type="button" className={`text-[12.5px] font-medium text-slate-500 hover:text-slate-800 ${T.sub}`}
                                         onClick={() => setRefusalOpen(true)}>
@@ -467,7 +488,7 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
                         </button>
                         {manage && (
                             <AttachButton label={signed ? 'Заменить подписанный акт' : 'Приложить подписанный акт'} accept={ACCEPT_ACT}
-                                          onFiles={upload} disabled={busy} invalid={!!errors.file} />
+                                          onFiles={upload} disabled={busy} invalid={!!errors.file} edge={false} />
                         )}
                         {busy && <Spinner />}
                     </div>

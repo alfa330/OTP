@@ -43,7 +43,7 @@ BASE_DDL = '''
                               head_user_id integer, is_active boolean NOT NULL DEFAULT TRUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, login text, role text NOT NULL,
                         status text NOT NULL DEFAULT 'working', department_id integer, hire_date date,
-                        telegram_id bigint, avatar_bucket text, avatar_blob_path text);
+                        telegram_id bigint, avatar_bucket text, avatar_blob_path text, gender text);
     CREATE TABLE directions (id integer PRIMARY KEY, name text NOT NULL);
     CREATE TABLE groups (id integer PRIMARY KEY, name text NOT NULL, department_id integer,
                          direction_id integer, status text NOT NULL DEFAULT 'active');
@@ -84,6 +84,9 @@ BASE_DDL = '''
         (10, 300, '2026-01-01'), (11, 301, '2026-01-01');
     INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time) VALUES
         (400, '2026-10-19', '22:00', '06:00'), (400, '2026-10-20', '09:00', '18:00');
+    -- Пол — поле карточки: по нему акт пишет «допустил/допустила». У остальных не заполнен.
+    UPDATE users SET gender = 'female' WHERE id = 400;
+    UPDATE users SET gender = 'male' WHERE id = 401;
 '''
 
 

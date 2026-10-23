@@ -370,6 +370,26 @@ export const ladderProblems = (ladders, nameMax = 60) => {
     return problems;
 };
 
+/* Шапка бланка объяснительной («Заказчику: …») так, как её сохранит сервер
+   (catalog.normalize_addressee): строки — только по переводу строки, внутри
+   строки пробельные — один пробел, управляющие символы (вставка из 1С, Excel)
+   убраны, пустые строки убраны. Наборы символов те же, что у сервера: у JS \s
+   нет \x1c–\x1f и \x85, у Python — \ufeff, поэтому они названы явно. Длина — в
+   символах, как len в Python, а не в UTF-16. Проблема — та же граница, что на
+   сервере, чтобы подсветить поле до отправки. */
+const ADDRESSEE_CONTROL = /[\u0000-\u0008\u000e-\u001b\ufffe\uffff]/g;
+const ADDRESSEE_SPACE = /[\s\u001c-\u001f\u0085\ufeff]+/g;
+
+export const addresseeLines = (text) => String(text || '').replace(/\r\n?/g, '\n').replace(ADDRESSEE_CONTROL, '')
+    .split('\n').map((line) => line.replace(ADDRESSEE_SPACE, ' ').trim()).filter(Boolean);
+
+export const addresseeProblem = (text, limits) => {
+    if (!limits) return null;
+    const lines = addresseeLines(text);
+    return lines.length > limits.max_lines || [...lines.join('\n')].length > limits.max_chars
+        ? `Не больше ${limits.max_lines} строк и ${limits.max_chars} символов` : null;
+};
+
 /* Основание и причина контроля одной строкой. Причина испытательного срока по
    умолчанию повторяет основание — тогда показываем его один раз. */
 export const controlReason = (row) => {

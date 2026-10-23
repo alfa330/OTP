@@ -57,6 +57,7 @@ export const createDisciplineApi = (apiBaseUrl, headers) => {
         closeRecord: (id) => send('post', `/records/${id}/close`, {}),
         comment: (id, comment) => send('post', `/records/${id}/comment`, { comment }),
         uploadExplanation: (id, file) => form(`/records/${id}/explanation`, {}, [['file', file]]),
+        explanationBlank: (id) => blob(`/records/${id}/explanation.docx`),
         refusal: (id, file, witnessIds) => form(`/records/${id}/refusal`, { witness_ids: witnessIds }, [['file', file]]),
         addEvidence: (id, files) => form(`/records/${id}/evidence`, {}, files.map((file) => ['files', file])),
         training: (id, body) => send('post', `/records/${id}/training`, body),

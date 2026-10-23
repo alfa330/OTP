@@ -1,20 +1,33 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2 } from 'lucide-react';
-import { apiError } from './disciplineApi';
-import { ACCEPT_DOCS, AttachButton, EmptyState, Group, LoadingRows, Spinner, StateBadge, T } from './disciplineUi';
+import { CheckCircle2, Download } from 'lucide-react';
+import { apiError, saveBlob } from './disciplineApi';
+import {
+    ACCEPT_DOCS, AttachButton, dLinkAction, dLinkEdge, EmptyState, Group, LoadingRows, Spinner, StateBadge, T,
+} from './disciplineUi';
 import { fmtDate, fmtDateTime, fmtMoney } from './disciplineRules';
 
 /*
  * Экран оператора (ТЗ п. 3): только свои записи — тип нарушения, дата, статус,
  * применённая мера. Записи коллег не видны. Объяснительную оператор загружает
- * сам — фото или скан прямо с телефона (п. 8.1). Описание обстоятельств,
- * доказательства и комментарий руководителя оператору не показываются.
+ * сам — фото или скан прямо с телефона (п. 8.1); бланк по шаблону организации
+ * скачивает здесь же. Описание обстоятельств, доказательства и комментарий
+ * руководителя оператору не показываются.
  */
 
 const MyRecords = ({ api, toast, version, reload, openRecord }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
-    const [busy, setBusy] = useState(null);
+    // Занятость — у каждой записи своя ({id: 'blank' | 'upload'}): бланк по одной
+    // записи не снимает спиннер загрузки по другой.
+    const [busy, setBusy] = useState({});
+    const run = async (item, action, work) => {
+        setBusy((prev) => ({ ...prev, [item.id]: action }));
+        try {
+            await work();
+        } finally {
+            setBusy(({ [item.id]: _done, ...rest }) => rest);
+        }
+    };
 
     useEffect(() => {
         let alive = true;
@@ -24,18 +37,22 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
         return () => { alive = false; };
     }, [api, version]);
 
-    const upload = async (item, files) => {
-        setBusy(item.id);
+    const upload = (item, files) => run(item, 'upload', async () => {
         try {
             await api.uploadExplanation(item.id, files[0]);
             toast('Объяснительная отправлена');
             reload();
         } catch (err) {
             toast(apiError(err, 'Файл не загрузился'), 'error');
-        } finally {
-            setBusy(null);
         }
-    };
+    });
+    const blank = (item) => run(item, 'blank', async () => {
+        try {
+            saveBlob(await api.explanationBlank(item.id), `Объяснительная_${item.number}.docx`);
+        } catch (err) {
+            toast(apiError(err, 'Бланк не собрался'), 'error');
+        }
+    });
 
     if (error) return <Group><EmptyState title={error} /></Group>;
     if (!data) return <LoadingRows rows={4} />;
@@ -59,9 +76,18 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
                                         {fmtDateTime(item.occurred_at)} · срок до {fmtDateTime(item.explanation_due_at)}
                                     </div>
                                 </div>
-                                {busy === item.id ? <Spinner /> : (
-                                    <AttachButton label="Загрузить фото или скан" accept={ACCEPT_DOCS} onFiles={(files) => upload(item, files)} />
-                                )}
+                                {/* Кнопки не пропадают на время работы — иначе ряд схлопывался
+                                    до спиннера и список ниже прыгал; спиннер встаёт на место значка. */}
+                                <span className="flex flex-wrap items-center gap-3">
+                                    <button type="button" className={`${dLinkAction} ${dLinkEdge}`} disabled={Boolean(busy[item.id])}
+                                            onClick={() => blank(item)}>
+                                        {busy[item.id] === 'blank' ? <Spinner size={14} /> : <Download size={14} />}
+                                        Бланк
+                                    </button>
+                                    <AttachButton label="Загрузить фото или скан" accept={ACCEPT_DOCS} edge={false}
+                                                  disabled={Boolean(busy[item.id])} busy={busy[item.id] === 'upload'}
+                                                  onFiles={(files) => upload(item, files)} />
+                                </span>
                             </li>
                         ))}
                     </ul>

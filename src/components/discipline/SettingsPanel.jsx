@@ -8,7 +8,9 @@ import {
     AttachButton, Chip, dBtnPrimary, dBtnSecondary, DepartmentPicker, dInput, EmptyState, Field, Group, INVALID_RING,
     LoadingRows, Spinner, T,
 } from './disciplineUi';
-import { filesProblem, fmtDateTime, ladderName, ladderProblems, ordinalWord, stepTitle } from './disciplineRules';
+import {
+    addresseeProblem, filesProblem, fmtDateTime, ladderName, ladderProblems, ordinalWord, stepTitle,
+} from './disciplineRules';
 
 /*
  * «Настройки и справочники» (ТЗ п. 4.5, 5, 7, 12) — только руководителю.
@@ -39,7 +41,10 @@ const LIMIT_LABELS = {
 
 const TemplateHint = 'Метки, которые подставит система: {{НОМЕР_АКТА}}, {{ДАТА}}, {{ФИО}}, {{ДОЛЖНОСТЬ}}, {{ОТДЕЛ}}, '
     + '{{ГРУППА}}, {{ДАТА_ПРИЁМА}}, {{НАРУШЕНИЯ}}, {{ОБЪЯСНИТЕЛЬНЫЕ}}, {{РЕШЕНИЕ}}, {{СОСТАВИЛ}}. Без шаблона '
-    + 'выгружается стандартный акт.';
+    + 'выгружается стандартный акт по образцу организации.';
+
+const AddresseeHint = 'Шапка бланка объяснительной — кому она адресована, как в шаблоне организации: «Заказчику: …». '
+    + 'Пусто — в бланке линия, чтобы вписать от руки. Бланк скачивают в карточке нарушения и в «Моих записях».';
 
 const DictionaryEditor = ({ kind, item, catalog, departmentId, api, toast, onClose, onSaved }) => {
     const isType = kind === 'type';
@@ -323,6 +328,8 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
                 next[key] = `${LIMIT_LABELS[key] || 'Значение'} — от ${low} до ${high} дней`;
             }
         });
+        const addressee = addresseeProblem(draft.explanation_addressee, data?.catalog?.addressee);
+        if (addressee) next.explanation_addressee = addressee;
         return next;
     };
     const save = async () => {
@@ -332,6 +339,13 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
             // Подвести к первой лестнице без названия (или с занятым): открыть её и показать поле.
             pickLadder((draft.ladders || []).find((l) => next.ladders[l.id])?.id);
             requestAnimationFrame(() => document.querySelector('[data-field="ladder_name"]')
+                ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+        } else if (Object.keys(next).length) {
+            // Сроки и «Кому»: к первому по экрану полю с ошибкой — липкая «Сохранить»
+            // нажимается и тогда, когда само поле за краем экрана.
+            requestAnimationFrame(() => Object.keys(next)
+                .map((key) => document.querySelector(`[data-field="${key}"]`)).filter(Boolean)
+                .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0]
                 ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
         }
         if (Object.keys(next).length) return;
@@ -402,17 +416,17 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
                                                       options={data.catalog.period_kinds} />
                                     </Field>
                                     {draft.period_kind === 'rolling' && (
-                                        <Field label="Длина окна, дней" error={errors.period_days}>
+                                        <Field label="Длина окна, дней" error={errors.period_days} anchor="period_days">
                                             <input inputMode="numeric" className={`${dInput} ${errors.period_days ? INVALID_RING : ''}`}
                                                    value={draft.period_days} onChange={editNumber('period_days')} />
                                         </Field>
                                     )}
                                     <div className="grid gap-4 sm:grid-cols-2">
-                                        <Field label="Особый контроль после акта, дней" error={errors.control_days}>
+                                        <Field label="Особый контроль после акта, дней" error={errors.control_days} anchor="control_days">
                                             <input inputMode="numeric" className={`${dInput} ${errors.control_days ? INVALID_RING : ''}`}
                                                    value={draft.control_days} onChange={editNumber('control_days')} />
                                         </Field>
-                                        <Field label="Срок объяснительной, рабочих дней" error={errors.explanation_days}
+                                        <Field label="Срок объяснительной, рабочих дней" error={errors.explanation_days} anchor="explanation_days"
                                                hint="Рабочие дни — понедельник–пятница от момента фиксации.">
                                             <input inputMode="numeric" className={`${dInput} ${errors.explanation_days ? INVALID_RING : ''}`}
                                                    value={draft.explanation_days} onChange={editNumber('explanation_days')} />
@@ -438,6 +452,19 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
                                     </li>
                                 ))}
                             </ul>
+                        </Group>
+
+                        <Group title="Бланк объяснительной" hint={AddresseeHint}>
+                            <Field label="Кому" error={errors.explanation_addressee} anchor="explanation_addressee">
+                                <textarea rows={2} className={`${dInput} resize-y ${errors.explanation_addressee ? INVALID_RING : ''}`}
+                                          value={draft.explanation_addressee || ''}
+                                          placeholder="Заказчику: Индивидуальному предпринимателю «…»"
+                                          onChange={(e) => {
+                                              const { value } = e.target;
+                                              setDraft((d) => ({ ...d, explanation_addressee: value }));
+                                              setErrors((prev) => ({ ...prev, explanation_addressee: null }));
+                                          }} />
+                            </Field>
                         </Group>
 
                         {dirty && (
@@ -501,12 +528,13 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
                                         <span className="text-[12px] text-slate-400">· {fmtDateTime(data.template.uploaded_at)}</span>
                                     </span>
                                 ) : (
-                                    <span className={`text-[13px] text-slate-500 ${T.sub}`}>Шаблона нет — выгружается стандартный акт.</span>
+                                    <span className={`text-[13px] text-slate-500 ${T.sub}`}>Шаблона нет — выгружается стандартный акт по образцу организации.</span>
                                 )}
                                 <span className="flex items-center gap-2">
                                     {templateBusy && <Spinner />}
                                     <AttachButton label={data.template ? 'Заменить шаблон' : 'Загрузить DOCX'} accept=".docx"
-                                                  onFiles={uploadTemplate} disabled={templateBusy} invalid={!!templateError} />
+                                                  onFiles={uploadTemplate} disabled={templateBusy} invalid={!!templateError}
+                                                  edge={false} />
                                 </span>
                             </div>
                             {templateError && <div className={`mt-2 text-[12px] font-medium text-rose-600 ${T.note}`}>{templateError}</div>}

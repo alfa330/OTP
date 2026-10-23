@@ -210,7 +210,18 @@ export const FileList = ({ files = [], onOpen, onInvalidate = null, canInvalidat
     );
 };
 
-export const AttachButton = ({ label = 'Приложить файл', accept, multiple = false, onFiles, disabled = false, invalid = false }) => {
+/* Ссылка-действие раздела: на компьютере и большом экране растёт вместе с
+   соседними кнопками (кегль и поля dBtnGhost). Первая в ряду (edge) сдвинута
+   влево на своё поле — текст стоит по краю карточки. Ссылке после другой кнопки
+   сдвиг не нужен: она наезжала бы на соседку (на 2xl — на 4–8 px, и при
+   наведении две плашки склеивались). */
+export const dLinkAction = dBtnGhost;
+export const dLinkEdge = '-ml-2 2xl:-ml-4';
+
+/* edge — кнопка первая в своём ряду (как было всегда); после другой кнопки —
+   edge={false}. busy — значок сменяется спиннером, ряд не перестраивается. */
+export const AttachButton = ({ label = 'Приложить файл', accept, multiple = false, onFiles, disabled = false, invalid = false,
+    busy = false, edge = true }) => {
     const inputRef = React.useRef(null);
     return (
         <>
@@ -228,11 +239,11 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
             />
             <button
                 type="button"
-                disabled={disabled}
+                disabled={disabled || busy}
                 onClick={() => inputRef.current?.click()}
-                className={`${iosBtnGhost} -ml-2 ${invalid ? `!text-rose-600 ${INVALID_RING}` : ''}`}
+                className={`${dLinkAction} ${edge ? dLinkEdge : ''} ${invalid ? `!text-rose-600 ${INVALID_RING}` : ''}`}
             >
-                <Paperclip size={14} />
+                {busy ? <Spinner size={14} /> : <Paperclip size={14} />}
                 {label}
             </button>
         </>

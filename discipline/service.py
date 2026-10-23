@@ -1208,6 +1208,52 @@ def load_act(cursor, ctx, act_id, today):
     return act, record
 
 
+def act_draft_context(cursor, ctx, act, trigger, *, settings_for):
+    """Чего нет в самом акте и его записях, а стандартному акту нужно
+    (act_docx.standard_act): отдел акта, кто его составил и на каком он месте
+    («супервайзером» или «руководителем»), руководитель для строки «ознакомлен»,
+    пол сотрудника для «допустил/допустила», испытательный срок — срок особого
+    контроля, начатого актом, — и окно подсчёта, по которому акт составлен.
+
+    Составитель — супервайзер, как в образце организации: СВ, зафиксировавший
+    нарушение-основание, иначе СВ, который скачивает черновик; СВ нет —
+    скачивающий (руководитель). Отметка «составил» в самом акте (composed_by)
+    в документ не идёт: её ставит руководитель вместе с датой, и тогда он
+    оказывался бы в акте и составителем, и ознакомленным руководителем.
+    Руководитель — утвердивший акт, иначе глава отдела акта; если это и есть
+    составитель, его строка остаётся линией для подписи."""
+    department_id = act.get('department_id')
+    department = (queries.department_names(cursor, [department_id]).get(int(department_id)) or {}
+                  if department_id is not None else {})
+    head_id = queries.department_heads(cursor, [department_id]).get(int(department_id)) \
+        if department_id is not None else None
+    candidates = [int(uid) for uid in (trigger.get('created_by'), ctx['user_id']) if uid is not None]
+    leader_id = act.get('approved_by') or head_id
+    people = queries.people(cursor, candidates + [leader_id, act['operator_id']])
+
+    def supervisor(user_id):
+        return access.normalize_role((people.get(user_id) or {}).get('role')) == 'sv' and user_id != head_id
+
+    composer_id = next((uid for uid in candidates if supervisor(uid)), int(ctx['user_id']))
+    settings = settings_for(department_id, trigger.get('created_at'))
+    control = queries.control_of_act(cursor, act['id'])
+    days, end = int(settings.get('control_days') or 30), None
+    if control and isinstance(trigger.get('occurred_at'), datetime):
+        days, end = (control['end_date'] - trigger['occurred_at'].date()).days, control['end_date']
+    leader_shown = leader_id is not None and int(leader_id) != composer_id
+    return {
+        'department_name': department.get('name'),
+        'composer_name': (people.get(composer_id) or {}).get('name') or ctx.get('name'),
+        'composer_role': 'supervisor' if supervisor(composer_id) else 'head',
+        'head_name': (people.get(int(leader_id)) or {}).get('name') if leader_shown else None,
+        'gender': (people.get(int(act['operator_id'])) or {}).get('gender'),
+        'control_days': days if days > 0 else None,
+        'control_end': end if days > 0 else None,
+        'period_kind': settings.get('period_kind'),
+        'period_days': settings.get('period_days'),
+    }
+
+
 def update_act(cursor, ctx, act, record, payload, *, now):
     if not access.manages_record(ctx, record):
         raise DisciplineError('Акт оформляет руководитель', 403)

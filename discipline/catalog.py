@@ -163,7 +163,14 @@ DEFAULT_SETTINGS = {
     'control_days': 30,
     'explanation_days': 2,
     'telegram': {code: default for code, _label, _who, default in NOTIFY_EVENTS},
+    'explanation_addressee': '',
 }
+
+# Кому адресована объяснительная — шапка бланка (шаблон организации:
+# «Заказчику: Индивидуальному предпринимателю …»). Реквизиты заказчика —
+# настройка отдела, а не код: репозиторий публичный. Пусто — в бланке линия.
+ADDRESSEE_MAX_LINES = 4
+ADDRESSEE_MAX_CHARS = 300
 
 LIMITS = {
     'period_days': (1, 365),
@@ -336,6 +343,33 @@ def active_ladder(settings):
     return next((ladder for ladder in ladders if ladder.get('id') == active), ladders[0] if ladders else None)
 
 
+_ADDRESSEE_CONTROL = re.compile('[\x00-\x08\x0e-\x1b\ufffe\uffff]')
+_ADDRESSEE_SPACE = re.compile('[\\s\x1c-\x1f\x85\ufeff]+')
+
+
+def normalize_addressee(raw, strict=True):
+    """Шапка бланка объяснительной. Строки — только по переводу строки (\\n, \\r\\n,
+    \\r); внутри строки любые пробельные — один пробел; управляющие символы
+    (вставка из 1С и Excel) убраны; пустые строки убраны. Клиент делит так же
+    (disciplineRules.addresseeLines), длину оба считают в символах — тест сверяет.
+    strict — присланное из формы (длинное — отказ); иначе сохранённое (обрезается)."""
+    if raw is None:
+        return ''
+    if not isinstance(raw, str):
+        if strict:
+            raise SettingsError('Кому адресована объяснительная — укажите текстом')
+        return ''
+    text = _ADDRESSEE_CONTROL.sub('', raw.replace('\r\n', '\n').replace('\r', '\n'))
+    lines = [line for line in (_ADDRESSEE_SPACE.sub(' ', part).strip() for part in text.split('\n')) if line]
+    text = '\n'.join(lines)
+    if len(lines) > ADDRESSEE_MAX_LINES or len(text) > ADDRESSEE_MAX_CHARS:
+        if strict:
+            raise SettingsError('Кому адресована объяснительная — не больше %d строк и %d символов'
+                                % (ADDRESSEE_MAX_LINES, ADDRESSEE_MAX_CHARS))
+        text = '\n'.join(lines[:ADDRESSEE_MAX_LINES])[:ADDRESSEE_MAX_CHARS]
+    return text
+
+
 def _int_in(raw, key):
     low, high = LIMITS[key]
     label = LIMIT_LABELS.get(key, 'Значение')
@@ -363,6 +397,7 @@ def normalize_settings(raw, base=None):
         'control_days': int(source.get('control_days') or 30),
         'explanation_days': int(source.get('explanation_days') or 2),
         'telegram': dict(DEFAULT_SETTINGS['telegram']),
+        'explanation_addressee': normalize_addressee(source.get('explanation_addressee'), strict=False),
     }
     result['telegram'].update({k: bool(v) for k, v in (source.get('telegram') or {}).items()
                                if k in NOTIFY_EVENT_CODES})
@@ -393,6 +428,8 @@ def normalize_settings(raw, base=None):
         for code, value in telegram.items():
             if code in NOTIFY_EVENT_CODES:
                 result['telegram'][code] = bool(value)
+    if 'explanation_addressee' in raw:
+        result['explanation_addressee'] = normalize_addressee(raw.get('explanation_addressee'))
     return result
 
 

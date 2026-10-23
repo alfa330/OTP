@@ -134,6 +134,16 @@ def user_names(cursor, user_ids):
     return {int(row[0]): row[1] for row in cursor.fetchall()}
 
 
+def people(cursor, user_ids):
+    """{id: {'name', 'role', 'gender'}} — для документов раздела: должность
+    составителя акта и «допустил»/«допустила» по полю карточки, а не по имени."""
+    ids = _int_list(user_ids)
+    if not ids:
+        return {}
+    cursor.execute("SELECT id, name, role, gender FROM users WHERE id = ANY(%s)", (ids,))
+    return {int(row[0]): {'name': row[1], 'role': row[2], 'gender': row[3]} for row in cursor.fetchall()}
+
+
 def telegram_ids(cursor, user_ids):
     ids = _int_list(user_ids)
     if not ids:
@@ -881,6 +891,14 @@ def list_controls(cursor, department_ids, state='active', operator_id=None, limi
     return _rows(cursor)
 
 
+def control_of_act(cursor, act_id):
+    """Особый контроль, начатый актом или привязанный к нему: срок для текста акта."""
+    cursor.execute('SELECT start_date, end_date FROM discipline_controls WHERE act_id = %s ORDER BY id DESC LIMIT 1',
+                   (int(act_id),))
+    row = cursor.fetchone()
+    return {'start_date': row[0], 'end_date': row[1]} if row else None
+
+
 def operator_controls(cursor, operator_id):
     cursor.execute(_CONTROL_SELECT + ' WHERE c.operator_id = %s ORDER BY c.start_date DESC, c.id DESC',
                    (int(operator_id),))
@@ -1188,11 +1206,14 @@ def list_audit(cursor, department_ids, *, date_from=None, date_to=None, operator
 
 
 def record_history(cursor, record_id):
+    """История записи — что с ней делали. Просмотры и скачивания документов
+    (черновик акта, бланк объяснительной) — чтение: они в журнале действий
+    (ТЗ п. 14), а в истории записи заслоняли бы её шаги."""
     cursor.execute(
         """
         SELECT id, actor_id, actor_name, action, entity, entity_id, changes, created_at
           FROM discipline_audit
-         WHERE record_id = %s AND action NOT IN ('view_record', 'view_file')
+         WHERE record_id = %s AND action NOT IN ('view_record', 'view_file', 'act_docx', 'explanation_docx')
          ORDER BY id
         """, (int(record_id),))
     return _rows(cursor)

@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, act_docx, catalog, files, notify, queries, report, schema, service
+from . import access, act_docx, catalog, explanation_docx, files, notify, queries, report, schema, service
 
 JOURNAL_LIMIT = 1500
 
@@ -658,29 +658,57 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
 
     @route('/acts/<int:act_id>/draft.docx')
     def discipline_act_draft(ctx, today, act_id, **_kw):
+        now = service.now_almaty()
         with db._get_cursor() as cursor:
             act, record = service.load_act(cursor, ctx, act_id, today)
             if not (access.manages_record(ctx, record) or access.supervises_record(ctx, record)):
                 raise service.DisciplineError('Черновик акта — для СВ и руководителя', 403)
+            if record.get('cancelled_at'):
+                # Основания нет — документ описал бы другое нарушение (п. 7.2: «проверить основание акта»).
+                raise service.DisciplineError('Запись-основание акта отменена — черновик не собирается. Проверьте акт',
+                                              409, code='ACT_BASIS_CANCELLED')
             operator = queries.operator_profiles(cursor, [act['operator_id']], today).get(int(act['operator_id']))
             # Все записи периода акта: в документе только номер, дата, тип и отметка
-            # об объяснительной — без описаний, поэтому и записи вне доступа
+            # об объяснительной — без описаний (описание — лишь у записи-основания,
+            # а она в доступе у того, кто скачивает), поэтому и записи вне доступа
             # читающего в нём остаются (акт без них был бы неполным).
-            records = [queries.get_record(cursor, rid, today) for rid in act['record_ids']]
-            records = sorted([r for r in records if r and not r.get('cancelled_at')], key=lambda r: r['occurred_at'])
+            members = [queries.get_record(cursor, rid, today) for rid in act['record_ids']]
+            records = service.enrich(cursor, ctx, sorted([r for r in members if r and not r.get('cancelled_at')],
+                                                         key=lambda r: (r['occurred_at'], r['id'])), now)
             templates = [f for f in queries.files_for(cursor, department_id=act.get('department_id'),
                                                       kind='act_template')
                          if not f.get('superseded_at') and not f.get('invalid_at')]
             composed_by = (queries.user_names(cursor, [act['composed_by']]).get(act['composed_by'])
                            if act.get('composed_by') else ctx.get('name'))
+            context = None if templates else service.act_draft_context(cursor, ctx, act, record,
+                                                                       settings_for=service.SettingsCache(cursor))
             queries.audit(cursor, ctx, 'act_docx', 'act', entity_id=act_id, operator_id=act['operator_id'],
                           department_id=act.get('department_id'), record_id=act['trigger_record_id'])
         template_bytes = files.download(gcs, templates[0]['bucket'], templates[0]['blob_path']) if templates else None
         position = 'Стажёр' if (operator or {}).get('role') == 'trainee' else 'Оператор'
         data = act_docx.build(act, operator or {}, records, template_bytes=template_bytes, position=position,
-                              today=today, composed_by=composed_by)
+                              today=today, composed_by=composed_by, context=context, created=now)
         return send_file(BytesIO(data), mimetype=act_docx.DOCX_MIME, as_attachment=True,
                          download_name='Акт_%s.docx' % act['number'])
+
+    @route('/records/<int:record_id>/explanation.docx')
+    def discipline_explanation_blank(ctx, today, record_id, **_kw):
+        """Бланк объяснительной по шаблону организации — тому, кто её загружает:
+        самому оператору и тем, кто ведёт запись (п. 8.1)."""
+        now = service.now_almaty()
+        with db._get_cursor() as cursor:
+            record = service.load_record(cursor, ctx, record_id, today)
+            if not access.can_upload_explanation(ctx, record):
+                raise service.DisciplineError('Бланк объяснительной — тому, кто её загружает', 403)
+            operator = queries.people(cursor, [record['operator_id']]).get(int(record['operator_id'])) or {}
+            settings = (queries.get_settings(cursor, record['department_id'])
+                        if record.get('department_id') is not None else {})
+            queries.audit(cursor, ctx, 'explanation_docx', 'record', entity_id=record_id,
+                          operator_id=record['operator_id'], department_id=record['department_id'],
+                          record_id=record_id)
+        data = explanation_docx.build(record, operator, addressee=settings.get('explanation_addressee'), created=now)
+        return send_file(BytesIO(data), mimetype=act_docx.DOCX_MIME, as_attachment=True,
+                         download_name='Объяснительная_%s.docx' % record['number'])
 
     # ── Карточка оператора ─────────────────────────────────────────────────
 
@@ -836,6 +864,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'steps': [{'value': k, 'label': catalog.STEP_LABELS[k]} for k in catalog.STEP_ACTIONS],
                 'ladders': {'max': catalog.MAX_LADDERS, 'name_max': catalog.LADDER_NAME_MAX,
                             'max_steps': catalog.MAX_LADDER},
+                'addressee': {'max_lines': catalog.ADDRESSEE_MAX_LINES, 'max_chars': catalog.ADDRESSEE_MAX_CHARS},
                 'period_kinds': [{'value': k, 'label': v} for k, v in catalog.PERIOD_KINDS],
                 'events': [{'value': code, 'label': label, 'who': who} for code, label, who, _d in
                            catalog.NOTIFY_EVENTS],

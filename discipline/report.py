@@ -370,6 +370,7 @@ AUDIT_ACTIONS = {
     'act_approve': 'Акт утверждён',
     'upload_act': 'Приложен подписанный акт',
     'act_docx': 'Выгружен черновик акта',
+    'explanation_docx': 'Выгружен бланк объяснительной',
     'upload_evidence': 'Добавлено доказательство',
     'invalidate_file': 'Файл признан недействительным',
     'view_record': 'Просмотр записи',
@@ -408,6 +409,7 @@ CHANGE_LABELS = {
     'value_kind': 'Чем выражена', 'period_kind': 'Окно подсчёта', 'period_days': 'Длина окна, дней',
     'active_ladder': 'Действующая лестница', 'ladder': 'Лестница', 'ladders': 'Лестницы отдела',
     'control_days': 'Контроль после акта, дней', 'explanation_days': 'Срок объяснительной',
+    'explanation_addressee': 'Бланк объяснительной: кому',
     'telegram': 'Telegram', 'version': None, 'sha256': None, 'training_id': None, 'file_id': None,
     'type_id': None, 'approved_by': None, 'composed_by': None, 'decision_measure_id': None,
 }
