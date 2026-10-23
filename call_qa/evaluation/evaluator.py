@@ -169,14 +169,45 @@ def _guidance_text(guidance) -> str:
     return str(guidance or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+# Заголовок блока статей вики (criteria.load_direction → «wiki»). Текст фиксированный
+# по той же причине, что у указаний: он входит в prompt_hash.
+_WIKI_HEADER = ("СПРАВКА ИЗ ВИКИ (статьи, на которые ссылаются критерии шкалы или указания "
+                "направления; это действующие данные компании — сверяй с ними то, что "
+                "сказал или должен был сказать оператор):")
+
+
+def _wiki_text(criteria: list[dict], wiki) -> str:
+    """Статьи вики для ЭТИХ критериев (и указаний направления). Повтор оценки части
+    критериев (HARD-модель, недостающие) получает только свои статьи."""
+    wanted = {c["idx"] for c in criteria}
+    parts = []
+    for article in wiki or []:
+        idxs = [idx for idx in article.get("criterion_idxs") or [] if idx in wanted]
+        if not idxs and not article.get("in_guidance"):
+            continue
+        where = ([("к критерию " if len(idxs) == 1 else "к критериям ")
+                  + ", ".join(str(idx) for idx in idxs)] if idxs else [])
+        if article.get("in_guidance"):
+            where.append("к указаниям направления")
+        updated = str(article.get("updated_at") or "")[:10]
+        if len(updated) == 10 and updated[4] == "-":
+            where.append("обновлена " + ".".join(reversed(updated.split("-"))))
+        parts.append(f"[статья «{article.get('title')}»; {'; '.join(where)}]\n"
+                     f"{article.get('text') or ''}")
+    return "\n\n".join(parts)
+
+
 def build_system(criteria: list[dict], subject_kind: str = config.SUBJECT_CALL,
-                 department=None, guidance=None) -> str:
+                 department=None, guidance=None, wiki=None) -> str:
     """Системный промпт оценщика: шаблон + вступление субъекта и отдела + критерии.
 
     guidance — указания направления (правила шкалы, справка по процессу). Блок
     дописывается ПОСЛЕ полного шаблона и только когда указания есть: без них текст
     байт в байт прежний, а значит прежние и prompt_hash, и отпечатки уже сделанных
-    оценок всех остальных направлений (эталон звонка ОП — в тестах)."""
+    оценок всех остальных направлений (эталон звонка ОП — в тестах).
+
+    wiki — статьи вики, на которые ссылаются критерии и указания (direction['wiki']).
+    Блок — последним и тоже только когда статьи есть: без ссылок промпт прежний."""
     template = open(_PROMPT, encoding="utf-8").read()
     system = (template
               # rstrip: шаблон уже содержит пустую строку перед «ПРАВИЛА:», и
@@ -184,11 +215,15 @@ def build_system(criteria: list[dict], subject_kind: str = config.SUBJECT_CALL,
               .replace("{{INTRO}}", intro_for(subject_kind, department).rstrip("\n"))
               .replace("{{CRITERIA}}", _criteria_block(criteria)))
     text = _guidance_text(guidance)
-    if not text:
-        return system
-    # Прежний текст остаётся префиксом как есть: блок отделён пустой строкой.
-    separator = "\n" if system.endswith("\n") else "\n\n"
-    return f"{system}{separator}{_GUIDANCE_HEADER}\n{text}\n"
+    if text:
+        # Прежний текст остаётся префиксом как есть: блок отделён пустой строкой.
+        separator = "\n" if system.endswith("\n") else "\n\n"
+        system = f"{system}{separator}{_GUIDANCE_HEADER}\n{text}\n"
+    articles = _wiki_text(criteria, wiki)
+    if articles:
+        separator = "\n" if system.endswith("\n") else "\n\n"
+        system = f"{system}{separator}{_WIKI_HEADER}\n{articles}\n"
+    return system
 
 
 # Заголовок блока разборов в сообщении оценщику. Правила копятся годами, и один
@@ -354,7 +389,8 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     # отпечаток (api._evaluation_identity), иначе каждая такая оценка — «устарела».
     return llm.build_body(model=model,
                           system=build_system(criteria, subject_kind, department,
-                                              guidance=(direction or {}).get("guidance")),
+                                              guidance=(direction or {}).get("guidance"),
+                                              wiki=(direction or {}).get("wiki")),
                           user=user,
                           schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True,
                           cache_ttl=cache_ttl)

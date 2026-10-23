@@ -1534,9 +1534,10 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
     (source_transcript_hash) — по нему очередь пересчитывает ожидаемый отпечаток,
     когда сторона стала известна уже после оценки.
 
-    Указания направления (direction['guidance']) — часть системного промпта, и
-    отпечаток считает их от того же словаря направления, что уходит в модель
-    (build_eval_body): правка указаний помечает оценки направления устаревшими."""
+    Указания направления (direction['guidance']) и статьи вики, на которые
+    ссылаются критерии (direction['wiki']), — часть системного промпта, и отпечаток
+    считает их от того же словаря направления, что уходит в модель (build_eval_body):
+    правка указаний или самой статьи в вики помечает оценки направления устаревшими."""
     party = (call_end.normalise_call_end_party(call_end_party)
              if subject_kind in config.AUDIO_SUBJECT_KINDS else "unknown")
     transcript_criteria = [c for c in direction["criteria"] if c.get("eval_source") == cc.TRANSCRIPT]
@@ -1552,7 +1553,8 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
         transcript_hash=call_end.identity(transcript_hash, party), model=config.CLAUDE_MODEL,
         model_config=model_config,
         prompt_hash=content_hash(evaluator.build_system(
-            transcript_criteria, subject_kind, department, guidance=direction.get("guidance"))),
+            transcript_criteria, subject_kind, department, guidance=direction.get("guidance"),
+            wiki=direction.get("wiki"))),
         output_schema_hash=content_hash(evaluator._OUTPUT_SCHEMA),
         scale_hash=direction["scale_hash"],
         criterion_config_hash=content_hash(criterion_cfg),

@@ -7,6 +7,7 @@ import unicodedata
 import psycopg2
 
 from .. import config
+from . import wiki_refs
 
 
 def _normalise_identity(value: str) -> str:
@@ -87,7 +88,11 @@ def load_direction(direction_id: int) -> dict:
 
     ``guidance`` — указания для ИИ на уровне направления (правила шкалы, справка
     по процессу), '' — их нет. В scale_hash они не входят: шкала та же, меняется
-    промпт, и это уже ловит prompt_hash отпечатка (evaluator.build_system)."""
+    промпт, и это уже ловит prompt_hash отпечатка (evaluator.build_system).
+
+    ``wiki`` — статьи вики, на которые ссылаются описания критериев и указания
+    (wiki_refs.load), с их текущим текстом; [] — ссылок нет. Тоже вне scale_hash:
+    в шкале лежит ссылка, а текст статьи меняется в вики и ловится prompt_hash."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
     cur.execute("SELECT id, name, criteria, canonical_id FROM directions WHERE id=%s", (direction_id,))
@@ -105,6 +110,9 @@ def load_direction(direction_id: int) -> dict:
             name, raw, row_id = crow[0], (crow[1] or []), canonical_id
     try:
         guidance = _read_guidance(cur, canonical_id)
+        wiki = wiki_refs.load(
+            cur, [(i, c.get("value") if isinstance(c, dict) else "") for i, c in enumerate(raw)],
+            guidance)
     finally:
         cur.close(); conn.close()
     crits = []
@@ -125,4 +133,4 @@ def load_direction(direction_id: int) -> dict:
         })
     return {"id": canonical_id, "row_id": row_id, "name": name, "criteria": crits,
             "scale_hash": scale_fingerprint(canonical_id, name, crits),
-            "guidance": guidance}
+            "guidance": guidance, "wiki": wiki}

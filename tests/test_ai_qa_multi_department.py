@@ -498,7 +498,8 @@ class PromptTests(unittest.TestCase):
         # того же словаря направления, что уходит в модель (build_eval_body).
         self.assertIn("prompt_hash=content_hash(evaluator.build_system(\n"
                       "            transcript_criteria, subject_kind, department, "
-                      "guidance=direction.get(\"guidance\")))",
+                      "guidance=direction.get(\"guidance\"),\n"
+                      "            wiki=direction.get(\"wiki\")))",
                       api_source)
 
 
