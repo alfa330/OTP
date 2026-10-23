@@ -52338,7 +52338,9 @@ def _work_schedule_operator_requester():
 # Отделы, операторам которых нельзя видеть смены коллег по отделу/направлению:
 # «Смены коллег» и обмены сменами закрыты (фронт скрывает табы, здесь — запрет API).
 # Зеркалит COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office'}
+# ООЗ (с 23.10.2026): направлений у отдела нет, а обмен и смены коллег строятся
+# по направлению — кандидатов обмена всё равно не нашлось бы.
+COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department'}
 
 
 def _operator_colleague_schedules_hidden(requester_id):

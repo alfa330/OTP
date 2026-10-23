@@ -26692,7 +26692,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 return () => { cancelled = true; };
             }, [isOperatorSelfSchedules, user, operatorColleagueShiftsHidden, operatorSelfTab, directionSchedWeekStart]);
             useEffect(() => {
-                if (!isOperatorSelfSchedules || !user) return;
+                // Обмен скрыт отделу — форма замены недостижима, а сервер ответил бы 403.
+                if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden) return;
                 if (!swapTimeValidation.isValid) {
                     setSwapCandidates([]);
                     setSwapCandidatesError('');
@@ -26746,6 +26747,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [
                 isOperatorSelfSchedules,
                 user,
+                operatorColleagueShiftsHidden,
                 swapTimeValidation.isValid,
                 swapForm.swapDate,
                 swapForm.endDate,

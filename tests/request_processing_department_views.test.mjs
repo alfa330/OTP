@@ -14,6 +14,7 @@ import {
     departmentCodeHidesFrontOfficeTraining,
     departmentCodeHidesOperatorFields,
     departmentCodeUsesEmployeeJobTitle,
+    departmentHidesColleagueSchedules,
     departmentHidesEmployeeDirection,
     departmentHidesEmployeeInternship,
     departmentHidesEmployeeTaxiproId,
@@ -147,6 +148,19 @@ test('ООЗ: «Мои смены» — только названным, а не
     // Карта отдела не тронута: добавка живёт отдельной строкой.
     assert.deepEqual(DEPARTMENT_VIEW_ALLOWLIST[CODE].operator, ['driver_mailings']);
     assert.deepEqual(DEPARTMENT_VIEW_ALLOWLIST[CODE].trainee, ['driver_mailings']);
+});
+
+test('ООЗ: в «Моих сменах» нет обмена и «Смен коллег» — как у фронт-офисов', () => {
+    /* Решение владельца 23.10.2026: у ООЗ нет направлений, а обмен и смены
+       коллег строятся по направлению — кнопка «Обменять» показывала бы ошибку
+       «У вашего профиля не задано направление». */
+    for (const id of [...NAMED_IDS, 523]) {
+        assert.equal(departmentHidesColleagueSchedules(named(id)), true, String(id));
+    }
+    assert.equal(departmentHidesColleagueSchedules(employee('operator', 'front_office')), true);
+    for (const code of ['szov', 'op', 'tez', 'remote_cc', 'analytik', null]) {
+        assert.equal(departmentHidesColleagueSchedules(employee('operator', code)), false, String(code));
+    }
 });
 
 test('ООЗ: добавка не едет за человеком в другой отдел', () => {

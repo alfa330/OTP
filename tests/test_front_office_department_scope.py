@@ -82,7 +82,12 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
     def test_colleague_schedule_hiding_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
 
-        self.assertIn("const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office']);", source)
+        # ООЗ в наборе с 23.10.2026 (tests/test_request_processing_department.py).
+        self.assertIn(
+            "const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = "
+            "new Set(['front_office', 'request_processing_department']);",
+            source,
+        )
         self.assertIn("export const departmentHidesColleagueSchedules = (user) =>", source)
         self.assertIn("COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS.has(code)", source)
 
@@ -421,10 +426,17 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
     def test_colleague_data_is_not_fetched_when_hidden(self):
         source = _read(APP_PATH)
 
-        self.assertIn(
-            "if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden) return;",
-            source,
-        )
+        # Два места: запросы на замену и кандидаты обмена. Кандидатов форма
+        # просит сразу при входе в «Мои смены» — без условия скрытому отделу
+        # каждый вход приносил бы 403.
+        guard = "if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden) return;"
+        self.assertEqual(source.count(guard), 2)
+        candidates_at = source.index("/api/work_schedules/shift_swap/candidates?")
+        effect_at = source.rindex("useEffect(() => {", 0, candidates_at)
+        self.assertIn(guard, source[effect_at:candidates_at])
+        deps_at = source.index("}, [", source.index("loadCandidates();", candidates_at))
+        deps = source[deps_at:source.index("]);", deps_at)]
+        self.assertIn("operatorColleagueShiftsHidden,", deps)
         self.assertIn(
             "if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden || operatorSelfTab !== 'direction') return;",
             source,
@@ -638,7 +650,10 @@ class FrontOfficeBackendScopeTests(unittest.TestCase):
 
     def test_hidden_departments_helper(self):
         source = _read(BOT_PATH)
-        self.assertIn("COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office'}", source)
+        self.assertIn(
+            "COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department'}",
+            source,
+        )
 
         helper = _function_source(BOT_PATH, "_operator_colleague_schedules_hidden")
         self.assertIn("db.get_user_department(requester_id)", helper)

@@ -386,7 +386,10 @@ export const headsSupervisorHoursDepartment = (user) => {
 // Отделы, операторам которых нельзя видеть смены коллег по отделу/направлению:
 // в «Мои смены» скрываются табы «Замены» и «Смены коллег» вместе с кнопками
 // обмена; бэкенд зеркалит это запретом /work_schedules/direction и shift_swap.
-const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office']);
+// ООЗ — по решению владельца 23.10.2026: у отдела нет направлений, а обмен и
+// смены коллег строятся по направлению — кнопка «Обменять» показывала бы
+// ошибку «У вашего профиля не задано направление».
+const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office', 'request_processing_department']);
 
 export const departmentHidesColleagueSchedules = (user) => {
     const code = departmentCodeOf(user);

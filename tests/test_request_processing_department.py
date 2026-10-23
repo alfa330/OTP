@@ -106,6 +106,42 @@ class RequestProcessingBackendTests(unittest.TestCase):
         self.assertFalse(hides_direction(999999))
         self.assertFalse(hides_direction('не число'))
 
+    def test_colleague_schedules_hidden_on_both_sides(self):
+        # Решение владельца 23.10.2026: у ООЗ нет направлений, а обмен сменами
+        # и «Смены коллег» строятся по направлению — в «Моих сменах» их нет, и
+        # сервер отказывает так же, как фронт-офисам. Два набора обязаны совпадать.
+        bot = _read(BOT_PATH)
+        server_line = re.search(r"^COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = (\{.*\})$", bot, re.M)
+        server = ast.literal_eval(server_line.group(1))
+        views = _read(DEPARTMENT_VIEWS_PATH)
+        front_line = re.search(r"^const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set\(\[(.*)\]\);$", views, re.M)
+        front = set(re.findall(r"'([a-z_]+)'", front_line.group(1)))
+        self.assertIn(CODE, server)
+        self.assertEqual(server, front)
+
+    def test_colleague_schedules_helper_runtime(self):
+        departments = {
+            619: (2008, CODE), 620: (2008, ' Request_Processing_Department '),
+            909: (909, 'front_office'), 1: (1, 'szov'), 367: (367, 'op'), 560: (560, 'tez'),
+            700: (1954, 'remote_cc'), 5: (None, None),
+        }
+
+        class _Db:
+            def get_user_department(self, user_id):
+                if user_id not in departments:
+                    raise RuntimeError('база недоступна')
+                return departments[user_id]
+
+        bot = _read(BOT_PATH)
+        namespace = {'db': _Db()}
+        exec(re.search(r"^COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = .*$", bot, re.M).group(0), namespace)
+        exec(_function_source(BOT_PATH, "_operator_colleague_schedules_hidden"), namespace)
+        hidden = namespace["_operator_colleague_schedules_hidden"]
+        for user_id in (619, 620, 909):
+            self.assertTrue(hidden(user_id), user_id)
+        for user_id in (1, 367, 560, 700, 5, 12345):
+            self.assertFalse(hidden(user_id), user_id)
+
     def test_add_user_resolves_department_before_the_direction_check(self):
         endpoint = _function_source(BOT_PATH, "add_user")
         resolved_at = endpoint.index(
