@@ -609,6 +609,25 @@ def front_office_head_ids(cursor):
     return [row[0] for row in cursor.fetchall()]
 
 
+# Главы отделов человека — для правил access.py, как в load_access_context.
+_HEADED_SQL = """
+       COALESCE((SELECT array_agg(h.id) FROM departments h
+                  WHERE h.head_user_id = u.id AND h.is_active), '{}'),
+       COALESCE((SELECT array_agg(h.code) FROM departments h
+                  WHERE h.head_user_id = u.id AND h.is_active), '{}')"""
+
+
+def _people_context(user_id, role, department_code, headed_ids, headed_codes):
+    """Контекст человека для правил access.py — тот же, что собирает
+    load_access_context для входа в раздел."""
+    return {
+        'user_id': user_id, 'role': access.normalize_role(role),
+        'department_code': department_code,
+        'headed_department_ids': list(headed_ids or []),
+        'headed_department_codes': list(headed_codes or []),
+    }
+
+
 def notify_candidates(cursor):
     """Кого можно выбрать получателем «Требуется закупка»: тех, кто воду выдаёт
     или ведёт учёт (access.can_issue / can_manage) — супер-админов, руководителя
@@ -621,11 +640,7 @@ def notify_candidates(cursor):
     """
     cursor.execute(
         """
-        SELECT u.id, u.name, u.city, u.telegram_id IS NOT NULL, u.role, d.code,
-               COALESCE((SELECT array_agg(h.id) FROM departments h
-                          WHERE h.head_user_id = u.id AND h.is_active), '{}'),
-               COALESCE((SELECT array_agg(h.code) FROM departments h
-                          WHERE h.head_user_id = u.id AND h.is_active), '{}')
+        SELECT u.id, u.name, u.city, u.telegram_id IS NOT NULL, u.role, d.code,%s
           FROM users u
           LEFT JOIN departments d ON d.id = u.department_id
          WHERE COALESCE(u.status, '') <> 'fired'
@@ -635,17 +650,11 @@ def notify_candidates(cursor):
                              WHERE code = 'front_office' AND is_active
                                AND head_user_id IS NOT NULL))
          ORDER BY u.name
-        """)
+        """ % _HEADED_SQL)
     people = []
     for (user_id, name, city, has_telegram, role, department_code,
          headed_ids, headed_codes) in cursor.fetchall():
-        # Тот же контекст, что собирает load_access_context для входа в раздел.
-        ctx = {
-            'user_id': user_id, 'role': access.normalize_role(role),
-            'department_code': department_code,
-            'headed_department_ids': list(headed_ids or []),
-            'headed_department_codes': list(headed_codes or []),
-        }
+        ctx = _people_context(user_id, role, department_code, headed_ids, headed_codes)
         if access.can_issue(ctx) or access.can_manage(ctx):
             people.append({'id': user_id, 'name': name, 'city': city,
                            'has_telegram': bool(has_telegram)})
@@ -672,3 +681,153 @@ def notify_recipients(cursor, settings):
     # закупке: пишем главе, как если бы список был пуст.
     return (deliverable(settings.get('notify_user_ids') or [])
             or deliverable(front_office_head_ids(cursor)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Доступ к выдаче по офисам
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Офисник из списка (access.ISSUER_USER_IDS) выдаёт воду только в офисах, к
+# которым ему выдан доступ (владелец 23.10.2026). Строки доступа раздаёт
+# руководитель в «Настройках»; каждая выдача и снятие — строка журнала.
+
+# Легли ли таблицы доступа. Схема раздела разворачивается одним SAVEPOINT, но
+# эти таблицы моложе остальных: не легли на живой базе — раздел работает как
+# работал (schema_is_ready смотрит на water_issues), а доступ по офисам честно
+# говорит «разворачивается». Однажды увиденные таблицы не исчезают, поэтому
+# после первого «есть» база больше не спрашивается.
+_access_tables_seen = False
+
+
+def access_ready(cursor):
+    global _access_tables_seen
+    if _access_tables_seen:
+        return True
+    cursor.execute("SELECT to_regclass('public.water_issuer_offices') IS NOT NULL "
+                   "AND to_regclass('public.water_access_log') IS NOT NULL")
+    row = cursor.fetchone()
+    _access_tables_seen = bool(row and row[0])
+    return _access_tables_seen
+
+
+def issue_office_ids(cursor, user_id):
+    """Офисы учёта (`water_offices.id`), где сотрудник выдаёт воду.
+
+    Таблиц доступа нет — пустой список: «только по доступным офисам» без строк
+    доступа не открывает ни одного (access.issue_office_ids).
+    """
+    if not access_ready(cursor):
+        return []
+    cursor.execute('SELECT water_office_id FROM water_issuer_offices WHERE user_id = %s '
+                   'ORDER BY water_office_id', (int(user_id),))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def issuer_candidates(cursor):
+    """Кому руководитель раздаёт доступ по офисам: сотрудники фронт-офисов,
+    которым открыт раздел и которые выдают воду по доступу
+    (access.issues_by_office_grant), — офисники из списка.
+
+    Отбор — правилами access.py, а не своей копией в SQL: разойдись они,
+    экран предлагал бы выдать доступ тому, кто в раздел не войдёт.
+    Руководителя и супер-админов здесь нет: они выдают в любом офисе.
+    """
+    cursor.execute(
+        """
+        SELECT u.id, u.name, u.city, u.role, d.code,%s
+          FROM users u
+          JOIN departments d ON d.id = u.department_id
+         WHERE d.code = %%s
+           AND COALESCE(u.status, '') <> 'fired'
+         ORDER BY u.name, u.id
+        """ % _HEADED_SQL, (access.ISSUE_DEPARTMENT_CODE,))
+    people = []
+    for user_id, name, city, role, department_code, headed_ids, headed_codes in cursor.fetchall():
+        ctx = _people_context(user_id, role, department_code, headed_ids, headed_codes)
+        if access.issues_by_office_grant(ctx):
+            people.append({'id': user_id, 'name': name,
+                           'city': str(city or '').strip() or None})
+    return people
+
+
+def access_state(cursor):
+    """Экран «Доступ к выдаче»: офисы учёта, кто в каждом выдаёт и кому
+    доступ можно выдать.
+
+    Офисы — только те, что в учёте: в выведенном воду не выдают, и его строки
+    доступа просто ждут возвращения офиса. Кто выдаёт — только из нынешних
+    кандидатов: уволенный или переведённый из фронт-офисов остаётся в таблице
+    (вернётся — вернётся и доступ), но в окне его нет и в счёт он не идёт.
+
+    changed — последняя запись журнала офиса: кто и когда менял доступ;
+    by_seed — её сделал переход по городу сотрудника, а не человек.
+    """
+    people = issuer_candidates(cursor)
+    known = {person['id'] for person in people}
+    cursor.execute('SELECT id, city, name, address FROM water_offices WHERE is_active '
+                   'ORDER BY city, name, id')
+    offices = [{'id': row[0], 'city': row[1], 'name': row[2], 'address': row[3],
+                'user_ids': [], 'changed': None} for row in cursor.fetchall()]
+    by_id = {office['id']: office for office in offices}
+    if by_id:
+        cursor.execute(
+            'SELECT water_office_id, user_id FROM water_issuer_offices '
+            'WHERE water_office_id = ANY(%s) ORDER BY water_office_id, user_id', (sorted(by_id),))
+        for office_id, user_id in cursor.fetchall():
+            if user_id in known:
+                by_id[office_id]['user_ids'].append(user_id)
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (water_office_id) water_office_id, actor_user_id, actor_name, created_at
+              FROM water_access_log
+             WHERE water_office_id = ANY(%s)
+             ORDER BY water_office_id, id DESC
+            """, (sorted(by_id),))
+        for office_id, actor_id, actor_name, created_at in cursor.fetchall():
+            by_id[office_id]['changed'] = {
+                'by_name': actor_name, 'at': _iso(created_at),
+                'by_seed': actor_id is None and not actor_name,
+            }
+    return {'offices': offices, 'people': people}
+
+
+def apply_access_changes(cursor, *, grants, revokes, actor):
+    """Выдать и снять доступ разом — три запроса на любое число пар.
+
+    grants, revokes — пары (user_id, water_office_id). Пара, которая уже такая
+    (выдают выданное, снимают снятое), не пишет ничего — ни строки доступа, ни
+    журнала: второй руководитель мог успеть сделать то же самое минутой раньше.
+    Возвращает изменённые пары: [(user_id, water_office_id, granted)].
+    """
+    changed = []
+    if grants:
+        users, offices = zip(*grants)
+        cursor.execute(
+            """
+            INSERT INTO water_issuer_offices (user_id, water_office_id)
+            SELECT * FROM unnest(%s::int[], %s::int[])
+            ON CONFLICT DO NOTHING
+            RETURNING user_id, water_office_id
+            """, (list(users), list(offices)))
+        changed += [(row[0], row[1], True) for row in cursor.fetchall()]
+    if revokes:
+        users, offices = zip(*revokes)
+        cursor.execute(
+            """
+            DELETE FROM water_issuer_offices a
+             USING unnest(%s::int[], %s::int[]) AS r(user_id, water_office_id)
+             WHERE a.user_id = r.user_id AND a.water_office_id = r.water_office_id
+            RETURNING a.user_id, a.water_office_id
+            """, (list(users), list(offices)))
+        changed += [(row[0], row[1], False) for row in cursor.fetchall()]
+    if changed:
+        users, offices, flags = zip(*changed)
+        cursor.execute(
+            """
+            INSERT INTO water_access_log (water_office_id, user_id, user_name, granted,
+                                          actor_user_id, actor_name)
+            SELECT c.water_office_id, c.user_id, u.name, c.granted, %s, %s
+              FROM unnest(%s::int[], %s::int[], %s::bool[]) AS c(user_id, water_office_id, granted)
+              LEFT JOIN users u ON u.id = c.user_id
+            """, (actor['user_id'], actor.get('name'), list(users), list(offices), list(flags)))
+    return changed

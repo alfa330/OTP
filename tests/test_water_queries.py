@@ -230,5 +230,104 @@ class RecipientsTests(unittest.TestCase):
         self.assertIn("COALESCE(u.status, '') <> 'fired'", cursor.sql[0][0])
 
 
+
+class OfficeAccessQueriesTests(unittest.TestCase):
+    """Доступ к выдаче по офисам (23.10.2026): кто кандидат, что видит окно,
+    как пишутся выдача и снятие. Сам SQL проверен на настоящем Postgres
+    (tests/test_water_access_postgres.py)."""
+
+    def setUp(self):
+        queries._access_tables_seen = False
+        self.addCleanup(setattr, queries, '_access_tables_seen', False)
+
+    def test_candidates_are_listed_issuers_only(self):
+        """Кому раздают доступ — офисникам из списка, которым открыт раздел:
+        отбор правилами water.access. Руководителя и супер-админа здесь нет —
+        они выдают в любом офисе."""
+        # id, name, city, role, department, headed ids, headed codes
+        rows = [
+            (424, 'Офисник из списка', ' Алматы ', 'operator', 'front_office', [], []),
+            (425, 'Офисник без города', None, 'operator', 'front_office', [], []),
+            (10, 'Офисник не из списка', 'Шымкент', 'operator', 'front_office', [], []),
+            (532, 'Руководитель', None, 'admin', 'front_office', [909], ['front_office']),
+            (1, 'Супер-админ во фронт-офисах', None, 'super_admin', 'front_office', [], []),
+        ]
+        cursor = ScriptedCursor(rows)
+        people = queries.issuer_candidates(cursor)
+        self.assertEqual(people, [{'id': 424, 'name': 'Офисник из списка', 'city': 'Алматы'},
+                                  {'id': 425, 'name': 'Офисник без города', 'city': None}])
+        sql, params = cursor.sql[0]
+        self.assertIn("COALESCE(u.status, '') <> 'fired'", sql)
+        self.assertEqual(params, ('front_office',))
+
+    def test_rows_are_read_only_once_the_tables_are_seen(self):
+        cursor = ScriptedCursor([(True,)], [(1,), (2,)], [(2,)])
+        self.assertEqual(queries.issue_office_ids(cursor, 424), [1, 2])
+        self.assertEqual(queries.issue_office_ids(cursor, 425), [2])
+        self.assertEqual(len(cursor.sql), 3)  # проверка таблиц — один раз
+        self.assertIn('to_regclass', cursor.sql[0][0])
+
+    def test_missing_tables_give_no_office_and_are_asked_again(self):
+        cursor = ScriptedCursor([(False,)], [(True,)], [(7,)])
+        self.assertEqual(queries.issue_office_ids(cursor, 424), [])
+        self.assertEqual(len(cursor.sql), 1)  # строк доступа без таблиц не читали
+        # Таблицы легли (перезапуск разворота) — следующий запрос их видит.
+        self.assertEqual(queries.issue_office_ids(cursor, 424), [7])
+
+    def test_state_counts_only_current_candidates(self):
+        """Уволенный или переведённый остаётся в таблице доступа, но в окне его
+        нет и в счёт «кто выдаёт» он не идёт."""
+        at = datetime(2026, 10, 23, 18, 0)
+        cursor = ScriptedCursor(
+            [(424, 'Офисник', 'Алматы', 'operator', 'front_office', [], [])],
+            [(1, 'Алматы', 'Офис «Бизнес»', 'Байзакова 78А'), (2, 'Астана', 'Офис Астана', 'Сарыарка 31')],
+            [(1, 424), (1, 999)],
+            [(1, None, None, at), (2, 5, 'Руководитель', at)],
+        )
+        state = queries.access_state(cursor)
+        self.assertEqual(state['people'], [{'id': 424, 'name': 'Офисник', 'city': 'Алматы'}])
+        self.assertEqual([(office['id'], office['user_ids']) for office in state['offices']],
+                         [(1, [424]), (2, [])])
+        # Запись перехода сделал не человек — экран так и скажет.
+        self.assertEqual(state['offices'][0]['changed'],
+                         {'by_name': None, 'at': '2026-10-23T18:00:00', 'by_seed': True})
+        self.assertEqual(state['offices'][1]['changed']['by_name'], 'Руководитель')
+        self.assertFalse(state['offices'][1]['changed']['by_seed'])
+        self.assertIn('WHERE is_active', cursor.sql[1][0])
+        self.assertIn('DISTINCT ON (water_office_id)', cursor.sql[3][0])
+
+    def test_state_without_offices_asks_nothing_more(self):
+        cursor = ScriptedCursor([], [])
+        self.assertEqual(queries.access_state(cursor), {'offices': [], 'people': []})
+        self.assertEqual(len(cursor.sql), 2)
+
+    def test_changes_take_three_statements_whatever_their_number(self):
+        """Батч, а не запрос на пару; в журнал — только то, что изменилось на
+        самом деле (вставка и удаление сами говорят, что сделали)."""
+        grants = [(424, 1), (425, 1), (426, 2)]
+        revokes = [(419, 1), (421, 2)]
+        cursor = ScriptedCursor([(424, 1), (426, 2)], [(419, 1)], [])
+        changed = queries.apply_access_changes(cursor, grants=grants, revokes=revokes,
+                                               actor={'user_id': 5, 'name': 'Руководитель'})
+        self.assertEqual(changed, [(424, 1, True), (426, 2, True), (419, 1, False)])
+        self.assertEqual(len(cursor.sql), 3)
+        insert, delete, log = cursor.sql
+        self.assertIn('ON CONFLICT DO NOTHING', insert[0])
+        self.assertEqual(insert[1], ([424, 425, 426], [1, 1, 2]))
+        self.assertIn('DELETE FROM water_issuer_offices', delete[0])
+        self.assertEqual(delete[1], ([419, 421], [1, 2]))
+        self.assertIn('INSERT INTO water_access_log', log[0])
+        self.assertEqual(log[1], (5, 'Руководитель', [424, 426, 419], [1, 2, 1], [True, True, False]))
+
+    def test_nothing_changed_writes_no_log(self):
+        cursor = ScriptedCursor([], [])
+        changed = queries.apply_access_changes(cursor, grants=[(424, 1)], revokes=[(425, 2)],
+                                               actor={'user_id': 5, 'name': 'Руководитель'})
+        self.assertEqual(changed, [])
+        self.assertEqual(len(cursor.sql), 2)
+        self.assertEqual(queries.apply_access_changes(ScriptedCursor(), grants=[], revokes=[],
+                                                      actor={'user_id': 5}), [])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -5,7 +5,7 @@ import { IosToggle, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { driverAccountUrl, extractAccountId, fmtDate, fmtDateTime, fmtPhone } from '../parcels/parcelMeta';
 import {
-    blocksWord, defaultOfficeId, kindLabel, nextIssueLine, readLastOffice, rememberOffice,
+    blocksWord, defaultOfficeId, issueOffices, kindLabel, nextIssueLine, readLastOffice, rememberOffice,
     stockStatus, tariffLabel, verdictBasis, verdictHeadline,
 } from './waterMeta';
 import { T, WaterStepper, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill } from './waterUi';
@@ -21,6 +21,11 @@ import { T, WaterStepper, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill }
  *
  * Колл-центр видит тот же экран без офиса и без кнопки: проверяет право,
  * пока водитель на линии.
+ *
+ * Офисник выбирает только из офисов, к которым ему выдан доступ (владелец
+ * 23.10.2026, «Настройки» → «Доступ по офисам»). Не выдан ни один — воду он не
+ * выдаёт, но водителя проверить может, как колл-центр, и экран говорит, у кого
+ * просить доступ.
  */
 
 const WORK_STATUS = {
@@ -114,22 +119,32 @@ const DriverCard = ({ driver, programTariffs }) => {
    рядом: 41 px на компьютере (с xl), 48 px на большом экране. */
 const NOTE = `px-4 py-3 text-[13px] xl:py-2.5 2xl:px-5 2xl:py-3 ${T.body}`;
 
-const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOfficeUpdated, showToast }) => {
+const WaterIssue = ({
+    apiBaseUrl, headers, capabilities, settings, offices, onOfficeUpdated, onCapabilities, showToast,
+}) => {
     const canIssue = Boolean(capabilities?.can_issue);
     // offices: null — ещё грузятся, 'error' — не загрузились, иначе список.
     const officesReady = Array.isArray(offices);
+    // Офиснику — офисы, к которым выдан доступ; руководителю (null) — все.
+    const allowedIds = capabilities?.issue_office_ids;
+    const byGrant = Array.isArray(allowedIds);
     const activeOffices = useMemo(
-        () => (officesReady ? offices : []).filter((office) => office.is_active),
-        [offices, officesReady],
+        () => issueOffices((officesReady ? offices : []).filter((office) => office.is_active), allowedIds),
+        [offices, officesReady, allowedIds],
     );
+    /* Офисник без доступа ни к одному офису учёта воду не выдаёт — экран
+       становится проверкой, как у колл-центра. Дальше «выдаёт ли этот экран»
+       — officeMode, а не canIssue. */
+    const noOffice = canIssue && byGrant && officesReady && activeOffices.length === 0;
+    const officeMode = canIssue && !noOffice;
 
     const [officeId, setOfficeId] = useState(null);
     useEffect(() => {
-        if (!canIssue) return;
+        if (!officeMode) { setOfficeId(null); return; }
         setOfficeId((current) => (current && activeOffices.some((office) => office.id === current)
             ? current
-            : defaultOfficeId(activeOffices, capabilities?.default_city, readLastOffice())));
-    }, [activeOffices, canIssue, capabilities?.default_city]);
+            : defaultOfficeId(activeOffices, capabilities?.default_city, readLastOffice(), byGrant)));
+    }, [activeOffices, officeMode, byGrant, capabilities?.default_city]);
     const office = activeOffices.find((item) => item.id === officeId) || null;
 
     const [link, setLink] = useState('');
@@ -147,7 +162,7 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
 
     /* Курсор — в поле ID, как только его можно заполнять: у фронт-офиса поле
        заперто до выбора офиса, и autoFocus на запертом поле не срабатывал. */
-    const inputEnabled = !canIssue || Boolean(officeId);
+    const inputEnabled = !officeMode || Boolean(officeId);
     useEffect(() => {
         if (inputEnabled) inputRef.current?.focus();
     }, [inputEnabled]);
@@ -181,10 +196,10 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
     useEffect(() => {
         setIssued(null);
         if (!accountId) { setResult(null); setError(''); return undefined; }
-        if (canIssue && !officeId) return undefined;
-        const timer = setTimeout(() => check(accountId, canIssue ? officeId : null), 250);
+        if (officeMode && !officeId) return undefined;
+        const timer = setTimeout(() => check(accountId, officeMode ? officeId : null), 250);
         return () => clearTimeout(timer);
-    }, [accountId, officeId, canIssue, check]);
+    }, [accountId, officeId, officeMode, check]);
 
     const clear = () => {
         ticket.current += 1;
@@ -229,6 +244,11 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
         } catch (requestError) {
             const data = requestError?.response?.data || {};
             toastRef.current?.(data.error || 'Не удалось выдать воду', 'error');
+            /* Доступ к офису сняли, пока экран был открыт: свежие права пришли
+               в ответе — офис уходит из списка, и проверять водителя по нему
+               заново незачем. */
+            if (data.capabilities) onCapabilities?.(data.capabilities);
+            if (data.code === 'WATER_OFFICE_FORBIDDEN') return;
             if (ticket.current !== myTicket) return;
             // Сервер перепроверил и отказал — показываем его свежий вердикт; нет
             // его в ответе (гонка на приветственном, сеть) — проверяем заново,
@@ -256,7 +276,7 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
     const fieldsRow = canIssue && (!officesReady || activeOffices.length > 0);
     const granted = verdict?.allowed || issued;
     const showFk = needsFk && !issued;
-    const showIssue = canIssue && Boolean(verdict?.allowed) && !issued;
+    const showIssue = officeMode && Boolean(verdict?.allowed) && !issued;
 
     return (
         <div className="max-w-2xl space-y-3 xl:space-y-4 xl:max-w-none 2xl:space-y-5">
@@ -286,6 +306,11 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
                                 roomy
                                 ariaLabel="Офис"
                             />
+                        ) : byGrant ? (
+                            <div className={`${iosCard} ${NOTE} text-slate-500`}>
+                                Выдавать воду вам пока не открыто ни в одном офисе — доступ выдаёт руководитель
+                                фронт-офисов. Проверить водителя можно и сейчас.
+                            </div>
                         ) : (
                             <div className={`${iosCard} ${NOTE} text-slate-500`}>
                                 Офисы ещё не заведены в учёт.{capabilities?.can_manage
@@ -305,7 +330,7 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
                             placeholder="Ссылка на водителя во Флите или его ID"
                             value={link}
                             onChange={(event) => setLink(event.target.value)}
-                            disabled={(canIssue && !officeId) || issuing}
+                            disabled={(officeMode && !officeId) || issuing}
                         />
                         {(link || checking) && (
                             <button type="button" onClick={clear} aria-label="Очистить" disabled={issuing}
@@ -326,7 +351,7 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
                 <div className={`${iosCard} flex items-center justify-between gap-3 px-4 py-3 2xl:px-6 2xl:py-4`}>
                     <span className={`text-[13px] text-rose-600 ${T.body}`}>{error}</span>
                     <button type="button" className={wBtnGhost}
-                            onClick={() => check(accountId, canIssue ? officeId : null)}>
+                            onClick={() => check(accountId, officeMode ? officeId : null)}>
                         <RotateCcw size={14} className={wIcon} /> Ещё раз
                     </button>
                 </div>
@@ -382,7 +407,7 @@ const WaterIssue = ({ apiBaseUrl, headers, capabilities, settings, offices, onOf
 
                         {(showFk || showIssue || issued) && (
                             <div className="order-4 space-y-4 2xl:space-y-5">
-                                {showFk && (canIssue ? (
+                                {showFk && (officeMode ? (
                                     <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5 xl:px-4 xl:py-3 2xl:rounded-2xl 2xl:px-6 2xl:py-4">
                                         <span className="min-w-0">
                                             <span className={`block text-[13.5px] text-slate-800 ${T.body}`}>ФК пройден — проверил во Флите</span>

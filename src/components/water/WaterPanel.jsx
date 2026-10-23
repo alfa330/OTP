@@ -23,8 +23,8 @@ import { T, wIcon, wTabs } from './waterUi';
  *   Проверка   — то же без кнопки «Выдать» (колл-центр СЗоВ и ОП)
  *   Остатки    — дашборд по офисам; поступления, пересчёт, пороги — руководителю
  *   Журнал     — история выдач с фильтрами и выгрузкой (руководителю)
- *   Настройки  — условия программы (руководителю); остальным — «Условия»,
- *                то же только для чтения
+ *   Настройки  — условия программы и доступ по офисам (руководителю);
+ *                остальным — «Условия», то же только для чтения
  */
 
 const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
@@ -144,6 +144,7 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                     settings={settings}
                     offices={offices}
                     onOfficeUpdated={officeUpdated}
+                    onCapabilities={setCapabilities}
                     showToast={showToast}
                 />
             )}

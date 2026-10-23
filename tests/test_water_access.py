@@ -6,6 +6,8 @@
     офисов (глава «Фронт офисы»); админ-сотрудник СЗоВ их не получает;
   * выдают воду поимённо названные офисники, руководитель и супер-админ;
     офисник не из списка в раздел не входит;
+  * офисник выдаёт только в офисах, к которым ему выдан доступ (23.10.2026),
+    руководитель и супер-админ — в любом;
   * колл-центр СЗоВ в любой роли — остатки, условия и проверка, без выдачи;
   * отдел продаж (ОП) — то же, что СЗоВ (02.10.2026);
   * тренер — как операторы своего отдела;
@@ -170,12 +172,60 @@ class QrTests(unittest.TestCase):
         self.assertFalse(access.requires_sensitive_qr(ctx(role='super_admin')))
 
 
+class OfficeGrantTests(unittest.TestCase):
+    """«…выдаём доступ, чтобы они могли выдавать воду только по доступным им
+    офисам» (владелец 23.10.2026). Офисы — строки доступа из контекста."""
+
+    def test_issuer_issues_only_in_granted_offices(self):
+        issuer = dict(ctx(user_id=ISSUER), issue_office_ids=[2, 1, 2])
+        self.assertTrue(access.issues_by_office_grant(issuer))
+        self.assertEqual(access.issue_office_ids(issuer), [1, 2])
+        self.assertTrue(access.can_issue_in_office(issuer, 1))
+        self.assertTrue(access.can_issue_in_office(issuer, '2'))
+        self.assertFalse(access.can_issue_in_office(issuer, 3))
+        self.assertFalse(access.can_issue_in_office(issuer, None))
+        self.assertFalse(access.can_issue_in_office(issuer, 'x'))
+
+    def test_no_rows_mean_no_office_not_every_office(self):
+        """Строк доступа нет (не выданы, не прочитались) — ни одного офиса, а не
+        «любой»: так было до 23.10.2026, и правило владельца именно это сняло."""
+        for issuer in (ctx(user_id=ISSUER), dict(ctx(user_id=ISSUER), issue_office_ids=None),
+                       dict(ctx(user_id=ISSUER), issue_office_ids=[])):
+            self.assertEqual(access.issue_office_ids(issuer), [])
+            self.assertFalse(access.can_issue_in_office(issuer, 1))
+            # Раздел при этом открыт, и человек — по-прежнему из выдающих.
+            self.assertTrue(access.can_open_section(issuer))
+            self.assertTrue(access.can_issue(issuer))
+
+    def test_manager_and_super_admin_issue_anywhere_without_rows(self):
+        for boss in (manager(), ctx(role='super_admin', department_code='szov')):
+            self.assertFalse(access.issues_by_office_grant(boss))
+            self.assertIsNone(access.issue_office_ids(boss))
+            self.assertTrue(access.can_issue_in_office(boss, 7))
+            # Даже чужие строки в контексте их не сужают.
+            self.assertTrue(access.can_issue_in_office(dict(boss, issue_office_ids=[1]), 7))
+
+    def test_those_who_do_not_issue_get_no_office_even_with_rows(self):
+        for person in (ctx(department_code='szov'), ctx(department_code='op'),
+                       ctx(role='admin', department_code='szov', headed_codes=('szov',)),
+                       ctx(user_id=10), ctx(department_code='tez', user_id=ISSUER),
+                       ctx(department_code='szov', user_id=ISSUER)):
+            person = dict(person, issue_office_ids=[1])
+            self.assertFalse(access.issues_by_office_grant(person), person)
+            self.assertEqual(access.issue_office_ids(person), [], person)
+            self.assertFalse(access.can_issue_in_office(person, 1), person)
+
+
 class CapabilitiesTests(unittest.TestCase):
     def test_capabilities_of_an_issuer(self):
-        self.assertEqual(access.capabilities(ctx(city='Алматы', user_id=ISSUER)), {
-            'can_open': True, 'can_issue': True, 'can_manage': False, 'can_view_journal': False,
-            'requires_qr': True, 'is_global_admin': False, 'default_city': 'Алматы',
+        self.assertEqual(access.capabilities(dict(ctx(city='Алматы', user_id=ISSUER), issue_office_ids=[1])), {
+            'can_open': True, 'can_issue': True, 'issue_office_ids': [1], 'can_manage': False,
+            'can_view_journal': False, 'requires_qr': True, 'is_global_admin': False, 'default_city': 'Алматы',
         })
+
+    def test_offices_of_the_manager_and_the_call_centre(self):
+        self.assertIsNone(access.capabilities(manager())['issue_office_ids'])
+        self.assertEqual(access.capabilities(ctx(department_code='szov'))['issue_office_ids'], [])
 
     def test_capabilities_of_the_call_centre(self):
         caps = access.capabilities(ctx(department_code='szov'))

@@ -32,7 +32,16 @@
 * **Настройки — одна строка (`id = 1`).** Условия программы и пороги по
   умолчанию меняет региональный руководитель; свой порог офиса лежит в строке
   офиса и перекрывает общий (NULL — «как у всех»).
+
+* **Где сотрудник выдаёт воду — пара «сотрудник, офис» (23.10.2026).**
+  Владелец: «выдаём доступ, чтобы они могли выдавать воду только по доступным
+  им офисам». Нет пары — в этом офисе не выдаёт; руководителю и супер-админу
+  пары не нужны, они выдают везде (access.py). Каждая выдача и снятие доступа
+  — строка `water_access_log`: кто, кому, где и когда; по последней строке
+  офиса экран пишет «Изменено …».
 """
+
+from .access import ISSUE_DEPARTMENT_CODE, ISSUER_USER_IDS
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
@@ -159,6 +168,35 @@ _STATEMENTS = [
     )
     """ % _NOW,
 
+    # Доступ к выдаче по офисам: сотрудник фронт-офиса выдаёт воду только в
+    # офисах, где у него есть строка. Удалили сотрудника или офис — уходит и
+    # строка: выдавать там больше некому и негде.
+    """
+    CREATE TABLE IF NOT EXISTS water_issuer_offices (
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        water_office_id  INTEGER NOT NULL REFERENCES water_offices(id) ON DELETE CASCADE,
+        created_at       TIMESTAMP NOT NULL DEFAULT %s,
+        PRIMARY KEY (user_id, water_office_id)
+    )
+    """ % _NOW,
+
+    # След выдачи и снятия доступа. Имена — снимком: сотрудника потом
+    # переименуют или уволят, а запись о том, кто кому что открыл, остаётся.
+    # actor_* пусты у записей перехода (seed_issuer_offices) — их сделал не
+    # человек, а разворот схемы.
+    """
+    CREATE TABLE IF NOT EXISTS water_access_log (
+        id               SERIAL PRIMARY KEY,
+        water_office_id  INTEGER NOT NULL REFERENCES water_offices(id) ON DELETE CASCADE,
+        user_id          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        user_name        VARCHAR(200),
+        granted          BOOLEAN NOT NULL,
+        actor_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        actor_name       VARCHAR(200),
+        created_at       TIMESTAMP NOT NULL DEFAULT %s
+    )
+    """ % _NOW,
+
     "INSERT INTO water_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
 
     "CREATE INDEX IF NOT EXISTS idx_water_offices_active ON water_offices(is_active, city, name)",
@@ -181,7 +219,41 @@ _STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_water_welcome_iin_live "
     "ON water_issues(driver_iin) WHERE kind = 'welcome' AND driver_iin IS NOT NULL "
     "AND canceled_at IS NULL",
+    # Ключ (user_id, water_office_id) отвечает «где выдаёт сотрудник»; экрану
+    # доступа нужно и обратное — «кто выдаёт в офисе».
+    "CREATE INDEX IF NOT EXISTS idx_water_issuer_offices_office ON water_issuer_offices(water_office_id)",
+    "CREATE INDEX IF NOT EXISTS idx_water_access_log_office "
+    "ON water_access_log(water_office_id, id DESC)",
 ]
+
+# Переход на доступ по офисам (решение владельца 23.10.2026: «по их городу»).
+# До него офисники из списка выдавали воду в любом офисе учёта. Чтобы выдача не
+# встала в минуту выкладки, каждый получает офисы своего города (`users.city`
+# против города офиса) — алматинцы офис Алматы, астанинцы офис Астаны; дальше
+# доступ правит руководитель. Только пока журнал доступа пуст: первая же правка
+# (выдача или снятие) пишет его, и переход больше не повторяется — ни при
+# следующем развороте, ни после того, как руководитель снял всё до последнего.
+# Двум процессам, развернувшим схему одновременно, хватит одного перехода:
+# повторную пару отсекает ключ, а в журнал идут только вставленные строки.
+SEED_ISSUER_OFFICES_SQL = """
+    WITH seeded AS (
+        INSERT INTO water_issuer_offices (user_id, water_office_id)
+        SELECT u.id, o.id
+          FROM users u
+          JOIN departments d ON d.id = u.department_id AND d.code = %(department)s
+          JOIN water_offices o ON o.is_active
+                              AND LOWER(TRIM(o.city)) = LOWER(TRIM(u.city))
+         WHERE u.id = ANY(%(user_ids)s)
+           AND COALESCE(u.status, '') <> 'fired'
+           AND NOT EXISTS (SELECT 1 FROM water_access_log)
+        ON CONFLICT DO NOTHING
+        RETURNING user_id, water_office_id
+    )
+    INSERT INTO water_access_log (water_office_id, user_id, user_name, granted)
+    SELECT s.water_office_id, s.user_id, u.name, TRUE
+      FROM seeded s
+      JOIN users u ON u.id = s.user_id
+"""
 
 # Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами (порядок держит
 # init_water_schema, см. parcels/schema.py — у «Обращений» обратный порядок
@@ -227,6 +299,8 @@ def init_water_schema(cursor):
     for statement in _STATEMENTS:
         if not _is_table(statement):
             cursor.execute(statement)
+    cursor.execute(SEED_ISSUER_OFFICES_SQL, {
+        'department': ISSUE_DEPARTMENT_CODE, 'user_ids': list(ISSUER_USER_IDS)})
 
 
 def schema_is_ready(cursor):

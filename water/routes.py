@@ -91,6 +91,12 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
                     with db._get_cursor() as cursor:
                         ctx = queries.load_access_context(cursor, requester_id)
+                        # Где офисник выдаёт воду — строки доступа по офисам.
+                        # Остальным они не нужны: руководитель и супер-админ
+                        # выдают везде, колл-центр — нигде.
+                        if ctx and access.issues_by_office_grant(ctx):
+                            ctx['issue_office_ids'] = queries.issue_office_ids(
+                                cursor, ctx['user_id'])
                     if not ctx:
                         return jsonify({"error": "Пользователь не найден"}), 404
 
@@ -458,6 +464,16 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         water_office_id = _int(data.get('water_office_id'))
         if not water_office_id:
             return _bad('Выберите офис, в котором выдаёте воду', 'WATER_OFFICE_REQUIRED')
+        # Офисник выдаёт только там, где ему выдан доступ (23.10.2026). Свежие
+        # права едут в ответ: экран, открытый до того, как доступ сняли,
+        # уберёт офис из списка, а не будет предлагать его снова.
+        if not access.can_issue_in_office(ctx, water_office_id):
+            return jsonify({
+                "error": "Выдавать воду в этом офисе вам не открыто — доступ по офисам "
+                         "выдаёт руководитель фронт-офисов",
+                "code": "WATER_OFFICE_FORBIDDEN",
+                "capabilities": access.capabilities(ctx),
+            }), 403
         requested = data.get('blocks')
         blocks = _int(requested) if requested not in (None, '') else None
         if requested not in (None, '') and (blocks is None or blocks < 1):
@@ -703,6 +719,67 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         payload['notify_user_ids'] = saved['notify_user_ids']
         return jsonify({"settings": payload})
 
+    # ── Доступ к выдаче по офисам ────────────────────────────────────────
+    # Владелец 23.10.2026: «выбираем офис, далее из фронт-офисников выбираем
+    # людей, которым открыт данный раздел, и выдаём доступ, чтобы они могли
+    # выдавать воду только по доступным им офисам». Раздаёт тот, кто ведёт
+    # учёт (need='manage').
+    def _access_not_ready(cursor):
+        if not schema.schema_is_ready(cursor) or not queries.access_ready(cursor):
+            return _not_ready()
+        return None
+
+    @water_route('/access', need='manage')
+    def water_access(ctx):
+        with db._get_cursor() as cursor:
+            not_ready = _access_not_ready(cursor)
+            if not_ready:
+                return not_ready
+            state = queries.access_state(cursor)
+        return jsonify({"access": state})
+
+    @water_route('/access', methods=('PATCH',), need='manage')
+    def water_access_update(ctx):
+        """Выдать и снять доступ — разницей: только те пары «офис, сотрудник»,
+        которые руководитель переключил. Целым списком офиса нельзя: два
+        руководителя, правящие разных людей одного офиса, затирали бы друг
+        друга. Отказ несёт свежее состояние — окно перерисуется по нему."""
+        changes, error = _access_changes(_payload())
+        if error:
+            return error
+        with db._get_cursor() as cursor:
+            not_ready = _access_not_ready(cursor)
+            if not_ready:
+                return not_ready
+            state = queries.access_state(cursor)
+            offices = {office['id'] for office in state['offices']}
+            people = {person['id'] for person in state['people']}
+            if any(office_id not in offices for office_id, _user, _granted in changes):
+                return jsonify({
+                    "error": "Этого офиса уже нет в учёте — окно обновлено, проверьте выбор",
+                    "code": "WATER_OFFICE_NOT_FOUND", "access": state,
+                }), 404
+            # Снять можно у любого — хоть у уволенного; выдать — только тому,
+            # кому открыт раздел и кто выдаёт воду по доступу.
+            if any(user_id not in people for _office, user_id, granted in changes if granted):
+                return jsonify({
+                    "error": "Выдать доступ можно только сотруднику фронт-офисов, которому "
+                             "открыт раздел, — окно обновлено, проверьте выбор",
+                    "code": "WATER_ACCESS_PERSON_UNKNOWN", "access": state,
+                }), 400
+            changed = queries.apply_access_changes(
+                cursor,
+                grants=[(user_id, office_id) for office_id, user_id, granted in changes if granted],
+                revokes=[(user_id, office_id) for office_id, user_id, granted in changes if not granted],
+                actor=_actor(ctx)) if changes else []
+            if changed:
+                state = queries.access_state(cursor)
+        if changed:
+            logging.info('Вода: доступ по офисам — выдано %d, снято %d, менял %s',
+                         sum(1 for item in changed if item[2]),
+                         sum(1 for item in changed if not item[2]), ctx.get('name'))
+        return jsonify({"access": state})
+
     return bp
 
 
@@ -858,6 +935,37 @@ def _settings_fields(data):
             return None, _bad('Слишком много получателей', 'WATER_SETTINGS_INVALID')
         fields['notify_user_ids'] = ids
     return fields, None
+
+
+_MAX_ACCESS_CHANGES = 500
+_ACCESS_CHANGES_ERROR = 'Изменения доступа — список пар «офис, сотрудник, выдан ли»'
+
+
+def _access_changes(data):
+    """[(water_office_id, user_id, granted)] из тела PATCH /access.
+
+    `granted` — только настоящее да/нет: строка «false» из чужого клиента иначе
+    сошла бы за «да» и молча открыла бы офис. Одна пара дважды — тоже отказ:
+    какое из двух решений верное, сервер не знает.
+    """
+    raw = data.get('changes')
+    if not isinstance(raw, list) or len(raw) > _MAX_ACCESS_CHANGES:
+        return None, _bad(_ACCESS_CHANGES_ERROR, 'WATER_ACCESS_CHANGES_INVALID')
+    changes, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict):
+            return None, _bad(_ACCESS_CHANGES_ERROR, 'WATER_ACCESS_CHANGES_INVALID')
+        office_id = _int(item.get('water_office_id'))
+        user_id = _int(item.get('user_id'))
+        granted = item.get('granted')
+        if not office_id or office_id < 1 or not user_id or user_id < 1 or not isinstance(granted, bool):
+            return None, _bad(_ACCESS_CHANGES_ERROR, 'WATER_ACCESS_CHANGES_INVALID')
+        if (office_id, user_id) in seen:
+            return None, _bad('Один и тот же сотрудник в одном офисе указан дважды',
+                              'WATER_ACCESS_CHANGES_INVALID')
+        seen.add((office_id, user_id))
+        changes.append((office_id, user_id, granted))
+    return changes, None
 
 
 def _filters_from_args(args):

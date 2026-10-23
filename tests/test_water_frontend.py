@@ -5,7 +5,9 @@
     QR-замком, что «Посылки»; «Посылки» при этом не тронуты;
   * подписи тарифов и видов выдачи на экране и в файле — одни и те же;
   * схема разворачивается при старте, Blueprint подключён со всеми зависимостями;
-  * DDL держит главное: остаток не уходит в минус, приветственный — один.
+  * DDL держит главное: остаток не уходит в минус, приветственный — один;
+  * доступ к выдаче по офисам: строка в «Настройках», «Выдача» офисника — только
+    по его офисам, переход по городу сотрудника (23.10.2026).
 """
 
 import json
@@ -449,7 +451,9 @@ class LargeScreenTests(unittest.TestCase):
                 for tag in _jsx_tags(source, tag_name):
                     seen[tag_name] = seen.get(tag_name, 0) + 1
                     self.assertRegex(tag, r'\broomy\b', '%s: %s' % (name, tag[:70]))
-        self.assertEqual(seen, {'CustomSelect': 8, 'IosDateRangePicker': 2, 'IosDateRangeCalendar': 1})
+        # Девятый список — офис в окне «Доступ по офисам», когда офисов в учёте
+        # больше трёх (до трёх там сегменты).
+        self.assertEqual(seen, {'CustomSelect': 9, 'IosDateRangePicker': 2, 'IosDateRangeCalendar': 1})
 
     def test_shared_pickers_are_unchanged_without_the_flag(self):
         select = _read(ROOT / 'src' / 'components' / 'ui' / 'CustomSelect.jsx')
@@ -720,6 +724,100 @@ class SchemaTests(unittest.TestCase):
         tables = [i for i, s in enumerate(executed) if 'CREATE TABLE' in s.upper()]
         others = [i for i, s in enumerate(executed) if 'CREATE TABLE' not in s.upper()]
         self.assertLess(max(tables), min(others))
+
+
+class OfficeAccessSchemaTests(unittest.TestCase):
+    """Где офисник выдаёт воду — пары «сотрудник, офис» и журнал их правок."""
+
+    def setUp(self):
+        self.ddl = '\n'.join(schema._STATEMENTS)
+
+    def test_pair_is_the_key_and_leaves_with_the_person_or_office(self):
+        table = self.ddl.split('CREATE TABLE IF NOT EXISTS water_issuer_offices')[1].split('"""')[0]
+        self.assertIn('PRIMARY KEY (user_id, water_office_id)', table)
+        self.assertIn('REFERENCES users(id) ON DELETE CASCADE', table)
+        self.assertIn('REFERENCES water_offices(id) ON DELETE CASCADE', table)
+        self.assertIn('ON water_issuer_offices(water_office_id)', self.ddl)
+        self.assertIn('ON water_access_log(water_office_id, id DESC)', self.ddl)
+
+    def test_transition_seeds_offices_of_the_own_city_once(self):
+        """«По их городу» (владелец 23.10.2026): офисники из списка получают
+        офисы своего города — один раз, пока журнал доступа пуст."""
+        executed = []
+
+        class Cursor:
+            def execute(self, statement, params=None):
+                executed.append((statement, params))
+
+        schema.init_water_schema(Cursor())
+        seed, params = executed[-1]
+        self.assertIs(seed, schema.SEED_ISSUER_OFFICES_SQL)
+        self.assertEqual(params, {'department': 'front_office', 'user_ids': list(access.ISSUER_USER_IDS)})
+        for part in ('NOT EXISTS (SELECT 1 FROM water_access_log)', 'ON CONFLICT DO NOTHING',
+                     'JOIN water_offices o ON o.is_active',
+                     'LOWER(TRIM(o.city)) = LOWER(TRIM(u.city))', "COALESCE(u.status, '') <> 'fired'",
+                     'INSERT INTO water_access_log'):
+            self.assertIn(part, seed)
+        # Записи перехода — без «кто менял»: их сделал разворот, а не человек.
+        self.assertNotIn('actor_name', seed)
+
+
+class OfficeAccessWiringTests(unittest.TestCase):
+    """«Кнопка выдачи доступов по офисам» в «Настройках» и «Выдача» по ним."""
+
+    def setUp(self):
+        self.settings = _read(WATER / 'WaterSettings.jsx')
+        self.access = _read(WATER / 'WaterAccess.jsx')
+        self.issue = _read(WATER / 'WaterIssue.jsx')
+        self.panel = _read(PANEL)
+
+    def test_settings_open_with_the_access_row_outside_the_form_lock(self):
+        """Строка сохраняется своим окном, а не «Сохранить» формы: она стоит над
+        формой условий и вне её замка (pointer-events-none до ответа и во время
+        сохранения)."""
+        row = self.settings.index('<WaterAccess apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />')
+        lock = self.settings.index("${locked ? 'pointer-events-none' : ''}")
+        self.assertLess(row, lock)
+        self.assertLess(row, self.settings.index('<Section title="Право на воду">'))
+
+    def test_window_sends_only_toggled_pairs(self):
+        self.assertIn('axios.patch(`${apiBaseUrl}/api/water/access`, { changes }', self.access)
+        self.assertIn('accessChanges(draft, access)', self.access)
+        self.assertIn('disabled={!dirty || saving}', self.access)
+        self.assertIn("axios.get(`${apiBaseUrl}/api/water/access`", self.access)
+        routes_source = _read(ROOT / 'water' / 'routes.py')
+        self.assertIn("@water_route('/access', methods=('PATCH',), need='manage')", routes_source)
+        self.assertIn("@water_route('/access', need='manage')", routes_source)
+
+    def test_two_or_three_offices_are_segments_with_a_hint_for_people(self):
+        self.assertIn('offices.length <= 3 ? (', self.access)
+        segments = _jsx_tags(self.access, 'IosSegmented')
+        self.assertEqual(len(segments), 1)
+        self.assertIn('stretch', segments[0])
+        hint = re.search(r"const PEOPLE_HINT = ((?:\s*\+?\s*'[^']*')+);", self.access).group(1)
+        hint = ''.join(re.findall(r"'([^']*)'", hint))
+        self.assertIn('которым открыт раздел', hint)
+        self.assertIn('супер-админы выдают воду в любом офисе', hint)
+
+    def test_issue_screen_offers_only_granted_offices(self):
+        self.assertIn('issueOffices((officesReady ? offices : []).filter((office) => office.is_active), allowedIds)',
+                      self.issue)
+        self.assertIn('const allowedIds = capabilities?.issue_office_ids;', self.issue)
+        self.assertIn('readLastOffice(), byGrant)', self.issue)
+        # Без единого офиса — проверка, как у колл-центра, и слова, у кого просить доступ.
+        self.assertIn('const officeMode = canIssue && !noOffice;', self.issue)
+        self.assertIn('const showIssue = officeMode && Boolean(verdict?.allowed) && !issued;', self.issue)
+        self.assertIn('доступ выдаёт руководитель', self.issue)
+
+    def test_revoked_office_leaves_the_list_on_the_refusal(self):
+        """Доступ сняли, пока экран открыт: отказ сервера несёт свежие права, и
+        офис уходит из списка, а не предлагается снова."""
+        self.assertIn('if (data.capabilities) onCapabilities?.(data.capabilities);', self.issue)
+        self.assertIn("if (data.code === 'WATER_OFFICE_FORBIDDEN') return;", self.issue)
+        self.assertIn('onCapabilities={setCapabilities}', self.panel)
+        routes_source = _read(ROOT / 'water' / 'routes.py')
+        forbidden = routes_source.split('"code": "WATER_OFFICE_FORBIDDEN",')[1][:80]
+        self.assertIn('"capabilities": access.capabilities(ctx)', forbidden)
 
 
 class DriverCardNoteTests(unittest.TestCase):

@@ -281,12 +281,102 @@ export const rememberOffice = (id) => {
    Тогда не подставляется ничего, даже свой: чужой могли выбрать и намеренно,
    подменяя коллегу, — пусть человек решит сам. Своего города в учёте нет —
    запомненный остаётся: сверять не с чем. Единственный офис вообще
-   подставляется только тому, у кого город не указан. Иначе человек выбирает сам. */
-export const defaultOfficeId = (offices, city, remembered) => {
+   подставляется только тому, у кого город не указан. Иначе человек выбирает сам.
+
+   granted — список уже сужен доступом по офисам (issueOffices): это офисы,
+   которые руководитель открыл именно этому человеку, и единственный из них
+   подставляется сам, какого бы города он ни был — открыли астанинцу офис
+   Алматы на время отпуска коллеги, значит, там он сейчас и выдаёт. */
+export const defaultOfficeId = (offices, city, remembered, granted = false) => {
     const active = (offices || []).filter((office) => office.is_active !== false);
     const own = active.filter((office) => office.city === city);
     const last = active.find((office) => office.id === remembered);
     if (last) return !city || !own.length || last.city === city ? last.id : null;
+    if (granted && active.length === 1) return active[0].id;
     if (city) return own.length === 1 ? own[0].id : null;
     return active.length === 1 ? active[0].id : null;
+};
+
+/* ── Доступ к выдаче по офисам (владелец 23.10.2026) ─────────────────────────
+   «Выбираем офис, далее из фронт-офисников выбираем людей, которым открыт
+   данный раздел, и выдаём доступ, чтобы они могли выдавать воду только по
+   доступным им офисам». Сервер — water/access.py и PATCH /api/water/access. */
+
+/* Офисы «Выдачи»: офиснику — только те, к которым ему выдан доступ
+   (`capabilities.issue_office_ids`), руководителю и супер-админу — все офисы
+   учёта (null). Нет поля вовсе (сервер старее фронта) — все, как было. */
+export const issueOffices = (offices, allowedIds) => {
+    const active = (offices || []).filter((office) => office.is_active !== false);
+    if (allowedIds == null) return active;
+    const allowed = new Set(allowedIds.map(Number));
+    return active.filter((office) => allowed.has(Number(office.id)));
+};
+
+/* Имя офиса в переключателе окна доступа: город, а если в учёте два офиса
+   одного города — город и адрес (по адресу офис и различают за стойкой). */
+export const officeShortLabel = (office, offices) => {
+    const city = String(office?.city || '').trim();
+    const twins = (offices || []).filter((item) => String(item?.city || '').trim() === city).length;
+    if (city && twins <= 1) return city;
+    const where = String(office?.address || office?.name || '').trim();
+    return [city, where].filter(Boolean).join(' · ');
+};
+
+/* Черновик окна: офис → кто в нём выдаёт. */
+export const accessDraftOf = (access) => Object.fromEntries(
+    (access?.offices || []).map((office) => [office.id, (office.user_ids || []).map(Number)]),
+);
+
+/* Что отправить серверу — только переключённые пары «офис, сотрудник»: снятая
+   и снова поставленная галочка — не правка. Разницей, а не списком офиса: так
+   два руководителя, правящие разных людей, не затирают друг друга. */
+export const accessChanges = (draft, access) => {
+    const changes = [];
+    (access?.offices || []).forEach((office) => {
+        const before = new Set((office.user_ids || []).map(Number));
+        const after = new Set((draft?.[office.id] || []).map(Number));
+        [...after].sort((a, b) => a - b).forEach((userId) => {
+            if (!before.has(userId)) changes.push({ water_office_id: office.id, user_id: userId, granted: true });
+        });
+        [...before].sort((a, b) => a - b).forEach((userId) => {
+            if (!after.has(userId)) changes.push({ water_office_id: office.id, user_id: userId, granted: false });
+        });
+    });
+    return changes;
+};
+
+/* Отметить или снять сотрудника в офисе черновика. */
+export const toggleAccess = (draft, officeId, userId) => {
+    const current = (draft?.[officeId] || []).map(Number);
+    const id = Number(userId);
+    return {
+        ...draft,
+        [officeId]: current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    };
+};
+
+/* Строка в «Настройках»: сколько человек выдаёт в каждом офисе — «Алматы: 6 ·
+   Астана: 2». */
+export const accessSummary = (access) => {
+    const offices = access?.offices || [];
+    if (!offices.length) return 'Офисов в учёте пока нет';
+    return offices
+        .map((office) => `${officeShortLabel(office, offices)}: ${(office.user_ids || []).length}`)
+        .join(' · ');
+};
+
+/* Сотрудники в окне: сначала из города выбранного офиса, потом остальные по
+   городу, без города — последними; внутри — по имени. Порядок не зависит от
+   отметок: строка не уезжает из-под пальца, когда её отмечают. */
+export const accessPeople = (people, office) => {
+    const own = String(office?.city || '').trim();
+    const rank = (city) => (city === own && own ? 0 : city ? 1 : 2);
+    return [...(people || [])].sort((a, b) => {
+        const cityA = String(a?.city || '').trim();
+        const cityB = String(b?.city || '').trim();
+        return rank(cityA) - rank(cityB)
+            || cityA.localeCompare(cityB, 'ru')
+            || String(a?.name || '').localeCompare(String(b?.name || ''), 'ru')
+            || Number(a?.id) - Number(b?.id);
+    });
 };

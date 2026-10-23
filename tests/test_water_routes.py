@@ -91,6 +91,15 @@ class Store:
             {'id': 65, 'city': 'Шымкент', 'name': 'Офис Шымкент', 'address': 'Республики 17'},
         ]
         self.fail_welcome_unique = False
+        # Доступ к выдаче по офисам: пары (user_id, water_office_id). None — у
+        # офисника доступ к каждому заведённому офису: прежние тесты выдачи о
+        # доступе не думают. Свои пары — в тестах доступа.
+        self.grants = None
+        self.access_tables = True
+        self.access_log = []
+        self.access_reads = []
+        self.people = [{'id': ISSUER, 'name': 'Сотрудник 424', 'city': 'Алматы'},
+                       {'id': 425, 'name': 'Сотрудник 425', 'city': 'Астана'}]
 
     # офисы
     def add(self, stock=50, active=True, own_low=None, own_buy=None, wiki_id=47):
@@ -227,6 +236,41 @@ class Store:
     def notify_recipients(self, cursor, settings):
         return list(self.recipients)
 
+    # доступ по офисам
+    def access_ready(self, cursor):
+        return self.access_tables
+
+    def issue_office_ids(self, cursor, user_id):
+        self.access_reads.append(user_id)
+        if not self.access_tables:
+            return []
+        if self.grants is None:
+            return sorted(self.offices)
+        return sorted(office for user, office in self.grants if user == user_id)
+
+    def access_state(self, cursor):
+        known = {person['id'] for person in self.people}
+        offices = [{'id': raw['id'], 'city': raw['city'], 'name': raw['name'], 'address': raw['address'],
+                    'user_ids': sorted(user for user, office in (self.grants or set())
+                                       if office == raw['id'] and user in known),
+                    'changed': None}
+                   for raw in self.offices.values() if raw['is_active']]
+        return {'offices': offices, 'people': [dict(person) for person in self.people]}
+
+    def apply_access_changes(self, cursor, grants, revokes, actor):
+        self.grants = set(self.grants or set())
+        changed = []
+        for pair in grants:
+            if pair not in self.grants:
+                self.grants.add(pair)
+                changed.append(pair + (True,))
+        for pair in revokes:
+            if pair in self.grants:
+                self.grants.discard(pair)
+                changed.append(pair + (False,))
+        self.access_log.extend(item + (actor['user_id'],) for item in changed)
+        return changed
+
 
 class FakeDb:
     def __init__(self):
@@ -270,7 +314,8 @@ class _Base(unittest.TestCase):
                      'create_issue', 'list_issues', 'issues_for_export', 'filter_values',
                      'issue_for_cancel', 'cancel_issue',
                      'dashboard', 'notify_candidates', 'front_office_head_ids',
-                     'notify_recipients'):
+                     'notify_recipients', 'access_ready', 'issue_office_ids', 'access_state',
+                     'apply_access_changes'):
             patches[name] = getattr(store, name)
         patcher = mock.patch.multiple(water_queries, **patches)
         patcher.start()
@@ -1155,6 +1200,206 @@ class ExportTests(_Base):
     def test_kind_filter_is_validated(self):
         response = self.client.get('/api/water/issues?kind=free')
         self.assertEqual(response.status_code, 400)
+
+
+
+class OfficeAccessIssueTests(_Base):
+    """Офисник выдаёт воду только в офисах, к которым ему выдан доступ
+    (владелец 23.10.2026: «…чтобы они могли выдавать воду только по доступным
+    им офисам»). Руководитель и супер-админ выдают в любом офисе."""
+
+    def setUp(self):
+        super().setUp()
+        self.almaty = self.store.add(stock=50, wiki_id=47)
+        self.astana = self.store.add(stock=50, wiki_id=49)
+        self.store.grants = {(ISSUER, self.almaty)}
+
+    def test_ping_names_the_offices_of_the_issuer(self):
+        capabilities = self.client.get('/api/water/ping').get_json()['capabilities']
+        self.assertTrue(capabilities['can_issue'])
+        self.assertEqual(capabilities['issue_office_ids'], [self.almaty])
+
+    def test_issue_in_a_granted_office(self):
+        response = self.issue(water_office_id=self.almaty)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.store.offices[self.almaty]['stock'], 49)
+
+    def test_issue_elsewhere_is_refused_before_crm_and_writes_nothing(self):
+        asked = []
+
+        def lookup(raw):
+            asked.append(raw)
+            return dict(self.crm, orders=dict(self.crm['orders']))
+        self.lookup_override = lookup
+        response = self.issue(water_office_id=self.astana)
+        self.assertEqual(response.status_code, 403)
+        body = response.get_json()
+        self.assertEqual(body['code'], 'WATER_OFFICE_FORBIDDEN')
+        # Свежие права — в ответе: экран уберёт офис из списка.
+        self.assertEqual(body['capabilities']['issue_office_ids'], [self.almaty])
+        self.assertEqual(asked, [])
+        self.assertEqual(self.store.locks, [])
+        self.assertEqual(self.store.issues, [])
+        self.assertEqual(self.store.offices[self.astana]['stock'], 50)
+
+    def test_issuer_without_offices_checks_but_does_not_issue(self):
+        self.store.grants = set()
+        capabilities = self.client.get('/api/water/ping').get_json()['capabilities']
+        self.assertEqual(capabilities['issue_office_ids'], [])
+        self.assertEqual(self.client.post('/api/water/check', json={'link': ACCOUNT}).status_code, 200)
+        for office_id in (self.almaty, self.astana):
+            response = self.issue(water_office_id=office_id)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.get_json()['code'], 'WATER_OFFICE_FORBIDDEN')
+        self.assertEqual(self.store.issues, [])
+
+    def test_manager_and_super_admin_issue_anywhere(self):
+        for index, viewer in enumerate((manager(), person(role='super_admin', department_code='szov'))):
+            self.viewer = viewer
+            capabilities = self.client.get('/api/water/ping').get_json()['capabilities']
+            self.assertIsNone(capabilities['issue_office_ids'])
+            self.crm = crm_driver(account=str(index) * 32, iin='90010130012%d' % index)
+            response = self.issue(water_office_id=self.astana, link=self.crm['account_id'])
+            self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.store.offices[self.astana]['stock'], 48)
+
+    def test_access_rows_are_read_only_for_issuers(self):
+        """Строки доступа нужны только офиснику: руководитель выдаёт везде,
+        колл-центр — нигде, и лишнего запроса на каждый их вызов нет."""
+        for viewer in (manager(), person(role='super_admin', department_code='szov'),
+                       person(department_code='szov'), person(department_code='op')):
+            self.viewer = viewer
+            self.assertEqual(self.client.get('/api/water/ping').status_code, 200)
+        self.assertEqual(self.store.access_reads, [])
+        self.viewer = person()
+        self.client.get('/api/water/ping')
+        self.assertEqual(self.store.access_reads, [ISSUER])
+
+    def test_access_tables_missing_close_issuing_to_issuers_only(self):
+        """Таблицы доступа не легли — «только по доступным офисам» без строк
+        доступа не открывает ни одного; руководитель выдаёт как выдавал."""
+        self.store.access_tables = False
+        response = self.issue(water_office_id=self.almaty)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'WATER_OFFICE_FORBIDDEN')
+        self.viewer = manager()
+        self.assertEqual(self.issue(water_office_id=self.almaty).status_code, 201)
+
+
+class OfficeAccessManageTests(_Base):
+    """Окно «Доступ по офисам» в «Настройках»: раздаёт тот, кто ведёт учёт."""
+
+    def setUp(self):
+        super().setUp()
+        self.viewer = manager()
+        self.almaty = self.store.add(stock=50, wiki_id=47)
+        self.astana = self.store.add(stock=50, wiki_id=49)
+        self.store.grants = {(ISSUER, self.almaty)}
+
+    def patch(self, *changes, **body):
+        body.setdefault('changes', [
+            {'water_office_id': office_id, 'user_id': user_id, 'granted': granted}
+            for office_id, user_id, granted in changes])
+        return self.client.patch('/api/water/access', json=body)
+
+    def test_state_lists_offices_and_who_issues_there(self):
+        body = self.client.get('/api/water/access').get_json()['access']
+        self.assertEqual([(office['id'], office['user_ids']) for office in body['offices']],
+                         [(self.almaty, [ISSUER]), (self.astana, [])])
+        self.assertEqual([person['id'] for person in body['people']], [ISSUER, 425])
+
+    def test_only_the_manager_hands_out_access(self):
+        for viewer in (person(), person(role='sv', department_code='szov'),
+                       person(role='admin', department_code='szov', headed_codes=('szov',))):
+            self.viewer = viewer
+            for response in (self.client.get('/api/water/access'),
+                             self.patch((self.astana, 425, True))):
+                self.assertEqual(response.status_code, 403, viewer)
+                self.assertEqual(response.get_json()['code'], 'WATER_MANAGE_FORBIDDEN')
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+        self.viewer = person(role='super_admin', department_code=None)
+        self.assertEqual(self.client.get('/api/water/access').status_code, 200)
+
+    def test_changes_are_applied_as_a_difference(self):
+        response = self.patch((self.astana, 425, True), (self.almaty, ISSUER, False))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.store.grants, {(425, self.astana)})
+        state = response.get_json()['access']
+        self.assertEqual([(office['id'], office['user_ids']) for office in state['offices']],
+                         [(self.almaty, []), (self.astana, [425])])
+        # В журнал — кто менял: руководитель под своим id.
+        self.assertEqual(sorted(self.store.access_log),
+                         sorted([(425, self.astana, True, ISSUER), (ISSUER, self.almaty, False, ISSUER)]))
+
+    def test_change_that_is_already_so_writes_nothing(self):
+        response = self.patch((self.almaty, ISSUER, True), (self.astana, 425, False))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.store.access_log, [])
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+
+    def test_empty_change_list_answers_with_the_state(self):
+        response = self.patch()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['access']['offices'][0]['user_ids'], [ISSUER])
+
+    def test_access_is_granted_only_to_issuers_with_the_section_open(self):
+        response = self.patch((self.astana, 425, True), (self.astana, 999, True))
+        self.assertEqual(response.status_code, 400)
+        body = response.get_json()
+        self.assertEqual(body['code'], 'WATER_ACCESS_PERSON_UNKNOWN')
+        self.assertIn('access', body)  # окно перерисуется по свежему доступу
+        # Проверено всё до записи: годная пара из того же запроса не легла.
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+        self.assertEqual(self.store.access_log, [])
+
+    def test_access_of_someone_who_left_can_still_be_revoked(self):
+        self.store.grants.add((999, self.astana))
+        response = self.patch((self.astana, 999, False))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn((999, self.astana), self.store.grants)
+
+    def test_office_outside_the_program_is_refused(self):
+        self.store.offices[self.astana]['is_active'] = False
+        response = self.patch((self.astana, 425, True))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()['code'], 'WATER_OFFICE_NOT_FOUND')
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+
+    def test_body_is_checked_whole(self):
+        for body in ({'changes': 'all'}, {},
+                     {'changes': [{'water_office_id': self.astana, 'user_id': 425, 'granted': 'false'}]},
+                     {'changes': [{'water_office_id': self.astana, 'user_id': 425, 'granted': 1}]},
+                     {'changes': [{'water_office_id': True, 'user_id': 425, 'granted': True}]},
+                     {'changes': [{'water_office_id': 0, 'user_id': 425, 'granted': True}]},
+                     {'changes': ['x']},
+                     {'changes': [{'water_office_id': self.astana, 'user_id': 425, 'granted': True}] * 2},
+                     {'changes': [{'water_office_id': self.astana, 'user_id': 425 + n, 'granted': False}
+                                  for n in range(501)]}):
+            response = self.client.patch('/api/water/access', json=body)
+            self.assertEqual(response.status_code, 400, body if len(str(body)) < 200 else 'длинный')
+            self.assertEqual(response.get_json()['code'], 'WATER_ACCESS_CHANGES_INVALID')
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+        self.assertEqual(self.store.access_log, [])
+
+    def test_access_tables_missing_is_not_ready(self):
+        self.store.access_tables = False
+        for response in (self.client.get('/api/water/access'), self.patch((self.astana, 425, True))):
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.get_json()['code'], 'WATER_SCHEMA_NOT_READY')
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+
+    def test_granted_office_opens_issuing_right_away(self):
+        """Выдали доступ — следующий же запрос офисника его видит: строки
+        доступа читаются на каждом запросе, а не запоминаются."""
+        self.assertEqual(self.patch((self.astana, ISSUER, True)).status_code, 200)
+        self.viewer = person()
+        self.assertEqual(self.issue(water_office_id=self.astana).status_code, 201)
+        self.viewer = manager()
+        self.assertEqual(self.patch((self.astana, ISSUER, False)).status_code, 200)
+        self.viewer = person()
+        self.crm = crm_driver(account='d' * 32, iin='900101300124')
+        response = self.issue(water_office_id=self.astana, link=self.crm['account_id'])
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == '__main__':

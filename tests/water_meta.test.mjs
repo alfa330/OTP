@@ -8,6 +8,10 @@ import {
   SETTINGS_LIMITS,
   TARIFF_LABELS,
   THRESHOLD_ORDER_ISSUE,
+  accessChanges,
+  accessDraftOf,
+  accessPeople,
+  accessSummary,
   blocksWord,
   conditionGroups,
   daysWord,
@@ -16,8 +20,10 @@ import {
   fmtAvg,
   forecastLabel,
   isCountDraft,
+  issueOffices,
   nextIssueLine,
   officePlace,
+  officeShortLabel,
   parseCount,
   plural,
   settingsDirty,
@@ -25,6 +31,7 @@ import {
   stepCount,
   stockStatus,
   tariffLabel,
+  toggleAccess,
   verdictBasis,
   verdictHeadline,
   visibleIssues,
@@ -245,4 +252,85 @@ test('while typing, only the cleared field and the threshold order keep quiet', 
   // Предел у закупки — не порядок: виден и в работе.
   const big = { ...draft, buy_threshold: '200000' };
   assert.match(visibleIssues(settingsIssues(big), big, 'buy_threshold').buy_threshold, /^От 0 до /);
+});
+
+/* ── Доступ к выдаче по офисам (23.10.2026) ─────────────────────────────── */
+
+const ALMATY = { id: 1, city: 'Алматы', name: 'Офис для подключения тарифа «Бизнес»', address: 'Байзакова 78А', is_active: true };
+const ASTANA = { id: 2, city: 'Астана', name: 'Офис Астана', address: 'Сарыарка 31', is_active: true };
+const ACCESS = {
+  offices: [{ ...ALMATY, user_ids: [11, 12] }, { ...ASTANA, user_ids: [] }],
+  people: [
+    { id: 12, name: 'Яковлев', city: 'Алматы' },
+    { id: 21, name: 'Борисов', city: 'Астана' },
+    { id: 11, name: 'Алиев', city: 'Алматы' },
+    { id: 31, name: 'Ветров', city: null },
+    { id: 41, name: 'Громов', city: 'Шымкент' },
+  ],
+};
+
+test('issue screen offers the issuer only the offices granted to them', () => {
+  const inactive = { id: 3, city: 'Алматы', name: 'Старый', is_active: false };
+  assert.deepEqual(issueOffices([ALMATY, ASTANA, inactive], [2]).map((o) => o.id), [2]);
+  assert.deepEqual(issueOffices([ALMATY, ASTANA], []), []);
+  // Строки «2» с сервера не бывает, но сравнение — по числу.
+  assert.deepEqual(issueOffices([ALMATY, ASTANA], ['1']).map((o) => o.id), [1]);
+  // null — руководитель: все офисы учёта; поля нет (сервер старее фронта) — как было.
+  assert.deepEqual(issueOffices([ALMATY, ASTANA, inactive], null).map((o) => o.id), [1, 2]);
+  assert.deepEqual(issueOffices([ALMATY, ASTANA], undefined).map((o) => o.id), [1, 2]);
+});
+
+test('the only granted office is chosen by itself, whatever its city', () => {
+  // Астанинцу открыли офис Алматы на время отпуска коллеги — он и подставляется.
+  assert.equal(defaultOfficeId([ALMATY], 'Астана', null, true), 1);
+  // Без доступа по офисам — прежнее правило: чужой город сам не подставляется.
+  assert.equal(defaultOfficeId([ALMATY], 'Астана', null), null);
+  // Двух открытых — свой город. Запомненный офис чужого города и здесь сам не
+  // подставляется (правило того же дня: шесть выдач на чужую полку).
+  assert.equal(defaultOfficeId([ALMATY, ASTANA], 'Астана', null, true), 2);
+  assert.equal(defaultOfficeId([ALMATY, ASTANA], 'Астана', 1, true), null);
+  assert.equal(defaultOfficeId([ALMATY, ASTANA], 'Астана', 2, true), 2);
+  // Запомненный единственный открытый — даже чужого города: своего в списке нет.
+  assert.equal(defaultOfficeId([ALMATY], 'Астана', 1, true), 1);
+  assert.equal(defaultOfficeId([ALMATY, ASTANA], null, null, true), null);
+});
+
+test('office switch names the city, and the address only for twins', () => {
+  assert.equal(officeShortLabel(ALMATY, [ALMATY, ASTANA]), 'Алматы');
+  const second = { id: 4, city: 'Алматы', name: 'Офис Алматы №1', address: 'Жамбыла 172В' };
+  assert.equal(officeShortLabel(ALMATY, [ALMATY, ASTANA, second]), 'Алматы · Байзакова 78А');
+  assert.equal(officeShortLabel(second, [ALMATY, second]), 'Алматы · Жамбыла 172В');
+  assert.equal(officeShortLabel({ id: 5, city: '', name: 'Без города' }, [ALMATY]), 'Без города');
+});
+
+test('only toggled pairs go to the server', () => {
+  const draft = accessDraftOf(ACCESS);
+  assert.deepEqual(draft, { 1: [11, 12], 2: [] });
+  assert.deepEqual(accessChanges(draft, ACCESS), []);
+  let next = toggleAccess(draft, 2, 21);
+  next = toggleAccess(next, 1, 12);
+  assert.deepEqual(next, { 1: [11], 2: [21] });
+  assert.deepEqual(accessChanges(next, ACCESS), [
+    { water_office_id: 1, user_id: 12, granted: false },
+    { water_office_id: 2, user_id: 21, granted: true },
+  ]);
+  // Сняли и поставили снова — не правка.
+  assert.deepEqual(accessChanges(toggleAccess(toggleAccess(draft, 1, 11), 1, 11), ACCESS), []);
+  // Черновик не трогается — новый объект на каждое переключение.
+  assert.deepEqual(draft, { 1: [11, 12], 2: [] });
+});
+
+test('settings row sums up who issues where', () => {
+  assert.equal(accessSummary(ACCESS), 'Алматы: 2 · Астана: 0');
+  assert.equal(accessSummary({ offices: [], people: [] }), 'Офисов в учёте пока нет');
+  assert.equal(accessSummary(null), 'Офисов в учёте пока нет');
+});
+
+test('people of the office city come first, order does not follow the ticks', () => {
+  const almaty = accessPeople(ACCESS.people, ALMATY).map((person) => person.id);
+  assert.deepEqual(almaty, [11, 12, 21, 41, 31]);
+  const astana = accessPeople(ACCESS.people, ASTANA).map((person) => person.id);
+  assert.deepEqual(astana, [21, 11, 12, 41, 31]);
+  // Исходный список не переставляется на месте.
+  assert.deepEqual(ACCESS.people.map((person) => person.id), [12, 21, 11, 31, 41]);
 });

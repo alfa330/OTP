@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { iosCard } from '../ui/ios';
 import { fmtDateTime } from '../parcels/parcelMeta';
 import { COUNT_HINT, useCountInput } from './CountInput';
+import WaterAccess from './WaterAccess';
 import {
     KNOWN_TARIFFS, SETTINGS_LIMITS, parseCount, settingsDirty, settingsIssues, stepCount, tariffLabel, visibleIssues,
 } from './waterMeta';
@@ -35,6 +36,10 @@ import { T, WaterStepper, wBtnPrimary, wBtnSecondary, wIcon, wLabel } from './wa
  *     исправить, красным;
  *   — тарифы — ровная сетка одинаковых плиток; выбранная — мягко-голубая с
  *     галочкой, а не чёрная (владелец 16.10.2026: чёрный выбор «выглядит плохо»).
+ *
+ * Первой группой — «Выдача воды»: строка-кнопка «Доступ по офисам» (владелец
+ * 23.10.2026, WaterAccess.jsx). Она сохраняется своим окном, а не кнопкой
+ * «Сохранить» внизу, поэтому стоит вне формы условий и её замка.
  */
 
 const PROGRAM_FIELDS = [
@@ -278,101 +283,106 @@ const WaterSettings = ({ apiBaseUrl, headers, preview = null, onSaved, showToast
 
     return (
         /* Ниже xl — одна колонка, как список настроек на телефоне. С xl
-           карточки во всю ширину раздела, строки в них — в две колонки. */
-        <div className={`max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7 ${locked ? 'pointer-events-none' : ''}`}
-             aria-busy={locked || undefined}>
-            <Section title="Право на воду">
-                <div className={`${iosCard} grid xl:grid-cols-2`}>
-                    {PROGRAM_FIELDS.map(numberCell)}
-                </div>
-            </Section>
+           карточки во всю ширину раздела, строки в них — в две колонки.
+           Доступ по офисам — над формой и вне её замка: пока условия грузятся
+           или сохраняются, строка доступа работает. */
+        <div className="max-w-2xl space-y-5 xl:max-w-none xl:space-y-6 2xl:space-y-7">
+            <WaterAccess apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+            <div className={`space-y-5 xl:space-y-6 2xl:space-y-7 ${locked ? 'pointer-events-none' : ''}`}
+                 aria-busy={locked || undefined}>
+                <Section title="Право на воду">
+                    <div className={`${iosCard} grid xl:grid-cols-2`}>
+                        {PROGRAM_FIELDS.map(numberCell)}
+                    </div>
+                </Section>
 
-            <Section title="Тарифы программы" issue={issues.tariffs} issueId={tariffsIssueId}
-                     info="Вода положена водителю, у машины которого есть хотя бы один из отмеченных тарифов">
-                {/* Две плитки в ряд на телефоне, три — с 640 px (телефон боком,
-                    планшет: по две выходили полосами в 400 px), четыре с xl, шесть
-                    на большом экране. С xl края плиток стоят там же, где текст
-                    строк в карточках выше и ниже. */}
-                <div role="group" aria-label="Тарифы программы" aria-describedby={issues.tariffs ? tariffsIssueId : undefined}
-                     className={`${iosCard} grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 xl:grid-cols-4 xl:gap-2.5 xl:p-5 2xl:grid-cols-6 2xl:gap-3 2xl:p-6`}>
-                    {tariffs.map((code) => {
-                        const on = chosen.includes(code);
-                        return (
-                            <button key={code} type="button" onClick={() => toggleTariff(code)} aria-pressed={on} style={NOWRAP}
-                                    title={tariffLabel(code)}
-                                    className={`${TILE} ${on
-                                        ? 'bg-blue-50 text-blue-700 ring-blue-200'
-                                        : 'bg-white text-slate-700 ring-slate-200/80 hover:bg-slate-50'}`}>
-                                <span className="truncate">{tariffLabel(code)}</span>
-                                {on ? (
-                                    <span className="grid size-5 shrink-0 place-items-center rounded-full bg-blue-600 text-white 2xl:size-6">
-                                        <Check size={13} strokeWidth={3} className="2xl:size-[15px]" />
-                                    </span>
-                                ) : (
-                                    <span className="size-5 shrink-0 rounded-full ring-1 ring-inset ring-slate-300 2xl:size-6" />
-                                )}
-                            </button>
-                        );
-                    })}
-                </div>
-            </Section>
+                <Section title="Тарифы программы" issue={issues.tariffs} issueId={tariffsIssueId}
+                         info="Вода положена водителю, у машины которого есть хотя бы один из отмеченных тарифов">
+                    {/* Две плитки в ряд на телефоне, три — с 640 px (телефон боком,
+                        планшет: по две выходили полосами в 400 px), четыре с xl, шесть
+                        на большом экране. С xl края плиток стоят там же, где текст
+                        строк в карточках выше и ниже. */}
+                    <div role="group" aria-label="Тарифы программы" aria-describedby={issues.tariffs ? tariffsIssueId : undefined}
+                         className={`${iosCard} grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 xl:grid-cols-4 xl:gap-2.5 xl:p-5 2xl:grid-cols-6 2xl:gap-3 2xl:p-6`}>
+                        {tariffs.map((code) => {
+                            const on = chosen.includes(code);
+                            return (
+                                <button key={code} type="button" onClick={() => toggleTariff(code)} aria-pressed={on} style={NOWRAP}
+                                        title={tariffLabel(code)}
+                                        className={`${TILE} ${on
+                                            ? 'bg-blue-50 text-blue-700 ring-blue-200'
+                                            : 'bg-white text-slate-700 ring-slate-200/80 hover:bg-slate-50'}`}>
+                                    <span className="truncate">{tariffLabel(code)}</span>
+                                    {on ? (
+                                        <span className="grid size-5 shrink-0 place-items-center rounded-full bg-blue-600 text-white 2xl:size-6">
+                                            <Check size={13} strokeWidth={3} className="2xl:size-[15px]" />
+                                        </span>
+                                    ) : (
+                                        <span className="size-5 shrink-0 rounded-full ring-1 ring-inset ring-slate-300 2xl:size-6" />
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </Section>
 
-            <Section title="Пороги остатка"
-                     info="Общие для всех офисов. Свой порог офиса задаётся в его карточке во вкладке «Остатки»">
-                <div className={`${iosCard} grid xl:grid-cols-2`}>
-                    {THRESHOLD_FIELDS.map(numberCell)}
-                    {/* Получатели — во всю ширину: список встаёт под правую
-                        колонку, вровень с полями порогов над ним. */}
-                    <div className={`${CELL} xl:col-span-2`}>
-                        <div className="flex flex-col gap-2 border-t border-slate-100 py-3 xl:flex-row xl:items-center xl:justify-between xl:gap-4 xl:py-3.5 2xl:py-4">
-                            <RowLabel htmlFor={recipientsId} label="Кому писать о закупке в Telegram"
-                                      hint={RECIPIENTS_HINT} />
-                            <div className="min-w-0 xl:w-1/2 xl:pl-5 2xl:pl-6">
-                                <CustomSelect
-                                    id={recipientsId}
-                                    multiple
-                                    searchable
-                                    variant="ios"
-                                    roomy
-                                    textClassName={`text-[14px] font-medium text-slate-800 ${T.body}`}
-                                    /* CustomSelect в режиме multiple держит ключи строками —
-                                       сравниваем строками, храним числами (как SessionModal). */
-                                    value={recipients.map(String)}
-                                    onChange={(value) => set('notify_user_ids', (value || []).map(Number))}
-                                    options={candidates.map((person) => ({
-                                        value: person.id,
-                                        label: person.name,
-                                        meta: person.has_telegram ? (person.city || '') : 'нет Telegram',
-                                        muted: !person.has_telegram,
-                                    }))}
-                                    placeholder={nobody}
-                                    renderValue={(values) => (values.length
-                                        ? candidates.filter((person) => values.map(String).includes(String(person.id)))
-                                            .map((person) => person.name).join(', ')
-                                        : nobody)}
-                                    ariaLabel="Кому писать о закупке в Telegram"
-                                />
+                <Section title="Пороги остатка"
+                         info="Общие для всех офисов. Свой порог офиса задаётся в его карточке во вкладке «Остатки»">
+                    <div className={`${iosCard} grid xl:grid-cols-2`}>
+                        {THRESHOLD_FIELDS.map(numberCell)}
+                        {/* Получатели — во всю ширину: список встаёт под правую
+                            колонку, вровень с полями порогов над ним. */}
+                        <div className={`${CELL} xl:col-span-2`}>
+                            <div className="flex flex-col gap-2 border-t border-slate-100 py-3 xl:flex-row xl:items-center xl:justify-between xl:gap-4 xl:py-3.5 2xl:py-4">
+                                <RowLabel htmlFor={recipientsId} label="Кому писать о закупке в Telegram"
+                                          hint={RECIPIENTS_HINT} />
+                                <div className="min-w-0 xl:w-1/2 xl:pl-5 2xl:pl-6">
+                                    <CustomSelect
+                                        id={recipientsId}
+                                        multiple
+                                        searchable
+                                        variant="ios"
+                                        roomy
+                                        textClassName={`text-[14px] font-medium text-slate-800 ${T.body}`}
+                                        /* CustomSelect в режиме multiple держит ключи строками —
+                                           сравниваем строками, храним числами (как SessionModal). */
+                                        value={recipients.map(String)}
+                                        onChange={(value) => set('notify_user_ids', (value || []).map(Number))}
+                                        options={candidates.map((person) => ({
+                                            value: person.id,
+                                            label: person.name,
+                                            meta: person.has_telegram ? (person.city || '') : 'нет Telegram',
+                                            muted: !person.has_telegram,
+                                        }))}
+                                        placeholder={nobody}
+                                        renderValue={(values) => (values.length
+                                            ? candidates.filter((person) => values.map(String).includes(String(person.id)))
+                                                .map((person) => person.name).join(', ')
+                                            : nobody)}
+                                        ariaLabel="Кому писать о закупке в Telegram"
+                                    />
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            </Section>
+                </Section>
 
-            {/* Как в настройках macOS: кто и когда менял — слева, действие — справа. */}
-            <div className="flex flex-col-reverse gap-3 pt-1 xl:flex-row xl:items-center xl:justify-between">
-                <span className={`${TEXT_INSET} text-[12px] text-slate-400 ${T.sub}`}>
-                    {stamp?.updated_by_name && `Изменил ${stamp.updated_by_name}, ${fmtDateTime(stamp.updated_at)}`}
-                </span>
-                <div className="flex gap-2 2xl:gap-3">
-                    {dirty && (
-                        <button type="button" className={`${wBtnSecondary} flex-1 xl:flex-none`} disabled={saving} onClick={reset}>
-                            Отменить
+                {/* Как в настройках macOS: кто и когда менял — слева, действие — справа. */}
+                <div className="flex flex-col-reverse gap-3 pt-1 xl:flex-row xl:items-center xl:justify-between">
+                    <span className={`${TEXT_INSET} text-[12px] text-slate-400 ${T.sub}`}>
+                        {stamp?.updated_by_name && `Изменил ${stamp.updated_by_name}, ${fmtDateTime(stamp.updated_at)}`}
+                    </span>
+                    <div className="flex gap-2 2xl:gap-3">
+                        {dirty && (
+                            <button type="button" className={`${wBtnSecondary} flex-1 xl:flex-none`} disabled={saving} onClick={reset}>
+                                Отменить
+                            </button>
+                        )}
+                        <button type="button" className={`${wBtnPrimary} flex-1 xl:flex-none 2xl:!px-8`} disabled={!dirty || invalid || saving} onClick={save}>
+                            {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
+                            Сохранить
                         </button>
-                    )}
-                    <button type="button" className={`${wBtnPrimary} flex-1 xl:flex-none 2xl:!px-8`} disabled={!dirty || invalid || saving} onClick={save}>
-                        {saving && <Loader2 size={15} className={`animate-spin ${wIcon}`} />}
-                        Сохранить
-                    </button>
+                    </div>
                 </div>
             </div>
         </div>
