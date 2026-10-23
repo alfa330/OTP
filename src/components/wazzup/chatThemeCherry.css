@@ -120,6 +120,7 @@ html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], b
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-slate-50\/70 { background-color: rgba(255, 243, 248, 0.7) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-slate-50\/90 { background-color: rgba(255, 243, 248, 0.9) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-white { background-color: #fff8fb !important; }
+html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-white\/60 { background-color: rgba(255, 248, 251, 0.6) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-white\/80 { background-color: rgba(255, 248, 251, 0.8) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-white\/85 { background-color: rgba(255, 248, 251, 0.85) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .bg-white\/95 { background-color: rgba(255, 248, 251, 0.95) !important; }
@@ -196,6 +197,7 @@ html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], b
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .text-slate-900 { color: #492b3c !important; }
 
 @media (min-width: 768px) {
+    html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .md\:bg-white\/60 { background-color: rgba(255, 248, 251, 0.6) !important; }
     html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .md\:border-slate-200 { border-color: #efc9dc !important; }
     html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .md\:border-slate-200\/70 { border-color: rgba(239, 201, 220, 0.7) !important; }
 }

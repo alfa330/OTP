@@ -54,6 +54,13 @@ await build({
     outfile: themesFile, bundle: true, format: 'esm', platform: 'node', target: 'node18',
     external: ['react'], plugins: [doubles],
 });
+const sheetShellFile = join(cache, 'commonFullscreenSheet.mjs');
+await build({
+    entryPoints: [join(process.cwd(), 'src/components/common/FullscreenSheet.jsx')],
+    outfile: sheetShellFile, bundle: true, format: 'esm', platform: 'node', target: 'node18', jsx: 'transform',
+    external: ['react', 'react-dom', 'lucide-react'],
+});
+const { default: FullscreenSheet } = await import(pathToFileURL(sheetShellFile).href);
 const { default: ChatWallpaperLayer, wallpaperFilter, wallpaperVeil } = await import(pathToFileURL(layerFile).href);
 const { PreviewPane, movedPosition, previewOverflow } = await import(pathToFileURL(sheetFile).href);
 const { wallpaperAllowed, chatThemesFor } = await import(pathToFileURL(themesFile).href);
@@ -360,4 +367,17 @@ test('the preview copies the classes of the real chat pane, so themes and glass 
     assert.match(html, /wz-thread-surface/);
     assert.match(html, /data-chat-wallpaper-layer/);
     assert.match(html, /Оператор/);
+});
+
+test('a full-screen editor fills the sheet body; other full-screen sheets keep the scrolling page', () => {
+    const render = (props) => renderToStaticMarkup(React.createElement(FullscreenSheet,
+        { open: true, onClose: () => {}, title: 'Окно', ...props }, React.createElement('i', { id: 'content' })));
+    const filled = render({ fill: true });
+    assert.match(filled, /<div class="flex min-h-0 flex-1 flex-col"><i id="content"><\/i><\/div>/);
+    assert.doesNotMatch(filled, /overflow-y-auto px-4 py-4/);
+    const page = render({});
+    assert.match(page, /min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6/);
+    assert.match(page, /mx-auto w-full max-w-5xl"><i id="content">/);
+    const customize = readFileSync(join(process.cwd(), 'src/components/wazzup/ChatCustomizeSheet.jsx'), 'utf8');
+    assert.match(customize, /<FullscreenSheet open=\{open\} onClose=\{cancel\}[^>]*\bfill\b/, 'окно «Кастомизация» — во весь экран');
 });

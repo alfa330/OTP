@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState
 import { createPortal } from 'react-dom';
 import { ImagePlus, Loader2, Send, Trash2 } from 'lucide-react';
 import {
-    APPLE_FONT, IosHint, IosLightbox, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel,
+    APPLE_FONT, IosHint, IosLightbox, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel,
 } from '../ui/ios';
+import FullscreenSheet from '../common/FullscreenSheet';
 import { DEFAULT_CHAT_THEME, chatThemeById, chatThemeStyle, loadThemeLayer } from './chatThemes';
 import {
     DEFAULT_WALLPAPER_SETTINGS, WALLPAPER_LIMITS, loadStaffWallpapers, prepareWallpaperFile, saveChatWallpaper,
@@ -15,6 +16,7 @@ import './chatCustomize.css';
 
 /* «Кастомизация» «Чатов ОП» — одно окно вместо прежних кнопок «Тема» и обоев
  * (просьба владельца 23.10.2026): тема окна, своя картинка на фоне и её вид.
+ * Окно во весь экран (FullscreenSheet): превью — почти в натуральную величину.
  *
  * Слева — живое превью: уменьшенная копия НАСТОЯЩЕГО окна переписки тех же
  * пропорций, что окно у человека на экране, и с теми же классами разметки.
@@ -329,8 +331,8 @@ function StaffWallpapers({ onCount }) {
         return <div className="flex flex-1 items-center justify-center px-6 py-10 text-[13.5px] text-slate-500">Обои пока никто не поставил</div>;
     }
     return (
-        <div className="thin-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        <div className="thin-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+            <div className="mx-auto grid max-w-6xl grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-5">
                 {items.map((item, index) => <StaffCard key={item.userId} item={item} onOpen={() => setOpen(index)} />)}
             </div>
             {open >= 0 && <StaffLightbox items={items} index={open} onIndex={setOpen} onClose={() => setOpen(-1)} />}
@@ -351,6 +353,7 @@ export default function ChatCustomizeSheet({
     const [staffCount, setStaffCount] = useState(null);
     const [dragOver, setDragOver] = useState(false);
     const fileInput = useRef(null);
+    const errorLine = useRef(null);
     // Своя, ещё не сохранённая картинка: её адрес освобождаем, когда она больше не нужна.
     const pendingUrl = useRef('');
     const releasePending = useCallback((keep = '') => {
@@ -387,13 +390,10 @@ export default function ChatCustomizeSheet({
     useEffect(() => () => releasePending(), [releasePending]);
     useEffect(() => { if (open) loadThemeLayer(themeId).catch(() => {}); }, [open, themeId]);
 
+    // Закрыть без «Готово» — крестик, шеврон «Назад» на телефоне или Esc — значит отменить.
     const cancel = useCallback(() => { if (busy !== 'save') onClose(); }, [busy, onClose]);
-    useEffect(() => {
-        if (!open) return undefined;
-        const onKey = (event) => { if (event.key === 'Escape' && !event.defaultPrevented) cancel(); };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, [open, cancel]);
+    // Ошибку видно и тогда, когда колонка настроек прокручена вниз.
+    useEffect(() => { if (error) errorLine.current?.scrollIntoView?.({ block: 'nearest' }); }, [error]);
 
     const pick = async (file) => {
         if (!file || busy) return;
@@ -458,12 +458,18 @@ export default function ChatCustomizeSheet({
     } : {};
 
     const mine = (
-        <div className="min-h-0 flex-1 overflow-y-auto md:grid md:grid-cols-[minmax(0,1fr)_360px] md:overflow-hidden" {...dropTarget}>
-            <div className={`h-[44vh] min-h-[240px] p-4 transition md:h-full md:p-6 ${dragOver ? 'bg-blue-50/70' : ''}`}>
+        <div className="thin-scroll min-h-0 flex-1 overflow-y-auto md:grid md:grid-cols-[minmax(0,1fr)_380px] md:overflow-hidden" {...dropTarget}>
+            <div className={`h-[46vh] min-h-[260px] p-4 transition md:h-full md:p-8 ${dragOver ? 'bg-blue-50/70' : ''}`}>
                 <ChatPreview pane={pane || FALLBACK_PANE} theme={theme} image={image} settings={settings} author={author}
                     onMove={(x, y) => change({ x, y })} />
             </div>
-            <div className="thin-scroll space-y-5 px-4 pb-5 md:overflow-y-auto md:border-l md:border-slate-200/70 md:py-5">
+            <div className="thin-scroll space-y-5 px-4 pb-6 md:overflow-y-auto md:border-l md:border-slate-200/70 md:bg-white/60 md:px-5 md:py-6">
+                {error && (
+                    <p ref={errorLine} role="alert"
+                        className="rounded-xl bg-rose-50 px-3 py-2 text-[12.5px] leading-snug text-rose-700 ring-1 ring-rose-100">
+                        {error}
+                    </p>
+                )}
                 {themes.length > 1 && (
                     <section className="space-y-2">
                         <div className={iosGroupLabel}>Тема</div>
@@ -533,28 +539,29 @@ export default function ChatCustomizeSheet({
         </div>
     );
 
-    const footer = tab === 'mine' ? (
-        <>
-            {error && <p role="alert" className="mr-auto min-w-0 text-[12.5px] leading-snug text-rose-600">{error}</p>}
-            <button type="button" onClick={cancel} disabled={busy === 'save'} className={iosBtnSecondary}>Отмена</button>
-            <button type="button" onClick={save} disabled={Boolean(busy)} className={iosBtnPrimary}>
-                {busy === 'save' ? <><Loader2 size={15} className="animate-spin" /> Сохраняем…</> : 'Готово'}
-            </button>
-        </>
+    // «Готово» — справа в шапке, как в iOS; на вкладке «Обои сотрудников» сохранять нечего.
+    const actions = tab === 'mine' ? (
+        <button type="button" onClick={save} disabled={Boolean(busy)} className={iosBtnPrimary}>
+            {busy === 'save' ? <><Loader2 size={15} className="animate-spin" /> Сохраняем…</> : 'Готово'}
+        </button>
     ) : null;
 
+    /* В портал: внутри окна раздела слои тем («Ночь», «Роза») перекрасили бы
+       и само окно настроек. */
     return createPortal(
-        <IosModal open={open} onClose={cancel} title="Кастомизация" maxWidth="max-w-5xl" footer={footer}
-            bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col overflow-hidden md:basis-[640px]">
+        <FullscreenSheet open={open} onClose={cancel} closeOnEscape={busy !== 'save'} fill z={150}
+            icon="fa-palette" title="Кастомизация" actions={actions}>
             {admin && (
-                <div className="shrink-0 border-b border-slate-200/70 px-4 py-2.5 sm:px-5">
-                    <IosSegmented value={tab} onChange={setTab} stretch slide ariaLabel="Что показать"
-                        options={[{ value: 'mine', label: 'Мой вид' },
-                            { value: 'staff', label: 'Обои сотрудников', count: staffCount ?? undefined }]} />
+                <div className="shrink-0 border-b border-slate-200/70 bg-white/60 px-4 py-2.5 sm:px-6">
+                    <div className="mx-auto max-w-md">
+                        <IosSegmented value={tab} onChange={setTab} stretch slide ariaLabel="Что показать"
+                            options={[{ value: 'mine', label: 'Мой вид' },
+                                { value: 'staff', label: 'Обои сотрудников', count: staffCount ?? undefined }]} />
+                    </div>
                 </div>
             )}
             {tab === 'staff' && admin ? <StaffWallpapers onCount={setStaffCount} /> : mine}
-        </IosModal>,
+        </FullscreenSheet>,
         document.body,
     );
 }

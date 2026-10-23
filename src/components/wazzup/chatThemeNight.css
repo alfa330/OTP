@@ -34,6 +34,7 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-slate-900\/95 { background-color: rgba(43, 48, 57, 0.95) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-slate-950 { background-color: #23272e !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-white { background-color: #1e2127 !important; }
+:is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-white\/60 { background-color: rgba(30, 33, 39, 0.6) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-white\/80 { background-color: rgba(30, 33, 39, 0.8) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-white\/85 { background-color: rgba(30, 33, 39, 0.85) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .bg-white\/95 { background-color: rgba(30, 33, 39, 0.95) !important; }
@@ -131,6 +132,7 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .border-\[\#e9e3d5\] { border-color: #2e333c !important; }
 
 @media (min-width: 768px) {
+    :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .md\:bg-white\/60 { background-color: rgba(30, 33, 39, 0.6) !important; }
     :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .md\:border-slate-200 { border-color: #2e333c !important; }
     :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .md\:border-slate-200\/70 { border-color: rgba(46, 51, 60, 0.7) !important; }
 }

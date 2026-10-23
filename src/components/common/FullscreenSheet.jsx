@@ -26,6 +26,9 @@ let sheetsBesideSidebar = 0;
  *    окно — например карточка задачи: Esc должен закрывать её, а не оба слоя)
  *  - offsetLeft: отступ слева, чтобы окно заняло только область контента и не
  *    накрывало сайдбар приложения (например 'var(--app-sidebar-offset, 0px)')
+ *  - fill: содержимое занимает всё тело окна — без общей прокрутки и отступов
+ *    (окно-редактор с колонками на всю высоту, например «Кастомизация» чатов:
+ *    превью вписывается в высоту экрана, прокручиваются колонки сами)
  */
 const FullscreenSheet = ({
   open,
@@ -39,6 +42,7 @@ const FullscreenSheet = ({
   wide = false,
   closeOnEscape = true,
   offsetLeft = null,
+  fill = false,
 }) => {
   /* Системное «назад» закрывает окно — только на телефоне, см. IosModal. */
   const isNarrowShell = useIsMobileShell();
@@ -172,9 +176,13 @@ const FullscreenSheet = ({
             </div>
           </div>
         )}
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
-          <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{shown.children}</div>
-        </div>
+        {fill ? (
+          <div className="flex min-h-0 flex-1 flex-col">{shown.children}</div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+            <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{shown.children}</div>
+          </div>
+        )}
       </div>
     </div>
   );
