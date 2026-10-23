@@ -1,8 +1,12 @@
 """Вход в окно «Чатов ОП» в CRM без пароля (владелец, 20.10.2026: по ФИО среди всех, у кого
 совпадает, иначе один вход; админские роли тоже; без QR из CRM; ключ — CRM_WEBHOOK_TOKEN).
+С 23.10.2026 в окне CRM пишет каждый, кого CRM открыла («не только потоку»): ссылку получает
+любая действующая учётка, нашедшаяся по правилам, а сессия помечается сессией из CRM.
 
 Без приложения и сети: поддельная база; очередь кодов — на одноразовом локальном Postgres.
 """
+import time
+import uuid
 from contextlib import contextmanager
 from urllib.parse import parse_qs, urlsplit
 
@@ -10,7 +14,7 @@ import pytest
 from flask import Flask, jsonify
 
 from tests.test_wazzup_pilot_persistence import PORT, pg  # noqa: F401
-from wazzup import crm_identity, embed_auth
+from wazzup import access, crm_identity, embed_auth
 
 KEY = 'synthetic-crm-key-0000000000000000'
 BASE = 'https://portal.example.test/OTP'
@@ -65,19 +69,18 @@ class FakeDb:
         yield Cursor()
 
 
-def app_for(db, *, modes=None, users=None, issued=None, monkeypatch=None):
-    modes = modes if modes is not None else {}
+def app_for(db, *, users=None, issued=None):
     users = users if users is not None else {}
     issued = issued if issued is not None else []
 
-    def issue(user, transport):
-        issued.append((user[0], transport))
+    def issue(user, transport, crm_user_id):
+        issued.append((user[0], transport, crm_user_id))
         return jsonify(status='success', access_token='a', refresh_token='r'), 200
 
     app = Flask(__name__)
     app.register_blueprint(embed_auth.build_embed_blueprint(
         db=db, preflight=lambda: ('', 204), portal_base_url=BASE,
-        chat_mode=lambda user_id: modes.get(user_id), load_user=lambda user_id: users.get(user_id),
+        load_user=lambda user_id: users.get(user_id),
         issue_session=issue, client_ip=lambda: '203.0.113.7'))
     return app.test_client()
 
@@ -161,7 +164,7 @@ def test_launch_needs_the_configured_key(monkeypatch):
 
 def test_known_pair_gets_a_one_time_link(key_env):
     db = FakeDb(binding=42)
-    response = launch(app_for(db, modes={42: 'potok'}, users={42: user_row(42)}),
+    response = launch(app_for(db, users={42: user_row(42)}),
                       {'crmUserId': '352', 'crmUserName': 'Айгерим'})
     data = response.get_json()
     assert (response.status_code, data['linked'], data['matchedBy']) == (200, True, 'binding')
@@ -176,21 +179,31 @@ def test_known_pair_gets_a_one_time_link(key_env):
 
 def test_name_finds_any_role_including_admins_and_remembers_the_pair(key_env):
     db = FakeDb(users=[{'id': 7, 'name': 'Аскаров Адильжан', 'role': 'admin'}, {'id': 8, 'name': 'Карабек Ержан'}])
-    data = launch(app_for(db, modes={7: 'full'}, users={7: user_row(7, 'Аскаров Адильжан', 'admin')}),
+    data = launch(app_for(db, users={7: user_row(7, 'Аскаров Адильжан', 'admin')}),
                   {'crmUserId': '500', 'crmUserName': 'Адильжан Аскаров'}).get_json()
     assert (data['linked'], data['matchedBy'], data['icoreUser']['id']) == (True, 'name', 7)
     assert db.binds == [(7, '500', 'Адильжан Аскаров')]
     assert db.launches and db.launches[0][1] == 7
 
 
-@pytest.mark.parametrize('users,modes,reason', [
-    ([], {}, 'NOT_FOUND'),
-    ([{'id': 1, 'name': 'Иванова Айгерим Сериковна'}, {'id': 2, 'name': 'Иванова Айгерим Болатовна'}], {}, 'AMBIGUOUS'),
-    ([{'id': 3, 'name': 'Иванова Айгерим'}], {3: None}, 'NO_ACCESS'),
+def test_an_account_without_the_section_in_the_portal_still_gets_the_window(key_env):
+    # «Всем кто есть в crm… не только потоку» (владелец, 23.10.2026): учётке, которой «Чаты ОП»
+    # в портале не открыты (здесь — бухгалтер), окно CRM всё равно открывается — писать в нём
+    # она будет в режиме «crm» (access.py). Раздел портала тут не спрашивается вовсе.
+    db = FakeDb(users=[{'id': 31, 'name': 'Ахметова Алия Маратовна', 'role': 'accounting_manager'}])
+    data = launch(app_for(db, users={31: user_row(31, 'Ахметова Алия Маратовна', 'accounting_manager')}),
+                  {'crmUserId': 777, 'crmUserName': 'Ахметова Алия'}).get_json()
+    assert (data['linked'], data['matchedBy'], data['icoreUser']['id']) == (True, 'name', 31)
+    assert db.binds == [(31, '777', 'Ахметова Алия')], 'числовой id CRM — строкой'
+
+
+@pytest.mark.parametrize('users,reason', [
+    ([], 'NOT_FOUND'),
+    ([{'id': 1, 'name': 'Иванова Айгерим Сериковна'}, {'id': 2, 'name': 'Иванова Айгерим Болатовна'}], 'AMBIGUOUS'),
 ])
-def test_without_a_single_account_the_window_asks_to_sign_in_once(key_env, users, modes, reason):
+def test_without_a_single_account_the_window_asks_to_sign_in_once(key_env, users, reason):
     db = FakeDb(users=users)
-    data = launch(app_for(db, modes=modes), {'crmUserId': '352', 'crmUserName': 'Иванова Айгерим'}).get_json()
+    data = launch(app_for(db), {'crmUserId': '352', 'crmUserName': 'Иванова Айгерим'}).get_json()
     assert (data['linked'], data['reason']) == (False, reason)
     query = parse_qs(urlsplit(data['url']).query)
     assert 'launch' not in query and query['crmUserId'] == ['352']
@@ -204,26 +217,24 @@ def test_a_namesake_does_not_get_an_account_paired_with_another_crm_user(key_env
     # именем (тёзка, дубль, тестовый) получает вход паролем, а пара 352 остаётся как была.
     users = [{'id': 42, 'name': 'Иванова Айгерим Сериковна'}]
     db = FakeDb(users=users, pairs={42: '352'})
-    data = launch(app_for(db, modes={42: 'potok'}, users={42: user_row(42)}),
+    data = launch(app_for(db, users={42: user_row(42)}),
                   {'crmUserId': '777', 'crmUserName': 'Иванова Айгерим'}).get_json()
     assert (data['linked'], data['reason']) == (False, 'TAKEN')
     assert not db.launches and not db.binds
-    # Своя же пара — не «занята»: учётка, потерявшая раздел, так и остаётся без доступа.
-    own = FakeDb(binding=42, users=users, pairs={42: '777'})
-    data = launch(app_for(own, modes={42: None}), {'crmUserId': '777', 'crmUserName': 'Иванова Айгерим'}).get_json()
-    assert (data['linked'], data['reason']) == (False, 'NO_ACCESS')
 
 
-def test_a_pair_whose_account_lost_the_section_falls_back_to_the_name(key_env):
+def test_a_known_pair_wins_over_the_name(key_env):
+    # Пара — от входа в окне или прежнего совпадения: держится, пока учётка действующая
+    # (user_for_crm), даже если ФИО в CRM сменили или оно теперь совпадает с другим.
     db = FakeDb(binding=42, users=[{'id': 9, 'name': 'Карабек Ержан'}])
-    data = launch(app_for(db, modes={42: None, 9: 'operator'}, users={9: user_row(9, 'Карабек Ержан')}),
-                  {'crmUserId': '352', 'crmUserName': 'Ержан Карабек'}).get_json()
-    assert (data['matchedBy'], data['icoreUser']['id']) == ('name', 9)
+    data = launch(app_for(db, users={42: user_row(42)}), {'crmUserId': '352', 'crmUserName': 'Ержан Карабек'}).get_json()
+    assert (data['matchedBy'], data['icoreUser']['id']) == ('binding', 42)
+    assert not db.binds
 
 
 def test_launch_is_rate_limited_per_crm_user(key_env):
     db = FakeDb(binding=42)
-    client = app_for(db, modes={42: 'potok'}, users={42: user_row(42)})
+    client = app_for(db, users={42: user_row(42)})
     codes = [launch(client, {'crmUserId': '352'}).status_code for _ in range(31)]
     assert codes[:30] == [200] * 30 and codes[30] == 429
     assert launch(client, {'crmUserId': '353'}).status_code == 200
@@ -237,19 +248,35 @@ def exchange(client, code='x' * 43):
 
 def test_exchange_opens_the_window_session_only_for_a_live_code():
     issued = []
-    client = app_for(FakeDb(consumed=(42, '352')), modes={42: 'potok'}, users={42: user_row(42)}, issued=issued)
+    client = app_for(FakeDb(consumed=(42, '352')), users={42: user_row(42)}, issued=issued)
     response = exchange(client)
-    assert response.status_code == 200 and issued == [(42, 'bearer')]
+    # Сессия выдаётся вместе с пользователем CRM кода — она будет помечена сессией из CRM.
+    assert response.status_code == 200 and issued == [(42, 'bearer', '352')]
     assert exchange(app_for(FakeDb(consumed=None))).status_code == 401
     assert exchange(app_for(FakeDb()), code='').status_code == 400
     assert exchange(app_for(FakeDb()), code='y' * 101).status_code == 400
 
 
-def test_exchange_refuses_dismissed_accounts_and_accounts_without_the_section():
-    fired = app_for(FakeDb(consumed=(42, '352')), modes={42: 'potok'}, users={42: user_row(42, status='fired')})
+def test_exchange_refuses_dismissed_accounts_only():
+    fired = app_for(FakeDb(consumed=(42, '352')), users={42: user_row(42, status='fired')})
     assert (exchange(fired).status_code, exchange(fired).get_json()['code']) == (403, 'USER_INACTIVE')
-    closed = app_for(FakeDb(consumed=(42, '352')), modes={42: None}, users={42: user_row(42)})
-    assert exchange(closed).get_json()['code'] == 'NO_ACCESS'
+    issued = []
+    clerk = app_for(FakeDb(consumed=(31, '777')), users={31: user_row(31, role='accounting_manager')}, issued=issued)
+    assert exchange(clerk).status_code == 200 and issued == [(31, 'bearer', '777')], 'без раздела в портале — тоже'
+
+
+def test_password_sign_in_counts_as_a_crm_window_only_with_our_signature(key_env):
+    exp = int(time.time()) + 600
+    signed = {'crmUserId': '352', 'crmUserName': 'Иван', 'crmExp': str(exp),
+              'crmSig': crm_identity.sign_identity(KEY, '352', 'Иван', exp)}
+    assert embed_auth.signed_crm_user(signed) == '352'
+    assert embed_auth.signed_crm_user(dict(signed, crmUserId='353')) is None, 'чужой пользователь CRM'
+    assert embed_auth.signed_crm_user(dict(signed, crmSig='0' * 64)) is None
+    assert embed_auth.signed_crm_user({'crmUserId': '352', 'crmUserName': 'Иван'}) is None, 'без подписи'
+    for junk in (None, [], 'icore', {}):
+        assert embed_auth.signed_crm_user(junk) is None, junk
+    key_env.delenv(embed_auth.KEY_ENV)
+    assert embed_auth.signed_crm_user(signed) is None, 'без ключа CRM окна из CRM нет'
 
 
 def test_exchange_is_rate_limited_per_ip():
@@ -311,3 +338,43 @@ def test_pair_is_one_to_one_and_dismissed_accounts_are_not_found(real):
         assert crm_identity.user_for_crm(cursor, '999') is None
         cursor.execute(embed_auth.ACTIVE_USERS_SQL)
         assert sorted(row[0] for row in cursor.fetchall()) == [42, 43]
+
+
+@needs_pg
+def test_crm_window_session_is_marked_and_its_lock_is_the_link_or_the_qr(real):
+    """Режим «crm» (access.py) держится на пометке сессии и её замке: ссылка CRM открывает
+    сразу (wazzup_chat_access), вход паролем — после обычного QR (sensitive_data_unlocked)."""
+    link, password, portal, revoked = (str(uuid.uuid4()) for _ in range(4))
+    with real._get_cursor() as cursor:
+        # Таблицы портала — в том виде, в каком их читает проверка (database.py их и создаёт).
+        cursor.execute("""
+            CREATE TABLE user_sessions (session_id UUID PRIMARY KEY, user_id BIGINT NOT NULL,
+                revoked_at TIMESTAMP, expires_at TIMESTAMP NOT NULL,
+                sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE);
+            CREATE TABLE wazzup_chat_access (session_id UUID PRIMARY KEY, user_id BIGINT NOT NULL,
+                revoked_at TIMESTAMPTZ);
+        """)
+        for session_id, revoked_at in ((link, None), (password, None), (portal, None), (revoked, 'now')):
+            cursor.execute("""INSERT INTO user_sessions (session_id, user_id, revoked_at, expires_at)
+                              VALUES (%s, 43, CASE WHEN %s IS NULL THEN NULL ELSE now() END,
+                                      now() + interval '30 days')""", (session_id, revoked_at))
+        cursor.execute("INSERT INTO wazzup_chat_access (session_id, user_id) VALUES (%s, 43), (%s, 43)",
+                       (link, revoked))
+        embed_auth.mark_crm_session(cursor, link, 43, '352', 'launch')
+        embed_auth.mark_crm_session(cursor, link, 43, '352', 'launch')  # повтор — без ошибки
+        embed_auth.mark_crm_session(cursor, password, 43, '352', 'password')
+        embed_auth.mark_crm_session(cursor, revoked, 43, '352', 'launch')
+    with real._get_cursor() as cursor:
+        state = lambda session_id, user_id=43: access.load_crm_window_state(cursor, user_id, session_id)
+        assert state(link) == {'crm': True, 'unlocked': True}, 'по ссылке — сразу'
+        assert state(password) == {'crm': True, 'unlocked': False}, 'паролем — до QR закрыто'
+        cursor.execute("UPDATE user_sessions SET sensitive_data_unlocked = TRUE WHERE session_id = %s", (password,))
+        assert state(password) == {'crm': True, 'unlocked': True}, 'QR открыл'
+        assert state(portal) == {'crm': False, 'unlocked': False}, 'сессия портала — не окно CRM'
+        assert state(revoked) == {'crm': True, 'unlocked': False}, 'отозванная не пишет'
+        assert state(link, user_id=42) == {'crm': False, 'unlocked': False}, 'чужая сессия'
+        assert state(None) == state('None') == {'crm': False, 'unlocked': False}
+        cursor.execute("SELECT via FROM wazzup_crm_sessions WHERE session_id = %s", (password,))
+        assert cursor.fetchone() == ('password',)
+        with pytest.raises(Exception):
+            embed_auth.mark_crm_session(cursor, str(uuid.uuid4()), 43, '352', 'guess')

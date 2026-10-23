@@ -2535,7 +2535,9 @@ function OperatorWorkspace(props) {
  * супервайзера, затем окно чатов — только канал +77070253322 (остальные сервер
  * не отдаёт) и без смены: ни «Начать смену», ни статусов, писать можно сразу.
  * Карточки водителя нет — она пишет сделку amoCRM верификаторов, а «Поток»
- * ведёт водителей в своей CRM. */
+ * ведёт водителей в своей CRM. Тот же экран — в окне CRM у того, кто пишет там
+ * без своего права в разделе (режим «crm», владелец 23.10.2026): по ссылке CRM замок
+ * сразу открыт, после входа паролем — за QR. */
 function PotokWorkspace(props) {
     const workspace = useGatedWorkspace(props);
     if (!workspace.ready) return <WorkspaceLoading error={workspace.error} />;
@@ -2545,11 +2547,13 @@ function PotokWorkspace(props) {
 
 /* Кому раздел открыт верификатором или «Потоком», сообщает сервер флагами
    профиля (wazzup_chat_operator, wazzup_chat_potok): группа определяется моделью
-   группы на сегодня, и портал сам этого не выведет. */
+   группы на сегодня, и портал сам этого не выведет. Окно CRM — флагом сессии
+   wazzup_chat_crm. */
 export default function WazzupChatsView(props) {
     const operator = Boolean(props.user?.wazzup_chat_operator ?? props.user?.wazzupChatOperator);
     const potok = Boolean(props.user?.wazzup_chat_potok ?? props.user?.wazzupChatPotok);
+    const crm = Boolean(props.user?.wazzup_chat_crm ?? props.user?.wazzupChatCrm);
     if (operator) return <OperatorWorkspace key={props.user?.id} {...props} />;
-    if (potok) return <PotokWorkspace key={props.user?.id} {...props} />;
+    if (potok || crm) return <PotokWorkspace key={props.user?.id} {...props} />;
     return <ChatsWorkspace key={props.user?.id} {...props} />;
 }

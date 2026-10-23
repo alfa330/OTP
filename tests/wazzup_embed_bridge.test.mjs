@@ -3,9 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    adoptEmbedIdentityFromSearch, installEmbedBridge, isChatsEmbedSearch, parseEmbedCommand, parseEmbedIdentity,
-    queueEmbedCommand, replyToEmbedParent, resetEmbedBridgeForTests, setEmbedStatus, takeEmbedCommands,
-    takeEmbedIdentity,
+    adoptEmbedIdentityFromSearch, currentEmbedIdentity, installEmbedBridge, isChatsEmbedSearch, parseEmbedCommand,
+    parseEmbedIdentity, queueEmbedCommand, replyToEmbedParent, resetEmbedBridgeForTests, setEmbedStatus,
+    takeEmbedCommands, takeEmbedIdentity,
 } from '../src/components/wazzup/embedBridge.js';
 
 /* «Чаты ОП» окном в CRM «Потока» (владелец, 20.10.2026): команды страницы-хозяина. */
@@ -130,8 +130,14 @@ test('пользователь CRM: из адреса окна с подпись
     const seen = [];
     takeEmbedIdentity((identity) => seen.push(identity));
     assert.deepEqual(seen, [], 'адрес без подписи пару не даёт');
+    assert.equal(currentEmbedIdentity(), null, 'и вход паролем идёт без пользователя CRM');
     adoptEmbedIdentityFromSearch(`?embed=1&crmUserId=352&crmUserName=%D0%98%D0%B2%D0%B0%D0%BD&crmExp=1790003600&crmSig=${sig}`);
     assert.deepEqual(seen, [{ crmUserId: '352', crmUserName: 'Иван', ...proof }]);
+    // Вход паролем в окне несёт ту же подпись — копией, мост её не отдаёт на правку.
+    const forLogin = currentEmbedIdentity();
+    assert.deepEqual(forLogin, { crmUserId: '352', crmUserName: 'Иван', ...proof });
+    forLogin.crmUserId = '999';
+    assert.equal(currentEmbedIdentity().crmUserId, '352');
     const { win, posted, send } = frame();
     installEmbedBridge(win);
     send({ type: 'icore.chats.identify', crmUserId: '352', crmUserName: 'Иван', ...proof });

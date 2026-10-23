@@ -168,6 +168,7 @@ test('обмен идёт раньше портала: модуль загруз
     assert.match(main, /embedLaunchDone\.then\(\(launch\) => \{\n\s*if \(reloadPending\(launch\)\) return;\n\s*root\.render\(/);
     assert.match(read('src/embedLaunchBoot.js'), /export const embedLaunchDone = runEmbedLaunch\(\)\.catch\(\(\) => null\);/);
     const app = read('src/App.jsx');
-    assert.match(app, /\.\.\.\(CHATS_EMBED \? \{ embed: true \} : \{\}\)/, 'вход паролем в окне — тоже сессия окна');
+    assert.match(app, /\.\.\.\(CHATS_EMBED \? \{ embed: true, crm: currentEmbedIdentity\(\) \|\| undefined \} : \{\}\)/,
+        'вход паролем в окне — тоже сессия окна, с подписью CRM из адреса');
     assert.match(app, /if \(!isEmbedApiAllowed\(config\?\.url, API_BASE_URL\)\) \{\n\s*throw new axios\.CanceledError/);
 });

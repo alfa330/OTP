@@ -247,6 +247,32 @@ class OperatorStateTests(unittest.TestCase):
         self.assertIn('AND (s.sensitive_data_unlocked OR EXISTS (SELECT 1 FROM wazzup_chat_access a', sql)
 
 
+class CrmWindowRuleTests(unittest.TestCase):
+    """Окно CRM (владелец, 23.10.2026: «дать доступ писать через crm всем кто есть в crm»)."""
+
+    def test_crm_mode_is_for_those_who_do_not_write_here_themselves(self):
+        applies = access.crm_window_applies
+        self.assertTrue(applies({'mode': None}), 'раздела нет')
+        self.assertTrue(applies({'mode': access.MODE_FULL, 'can_process': False}), 'только смотрит')
+        for own in ({'mode': access.MODE_OPERATOR, 'locked': True}, {'mode': access.MODE_POTOK},
+                    {'mode': access.MODE_FULL, 'can_process': True}):
+            self.assertFalse(applies(own), own)
+
+    def test_no_session_means_no_crm_window_and_no_query(self):
+        calls = []
+        cursor = SimpleNamespace(execute=lambda sql, params: calls.append(params))
+        for missing in (None, '', 'None', 'not-a-session'):
+            self.assertEqual(access.load_crm_window_state(cursor, 7, missing), {'crm': False, 'unlocked': False})
+        self.assertEqual(calls, [])
+
+    def test_lock_is_the_live_own_session_opened_by_the_link_or_the_qr(self):
+        sql = ' '.join(access._CRM_WINDOW_SQL.split())
+        self.assertIn('FROM wazzup_crm_sessions c WHERE c.session_id = %(session_id)s::uuid AND c.user_id = %(user_id)s', sql)
+        self.assertIn('s.revoked_at IS NULL', sql)
+        self.assertIn("s.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", sql)
+        self.assertIn('AND (s.sensitive_data_unlocked OR EXISTS (SELECT 1 FROM wazzup_chat_access a', sql)
+
+
 # ── _wazzup_chat_access и гарды: настоящие функции монолита ───────────────────
 
 USERS = {
@@ -262,12 +288,15 @@ USERS = {
     9: ('super_admin', 'fired'),
     10: ('operator', 'working'),        # группа «Поток», доступ подтверждён
     11: ('operator', 'working'),        # группа «Поток», доступ не подтверждён
+    12: ('accounting_manager', 'working'),  # раздела в портале нет
 }
 FULL_AUDIENCE = {1, 2, 3, 4, 9}
 OPERATOR_STATES = {5: {'verifier': True, 'potok': False, 'unlocked': True},
                    6: {'verifier': True, 'potok': False, 'unlocked': False},
                    10: {'verifier': False, 'potok': True, 'unlocked': True},
                    11: {'verifier': False, 'potok': True, 'unlocked': False}}
+# Сессии окна CRM (владелец, 23.10.2026): 2 — по ссылке, 12 — вход паролем до QR.
+CRM_WINDOWS = {2: {'crm': True, 'unlocked': True}, 12: {'crm': True, 'unlocked': False}}
 
 
 def _user_tuple(user_id):
@@ -280,8 +309,11 @@ def _user_tuple(user_id):
 class ChatAccessWiringTests(unittest.TestCase):
     def setUp(self):
         self.state_calls = []
+        self.window_calls = []
+        self.windows = dict(CRM_WINDOWS)
         self.account = 'op'
         self.broken_state = False
+        self.broken_window = False
         test = self
 
         class _Db:
@@ -299,15 +331,24 @@ class ChatAccessWiringTests(unittest.TestCase):
                 raise RuntimeError('pool timeout')
             return OPERATOR_STATES.get(user_id, {'verifier': False, 'potok': False, 'unlocked': False})
 
+        def load_crm_window_state(cursor, user_id, session_id):
+            test.window_calls.append((user_id, session_id))
+            if test.broken_window:
+                raise RuntimeError('pool timeout')
+            return test.windows.get(user_id, {'crm': False, 'unlocked': False})
+
         wazzup_access = SimpleNamespace(
             MODE_FULL=access.MODE_FULL, MODE_OPERATOR=access.MODE_OPERATOR,
-            MODE_POTOK=access.MODE_POTOK, GATED_MODES=access.GATED_MODES,
-            POTOK_CHANNEL_IDS=access.POTOK_CHANNEL_IDS,
+            MODE_POTOK=access.MODE_POTOK, MODE_CRM=access.MODE_CRM, GATED_MODES=access.GATED_MODES,
+            POTOK_CHANNEL_IDS=access.POTOK_CHANNEL_IDS, CRM_CHANNEL_IDS=access.CRM_CHANNEL_IDS,
             processes_without_gate=access.processes_without_gate,
-            load_operator_state=load_operator_state)
+            crm_window_applies=access.crm_window_applies,
+            load_operator_state=load_operator_state, load_crm_window_state=load_crm_window_state)
         self.g = SimpleNamespace(user_id=None)
         self.namespace = {
             'g': self.g, 'db': _Db(), 'wazzup_access': wazzup_access,
+            'wazzup_embed_auth': SimpleNamespace(SCOPE='crm_embed'),
+            '_request_session_id': lambda: SESSION,
             'jsonify': lambda payload: payload,
             'logging': SimpleNamespace(exception=lambda *a, **k: None),
             'datetime': datetime, 'ZoneInfo': __import__('zoneinfo').ZoneInfo,
@@ -321,9 +362,11 @@ class ChatAccessWiringTests(unittest.TestCase):
         }
         _load(('_wazzup_chat_access', '_wazzup_chat_reader_guard'), self.namespace)
 
-    def _as(self, user_id):
+    def _as(self, user_id, scope=None):
         self.g.__dict__.clear()
         self.g.user_id = user_id
+        if scope:
+            self.g.auth_scope = scope
         return self.namespace['_wazzup_chat_access']()
 
     def test_modes_table(self):
@@ -340,6 +383,7 @@ class ChatAccessWiringTests(unittest.TestCase):
             9: ('full', False, False),          # уволенный супер-админ не пишет
             10: ('potok', False, True),         # «Поток» после QR пишет
             11: ('potok', True, False),         # «Поток» до QR — замок
+            12: (None, False, False),           # в портале раздела нет
             None: (None, False, False),
         }
         for user_id, (mode, locked, can_process) in expected.items():
@@ -402,6 +446,57 @@ class ChatAccessWiringTests(unittest.TestCase):
             self._as(2)
             self.assertEqual(guard(), (2, None), account)
 
+    # ── окно CRM (владелец, 23.10.2026: «дать доступ писать через crm всем кто есть в crm») ──
+
+    def test_crm_window_session_writes_to_the_crm_number(self):
+        crm = 'crm_embed'
+        # Админ смотрит в портале, а в окне CRM по ссылке пишет — только в номер CRM.
+        state = self._as(2, crm)
+        self.assertEqual((state['mode'], state['locked'], state['can_process'], state['channels']),
+                         ('crm', False, True, access.CRM_CHANNEL_IDS))
+        # Раздела в портале нет вовсе: после входа паролем — замок до QR, потом пишет.
+        state = self._as(12, crm)
+        self.assertEqual((state['mode'], state['locked'], state['can_process']), ('crm', True, False))
+        self.windows[12] = {'crm': True, 'unlocked': True}
+        self.assertEqual(self._as(12, crm)['can_process'], True)
+        # Сессия окна, но не из CRM (нет пометки: окно открыли без подписи CRM) — как было.
+        self.assertEqual(self._as(7, crm)['mode'], None)
+        self.assertEqual(self.window_calls[-1], (7, SESSION))
+
+    def test_own_rights_win_over_the_crm_window(self):
+        """Верификатор остаётся со сменой и всеми каналами, «Поток» — со своим каналом,
+        супер-админ — со всем; окно CRM у них даже не спрашивается."""
+        self.windows.update({1: {'crm': True, 'unlocked': True}, 5: {'crm': True, 'unlocked': True},
+                             10: {'crm': True, 'unlocked': True}})
+        self.assertEqual((self._as(1, 'crm_embed')['mode'], self._as(1, 'crm_embed')['channels']), ('full', None))
+        self.assertEqual((self._as(5, 'crm_embed')['mode'], self._as(5, 'crm_embed')['channels']), ('operator', None))
+        self.assertEqual(self._as(10, 'crm_embed')['mode'], 'potok')
+        self.assertEqual(self.window_calls, [])
+
+    def test_portal_sessions_never_ask_about_the_crm_window(self):
+        for user_id in (2, 7, 12):
+            self._as(user_id)
+        self.assertEqual(self.window_calls, [])
+        self.assertEqual(self._as(2)['mode'], 'full')
+
+    def test_crm_window_lock_and_account_go_through_the_reader_guard(self):
+        guard = self.namespace['_wazzup_chat_reader_guard']
+        self._as(12, 'crm_embed')
+        requester, error = guard()
+        self.assertIsNone(requester)
+        self.assertEqual((error[1], error[0]['code']), (403, 'CHAT_ACCESS_LOCKED'))
+        self._as(2, 'crm_embed')
+        self.assertEqual(guard(), (2, None))
+        self.account = 'potok'
+        self._as(2, 'crm_embed')
+        self.assertEqual(guard(), (None, ({'error': 'forbidden'}, 403)), 'окну CRM — только «op»')
+
+    def test_crm_window_check_failure_keeps_the_portal_rights(self):
+        self.broken_window = True
+        state = self._as(2, 'crm_embed')
+        self.assertEqual((state['mode'], state['can_process'], state['channels']), ('full', False, None))
+        self.assertEqual(self._as(12, 'crm_embed')['mode'], None)
+
 
 class WiringTextTests(unittest.TestCase):
     """Места, где правило подключено. Сломанная проводка не роняет ни один
@@ -426,6 +521,16 @@ class WiringTextTests(unittest.TestCase):
     def test_shift_watcher_is_scheduled(self):
         self.assertIn("id='wazzup_workspace_sweep_2min'", BOT_SOURCE)
         self.assertIn('_wazzup_workspace_sweep = _wazzup_workspace_bp.sweep', BOT_SOURCE)
+
+    def test_crm_window_flag_is_about_the_own_session_only(self):
+        """Флаг окна CRM — про сессию запроса: только самому вошедшему, только в сессии окна
+        и тем же правилом, что доступ (_wazzup_chat_access)."""
+        self.assertIn('"wazzup_chat_crm": wazzup_chat_crm,', BOT_SOURCE)
+        payload = BOT_SOURCE[BOT_SOURCE.index('def _get_user_payload(user):'):]
+        payload = payload[:payload.index('\ndef ', 10)]
+        self.assertIn("own_crm_window = (user_id is not None and getattr(g, 'user_id', None) == user_id\n"
+                      "                          and getattr(g, 'auth_scope', None) == wazzup_embed_auth.SCOPE)", payload)
+        self.assertIn("wazzup_chat_crm = _wazzup_chat_access().get('mode') == wazzup_access.MODE_CRM", payload)
 
     def test_profile_flag_reaches_the_portal(self):
         self.assertIn('"wazzup_chat_operator": wazzup_chat_operator,', BOT_SOURCE)

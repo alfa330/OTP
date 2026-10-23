@@ -12,6 +12,12 @@ CRM (POTOK_CRM_WEBHOOK_API_KEY): решение владельца.
 запоминает пару, и дальше вход без пароля. QR от СВ окну из CRM не нужен (тоже решение
 владельца): сессия, открытая по ссылке, сразу получает доступ к чатам (wazzup_chat_access).
 
+Пишет в окне CRM каждый, кого CRM открыла (владелец, 23.10.2026: «всем кто есть в crm…
+не только потоку»): сессия из CRM помечена в wazzup_crm_sessions — по ссылке или входом
+паролем в окне с подписью CRM, — и кто сам в разделе не пишет, получает в ней режим «crm»
+(access.py): номер CRM, без смены. Поэтому ссылку получает любая действующая учётка,
+нашедшаяся по правилам, а не только та, кому раздел открыт в портале.
+
 Сессия окна — только чаты: в её токенах scope crm_embed, и сервер пускает с ней лишь в
 /api/wazzup/* и вход-выход (path_allowed). Ключ CRM, попавший не в те руки, откроет чаты под
 чужой учёткой, но не весь портал, — среди совпавших по ФИО бывают админы. Куки такой сессии
@@ -100,15 +106,15 @@ ACTIVE_USERS_SQL = ("SELECT id, name, role FROM users "
                     "WHERE COALESCE(LOWER(status), '') NOT IN ('fired', 'dismissal')")
 
 
-def resolve_user(cursor, crm_user_id, crm_user_name, chat_mode):
+def resolve_user(cursor, crm_user_id, crm_user_name):
     """(id учётки iCORE, как найдена) или (None, причина).
 
-    как: 'binding' — пара уже известна; 'name' — по ФИО. Причина: 'NOT_FOUND', 'AMBIGUOUS',
-    'TAKEN' (учётка с этим ФИО уже закреплена за другим пользователем CRM — тёзка или второй
-    аккаунт CRM не получает её без пароля), 'NO_ACCESS' (ФИО совпало, но «Чаты ОП» учётке не
-    открыты)."""
+    как: 'binding' — пара уже известна (действующая учётка); 'name' — по ФИО. Причина:
+    'NOT_FOUND', 'AMBIGUOUS', 'TAKEN' (учётка с этим ФИО уже закреплена за другим
+    пользователем CRM — тёзка или второй аккаунт CRM не получает её без пароля). Доступ к
+    разделу в портале не спрашиваем: в окне CRM пишет каждый, кого CRM открыла (access.py)."""
     bound = crm_identity.user_for_crm(cursor, crm_user_id)
-    if bound is not None and chat_mode(bound):
+    if bound is not None:
         return bound, 'binding'
     cursor.execute(ACTIVE_USERS_SQL)
     users = [{'id': int(row[0]), 'name': row[1], 'role': row[2]} for row in cursor.fetchall()]
@@ -121,17 +127,44 @@ def resolve_user(cursor, crm_user_id, crm_user_name, chat_mode):
     paired = crm_identity.pair_of(cursor, user_id)
     if paired is not None and paired != crm_user_id:
         return None, 'TAKEN'
-    if not chat_mode(user_id):
-        return None, 'NO_ACCESS'
     return user_id, 'name'
 
 
+def signed_crm_user(body):
+    """Пользователь CRM из входа паролем в окне ({crmUserId, crmUserName, crmExp, crmSig} из
+    адреса окна) — только с живой подписью iCORE, иначе None: без неё сессия окна из CRM не
+    считается, и режима «crm» в ней нет."""
+    identity = crm_identity.clean_identity(body)
+    if identity is None:
+        return None
+    crm_user_id, crm_user_name = identity
+    if not crm_identity.identity_signed(launch_key(), crm_user_id, crm_user_name,
+                                        body.get('crmExp'), body.get('crmSig')):
+        return None
+    return crm_user_id
+
+
+def mark_crm_session(cursor, session_id, user_id, crm_user_id, via):
+    """Сессия открыта из CRM: via — 'launch' (ссылка) или 'password' (вход в окне)."""
+    cursor.execute("""
+        INSERT INTO wazzup_crm_sessions (session_id, user_id, crm_user_id, via)
+        VALUES (%s::uuid, %s, %s, %s)
+        ON CONFLICT (session_id) DO NOTHING
+    """, (str(session_id), int(user_id), str(crm_user_id), via))
+
+
 def create_launch(cursor, user_id, crm_user_id, ttl=LAUNCH_TTL_SECONDS):
-    """Одноразовый код окна: в базе только отпечаток. Попутно — уборка вчерашних кодов."""
+    """Одноразовый код окна: в базе только отпечаток. Попутно — уборка вчерашних кодов и
+    пометок сессий старше любой живой сессии (refresh живёт 30 дней)."""
     cursor.execute("""
         DELETE FROM wazzup_embed_launches WHERE code_hash IN (
             SELECT code_hash FROM wazzup_embed_launches
              WHERE expires_at < now() - interval '1 day' LIMIT 500)
+    """)
+    cursor.execute("""
+        DELETE FROM wazzup_crm_sessions WHERE session_id IN (
+            SELECT session_id FROM wazzup_crm_sessions
+             WHERE created_at < now() - interval '60 days' LIMIT 500)
     """)
     code = new_code()
     cursor.execute("""
@@ -183,6 +216,15 @@ def init_schema(cursor):
         );
         CREATE INDEX IF NOT EXISTS idx_wazzup_embed_launches_expires
             ON wazzup_embed_launches(expires_at);
+        CREATE TABLE IF NOT EXISTS wazzup_crm_sessions (
+            session_id UUID PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            crm_user_id TEXT NOT NULL,
+            via TEXT NOT NULL CHECK (via IN ('launch', 'password')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_wazzup_crm_sessions_created
+            ON wazzup_crm_sessions(created_at);
     """)
 
 
@@ -208,13 +250,11 @@ class RateLimiter:
             return True
 
 
-def build_embed_blueprint(*, db, preflight, portal_base_url, chat_mode, load_user, issue_session,
+def build_embed_blueprint(*, db, preflight, portal_base_url, load_user, issue_session,
                           client_ip=lambda: request.remote_addr):
-    """chat_mode(user_id) -> режим «Чатов ОП» учётки ('full', 'operator', 'potok') или None —
-    тем же правилом, что у запросов (bot_schedule2._wazzup_chat_access).
-    load_user(user_id) -> строка users (db.get_user).
-    issue_session(user, auth_transport) -> ответ Flask: сессия scope crm_embed, токены, без кук,
-    чаты открыты без QR.
+    """load_user(user_id) -> строка users (db.get_user).
+    issue_session(user, auth_transport, crm_user_id) -> ответ Flask: сессия scope crm_embed,
+    помеченная как сессия из CRM, токены, без кук, чаты открыты без QR.
     client_ip() -> адрес человека за прокси Render (bot_schedule2._client_ip)."""
     bp = Blueprint('wazzup_embed', __name__)
     per_crm_user = RateLimiter(30)
@@ -237,7 +277,7 @@ def build_embed_blueprint(*, db, preflight, portal_base_url, chat_mode, load_use
         if not overall.allow('all') or not per_crm_user.allow(crm_user_id):
             return jsonify(error='Слишком часто', code='RATE_LIMITED'), 429, {'Retry-After': '60'}
         with db._get_cursor() as cursor:
-            user_id, how = resolve_user(cursor, crm_user_id, crm_user_name, chat_mode)
+            user_id, how = resolve_user(cursor, crm_user_id, crm_user_name)
             if user_id is None:
                 url = launch_url(portal_base_url, crm_user_id=crm_user_id, crm_user_name=crm_user_name,
                                  key=expected)
@@ -269,13 +309,11 @@ def build_embed_blueprint(*, db, preflight, portal_base_url, chat_mode, load_use
         if consumed is None:
             return jsonify(error='Ссылка входа устарела — откройте окно в CRM заново',
                            code='LAUNCH_INVALID'), 401
-        user_id, _crm_user_id = consumed
+        user_id, crm_user_id = consumed
         user = load_user(user_id)
         status = str(user[11] if user and len(user) > 11 else '').strip().lower()
         if not user or status in DISMISSED:
             return jsonify(error='Учётка неактивна', code='USER_INACTIVE'), 403
-        if not chat_mode(user_id):
-            return jsonify(error='«Чаты ОП» этой учётке не открыты', code='NO_ACCESS'), 403
-        return issue_session(user, 'bearer')
+        return issue_session(user, 'bearer', crm_user_id)
 
     return bp

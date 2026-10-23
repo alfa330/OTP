@@ -199,8 +199,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
 
     def sender_author_id(user):
         # Only an operator's reply (a verifier or the «Поток» group) is credited
-        # in the reports; a super admin stays out of them, as before.
-        if access is not None and access().get('mode') in access_rules.GATED_MODES:
+        # in the reports; a super admin and anyone writing from the CRM window
+        # without a role of their own here stay out of them, as before.
+        if access is not None and access().get('mode') in access_rules.CREDITED_MODES:
             return access_rules.icore_author_id(user[0])
         return None
 
@@ -227,11 +228,13 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     register_note_routes(bp, actor, require_api_key, preflight, db, exclusions)
     from .driver_cards import register_driver_card_routes
     from . import driver_cards_sync
-    # The driver card writes the verifiers' amoCRM deal; the «Поток» group works in its own CRM.
+    # The driver card writes the verifiers' amoCRM deal; the «Поток» group and the CRM
+    # window work in their own CRM.
     register_driver_card_routes(
         bp, guard=guard, actor=actor, require_api_key=require_api_key, preflight=preflight, db=db,
         may_edit=lambda user_id: (may_process(db.get_user(id=user_id))
-                                  and (access is None or access().get('mode') != access_rules.MODE_POTOK)),
+                                  and (access is None or access().get('mode') not in (
+                                      access_rules.MODE_POTOK, access_rules.MODE_CRM))),
         excluded_channels=exclusions,
         on_saved=driver_card_sync.get('wake', driver_cards_sync.wake),
         options_provider=driver_card_sync.get('options', lambda: driver_cards_sync.current_options(db)),
@@ -239,8 +242,9 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     from .typing import register_typing_routes
     register_typing_routes(bp, actor, require_api_key, preflight, db, exclusions)
     # The CRM user behind the window's iCORE account: who wrote, for the CRM (crm_identity.py).
-    # A free pair is taken only by an operator whose sign-in the supervisor confirmed by QR;
-    # others are paired by name when the CRM opens the window (embed_auth.py).
+    # A free pair is taken only behind the QR: an operator, or anyone in a CRM window session
+    # signed in by password (mode «crm»); others are paired by name when the CRM opens the
+    # window (embed_auth.py).
     from .crm_identity import register_crm_identity_route
     register_crm_identity_route(bp, actor, require_api_key, preflight, db,
                                 may_bind=lambda: access is None or access().get('mode') in access_rules.GATED_MODES)

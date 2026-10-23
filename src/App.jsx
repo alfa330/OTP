@@ -150,7 +150,8 @@ import {
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { useChatWaitingCount, waitingBadgeLabel } from './components/wazzup/chatWaitingBadge';
 import {
-    adoptEmbedIdentityFromSearch, installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand, setEmbedStatus,
+    adoptEmbedIdentityFromSearch, currentEmbedIdentity, installEmbedBridge, isChatsEmbedSearch, queueEmbedCommand,
+    setEmbedStatus,
 } from './components/wazzup/embedBridge';
 import { isEmbedApiAllowed } from './components/wazzup/embedLaunch';
 import { stripBaigaParams } from './components/baiga/baigaMeta';
@@ -2268,6 +2269,12 @@ const isWazzupChatOperator = (userLike) => Boolean(
 const isWazzupChatPotok = (userLike) => Boolean(
     userLike?.wazzup_chat_potok ?? userLike?.wazzupChatPotok
 );
+/* Сессия окна CRM (владелец, 23.10.2026: «дать доступ писать через crm всем кто есть в
+   crm»): в ней пишет в номер CRM и тот, у кого своего права нет, — экран как у «Потока».
+   Флаг сервер считает по сессии (wazzup_chat_crm), в портале его не бывает. */
+const isWazzupChatCrm = (userLike) => Boolean(
+    userLike?.wazzup_chat_crm ?? userLike?.wazzupChatCrm
+);
 
 /* «Чаты ОП» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
    отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
@@ -2277,6 +2284,8 @@ const isWazzupChatPotok = (userLike) => Boolean(
    Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py, а для
    верификатора — _wazzup_chat_access там же. */
 const canAccessVerifierChatsForUser = (userLike) => {
+    // Окно CRM открывает раздел каждому, кого открыла CRM, — раньше всех вычетов портала.
+    if (isWazzupChatCrm(userLike)) return true;
     // Наблюдатель «Маркетинга» вычитается ПЕРВЫМ: разбор звонков ему открыт, а
     // переписка Верификаторов в выданный ему перечень разделов не входит.
     if (isMarketingObserver(userLike)) return false;
@@ -51280,7 +51289,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         password: password.trim(),
                         auth_transport: requestedAuthTransport,
                         // Вход в окне «Чатов ОП» в CRM — сессия окна: только чаты, без кук.
-                        ...(CHATS_EMBED ? { embed: true } : {})
+                        // С подписью CRM из адреса окна сервер считает её сессией из CRM:
+                        // за QR в ней пишет и тот, у кого своего права нет (режим «crm»).
+                        ...(CHATS_EMBED ? { embed: true, crm: currentEmbedIdentity() || undefined } : {})
                     }, {
                         headers: withAccessTokenHeader(
                             { 'Content-Type': 'application/json' },

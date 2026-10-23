@@ -99,6 +99,10 @@ export const takeEmbedIdentity = (onIdentity) => {
     return () => { if (identityHandler === onIdentity) identityHandler = null; };
 };
 
+/** Подписанный пользователь CRM этого окна или null — для входа паролем в окне: с ним
+ *  сервер считает сессию сессией из CRM (wazzup/embed_auth.py, режим «crm»). */
+export const currentEmbedIdentity = () => (identity ? { ...identity } : null);
+
 /** Пользователь CRM из адреса окна (?crmUserId=…&crmUserName=…). */
 export const adoptEmbedIdentityFromSearch = (search) => {
     try {

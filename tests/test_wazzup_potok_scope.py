@@ -31,7 +31,11 @@ def potok_access():
 class PotokChannelTests(unittest.TestCase):
     def test_potok_channel_is_the_help_taxi_number(self):
         self.assertEqual({HELP}, access.POTOK_CHANNEL_IDS)
-        self.assertEqual({access.MODE_OPERATOR, access.MODE_POTOK}, access.GATED_MODES)
+        # Окно CRM (владелец, 23.10.2026) пишет в тот же номер — номер CRM «Потока».
+        self.assertEqual({HELP}, access.CRM_CHANNEL_IDS)
+        self.assertEqual({access.MODE_OPERATOR, access.MODE_POTOK, access.MODE_CRM}, access.GATED_MODES)
+        # В показатели входят ответы операторов; окна CRM без своего права — нет.
+        self.assertEqual({access.MODE_OPERATOR, access.MODE_POTOK}, access.CREDITED_MODES)
 
 
 class PotokPilotTests(unittest.TestCase):

@@ -20,6 +20,14 @@ bot_schedule2.py, сюда она не входит.
 CRM; теперь номер в аккаунте «op», и окно ему даёт «Чаты ОП» (в том числе
 встроенными в CRM).
 
+С 23.10.2026 (владелец: «дать доступ писать через crm всем кто есть в crm сохраняя
+правила проверки фио, не только потоку») в окне CRM пишет любой, кого CRM открыла:
+сессия, полученная по ссылке CRM или входом паролем в окне с подписью CRM
+(wazzup_crm_sessions, embed_auth.py), получает режим «crm» — номер CRM
+(CRM_CHANNEL_IDS), без смены, как у «Потока». Ссылка открывает его без QR, вход
+паролем — после обычного QR. Режим даётся только тому, кто сам в разделе не пишет
+(смотрит или раздела не имеет): верификатор, «Поток» и супер-админ остаются при своём.
+
 Обычный QR — решение владельца 09.10.2026 («чтобы раздел открывался через
 обычный QR и его могли открывать супервайзеры»). До него у чатов был отдельный
 ключ: свой код (`OTPW:`, своя подпись), а супервайзер вводил ещё и временный код
@@ -49,8 +57,14 @@ DISMISSED_STATUSES = frozenset({'fired', 'dismissal'})
 MODE_FULL = 'full'
 MODE_OPERATOR = 'operator'
 MODE_POTOK = 'potok'
+MODE_CRM = 'crm'
+# Номер CRM «Потока» — его события iCORE пересылает в CRM (syntony.py), в него и пишут из окна CRM.
+CRM_CHANNEL_IDS = POTOK_CHANNEL_IDS
 # Режимы, в которых раздел открывается за QR и только в аккаунте «op».
-GATED_MODES = frozenset({MODE_OPERATOR, MODE_POTOK})
+GATED_MODES = frozenset({MODE_OPERATOR, MODE_POTOK, MODE_CRM})
+# Чьи ответы засчитываются в показатели (свой id автора): операторы — верификатор и «Поток».
+# Пишущий из окна CRM без своего права в разделе, как и супер-админ, в них не входит.
+CREDITED_MODES = frozenset({MODE_OPERATOR, MODE_POTOK})
 
 QR_PREFIX = 'OTPW:'
 QR_TTL_SECONDS = 300
@@ -207,6 +221,45 @@ def load_operator_state(cursor, user_id, session_id, day, sales_department_id):
     potok = is_potok_operator(row[0], row[2], row[3], row[1])
     return {'verifier': verifier, 'potok': potok,
             'unlocked': bool((verifier or potok) and session and row[4])}
+
+
+# ── Окно CRM ─────────────────────────────────────────────────────────────────
+
+def crm_window_applies(state):
+    """Получает ли человек в сессии окна CRM режим «crm»: только если сам в разделе не
+    пишет — смотрит (full без обработки) или раздела не имеет. Верификатор, «Поток» и
+    супер-админ остаются при своём режиме и своих правилах."""
+    mode = state.get('mode')
+    if mode in (MODE_OPERATOR, MODE_POTOK):
+        return False
+    return not (mode == MODE_FULL and state.get('can_process'))
+
+
+_CRM_WINDOW_SQL = """
+    SELECT EXISTS (SELECT 1 FROM wazzup_crm_sessions c
+                    WHERE c.session_id = %(session_id)s::uuid AND c.user_id = %(user_id)s),
+           EXISTS (SELECT 1 FROM user_sessions s
+                    WHERE s.session_id = %(session_id)s::uuid
+                      AND s.user_id = %(user_id)s
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                      AND (s.sensitive_data_unlocked
+                           OR EXISTS (SELECT 1 FROM wazzup_chat_access a
+                                       WHERE a.session_id = s.session_id
+                                         AND a.user_id = s.user_id
+                                         AND a.revoked_at IS NULL)))
+"""
+
+
+def load_crm_window_state(cursor, user_id, session_id):
+    """{'crm': bool, 'unlocked': bool}: открыта ли сессия из CRM (wazzup_crm_sessions) и
+    подтверждён ли в ней доступ — ссылкой CRM (wazzup_chat_access сразу) или обычным QR."""
+    session = clean_session_id(session_id)
+    if not session:
+        return {'crm': False, 'unlocked': False}
+    cursor.execute(_CRM_WINDOW_SQL, {'user_id': int(user_id), 'session_id': session})
+    row = cursor.fetchone() or (False, False)
+    return {'crm': bool(row[0]), 'unlocked': bool(row[0] and row[1])}
 
 
 # ── Код для сканера ──────────────────────────────────────────────────────────

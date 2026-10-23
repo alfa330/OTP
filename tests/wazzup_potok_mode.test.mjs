@@ -14,8 +14,20 @@ test('раздел: «Поток» — замок с QR и окно чатов �
     assert.match(potok, /if \(workspace\.locked\) return <GateScreen embed=\{props\.embed\} onLogout=\{props\.onLogout\}><ChatAccessGate \/><\/GateScreen>;/);
     assert.match(potok, /return <ChatsWorkspace \{\.\.\.props\} operator potok \/>;/);
     assert.doesNotMatch(potok, /ShiftStartScreen|ShiftStatusMenu|writeLock/, 'смены у «Потока» нет');
-    assert.match(view, /if \(potok\) return <PotokWorkspace key=\{props\.user\?\.id\} \{\.\.\.props\} \/>;/);
+    assert.match(view, /if \(potok \|\| crm\) return <PotokWorkspace key=\{props\.user\?\.id\} \{\.\.\.props\} \/>;/);
     assert.match(view, /props\.user\?\.wazzup_chat_potok \?\? props\.user\?\.wazzupChatPotok/);
+});
+
+test('окно CRM (владелец, 23.10.2026): кто пишет там без своего права — экран «Потока»', () => {
+    assert.match(view, /const crm = Boolean\(props\.user\?\.wazzup_chat_crm \?\? props\.user\?\.wazzupChatCrm\);/);
+    // Верификатор остаётся верификатором — со сменой; флаг окна его не перебивает.
+    assert.ok(view.indexOf('if (operator) return <OperatorWorkspace') < view.indexOf('if (potok || crm) return <PotokWorkspace'));
+    assert.match(app, /const isWazzupChatCrm = \(userLike\) => Boolean\(\s*userLike\?\.wazzup_chat_crm \?\? userLike\?\.wazzupChatCrm\s*\);/);
+    const predicate = app.slice(app.indexOf('const canAccessVerifierChatsForUser = (userLike) => {'));
+    assert.ok(predicate.indexOf('if (isWazzupChatCrm(userLike)) return true;')
+        < predicate.indexOf('if (isMarketingObserver(userLike)) return false;'), 'окно CRM — раньше вычетов портала');
+    // Вход паролем в окне несёт подпись CRM из адреса окна — так сервер узнаёт сессию из CRM.
+    assert.match(app, /\.\.\.\(CHATS_EMBED \? \{ embed: true, crm: currentEmbedIdentity\(\) \|\| undefined \} : \{\}\)/);
 });
 
 test('раздел: у «Потока» нет карточек водителя и их вкладки', () => {

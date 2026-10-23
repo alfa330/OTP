@@ -65,6 +65,8 @@ const NAMES = [
     'isWazzupChatOperator',
     // Группа «Поток» (20.10.2026) — свой флаг профиля, тот же раздел.
     'isWazzupChatPotok',
+    // Окно CRM (23.10.2026) — флаг сессии от сервера.
+    'isWazzupChatCrm',
     'canAccessVerifierChatsForUser',
 ];
 
@@ -143,6 +145,12 @@ const PEOPLE = [
     ['маркетолог, переведённый в ОП', {
         id: 13, role: 'marketing_manager', department_code: 'op',
     }, false, false],
+    // Окно CRM (владелец, 23.10.2026: «всем кто есть в crm»): раздел открывает флаг сессии
+    // от сервера — и тем, кому в портале переписка закрыта, включая наблюдателя «Маркетинга».
+    ['бухгалтер в окне CRM', { id: 22, role: 'accounting_manager', wazzup_chat_crm: true }, true, false],
+    ['маркетолог в окне CRM', {
+        id: 23, role: 'marketing_manager', department_code: 'marketing', wazzupChatCrm: true,
+    }, true, true],
     ['никто (нет сессии)', null, false, false],
 ];
 

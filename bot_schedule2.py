@@ -1329,6 +1329,18 @@ def _get_user_payload(user):
             wazzup_chat_potok = bool(chat_state.get('potok'))
         except Exception:
             logging.exception("Не удалось определить режим «Чатов ОП» пользователя %s", user_id)
+    # Окно «Чатов ОП» в CRM (владелец, 23.10.2026): в сессии, открытой из CRM, пишет и тот,
+    # у кого своего права писать нет, — режим «crm» (_wazzup_chat_access). Флаг — про сессию
+    # запроса, поэтому только самому вошедшему и только в сессии окна; портал рисует по
+    # нему раздел, как у «Потока».
+    wazzup_chat_crm = False
+    try:
+        own_crm_window = (user_id is not None and getattr(g, 'user_id', None) == user_id
+                          and getattr(g, 'auth_scope', None) == wazzup_embed_auth.SCOPE)
+    except RuntimeError:
+        own_crm_window = False
+    if own_crm_window:
+        wazzup_chat_crm = _wazzup_chat_access().get('mode') == wazzup_access.MODE_CRM
 
     # Сидит ли человек на линии удалённого КЦ, числясь в другом отделе (раздел
     # «Удаленный КЦ», вкладка «Линии»). По флагу портал показывает ему «Скачать
@@ -1364,6 +1376,7 @@ def _get_user_payload(user):
         "production_access": production_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
+        "wazzup_chat_crm": wazzup_chat_crm,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -1770,6 +1783,7 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
             _set_request_auth_context(user_id, user=user)
             # Сессия окна «Чатов ОП» в CRM — только чаты (embed_auth.py, проверка ниже).
             g.auth_scope = payload.get("scp") or None
+            g.auth_session_id = session_id
             _record_elapsed_server_timing("auth-access", auth_started_at)
             return payload
         except AuthError as auth_error:
@@ -1857,6 +1871,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True, rotate_refre
 
             _set_request_auth_context(user_id, user=user)
             g.auth_scope = scope
+            g.auth_session_id = session_id
             _record_elapsed_server_timing("auth-refresh", auth_started_at)
             return payload
         except AuthError as auth_error:
@@ -1875,6 +1890,17 @@ def _current_session_id_from_access_token():
         return str(payload.get("sid"))
     except AuthError:
         return None
+
+
+def _request_session_id():
+    """Сессия, которой подтвердился запрос (или только что выданная входом), а без неё —
+    из токена, как _current_session_id_from_access_token. Нужна проверке окна CRM: у неё
+    вопрос именно об этой сессии."""
+    try:
+        session_id = getattr(g, 'auth_session_id', None)
+    except RuntimeError:
+        session_id = None
+    return session_id or _current_session_id_from_access_token()
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -6090,6 +6116,10 @@ def _wazzup_chat_access():
         mode 'potok'     оператор группы «Поток» (владелец, 20.10.2026): то же,
                          что у верификатора, но только каналы channels
                          (+77070253322) и без смены;
+        mode 'crm'       сессия окна CRM (владелец, 23.10.2026: «дать доступ писать
+                         через crm всем кто есть в crm»): тот, кто сам здесь не
+                         пишет, в окне, открытом из CRM, пишет в номер CRM, как
+                         «Поток»; ссылка CRM открывает без QR, вход паролем — за QR;
         mode None        раздел закрыт.
 
     channels — каналы, открытые человеку; None — все каналы аккаунта.
@@ -6130,6 +6160,21 @@ def _wazzup_chat_access():
                 state.update(mode=wazzup_access.MODE_POTOK, locked=not operator['unlocked'],
                              can_process=bool(operator['unlocked']),
                              channels=wazzup_access.POTOK_CHANNEL_IDS)
+        try:
+            in_crm_window = getattr(g, 'auth_scope', None) == wazzup_embed_auth.SCOPE
+        except RuntimeError:
+            in_crm_window = False
+        if in_crm_window and wazzup_access.crm_window_applies(state):
+            try:
+                with db._get_cursor() as cursor:
+                    window = wazzup_access.load_crm_window_state(cursor, requester_id, _request_session_id())
+            except Exception:
+                logging.exception("Чаты ОП: не удалось проверить окно CRM для %s", requester_id)
+                window = {'crm': False, 'unlocked': False}
+            if window['crm']:
+                state.update(mode=wazzup_access.MODE_CRM, locked=not window['unlocked'],
+                             can_process=bool(window['unlocked']),
+                             channels=wazzup_access.CRM_CHANNEL_IDS)
     try:
         g._wazzup_chat_access = state
     except RuntimeError:
@@ -6147,8 +6192,8 @@ def _wazzup_chat_reader_guard():
     state = _wazzup_chat_access()
     if state['mode'] == wazzup_access.MODE_FULL:
         return state['user_id'], None
-    # Группа «Поток» — тот же замок и только «op»; свои каналы ручки берут
-    # из _wazzup_channel_scope.
+    # Группа «Поток» и окно CRM — тот же замок и только «op»; свои каналы ручки
+    # берут из _wazzup_channel_scope.
     if state['mode'] in wazzup_access.GATED_MODES:
         if state['locked']:
             return None, (jsonify({"error": "Доступ к чатам не подтверждён",
@@ -9789,26 +9834,11 @@ app.register_blueprint(wazzup_appearance.build_appearance_blueprint(
 ))
 
 
-def _wazzup_chat_mode_for(user_id):
-    """Режим «Чатов ОП» чужой учётки ('full' / 'operator' / 'potok' / None) — тем же
-    правилом, что у запросов. Нужен входу из CRM: ссылку получает только тот, кому раздел
-    открыт. Запрос CRM своей учётки не несёт, поэтому человек подставляется на время."""
-    saved = {name: getattr(g, name) for name in ('user_id', '_wazzup_chat_access') if hasattr(g, name)}
-    try:
-        g.pop('_wazzup_chat_access', None)
-        g.user_id = int(user_id)
-        return _wazzup_chat_access().get('mode')
-    finally:
-        g.pop('_wazzup_chat_access', None)
-        g.pop('user_id', None)
-        for name, value in saved.items():
-            setattr(g, name, value)
-
-
-def _issue_embed_session_response(user, auth_transport='bearer'):
+def _issue_embed_session_response(user, auth_transport='bearer', crm_user_id=None):
     """Сессия окна «Чатов ОП» в CRM по одноразовой ссылке (wazzup/embed_auth.py): как вход
     паролем, но только чаты (scope), без кук и — решение владельца 20.10.2026 «без QR из CRM» —
-    чаты этой сессии открыты сразу."""
+    чаты этой сессии открыты сразу. Сессия помечена как сессия из CRM: кто сам в разделе не
+    пишет, пишет в ней в номер CRM (режим «crm», владелец 23.10.2026)."""
     session_id = str(uuid.uuid4())
     scope = wazzup_embed_auth.SCOPE
     access_token = _build_access_token(user, session_id, scope=scope)
@@ -9825,7 +9855,13 @@ def _issue_embed_session_response(user, auth_transport='bearer'):
         cursor.execute("""INSERT INTO wazzup_chat_access (session_id, user_id)
                           VALUES (%s::uuid, %s) ON CONFLICT (session_id) DO NOTHING""",
                        (session_id, int(user[0])))
+        if crm_user_id:
+            wazzup_embed_auth.mark_crm_session(cursor, session_id, user[0], crm_user_id, 'launch')
     _set_request_auth_context(user[0], user=user)
+    # Профиль — уже для выданной сессии: флаг окна CRM считается по ней.
+    g.auth_scope = scope
+    g.auth_session_id = session_id
+    g.pop('_wazzup_chat_access', None)
     response = jsonify(_build_auth_response_payload(
         _get_user_payload(user), transport=auth_transport,
         access_token=access_token, refresh_token=refresh_token))
@@ -9836,7 +9872,7 @@ def _issue_embed_session_response(user, auth_transport='bearer'):
 # Вход в окно «Чатов ОП» в CRM без пароля: CRM просит одноразовую ссылку своим ключом.
 app.register_blueprint(wazzup_embed_auth.build_embed_blueprint(
     db=db, preflight=_build_cors_preflight_response, portal_base_url=TASK_WEB_APP_BASE_URL,
-    chat_mode=_wazzup_chat_mode_for, load_user=lambda user_id: db.get_user(id=user_id),
+    load_user=lambda user_id: db.get_user(id=user_id),
     issue_session=_issue_embed_session_response, client_ip=_client_ip,
 ))
 # Карточка водителя в чатах Верификаторов: свой поток пишет её поля в сделку
@@ -15530,6 +15566,9 @@ def login():
             # Вход паролем внутри окна «Чатов ОП» в CRM — тоже сессия окна: только
             # чаты и без кук (wazzup/embed_auth.py). QR при этом остаётся.
             scope = wazzup_embed_auth.SCOPE if data.get('embed') is True else None
+            # С подписью CRM из адреса окна это сессия из CRM: за QR в ней пишет каждый,
+            # кого CRM открыла (режим «crm», владелец 23.10.2026). Без подписи — нет.
+            crm_user_id = wazzup_embed_auth.signed_crm_user(data.get('crm')) if scope else None
             session_id = str(uuid.uuid4())
             access_token = _build_access_token(user_profile, session_id, scope=scope)
             refresh_token = _build_refresh_token(user[0], session_id, scope=scope)
@@ -15541,7 +15580,14 @@ def login():
                 user_agent=request.headers.get('User-Agent'),
                 ip_address=_client_ip()
             )
+            if crm_user_id:
+                with db._get_cursor() as cursor:
+                    wazzup_embed_auth.mark_crm_session(cursor, session_id, user[0], crm_user_id, 'password')
             _set_request_auth_context(user[0], user=user_profile)
+            # Профиль — уже для новой сессии (флаг окна CRM считается по ней).
+            g.auth_scope = scope
+            g.auth_session_id = session_id
+            g.pop('_wazzup_chat_access', None)
             payload = _get_user_payload(user_profile)
             response_payload = _build_auth_response_payload(
                 payload,

@@ -957,6 +957,8 @@ class ProfileCarriesHeadedDepartmentsTests(unittest.TestCase):
             '_baiga_section_open_for': lambda _user_id, _profile=None: False,
             # Флаг раздела «Продакшн» (задача #316) — тоже часть профиля.
             '_production_section_open_for': lambda _user_id, _role=None, **_known: False,
+            # Флаг окна «Чатов ОП» в CRM читает сессию запроса из flask.g; вне окна он пуст.
+            'g': SimpleNamespace(),
         }
         exec(_endpoint("_get_user_payload"), namespace)
         return namespace["_get_user_payload"]({'id': 300, 'role': 'admin', 'name': 'Руководитель'})
