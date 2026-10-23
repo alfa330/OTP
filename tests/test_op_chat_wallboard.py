@@ -453,13 +453,27 @@ def _passthrough_cache(*, fetch, before=None, after=None, **_ignored):
     return dict(fetch(), stale=False, age_seconds=0)
 
 
+def _clock_at(moment):
+    """`datetime` ручки, у которого «сейчас» стоит на `moment` (наивное время Алматы)."""
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.replace(tzinfo=tz)
+    return Clock
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.requester = {'role': 'operator', 'headed': None}
         # «Сейчас» — по тем же часам, что у ручки (Алматы), а не по часам машины: на CI они UTC, и
         # сообщение «2 минуты назад» выглядело бы пятичасовым и выпадало из окна «ждёт ответа».
-        now = datetime.now(op_routes._ALMATY).replace(tzinfo=None, microsecond=0)
+        # Часы ручки стоят на полудне этих суток: с 00:00 до 00:50 смена «50 минут назад» начиналась
+        # бы во вчерашних, вход на табло терялся, и тест краснел по ночам.
+        now = datetime.now(op_routes._ALMATY).replace(tzinfo=None, hour=12, minute=0, second=0, microsecond=0)
         self.now = now
+        patcher = mock.patch.object(op_routes, 'datetime', _clock_at(now))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.rows = [client(now - timedelta(minutes=5)), reply(now - timedelta(minutes=4), VER_A)]
         self.loaded = []
         # Статусы смены «Чатов ОП»: последнее событие и события для времени входа и журнала.
