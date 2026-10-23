@@ -20,7 +20,9 @@ from wazzup import appearance
 ROOT = Path(__file__).resolve().parents[1]
 PATH = '/api/wazzup/appearance'
 OWNER, OTHER, ADMIN, CLOSED = 7, 8, 9, 10
-LIMITED = next(iter(appearance.STANDARD_ONLY))
+# Учётка «только стандартный вид» — выдуманная: тест проверяет правило, а не
+# сегодняшний состав списка (его равенство в двух местах сверяет последний тест).
+LIMITED = 4242
 
 
 class Cursor:
@@ -304,7 +306,8 @@ def test_settings_change_only_for_the_wallpaper_they_were_made_for():
                       headers=as_user(OWNER)).status_code == 400
 
 
-def test_a_standard_only_account_has_no_wallpaper_at_all():
+def test_a_standard_only_account_has_no_wallpaper_at_all(monkeypatch):
+    monkeypatch.setattr(appearance, 'STANDARD_ONLY', frozenset({LIMITED}))
     client, db, storage = build()
     state = client.get(PATH, headers=as_user(LIMITED)).get_json()
     assert state == {'wallpaper': None, 'settings': appearance.DEFAULT_SETTINGS, 'mayUpload': False}

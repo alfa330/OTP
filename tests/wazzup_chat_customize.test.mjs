@@ -289,10 +289,11 @@ test('settings outside the limits fall back to defaults', async () => {
     assert.deepEqual(store.cleanWallpaperSettings('nope'), store.DEFAULT_WALLPAPER_SETTINGS);
 });
 
-test('standard-only accounts get no wallpaper and one theme; others may have their own', () => {
-    for (const owner of [241, '241']) {
-        assert.equal(wallpaperAllowed(owner), false, String(owner));
-        assert.deepEqual(chatThemesFor(owner).map((theme) => theme.id), ['standard']);
+test('wallpaper and themes follow one list: whoever has only the standard theme has no wallpaper either', () => {
+    // Сам список проверяет wazzup_chat_themes.test.mjs на выдуманной учётке; здесь —
+    // что обои и темы читают его одинаково для любой учётки, сколько бы в нём ни было.
+    for (const owner of [7, '7', 241, 292, 4242]) {
+        assert.equal(wallpaperAllowed(owner), chatThemesFor(owner).length > 1, String(owner));
     }
     for (const owner of [null, undefined, '']) assert.equal(wallpaperAllowed(owner), false, String(owner));
     assert.equal(wallpaperAllowed(7), true);

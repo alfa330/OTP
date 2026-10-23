@@ -31,7 +31,7 @@ from .attachments import AttachmentError, _rate
 # Учётки, которым раздел показывает только стандартный вид: одна стандартная
 # тема и без обоев. Зеркало STANDARD_ONLY в src/components/wazzup/chatThemes.js —
 # равенство сторожит тест.
-STANDARD_ONLY = frozenset({241})
+STANDARD_ONLY = frozenset()
 
 MAX_UPLOAD = 12 * 1024 * 1024
 MAX_BODY = MAX_UPLOAD + 64 * 1024

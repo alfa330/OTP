@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Chat themes of «Чаты ОП» (chatThemes.js): a personal choice kept per person in
@@ -12,10 +12,20 @@ const { build } = require('esbuild');
 const cache = join(process.cwd(), 'node_modules', '.cache', 'otp-tests');
 mkdirSync(cache, { recursive: true });
 const output = join(cache, 'wazzupChatThemes.mjs');
+// The standard-only rule is checked on a made-up account put into the list at
+// build time: the rule must hold whoever is listed today (the list may be empty).
+const LIMITED = 4242;
+const STANDARD_ONLY_LINE = /const STANDARD_ONLY = Object\.freeze\(\[[^\]]*\]\);/;
 await build({
     entryPoints: [join(process.cwd(), 'src/components/wazzup/chatThemes.js')],
     outfile: output, bundle: true, format: 'esm', platform: 'node', target: 'node18',
     plugins: [{ name: 'doubles', setup(builder) {
+        builder.onLoad({ filter: /chatThemes\.js$/ }, ({ path }) => {
+            const source = readFileSync(path, 'utf8');
+            assert.match(source, STANDARD_ONLY_LINE, 'STANDARD_ONLY declaration not found');
+            return { loader: 'js', contents: source.replace(STANDARD_ONLY_LINE,
+                `const STANDARD_ONLY = Object.freeze([${LIMITED}]);`) };
+        });
         builder.onResolve({ filter: /^react$/ }, () => ({ path: 'react', namespace: 'doubles' }));
         builder.onResolve({ filter: /\.css$/ }, () => ({ path: 'css', namespace: 'doubles' }));
         builder.onLoad({ filter: /.*/, namespace: 'doubles' }, ({ path }) => ({ loader: 'js', contents: path === 'react'
@@ -96,21 +106,23 @@ test('Rose is shared: in everyone\'s menu, chosen like any other theme, never on
 
 test('a standard-only account gets no other theme: not in the menu, not from a saved value, not by choice', async () => {
     const storage = memory();
-    storage.setItem('icore.wazzup.chatTheme.241', 'rose');
-    storage.setItem('icore.wazzup.chatTheme.personal.241', 'rose');
+    storage.setItem(`icore.wazzup.chatTheme.${LIMITED}`, 'rose');
+    storage.setItem(`icore.wazzup.chatTheme.personal.${LIMITED}`, 'rose');
     const themes = await freshTab(storage);
-    for (const owner of [241, '241']) {
+    for (const owner of [LIMITED, String(LIMITED)]) {
         assert.deepEqual(themes.chatThemesFor(owner).map((theme) => theme.id), ['standard'], String(owner));
     }
-    const limited = themes.useChatTheme(241);
+    const limited = themes.useChatTheme(LIMITED);
     assert.equal(limited.selected, 'standard', 'a theme saved earlier no longer applies');
     assert.deepEqual(limited.themes.map((theme) => theme.id), ['standard']);
     for (const id of ['rose', 'sky', 'night', 'cherry']) {
-        themes.setChatTheme(241, id);
-        assert.equal(themes.useChatTheme(241).selected, 'standard', id);
+        themes.setChatTheme(LIMITED, id);
+        assert.equal(themes.useChatTheme(LIMITED).selected, 'standard', id);
     }
     await themes.loadThemeLayer('rose');
-    assert.equal(themes.useChatTheme(241).applied.id, 'standard');
+    assert.equal(themes.useChatTheme(LIMITED).applied.id, 'standard');
+    assert.equal(themes.wallpaperAllowed(LIMITED), false, 'and no wallpaper of their own');
+    assert.equal(themes.wallpaperAllowed(7), true);
     assert.deepEqual(themes.useChatTheme(7).themes, themes.CHAT_THEMES, 'other accounts keep every shared theme');
 });
 

@@ -79,7 +79,7 @@ const ALL_THEMES = Object.freeze([
 
 // Общие темы — у всех; к ним человек видит свои личные.
 export const CHAT_THEMES = Object.freeze(ALL_THEMES.filter((theme) => !theme.owners));
-const STANDARD_ONLY = Object.freeze([241]);
+const STANDARD_ONLY = Object.freeze([]);
 const STANDARD_THEMES = Object.freeze(ALL_THEMES.filter((theme) => theme.id === DEFAULT_CHAT_THEME));
 export function chatThemesFor(owner) {
     if (owner == null) return CHAT_THEMES;
