@@ -3573,7 +3573,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (url.includes('/api/login') || url.includes('/api/auth/refresh')) {
                         return config;
                     }
-                    if (bootAuthRefresh) await bootAuthRefresh;
+                    if (bootAuthRefresh) {
+                        const { outcome } = await bootAuthRefresh;
+                        /* Сессию отвергли — страница уже уходит на вход, а без
+                           токена запрос получил бы только 401. */
+                        if (outcome === AUTH_REFRESH_OUTCOME.REJECTED) return new Promise(() => {});
+                    }
                     const nextConfig = config || {};
                     nextConfig.headers = withAccessTokenHeader(nextConfig.headers || {});
                     return nextConfig;
@@ -3646,17 +3651,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
  * не после его отказа. */
 const ACCESS_TOKEN_REFRESH_MARGIN_MS = 15000;
 
-/* Срок токена — из него самого (JWT, поле exp). Подпись здесь не проверяется и
-   не нужна: решается только, обновить ли токен заранее. */
-const readTokenExpiryMs = (token) => {
+/* Срок и владелец токена — из него самого (JWT: exp, sub). Подпись здесь не
+   проверяется и не нужна: решается только, обновить ли токен заранее и тому
+   ли человеку он выдан. */
+const readTokenPayload = (token) => {
     try {
         const payload = String(token || '').split('.')[1];
-        if (!payload) return 0;
-        const exp = Number(JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))?.exp);
-        return Number.isFinite(exp) && exp > 0 ? exp * 1000 : 0;
+        if (!payload) return null;
+        const parsed = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+        return parsed && typeof parsed === 'object' ? parsed : null;
     } catch (_error) {
-        return 0;
+        return null;
     }
+};
+const readTokenExpiryMs = (token) => {
+    const exp = Number(readTokenPayload(token)?.exp);
+    return Number.isFinite(exp) && exp > 0 ? exp * 1000 : 0;
+};
+/* Чьи токены сейчас на устройстве: refresh-токен меняется вместе с человеком
+   (вход в соседней вкладке), а сохранённый user — нет. */
+const storedRefreshTokenOwner = () => String(readTokenPayload(getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY))?.sub || '');
+/* Токены на устройстве живы и выданы этому человеку: refresh-токен не истёк,
+   и его владелец — он. */
+const storedTokensBelongTo = (storedUser) => {
+    const refreshToken = getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY);
+    if (!refreshToken || readTokenExpiryMs(refreshToken) <= Date.now()) return false;
+    const owner = storedRefreshTokenOwner();
+    return Boolean(owner) && owner === String(storedUser?.id ?? '');
 };
 
 /* Фото в профиле — подписанная ссылка Google Storage, живёт сутки
@@ -3674,40 +3695,36 @@ const readSignedUrlExpiryMs = (url) => {
         return 0;
     }
 };
-/* Фото должно прожить смену: ссылку из памяти устройства портал держит, пока
-   его не перезапустят, и картинки, открытые позже (профиль, шторка), идут по ней. */
-const AVATAR_KEEP_MS = 12 * 60 * 60 * 1000;
-const avatarLastsAShift = (url) => {
-    if (!url) return true;
-    const expiresAt = readSignedUrlExpiryMs(url);
-    return !expiresAt || expiresAt - Date.now() >= AVATAR_KEEP_MS;
-};
+/* Просроченную подпись до ответа сервера не показываем: на месте фото была
+   бы битая картинка, а не инициалы. */
+const SIGNED_URL_SPARE_MS = 10 * 60 * 1000;
 
 /* Человек, которым можно рисовать портал до ответа сервера: сохранён на
-   устройстве И у него есть токены. Без токенов (вышел, сессию стёрла другая
-   вкладка) — прежний путь через «Проверку сессии». Тот же путь, если подпись
-   фото доживает последние часы: свежий ответ отличался бы от сохранённого, а
-   ДРУГОЙ объект user перезапускает эффект «восстановить раздел» — тот читает
-   адрес, каким он был при запуске, и уводил бы человека, успевшего открыть
-   другой раздел, обратно в раздел по умолчанию. */
+   устройстве, токены на месте, refresh-токен не истёк и выдан ЕМУ ЖЕ. Иначе —
+   прежний путь через «Проверку сессии»: вышел или сессию стёрла другая
+   вкладка; в соседней вкладке вошёл другой человек (портал рисовался бы чужим
+   именем с пачкой 403); refresh истёк — портал мелькнул бы и ушёл на вход. */
 const readStoredSessionUser = () => {
     if (typeof window === 'undefined') return null;
-    if (!getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)) return null;
     try {
         const stored = sanitizeClientUser(JSON.parse(window.localStorage.getItem('user')));
         if (!stored || typeof stored !== 'object' || !stored.id) return null;
-        return avatarLastsAShift(stored.avatar_url) ? stored : null;
+        if (!storedTokensBelongTo(stored)) return null;
+        const avatarExpiresAt = stored.avatar_url ? readSignedUrlExpiryMs(stored.avatar_url) : 0;
+        if (avatarExpiresAt && avatarExpiresAt - Date.now() < SIGNED_URL_SPARE_MS) {
+            return { ...stored, avatar_url: null };
+        }
+        return stored;
     } catch (_error) {
         return null;
     }
 };
 
 /* Ответ /api/auth/me — тот же человек? Тогда портал не трогаем: новый объект
-   перезапустил бы каждый эффект, зависящий от user, — разделы запросили бы
-   свои данные второй раз, а эффект «восстановить раздел» увёл бы в раздел по
-   умолчанию. Порядок ключей не важен; фото сравнивается не по ссылке (сервер
-   переподписывает её после каждой выкладки), а по файлу, пока прежней подписи
-   хватает на смену. */
+   перезапустил бы каждый эффект, зависящий от user, и разделы запросили бы
+   свои данные второй раз. Порядок ключей не важен; фото сравнивается не по
+   ссылке (сервер переподписывает её после каждой выкладки), а по файлу —
+   свежую подпись restoreSession подставляет в тот же объект. */
 const canonicalUserJson = (value) => {
     if (Array.isArray(value)) return `[${value.map(canonicalUserJson).join(',')}]`;
     if (value && typeof value === 'object') {
@@ -3722,9 +3739,7 @@ const isSameSessionUser = (current, next) => {
     const { avatar_url: nextAvatar, ...nextRest } = next;
     if (canonicalUserJson(currentRest) !== canonicalUserJson(nextRest)) return false;
     if ((currentAvatar || null) === (nextAvatar || null)) return true;
-    return Boolean(currentAvatar && nextAvatar)
-        && signedUrlFile(currentAvatar) === signedUrlFile(nextAvatar)
-        && avatarLastsAShift(currentAvatar);
+    return Boolean(currentAvatar && nextAvatar) && signedUrlFile(currentAvatar) === signedUrlFile(nextAvatar);
 };
 
 if (typeof window !== 'undefined' && readStoredSessionUser()) {
@@ -43538,6 +43553,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             /* Сохранённый на устройстве человек — сразу: портал не ждёт ответа
                /api/auth/me (см. «Запуск с сохранённой сессией» у перехватчиков). */
             const [user, setUser] = useState(readStoredSessionUser);
+            /* Счётчик входов и выходов: ответ /api/auth/me, ушедший при запуске, не
+               должен вернуть человека, который за это время вышел или после
+               которого вошёл другой. */
+            const authEpochRef = useRef(0);
+            /* Фоновая сверка того же человека подставила свежий объект — эффект
+               «восстановить раздел» её пропускает: адрес он читает тот, что был при
+               запуске, и увёл бы из раздела, который человек уже открыл. Права на
+               открытый раздел стережёт эффект за ним. */
+            const keepViewOnSessionRefreshRef = useRef(false);
+            const userRef = useRef(user);
+            userRef.current = user;
             useEffect(() => {
                 attachmentCache.setOwner(user?.id);
                 return () => attachmentCache.clear();
@@ -47242,6 +47268,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 let cancelled = false;
 
                 const restoreSession = async () => {
+                    const epoch = authEpochRef.current;
                     let parsedStoredUser = null;
                     const storedUser = localStorage.getItem('user');
                     if (storedUser) {
@@ -47259,7 +47286,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             headers: withAccessTokenHeader()
                         });
                         const data = response.data;
-                        if (data?.status === 'success' && !cancelled) {
+                        if (data?.status === 'success' && !cancelled && authEpochRef.current === epoch) {
                             const sessionUser = sanitizeClientUser(data.user || {
                                 role: data.role,
                                 id: data.id,
@@ -47267,11 +47294,24 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 telegram_id: data.telegram_id,
                                 gender: data.gender
                             });
-                            /* Портал уже нарисован сохранённым человеком — тот же
-                               ответ его не пересобирает. На устройство же кладём
-                               свежий ответ: с новой подписью фото следующий запуск
-                               тоже пойдёт без «Проверки сессии». */
-                            setUser((current) => (isSameSessionUser(current, sessionUser) ? current : sessionUser));
+                            /* Пока ответ шёл, в соседней вкладке мог войти другой
+                               человек: токены уже его, и ответ про прежнего не к месту. */
+                            const tokenOwner = storedRefreshTokenOwner();
+                            if (tokenOwner && tokenOwner !== String(sessionUser.id)) return;
+                            const current = userRef.current;
+                            if (isSameSessionUser(current, sessionUser)) {
+                                /* Тот же человек — портал не пересобираем. Фото тот же
+                                   файл, но со свежей подписью (сервер переподписывает
+                                   её после выкладок): картинки, открытые позже, пойдут
+                                   по ней, а показанные уже загружены. */
+                                if (sessionUser.avatar_url && current.avatar_url !== sessionUser.avatar_url) {
+                                    current.avatar_url = sessionUser.avatar_url;
+                                }
+                            } else {
+                                keepViewOnSessionRefreshRef.current = Boolean(current)
+                                    && String(current.id) === String(sessionUser.id);
+                                setUser(sessionUser);
+                            }
                             try {
                                 localStorage.setItem('user', JSON.stringify(sessionUser));
                             } catch (_error) {
@@ -47279,9 +47319,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             }
                         }
                     } catch (err) {
-                        if (!cancelled) {
-                            if (parsedStoredUser && !err?.response) {
-                                setUser((current) => current || parsedStoredUser);
+                        if (!cancelled && authEpochRef.current === epoch) {
+                            const status = Number(err?.response?.status || 0);
+                            /* На вход — только когда сервер ответил о сессии по
+                               существу: 401 после неудачного обновления, 404 — учётки
+                               нет. Обрыв, 5xx и 429 о ней не говорят ничего: прокси
+                               Render отвечает 502 на каждой выкладке. */
+                            if (!err?.response || status >= 500 || status === 429) {
+                                /* Сохранённого человека — только с его живыми токенами,
+                                   как и до ответа сервера (readStoredSessionUser). Вход по
+                                   куке токенов в хранилище не держит — там как раньше. */
+                                const tokensFit = !getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+                                    || storedTokensBelongTo(parsedStoredUser);
+                                if (parsedStoredUser && tokensFit) setUser((current) => current || parsedStoredUser);
                             } else {
                                 setUser(null);
                                 localStorage.removeItem('user');
@@ -47342,6 +47392,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Persist and restore view (after user is loaded to ensure role-based access)
             useEffect(() => {
                 if (!user) return;
+                /* Свежий объект пришёл фоновой сверкой того же человека — раздел
+                   не трогаем (см. keepViewOnSessionRefreshRef). */
+                if (keepViewOnSessionRefreshRef.current) {
+                    keepViewOnSessionRefreshRef.current = false;
+                    return;
+                }
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
@@ -51462,6 +51518,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             telegram_id: data.telegram_id,
                             gender: data.gender
                         });
+                        authEpochRef.current += 1;
+                        keepViewOnSessionRefreshRef.current = false;
                         setUser(sessionUser);
                         setLogin('');
                         setPassword('');
@@ -51526,6 +51584,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         .filter((key) => key.startsWith('otp.discipline.draft.'))
                         .forEach((key) => window.localStorage.removeItem(key));
                 } catch { /* хранилище недоступно — чистить нечего */ }
+                /* Опоздавший ответ /api/auth/me, ушедший при запуске, не вернёт
+                   вышедшего человека. */
+                authEpochRef.current += 1;
+                keepViewOnSessionRefreshRef.current = false;
 
                 if (isMounted.current) {
                     clearSensitiveQrPolling();
