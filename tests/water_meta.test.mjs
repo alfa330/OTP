@@ -117,6 +117,20 @@ test('default office: remembered, then the only one in own city, then the only o
   assert.equal(defaultOfficeId([offices[0]], 'Астана', null), null);
 });
 
+test('default office: a remembered office of another city is not picked by itself', () => {
+  const offices = [
+    { id: 1, city: 'Алматы', is_active: true },
+    { id: 2, city: 'Астана', is_active: true },
+  ];
+  // 23.10.2026: астанинскому сотруднику неделю подставлялся раз выбранный алматинский офис.
+  assert.equal(defaultOfficeId(offices, 'Астана', 1), null);
+  assert.equal(defaultOfficeId(offices, 'Астана', 2), 2);
+  assert.equal(defaultOfficeId(offices, 'Астана', null), 2);
+  // Города нет или своего офиса в учёте нет — сверять не с чем, запомненный остаётся.
+  assert.equal(defaultOfficeId(offices, null, 1), 1);
+  assert.equal(defaultOfficeId(offices, 'Шымкент', 1), 1);
+});
+
 test('conditions spell out the program from the settings', () => {
   const groups = conditionGroups({
     tariffs: ['business', 'ultimate'], min_trips: 20, cooldown_days: 7,

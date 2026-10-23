@@ -276,14 +276,17 @@ export const rememberOffice = (id) => {
 /* Офис по умолчанию: запомненный (если он ещё в учёте) → единственный офис
    своего города. Офис ЧУЖОГО города сам не подставляется никогда: пока в учёте
    один алматинский офис, астанинский сотрудник иначе получил бы его выбранным и
-   списывал бы воду с чужой полки. Единственный офис вообще подставляется только
-   тому, у кого город не указан. Иначе человек выбирает сам. */
+   списывал бы воду с чужой полки. Запомненный — тоже: раз выбранный не тот офис
+   подставлялся сам неделю, и шесть выдач легли на чужую полку (23.10.2026).
+   Тогда не подставляется ничего, даже свой: чужой могли выбрать и намеренно,
+   подменяя коллегу, — пусть человек решит сам. Своего города в учёте нет —
+   запомненный остаётся: сверять не с чем. Единственный офис вообще
+   подставляется только тому, у кого город не указан. Иначе человек выбирает сам. */
 export const defaultOfficeId = (offices, city, remembered) => {
     const active = (offices || []).filter((office) => office.is_active !== false);
-    if (remembered && active.some((office) => office.id === remembered)) return remembered;
-    if (city) {
-        const own = active.filter((office) => office.city === city);
-        return own.length === 1 ? own[0].id : null;
-    }
+    const own = active.filter((office) => office.city === city);
+    const last = active.find((office) => office.id === remembered);
+    if (last) return !city || !own.length || last.city === city ? last.id : null;
+    if (city) return own.length === 1 ? own[0].id : null;
     return active.length === 1 ? active[0].id : null;
 };
