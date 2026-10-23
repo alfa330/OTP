@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useMemo, useRef } from 'react';
 import DealBadge from './DealBadge';
 import TaxiPark from './TaxiPark';
-import { Languages, AlertTriangle, MessageSquare, Paperclip, PhoneOff } from 'lucide-react';
+import { Languages, AlertTriangle, BookOpen, MessageSquare, Paperclip, PhoneOff } from 'lucide-react';
+import { buildRelativeArticleLink } from '../wiki/articleLink';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
 import CriteriaReviewPanel from './CriteriaReviewPanel';
@@ -150,12 +151,21 @@ const RETRIEVAL_LABEL = {
     disabled: 'retrieval отключён', skipped: 'retrieval пропущен',
 };
 const RETRIEVAL_PROBLEM = ['failed', 'error', 'unavailable', 'degraded', 'partial'];
+/* Поиск по вики перед оценкой (call_qa/evaluation/wiki_lookup.py): что искал оценщик
+ * и что из этого вышло — в технических данных; прочитанные статьи — отдельной
+ * строкой шапки (WikiSources), потому что они меняют доверие к вердикту. */
+const WIKI_LABEL = {
+    ok: 'вики: справка получена', no_queries: 'вики: оценщик не искал', no_match: 'вики: ничего не найдено',
+    degraded: 'вики: поиск без векторов', failed: 'вики: поиск не удался', no_perimeter: 'вики: нет статей отдела',
+    no_department: 'вики: отдел не определён', disabled: 'вики: поиск отключён', skipped: 'вики: поиск пропущен',
+    absent: 'вики: без справки',
+};
 
 /* Технические данные прогона (отпечаток, ревизия базы, retrieval) нужны при
  * разборе самой оценки, а не при проверке разговора — поэтому под «i», а не
  * рядом меток на каждой карточке. На виду остаётся только то, что меняет доверие
  * к оценке: устаревший снимок базы и сбой retrieval. */
-const evaluationDetails = (evaluation) => {
+export const evaluationDetails = (evaluation) => {
     if (!evaluation) return null;
     const status = String(evaluation.retrieval_status || '').toLowerCase();
     const retrieved = evaluation.retrieved_count ?? evaluation.retrieved;
@@ -166,9 +176,40 @@ const evaluationDetails = (evaluation) => {
         status && (RETRIEVAL_LABEL[status] || `retrieval: ${status}`),
         (retrieved != null || included != null) && `правил в промпте ${included ?? '—'} из ${retrieved ?? '—'}`,
         evaluation.retrieval_ms != null && `${Math.round(evaluation.retrieval_ms)} мс`,
+        evaluation.wiki_status && (WIKI_LABEL[evaluation.wiki_status] || `вики: ${evaluation.wiki_status}`),
+        evaluation.wiki_queries ? `запросов в вики ${evaluation.wiki_queries}, выдержек ${evaluation.wiki_chunks ?? 0}` : null,
     ].filter(Boolean);
     return parts.length ? `${parts.join(' · ')}.` : null;
 };
+
+/* Статьи вики, которые оценщик прочитал перед вердиктом (call.wiki_sources). Ссылка
+ * ведёт на статью в разделе «Вики»; несвежая (архив или истёкший срок) помечена. */
+function WikiSources({ sources }) {
+    const items = Array.isArray(sources) ? sources.filter((item) => item && item.title) : [];
+    if (!items.length) return null;
+    return (
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-4 pb-2.5 text-[12px] text-slate-500 sm:px-5"
+             data-qa="wiki-sources">
+            <BookOpen size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+            <span>ИИ читал в вики:</span>
+            {items.map((item, index) => {
+                // Относительный адрес, как в теле статей вики: открывается с любого хоста портала.
+                const href = item.slug ? buildRelativeArticleLink(item.slug) : '';
+                const label = `«${item.title}»`;
+                const body = href
+                    ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-blue-700">{label}</a>
+                    : <span className="text-slate-700">{label}</span>;
+                return (
+                    <span key={item.article_id ?? item.slug ?? index} className="inline-flex items-center gap-1">
+                        {body}
+                        {item.stale && <span className="font-medium text-amber-700" title="Архив или истёкший срок — сведения могут не действовать">несвежая</span>}
+                        {index < items.length - 1 ? <span aria-hidden="true">·</span> : null}
+                    </span>
+                );
+            })}
+        </div>
+    );
+}
 
 /* Нижняя строка шапки: слева — о записи или переписке, справа — тревоги оценки и
  * «i» с техническими данными. */
@@ -213,6 +254,7 @@ function CallMeta({ call }) {
     const firstPass = call.asr?.first_pass_conf != null
         ? ` (${Math.round(call.asr.first_pass_conf * 100)}%)` : '';
     return (
+        <>
         <MetaRow evaluation={call.evaluation}>
             {endLabel && (
                 <span className="inline-flex items-center gap-1.5" title="По данным телефонии">
@@ -231,7 +273,9 @@ function CallMeta({ call }) {
                     распознано повторно
                 </span>
             ) : call.asr_mean_conf != null && <span>распознавание {Math.round(call.asr_mean_conf * 100)}%</span>}
-        </MetaRow>
+            </MetaRow>
+            <WikiSources sources={call.wiki_sources} />
+        </>
     );
 }
 
@@ -265,6 +309,7 @@ function ChatMeta({ call }) {
                     </span>
                 ) : null}
             </MetaRow>
+            <WikiSources sources={call.wiki_sources} />
             {expired && (
                 <p className="bg-amber-50/70 px-4 py-2.5 text-[12px] text-amber-800 sm:px-5">
                     Сырые сообщения этого чата уже удалены ретеншном (45 дней): содержимое

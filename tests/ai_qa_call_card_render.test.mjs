@@ -91,3 +91,29 @@ test('стороны реплик — по подписи бэкенда', () =>
   assert.match(html.slice(0, operator), /justify-start[^]*Оператор/);
   assert.match(html.slice(operator, client), /justify-end[^]*Клиент/);
 });
+
+test('прочитанные оценщиком статьи вики — строкой со ссылками, несвежая помечена', async () => {
+  // Что искал ИИ — в технических данных; что прочитал — на виду: это меняет доверие к вердикту.
+  const html = card({
+    wiki_sources: [
+      { article_id: 33, title: 'Все акции', slug: 'все-акции', headings: ['Актуальные акции 2026'], stale: false },
+      { article_id: 731, title: 'Архивные акции TEZ', slug: 'arhivnye-akcii-tez', headings: [], stale: true },
+    ],
+    evaluation: { wiki_status: 'ok', wiki_queries: 2, wiki_chunks: 5 },
+  });
+  assert.match(html, /ИИ читал в вики:/);
+  assert.match(html, /href="\?view=wiki&amp;article=все-акции"[^>]*>«Все акции»<\/a>/);
+  assert.match(html, /«Архивные акции TEZ»<\/a>[\s\S]{0,200}несвежая/);
+  // Подсказка «i» рисуется по наведению — её текст проверяем у самой функции.
+  const built = join(process.cwd(), 'node_modules', '.cache', 'otp-tests', 'call_qa_CallReviewCard.jsx.mjs');
+  const { evaluationDetails } = await import(`file://${built.split('\\').join('/')}`);
+  const details = evaluationDetails({ wiki_status: 'ok', wiki_queries: 2, wiki_chunks: 5 });
+  assert.match(details, /вики: справка получена · запросов в вики 2, выдержек 5\./);
+  assert.match(evaluationDetails({ wiki_status: 'no_queries', wiki_queries: 0 }), /вики: оценщик не искал\./);
+  assert.doesNotMatch(evaluationDetails({ wiki_status: 'no_queries', wiki_queries: 0 }), /запросов в вики/);
+});
+
+test('без статей из вики строки нет', () => {
+  const html = card({ wiki_sources: [], evaluation: { wiki_status: 'no_queries', wiki_queries: 0 } });
+  assert.doesNotMatch(html, /ИИ читал в вики/);
+});

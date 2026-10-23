@@ -778,6 +778,11 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 use_rag=True, knowledge_snapshot_id=snapshot["id"],
                 subject_kind=subject_kind, subject_id=call["id"],
             )
+            # Справка из вики — при отправке, как и разборы: добивка HARD-моделью в
+            # process_results читает те же выдержки, что и первый проход.
+            prepared_wiki = evaluator.prepare_wiki_context(
+                info["direction"], info["t_crits"], rec["asm"]["text"],
+                subject_kind=subject_kind, department=department_code)
             body = evaluator.build_eval_body(
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
@@ -785,6 +790,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 subject_kind=subject_kind, department=department_code,
                 cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
                 call_end_party=components["call_end_party"],
+                wiki_text=prepared_wiki["wiki_text"],
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
@@ -799,6 +805,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 "fingerprint_components": components,
                 "retrieval_config": retrieval_cfg,
                 "prepared_rag": prepared,
+                "prepared_wiki": prepared_wiki,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "request_body_hash": content_hash(body),
                 "request_body": body,
@@ -978,6 +985,9 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         prepared_rag=entry["prepared_rag"], primary_result=parsed,
                         primary_llm_meta=primary_meta, subject_kind=subject_kind,
                         subject_id=cid,
+                        # Манифест прежней версии справки не несёт — тогда оценка без неё,
+                        # как и шла в первом проходе этого же пакета.
+                        prepared_wiki=entry.get("prepared_wiki") or {"wiki_text": "", "trace": {"status": "absent"}, "sources": []},
                         # Манифест мог быть создан прежней версией — там ключа
                         # ещё нет; тогда считаем отдел по направлению прогона.
                         department=entry.get("department") or _direction_department_code(
@@ -1048,6 +1058,8 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 "_knowledge_snapshot_id": snapshot["id"],
                 "_evaluation_fingerprint": entry["evaluation_fingerprint"],
                 "_retrieval_trace": result.get("retrieval_trace") or {},
+                "_wiki_trace": result.get("wiki_trace") or {},
+                "wiki_sources": result.get("wiki_sources") or [],
                 "_llm_meta": result.get("_llm_meta") or {},
             }
             payload["evaluation"] = {
@@ -1057,6 +1069,10 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 "retrieval_status": payload["_retrieval_trace"].get("status") or "unknown",
                 "retrieval_ms": int(payload["_retrieval_trace"].get("latency_ms") or 0),
                 "stale": False, "rollout_mode": "batch", "rag_enabled": True,
+                "wiki_status": payload["_wiki_trace"].get("status") or "unknown",
+                "wiki_queries": len(payload["_wiki_trace"].get("queries") or []),
+                "wiki_chunks": len(payload["_wiki_trace"].get("chunks") or []),
+                "wiki_ms": int(payload["_wiki_trace"].get("latency_ms") or 0),
             }
             if rec.get("media"):
                 payload["media"] = rec["media"]

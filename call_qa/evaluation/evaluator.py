@@ -356,10 +356,33 @@ def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: 
     return "\n\n".join(part for part in parts if part) or fallback
 
 
+# Заголовок блока выдержек из вики, которые оценщик нашёл сам (wiki_lookup):
+# в сообщении, а не в системном блоке — это данные конкретной оценки, как разборы.
+_WIKI_SEARCH_HEADER = (
+    "ВЫДЕРЖКИ ИЗ ВИКИ (найдены по твоим запросам в базе знаний компании; это действующие "
+    "данные — сверяй с ними то, что сказал или должен был сказать оператор; если выдержки "
+    "из разных статей расходятся — верь более свежей; на вопрос, которого выдержки не "
+    "закрывают, не додумывай ответ; выдержка с пометкой «АРХИВ» или «СРОК ИСТЁК» уже не "
+    "действует):")
+
+
+def prepare_wiki_context(direction: dict, criteria: list[dict], transcript: str, *,
+                         subject_kind=config.SUBJECT_CALL, department=None,
+                         model=None) -> dict:
+    """Справка из вики для оценки: модель решает, что искать, сервер ищет
+    (wiki_lookup.prepare). Возвращает {wiki_text, trace, sources} — JSON-сериализуемо,
+    поэтому уходит и в манифест пакета, и в payload прогона."""
+    from . import wiki_lookup
+    return wiki_lookup.prepare(
+        criteria=criteria, transcript=transcript, subject_kind=subject_kind,
+        department=department, model=model or config.CLAUDE_MODEL_BULK)
+
+
 def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model,
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
                     subject_kind=config.SUBJECT_CALL, cache_ttl=None,
-                    department=None, call_end_party=None, subject_id=None) -> dict:
+                    department=None, call_end_party=None, subject_id=None,
+                    wiki_text=None) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API).
 
     cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
@@ -368,7 +391,10 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
 
     call_end_party — кто завершил звонок по данным телефонии (call_end.py). Идёт в
     ПОЛЬЗОВАТЕЛЬСКОЕ сообщение рядом с транскриптом, а не в системный блок: это
-    данные звонка, а системный промпт закреплён эталонным хэшем и кэшируется."""
+    данные звонка, а системный промпт закреплён эталонным хэшем и кэшируется.
+
+    wiki_text — выдержки из вики, найденные по запросам оценщика (prepare_wiki_context);
+    пусто — блока нет, сообщение прежнее."""
     if use_rag and rag_text is None:
         rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
                                      knowledge_snapshot_id=knowledge_snapshot_id,
@@ -382,7 +408,8 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     # У переписки трубку не кладут; неизвестная сторона даёт '' — вход прежний.
     end = (call_end.prompt_block(call_end_party)
            if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
-    user = (f"{_RAG_HEADER}\n{rag}\n\n"
+    wiki = f"{_WIKI_SEARCH_HEADER}\n{wiki_text}\n\n" if str(wiki_text or "").strip() else ""
+    user = (f"{_RAG_HEADER}\n{rag}\n\n{wiki}"
             f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}\n\nОцени по всем перечисленным критериям.")
     # Указания направления — в системный блок, как и критерии: это правила шкалы, а не
     # данные звонка, и GLM кэширует системный блок сам. Тот же текст обязан получить
@@ -398,12 +425,12 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
                  rag_text=None, stage="primary", subject_kind=config.SUBJECT_CALL,
-                 department=None, call_end_party=None) -> dict:
+                 department=None, call_end_party=None, wiki_text=None) -> dict:
     """Оценка подмножества (transcript) критериев моделью `model`."""
     body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
                            use_rag=use_rag, model=model, rag_text=rag_text,
                            subject_kind=subject_kind, department=department,
-                           call_end_party=call_end_party)
+                           call_end_party=call_end_party, wiki_text=wiki_text)
     result = llm.post_body(body, timeout=120.0, include_meta=True)
     if result.get("_llm_meta") is not None:
         result["_llm_meta"]["stage"] = stage
@@ -470,15 +497,27 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
              call_context=None, knowledge_snapshot_id=None, prepared_rag=None,
              primary_result=None, primary_llm_meta=None,
              subject_kind=config.SUBJECT_CALL, department=None,
-             call_end_party=None, subject_id=None) -> dict:
+             call_end_party=None, subject_id=None, prepared_wiki=None,
+             use_wiki=True) -> dict:
     """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
     критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику.
 
     subject_id — id оцениваемого разговора (вместе с subject_kind): правила из его же
-    разборов идут в промпт всегда."""
+    разборов идут в промпт всегда.
+
+    prepared_wiki — готовая справка из вики (prepare_wiki_context) — пакет готовит её при
+    отправке, чтобы добивка HARD-моделью читала те же выдержки; None — собрать здесь.
+    use_wiki=False — оценка без поиска по вики (теневой вариант без базы, тесты)."""
     cc.apply_to_direction(direction)
     crit_by_idx = {c["idx"]: c for c in direction["criteria"]}
     t_crits = [c for c in direction["criteria"] if c["eval_source"] == cc.TRANSCRIPT]
+
+    if prepared_wiki is None:
+        prepared_wiki = (prepare_wiki_context(direction, t_crits, transcript,
+                                              subject_kind=subject_kind, department=department)
+                         if use_wiki and t_crits else
+                         {"wiki_text": "", "trace": {"status": "disabled"}, "sources": []})
+    wiki_text = prepared_wiki.get("wiki_text") or ""
 
     if prepared_rag is not None:
         rag_text = prepared_rag["rag_text"]
@@ -511,7 +550,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
           (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans,
                         use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                         rag_text=rag_text, stage="bulk", subject_kind=subject_kind, department=department,
-                        call_end_party=call_end_party)
+                        call_end_party=call_end_party, wiki_text=wiki_text)
            if t_crits else {"per_criterion": [], "overall_comment": ""}))
     if primary_llm_meta and not ai.get("_llm_meta"):
         llm_calls.append(primary_llm_meta)
@@ -528,7 +567,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
         retry = _claude_eval(transcript, direction, missing, asr_low_spans=asr_low_spans,
                              use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                              rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind, department=department,
-                             call_end_party=call_end_party)
+                             call_end_party=call_end_party, wiki_text=wiki_text)
         if retry.get("_llm_meta"):
             llm_calls.append(retry["_llm_meta"])
         for idx, v in _collect_verdicts(retry.get("per_criterion")).items():
@@ -551,7 +590,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
                                use_rag=use_rag, model=config.CLAUDE_MODEL_HARD,
                                rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind, department=department,
-                               call_end_party=call_end_party)
+                               call_end_party=call_end_party, wiki_text=wiki_text)
             if ai2.get("_llm_meta"):
                 llm_calls.append(ai2["_llm_meta"])
             for idx, v in _collect_verdicts(ai2.get("per_criterion")).items():
@@ -561,6 +600,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
     result = assemble_results(direction, by_idx, model_by_idx,
                               call_context=call_context, overall_comment=ai.get("overall_comment", ""))
     result["retrieval_trace"] = retrieval_trace
+    result["wiki_trace"] = prepared_wiki.get("trace") or {}
+    result["wiki_sources"] = prepared_wiki.get("sources") or []
     result["_llm_meta"] = {
         "calls": llm_calls,
         "total_calls": len(llm_calls),

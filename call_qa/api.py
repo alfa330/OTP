@@ -27,6 +27,7 @@ from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
 from .evaluation import evaluator
 from .evaluation import runtime_store
+from .evaluation import wiki_lookup
 from .evaluation.fingerprint import (RETRIEVAL_PIPELINE_VERSION, build_evaluation_fingerprint,
                                      content_hash, transcript_fingerprint)
 from .review import queue as review_queue
@@ -1544,6 +1545,10 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
     model_config = {
         "bulk": config.CLAUDE_MODEL_BULK, "hard": config.CLAUDE_MODEL_HARD,
         "effort": config.CLAUDE_EFFORT, "escalate_conf": config.ESCALATE_CONF,
+        # Поиск по вики перед оценкой (evaluation/wiki_lookup): его включение или
+        # смена версии — другая оценка; сами выдержки в отпечаток не входят (они
+        # разные у каждого разговора и лежат в трассе прогона).
+        "wiki_search": wiki_lookup.VERSION if wiki_lookup.ENABLED else "off",
     }
     criterion_cfg = [{"criterion_id": c["criterion_id"], "eval_source": c.get("eval_source"),
                       "default_verdict": c.get("default_verdict")}
@@ -1569,8 +1574,9 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
 
 
 def _evaluation_summary(*, run_id: str, fingerprint: str, knowledge_snapshot: dict,
-                        trace: dict, rollout: dict, stale=False) -> dict:
+                        trace: dict, rollout: dict, stale=False, wiki_trace=None) -> dict:
     criteria_trace = trace.get("criteria") or []
+    wiki_trace = wiki_trace or {}
     return {
         "run_id": run_id, "fingerprint_short": fingerprint[:12],
         "knowledge_revision": knowledge_snapshot.get("knowledge_revision"),
@@ -1579,6 +1585,11 @@ def _evaluation_summary(*, run_id: str, fingerprint: str, knowledge_snapshot: di
         "included_count": sum(int(item.get("included_count") or 0) for item in criteria_trace),
         "retrieval_ms": int(trace.get("latency_ms") or 0), "stale": bool(stale),
         "rollout_mode": rollout.get("mode"), "rag_enabled": rollout.get("rag_enabled"),
+        # Поиск по вики: статус, сколько запросов задал оценщик и сколько выдержек прочёл.
+        "wiki_status": wiki_trace.get("status") or "unknown",
+        "wiki_queries": len(wiki_trace.get("queries") or []),
+        "wiki_chunks": len(wiki_trace.get("chunks") or []),
+        "wiki_ms": int(wiki_trace.get("latency_ms") or 0),
     }
 
 
@@ -2134,7 +2145,7 @@ def _cache_get(call_id, model, subject_kind=config.SUBJECT_CALL):
 # транскрипт ~28 тыс. на карточку, ~19 МБ прироста базы в сутки на всю ИИ-оценку).
 # Трасса поиска правил и метаданные вызовов LLM хранятся один раз — в прогоне
 # (ai_evaluation_runs.payload), оттуда их и читают карточка, разбор и кэш по отпечатку.
-_PROJECTION_DROPPED_KEYS = ("_retrieval_trace", "_llm_meta")
+_PROJECTION_DROPPED_KEYS = ("_retrieval_trace", "_wiki_trace", "_llm_meta")
 
 
 def _projection_payload(payload: dict) -> dict:
@@ -2825,12 +2836,15 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         "_evaluation_fingerprint": fingerprint,
         "_pair_id": pair_id,
         "_retrieval_trace": result.get("retrieval_trace") or {},
+        "_wiki_trace": result.get("wiki_trace") or {},
+        "wiki_sources": result.get("wiki_sources") or [],
         "_llm_meta": result.get("_llm_meta") or {},
         "_previous_evaluation_stale": previous_evaluation_stale,
     }
     payload["evaluation"] = _evaluation_summary(
         run_id=run_id, fingerprint=fingerprint, knowledge_snapshot=snapshot,
-        trace=payload["_retrieval_trace"], rollout=rollout)
+        trace=payload["_retrieval_trace"], rollout=rollout,
+        wiki_trace=payload["_wiki_trace"])
     for key, value in (source.get("extra") or {}).items():
         payload[key] = value
 
@@ -2922,6 +2936,8 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
             "_primary_run_id": primary_run_id,
             "_pair_id": pair_id,
             "_retrieval_trace": result.get("retrieval_trace") or {},
+            "_wiki_trace": result.get("wiki_trace") or {},
+            "wiki_sources": result.get("wiki_sources") or [],
             "_llm_meta": result.get("_llm_meta") or {},
         }
         runtime_store.save_evaluation_run(

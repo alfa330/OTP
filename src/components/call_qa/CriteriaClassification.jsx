@@ -91,7 +91,7 @@ function GuidancePanel({ apiBaseUrl, headers, directionId, showToast, onDirtyCha
             <div className="flex items-center gap-2">
                 <span className="text-[13.5px] font-semibold text-slate-800">Указания для ИИ</span>
                 <IosHint label="Что такое указания для ИИ"
-                    text="Правила шкалы и справка по процессу, которые ИИ читает в каждой оценке этого направления. Люди их не видят. Ссылку на статью вики (как в адресной строке) ИИ раскроет сам: прочитает её текущий текст — так же работает ссылка в описании критерия. После сохранения прежние оценки направления помечаются устаревшими — пересчёт кнопкой «Переоценить»." />
+                    text="Правила шкалы и справка по процессу, которые ИИ читает в каждой оценке этого направления. Люди их не видят. Факты из вики ИИ ищет сам перед каждой оценкой; ссылку на конкретную статью (как в адресной строке) можно поставить здесь или в описании критерия — тогда её текущий текст ИИ получит всегда. После сохранения прежние оценки направления помечаются устаревшими — пересчёт кнопкой «Переоценить»." />
                 <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
                     className="ml-auto flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] font-medium text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
                     {status}

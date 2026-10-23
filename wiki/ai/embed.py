@@ -106,6 +106,19 @@ def embed_query(text):
     return _with_backoff(provider.embed_query, [str(text)])[0]
 
 
+def embed_queries(texts):
+    """Векторы нескольких запросов ОДНИМ обращением к провайдеру.
+
+    Нужен ИИ-оценке (call_qa/evaluation/wiki_lookup.py): у неё до восьми запросов
+    на оценку, и по одному вызову на запрос ночной прогон в 16 потоков упирался в
+    квоту Vertex (429 → паузы _with_backoff) — поиск занимал 20–50 с вместо 3–5."""
+    texts = [str(text) for text in texts]
+    if not texts:
+        return []
+    provider = _provider()
+    return _with_backoff(provider.embed_query, texts)
+
+
 _PENDING_SQL = """
 SELECT c.id, c.text_hash, c.heading_path, c.text
   FROM wiki_ai_chunks c
