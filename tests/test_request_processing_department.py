@@ -253,6 +253,18 @@ class RequestProcessingMenuTests(unittest.TestCase):
         for user_id in (524, 618, 621):
             self.assertFalse(access.can_view_section({'id': user_id, 'role': 'operator'}), user_id)
 
+    def test_named_ids_pass_as_strings_and_in_camel_case(self):
+        # Контекст запроса приходит из JSON: id бывает строкой и под userId.
+        from driver_mailings import access
+        for raw in (619, '619', '620', '523'):
+            for ctx in ({'id': raw, 'role': 'operator'}, {'userId': raw, 'role': 'operator'}):
+                self.assertTrue(access.can_view_section(ctx), ctx)
+                caps = access.capabilities(ctx)
+                self.assertTrue(caps['can_send'], ctx)
+                self.assertTrue(caps['requires_qr'], ctx)
+        for raw in ('618', '6190', '619abc', None):
+            self.assertFalse(access.can_view_section({'id': raw, 'role': 'operator'}), raw)
+
     def test_screen_is_rendered_outside_role_branches(self):
         app = _read(APP_PATH)
         self.assertIn('{( view === "driver_mailings" && canAccessDriverMailings && (', app)

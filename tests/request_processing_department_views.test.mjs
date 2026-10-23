@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { isDepartmentHead, normalizeRole } from '../src/utils/roles.js';
+import { isDepartmentHead, isSupervisorRole, normalizeRole } from '../src/utils/roles.js';
 import {
     DEPARTMENT_VIEW_ALLOWLIST,
     departmentAllowsView,
@@ -137,6 +137,17 @@ for (const id of NAMED_IDS) {
     });
 }
 
+test('ООЗ: добавка читает код отдела так же, как карта (camelCase, регистр)', () => {
+    for (const user of [
+        { id: 619, role: 'operator', departmentCode: CODE },
+        { id: 620, role: 'operator', department_code: 'Request_Processing_Department' },
+    ]) {
+        assert.equal(departmentAllowsView(user, 'driver_mailings'), true, JSON.stringify(user));
+        assert.equal(departmentAllowsView(user, 'work_schedules'), true, JSON.stringify(user));
+        assert.equal(firstAllowedView(user, []), 'driver_mailings');
+    }
+});
+
 test('ООЗ: «Мои смены» — только названным, а не всему отделу', () => {
     for (const id of [523, 3, 476, 618, 621, 6190, null, undefined, '', 'abc', '619abc']) {
         for (const role of ['operator', 'trainee']) {
@@ -190,10 +201,11 @@ test('ООЗ: глава отдела и повышенные — без наб�
     }
 });
 
-/* Проводка — настоящий код App.jsx: ветка рядового в сайдбаре, бар телефона и
-   два стража раздела (тот же приём, что в remote_cc_department_views.test.mjs).
-   App.jsx монолитен и не импортируется, а переписать его куски в тест значило
-   бы проверять копию. */
+/* Проводка — настоящий код App.jsx: предикат «Рассылок», ветка рядового в
+   сайдбаре и в рендере, бар телефона, восстановление вида из адреса и два стража
+   раздела (тот же приём, что в remote_cc_department_views.test.mjs). App.jsx
+   монолитен и не импортируется, а переписать его куски в тест значило бы
+   проверять копию. */
 const appSource = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
     .split('\r\n').join('\n');
 
@@ -210,6 +222,28 @@ const declarationOf = (name) => {
     throw new Error(`не нашёл конец объявления ${name} — проверь тест`);
 };
 
+const { canAccessDriverMailingsForUser } = new Function('normalizeRole', `
+    ${declarationOf('DRIVER_MAILINGS_ALLOWED_USER_IDS')}
+    ${declarationOf('canAccessDriverMailingsForUser')}
+    return { canAccessDriverMailingsForUser };
+`)(normalizeRole);
+
+test('«Рассылки»: предикат портала пускает рядовых из списка, флаг компонента — он же', () => {
+    for (const id of [523, 619, 620, '619', '620']) {
+        for (const role of ['operator', 'trainee', 'admin']) {
+            assert.equal(canAccessDriverMailingsForUser({ id, role }), true, `${role}/${id}`);
+        }
+    }
+    for (const id of [618, 621, 524, null]) {
+        assert.equal(canAccessDriverMailingsForUser({ id, role: 'operator' }), false, String(id));
+        assert.equal(canAccessDriverMailingsForUser({ id, role: 'admin' }), false, `admin/${id}`);
+    }
+    assert.equal(canAccessDriverMailingsForUser({ id: 1, role: 'super_admin' }), true);
+    // Флаг, которым меню, гарды и экран спрашивают раздел, — без своих оговорок
+    // по роли: оговорка здесь закрыла бы раздел ровно рядовым из списка.
+    assert.match(appSource, /\n\s*const canAccessDriverMailings = canAccessDriverMailingsForUser\(user\);\n/);
+});
+
 test('меню рядового: у названных сотрудниц из пунктов карты — одни «Мои смены»', () => {
     const start = appSource.indexOf('{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (');
     const end = appSource.indexOf('{/* Запрещающий список', start);
@@ -225,6 +259,16 @@ test('меню рядового: у названных сотрудниц из �
     assert.match(item.slice(0, item.indexOf('</li>')), /handleSidebarViewNavigation\(e, 'work_schedules'\)[^]*Мои смены/);
     // «Рассылки» в ветке — под именным предикатом, карта их не выдаёт.
     assert.ok(branch.includes('{canAccessDriverMailings && ('));
+});
+
+test('«Мои смены»: экран объявлен в ветке рендера рядового безусловно', () => {
+    // Иначе пункт меню есть, гарды пускают, а область раздела пустая.
+    const marker = '{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (\n                            <>';
+    const start = appSource.indexOf(marker);
+    assert.ok(start >= 0, 'ветка рендера рядового не найдена — проверь тест');
+    const branch = appSource.slice(start, appSource.indexOf('\n                        )}', start));
+    assert.ok(branch.includes('{( view === "work_schedules" && (<ShiftPlannerViewWithCalendar '),
+        'в ветке рядового нет экрана «Мои смены» или он под лишним условием');
 });
 
 const { pickMobileTabs } = new Function(
@@ -252,8 +296,18 @@ test('бар телефона: названным — «Смены», остал
         for (const id of NAMED_IDS) assert.deepEqual(barOf(named(id), wiki), ['work_schedules'], `${id}/${wiki}`);
         assert.deepEqual(barOf(named(523), wiki), wiki ? ['wiki', 'events'] : ['events'], `523/${wiki}`);
     }
-    // Мост к App.jsx: флаг «Смен» в баре спрашивает тот же departmentAllowsView.
-    assert.match(appSource, /myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& departmentAllowsView\(user, 'work_schedules'\)/);
+    // Мосты к App.jsx: флаги бара — ровно эти выражения, без хвоста.
+    assert.match(appSource, /\n\s*myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& departmentAllowsView\(user, 'work_schedules'\),\n/);
+    assert.match(appSource, /\n\s*events: eventsSectionShown,\n/);
+    assert.match(appSource, /\n\s*const eventsSectionShown = departmentAllowsView\(user, 'events'\);\n/);
+    // Бар пересчитывается по самому человеку, а не только по роли: выход 523 и
+    // вход 619 на том же телефоне роль не меняют, а набор — меняют.
+    const at = appSource.indexOf('const mobileTabItems = useMemo(() => pickMobileTabs(');
+    assert.ok(at >= 0, 'mobileTabItems не найден — проверь тест');
+    const depsAt = appSource.indexOf('), [', at);
+    const deps = appSource.slice(depsAt + 4, appSource.indexOf(']);', depsAt))
+        .split(',').map((part) => part.trim()).filter(Boolean);
+    assert.ok(deps.includes('user'), `в зависимостях бара нет user: ${deps}`);
 });
 
 const effectBody = (anchor, { openBefore, closing }) => {
@@ -266,6 +320,9 @@ const effectBody = (anchor, { openBefore, closing }) => {
     return appSource.slice(open + opener.length, end);
 };
 
+const RESTORE = effectBody('// Persist and restore view (after user is loaded to ensure role-based access)', {
+    openBefore: false, closing: '\n            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer,',
+});
 const ROLE_GUARD = effectBody('// Do not touch view while authentication is still initializing', {
     openBefore: true, closing: '\n            }, [isAuthInitializing, user,',
 });
@@ -288,27 +345,37 @@ const runEffect = (body, scope) => {
     new Function('scope', `with (scope) {${body}\n}`)(everything);
 };
 
-// Куда приходит рядовой из раздела start. «Рассылки» открыты всем троим.
-const settle = (user, start) => {
+const scopeFor = (user, view, url, redirectToView) => ({
+    user, view, requestedViewFromLocation: url, isAuthInitializing: false,
+    EMPLOYEE_ACCOUNTING_MANAGER_MENU: [], TRAINER_ALLOWED_VIEWS: [],
+    isAdminLikeRole: false, isDepartmentHeadUser: false, isPlainTrainer: false,
+    departmentAllowsView, departmentRestrictsViews, firstAllowedView, isDepartmentHead, isSupervisorRole,
+    canAccessDriverMailings: canAccessDriverMailingsForUser(user),
+    redirectToView,
+});
+
+// Куда приходит рядовой из раздела start: оба стража, пока не встанут.
+const settle = (user, start, url = '') => {
     let view = start;
     const trail = [view];
     for (let pass = 0; pass < 12; pass += 1) {
         let next = null;
-        const scope = {
-            user, view, isAuthInitializing: false, EMPLOYEE_ACCOUNTING_MANAGER_MENU: [],
-            isAdminLikeRole: false, isDepartmentHeadUser: false, isPlainTrainer: false,
-            departmentAllowsView, departmentRestrictsViews, firstAllowedView, isDepartmentHead,
-            isSupervisorRole: (value) => normalizeRole(value) === 'sv',
-            redirectToView: (target) => { if (target && target !== view) next = target; },
-            canAccessDriverMailings: true,
-        };
-        runEffect(ROLE_GUARD, scope);
-        runEffect(VIEW_MAP_GUARD, scope);
+        const redirect = (target) => { if (target && target !== view) next = target; };
+        runEffect(ROLE_GUARD, scopeFor(user, view, url, redirect));
+        runEffect(VIEW_MAP_GUARD, scopeFor(user, view, url, redirect));
         if (next === null) return trail;
         view = next;
         trail.push(view);
     }
     assert.fail(`переброс не остановился: ${trail.join(' → ')}`);
+};
+
+// Открыл портал по адресу ?view=<url> ('' — без вида): восстановление, затем стражи.
+const landing = (user, url) => {
+    let view = null;
+    runEffect(RESTORE, scopeFor(user, view, url, (target) => { view = target; }));
+    assert.ok(view, `восстановление вида никуда не повело: ${url}`);
+    return settle(user, view, url);
 };
 
 test('стражи: «Мои смены» названные открывают, вход и чужие разделы ведут в «Рассылки»', () => {
@@ -322,4 +389,16 @@ test('стражи: «Мои смены» названные открывают,
     }
     // Третьего сотрудника «Мои смены» по-прежнему уводят в «Рассылки».
     assert.deepEqual(settle(named(523), 'work_schedules'), ['work_schedules', 'driver_mailings']);
+});
+
+test('вход без адреса — «Рассылки»; перезагрузка в «Моих сменах» остаётся там', () => {
+    for (const id of [...NAMED_IDS, '619']) {
+        assert.equal(landing(named(id), '').at(-1), 'driver_mailings', `${id}: вход`);
+        assert.deepEqual(landing(named(id), 'work_schedules'), ['work_schedules'], `${id}: перезагрузка`);
+        assert.deepEqual(landing(named(id), 'driver_mailings'), ['driver_mailings'], `${id}: «Рассылки»`);
+        assert.equal(landing(named(id), 'profile').at(-1), 'driver_mailings', `${id}: чужой раздел`);
+    }
+    // 523: «Моих смен» нет — адрес уводит в «Рассылки», вход как раньше.
+    assert.equal(landing(named(523), '').at(-1), 'driver_mailings');
+    assert.equal(landing(named(523), 'work_schedules').at(-1), 'driver_mailings');
 });
