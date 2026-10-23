@@ -31872,6 +31872,9 @@ def operator_sip_settings_endpoint():
         autodial = account.get("autodial")
         if autodial and not (autodial.get("server") and autodial.get("password")):
             autodial = None
+        # TLS вместо UDP — шифрованной линии Binotel и телефону 3.22.38+ (обход сетей,
+        # где режут порт 5060 SIP); остальным ответ прежний.
+        main = _icore_phone_sip_transport(requester_id, provider, main)
         payload = {
             "status": "success",
             # Плоские поля основного аккаунта — совместимость со старым iCORE Phone.
@@ -68043,6 +68046,32 @@ def _dial_list_line_account(user_id):
     except Exception:
         logging.exception("dial_list: не удалось собрать регистрацию на линии для %s", user_id)
         return None
+
+
+def _icore_phone_sip_transport(user_id, provider, main):
+    """Основной аккаунт для телефона с транспортом SIP: TLS — шифрованной линии Binotel
+    (encryptedWithTls) и телефону, который TLS умеет (3.22.38+), иначе как было — UDP.
+
+    Зачем (22.10.2026): в части офисов провайдер или роутер режет порт 5060, а TLS 5061 до
+    Binotel проходит. Binotel пускает по TLS только шифрованную линию, поэтому транспорт
+    следует за её флагом: руководитель включает шифрование в кабинете Binotel, остальное
+    телефон делает сам. Компанию Binotel знает отдел линии — у посаженного на линию другого
+    отдела это отдел линии, у остальных — свой. Любой сбой — прежний UDP."""
+    if provider != 'binotel' or not main or _dial_list_service is None:
+        return main
+    try:
+        from dial_list import service as dial_list_service_mod
+        if not dial_list_service_mod.phone_has_tls(
+                request.headers.get(dial_list_service_mod.PHONE_VERSION_HEADER)):
+            return main
+        number = str(main.get("number") or "").strip()
+        member = _dial_list_line_member(user_id)
+        department_id = member.get("department_id") if member else db.get_user_department_id(user_id)
+        if number and department_id and _dial_list_service.line_uses_tls(department_id, number):
+            return {**main, "transport": "TLS"}
+    except Exception:
+        logging.exception("sip_settings: транспорт TLS для %s не определён — остаётся UDP", user_id)
+    return main
 
 
 def _dial_list_phone_settings(user_id):

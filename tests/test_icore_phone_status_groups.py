@@ -329,6 +329,7 @@ class SipSettingsStatusProfileTests(unittest.TestCase):
             'SIP_AUTO_ANSWER_DELAY_DEFAULT': 3,
             '_ICORE_PHONE_PROFILE_UNKNOWN': unknown,
             '_icore_phone_status_profile': status_profile,
+            '_icore_phone_sip_transport': lambda user_id, provider, main: main,
         }
         exec(compile(module, '<sip-settings-endpoint>', 'exec'), namespace)
         body, code = namespace['operator_sip_settings_endpoint']()

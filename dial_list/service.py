@@ -239,6 +239,19 @@ RING_RETRY_AFTER_SEC = 3
 # «класть» — так 12.10.2026 рвались разговоры. Ему, как и телефону без заголовка, —
 # ring_timeout_sec: 0 и «не класть» на вопрос ring_timeout.
 RING_TIMER_MIN_VERSION = (3, 22, 35)
+# SIP по TLS (порт 5061) — для офисов, где провайдер или роутер режет порт 5060 (22.10.2026:
+# фронт-офис в Шымкенте, Beeline: UDP и TCP на 5060 молча пропадали до любых SIP-серверов, а
+# TLS 5061 до Binotel проходил). Binotel пускает по TLS только шифрованную линию
+# (endpointData.encryptedWithTls = "1"; обычную — 403 на REGISTER с верным паролем, проверено
+# на линии 926), поэтому транспорт следует за этим флагом: руководитель включает шифрование
+# линии в кабинете Binotel — и телефон сам переходит на TLS. Умеет TLS телефон 3.22.38 и новее;
+# старому — UDP, как было.
+TLS_MIN_VERSION = (3, 22, 38)
+# Флаги линий берутся из settings/list-of-employees и живут столько секунд: ручку
+# /api/operator/sip_settings телефон зовёт при входе и раз в 10 минут, а флаг меняют руками.
+LINE_TLS_TTL_SECONDS = 120
+# Ждать очереди к Binotel не дольше стольких секунд: регистрация телефона ждёт этот ответ.
+LINE_TLS_MAX_WAIT = 3
 # Анализ звука на плече выключен насовсем (владелец, 13.10.2026: «нестабильная вещь — отключить»).
 # Ключи состояния speech_guard / announcement_ms / announcement_sit / announcement_mode остаются
 # только для телефона 3.22.34, который ещё стоит у операторов, и всегда «выключено»: отводы звука в
@@ -972,6 +985,14 @@ def phone_has_ring_timer(value):
     return version is not None and version >= RING_TIMER_MIN_VERSION
 
 
+def phone_has_tls(value):
+    """Телефон умеет SIP по TLS с проверкой сертификата Binotel — версия в заголовке не ниже
+    TLS_MIN_VERSION (3.22.38). Заголовка нет или он неразборчив — нет: старый телефон TLS
+    молча превращал в UDP, и шифрованная линия у него просто не зарегистрировалась бы."""
+    version = parse_phone_version(value)
+    return version is not None and version >= TLS_MIN_VERSION
+
+
 def call_error_kind(error, text=None):
     """Почему не удался звонок — CALL_ERROR_* (line | network | pbx_busy | rate | pbx).
 
@@ -1431,6 +1452,9 @@ class DialListService:
         self._client_factory = client_factory or self._default_client
         self._clients = {}
         self._clients_lock = threading.Lock()
+        # Шифрованные линии Binotel по отделам: {department_id: (monotonic, {номер: bool})}.
+        self._line_tls = {}
+        self._line_tls_lock = threading.Lock()
         # Проверка подписания в Sapar: свой поток, запросы склеиваются (sign_check.py).
         self.sign_checker = sign_checker or SignChecker(db)
         # Автообзвон Тез (15.10.2026): поездки в TEZ APP — свой поток (trips_check.py); клиент TEZ
@@ -1865,6 +1889,43 @@ class DialListService:
     def _endpoint_of(record):
         ep = record.get("endpointData") if isinstance(record, dict) else None
         return ep if isinstance(ep, dict) and str(ep.get("internalNumber") or "").strip() else None
+
+    def line_uses_tls(self, department_id, internal_number):
+        """Шифрованная ли у Binotel линия internal_number компании отдела (encryptedWithTls).
+
+        По ней телефон регистрируется по TLS 5061 (см. TLS_MIN_VERSION). Флаги всех линий
+        компании — одним запросом settings/list-of-employees, на LINE_TLS_TTL_SECONDS. Отдел
+        без настроек раздела — False: компанию Binotel знают только его настройки, а чужой
+        одноимённый номер дал бы чужой флаг. Сбой Binotel — последнее известное значение,
+        без него False: регистрация остаётся прежней, UDP."""
+        number = str(internal_number or "").strip()
+        if not number:
+            return False
+        department_id = int(department_id)
+        now = time.monotonic()
+        with self._line_tls_lock:
+            cached = self._line_tls.get(department_id)
+        if cached and now - cached[0] < LINE_TLS_TTL_SECONDS:
+            return cached[1].get(number, False)
+        try:
+            if not self.department_settings(department_id).get("configured"):
+                return False
+            payload = self._client(department_id)._post(
+                "settings/list-of-employees", {}, max_wait=LINE_TLS_MAX_WAIT)
+            emps = (payload or {}).get("listOfEmployees") or {}
+            flags = {}
+            for rec in (emps.values() if isinstance(emps, dict) else emps):
+                ep = self._endpoint_of(rec)
+                if ep:
+                    flags[str(ep.get("internalNumber")).strip()] = (
+                        str(ep.get("encryptedWithTls") or "").strip() == "1")
+        except Exception as exc:
+            log.warning("dial_list: шифрование линий отдела %s у Binotel не получено: %s",
+                        department_id, exc)
+            return cached[1].get(number, False) if cached else False
+        with self._line_tls_lock:
+            self._line_tls[department_id] = (now, flags)
+        return flags.get(number, False)
 
     def _line_status_hint(self, department_id, internal_number):
         """Что Binotel сам думает о линии оператора — для текста ошибки при коде 150.
