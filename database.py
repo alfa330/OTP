@@ -4280,6 +4280,28 @@ class Database:
                     meta_json JSONB NOT NULL DEFAULT '{}'::jsonb
                 );
             """)
+            # Прогоны синка звонков Oktell («Учёт часов» -> «Звонки»). По ним ночной прогон
+            # находит недобранные дни: после окончания дня по нему не прошло ни одного удачного
+            # синка (18.10.2026 прокси лёг до утра, и день застыл на срезе 14:20). Такие дни
+            # ночью дозабираются, а добранные не трогаются — ручные правки звонков в них
+            # остаются. Время прогона — местное, как у самого синка (datetime.now()).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oktell_calls_sync_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    started_at TIMESTAMP NOT NULL,
+                    finished_at TIMESTAMP NOT NULL,
+                    date_from DATE NOT NULL,
+                    date_to DATE NOT NULL,
+                    triggered_by VARCHAR(32) NOT NULL DEFAULT '',
+                    status VARCHAR(16) NOT NULL,
+                    updated_days INTEGER NOT NULL DEFAULT 0,
+                    error TEXT
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_oktell_calls_sync_runs_dates
+                ON oktell_calls_sync_runs (date_to, date_from);
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_status_events (
                     id BIGSERIAL PRIMARY KEY,
@@ -18803,29 +18825,120 @@ class Database:
             cursor.execute("UPDATE users SET department_id = %s WHERE id = %s RETURNING id", (department_id, user_id))
             return cursor.fetchone() is not None
 
-    def upsert_daily_calls(self, operator_id, day, calls, group_id=None):
-        """Обновляет ТОЛЬКО количество звонков (daily_hours.calls) за день оператора,
+    def upsert_daily_calls(self, rows):
+        """Обновляет ТОЛЬКО количество звонков (daily_hours.calls) за дни операторов,
         не затрагивая остальные поля (work_time/break_time/talk_time/efficiency/штрафы/
         бонусы). Используется синхронизацией звонков из Oktell — она не должна затирать
-        вручную внесённые часы. Уникальность (operator_id, day); при создании новой строки
-        остальные метрики берут DEFAULT 0, а group_id резолвится в активную группу на дату.
+        вручную внесённые часы. rows — (operator_id, day, calls), по строке на оператор-день;
+        при создании новой строки остальные метрики берут DEFAULT 0, а group_id резолвится
+        в активную группу на дату. Звонки пишутся одной транзакцией.
+
+        Месячный итог work_hours (total_calls, calls_per_hour) считается из дней, но сам
+        по себе пересчитывается только пересчётом часов по статусам. Поэтому здесь же
+        пересчитываем месяцы, где число звонков изменилось: иначе день, исправленный
+        повторным синком (18.10.2026 после сбоя прокси), в месячном итоге и «звонках в час»
+        оставался прежним. Месяцы считаются уже после коммита звонков, каждый своей короткой
+        транзакцией: сбой пересчёта у одного оператора не откатывает звонки остальных, а
+        строки дней не держатся под блокировкой, пока считаются месяцы.
         """
-        if isinstance(day, str):
-            day = datetime.strptime(day, "%Y-%m-%d").date()
+        calls_by_key = {}
+        for operator_id, day, calls in rows or []:
+            if isinstance(day, str):
+                day = datetime.strptime(day, "%Y-%m-%d").date()
+            calls_by_key[(int(operator_id), day)] = max(0, int(calls or 0))
+        if not calls_by_key:
+            return {"saved_days": 0, "changed_days": 0, "aggregated_months": 0, "aggregate_errors": 0}
+
+        keys = sorted(calls_by_key)
         with self._get_cursor() as cursor:
-            if group_id is None:
-                group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
             cursor.execute("""
+                SELECT dh.operator_id, dh.day, dh.calls, dh.group_id
+                FROM daily_hours dh
+                JOIN UNNEST(%s::int[], %s::date[]) AS k(operator_id, day)
+                  ON k.operator_id = dh.operator_id AND k.day = dh.day
+            """, ([key[0] for key in keys], [key[1] for key in keys]))
+            previous = {(int(row[0]), row[1]): (int(row[2] or 0), row[3]) for row in cursor.fetchall()}
+
+            # Группа на дату нужна только новой строке или строке без группы: у остальных
+            # upsert её не меняет, а запрос на каждую строку ручного синка за месяц — это
+            # тысяча с лишним лишних запросов.
+            values = []
+            for operator_id, day in keys:
+                group_id = (previous.get((operator_id, day)) or (0, None))[1]
+                if group_id is None:
+                    group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
+                values.append((operator_id, day, calls_by_key[(operator_id, day)], group_id))
+            execute_values(
+                cursor,
+                """
                 INSERT INTO daily_hours (operator_id, day, calls, group_id)
-                VALUES (%s, %s, %s, %s)
+                VALUES %s
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
                     calls = EXCLUDED.calls,
                     group_id = COALESCE(daily_hours.group_id, EXCLUDED.group_id)
-                RETURNING id
-            """, (operator_id, day, int(calls or 0), group_id))
-            res = cursor.fetchone()
-            return res[0] if res else None
+                """,
+                values,
+                page_size=500,
+            )
+
+        changed = [key for key in keys if (previous.get(key) or (0, None))[0] != calls_by_key[key]]
+        changed_months = sorted({
+            (operator_id, day.strftime("%Y-%m")) for operator_id, day in changed
+        })
+        aggregate_errors = 0
+        for operator_id, month_key in changed_months:
+            try:
+                self.aggregate_month_from_daily(operator_id, month_key)
+            except Exception:
+                aggregate_errors += 1
+                logging.exception(
+                    "upsert_daily_calls: месяц %s оператора %s не пересчитан", month_key, operator_id
+                )
+
+        return {
+            "saved_days": len(values),
+            "changed_days": len(changed),
+            "aggregated_months": len(changed_months) - aggregate_errors,
+            "aggregate_errors": aggregate_errors,
+        }
+
+    def record_oktell_calls_sync_run(self, started_at, finished_at, date_from, date_to,
+                                     triggered_by, status, updated_days=0, error=None):
+        """Запись в историю прогонов синка звонков Oktell (oktell_calls_sync_runs)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO oktell_calls_sync_runs (
+                    started_at, finished_at, date_from, date_to,
+                    triggered_by, status, updated_days, error
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                started_at, finished_at, date_from, date_to,
+                str(triggered_by or '')[:32], str(status or '')[:16], int(updated_days or 0),
+                str(error)[:1000] if error else None,
+            ))
+
+    def get_oktell_calls_unfinished_days(self, date_from, date_to):
+        """Дни периода, которые синк звонков Oktell так и не добрал: после окончания дня по
+        нему не прошло ни одного удачного прогона. Дни раньше начала истории прогонов не в
+        счёт — до неё прогоны просто не записывались, и такие дни считаем добранными."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT g.day::date
+                FROM generate_series(%s::date, %s::date, INTERVAL '1 day') AS g(day)
+                WHERE g.day >= (SELECT MIN(r.started_at)::date FROM oktell_calls_sync_runs r)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM oktell_calls_sync_runs r
+                      WHERE r.status = 'success'
+                        AND r.date_from <= g.day::date
+                        AND r.date_to >= g.day::date
+                        AND r.started_at >= g.day + INTERVAL '1 day'
+                  )
+                ORDER BY 1
+            """, (date_from, date_to))
+            return [row[0] for row in cursor.fetchall()]
 
     @staticmethod
     def _coerce_daily_extra_metrics(value):

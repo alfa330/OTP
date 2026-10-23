@@ -361,6 +361,11 @@ OKTELL_CALLS_MAX_RANGE_DAYS = _env_int('OKTELL_CALLS_MAX_RANGE_DAYS', 31, minimu
 OKTELL_CALLS_CHUNK_DAYS = _env_int('OKTELL_CALLS_CHUNK_DAYS', 7, minimum=1, maximum=31)
 OKTELL_CALLS_NIGHTLY_HOUR = _env_int('OKTELL_CALLS_NIGHTLY_HOUR', 5, minimum=0, maximum=23)
 OKTELL_CALLS_NIGHTLY_MINUTE = _env_int('OKTELL_CALLS_NIGHTLY_MINUTE', 25, minimum=0, maximum=59)
+# На сколько дней назад (считая вчера) ночной прогон ищет недобранные дни — те, по которым после
+# окончания дня не прошло ни одного удачного синка. Без этого прогон, упавший на недоступном
+# прокси, никто не повторял, и день навсегда оставался на последнем внутридневном срезе
+# (18.10.2026 так застыли звонки всех операторов).
+OKTELL_CALLS_NIGHTLY_LOOKBACK_DAYS = _env_int('OKTELL_CALLS_NIGHTLY_LOOKBACK_DAYS', 7, minimum=1, maximum=31)
 OKTELL_CALLS_INTRADAY_HOURS = (os.getenv('OKTELL_CALLS_INTRADAY_HOURS') or '11,14,17,20,23').strip()
 OKTELL_CALLS_INTRADAY_MINUTE = _env_int('OKTELL_CALLS_INTRADAY_MINUTE', 20, minimum=0, maximum=59)
 
@@ -40037,6 +40042,39 @@ def _oktell_calls_target_days(day=None, date_from=None, date_to=None):
     return [today - timedelta(days=1)]
 
 
+def _oktell_calls_nightly_range(today=None):
+    """(date_from, date_to) ночного прогона: вчера и, если есть, более ранние недобранные дни
+    окна OKTELL_CALLS_NIGHTLY_LOOKBACK_DAYS — по ним после окончания дня не прошло ни одного
+    удачного синка. Добранные дни ночью не повторяем: синк переписывает звонки дня целиком и
+    стёр бы ручные правки СВ в «Учёте часов»."""
+    yesterday = (today or datetime.now().date()) - timedelta(days=1)
+    # Окно не шире лимита периода синка, иначе ночной прогон падал бы на проверке периода.
+    lookback = max(1, min(OKTELL_CALLS_NIGHTLY_LOOKBACK_DAYS, OKTELL_CALLS_MAX_RANGE_DAYS))
+    date_from = yesterday
+    if lookback > 1:
+        try:
+            unfinished = db.get_oktell_calls_unfinished_days(
+                yesterday - timedelta(days=lookback - 1), yesterday - timedelta(days=1))
+        except Exception:
+            logging.exception("Oktell calls sync: история прогонов не прочитана, ночью берём только вчера")
+            unfinished = []
+        if unfinished:
+            date_from = min(unfinished)
+    return date_from.strftime('%Y-%m-%d'), yesterday.strftime('%Y-%m-%d')
+
+
+def _oktell_calls_record_run(started_at, range_from, range_to, triggered_by, status, updated_days=0, error=None):
+    """Прогон — в историю oktell_calls_sync_runs (по ней ночью ищутся недобранные дни).
+    Сбой записи истории синк не роняет."""
+    try:
+        db.record_oktell_calls_sync_run(
+            started_at=started_at, finished_at=datetime.now(), date_from=range_from, date_to=range_to,
+            triggered_by=triggered_by, status=status, updated_days=updated_days, error=error,
+        )
+    except Exception:
+        logging.exception("Oktell calls sync: прогон не записан в историю")
+
+
 def _oktell_call_count_sql(date_from_compact, date_to_excl_compact):
     return (
         "SELECT oi.Name AS OperatorName, "
@@ -40079,7 +40117,8 @@ def _oktell_fetch_call_counts(range_from, range_to):
 
 def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, imported_by=None):
     """Синхронизирует кол-во звонков операторов из Oktell в daily_hours.calls.
-    Только операторы (чат-менеджеры исключаются матчингом по имени). Меняет ТОЛЬКО calls."""
+    Только операторы (чат-менеджеры исключаются матчингом по имени). Меняет ТОЛЬКО calls
+    дня и, где число изменилось, месячный итог work_hours, который из дней и считается."""
     if not force and not _oktell_calls_sync_enabled():
         logging.info("Oktell calls sync skipped: disabled")
         return {'status': 'skipped', 'reason': 'disabled'}
@@ -40096,6 +40135,7 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
         return {'status': 'skipped', 'reason': 'locked'}
 
     started = time.time()
+    run_started_at = datetime.now()
     try:
         # Операторско-дневной гейт: звонки пишем в daily_hours.calls только за дни,
         # когда оператор был в группе с операторской моделью. Перешедший в
@@ -40110,7 +40150,8 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
 
         source_rows = len(rows)
         matched_operators = set()
-        updated = 0
+        calls_by_operator_day = {}
+        names_by_operator_day = {}
         unmatched = 0
         skipped_non_operator_day = 0
         unmatched_preview = []
@@ -40139,15 +40180,39 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
                 # День не операторский для этого оператора — звонки не пишем.
                 skipped_non_operator_day += 1
                 continue
-            db.upsert_daily_calls(operator_id, day_str, calls_count)
+            # Два имени Oktell могут сойтись на одного оператора (вторая учётка на станции
+            # под другим написанием): звонки дня складываем, а не перетираем последним. На
+            # проде 01.09–22.10.2026 такого не было ни разу; если появится — это видно в
+            # merged_preview (так же сходится и однофамилец, которого нет среди операторов).
+            key = (operator_id, day_str)
+            calls_by_operator_day[key] = calls_by_operator_day.get(key, 0) + calls_count
+            names_by_operator_day.setdefault(key, set()).add(operator_name)
             matched_operators.add(operator_id)
-            updated += 1
+
+        saved = db.upsert_daily_calls(
+            (operator_id, day_str, calls)
+            for (operator_id, day_str), calls in calls_by_operator_day.items()
+        )
+        updated = len(calls_by_operator_day)
+        aggregated_months = int((saved or {}).get('aggregated_months') or 0)
+        merged_keys = sorted(key for key, names in names_by_operator_day.items() if len(names) > 1)
+        merged_preview = [
+            {
+                'operator_id': operator_id,
+                'day': day_str,
+                'calls': calls_by_operator_day[(operator_id, day_str)],
+                'names': sorted(names_by_operator_day[(operator_id, day_str)]),
+            }
+            for operator_id, day_str in merged_keys[:STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT]
+        ]
 
         logging.info(
-            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s skipped_non_operator_day=%s",
+            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s skipped_non_operator_day=%s merged=%s aggregated_months=%s",
             range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
-            source_rows, updated, len(matched_operators), unmatched, skipped_non_operator_day
+            source_rows, updated, len(matched_operators), unmatched, skipped_non_operator_day,
+            len(merged_keys), aggregated_months
         )
+        _oktell_calls_record_run(run_started_at, range_from, range_to, triggered_by, 'success', updated)
         return {
             'status': 'success',
             'triggered_by': triggered_by,
@@ -40158,11 +40223,15 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
             'operators_count': len(matched_operators),
             'unmatched': unmatched,
             'skipped_non_operator_day': skipped_non_operator_day,
+            'merged': len(merged_keys),
+            'aggregated_months': aggregated_months,
             'unmatched_preview': unmatched_preview,
+            'merged_preview': merged_preview,
             'elapsed_seconds': round(time.time() - started, 2),
         }
     except Exception as exc:
         logging.exception("Oktell calls sync failed")
+        _oktell_calls_record_run(run_started_at, range_from, range_to, triggered_by, 'failed', error=str(exc))
         return {
             'status': 'failed',
             'triggered_by': triggered_by,
@@ -70822,12 +70891,13 @@ async def run_oktell_operator_statuses_today_sync_async(triggered_by='scheduler-
 
 
 async def run_oktell_operator_calls_sync_async(triggered_by='scheduler'):
-    # Ночной прогон звонков: полный предыдущий день.
+    # Ночной прогон звонков: вчера и недобранные дни до него (_oktell_calls_nightly_range) —
+    # день, за который прогоны упали, дочинится сам.
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        executor_pool,
-        lambda: sync_oktell_operator_calls(triggered_by=triggered_by)
-    )
+    def _run():
+        date_from, date_to = _oktell_calls_nightly_range()
+        return sync_oktell_operator_calls(date_from=date_from, date_to=date_to, triggered_by=triggered_by)
+    return await loop.run_in_executor(executor_pool, _run)
 
 
 async def run_oktell_operator_calls_today_sync_async(triggered_by='scheduler-intraday'):
