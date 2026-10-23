@@ -181,6 +181,31 @@ def test_transition_waits_for_an_empty_log_only(db):
     assert grants(db) == [(NO_CITY, almaty)]
 
 
+def test_transition_skips_listed_ids_moved_out_of_front_office(db):
+    """Офисник из списка, переведённый в СЗоВ, воду не выдаёт — и переход ему
+    офис не открывает (разбор 23.10.2026: отбор по отделу тестом не держался)."""
+    with db.cursor() as cur:
+        cur.execute('UPDATE users SET department_id = %s WHERE id = %s', (SZOV, ALMATY_B))
+    almaty, astana, _closed = add_offices(db)
+    init(db)
+    assert grants(db) == sorted([(ALMATY_A, almaty), (ASTANA_A, astana)])
+
+
+def test_change_by_a_deleted_manager_is_not_shown_as_the_transition(db):
+    """Учётку руководителя удалили — его id в журнале обнулился, а имя
+    осталось: подпись окна — «Изменено · он», а не «Выдано по городу»."""
+    almaty, _astana, _closed = add_offices(db)
+    with db.cursor() as cur:
+        queries.apply_access_changes(cur, grants=[(ALMATY_A, almaty)], revokes=[], actor=ACTOR)
+        cur.execute('UPDATE departments SET head_user_id = NULL WHERE head_user_id = %s', (HEAD,))
+        cur.execute('DELETE FROM users WHERE id = %s', (HEAD,))
+    with db.cursor() as cur:
+        state = queries.access_state(cur)
+    changed = {office['id']: office['changed'] for office in state['offices']}[almaty]
+    assert changed['by_name'] == 'Руководов Рустам'
+    assert changed['by_seed'] is False
+
+
 def test_candidates_are_listed_issuers_with_the_section_open(db):
     with db.cursor() as cur:
         people = queries.issuer_candidates(cur)

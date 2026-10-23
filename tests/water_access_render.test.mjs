@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -55,6 +55,7 @@ async function bundle(entry, name) {
 }
 
 const { default: WaterAccess, WaterAccessSheet } = await bundle('src/components/water/WaterAccess.jsx', 'WaterAccess');
+const { default: WaterIssue } = await bundle('src/components/water/WaterIssue.jsx', 'WaterIssue');
 
 const office = (id, city, name, address, userIds, changed = null) => ({ id, city, name, address, user_ids: userIds, changed });
 const ACCESS = {
@@ -79,17 +80,23 @@ const sheet = (props) => renderToStaticMarkup(React.createElement(WaterAccessShe
 
 const rows = (html) => [...html.matchAll(/<button[^>]*role="checkbox"[^>]*aria-checked="(true|false)"[^>]*>([\s\S]*?)<\/button>/g)]
     .map((match) => ({ checked: match[1] === 'true', text: match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }));
+const groupTitles = (html) => [...html.matchAll(/<div role="group" aria-label="([^"]+)"/g)].map((match) => match[1]);
+const stampLine = (html) => html.match(/<p class="px-1 text-\[11\.5px\][^"]*">([^<]*)<\/p>/)?.[1];
 
 test('окно открывается сразу с отметками сохранённого доступа', () => {
     const html = sheet();
     assert.match(html, /Доступ к выдаче/);
-    // Первый офис — Алматы; его город первым, отмечены выдающие там.
+    // Первый офис — Алматы: его город — первой группой, отмечены выдающие там.
+    // Город назван подписью группы один раз, а не в каждой строке.
+    assert.deepEqual(groupTitles(html), ['Сотрудники · Алматы', 'Сотрудники · Астана']);
     assert.deepEqual(rows(html), [
-        { checked: true, text: 'Алиев Али Алматы' },
-        { checked: false, text: 'Ветров Виктор Алматы' },
-        { checked: true, text: 'Яковлев Яков Алматы' },
-        { checked: false, text: 'Борисов Борис Астана' },
+        { checked: true, text: 'Алиев Али' },
+        { checked: false, text: 'Ветров Виктор' },
+        { checked: true, text: 'Яковлев Яков' },
+        { checked: false, text: 'Борисов Борис' },
     ]);
+    // Полное ФИО — в title: длинное обрезается.
+    assert.match(html, /role="checkbox" aria-checked="true" title="Алиев Али"/);
     // Подзаголовок — где офис: по адресу его и узнают за стойкой.
     assert.match(html, /Алматы · Байзакова 78А/);
     // Доступ выдан переходом, а не человеком — окно так и говорит.
@@ -112,14 +119,35 @@ test('два-три офиса — сегментами с числом выда
     assert.match(listed, /aria-label="Офис"/);
 });
 
-test('выбранная строка — мягко-голубая с галочкой, а не чёрная', () => {
+test('выбранная строка — мягко-голубая с галочкой и своим разделителем', () => {
     const html = sheet();
     const checked = html.match(/<button[^>]*aria-checked="true"[^>]*>/)[0];
     assert.match(checked, /bg-blue-50/);
+    // Вторая отмеченная строка подряд — с голубой линией над собой: иначе
+    // отмеченные сливаются в один голубой блок.
+    const second = [...html.matchAll(/<button[^>]*role="checkbox"[^>]*>/g)][2][0];
+    assert.match(second, /border-t border-blue-100 bg-blue-50/);
     assert.doesNotMatch(html, /bg-slate-900(?!\/)/);  // затемнение окна bg-slate-900/40 — не выбор
     // «Сохранить» спит, пока ничего не переключено; «Отменить» нет вовсе.
     assert.match(html, /<button[^>]*disabled=""[^>]*>Сохранить<\/button>/);
     assert.doesNotMatch(html, />Отменить</);
+});
+
+test('строка «кто менял» стоит и у офиса, где доступ ещё не меняли', () => {
+    // Иначе при смене офиса окно прыгало на её высоту (разбор 23.10.2026).
+    const fresh = { ...ACCESS, offices: [{ ...ACCESS.offices[1], changed: null }, ACCESS.offices[0]] };
+    assert.equal(stampLine(sheet({ access: fresh })), '\u00a0');
+    assert.match(stampLine(sheet()), /^Выдано по городу сотрудника · /);
+});
+
+test('два офиса одного города — списком, а не сегментами', () => {
+    const twins = { ...ACCESS, offices: [
+        ...ACCESS.offices,
+        office(3, 'Алматы', 'Офис Алматы №1', 'Улица Жамбыла, 172В угол улицы Байзакова', []),
+    ] };
+    const html = sheet({ access: twins });
+    assert.doesNotMatch(html, /role="tablist"/);
+    assert.match(html, /aria-haspopup="listbox"[^>]*>|aria-label="Офис"/);
 });
 
 test('пустые состояния говорят, что делать', () => {
@@ -137,8 +165,56 @@ test('закрытое окно не рисуется, строка «Настр
     assert.match(html, /Выдача воды/);
     assert.match(html, /Доступ по офисам/);
     // До ответа — неразрывный пробел, а не «Загружаем…»: строка не перестроится.
-    assert.match(html, /<span class="block truncate[^"]*"> <\/span>/);
+    assert.match(html, /<span class="block truncate[^"]*">\u00a0<\/span>/);
     assert.match(html, /<button[^>]*disabled=""/);
     // Столбик на gap, а не на space-y: окно — его ребёнок.
     assert.match(html, /^<section class="flex flex-col gap-1\.5/);
+});
+
+/* ── «Выдача» офисника без единого открытого офиса ─────────────────────── */
+
+const issueScreen = (props) => renderToStaticMarkup(React.createElement(WaterIssue, {
+    apiBaseUrl: 'http://api.test', headers: () => ({}), settings: {},
+    capabilities: { can_issue: true, issue_office_ids: [], default_city: 'Алматы' },
+    offices: [{ id: 1, is_active: true, city: 'Алматы', name: 'Офис', stock: 10 }],
+    onOfficeUpdated: () => {}, onCapabilities: () => {}, showToast: () => {}, ...props,
+}));
+
+test('офисник без офисов проверяет водителя и знает, у кого просить доступ', () => {
+    const html = issueScreen();
+    assert.match(html, /Выдавать воду вам пока не открыто ни в одном офисе — доступ выдаёт руководитель/);
+    const input = html.match(/<input[^>]*placeholder="Ссылка на водителя[^>]*>/)[0];
+    assert.doesNotMatch(input, /disabled/);
+    // Списка офисов нет вовсе — выбирать нечего.
+    assert.doesNotMatch(html, /aria-label="Офис"/);
+});
+
+test('офисник с открытым офисом без выбора офиса водителя не вводит', () => {
+    const html = issueScreen({ capabilities: { can_issue: true, issue_office_ids: [1], default_city: 'Алматы' } });
+    assert.doesNotMatch(html, /Выдавать воду вам пока не открыто/);
+    const input = html.match(/<input[^>]*placeholder="Ссылка на водителя[^>]*>/)[0];
+    assert.match(input, /disabled/);
+});
+
+test('отказ «не ваш офис» применяет свежие права и не проверяет водителя по отнятому офису', () => {
+    // Блок catch выдачи из исходника, исполненный с подменами: порядок «права →
+    // выход» держит офис вне списка, перепроверки по нему нет.
+    const source = readFileSync(new URL('src/components/water/WaterIssue.jsx', ROOT), 'utf8');
+    const issue = source.slice(source.indexOf('const issue = async () => {'));
+    const body = issue.slice(issue.indexOf('} catch (requestError) {') + '} catch (requestError) {'.length,
+        issue.indexOf('} finally {'));
+    const run = new Function('requestError', 'onCapabilities', 'toastRef', 'ticket', 'myTicket',
+        'setResult', 'setBlocks', 'check', 'office', 'target', body);
+    const fresh = { can_issue: true, issue_office_ids: [] };
+    const calls = [];
+    run({ response: { data: { code: 'WATER_OFFICE_FORBIDDEN', capabilities: fresh, error: 'нельзя' } } },
+        (caps) => calls.push(['caps', caps]), { current: (text) => calls.push(['toast', text]) }, { current: 1 }, 1,
+        () => calls.push(['result']), () => {}, () => calls.push(['check']), { id: 2 }, 'acc');
+    assert.deepEqual(calls, [['toast', 'нельзя'], ['caps', fresh]]);
+    // Другой отказ без вердикта — по-прежнему перепроверка водителя.
+    calls.length = 0;
+    run({ response: { data: { code: 'WATER_NOT_ELIGIBLE', error: 'нет' } } },
+        (caps) => calls.push(['caps', caps]), { current: () => {} }, { current: 1 }, 1,
+        () => calls.push(['result']), () => {}, () => calls.push(['check']), { id: 2 }, 'acc');
+    assert.deepEqual(calls, [['check']]);
 });

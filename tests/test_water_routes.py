@@ -1242,6 +1242,23 @@ class OfficeAccessIssueTests(_Base):
         self.assertEqual(self.store.issues, [])
         self.assertEqual(self.store.offices[self.astana]['stock'], 50)
 
+    def test_access_revoked_while_crm_answers_is_refused_under_the_lock(self):
+        """Доступ сняли, пока сервер ждал CRM (секунды, разбор 23.10.2026):
+        под замком офиса строки доступа читаются заново, и выдача не проходит."""
+        def lookup(raw):
+            self.store.grants = set()  # руководитель снял доступ, пока CRM отвечала
+            return dict(self.crm, orders=dict(self.crm['orders']))
+        self.lookup_override = lookup
+        response = self.issue(water_office_id=self.almaty)
+        self.assertEqual(response.status_code, 403, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body['code'], 'WATER_OFFICE_FORBIDDEN')
+        self.assertEqual(body['capabilities']['issue_office_ids'], [])
+        self.assertEqual(self.store.issues, [])
+        self.assertEqual(self.store.offices[self.almaty]['stock'], 50)
+        # Отказ пришёл раньше замка водителя: под замком офиса ничего не делалось.
+        self.assertEqual(self.store.locks, [])
+
     def test_issuer_without_offices_checks_but_does_not_issue(self):
         self.store.grants = set()
         capabilities = self.client.get('/api/water/ping').get_json()['capabilities']
@@ -1380,6 +1397,30 @@ class OfficeAccessManageTests(_Base):
             self.assertEqual(response.get_json()['code'], 'WATER_ACCESS_CHANGES_INVALID')
         self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
         self.assertEqual(self.store.access_log, [])
+
+    def test_body_that_is_not_an_object_is_a_400(self):
+        """Список, строка или число вместо объекта — отказ «не тот формат», а не
+        «внутренняя ошибка» (разбор 23.10.2026)."""
+        for body in ([{'water_office_id': self.astana, 'user_id': 425, 'granted': True}], 'x', 5):
+            response = self.client.patch('/api/water/access', json=body)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertEqual(response.get_json()['code'], 'WATER_ACCESS_CHANGES_INVALID')
+        self.assertEqual(self.store.grants, {(ISSUER, self.almaty)})
+
+    def test_answer_shows_what_is_in_the_base_even_when_ours_changed_nothing(self):
+        """Ту же пару в эти миллисекунды переключил второй руководитель: наша
+        правка ничего не изменила, но ответ обязан показать то, что в базе."""
+        apply = self.store.apply_access_changes
+
+        def neighbour_first(cursor, grants, revokes, actor):
+            self.store.grants.add((425, self.astana))  # сосед успел выдать
+            return apply(cursor, grants=grants, revokes=revokes, actor=actor)
+        with mock.patch.object(water_queries, 'apply_access_changes', neighbour_first):
+            response = self.patch((self.astana, 425, True))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.store.access_log, [])  # наша правка ничего не меняла
+        offices = {office['id']: office['user_ids'] for office in response.get_json()['access']['offices']}
+        self.assertEqual(offices[self.astana], [425])
 
     def test_access_tables_missing_is_not_ready(self):
         self.store.access_tables = False

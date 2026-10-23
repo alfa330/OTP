@@ -9,8 +9,11 @@ import {
   TARIFF_LABELS,
   THRESHOLD_ORDER_ISSUE,
   accessChanges,
+  accessCloseStep,
   accessDraftOf,
-  accessPeople,
+  accessPeopleGroups,
+  accessSegments,
+  accessSession,
   accessSummary,
   blocksWord,
   conditionGroups,
@@ -22,14 +25,15 @@ import {
   isCountDraft,
   issueOffices,
   nextIssueLine,
+  nextOfficeId,
   officePlace,
-  officeShortLabel,
   parseCount,
   plural,
   settingsDirty,
   settingsIssues,
   stepCount,
   stockStatus,
+  rebaseAccessDraft,
   tariffLabel,
   toggleAccess,
   verdictBasis,
@@ -295,12 +299,29 @@ test('the only granted office is chosen by itself, whatever its city', () => {
   assert.equal(defaultOfficeId([ALMATY, ASTANA], null, null, true), null);
 });
 
-test('office switch names the city, and the address only for twins', () => {
-  assert.equal(officeShortLabel(ALMATY, [ALMATY, ASTANA]), 'Алматы');
-  const second = { id: 4, city: 'Алматы', name: 'Офис Алматы №1', address: 'Жамбыла 172В' };
-  assert.equal(officeShortLabel(ALMATY, [ALMATY, ASTANA, second]), 'Алматы · Байзакова 78А');
-  assert.equal(officeShortLabel(second, [ALMATY, second]), 'Алматы · Жамбыла 172В');
-  assert.equal(officeShortLabel({ id: 5, city: '', name: 'Без города' }, [ALMATY]), 'Без города');
+const SECOND = { id: 4, city: 'Алматы', name: 'Офис Алматы №1', address: 'Улица Жамбыла, 172В угол улицы Байзакова', is_active: true };
+
+test('offices are segments only when two or three and each city is its own', () => {
+  assert.equal(accessSegments([ALMATY, ASTANA]), true);
+  assert.equal(accessSegments([ALMATY]), true);
+  // Два офиса одного города сегментом не различить — список (разбор 23.10.2026).
+  assert.equal(accessSegments([ALMATY, ASTANA, SECOND]), false);
+  assert.equal(accessSegments([ALMATY, { ...ASTANA, city: '  алматы ' }]), false);
+  assert.equal(accessSegments([ALMATY, ASTANA, { id: 6, city: 'Шымкент' }, { id: 7, city: 'Тараз' }]), false);
+  assert.equal(accessSegments([ALMATY, { id: 8, city: '' }]), false);
+  assert.equal(accessSegments([]), false);
+});
+
+test('a lost office is not replaced silently with one of another city', () => {
+  // Первый приход списка: свой город или единственный открытый.
+  assert.equal(nextOfficeId(null, [ALMATY, ASTANA], { city: 'Астана', granted: true }), 2);
+  assert.equal(nextOfficeId(null, [ASTANA], { city: 'Алматы', granted: true }), 2);
+  // Выбранный офис на месте — остаётся.
+  assert.equal(nextOfficeId(1, [ALMATY, ASTANA], { picked: true, city: 'Астана' }), 1);
+  // Его отняли — выбор пустой, даже если остался единственный офис.
+  assert.equal(nextOfficeId(1, [ASTANA], { picked: true, city: 'Алматы', granted: true }), null);
+  // Список пришёл заново после сброса — сам ничего не подставляет.
+  assert.equal(nextOfficeId(null, [ASTANA], { picked: true, city: 'Астана', granted: true }), null);
 });
 
 test('only toggled pairs go to the server', () => {
@@ -324,13 +345,73 @@ test('settings row sums up who issues where', () => {
   assert.equal(accessSummary(ACCESS), 'Алматы: 2 · Астана: 0');
   assert.equal(accessSummary({ offices: [], people: [] }), 'Офисов в учёте пока нет');
   assert.equal(accessSummary(null), 'Офисов в учёте пока нет');
+  // Два офиса одного города — итогом: перечень с адресами в строку не входит.
+  const twins = { offices: [{ ...ALMATY, user_ids: [11, 12] }, { ...SECOND, user_ids: [12] },
+    { ...ASTANA, user_ids: [21] }], people: ACCESS.people };
+  assert.equal(accessSummary(twins), '3 офиса, доступ у 3 сотрудников');
+  assert.equal(accessSummary({ offices: [{ ...ALMATY, user_ids: [11] }, { ...SECOND, user_ids: [] }] }),
+    '2 офиса, доступ у 1 сотрудника');
+  assert.equal(accessSummary({ offices: [{ ...ALMATY, user_ids: [] }, { ...SECOND, user_ids: [] }] }),
+    '2 офиса, доступа пока ни у кого');
+  assert.ok(accessSummary(twins).length < 60);
 });
 
-test('people of the office city come first, order does not follow the ticks', () => {
-  const almaty = accessPeople(ACCESS.people, ALMATY).map((person) => person.id);
-  assert.deepEqual(almaty, [11, 12, 21, 41, 31]);
-  const astana = accessPeople(ACCESS.people, ASTANA).map((person) => person.id);
-  assert.deepEqual(astana, [21, 11, 12, 41, 31]);
+test('people are grouped by city, the office city first, order does not follow the ticks', () => {
+  const titles = (office) => accessPeopleGroups(ACCESS.people, office).map((group) => [group.title, group.rows.map((p) => p.id)]);
+  assert.deepEqual(titles(ALMATY), [
+    ['Сотрудники · Алматы', [11, 12]],
+    ['Сотрудники · Астана', [21]],
+    ['Сотрудники · Шымкент', [41]],
+    ['Сотрудники · город не указан', [31]],
+  ]);
+  assert.deepEqual(titles(ASTANA).map(([title]) => title),
+    ['Сотрудники · Астана', 'Сотрудники · Алматы', 'Сотрудники · Шымкент', 'Сотрудники · город не указан']);
+  // «  алматы » из карточки — тот же город, а не вторая группа.
+  const messy = [...ACCESS.people, { id: 51, name: 'Аманов', city: '  алматы ' }];
+  assert.deepEqual(accessPeopleGroups(messy, ALMATY)[0].rows.map((p) => p.id), [11, 51, 12]);
   // Исходный список не переставляется на месте.
   assert.deepEqual(ACCESS.people.map((person) => person.id), [12, 21, 11, 31, 41]);
+});
+
+test('a refusal keeps the edits that are still possible', () => {
+  // Отметили 21 и 41 в Алматы и 12 в Астане, сняли 11 в Алматы; тем временем
+  // 41 перевели из фронт-офисов (его нет среди людей), а Астану вывели из учёта.
+  let draft = accessDraftOf(ACCESS);
+  draft = toggleAccess(draft, 1, 21);
+  draft = toggleAccess(draft, 1, 41);
+  draft = toggleAccess(draft, 1, 11);
+  draft = toggleAccess(draft, 2, 12);
+  const fresh = { offices: [{ ...ALMATY, user_ids: [11, 12] }], people: ACCESS.people.filter((p) => p.id !== 41) };
+  const next = rebaseAccessDraft(draft, ACCESS, fresh);
+  assert.deepEqual(next, { 1: [12, 21] });
+  // Снять можно и у того, кого больше нет в списке: снятие не требует кандидата.
+  const gone = rebaseAccessDraft(toggleAccess(accessDraftOf(ACCESS), 1, 12), ACCESS, fresh);
+  assert.deepEqual(gone, { 1: [11] });
+});
+
+test('window draft: open, toggle, reset, ask before closing', () => {
+  let session = accessSession(null, { type: 'open', officeId: 2 }, ACCESS);
+  assert.deepEqual(session, { draft: { 1: [11, 12], 2: [] }, officeId: 2, confirmClose: false });
+  session = accessSession(session, { type: 'toggle', officeId: 2, userId: 21 }, ACCESS);
+  assert.deepEqual(session.draft, { 1: [11, 12], 2: [21] });
+  // «Отменить» — снова сохранённое.
+  assert.deepEqual(accessSession(session, { type: 'reset' }, ACCESS).draft, { 1: [11, 12], 2: [] });
+  // Закрывают с несохранённым: спросить; «Вернуться» снимает вопрос, отметка — тоже.
+  session = accessSession(session, { type: 'ask-close' }, ACCESS);
+  assert.equal(session.confirmClose, true);
+  assert.equal(accessSession(session, { type: 'keep' }, ACCESS).confirmClose, false);
+  assert.equal(accessSession(session, { type: 'toggle', officeId: 1, userId: 11 }, ACCESS).confirmClose, false);
+  assert.equal(accessSession(session, { type: 'choose', officeId: 1 }, ACCESS).officeId, 1);
+  // Отказ сервера переносит правку на свежий доступ.
+  const fresh = { offices: [{ ...ASTANA, user_ids: [] }], people: ACCESS.people };
+  assert.deepEqual(accessSession(session, { type: 'refused', fresh }, ACCESS).draft, { 2: [21] });
+  assert.equal(accessSession(session, { type: 'unknown' }, ACCESS), session);
+});
+
+test('closing: stay while saving, ask once with unsaved ticks, then close', () => {
+  assert.equal(accessCloseStep({ saving: true, dirty: true, confirmClose: false }), 'stay');
+  assert.equal(accessCloseStep({ saving: true, dirty: false, confirmClose: false }), 'stay');
+  assert.equal(accessCloseStep({ saving: false, dirty: true, confirmClose: false }), 'ask');
+  assert.equal(accessCloseStep({ saving: false, dirty: true, confirmClose: true }), 'close');
+  assert.equal(accessCloseStep({ saving: false, dirty: false, confirmClose: false }), 'close');
 });

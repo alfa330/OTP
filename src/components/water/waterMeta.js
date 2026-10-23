@@ -297,6 +297,19 @@ export const defaultOfficeId = (offices, city, remembered, granted = false) => {
     return active.length === 1 ? active[0].id : null;
 };
 
+/* Какой офис выбран в «Выдаче» после того, как список офисов пришёл или
+   сменился. Подставить офис экран может один раз — когда список пришёл
+   впервые (picked = false). Выбранный офис отняли (доступ сняли, офис вывели
+   из учёта) — выбор сбрасывается, и человек выбирает сам: пересадить его
+   молча в офис другого города значило бы списывать воду с чужой полки
+   (разбор 23.10.2026: после отказа экран сам выбрал Астану и снова предлагал
+   «Выдать» офиснику, стоящему в Алматы). */
+export const nextOfficeId = (current, offices, { picked = false, city = null, remembered = null, granted = false } = {}) => {
+    if (current && (offices || []).some((office) => office.id === current)) return current;
+    if (current || picked) return null;
+    return defaultOfficeId(offices, city, remembered, granted);
+};
+
 /* ── Доступ к выдаче по офисам (владелец 23.10.2026) ─────────────────────────
    «Выбираем офис, далее из фронт-офисников выбираем людей, которым открыт
    данный раздел, и выдаём доступ, чтобы они могли выдавать воду только по
@@ -312,14 +325,17 @@ export const issueOffices = (offices, allowedIds) => {
     return active.filter((office) => allowed.has(Number(office.id)));
 };
 
-/* Имя офиса в переключателе окна доступа: город, а если в учёте два офиса
-   одного города — город и адрес (по адресу офис и различают за стойкой). */
-export const officeShortLabel = (office, offices) => {
-    const city = String(office?.city || '').trim();
-    const twins = (offices || []).filter((item) => String(item?.city || '').trim() === city).length;
-    if (city && twins <= 1) return city;
-    const where = String(office?.address || office?.name || '').trim();
-    return [city, where].filter(Boolean).join(' · ');
+/* Офис в окне доступа выбирают сегментами, только когда их два-три и у каждого
+   свой город: подпись сегмента — город. Два офиса одного города сегментом не
+   различить — подпись с адресом не входит в окно (разбор 23.10.2026: «Астана»
+   уезжала за край, на телефоне подписи наезжали друг на друга), — тогда список,
+   как и при четырёх офисах и больше. */
+const cityKey = (value) => String(value || '').trim().toLowerCase();
+
+export const accessSegments = (offices) => {
+    const list = offices || [];
+    const cities = list.map((office) => cityKey(office?.city));
+    return list.length > 0 && list.length <= 3 && cities.every(Boolean) && new Set(cities).size === list.length;
 };
 
 /* Черновик окна: офис → кто в нём выдаёт. */
@@ -356,27 +372,104 @@ export const toggleAccess = (draft, officeId, userId) => {
 };
 
 /* Строка в «Настройках»: сколько человек выдаёт в каждом офисе — «Алматы: 6 ·
-   Астана: 2». */
+   Астана: 2». Когда офисы так не назвать (два в одном городе, больше трёх),
+   строка говорит итогом — «3 офиса, доступ у 8 сотрудников»: перечень с
+   адресами в одну строку не входит и не читается, он — в окне. */
 export const accessSummary = (access) => {
     const offices = access?.offices || [];
     if (!offices.length) return 'Офисов в учёте пока нет';
-    return offices
-        .map((office) => `${officeShortLabel(office, offices)}: ${(office.user_ids || []).length}`)
-        .join(' · ');
+    if (accessSegments(offices)) {
+        return offices.map((office) => `${String(office.city).trim()}: ${(office.user_ids || []).length}`).join(' · ');
+    }
+    const people = new Set(offices.flatMap((office) => (office.user_ids || []).map(Number))).size;
+    const count = `${offices.length} ${plural(offices.length, 'офис', 'офиса', 'офисов')}`;
+    return people
+        ? `${count}, доступ у ${people} ${plural(people, 'сотрудника', 'сотрудников', 'сотрудников')}`
+        : `${count}, доступа пока ни у кого`;
 };
 
-/* Сотрудники в окне: сначала из города выбранного офиса, потом остальные по
-   городу, без города — последними; внутри — по имени. Порядок не зависит от
-   отметок: строка не уезжает из-под пальца, когда её отмечают. */
-export const accessPeople = (people, office) => {
-    const own = String(office?.city || '').trim();
-    const rank = (city) => (city === own && own ? 0 : city ? 1 : 2);
-    return [...(people || [])].sort((a, b) => {
-        const cityA = String(a?.city || '').trim();
-        const cityB = String(b?.city || '').trim();
-        return rank(cityA) - rank(cityB)
-            || cityA.localeCompare(cityB, 'ru')
-            || String(a?.name || '').localeCompare(String(b?.name || ''), 'ru')
-            || Number(a?.id) - Number(b?.id);
+/* Отказ сервера несёт свежий доступ (офис вывели из учёта, сотрудника
+   перевели). Правку человека он не отменяет: переключённое заново ложится на
+   свежее состояние, кроме того, что стало невозможным, — офиса больше нет в
+   учёте или выдать некому. Иначе одна устаревшая отметка стирала бы все
+   остальные (разбор 23.10.2026). */
+export const rebaseAccessDraft = (draft, access, fresh) => {
+    const next = accessDraftOf(fresh);
+    const people = new Set((fresh?.people || []).map((person) => Number(person.id)));
+    accessChanges(draft, access).forEach(({ water_office_id: officeId, user_id: userId, granted }) => {
+        if (!(officeId in next)) return;
+        if (granted && !people.has(userId)) return;
+        const current = next[officeId].filter((item) => item !== userId);
+        next[officeId] = granted ? [...current, userId] : current;
     });
+    return next;
+};
+
+/* Окно доступа — черновик одного открытия. Переходы — чистой функцией (её
+   гоняет node --test), экран только отправляет действия:
+     open      — окно открылось: черновик — сохранённый доступ;
+     choose    — другой офис; toggle — отметить или снять человека;
+     reset     — «Отменить»: черновик — снова сохранённый доступ;
+     ask-close — закрывают с несохранёнными отметками: подвал спрашивает;
+     keep      — «Вернуться» к отметкам;
+     refused   — отказ сервера со свежим доступом: правка переносится на него.
+   Вопрос в подвале снимается любым действием с отметками — человек вернулся
+   к работе. */
+export const accessSession = (session, action, access) => {
+    switch (action?.type) {
+        case 'open':
+            return { draft: accessDraftOf(access), officeId: action.officeId ?? null, confirmClose: false };
+        case 'choose':
+            return { ...session, officeId: action.officeId, confirmClose: false };
+        case 'toggle':
+            return { ...session, draft: toggleAccess(session.draft, action.officeId, action.userId), confirmClose: false };
+        case 'reset':
+            return { ...session, draft: accessDraftOf(access), confirmClose: false };
+        case 'ask-close':
+            return { ...session, confirmClose: true };
+        case 'keep':
+            return { ...session, confirmClose: false };
+        case 'refused':
+            return { ...session, draft: rebaseAccessDraft(session.draft, access, action.fresh), confirmClose: false };
+        default:
+            return session;
+    }
+};
+
+/* Что делать с попыткой закрыть окно (крестик, щелчок мимо, «назад» на
+   телефоне): пока идёт сохранение — остаться (ответ некуда было бы показать);
+   есть несохранённые отметки — спросить в подвале, как форма заявки «Оплаты
+   счетов» (разбор 23.10.2026: щелчок мимо окна молча стирал всю правку);
+   спросили уже — закрыть. */
+export const accessCloseStep = ({ saving, dirty, confirmClose }) => {
+    if (saving) return 'stay';
+    if (dirty && !confirmClose) return 'ask';
+    return 'close';
+};
+
+/* Сотрудники в окне — группами по городу, как списки «Настроек» iOS: подпись
+   группы называет город один раз, а не каждая строка (разбор 23.10.2026: шесть
+   «Алматы» подряд — шум, и колонка города обрезала ФИО на телефоне). Город
+   выбранного офиса — первым, остальные — по алфавиту, без города — последними;
+   внутри — по имени. Порядок не зависит от отметок: строка не уезжает из-под
+   пальца, когда её отмечают. */
+export const accessPeopleGroups = (people, office) => {
+    const own = cityKey(office?.city);
+    // Группа — по городу без оглядки на регистр и пробелы («  алматы » из
+    // карточки — тот же город); подпись — как город записан у первого.
+    const groups = new Map();
+    (people || []).forEach((person) => {
+        const key = cityKey(person?.city);
+        if (!groups.has(key)) groups.set(key, { city: String(person?.city || '').trim(), rows: [] });
+        groups.get(key).rows.push(person);
+    });
+    const rank = (key) => (key === own && own ? 0 : key ? 1 : 2);
+    return [...groups.entries()]
+        .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b, 'ru'))
+        .map(([, { city, rows }]) => ({
+            city,
+            title: city ? `Сотрудники · ${city}` : 'Сотрудники · город не указан',
+            rows: [...rows].sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), 'ru')
+                || Number(a?.id) - Number(b?.id)),
+        }));
 };

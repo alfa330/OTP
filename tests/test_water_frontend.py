@@ -349,9 +349,12 @@ class LargeScreenTests(unittest.TestCase):
         low = sorted(re.findall(r'(?<![\w-])(?:sm|md|lg):[^\s`\'"]+', ' '.join(self.screens.values()) + self.ui))
         # sm:grid-cols-3 — плитки тарифов в «Настройках» по три с 640 px: по две у
         # телефона боком и на планшете выходили полосами по 400 px (21.10.2026).
+        # sm:basis-auto — вопрос «Закрыть без сохранения?» в окне доступа: на
+        # телефоне своей строкой над кнопками, шире — в одном ряду с ними.
         self.assertEqual(low, ['lg:grid-cols-3', 'md:block', 'md:block', 'md:hidden', 'md:hidden',
-                               'sm:flex-1', 'sm:flex-none', 'sm:flex-row', 'sm:grid-cols-2', 'sm:grid-cols-3',
-                               'sm:items-center', 'sm:left-auto', 'sm:px-5', 'sm:py-6', 'sm:right-0', 'sm:w-auto'])
+                               'sm:basis-auto', 'sm:flex-1', 'sm:flex-none', 'sm:flex-row', 'sm:grid-cols-2',
+                               'sm:grid-cols-3', 'sm:items-center', 'sm:left-auto', 'sm:px-5', 'sm:py-6',
+                               'sm:right-0', 'sm:w-auto'])
 
     def test_base_classes_are_carried_over_untouched(self):
         """Классы без префикса в шкале — те, что стояли в разметке до правки:
@@ -780,6 +783,18 @@ class OfficeAccessWiringTests(unittest.TestCase):
         self.assertLess(row, lock)
         self.assertLess(row, self.settings.index('<Section title="Право на воду">'))
 
+    def test_window_asks_before_dropping_unsaved_ticks(self):
+        """Крестик, щелчок мимо окна и «назад» на телефоне с несохранёнными
+        отметками сначала спрашивают в подвале; пока идёт сохранение, окно не
+        закрывается; false оставляет жест «назад» на месте."""
+        close = self.access.split('const close = () => {')[1].split('};')[0]
+        self.assertIn('accessCloseStep({ saving, dirty, confirmClose })', close)
+        self.assertIn("if (step !== 'close') return false;", close)
+        self.assertIn('Закрыть без сохранения?', self.access)
+        self.assertIn("dispatch({ type: 'refused', fresh: data.access });", self.access)
+        modal = _jsx_tags(self.access, 'IosModal')[0]
+        self.assertIn('onClose={close}', modal)
+
     def test_window_sends_only_toggled_pairs(self):
         self.assertIn('axios.patch(`${apiBaseUrl}/api/water/access`, { changes }', self.access)
         self.assertIn('accessChanges(draft, access)', self.access)
@@ -790,7 +805,10 @@ class OfficeAccessWiringTests(unittest.TestCase):
         self.assertIn("@water_route('/access', need='manage')", routes_source)
 
     def test_two_or_three_offices_are_segments_with_a_hint_for_people(self):
-        self.assertIn('offices.length <= 3 ? (', self.access)
+        """Сегменты — только два-три офиса разных городов (accessSegments);
+        два офиса одного города или больше трёх — список (разбор 23.10.2026)."""
+        self.assertIn('const asSegments = accessSegments(offices);', self.access)
+        self.assertIn('{asSegments ? (', self.access)
         segments = _jsx_tags(self.access, 'IosSegmented')
         self.assertEqual(len(segments), 1)
         self.assertIn('stretch', segments[0])
@@ -803,7 +821,16 @@ class OfficeAccessWiringTests(unittest.TestCase):
         self.assertIn('issueOffices((officesReady ? offices : []).filter((office) => office.is_active), allowedIds)',
                       self.issue)
         self.assertIn('const allowedIds = capabilities?.issue_office_ids;', self.issue)
-        self.assertIn('readLastOffice(), byGrant)', self.issue)
+        # Офис подставляется сам один раз; отнятый не заменяется офисом другого
+        # города (nextOfficeId, разбор 23.10.2026).
+        self.assertIn('setOfficeId((current) => nextOfficeId(current, activeOffices, {', self.issue)
+        self.assertIn('picked: once, city: capabilities?.default_city, remembered: readLastOffice(), granted: byGrant,',
+                      self.issue)
+        # «Один раз» держит отметка в эффекте: без неё перечитанный после отказа
+        # список снова подставил бы офис другого города.
+        effect = self.issue.split('const picked = useRef(false);')[1].split('}, [activeOffices')[0]
+        self.assertIn('const once = picked.current;\n        picked.current = true;', effect)
+        self.assertNotIn('defaultOfficeId(', self.issue)
         # Без единого офиса — проверка, как у колл-центра, и слова, у кого просить доступ.
         self.assertIn('const officeMode = canIssue && !noOffice;', self.issue)
         self.assertIn('const showIssue = officeMode && Boolean(verdict?.allowed) && !issued;', self.issue)

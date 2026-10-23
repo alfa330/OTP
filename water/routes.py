@@ -155,6 +155,17 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "code": "WATER_SCHEMA_NOT_READY",
         }), 409
 
+    def _office_forbidden(ctx):
+        """Офисник выдаёт воду только там, где ему выдан доступ (23.10.2026).
+        Свежие права едут в ответ: экран, открытый до того, как доступ сняли,
+        уберёт офис из списка, а не будет предлагать его снова."""
+        return jsonify({
+            "error": "Выдавать воду в этом офисе вам не открыто — доступ по офисам "
+                     "выдаёт руководитель фронт-офисов",
+            "code": "WATER_OFFICE_FORBIDDEN",
+            "capabilities": access.capabilities(ctx),
+        }), 403
+
     # ── Telegram «Требуется закупка» ─────────────────────────────────────
     def _queue_buy_alert(cursor, office, before, after, settings, outbox):
         if not notify.crossed_buy_threshold(before, after, office['buy_threshold']):
@@ -464,16 +475,10 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         water_office_id = _int(data.get('water_office_id'))
         if not water_office_id:
             return _bad('Выберите офис, в котором выдаёте воду', 'WATER_OFFICE_REQUIRED')
-        # Офисник выдаёт только там, где ему выдан доступ (23.10.2026). Свежие
-        # права едут в ответ: экран, открытый до того, как доступ сняли,
-        # уберёт офис из списка, а не будет предлагать его снова.
+        # Офис без доступа — отказ сразу, без похода в CRM. Под замком офиса
+        # доступ проверяется ещё раз (ниже).
         if not access.can_issue_in_office(ctx, water_office_id):
-            return jsonify({
-                "error": "Выдавать воду в этом офисе вам не открыто — доступ по офисам "
-                         "выдаёт руководитель фронт-офисов",
-                "code": "WATER_OFFICE_FORBIDDEN",
-                "capabilities": access.capabilities(ctx),
-            }), 403
+            return _office_forbidden(ctx)
         requested = data.get('blocks')
         blocks = _int(requested) if requested not in (None, '') else None
         if requested not in (None, '') and (blocks is None or blocks < 1):
@@ -506,6 +511,13 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 office = queries.read_office(cursor, water_office_id, settings, for_update=True)
                 if not office or not office['is_active']:
                     return _bad('Офис не найден в учёте', 'WATER_OFFICE_NOT_FOUND', 404)
+                # Доступ к офису могли снять, пока отвечала CRM (секунды, разбор
+                # 23.10.2026): под замком офиса строки доступа читаются заново.
+                # До этого места не записано ничего — отказ ничего не коммитит.
+                if access.issues_by_office_grant(ctx):
+                    ctx['issue_office_ids'] = queries.issue_office_ids(cursor, ctx['user_id'])
+                    if not access.can_issue_in_office(ctx, water_office_id):
+                        return _office_forbidden(ctx)
                 queries.lock_driver(cursor, found['account_id'], found.get('iin'))
                 history = queries.person_history(cursor, found['account_id'], found.get('iin'))
                 # История сменилась после пред-чтения (соседний офис выдал,
@@ -772,7 +784,10 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 grants=[(user_id, office_id) for office_id, user_id, granted in changes if granted],
                 revokes=[(user_id, office_id) for office_id, user_id, granted in changes if not granted],
                 actor=_actor(ctx)) if changes else []
-            if changed:
+            # Перечитывается и тогда, когда наша правка ничего не изменила:
+            # ту же пару в эти миллисекунды мог переключить второй руководитель,
+            # и ответ должен показать то, что в базе, а не то, что было до него.
+            if changes:
                 state = queries.access_state(cursor)
         if changed:
             logging.info('Вода: доступ по офисам — выдано %d, снято %d, менял %s',
@@ -948,7 +963,7 @@ def _access_changes(data):
     сошла бы за «да» и молча открыла бы офис. Одна пара дважды — тоже отказ:
     какое из двух решений верное, сервер не знает.
     """
-    raw = data.get('changes')
+    raw = data.get('changes') if isinstance(data, dict) else None
     if not isinstance(raw, list) or len(raw) > _MAX_ACCESS_CHANGES:
         return None, _bad(_ACCESS_CHANGES_ERROR, 'WATER_ACCESS_CHANGES_INVALID')
     changes, seen = [], set()

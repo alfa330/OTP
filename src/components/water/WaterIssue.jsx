@@ -5,7 +5,7 @@ import { IosToggle, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { driverAccountUrl, extractAccountId, fmtDate, fmtDateTime, fmtPhone } from '../parcels/parcelMeta';
 import {
-    blocksWord, defaultOfficeId, issueOffices, kindLabel, nextIssueLine, readLastOffice, rememberOffice,
+    blocksWord, issueOffices, kindLabel, nextIssueLine, nextOfficeId, readLastOffice, rememberOffice,
     stockStatus, tariffLabel, verdictBasis, verdictHeadline,
 } from './waterMeta';
 import { T, WaterStepper, wBtnGhost, wBtnPrimary, wIcon, wInput, wLabel, wPill } from './waterUi';
@@ -138,13 +138,21 @@ const WaterIssue = ({
     const noOffice = canIssue && byGrant && officesReady && activeOffices.length === 0;
     const officeMode = canIssue && !noOffice;
 
+    /* Офис подставляется сам один раз — когда список пришёл впервые. Отняли
+       выбранный офис (доступ сняли при открытом экране) — выбор сбрасывается, и
+       человек выбирает сам, а не оказывается молча в офисе другого города
+       (nextOfficeId, разбор 23.10.2026). */
     const [officeId, setOfficeId] = useState(null);
+    const picked = useRef(false);
     useEffect(() => {
         if (!officeMode) { setOfficeId(null); return; }
-        setOfficeId((current) => (current && activeOffices.some((office) => office.id === current)
-            ? current
-            : defaultOfficeId(activeOffices, capabilities?.default_city, readLastOffice(), byGrant)));
-    }, [activeOffices, officeMode, byGrant, capabilities?.default_city]);
+        if (!officesReady) return;
+        const once = picked.current;
+        picked.current = true;
+        setOfficeId((current) => nextOfficeId(current, activeOffices, {
+            picked: once, city: capabilities?.default_city, remembered: readLastOffice(), granted: byGrant,
+        }));
+    }, [activeOffices, officeMode, officesReady, byGrant, capabilities?.default_city]);
     const office = activeOffices.find((item) => item.id === officeId) || null;
 
     const [link, setLink] = useState('');
