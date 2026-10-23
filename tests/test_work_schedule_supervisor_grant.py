@@ -68,6 +68,11 @@ UNDER_TEST = (
     "save_work_schedule_break_rules",
     "create_technical_issue",
     "create_offline_activity",
+    "delete_work_shift",
+    "toggle_work_day_off",
+    "respond_shift_change_request",
+    "delete_work_schedule_status_period",
+    "apply_work_schedule_bulk_actions",
 )
 
 
@@ -102,13 +107,19 @@ class _Portal:
         9: ("admin", None, None),       # админ портала
     }
     DIRECTIONS = {83: ("ТП линия", TEZ), 78: ("ОП линия", TEZ), 10: ("Основа", SZOV)}
+    # id периода статуса → чей он (больничный оператора СЗоВ и Тез КЦ).
+    STATUS_PERIODS = {5: 1003, 6: 1001}
 
-    def __init__(self, *, heads=None, inactive=()):
+    def __init__(self, *, heads=None, inactive=(), people=None):
         self.heads = {476: {OOZ}, 300: {TEZ}} if heads is None else heads
         self.inactive = set(inactive)
+        if people is not None:
+            self.PEOPLE = people
         self.calls = []
+        self.lookups = 0
 
     def user(self, user_id):
+        self.lookups += 1
         person = self.PEOPLE.get(int(user_id))
         if person is None:
             return None
@@ -117,6 +128,7 @@ class _Portal:
         return (int(user_id), None, f"User {user_id}", role, None, None, supervisor_id)
 
     def department_of(self, user_id):
+        self.lookups += 1
         person = self.PEOPLE.get(int(user_id))
         return person[1] if person else None
 
@@ -155,7 +167,21 @@ class _Portal:
             add_manual_fine_for_day=lambda **kwargs: self.calls.append(("fine", kwargs["operator_id"])) or {},
             create_operator_technical_issues=lambda **kwargs: self.calls.append(("tech", kwargs)) or {},
             create_operator_offline_activity=lambda **kwargs: self.calls.append(("offline", kwargs)) or {},
+            delete_shift=lambda operator_id, *a, **k: self.calls.append(("delete_shift", operator_id)) or True,
+            toggle_day_off=lambda operator_id, *a, **k: self.calls.append(("day_off", operator_id)) or True,
+            get_shift_change_request_operator=lambda request_id: int(request_id),
+            respond_shift_change_request=lambda **kw: self.calls.append(("respond", kw["request_id"])) or {},
+            delete_schedule_status_period=self.delete_status_period,
+            apply_work_schedule_bulk_actions=lambda actions, actor_id=None: (
+                self.calls.append(("bulk", [a["operator_id"] for a in actions])) or {}),
         )
+
+    def delete_status_period(self, status_period_id, operator_id=None):
+        owner = self.STATUS_PERIODS.get(int(status_period_id))
+        if owner is None or (operator_id is not None and int(operator_id) != owner):
+            return None
+        self.calls.append(("delete_status", int(status_period_id)))
+        return {"id": int(status_period_id), "operatorId": owner}
 
     def load(self, requester_id, *, args=None, body=None):
         portal = self
@@ -180,6 +206,7 @@ class _Portal:
             "_trainer_work_schedule_member_ids": lambda: set(),
             "_ws_query_bool": lambda _name, default=False: default,
             "_record_elapsed_server_timing": lambda *_a, **_k: None,
+            "_work_schedule_operator_requester": lambda: (requester_id, portal.user(requester_id), None),
         }
         module = source_cache.parse(BOT_SOURCE)
         by_name = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
@@ -318,6 +345,11 @@ class EditBoundaryTests(unittest.TestCase):
         self.assertEqual(scope([1001, 523]), ("sv", OOZ))
         self.assertEqual(scope([1003]), ("sv", OOZ))
         self.assertEqual(scope([None, "x"]), ("sv", OOZ))
+        # Оператор без отдела — прежняя граница, а не падение на int(None).
+        portal_none = _Portal(people={**_Portal.PEOPLE, 1005: ("operator", None, None)})
+        ns_none = portal_none.load(476)
+        self.assertEqual(
+            ns_none["_management_scope_for_targets"](_requester(portal_none, 476), 476, [1005]), ("sv", OOZ))
 
         ns55 = portal.load(55)
         self.assertEqual(ns55["_management_scope_for_targets"](_requester(portal, 55), 55, [1001]), ("sv", SZOV))
@@ -333,7 +365,12 @@ class RouteTests(unittest.TestCase):
         payload, status = portal.load(476, args={"start_date": "2026-10-01", "end_date": "2026-10-31"})[
             "get_operators_with_schedules"]()
         self.assertEqual(status, 200)
-        self.assertEqual(payload["granted_departments"], [{"id": TEZ, "code": "tez", "name": "Тез КЦ"}])
+        # С направлениями отдела: справочник направлений главе режется до её отдела,
+        # а массовая тех. причина по Тез КЦ без них пуста.
+        self.assertEqual(payload["granted_departments"], [{
+            "id": TEZ, "code": "tez", "name": "Тез КЦ",
+            "directions": [{"id": 83, "name": "ТП линия"}, {"id": 78, "name": "ОП линия"}],
+        }])
         self.assertEqual([op["id"] for op in payload["operators"]], [3, 523, 1001, 1002])
 
         payload, _ = _Portal().load(55, args={"start_date": "2026-10-01", "end_date": "2026-10-31"})[
@@ -362,19 +399,80 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(("unblacklist", 523), portal.calls)
 
-    def test_fine_reaches_operators_of_the_granted_department(self):
-        """Операторы Тез КЦ — подчинённые СВ отдела, а он штрафует своих."""
+    def test_fine_stays_closed_in_the_granted_department(self):
+        """СВ штрафует только своих подчинённых, а по допуску она ничей не СВ:
+        штраф операторам Тез КЦ ей не открыт. Своему отделу — как раньше."""
+        body = {"day": "2026-10-20", "amount": 500, "reason": "Опоздание"}
+        for operator_id, expected in ((1001, 403), (1003, 403), (523, 200)):
+            with self.subTest(operator_id=operator_id):
+                portal = _Portal()
+                _payload, status = portal.load(476, body=dict(body, operator_id=operator_id))["add_work_schedule_fine"]()
+                self.assertEqual(status, expected)
+                self.assertEqual(("fine", operator_id) in portal.calls, expected == 200)
         portal = _Portal()
-        body = {"operator_id": 1001, "day": "2026-10-20", "amount": 500, "reason": "Опоздание"}
-        _payload, status = portal.load(476, body=body)["add_work_schedule_fine"]()
-        self.assertEqual(status, 200)
-        self.assertIn(("fine", 1001), portal.calls)
+        _payload, status = portal.load(300, body=dict(body, operator_id=1001))["add_work_schedule_fine"]()
+        self.assertEqual(status, 200, "глава Тез КЦ штрафует, как и раньше")
 
+    def test_status_period_is_not_deleted_by_bare_id(self):
+        """Без operator_id удаление шло по одному id, а граница проверялась уже
+        после него: глава с ролью admin стирала статус любого отдела и получала
+        403 на уже удалённую запись. Теперь так может только глобальный админ."""
+        for requester_id in (476, 300, 55):
+            with self.subTest(requester_id=requester_id):
+                portal = _Portal()
+                _payload, status = portal.load(requester_id, body={"status_period_id": 5})[
+                    "delete_work_schedule_status_period"]()
+                self.assertEqual(status, 400)
+                self.assertNotIn(("delete_status", 5), portal.calls)
         portal = _Portal()
-        body = dict(body, operator_id=1003)
-        _payload, status = portal.load(476, body=body)["add_work_schedule_fine"]()
-        self.assertEqual(status, 403)
-        self.assertNotIn(("fine", 1003), portal.calls)
+        _payload, status = portal.load(9, body={"status_period_id": 5})["delete_work_schedule_status_period"]()
+        self.assertEqual(status, 200)
+        self.assertIn(("delete_status", 5), portal.calls)
+
+    def test_status_period_of_the_granted_department_is_deleted_with_operator(self):
+        portal = _Portal()
+        _payload, status = portal.load(476, body={"status_period_id": 6, "operator_id": 1001})[
+            "delete_work_schedule_status_period"]()
+        self.assertEqual(status, 200)
+        self.assertIn(("delete_status", 6), portal.calls)
+        # Чужой период под своим оператором база не удалит — и сервер ответит 404.
+        portal = _Portal()
+        _payload, status = portal.load(476, body={"status_period_id": 5, "operator_id": 1001})[
+            "delete_work_schedule_status_period"]()
+        self.assertEqual(status, 404)
+        self.assertNotIn(("delete_status", 5), portal.calls)
+
+    def test_every_write_of_the_day_reaches_the_granted_department(self):
+        """Каждая пишущая ручка — как код: оператор Тез КЦ да, СЗоВ нет."""
+        cases = (
+            ("delete_work_shift", "delete_shift",
+             lambda op: {"operator_id": op, "shift_date": "2026-10-24", "start_time": "09:00", "end_time": "18:00"}),
+            ("toggle_work_day_off", "day_off", lambda op: {"operator_id": op, "day_off_date": "2026-10-24"}),
+            ("respond_shift_change_request", "respond", lambda op: {"request_id": op, "action": "approve"}),
+            ("apply_work_schedule_bulk_actions", "bulk",
+             lambda op: {"actions": [{"action": "set_day_off", "operator_id": op, "date": "2026-10-24"}]}),
+        )
+        for handler, call, body in cases:
+            for operator_id, expected in ((1001, 200), (523, 200), (1003, 403)):
+                with self.subTest(handler=handler, operator_id=operator_id):
+                    portal = _Portal()
+                    _payload, status = portal.load(476, body=body(operator_id))[handler]()
+                    self.assertEqual(status, expected)
+                    self.assertEqual(any(c[0] == call for c in portal.calls), expected == 200)
+
+    def test_bulk_edit_costs_her_no_more_than_the_head_of_the_department(self):
+        """Проверка цели по допуску запоминается на запрос: месяц одному
+        оператору не превращается в вдвое больше запросов к базе."""
+        actions = [{"action": "set_day_off", "operator_id": 1001, "date": "2026-10-%02d" % day}
+                   for day in range(1, 32)]
+        lookups = {}
+        for requester_id in (476, 300):
+            portal = _Portal()
+            _payload, status = portal.load(requester_id, body={"actions": [dict(a) for a in actions]})[
+                "apply_work_schedule_bulk_actions"]()
+            self.assertEqual(status, 200)
+            lookups[requester_id] = portal.lookups
+        self.assertLessEqual(lookups[476], lookups[300] + 4, lookups)
 
     def test_break_rules_include_the_granted_department(self):
         """Перерывы смены сетка считает по этим правилам: без них правка смены
@@ -426,24 +524,60 @@ class DayRecordRouteTests(unittest.TestCase):
         self.assertEqual(self._scope("create_offline_activity", dict(activity, group_id=40)), ("sv", OOZ))
 
 
+def _calls_in(func_node, name):
+    return [node for node in ast.walk(func_node)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == name]
+
+
 class WiringTests(unittest.TestCase):
-    """Где допуск подключён — и где намеренно нет."""
+    """Где допуск подключён — и где намеренно нет. По дереву разбора: имя в
+    комментарии или лишний фильтр рядом проверку не обманут."""
 
-    @staticmethod
-    def _body(name):
-        return BOT_SOURCE.split(f"def {name}(", 1)[1].split("\n@app.route(", 1)[0].split("\ndef ", 1)[0]
+    FUNCS = {node.name: node for node in source_cache.parse(BOT_SOURCE).body if isinstance(node, ast.FunctionDef)}
 
-    def test_section_reads_go_through_the_granted_filter(self):
+    # Пишущие ручки раздела, где допуск обязан действовать, и где он закрыт.
+    GRANTED_WRITES = {
+        "add_training_rejection", "recalculate_work_schedule_breaks", "save_work_shift",
+        "delete_work_shift", "toggle_work_day_off", "save_work_schedule_status_period",
+        "delete_work_schedule_status_period", "save_shifts_bulk", "apply_work_schedule_bulk_actions",
+        "aggregate_work_schedule_metrics", "resolve_work_schedule_auto_flag",
+    }
+    CLOSED = {"remove_work_schedule_dismissal_blacklist", "add_work_schedule_fine"}
+
+    def test_every_write_resolves_through_the_grant(self):
+        callers = {}
+        for name, node in self.FUNCS.items():
+            for call in _calls_in(node, "_resolve_scoped_operator_for_requester"):
+                callers.setdefault(name, []).append(call)
+        self.assertEqual(set(callers), self.GRANTED_WRITES | self.CLOSED)
+        for name, calls in callers.items():
+            for call in calls:
+                keywords = {item.arg: item.value for item in call.keywords}
+                with self.subTest(name=name):
+                    if name in self.CLOSED:
+                        self.assertIs(getattr(keywords.get("allow_grant"), "value", None), False)
+                    else:
+                        self.assertNotIn("allow_grant", keywords)
+
+    def test_section_reads_call_the_granted_filter_and_only_it(self):
         for name in ("get_operators_with_schedules", "get_work_schedule_history",
                      "review_shift_change_requests", "respond_shift_change_request",
                      "get_work_schedule_status_track", "get_work_schedule_training_news",
                      "export_work_schedules_excel", "_work_schedule_operator_ids"):
             with self.subTest(name=name):
-                self.assertIn("_filter_operators_for_requester_scope(", self._body(name))
+                self.assertTrue(_calls_in(self.FUNCS[name], "_filter_operators_for_requester_scope"))
+                self.assertFalse(_calls_in(self.FUNCS[name], "_filter_operators_for_requester_role"))
+
+    def test_trainings_resolve_through_the_granted_loader(self):
+        for name in ("add_training", "update_training", "delete_training"):
+            with self.subTest(name=name):
+                self.assertTrue(_calls_in(self.FUNCS[name], "_load_training_target_with_scope"))
+                self.assertFalse(_calls_in(self.FUNCS[name], "_load_target_user_with_scope"))
 
     def test_day_records_use_the_granted_scope(self):
-        self.assertIn("_management_scope_for_targets(", self._body("create_technical_issue"))
-        self.assertIn("_management_scope_for_targets(", self._body("create_offline_activity"))
+        for name in ("create_technical_issue", "create_offline_activity"):
+            with self.subTest(name=name):
+                self.assertTrue(_calls_in(self.FUNCS[name], "_management_scope_for_targets"))
 
     def test_other_sections_keep_their_boundary(self):
         """Правка и удаление тех. сбоев и офлайн-активностей живут в своих
@@ -452,9 +586,11 @@ class WiringTests(unittest.TestCase):
                      "update_offline_activity", "delete_offline_activity",
                      "list_technical_issues", "list_offline_activities"):
             with self.subTest(name=name):
-                self.assertNotIn("_management_scope_for_targets(", self._body(name))
-        self.assertNotIn("_work_schedule_granted", self._body("_requester_can_access_target_user"))
-        self.assertNotIn("_work_schedule_granted", self._body("_authorize_operator_scope"))
+                self.assertFalse(_calls_in(self.FUNCS[name], "_management_scope_for_targets"))
+        for name in ("_requester_can_access_target_user", "_authorize_operator_scope", "_load_target_user_with_scope"):
+            with self.subTest(name=name):
+                called = {getattr(n.func, "id", "") for n in ast.walk(self.FUNCS[name]) if isinstance(n, ast.Call)}
+                self.assertFalse({c for c in called if c.startswith("_work_schedule_granted")}, name)
 
 
 if __name__ == "__main__":

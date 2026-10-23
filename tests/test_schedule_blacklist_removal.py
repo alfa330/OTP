@@ -327,8 +327,7 @@ class FrontendWiringTests(unittest.TestCase):
         # окно дня на компьютере, на телефоне (там ещё и не в режиме просмотра)...
         # Флаг окна — тот же, но без отделов поимённого допуска (права СВ).
         self.assertIn(
-            "const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist\n"
-            "                && !plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));",
+            "const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist && !plannerModalInGrantedDepartment;",
             app,
         )
         self.assertIn("modalActiveScheduleStatus?.isBlacklist && plannerModalCanRemoveBlacklist ? (", app)

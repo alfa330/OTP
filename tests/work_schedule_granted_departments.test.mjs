@@ -51,6 +51,16 @@ const TEZ = { id: 560, name: 'Тез КЦ', code: 'tez' };
 
 const isPlannerSupervisorRow = evaluate('isPlannerSupervisorRow', { isSupervisorRole });
 
+test('варианты отдела пересчитываются, когда приходит допуск', () => {
+    let deps = null;
+    evaluate('plannerDepartmentOptions', {
+        ...hooks,
+        useMemo: (fn, list) => { deps = list; return fn(); },
+        departments: 'D', plannerGrantedDepartments: 'G', operators: [],
+    });
+    assert.ok(deps.includes('G'), 'plannerGrantedDepartments обязан быть в зависимостях useMemo');
+});
+
 test('выбор отдела: Тез КЦ появляется, как только пришли его строки', () => {
     const options = (operators, granted) => evaluate('plannerDepartmentOptions', {
         ...hooks, departments: [OOZ], plannerGrantedDepartments: granted, operators,
@@ -79,13 +89,54 @@ test('ответ сервера: список допуска запоминае�
     });
     remember(undefined);
     assert.deepEqual(state, [{ id: 1, name: 'старое', code: 'x' }], 'старый сервер без поля список не сбрасывает');
-    remember([{ id: '560', name: 'Тез КЦ', code: ' TEZ ' }, { id: null }, { id: 'abc' }, { id: -4 }]);
-    assert.deepEqual(state, [{ id: 560, name: 'Тез КЦ', code: 'tez' }]);
+    remember([{ id: '560', name: 'Тез КЦ', code: ' TEZ ', directions: [{ id: '83', name: ' ТП линия ' }, { id: 0, name: 'x' }, { id: 5, name: ' ' }] },
+        { id: null }, { id: 'abc' }, { id: -4 }]);
+    assert.deepEqual(state, [{ id: 560, name: 'Тез КЦ', code: 'tez', directions: [{ id: 83, name: 'ТП линия' }] }]);
     const sameList = state;
-    remember([{ id: 560, name: 'Тез КЦ', code: 'tez' }]);
+    remember([{ id: 560, name: 'Тез КЦ', code: 'tez', directions: [{ id: 83, name: 'ТП линия' }] }]);
     assert.equal(state, sameList, 'тот же список — тот же объект, без лишней перерисовки');
     remember([]);
     assert.deepEqual(state, []);
+});
+
+test('массовая тех. причина: направления отдела допуска в списке', () => {
+    const options = (granted) => evaluate('plannerTechMassDirectionOptions', {
+        ...hooks,
+        plannerSystemDirectionItems: [],
+        operators: [{ id: 1001, department_id: 560, direction: 'ТП линия' }],
+        plannerGrantedDepartments: granted,
+    });
+    assert.deepEqual(options([{ ...TEZ, directions: [{ id: 83, name: 'ТП линия' }, { id: 78, name: 'ОП линия' }] }]),
+        [{ id: 78, name: 'ОП линия' }, { id: 83, name: 'ТП линия' }]);
+    assert.deepEqual(options([]), [], 'без допуска — как раньше');
+    let deps = null;
+    const granted = [];
+    evaluate('plannerTechMassDirectionOptions', {
+        ...hooks, useMemo: (fn, list) => { deps = list; return fn(); },
+        plannerSystemDirectionItems: [], operators: [], plannerGrantedDepartments: granted,
+    });
+    assert.ok(deps.includes(granted), 'список пересчитывается, когда приходит допуск');
+});
+
+test('отдела нет в пришедшей выдаче — возвращается свой', () => {
+    const keep = evaluate('plannerDepartmentToKeep', {});
+    const ooz = { value: '2008' };
+    const tez = { value: '560' };
+    assert.equal(keep('560', [ooz, tez], '2008', true), '560', 'допуск на месте');
+    assert.equal(keep('560', [ooz], '2008', true), '2008', 'допуск сняли — свой отдел');
+    assert.equal(keep('560', [{ value: '1' }], '2008', true), '', 'своего нет — «Все отделы»');
+    assert.equal(keep('560', [ooz], '2008', false), '560', 'до ответа /operators выбор не трогаем');
+    assert.equal(keep('560', [], '2008', true), '560', 'вариантов ещё нет');
+    assert.equal(keep('', [ooz], '2008', true), '', '«Все отделы» — не трогаем');
+    assert.match(appSource, /const next = plannerDepartmentToKeep\(\s*plannerDepartmentId, plannerDepartmentOptions, plannerOwnDepartmentId,\s*plannerLoadedMonthKeysRef\.current\.size > 0\s*\);/);
+    assert.ok(appSource.includes('if (next !== plannerDepartmentId) setPlannerDepartmentId(next);'));
+});
+
+test('телефон: до ответа шапка не пишет «Все отделы» при выбранном отделе', () => {
+    assert.ok(appSource.includes(`{plannerDepartmentId
+                                        ? (plannerDepartmentSelectOptions.find(opt => String(opt.value) === String(plannerDepartmentId))?.label || '')
+                                        : 'Все отделы'}`));
+    assert.equal(appSource.split("?.label || 'Все отделы'}").length - 1, 0);
 });
 
 test('строки СВ отдела допуска заперты, операторов — нет', () => {
@@ -104,16 +155,34 @@ test('строки СВ отдела допуска заперты, операт
     assert.equal(lockedFor({ plain: false, granted: [] })({ id: 3, role: 'sv', department_id: 560 }), false);
 });
 
-test('«Убрать из ЧС» в отделе допуска не показывается', () => {
-    const canRemove = (operator, viewerCan = true) => evaluate('plannerModalCanRemoveBlacklist', {
-        plannerViewerCanRemoveBlacklist: viewerCan,
-        plannerGrantedDepartmentIds: new Set(['560']),
-        plannerModalOperator: operator,
+// Окно дня: оператор по opId окна → «из отдела допуска?» → флаги ЧС и штрафа.
+const modalFlags = (opId, { viewerCan = true } = {}) => {
+    const operators = [{ id: 523, department_id: 2008 }, { id: 1001, department_id: 560 }];
+    const plannerModalOperator = evaluate('plannerModalOperator', { operators, modalState: { opId } });
+    const plannerModalInGrantedDepartment = evaluate('plannerModalInGrantedDepartment', {
+        plannerGrantedDepartmentIds: new Set(['560']), plannerModalOperator,
     });
-    assert.equal(canRemove({ id: 1001, department_id: 560 }), false, 'оператор Тез КЦ');
-    assert.equal(canRemove({ id: 523, department_id: 2008 }), true, 'оператор своего отдела');
-    assert.equal(canRemove(undefined), true, 'окно ещё без оператора — как раньше');
-    assert.equal(canRemove({ id: 523, department_id: 2008 }, false), false, 'рядовой СВ — как раньше');
+    return {
+        operator: plannerModalOperator,
+        canRemoveBlacklist: evaluate('plannerModalCanRemoveBlacklist', {
+            plannerViewerCanRemoveBlacklist: viewerCan, plannerModalInGrantedDepartment,
+        }),
+        canFine: evaluate('plannerModalCanFine', { plannerModalInGrantedDepartment }),
+    };
+};
+
+test('«Убрать из ЧС» и штраф в отделе допуска не показываются', () => {
+    const tez = modalFlags('1001');
+    assert.equal(tez.operator?.id, 1001, 'оператор окна — по opId окна');
+    assert.equal(tez.canRemoveBlacklist, false, 'ЧС: оператор Тез КЦ');
+    assert.equal(tez.canFine, false, 'штраф: оператор Тез КЦ');
+    const own = modalFlags('523');
+    assert.equal(own.canRemoveBlacklist, true, 'ЧС: оператор своего отдела');
+    assert.equal(own.canFine, true, 'штраф: оператор своего отдела');
+    const empty = modalFlags(null);
+    assert.equal(empty.canRemoveBlacklist, true, 'окно ещё без оператора — как раньше');
+    assert.equal(empty.canFine, true);
+    assert.equal(modalFlags('523', { viewerCan: false }).canRemoveBlacklist, false, 'рядовой СВ — как раньше');
 });
 
 test('запирание и флаг ЧС подключены там, где решают показ', () => {
@@ -122,6 +191,12 @@ test('запирание и флаг ЧС подключены там, где р
         /isPlannerSupervisorRowLocked\(operators\.find\(o => String\(o\?\.id\) === String\(opId\)\)\)/,
     );
     assert.ok(appSource.includes('modalActiveScheduleStatus?.isBlacklist && plannerModalCanRemoveBlacklist ? ('));
+    // Штраф: кнопка на телефоне, кнопка на компьютере и сам обработчик.
+    assert.ok(appSource.includes('{!plannerReadOnly && !plannerModalIsSupervisorRow && plannerModalCanFine ? ('));
+    const desktopFine = appSource.indexOf('{plannerModalCanFine && (');
+    assert.ok(desktopFine >= 0 && appSource.indexOf('onClick={openPlannerFineModalForCurrentDay}', desktopFine) - desktopFine < 200);
+    assert.match(declarationOf('openPlannerFineModalForCurrentDay'), /if \(plannerReadOnly \|\| !plannerModalCanFine\) return;/);
+    assert.equal(appSource.split('onClick={openPlannerFineModalForCurrentDay}').length - 1, 2);
     assert.ok(appSource.includes(
         'modalActiveScheduleStatus.isBlacklist && plannerModalCanRemoveBlacklist && !plannerReadOnly ? ('));
     // Оба запроса списка сотрудников раздела сообщают отделы допуска.

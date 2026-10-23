@@ -16530,9 +16530,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // тех. сбой) к СВ неприменимы — сервер штраф СВ не примет (задача #352).
             const plannerModalOperator = operators.find(o => String(o?.id) === String(modalState?.opId));
             const plannerModalIsSupervisorRow = isPlannerSupervisorRow(plannerModalOperator);
-            // Отдел открыт поимённо с правами СВ — а СВ из ЧС не убирает.
-            const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist
-                && !plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));
+            // Отдел открыт поимённо с правами СВ — а СВ из ЧС не убирает и штрафует
+            // только своих подчинённых; сервер то же отклонит.
+            const plannerModalInGrantedDepartment = plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));
+            const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist && !plannerModalInGrantedDepartment;
+            const plannerModalCanFine = !plannerModalInGrantedDepartment;
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [modalActiveTab, setModalActiveTab] = useState('shifts');
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
@@ -17307,7 +17309,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (!Array.isArray(list)) return;
                 const next = list
                     .filter(dep => Number.isFinite(Number(dep?.id)) && Number(dep.id) > 0)
-                    .map(dep => ({ id: Number(dep.id), name: String(dep?.name || ''), code: normalizeDepartmentCode(dep?.code) }));
+                    .map(dep => ({
+                        id: Number(dep.id),
+                        name: String(dep?.name || ''),
+                        code: normalizeDepartmentCode(dep?.code),
+                        directions: (Array.isArray(dep?.directions) ? dep.directions : [])
+                            .filter(dir => Number.isFinite(Number(dir?.id)) && Number(dir.id) > 0 && String(dir?.name || '').trim())
+                            .map(dir => ({ id: Math.trunc(Number(dir.id)), name: String(dir.name).trim() }))
+                    }));
                 setPlannerGrantedDepartments(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
             }, []);
             const fetchPlannerSchedulesByMonths = useCallback(async (monthKeys = [], { force = false, signal } = {}) => {
@@ -18237,6 +18246,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     setPlannerDepartmentId(plannerOwnDepartmentId);
                 }
             }, [plannerDepartmentOptions, plannerOwnDepartmentId]);
+            /* Выбранного отдела нет в пришедшей выдаче — допуск сняли, отдел
+               закрыли. Без возврата сетка пуста, а выбора отдела в шапке нет:
+               человек терял и свой отдел. Решаем только после ответа /operators —
+               до него отдела допуска в вариантах ещё нет по определению. */
+            const plannerDepartmentToKeep = (selectedId, options, ownId, loaded) => {
+                if (!selectedId || !loaded || options.length === 0) return selectedId;
+                if (options.some(opt => opt.value === selectedId)) return selectedId;
+                return options.some(opt => opt.value === ownId) ? ownId : '';
+            };
+            useEffect(() => {
+                const next = plannerDepartmentToKeep(
+                    plannerDepartmentId, plannerDepartmentOptions, plannerOwnDepartmentId,
+                    plannerLoadedMonthKeysRef.current.size > 0
+                );
+                if (next !== plannerDepartmentId) setPlannerDepartmentId(next);
+            }, [plannerDepartmentId, plannerDepartmentOptions, plannerOwnDepartmentId]);
             /* Код отдела, по которому раздел решает, какие действия показывать.
                Для админа это ВЫБРАННЫЙ отдел, а не его собственный: в «⋮» должны
                быть кнопки того отдела, чей график открыт. «Все отделы» — код
@@ -23416,7 +23441,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const openPlannerFineModalForCurrentDay = () => {
-                if (plannerReadOnly) return;
+                if (plannerReadOnly || !plannerModalCanFine) return;
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
@@ -24601,10 +24626,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         map.set(id, { id: Math.trunc(id), name });
                     }
                 });
+                // Направления отделов поимённого допуска: справочник главе режется до её отдела.
+                plannerGrantedDepartments.forEach((dep) => {
+                    (dep.directions || []).forEach((dir) => {
+                        if (!map.has(dir.id)) map.set(dir.id, { id: dir.id, name: dir.name });
+                    });
+                });
                 return Array.from(map.values()).sort((a, b) =>
                     String(a?.name || '').localeCompare(String(b?.name || ''), 'ru', { sensitivity: 'base' })
                 );
-            }, [plannerSystemDirectionItems, operators]);
+            }, [plannerSystemDirectionItems, operators, plannerGrantedDepartments]);
             const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
             const dayBreaksByOperator = useMemo(() => {
                 if (viewMode !== 'day') return [];
@@ -32448,8 +32479,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         <div className="flex flex-col gap-4 px-4 pb-6">
                             <header className="pt-1">
                                 <h1 className="sa-m-title truncate text-slate-900">Графики работы</h1>
-                                <p className="text-[15px] text-slate-500">
-                                    {plannerDepartmentSelectOptions.find(opt => String(opt.value) === String(plannerDepartmentId))?.label || 'Все отделы'}
+                                <p className="min-h-[1.5em] text-[15px] text-slate-500">
+                                    {/* Отдел допуска узнаётся из ответа /operators: до него подпись
+                                        пустая, а не «Все отделы», которые здесь не выбраны. */}
+                                    {plannerDepartmentId
+                                        ? (plannerDepartmentSelectOptions.find(opt => String(opt.value) === String(plannerDepartmentId))?.label || '')
+                                        : 'Все отделы'}
                                     {plannerReadOnly ? ' · только просмотр' : ''}
                                 </p>
                             </header>
@@ -33175,7 +33210,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             ))}
                                         </WsPhoneGroup>
 
-                                        {!plannerReadOnly && !plannerModalIsSupervisorRow ? (
+                                        {!plannerReadOnly && !plannerModalIsSupervisorRow && plannerModalCanFine ? (
                                             <button
                                                 type="button"
                                                 className={WS_PHONE_BUTTON.gray}
@@ -35540,6 +35575,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-chalkboard-teacher'}`}></FaIcon>
                                     Добавить тренинг
                                 </button>
+                                {plannerModalCanFine && (
                                 <button
                                     type="button"
                                     onClick={openPlannerFineModalForCurrentDay}
@@ -35549,6 +35585,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-exclamation-triangle'}`}></FaIcon>
                                     Добавить штраф
                                 </button>
+                                )}
                             </div>
                         </div>
 

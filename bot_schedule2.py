@@ -2648,10 +2648,11 @@ def _trainer_work_schedule_member_ids():
 
 # Поимённый допуск к «Графикам работы» чужого отдела: users.id → коды отделов,
 # графики которых человек ведёт с правами СВ этого отдела — видит всех его
-# сотрудников, правит графики операторов, но не снимает ЧС и не трогает строки
-# СВ. Решение владельца 23.10.2026: главе ООЗ (476) открыть графики Тез КЦ на
-# просмотр и правку, «как СВ этого отдела». Допуск только расширяет границу
-# управленца — сам раздел он не открывает, и в других разделах её не меняет.
+# сотрудников, правит графики операторов, но не снимает ЧС, не штрафует (СВ
+# штрафует только своих подчинённых) и не трогает строки СВ. Решение владельца
+# 23.10.2026: главе ООЗ (476) открыть графики Тез КЦ на просмотр и правку,
+# «как СВ этого отдела». Допуск только расширяет границу управленца — сам
+# раздел он не открывает, и в других разделах её не меняет.
 WORK_SCHEDULE_SUPERVISOR_GRANTS = {476: ('tez',)}
 
 
@@ -2710,23 +2711,41 @@ def _work_schedule_granted_target(requester_id, target_user_id, target_roles):
     """Сотрудник, которого requester правит по поимённому допуску, или None.
 
     Граница СВ этого отдела: только перечисленные роли и только люди отдела —
-    админы и СВ отдела допуском не открываются.
+    админы и СВ отдела допуском не открываются. Ответ запоминается в g на
+    запрос: массовая правка проверяет одного оператора на каждый день.
     """
     granted = _work_schedule_granted_department_ids(requester_id)
     if not granted:
         return None
     try:
-        target_user = db.get_user(id=int(target_user_id))
+        target_user_id = int(target_user_id)
     except (TypeError, ValueError):
         return None
-    if not target_user or _normalize_user_role(target_user[3]) not in set(target_roles):
-        return None
-    department_id = db.get_user_department_id(int(target_user[0]))
+
+    cache = None
+    cache_key = (requester_id, target_user_id, tuple(target_roles))
     try:
-        in_granted = department_id is not None and int(department_id) in granted
-    except (TypeError, ValueError):
-        in_granted = False
-    return target_user if in_granted else None
+        cache = getattr(g, '_ws_granted_target_cache', None)
+        if cache is None:
+            cache = {}
+            g._ws_granted_target_cache = cache
+    except RuntimeError:
+        cache = None
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    target_user = db.get_user(id=target_user_id)
+    result = None
+    if target_user and _normalize_user_role(target_user[3]) in set(target_roles):
+        department_id = db.get_user_department_id(int(target_user[0]))
+        try:
+            if department_id is not None and int(department_id) in granted:
+                result = target_user
+        except (TypeError, ValueError):
+            result = None
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def _filter_operators_for_requester_scope(requester, requester_id, operators):
@@ -53063,6 +53082,19 @@ def get_operators_with_schedules():
         )
         _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
+        # Отделы поимённого допуска: справочник отделов главе режется до
+        # своего, и без этого списка выбор отдела в шапке их не предложит; по
+        # нему же интерфейс запирает в них строки СВ, «Убрать из ЧС» и штраф.
+        # Направления — для массовой тех. причины: справочник направлений главе
+        # тоже режется до её отдела.
+        granted_departments = [
+            dict(item, directions=[
+                {'id': int(direction['id']), 'name': str(direction.get('name') or '')}
+                for direction in (db.get_directions(department_id=item['id']) or [])
+                if direction.get('id') is not None
+            ])
+            for item in _work_schedule_granted_departments(user_id)
+        ]
 
         return jsonify({
             "operators": operators,
@@ -53070,10 +53102,7 @@ def get_operators_with_schedules():
                 "start_date": start_date,
                 "end_date": end_date
             },
-            # Отделы поимённого допуска: справочник отделов главе режется до
-            # своего, и без этого списка выбор отдела в шапке их не предложит;
-            # по нему же интерфейс запирает в них строки СВ и «Убрать из ЧС».
-            "granted_departments": _work_schedule_granted_departments(user_id)
+            "granted_departments": granted_departments
         }), 200
     
     except ValueError as e:
@@ -53801,7 +53830,11 @@ def delete_work_schedule_status_period():
 
         if not status_period_id:
             return jsonify({"error": "Missing status_period_id"}), 400
-        if not _is_admin_role(user_data[3]) and not operator_id:
+        # Без operator_id удаление идёт по одному id и граница проверяется уже после
+        # него: глава отдела с ролью admin так стирала статус любого отдела, получая
+        # 403 на уже удалённую запись. Обходиться без operator_id может только
+        # глобальный админ — у него границы нет.
+        if not _is_global_admin_requester(_normalize_user_role(user_data[3]), requester_id) and not operator_id:
             return jsonify({"error": "operator_id is required for scoped manager requests"}), 400
 
         if operator_id:
@@ -54188,7 +54221,10 @@ def add_work_schedule_fine():
         if operator_id is None or not day:
             return jsonify({"error": "operator_id and day are required"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        # Поимённый допуск даёт права СВ отдела, а СВ штрафует только своих
+        # подчинённых — человек по допуску ничей не СВ, штраф ему не открыт.
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(
+            user_data, requester_id, operator_id, allow_grant=False)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
