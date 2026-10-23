@@ -1090,8 +1090,9 @@ class RankAndFileGatesTests(unittest.TestCase):
         # выходил сразу, profileData оставался null, и раздел показывал
         # «Нету информации о профиле».
         app = _read(APP_PATH)
+        # CHATS_EMBED — окно «Чатов ОП» в CRM: данных разделов портала оно не грузит (23.10.2026).
         self.assertIn(
-            "                if (!user || !user.id || !isRankAndFileRole(currentUserRole) "
+            "                if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) "
             "|| isScopedDepartmentHead) return;\n"
             "\n"
             "                if (view === 'profile') {\n"

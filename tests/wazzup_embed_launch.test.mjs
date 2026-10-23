@@ -138,6 +138,37 @@ test('код меняется на сессию: токены в хранили�
     assert.ok(calls.some(([kind]) => kind === 'reload'));
 });
 
+test('сессия по ссылке, выданная до пометки «из CRM» (23.10), меняется на новую один раз', async () => {
+    // Её отметка лежит под прежним ключом: такую сессию сервер не знает как сессию из CRM,
+    // и админ в ней остался бы на просмотре. Код из адреса — обменять, прежнюю — отозвать.
+    const fresh = jwtWith({ sub: '42', sid: 's-9', scp: EMBED_SCOPE, exp: future });
+    const { win, logouts } = fakeWindow({
+        stored: { otp_access_token: 'old-access', otp_refresh_token: launchRefresh, [CRM_USER_KEY]: '352',
+            otp_embed_launch_sid: 's-1' },
+        reply: () => ({ ok: true, json: async () => ({ access_token: 'new-a', refresh_token: fresh, user: { id: 42 } }) }),
+    });
+    assert.notEqual(LAUNCH_SID_KEY, 'otp_embed_launch_sid');
+    assert.equal(await runEmbedLaunch({ win }), 'exchanged');
+    assert.equal(win.localStorage.getItem(LAUNCH_SID_KEY), 's-9', 'новая — уже помеченная');
+    assert.equal(win.localStorage.getItem('otp_embed_launch_sid'), null, 'прежний ключ убран');
+    assert.deepEqual(logouts(), ['Bearer old-access']);
+});
+
+test('в окне CRM портал не уводит с чатов и не грузит данные своих разделов', () => {
+    const app = read('src/App.jsx');
+    const redirect = app.slice(app.indexOf('const redirectToView = useCallback((nextView) => {'));
+    assert.match(redirect.slice(0, 600), /if \(CHATS_EMBED && nextView !== 'wazzup_chats'\) return;/);
+    // Справочники при входе, данные СВ, разделы рядового и бейдж «Опросы» — только вне окна.
+    for (const guard of [
+        "if (!user || !user.id || CHATS_EMBED) return;\n\n                if (isAdminLikeRole) {\n                    fetchSvList();",
+        'if (!user || !user.id || CHATS_EMBED || !isSupervisorRole(user?.role)) return;\n                fetchSvData(',
+        "if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead) return;\n\n                if (view === 'profile') {",
+        "if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;\n                fetchSurveysPendingBadgeCount();",
+    ]) {
+        assert.ok(app.includes(guard), guard.split('\n')[0]);
+    }
+});
+
 test('не вышло — возвращается прежняя сессия той же учётки; чужая — нет, окно покажет вход', async () => {
     const failing = () => ({ ok: false, json: async () => ({ code: 'LAUNCH_INVALID' }) });
     const before = { otp_access_token: 'old-access', otp_refresh_token: launchRefresh, user: '{"id":42}',

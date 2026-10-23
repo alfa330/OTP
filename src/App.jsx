@@ -45862,6 +45862,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                съел бы его запись. */
             const redirectViewRef = useRef(false);
             const redirectToView = useCallback((nextView) => {
+                /* Окно CRM — один раздел: вид с чатов не уходит, даже если раздел учётке
+                   закрыт (её встретит «не открыты»). Иначе портал открывал бы «Часы» или
+                   «Профиль» и грузил их данные, а сессия окна их не получит — красные тосты. */
+                if (CHATS_EMBED && nextView !== 'wazzup_chats') return;
                 if (!nextView || nextView === backViewRef.current) return;
                 redirectViewRef.current = true;
                 setView(nextView);
@@ -53233,7 +53237,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [user?.id, isAdminLikeRole]);
 
             useEffect(() => {
-                if (!user || !user.id) return;
+                // Справочники меню и карточек портала окну CRM не нужны, и сессия окна их не получит.
+                if (!user || !user.id || CHATS_EMBED) return;
 
                 if (isAdminLikeRole) {
                     fetchSvList();
@@ -53409,12 +53414,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager, isEmployeeAccountingManager]);
 
             useEffect(() => {
-                if (!user || !user.id || !isSupervisorRole(user?.role)) return;
+                if (!user || !user.id || CHATS_EMBED || !isSupervisorRole(user?.role)) return;
                 fetchSvData(selectedReportMonth || selectedMonth);
             }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
 
             useEffect(() => {
-                if (!user || !user.id || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead) return;
+                if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead) return;
 
                 if (view === 'profile') {
                     fetchProfileData();
@@ -53478,7 +53483,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                fetchUsers(), а /api/admin/users открыт по литералу role == 'operator'
                и отдал бы marketing_manager'у 403 с красным тостом на весь экран. */
             useEffect(() => {
-                if (!user || !user.id || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;
+                if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;
                 fetchSurveysPendingBadgeCount();
             }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 

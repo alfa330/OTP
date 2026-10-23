@@ -31,7 +31,11 @@ const TRANSPORT_KEY = 'otp_auth_transport';
 const USER_KEY = 'user';
 // Для какого пользователя CRM открыта сессия окна и какая сессия получена по ссылке.
 export const CRM_USER_KEY = 'otp_embed_crm_user';
-export const LAUNCH_SID_KEY = 'otp_embed_launch_sid';
+/* Ключ сменился 23.10.2026, когда сервер начал помечать сессии из CRM (wazzup_crm_sessions,
+   режим «crm»): выданные раньше пометки не имеют, и окно один раз меняет такую сессию на
+   новую — иначе админ так и сидел бы в окне на просмотре до истечения старой (30 дней). */
+export const LAUNCH_SID_KEY = 'otp_embed_crm_sid';
+const LEGACY_LAUNCH_SID_KEY = 'otp_embed_launch_sid';
 const KEEP_MARGIN_MS = 60 * 1000;
 
 /** Окно CRM → { code, uid, crmUserId } ('' — нет), не окно → null. */
@@ -137,7 +141,9 @@ const snapshotSession = (win) => ({
 });
 
 const clearSession = (win) => {
-    for (const key of [ACCESS_KEY, REFRESH_KEY, TRANSPORT_KEY, LAUNCH_SID_KEY]) writeStored(win, key, '');
+    for (const key of [ACCESS_KEY, REFRESH_KEY, TRANSPORT_KEY, LAUNCH_SID_KEY, LEGACY_LAUNCH_SID_KEY]) {
+        writeStored(win, key, '');
+    }
     try {
         win.localStorage.removeItem(USER_KEY);
     } catch (error) {
