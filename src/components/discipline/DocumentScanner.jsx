@@ -32,7 +32,10 @@ import {
  * шаги. Разрешения на камеру для этого не нужно.
  *
  * Окно — порталом в body: корень IosModal несёт backdrop-filter, и всё
- * fixed внутри карточки отсчитывалось бы от неё (см. IosLightbox).
+ * fixed внутри карточки отсчитывалось бы от неё (см. IosLightbox). Слой — выше
+ * листа выбора телефона (.mobile-actions, 10000): «Сделать скан» открывает
+ * сканер, пока лист ещё уезжает вниз, и иначе 240 мс он лежал бы поверх камеры
+ * вместе со своим размытием (стенд, 23.10.2026).
  */
 
 /* Какой кадр просим у камеры. 4K «по возможности» (ideal, не exact): лист A4
@@ -741,8 +744,8 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
 
     const dark = step !== 'review';
     const shell = mobile
-        ? `fixed inset-0 z-[400] flex flex-col outline-none motion-safe:animate-fade-in-soft ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`
-        : 'fixed inset-0 z-[400] flex items-center justify-center bg-slate-900/70 p-6 outline-none backdrop-blur-sm motion-safe:animate-window-dim-in';
+        ? `fixed inset-0 z-[10050] flex flex-col outline-none motion-safe:animate-fade-in-soft ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`
+        : 'fixed inset-0 z-[10050] flex items-center justify-center bg-slate-900/70 p-6 outline-none backdrop-blur-sm motion-safe:animate-window-dim-in';
     const panel = mobile ? 'contents'
         : `relative flex h-[min(88vh,820px)] w-[min(980px,94vw)] flex-col overflow-hidden rounded-[28px] shadow-2xl ring-1 ring-white/10 motion-safe:animate-window-in ${dark ? 'bg-black text-white' : 'bg-slate-50 text-slate-900'}`;
     const topPad = { paddingTop: 'max(12px, env(safe-area-inset-top))' };
@@ -800,13 +803,20 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                         <div className="flex max-w-xs flex-col items-center gap-3">
                             <span className="grid h-12 w-12 place-items-center rounded-2xl bg-white/10 text-white/80"><CameraOff size={22} /></span>
                             <span className="text-[14px] leading-snug text-white/85">{camera.message}</span>
-                            <div className="mt-1 flex flex-wrap justify-center gap-2">
-                                <button type="button" className={`${darkButton} bg-white/10`} onClick={() => { stopCamera(); setCamera({ state: 'idle', message: '' }); startCamera(); }}>
+                            {/* Нижняя панель (спуск, фото из галереи) на время ошибки
+                                спрятана: все выходы — здесь, по одному разу. */}
+                            <button type="button" className="mt-1 rounded-full bg-white px-4 py-2 text-[15px] font-semibold text-slate-900 transition active:opacity-70"
+                                    onClick={() => fileRef.current?.click()}>
+                                {fallbackLabel}
+                            </button>
+                            <div className="flex flex-wrap justify-center gap-1">
+                                {mobile && (
+                                    <button type="button" className={darkButton} onClick={() => galleryRef.current?.click()}>
+                                        Выбрать фото
+                                    </button>
+                                )}
+                                <button type="button" className={darkButton} onClick={() => { stopCamera(); setCamera({ state: 'idle', message: '' }); startCamera(); }}>
                                     Повторить
-                                </button>
-                                <button type="button" className="rounded-full bg-white px-3.5 py-1.5 text-[15px] font-semibold text-slate-900 transition active:opacity-70"
-                                        onClick={() => fileRef.current?.click()}>
-                                    {fallbackLabel}
                                 </button>
                             </div>
                         </div>
@@ -819,7 +829,8 @@ const DocumentScanner = ({ formats, onClose, onDone }) => {
                 )}
                 <div ref={flashRef} className="pointer-events-none absolute inset-0 bg-white opacity-0" aria-hidden="true" />
             </div>
-            <div className="grid grid-cols-3 items-center px-6 pt-4" style={mobile ? bottomPad : { paddingBottom: 20 }}>
+            <div className={`grid grid-cols-3 items-center px-6 pt-4 ${camera.state === 'error' ? 'invisible' : ''}`}
+                 style={mobile ? bottomPad : { paddingBottom: 20 }} aria-hidden={camera.state === 'error' || undefined}>
                 <div className="justify-self-start">
                     {lastPreview && (
                         <button type="button" onClick={() => setStep('review')} aria-label={`Снятые страницы: ${pages.length}`}
