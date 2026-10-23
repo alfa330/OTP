@@ -1,7 +1,11 @@
 import React from 'react';
-import { ChevronRight, FileText, Image as ImageIcon, Loader2, Paperclip, Search, Video } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint, IosSegmented } from '../ui/ios';
+import { ChevronRight, FileText, FileUp, Image as ImageIcon, Loader2, Paperclip, ScanLine, Search, Video } from 'lucide-react';
+import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint, IosMenu, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import MobileActionSheet from '../common/MobileActionSheet';
+import useIsMobileShell from '../common/useIsMobileShell';
+import DocumentScanner from './DocumentScanner';
+import { scanFormats } from './docScan';
 import {
     fileSizeText, fmtDateTime, fmtShort as fmtShortDate, fmtTime as fmtClock, PLATE_TONES, stepChip, STATE_LABELS,
     STATE_TONES, TONE_CHIP,
@@ -219,10 +223,45 @@ export const dLinkAction = dBtnGhost;
 export const dLinkEdge = '-ml-2 2xl:-ml-4';
 
 /* edge — кнопка первая в своём ряду (как было всегда); после другой кнопки —
-   edge={false}. busy — значок сменяется спиннером, ряд не перестраивается. */
+   edge={false}. busy — значок сменяется спиннером, ряд не перестраивается.
+
+   Документ, который можно сфотографировать (поле примет фото или PDF), — по
+   нажатию выбор «Загрузить файл / Сделать скан» (владелец, 23.10.2026): на
+   компьютере меню под кнопкой, на телефоне лист снизу, как системный.
+   «Сделать скан» открывает камеру (DocumentScanner), и готовый скан уходит в
+   onFiles так же, как выбранный файл: дальше всё по-старому — пределы,
+   проверка, загрузка. Шаблон DOCX сканом не бывает — там кнопка, как и
+   раньше, сразу открывает выбор файла. */
 export const AttachButton = ({ label = 'Приложить файл', accept, multiple = false, onFiles, disabled = false, invalid = false,
     busy = false, edge = true }) => {
     const inputRef = React.useRef(null);
+    const mobile = useIsMobileShell();
+    const formats = React.useMemo(() => scanFormats(accept), [accept]);
+    const [sheetOpen, setSheetOpen] = React.useState(false);
+    const [scanning, setScanning] = React.useState(false);
+    const pick = () => inputRef.current?.click();
+    const off = disabled || busy;
+    const className = `${dLinkAction} ${edge ? dLinkEdge : ''} ${invalid ? `!text-rose-600 ${INVALID_RING}` : ''}`;
+    const icon = busy ? <Spinner size={14} /> : <Paperclip size={14} />;
+    let trigger;
+    if (!formats.any) {
+        trigger = <button type="button" disabled={off} onClick={pick} className={className}>{icon}{label}</button>;
+    } else if (mobile) {
+        trigger = (
+            <button type="button" disabled={off} onClick={() => setSheetOpen(true)} className={className} aria-haspopup="dialog">
+                {icon}
+                {label}
+            </button>
+        );
+    } else {
+        trigger = (
+            <IosMenu label={label} align="left" disabled={off} trigger={{ icon, text: label, className }}
+                     items={[
+                         { key: 'upload', label: 'Загрузить файл', icon: FileUp, onSelect: pick },
+                         { key: 'scan', label: 'Сделать скан', icon: ScanLine, onSelect: () => setScanning(true) },
+                     ]} />
+        );
+    }
     return (
         <>
             <input
@@ -237,15 +276,25 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
                     if (files.length) onFiles(files);
                 }}
             />
-            <button
-                type="button"
-                disabled={disabled || busy}
-                onClick={() => inputRef.current?.click()}
-                className={`${dLinkAction} ${edge ? dLinkEdge : ''} ${invalid ? `!text-rose-600 ${INVALID_RING}` : ''}`}
-            >
-                {busy ? <Spinner size={14} /> : <Paperclip size={14} />}
-                {label}
-            </button>
+            {trigger}
+            {formats.any && mobile && (
+                <MobileActionSheet
+                    open={sheetOpen}
+                    onClose={() => setSheetOpen(false)}
+                    actions={[
+                        // Выбор файла — в том же нажатии: иначе Safari не откроет окно файлов.
+                        { key: 'upload', label: 'Загрузить файл', onClick: () => { setSheetOpen(false); pick(); } },
+                        { key: 'scan', label: 'Сделать скан', onClick: () => { setSheetOpen(false); setScanning(true); } },
+                    ]}
+                />
+            )}
+            {scanning && (
+                <DocumentScanner
+                    formats={formats}
+                    onClose={() => setScanning(false)}
+                    onDone={(file) => { setScanning(false); onFiles([file]); }}
+                />
+            )}
         </>
     );
 };

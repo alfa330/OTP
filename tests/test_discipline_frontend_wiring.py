@@ -293,7 +293,11 @@ class DocumentTemplatesTests(unittest.TestCase):
         self.assertIn('export const dLinkAction = dBtnGhost;', ui)
         self.assertIn("export const dLinkEdge = '-ml-2 2xl:-ml-4';", ui)
         self.assertIn('busy = false, edge = true }) => {', ui)
-        self.assertIn("className={`${dLinkAction} ${edge ? dLinkEdge : ''} ", ui)
+        # Классы кнопки — одной строкой на обе её формы (кнопка и меню «Загрузить / Сделать скан»).
+        self.assertIn("const className = `${dLinkAction} ${edge ? dLinkEdge : ''} ", ui)
+        body = ui[ui.index('export const AttachButton'):ui.index('export const ACCEPT_DOCS')]
+        self.assertEqual(body.count('className={className}'), 2)
+        self.assertIn('trigger={{ icon, text: label, className }}', ui)
         panel = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
         self.assertIn('invalid={!!templateError}\n                                                  edge={false} />', panel)
 
@@ -387,3 +391,51 @@ class ReportsPagingTests(unittest.TestCase):
         self.assertIn('}, [api, selected, params, auditPage, queryKey]);', self.PANEL)
         self.assertIn("const auditPage = selected === 'audit' ? page : 1;", self.PANEL)
         self.assertIn('if (shownQuery.current !== queryKey) {', self.PANEL)
+
+
+class ScanFileTests(unittest.TestCase):
+    """Скан документа (владелец, 23.10.2026: «сделать скан») уходит JPEG — одна
+    страница — или PDF — несколько. Сервер проверяет файл по белому списку и
+    сигнатуре (files.check), и скан обязан проходить её у каждого вида, куда
+    кнопка «Приложить…» его предлагает: иначе человек снимет страницы, а
+    загрузка ответит отказом."""
+
+    SCAN = ROOT / 'src' / 'components' / 'discipline' / 'docScan.js'
+    # JPEG 8×8, снятый с canvas, — тот же, что в tests/discipline_doc_scan.test.mjs.
+    TINY_JPEG = ('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAx'
+                 'NDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy'
+                 'MjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QA'
+                 'FAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKpgB//Z')
+
+    def _scan(self):
+        script = (
+            "import(%s).then((m) => {"
+            " const jpeg = Uint8Array.from(Buffer.from(%s, 'base64'));"
+            " const pdf = m.buildPdf([{ jpeg, width: 1700, height: 2404 }, { jpeg, width: 1700, height: 2404 }]);"
+            " const when = new Date(2026, 9, 23, 17, 40);"
+            " console.log(JSON.stringify({ pdf: Buffer.from(pdf).toString('base64'),"
+            "   pdfName: m.scanFileName(when, 'pdf'), jpgName: m.scanFileName(when, 'jpg') }));"
+            "})" % (json.dumps(self.SCAN.as_uri()), json.dumps(self.TINY_JPEG)))
+        out = subprocess.run(['node', '--input-type=module', '-e', script], capture_output=True, text=True,
+                             check=True, timeout=30)
+        return json.loads(out.stdout)
+
+    def test_scan_passes_server_check_for_every_scanned_kind(self):
+        import base64
+        from discipline import files
+        scan = self._scan()
+        pdf = base64.b64decode(scan['pdf'])
+        jpeg = base64.b64decode(self.TINY_JPEG)
+        for kind in ('explanation', 'evidence', 'act', 'refusal_act'):
+            name, ext, content_type = files.check(kind, filename=scan['pdfName'], data=pdf)
+            self.assertEqual((name, ext, content_type), (scan['pdfName'], 'pdf', 'application/pdf'), kind)
+            name, ext, content_type = files.check(kind, filename=scan['jpgName'], data=jpeg)
+            self.assertEqual((name, ext, content_type), (scan['jpgName'], 'jpg', 'image/jpeg'), kind)
+        # Имя дойдёт до списка файлов как есть: кириллица и пробелы сохраняются.
+        self.assertEqual(scan['pdfName'], 'Скан 23.10.2026 17-40.pdf')
+
+    def test_template_upload_offers_no_scan(self):
+        # Шаблон акта — только DOCX: кнопка остаётся выбором файла (scanFormats ≠ any).
+        settings = (ROOT / 'src' / 'components' / 'discipline' / 'SettingsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn('accept=".docx"', settings)
+        self.assertEqual(catalog.FILE_KINDS['act_template']['ext'], ('docx',))
