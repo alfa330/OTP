@@ -823,3 +823,33 @@ def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):
     assert client.get('/api/discipline/records/%d' % other.get_json()['id'], headers=h(OP_A)).status_code == 403
     blank = client.get('/api/discipline/records/%d/explanation.docx' % mine.get_json()['id'], headers=h(OP_A))
     assert blank.status_code == 200
+
+
+def test_audit_pages_by_the_requested_size(client, db):
+    """«Отчёты» листают журнал действий по 10 строк (владелец, 23.10.2026: «чтобы
+    не уходило вниз»): сервер отдаёт страницу заданного размера в границах, без
+    размера — прежние 50; страницы не пересекаются."""
+    from discipline import queries, routes
+    from tests.test_discipline_postgres import ctx_of
+
+    with db.cursor() as cur:
+        head = ctx_of(cur, HEAD_SZOV)
+        for index in range(23):
+            queries.audit(cur, head, 'export', 'journal', department_id=SZOV, changes={'rows': index})
+    url = '/api/discipline/audit'
+    first = client.get(url + '?page_size=10', headers=h(HEAD_SZOV)).get_json()
+    second = client.get(url + '?page_size=10&page=2', headers=h(HEAD_SZOV)).get_json()
+    third = client.get(url + '?page_size=10&page=3', headers=h(HEAD_SZOV)).get_json()
+    assert (first['total'], first['page_size'], len(first['items'])) == (23, 10, 10)
+    assert (len(second['items']), len(third['items'])) == (10, 3)
+    ids = [row['id'] for page in (first, second, third) for row in page['items']]
+    assert len(set(ids)) == 23
+    sizes = {raw: client.get(url + '?page_size=%s' % raw, headers=h(HEAD_SZOV)).get_json()['page_size']
+             for raw in ('1', '100000', 'abc', '')}
+    assert sizes == {'1': routes.AUDIT_PAGE_MIN, '100000': routes.AUDIT_PAGE_MAX, 'abc': 50, '': 50}
+    # Выгрузка в Excel — весь журнал, размер страницы на неё не влияет.
+    xlsx = client.get(url + '?format=xlsx&page_size=10', headers=h(HEAD_SZOV))
+    assert xlsx.status_code == 200 and zipfile.is_zipfile(io.BytesIO(xlsx.data))
+    import openpyxl
+    sheet = openpyxl.load_workbook(io.BytesIO(xlsx.data))['Журнал действий']
+    assert sum(1 for row in sheet.iter_rows(min_row=2, values_only=True) if any(row)) == 23

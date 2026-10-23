@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 
 import {
     daysLeftText, fmtDateTime, fmtMoney, groupSummary, groupTone, hasTimecode, isFullMoment, isOvernight, joinMoment,
-    joinShift, joinTimecodes, ladderName, ladderProblems, momentProblem, ordinalWord, pluralViolations, shiftParts, shiftProblem, splitMoment,
+    joinShift, joinTimecodes, ladderName, ladderProblems, momentProblem, ordinalWord, pluralViolations, REPORT_PAGE_SIZE,
+    reportPage, shiftParts, shiftProblem, splitMoment,
     stepChip, stepTitle, timecodeRows, timecodesProblem,
 } from '../src/components/discipline/disciplineRules.js';
 
@@ -120,3 +121,21 @@ test('лестницы отдела: название обязательно и 
     assert.deepEqual(ladderProblems([{ id: 'main', name: 'Основная' }]), {});
 });
 
+
+test('отчёты — по страницам: десять строк, подпись «с–по из N», страница не за концом', () => {
+    // Владелец, 23.10.2026: «реализовать пагинацию, чтобы оно не уходило вниз».
+    assert.equal(REPORT_PAGE_SIZE, 10);
+    const rows = Array.from({ length: 23 }, (_, i) => ({ id: i + 1 }));
+    const first = reportPage(rows, 1);
+    assert.deepEqual([first.page, first.pageCount, first.total, first.from, first.to], [1, 3, 23, 1, 10]);
+    assert.deepEqual(first.rows.map((r) => r.id), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const last = reportPage(rows, 3);
+    assert.deepEqual([last.from, last.to, last.rows.length], [21, 23, 3]);
+    // Сменили период — строк стало меньше: страница прижимается к последней, а не пустеет.
+    assert.deepEqual([reportPage(rows.slice(0, 12), 3).page, reportPage(rows.slice(0, 12), 3).rows.length], [2, 2]);
+    // Пусто или мусор вместо номера — первая страница без строк, «0–0».
+    assert.deepEqual([reportPage([], 2).page, reportPage([], 2).from, reportPage([], 2).to], [1, 0, 0]);
+    assert.equal(reportPage(rows, 'x').page, 1);
+    assert.equal(reportPage(rows, 0).page, 1);
+    assert.equal(reportPage(null, 1).total, 0);
+});

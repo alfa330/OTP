@@ -332,3 +332,29 @@ class LadderSettingsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReportsPagingTests(unittest.TestCase):
+    """Владелец, 23.10.2026: «в разделе отчёты реализовать пагинацию, чтобы оно
+    не уходило вниз». Отчёт листается на клиенте, журнал действий — сервером,
+    размер страницы один."""
+    PANEL = (ROOT / 'src' / 'components' / 'discipline' / 'ReportsPanel.jsx').read_text(encoding='utf-8')
+
+    def test_table_shows_one_page(self):
+        self.assertIn(': reportPage(rows, page);', self.PANEL)
+        self.assertIn('{paged.rows.map((row, index) => (', self.PANEL)
+        self.assertNotIn('slice(0, 300)', self.PANEL)
+        self.assertIn('<IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}', self.PANEL)
+
+    def test_audit_pages_on_the_server_with_the_same_size(self):
+        from discipline import routes
+        self.assertIn('api.audit({ ...params, page: auditPage, page_size: REPORT_PAGE_SIZE })', self.PANEL)
+        size = _js_object('REPORT_PAGE_SIZE')
+        self.assertTrue(routes.AUDIT_PAGE_MIN <= size <= routes.AUDIT_PAGE_MAX, size)
+
+    def test_turning_a_report_page_does_not_refetch_or_jump(self):
+        # Номер страницы в зависимостях эффекта — только у журнала действий; новая
+        # страница журнала не сменяется заготовкой строк (высота не прыгает).
+        self.assertIn('}, [api, selected, params, auditPage, queryKey]);', self.PANEL)
+        self.assertIn("const auditPage = selected === 'audit' ? page : 1;", self.PANEL)
+        self.assertIn('if (shownQuery.current !== queryKey) {', self.PANEL)

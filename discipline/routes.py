@@ -22,6 +22,7 @@ from flask import Blueprint, jsonify, request, send_file
 from . import access, act_docx, catalog, explanation_docx, files, notify, queries, report, schema, service
 
 JOURNAL_LIMIT = 1500
+AUDIT_PAGE_MIN, AUDIT_PAGE_MAX = 5, 100
 
 
 def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester,
@@ -1088,8 +1089,14 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             page = max(1, int(request.args.get('page') or 1))
         except ValueError:
             page = 1
+        # Размер страницы задаёт экран «Отчётов» (по 10 строк, чтобы журнал не уходил
+        # вниз); без него — прежние 50. Границы — чтобы запросом не выкачать журнал целиком.
+        try:
+            page_size = min(AUDIT_PAGE_MAX, max(AUDIT_PAGE_MIN, int(request.args.get('page_size') or 50)))
+        except ValueError:
+            page_size = 50
         export = request.args.get('format') == 'xlsx'
-        limit = 50000 if export else 50
+        limit = 50000 if export else page_size
         with db._get_cursor() as cursor:
             total, rows = queries.list_audit(cursor, [department_id] if department_id else managed,
                                              date_from=date_from, date_to=date_to,

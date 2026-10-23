@@ -390,6 +390,23 @@ export const addresseeProblem = (text, limits) => {
         ? `Не больше ${limits.max_lines} строк и ${limits.max_chars} символов` : null;
 };
 
+/* «Отчёты» — по страницам (владелец, 23.10.2026: «реализовать пагинацию, чтобы
+   оно не уходило вниз»): десять строк — таблица стоит рядом со списком отчётов,
+   а не уходит лентой под край экрана. Отчёт приходит целиком и листается здесь;
+   журнал действий тем же размером страницы листает сервер. */
+export const REPORT_PAGE_SIZE = 10;
+
+/* Строки страницы и подпись «с–по из N». Страница за концом списка (сменили
+   период — строк стало меньше) прижимается к последней. */
+export const reportPage = (rows, page, perPage = REPORT_PAGE_SIZE) => {
+    const list = rows || [];
+    const pageCount = Math.max(1, Math.ceil(list.length / perPage));
+    const current = Math.min(Math.max(1, Math.floor(Number(page)) || 1), pageCount);
+    const start = (current - 1) * perPage;
+    const shown = list.slice(start, start + perPage);
+    return { page: current, pageCount, total: list.length, from: shown.length ? start + 1 : 0, to: start + shown.length, rows: shown };
+};
+
 /* Основание и причина контроля одной строкой. Причина испытательного срока по
    умолчанию повторяет основание — тогда показываем его один раз. */
 export const controlReason = (row) => {

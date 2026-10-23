@@ -1,16 +1,20 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, ChevronRight, Download, History } from 'lucide-react';
 import { IosPager } from '../ui/ios';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
 import { apiError, saveBlob } from './disciplineApi';
 import { dBtnSecondary, EmptyState, Group, LoadingRows, T } from './disciplineUi';
-import { fmtDate, fmtDateTime, fmtMoney, todayIso } from './disciplineRules';
+import { fmtDate, fmtDateTime, fmtMoney, REPORT_PAGE_SIZE, reportPage, todayIso } from './disciplineRules';
 
 /*
  * «Отчёты» (ТЗ п. 15) и «Журнал действий» (п. 14) — руководителю. Каждый отчёт
  * — с фильтром по периоду и выгрузкой в Excel. «По мерам» — это и есть файл на
  * удержания: все утверждённые меры с финансовым эффектом, включая процент.
  * Журнал действий только дописывается: правок и удалений в нём не бывает.
+ *
+ * Таблица — по страницам (REPORT_PAGE_SIZE), чтобы не уходила вниз: отчёт
+ * приходит целиком и листается без запроса, журнал действий листает сервер.
+ * Весь отчёт целиком — в Excel.
  */
 
 const REPORTS = [
@@ -49,23 +53,38 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
         date_from: period.from, date_to: period.to, ...(departmentId ? { department_id: departmentId } : {}),
     }), [period, departmentId]);
 
-    // Страница журнала действий принадлежит своему отчёту и периоду: сменили их —
-    // снова первая, и сразу, без второго запроса со старой страницей.
+    // Страница принадлежит своему отчёту и периоду: сменили их — снова первая, и
+    // сразу, без второго запроса со старой страницей.
     const pageKey = `${selected}|${period.from}|${period.to}|${departmentId || ''}`;
     const [pageState, setPageState] = useState({ key: pageKey, page: 1 });
     const page = pageState.key === pageKey ? pageState.page : 1;
     const setPage = (value) => setPageState({ key: pageKey, page: value });
+    // Страницу запрашивает только журнал действий; отчёт листается без запроса.
+    const auditPage = selected === 'audit' ? page : 1;
 
+    // Другой отчёт или период — заготовка строк. Следующая страница журнала —
+    // прежняя таблица стоит, пока не придёт новая: высота не прыгает.
+    const queryKey = `${pageKey}|${version}`;
+    const shownQuery = useRef(null);
+    const [paging, setPaging] = useState(false);
     useEffect(() => {
         let alive = true;
-        setData(null);
+        if (shownQuery.current !== queryKey) {
+            shownQuery.current = queryKey;
+            setData(null);
+        } else {
+            setPaging(true);
+        }
         setError(null);
-        const request = selected === 'audit' ? api.audit({ ...params, page }) : api.report(selected, params);
+        const request = selected === 'audit'
+            ? api.audit({ ...params, page: auditPage, page_size: REPORT_PAGE_SIZE })
+            : api.report(selected, params);
         request
             .then((payload) => { if (alive) { setData(payload); setError(null); } })
-            .catch((err) => { if (alive) setError(apiError(err, 'Отчёт не собрался')); });
+            .catch((err) => { if (alive) setError(apiError(err, 'Отчёт не собрался')); })
+            .finally(() => { if (alive) setPaging(false); });
         return () => { alive = false; };
-    }, [api, selected, params, page, version]);
+    }, [api, selected, params, auditPage, queryKey]);
 
     const exportExcel = async () => {
         setExporting(true);
@@ -86,6 +105,11 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
     ];
     const columns = selected === 'audit' ? auditColumns : (data?.columns || []);
     const rows = selected === 'audit' ? (data?.items || []) : (data?.rows || []);
+    const auditSize = data?.page_size || REPORT_PAGE_SIZE;
+    const paged = selected === 'audit'
+        ? { rows, page: auditPage, pageCount: Math.max(1, Math.ceil((data?.total || 0) / auditSize)), total: data?.total || 0,
+            from: (auditPage - 1) * auditSize + 1, to: (auditPage - 1) * auditSize + rows.length }
+        : reportPage(rows, page);
 
     return (
         <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[340px_minmax(0,1fr)] 2xl:gap-6">
@@ -139,13 +163,14 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
                 {error ? <Group><EmptyState title={error} /></Group> : !data ? <LoadingRows rows={6} /> : !rows.length ? (
                     <Group><EmptyState title="За период данных нет" /></Group>
                 ) : (
-                    <div className="overflow-x-auto rounded-2xl bg-white ring-1 ring-slate-200/70">
+                    <div className={`overflow-x-auto rounded-2xl bg-white ring-1 ring-slate-200/70 transition-opacity ${paging ? 'opacity-60' : ''}`}
+                         aria-busy={paging || undefined}>
                         <table className="w-full min-w-[560px] text-left text-[13px] 2xl:text-[15px]">
                             <thead className="bg-slate-50/80 text-[11.5px] uppercase tracking-wide text-slate-500 2xl:text-[12.5px]">
                                 <tr>{columns.map((c) => <th key={c.key} className="px-4 py-2.5 font-semibold">{c.title}</th>)}</tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                                {rows.slice(0, 300).map((row, index) => (
+                                {paged.rows.map((row, index) => (
                                     <tr key={row.id || index} className="align-top">
                                         {columns.map((c) => (
                                             <td key={c.key} className={`px-4 py-2.5 text-slate-700 ${typeof row[c.key] === 'number' ? 'tabular-nums' : ''} ${WRAP_KEYS.has(c.key) ? 'min-w-[220px]' : 'whitespace-nowrap'}`}>
@@ -172,13 +197,9 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
                     </Group>
                 )}
 
-                {selected === 'audit' && data?.total > data?.page_size && (
-                    <IosPager page={page} pageCount={Math.ceil(data.total / data.page_size)} total={data.total}
-                              from={(page - 1) * data.page_size + 1} to={Math.min(page * data.page_size, data.total)}
-                              onPage={setPage} />
-                )}
-                {selected !== 'audit' && rows.length > 300 && (
-                    <div className={`px-1 text-[12px] text-slate-500 ${T.note}`}>Показаны первые 300 строк — полный отчёт в Excel.</div>
+                {data && rows.length > 0 && (
+                    <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
+                              from={paged.from} to={paged.to} onPage={setPage} />
                 )}
             </div>
         </div>
