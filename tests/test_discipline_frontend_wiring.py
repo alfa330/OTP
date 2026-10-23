@@ -41,10 +41,15 @@ def _js_call(name, *args):
 
 
 class AppWiringTests(unittest.TestCase):
-    def test_lazy_view_and_render_behind_qr_lock(self):
+    def test_lazy_view_and_render_without_qr_lock(self):
+        # Владелец, 23.10.2026: «для операторов сделать доступ без qr» — раздел
+        # рисуется сразу, без общего QR-замка портала.
         self.assertIn("const DisciplineView = lazyWithRetry(() => import('./components/discipline/DisciplineView'));", APP)
-        self.assertIn('{view === "discipline" && canAccessDisciplineSection && (sensitiveSectionsLocked ? (', APP)
-        self.assertIn('focusRequest={disciplineFocusRequest}', APP)
+        start = APP.index('{view === "discipline" && canAccessDisciplineSection && (\n')
+        block = APP[start:APP.index('</Suspense>', start)]
+        self.assertIn('focusRequest={disciplineFocusRequest}', block)
+        self.assertNotIn('sensitiveSectionsLocked', block)
+        self.assertNotIn('SensitiveSectionGate', block)
 
     def test_guard_url_and_sidebar(self):
         self.assertIn("if (view === 'discipline' && canAccessDisciplineSection) return;", APP)
@@ -56,7 +61,11 @@ class AppWiringTests(unittest.TestCase):
         self.assertIn('canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection', APP)
         self.assertIn('canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]', APP)
         self.assertIn('canAccessWaterSection,\n                showDisciplineMenu,', APP)
-        self.assertIn("|| view === 'discipline' || view === 'baiga' || view === 'driver_mailings') {", APP)
+        # Статус QR раздел больше не спрашивает: лишний запрос при каждом входе.
+        start = APP.index("if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki'")
+        condition = APP[start:APP.index(') {', start)]
+        self.assertIn("view === 'baiga'", condition)
+        self.assertNotIn("'discipline'", condition)
 
     def test_department_lists_match_server(self):
         match = re.search(r"const DISCIPLINE_DEPARTMENT_CODES = \[([^\]]*)\];", APP)
@@ -84,9 +93,29 @@ class AppWiringTests(unittest.TestCase):
         # Порядок важен: глава отдела раздела проходит раньше, чем админ отсекается.
         self.assertLess(body.index('isDepartmentHead(userLike)'), body.index("if (role === 'admin') return false;"))
 
-    def test_qr_rule_matches_portal_lock(self):
-        # Сервер просит QR у роли «оператор» — общий замок портала тоже.
-        self.assertIn("const SENSITIVE_QR_GATED_ROLES = new Set(['operator',", APP)
+    def test_no_qr_on_either_side(self):
+        # Разойдись стороны — экран показал бы раздел, а сервер ответил бы отказом
+        # без кнопки QR (или наоборот: замок там, где всё открыто).
+        routes = (ROOT / 'discipline' / 'routes.py').read_text(encoding='utf-8')
+        view = (ROOT / 'src' / 'components' / 'discipline' / 'DisciplineView.jsx').read_text(encoding='utf-8')
+        self.assertFalse(hasattr(access, 'requires_sensitive_qr'))
+        for text in (routes, view):
+            self.assertNotIn('SENSITIVE_ACCESS_REQUIRED', text)
+        self.assertNotIn('sensitive_access_granted', routes)
+
+    def test_blueprint_call_matches_factory(self):
+        # Регистрация блюпринта в bot_schedule2 обёрнута в try/except: лишний или
+        # пропавший аргумент там не уронит запуск, а молча выключит раздел на проде.
+        import inspect
+        from discipline.routes import build_discipline_blueprint
+        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        start = bot.index('app.register_blueprint(build_discipline_blueprint(')
+        call = bot[start:bot.index('))', start)]
+        passed = set(re.findall(r'^\s+(\w+)=', call, re.M))
+        params = inspect.signature(build_discipline_blueprint).parameters
+        required = {name for name, p in params.items() if p.default is inspect.Parameter.empty}
+        self.assertLessEqual(passed, set(params))
+        self.assertLessEqual(required, passed)
 
     def test_bell(self):
         self.assertIn('discipline', sources.SOURCES)

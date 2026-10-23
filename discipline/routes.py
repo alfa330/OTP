@@ -3,8 +3,9 @@
 
 Устроен как complaints/routes.py: фабрика получает зависимости аргументами
 (обратный импорт из bot_schedule2 был бы циклом), каждый роут проходит общий
-каркас — preflight, авторизация, контекст доступа, вход в раздел и QR для
-рядовых, — а ошибки отдаются {"error": "..."} по-русски.
+каркас — preflight, авторизация, контекст доступа и вход в раздел, — а ошибки
+отдаются {"error": "..."} по-русски. QR-подтверждения раздел не спрашивает
+(владелец, 23.10.2026; см. access.py).
 
 Файлы сначала проверяются и заливаются в хранилище, потом пишется база; если
 транзакция откатилась, залитое стирается (files.drop) — в бакете не остаётся
@@ -26,15 +27,10 @@ AUDIT_PAGE_MIN, AUDIT_PAGE_MAX = 5, 100
 
 
 def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester,
-                               sensitive_access_granted, send_telegram=None, web_app_base_url=None,
-                               gcs=None, avatar_url=None):
-    """sensitive_access_granted обязателен: забытая зависимость должна уронить
-    сборку блюпринта, а не тихо открыть записи о дисциплине без QR."""
-    if sensitive_access_granted is None:
-        raise ValueError('sensitive_access_granted is required')
+                               send_telegram=None, web_app_base_url=None, gcs=None, avatar_url=None):
     bp = Blueprint('discipline', __name__, url_prefix='/api/discipline')
 
-    def route(rule, methods=('GET',), manager=False, qr=True):
+    def route(rule, methods=('GET',), manager=False):
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -62,9 +58,6 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                     if not access.can_open_section(ctx):
                         return jsonify({"error": "Раздел «Дисциплина» вам не открыт",
                                         "code": "DISCIPLINE_SECTION_CLOSED"}), 403
-                    if qr and access.requires_sensitive_qr(ctx) and not sensitive_access_granted(ctx['user_id']):
-                        return jsonify({"error": "Раздел откроется после QR-подтверждения доступа",
-                                        "code": "SENSITIVE_ACCESS_REQUIRED"}), 403
                     if manager and not access.is_manager(ctx):
                         return jsonify({"error": "Это доступно руководителю отдела",
                                         "code": "DISCIPLINE_FORBIDDEN"}), 403
@@ -164,9 +157,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
 
     # ── Вход ────────────────────────────────────────────────────────────────
 
-    # Без QR: ping отдаёт только права и ЧИСЛО своих записей — по нему меню
-    # решает, показывать ли оператору пункт. Сами записи — за QR.
-    @route('/ping', qr=False)
+    # ping — права и ЧИСЛО своих записей: по нему меню решает, показывать ли
+    # оператору пункт.
+    @route('/ping')
     def discipline_ping(ctx, today, **_kw):
         with db._get_cursor() as cursor:
             departments = _department_choices(cursor, ctx)
@@ -178,7 +171,6 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'capabilities': access.capabilities(ctx),
                 'departments': departments,
                 'storage_ready': files.storage_ready(gcs),
-                'qr_granted': (not access.requires_sensitive_qr(ctx)) or bool(sensitive_access_granted(ctx['user_id'])),
             }
             if access.is_operator(ctx):
                 cursor.execute(

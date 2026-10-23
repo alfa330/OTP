@@ -214,8 +214,6 @@ def test_section_circle(db):
         assert access.is_manager(head_op) and not access.is_supervisor(head_op)
         assert access.scope(ctx_of(cur, SV_A)) == access.SCOPE_GROUPS
         assert access.scope(ctx_of(cur, OP_A)) == access.SCOPE_OWN
-        assert access.requires_sensitive_qr(ctx_of(cur, OP_A))
-        assert not access.requires_sensitive_qr(ctx_of(cur, SV_A))
 
 
 def test_supervisor_sees_only_own_group(db):

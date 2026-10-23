@@ -53446,7 +53446,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Проверяем доступ…» без кнопки QR.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'water' || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'discipline' || view === 'baiga' || view === 'driver_mailings') {
+                        || view === 'baiga' || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -56909,16 +56909,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 />
                             </Suspense>
                         ))}
-                        {/* «Дисциплина» — за QR-замком у оператора: записи о дисциплине —
-                            персональные данные (ТЗ п. 16). СВ и руководителю замок не нужен. */}
-                        {view === "discipline" && canAccessDisciplineSection && (sensitiveSectionsLocked ? (
-                            <SensitiveSectionGate
-                                sectionTitle="Дисциплина"
-                                description="Ваши записи о нарушениях и объяснительные. Раздел открывается после подтверждения доступа старшим."
-                                checking={sensitiveSectionsChecking}
-                                onRequestQr={requestSensitiveQrAccess}
-                            />
-                        ) : (
+                        {/* «Дисциплина» — без QR-замка и у оператора (владелец, 23.10.2026:
+                            «для операторов сделать доступ без qr»). Сервер QR тоже не
+                            спрашивает — discipline/access.py, тест сверяет обе стороны. */}
+                        {view === "discipline" && canAccessDisciplineSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <DisciplineView
                                     apiBaseUrl={API_BASE_URL}
@@ -56927,7 +56921,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     focusRequest={disciplineFocusRequest}
                                 />
                             </Suspense>
-                        ))}
+                        )}
                         {/* «Термокороба» — без QR-замка: в разделе нет персональных данных. */}
                         {view === "thermoboxes" && canAccessThermoboxesSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>

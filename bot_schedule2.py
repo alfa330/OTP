@@ -67505,7 +67505,6 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
-        sensitive_access_granted=_sensitive_access_granted_for_user,
         send_telegram=_send_telegram_text_message,
         web_app_base_url=TASK_WEB_APP_BASE_URL,
         gcs={'bucket_name': _discipline_bucket_name, 'client': get_gcs_client},

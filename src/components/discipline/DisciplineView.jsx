@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { BarChart3, ClipboardList, LayoutGrid, Plus, Settings2, ShieldAlert } from 'lucide-react';
 import { APPLE_FONT, IosModal, IosSegmented } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
-import { apiCode, apiError, createDisciplineApi } from './disciplineApi';
+import { apiError, createDisciplineApi } from './disciplineApi';
 import { dBtnPrimary, DepartmentPicker, dTabs, EmptyState, LoadingRows, T } from './disciplineUi';
 import SummaryPanel from './SummaryPanel';
 import JournalPanel from './JournalPanel';
@@ -159,7 +159,7 @@ const DisciplineView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
         let alive = true;
         api.ping()
             .then((data) => { if (alive) { setPing(data); setPingError(null); } })
-            .catch((error) => { if (alive) setPingError({ message: apiError(error, 'Раздел не открылся'), code: apiCode(error) }); });
+            .catch((error) => { if (alive) setPingError(apiError(error, 'Раздел не открылся')); });
         return () => { alive = false; };
     }, [api]);
 
@@ -211,9 +211,7 @@ const DisciplineView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     if (pingError) {
         body = (
             <div className="rounded-2xl bg-white p-2 ring-1 ring-slate-200/70">
-                <EmptyState icon={ShieldAlert} title={pingError.message}
-                            text={pingError.code === 'SENSITIVE_ACCESS_REQUIRED'
-                                ? 'Покажите QR-код супервайзеру, чтобы открыть свои записи.' : null} />
+                <EmptyState icon={ShieldAlert} title={pingError} />
             </div>
         );
     } else if (!ping) {

@@ -205,10 +205,12 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(access.scope(ctx('trainee')), access.SCOPE_OWN)
         self.assertFalse(access.can_open_section(ctx('trainer')))
 
-    def test_qr_only_for_operator_role(self):
-        self.assertTrue(access.requires_sensitive_qr(ctx('operator')))
-        self.assertFalse(access.requires_sensitive_qr(ctx('trainee')))
-        self.assertFalse(access.requires_sensitive_qr(ctx('sv', groups=[5])))
+    def test_no_qr_for_anyone(self):
+        # Владелец, 23.10.2026: «для операторов сделать доступ без qr». Правила
+        # QR в разделе нет вовсе, и права его не обещают ни одной роли.
+        self.assertFalse(hasattr(access, 'requires_sensitive_qr'))
+        for who in (ctx('operator'), ctx('trainee'), ctx('sv', groups=[5]), ctx('admin', headed=[1])):
+            self.assertNotIn('requires_qr', access.capabilities(who), who['role'])
 
     def test_supervisor_group_scope(self):
         sv = ctx('sv', groups=[5])
@@ -337,8 +339,6 @@ class SuperAdminRolloutTests(unittest.TestCase):
             operator = ctx('operator', user_id=56)
             self.assertTrue(access.can_open_section(operator))
             self.assertEqual(access.scope(operator), access.SCOPE_OWN)
-            # Записи о дисциплине — за QR, как у всех операторов.
-            self.assertTrue(access.requires_sensitive_qr(operator))
             # Тот же профиль с другим id — закрыто; поимённый вне отделов раздела
             # или админ без отдела под рукой — тоже: правила ТЗ никто не отменял.
             for who in (ctx('operator', user_id=57), ctx('operator', user_id=56, department_id=4),

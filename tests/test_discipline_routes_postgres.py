@@ -3,7 +3,7 @@
 хранилище файлов подменено словарём. DISCIPLINE_TEST_PORT — порт кластера.
 
 Ловит то, чего не видят тесты сервиса: разбор формы и файлов, коды ответов,
-сериализацию дат и сумм в JSON, выгрузки xlsx и DOCX, QR-замок рядовых.
+сериализацию дат и сумм в JSON, выгрузки xlsx и DOCX, вход рядовых без QR.
 
     DISCIPLINE_TEST_PORT=55461 python -m pytest tests/test_discipline_routes_postgres.py
 """
@@ -78,7 +78,6 @@ def client(db):
 
     store = {}
     sent = []
-    granted = {'value': False}
 
     def resolve_requester():
         user_id = request.headers.get('X-User-Id')
@@ -90,14 +89,12 @@ def client(db):
     app.register_blueprint(build_discipline_blueprint(
         db=_Sqlite(db), require_api_key=lambda fn: fn,
         build_cors_preflight_response=lambda: ('', 204), resolve_requester=resolve_requester,
-        sensitive_access_granted=lambda _uid: granted['value'],
         send_telegram=lambda chat_id, text, **kw: sent.append((chat_id, text)),
         web_app_base_url='https://portal.example', gcs={'bucket_name': lambda: 'bucket',
                                                          'client': lambda: _Client(store)}))
     test_client = app.test_client()
     test_client.store = store
     test_client.sent = sent
-    test_client.granted = granted
     return test_client
 
 
@@ -126,13 +123,11 @@ def test_gates(client):
     assert client.get('/api/discipline/ping').status_code == 401
     response = client.get('/api/discipline/ping', headers=h(ADMIN))
     assert response.status_code == 403 and response.get_json()['code'] == 'DISCIPLINE_SECTION_CLOSED'
-    # Рядовой: ping без QR (только права и число своих записей), записи — после QR.
+    # Рядовой — без QR (владелец, 23.10.2026: «для операторов сделать доступ без qr»):
+    # права, число своих записей и сами записи отдаются сразу.
     payload = client.get('/api/discipline/ping', headers=h(OP_A)).get_json()
     assert payload['capabilities']['scope'] == 'own' and payload['own_total'] == 0
-    assert payload['qr_granted'] is False
-    response = client.get('/api/discipline/records', headers=h(OP_A))
-    assert response.status_code == 403 and response.get_json()['code'] == 'SENSITIVE_ACCESS_REQUIRED'
-    client.granted['value'] = True
+    assert 'qr_granted' not in payload and 'requires_qr' not in payload['capabilities']
     assert client.get('/api/discipline/records', headers=h(OP_A)).status_code == 200
     payload = client.get('/api/discipline/ping', headers=h(HEAD_SZOV)).get_json()
     assert payload['capabilities']['can_settings'] and payload['departments'][0]['id'] == SZOV
@@ -171,7 +166,6 @@ def test_full_flow(client, db):
     assert preview.headers['X-Content-Type-Options'] == 'nosniff'
 
     # Оператор загружает объяснительную сам — и видит только свои поля.
-    client.granted['value'] = True
     own = client.get('/api/discipline/records', headers=h(OP_A)).get_json()['items']
     assert {i['id'] for i in own} == {first, second} and 'description' not in own[0]
     response = client.post('/api/discipline/records/%d/explanation' % second, headers=h(OP_A),
@@ -361,7 +355,6 @@ def test_record_payload_brings_its_departments_dictionaries(client):
     assert item['measures'] and {m['department_id'] for m in item['measures']} == {SZOV}
     assert item['types'] and {t['department_id'] for t in item['types']} == {SZOV}
     # Оператору справочники не отдаются.
-    client.granted['value'] = True
     own = client.get('/api/discipline/records/%d' % rid, headers=h(OP_A)).get_json()
     assert 'measures' not in own and 'types' not in own
 
@@ -571,9 +564,7 @@ def test_explanation_blank_by_the_organization_template(client):
     created = Document(io.BytesIO(blank.data)).core_properties.created.replace(tzinfo=None)
     assert abs(created - datetime.now(timezone.utc).replace(tzinfo=None)) < timedelta(minutes=2)
 
-    # Оператор — свой бланк после QR; чужой человек и СВ чужой группы — нет.
-    assert client.get(url, headers=h(OP_A)).get_json()['code'] == 'SENSITIVE_ACCESS_REQUIRED'
-    client.granted['value'] = True
+    # Оператор — свой бланк; чужой человек и СВ чужой группы — нет.
     assert client.get(url, headers=h(OP_A)).status_code == 200
     assert client.get(url, headers=h(OP_B)).status_code == 403
     assert client.get(url, headers=h(SV_B)).status_code == 403
@@ -795,7 +786,7 @@ def test_act_draft_term_runs_to_the_end_of_a_linked_probation(client):
 
 def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):
     """Владелец, 23.10.2026: раздел открыт поимённо «как оператору», пока он закрыт
-    остальным. Поимённый входит по обычным правилам (за QR, только свои записи),
+    остальным. Поимённый входит по обычным правилам (только свои записи),
     колокол ему приходит, а его СВ и главе — по-прежнему ничего."""
     from discipline import access
     from notifications import sources
@@ -815,9 +806,7 @@ def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):
         total, rows = sources.discipline(cur, {'user_id': OP_A}, 10)
         assert total >= 1 and rows
         assert sources.discipline(cur, {'user_id': SV_A}, 10) == (0, [])
-    # Записи — за QR, как у всех операторов, и только свои.
-    assert client.get('/api/discipline/records', headers=h(OP_A)).get_json()['code'] == 'SENSITIVE_ACCESS_REQUIRED'
-    client.granted['value'] = True
+    # Записи — только свои.
     items = client.get('/api/discipline/records', headers=h(OP_A)).get_json()['items']
     assert [item['id'] for item in items] == [mine.get_json()['id']]
     assert client.get('/api/discipline/records/%d' % other.get_json()['id'], headers=h(OP_A)).status_code == 403
