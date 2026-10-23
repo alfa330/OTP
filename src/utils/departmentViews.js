@@ -136,8 +136,33 @@ const MARKETING_EMPLOYEE_VIEWS = [
 // (driver_mailings/access.py), потому что одно нажатие уходит тысяче водителей.
 // Сотрудник отдела, которого нет в именном списке, увидит пустой портал, а не
 // чужую рассылку. Строка отвечает на другой вопрос — что ЕЩЁ показать
-// сотруднику отдела помимо рассылок: ничего.
+// сотруднику отдела помимо рассылок: ничего. «Мои смены» двум сотрудницам
+// выданы поимённо — DEPARTMENT_PERSONAL_EXTRA_VIEWS ниже, а не здесь.
 const REQUEST_PROCESSING_EMPLOYEE_VIEWS = ['driver_mailings'];
+
+/* Разделы СВЕРХ карты отдела — поимённо. Решение владельца 23.10.2026 про двух
+   сотрудниц ООЗ: «открой доступ к разделам рассылки и к их графикам», «Мои
+   смены» — только им двоим. Остальным сотрудникам ООЗ карта по-прежнему
+   оставляет одни «Рассылки». Ключ — код отдела, внутри users.id; ФИО в
+   публичный репозиторий не кладём.
+
+   Добавка дописывается к набору отдела по роли и потому действует, пока
+   человек числится в этом отделе рядовым: у главы ООЗ, супервайзера и админа
+   набора нет вовсе (ключей 'head' и 'sv' в карте отдела нет). Переведут в
+   другой отдел — меню соберёт карта нового отдела, и раздел отсюда за
+   человеком не поедет.
+
+   Встаёт в ХВОСТ набора отдела: firstAllowedView берёт allow[0], и после
+   входа человек по-прежнему попадает в «Рассылки». Доступа добавка не
+   выдаёт — только пункт меню и место в гардах: свои смены сервер отдаёт
+   любому оператору (/api/work_schedules/my), а «Рассылки» открывает именной
+   список driver_mailings/access.py. */
+const DEPARTMENT_PERSONAL_EXTRA_VIEWS = {
+    request_processing_department: {
+        619: ['work_schedules'],
+        620: ['work_schedules'],
+    },
+};
 
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
@@ -661,7 +686,10 @@ const allowlistFor = (user) => {
     if (!deptCfg) return null;
     const role = isDepartmentHead(user) ? 'head' : normalizeRole(user?.role);
     const allow = deptCfg[role];
-    return Array.isArray(allow) ? allow : null;
+    if (!Array.isArray(allow)) return null;
+    // Поимённая добавка — в хвост набора отдела (DEPARTMENT_PERSONAL_EXTRA_VIEWS).
+    const extra = DEPARTMENT_PERSONAL_EXTRA_VIEWS[code]?.[Number(user?.id)];
+    return Array.isArray(extra) ? [...allow, ...extra] : allow;
 };
 
 export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(user));

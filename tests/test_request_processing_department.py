@@ -198,19 +198,24 @@ class RequestProcessingMenuTests(unittest.TestCase):
         self.assertNotIn("departmentAllowsView(user, 'driver_mailings')", menu)
 
     def test_employee_is_named_in_both_allowlists(self):
-        # 523 — сотрудник ООЗ из задачи #359. Списки обязаны совпадать В ОБЕ
+        # 523 — сотрудник ООЗ из задачи #359, 619 и 620 — сотрудницы ООЗ,
+        # допущенные владельцем 23.10.2026. Списки обязаны совпадать В ОБЕ
         # стороны: лишний id на фронте — пункт меню, ведущий в 403; лишний на
         # бэкенде — раздел, который открывается только прямым адресом.
         from driver_mailings import access
-        self.assertIn(523, access.SECTION_ALLOWED_USER_IDS)
         app = _read(APP_PATH)
         front = app.split("const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([", 1)[1].split("]", 1)[0]
         front_ids = {int(part) for part in front.split(",") if part.strip()}
         self.assertEqual(set(access.SECTION_ALLOWED_USER_IDS), front_ids)
+        for user_id in (523, 619, 620):
+            self.assertIn(user_id, access.SECTION_ALLOWED_USER_IDS)
+            self.assertTrue(access.can_view_section({'id': user_id, 'role': 'operator'}), user_id)
+            # Рядовой открывает раздел после QR, как и 523.
+            self.assertTrue(access.capabilities({'id': user_id, 'role': 'operator'})['requires_qr'], user_id)
         # Именной допуск не превращается в «весь отдел»: коллега по ООЗ без
         # своего id в список не попадает.
-        self.assertTrue(access.can_view_section({'id': 523, 'role': 'operator'}))
-        self.assertFalse(access.can_view_section({'id': 524, 'role': 'operator'}))
+        for user_id in (524, 618, 621):
+            self.assertFalse(access.can_view_section({'id': user_id, 'role': 'operator'}), user_id)
 
     def test_screen_is_rendered_outside_role_branches(self):
         app = _read(APP_PATH)

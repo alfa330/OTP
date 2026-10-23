@@ -40,7 +40,9 @@ from wiki.access import QR_GATED_ROLES
 # 523 — сотрудник ООЗ (роль operator), учётка заведена по задаче #359 от Даны
 # «с доступом только к разделу Рассылки»; другие разделы ему закрывает карта
 # отдела (DEPARTMENT_VIEW_ALLOWLIST в src/utils/departmentViews.js).
-SECTION_ALLOWED_USER_IDS = (476, 523)
+# 619, 620 — сотрудницы ООЗ (роль operator), допуск по слову владельца
+# 23.10.2026 вместе с «Моими сменами» (DEPARTMENT_PERSONAL_EXTRA_VIEWS там же).
+SECTION_ALLOWED_USER_IDS = (476, 523, 619, 620)
 
 
 def normalize_role(role) -> str:
