@@ -283,6 +283,16 @@ export default function MailingComposer({
         if (found) setGroupCategory(found.category);
     }, [filters.group, refs]);
     const groupOptions = (refs?.groups || []).filter((item) => item.category === groupCategory);
+    /* Чип «Группа» — только когда кабинет отдал хоть одну группу. Аккаунту
+       рассылок (ooz@) он на 22.10.2026 не отдаёт их ни в одной диспетчерской,
+       и подсчёт по любой группе даёт ноль даже в парке на двадцать тысяч
+       водителей (ответ сверен с фронтендом кабинета: поле и ключи прежние).
+       Открытый чип показывал «Категорию группы» с «Нет вариантов» — мёртвый
+       контрол. Сам кабинет в этом случае фильтр по группам не рисует вовсе;
+       так же у нас прячутся пустые справочники в «Фильтрах».
+       Уже выбранная группа (повтор из журнала, шаблон) держит чип на месте:
+       иначе снять её было бы нечем. */
+    const groupsAvailable = (refs?.groups || []).length > 0 || Boolean(filters.group);
 
     /* Города зависят от сегмента: кабинет отдаёт свой список на каждый. Поэтому
        чистим выбор при ЛЮБОЙ смене сегмента, а не только при уходе на сегмент
@@ -314,7 +324,7 @@ export default function MailingComposer({
 
     const CHIPS = [
         { id: 'segment', label: 'Сегмент' },
-        { id: 'group', label: 'Группа' },
+        ...(groupsAvailable ? [{ id: 'group', label: 'Группа' }] : []),
         { id: 'filters', label: 'Фильтры' },
     ];
 
@@ -506,7 +516,7 @@ export default function MailingComposer({
                         </div>
                     )}
 
-                    {openSections.has('group') && (
+                    {openSections.has('group') && groupsAvailable && (
                         <div className="grid gap-2.5 rounded-xl bg-slate-50 p-3 sm:grid-cols-2">
                             <div>
                                 {/* «Категория группы», а не просто «Категория»: рядом
