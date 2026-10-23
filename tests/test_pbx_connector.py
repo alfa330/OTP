@@ -13,7 +13,8 @@ AMI подменён, HTTP подменён. События — как у Asteri
   * неудачный Originate (телефон не ответил) даёт итог failed с человеческой причиной;
   * портал упал — изменения не теряются; переподключение AMI начинает состояние с чистого
     листа и шлёт полный снимок;
-  * клиент AMI: вход, ответ по ActionID, списковый ответ, обрыв отпускает ждущих.
+  * клиент AMI: вход, ответ по ActionID, списковый ответ, обрыв отпускает ждущих, закрытие
+    кончает сессию и на станции.
 """
 import json
 import os
@@ -170,6 +171,9 @@ def test_ami_drop_releases_waiters(monkeypatch):
     ami.connect()
     dropped = []
     ami.on_disconnect = dropped.append
+    # Станция рвёт соединение. Голый close() тут не годится: на Linux он не будит поток
+    # станции, стоящий в recv(), и соединение остаётся живым (так тест краснел в CI).
+    station.sock.shutdown(socket.SHUT_RDWR)
     station.sock.close()
     for _ in range(100):
         if dropped:
@@ -179,6 +183,24 @@ def test_ami_drop_releases_waiters(monkeypatch):
     assert dropped, 'обрыв должен быть доложен'
     with pytest.raises(ami_mod.AmiError):
         ami.action({'Action': 'Ping'})
+
+
+def test_ami_close_ends_session_at_station_and_reader(monkeypatch):
+    # Коннектор закрывает сессию, когда станция не ответила на Ping или не отдала список каналов,
+    # и следом открывает новую. Старая обязана кончиться и на станции, иначе её события идут в
+    # on_event рядом с событиями новой. Ловится на Linux (шлюз, CI): там голый close() не будит
+    # поток чтения, стоящий в recv().
+    ami, station, _events = connected_ami(monkeypatch)
+    ami.connect()
+    dropped = []
+    ami.on_disconnect = dropped.append
+    reader = ami._reader
+    ami.close()
+    reader.join(2)
+    station.join(2)
+    assert not reader.is_alive(), 'поток чтения закрытой сессии должен закончиться'
+    assert not station.is_alive(), 'станция должна увидеть конец сессии'
+    assert dropped == [], 'своё закрытие — не обрыв'
 
 
 # ── SSE канала команд ─────────────────────────────────────────────────────────

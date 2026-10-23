@@ -138,6 +138,13 @@ class Ami:
         self.connected = False
         sock, self.sock = self.sock, None
         if sock is not None:
+            # Сначала shutdown. На Linux (шлюз) голый close() не будит поток чтения, стоящий в
+            # recv(): соединение живёт, станция шлёт события в брошенную сессию, а поток чтения
+            # отдаёт их в on_event рядом с новой сессией. shutdown() рвёт соединение сразу.
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 sock.close()
             except OSError:
