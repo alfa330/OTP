@@ -1,19 +1,23 @@
-"""Scalable, fail-closed hybrid retrieval over immutable policy-rule versions.
+"""Scalable, fail-closed semantic retrieval over immutable policy-rule versions.
 
 The compatibility mutation functions at the bottom still support legacy
 ``qa_adjudications`` during a rolling deployment.  New evaluation code uses one
 set-based SQL statement for all criteria and transcript chunks, a real relevance
-gate, stable criterion IDs, and a structured trace.  Provider/DB failures never
-fall back to arbitrary recent rows.
+gate, stable criterion IDs, and a structured trace.  Rules are ordered by
+meaning; word overlap only rescues a rule just below the gate.  Rules made from
+the evaluated conversation itself are always included.  Provider/DB failures
+never fall back to arbitrary recent rows.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
 from .. import config
 from ..embeddings.provider import get_provider
+from . import similar as similar_mod
 
 
 class AdjudicationEmbeddingUnavailable(RuntimeError):
@@ -339,17 +343,9 @@ def _lexical_query(text: str, *, limit: int = 72) -> str:
     return " | ".join("'" + item.replace("'", "''") + "'" for item in selected)
 
 
-_BATCH_RETRIEVAL_SQL = """
-WITH criteria_input AS (
-    SELECT criterion_id, criterion_idx
-      FROM jsonb_to_recordset(%s::jsonb)
-           AS x(criterion_id text, criterion_idx integer)
-),
-query_vectors AS (
-    SELECT (ordinality - 1)::integer AS chunk_idx, raw_vector::vector AS embedding
-      FROM unnest(%s::text[]) WITH ORDINALITY AS q(raw_vector, ordinality)
-),
-rules AS NOT MATERIALIZED (
+# Правила, по которым ищет оценка: снимок базы знаний прогона, а без снимка —
+# действующие. Один набор и для поиска по смыслу, и для правил самого разговора.
+_RULES_CTE = """rules AS NOT MATERIALIZED (
     SELECT rule_id,rule_version_id,source_type,legacy_adjudication_id,direction_id,
            criterion_id,criterion_idx,criterion_name,situation,excerpt,correct_verdict,
            reason,not_covered,rule_version,content_hash,embedding,
@@ -365,7 +361,28 @@ rules AS NOT MATERIALIZED (
            embedding_config_hash,search_document
       FROM qa_snapshot_policy_rules
      WHERE %s::bigint IS NOT NULL AND snapshot_id=%s::bigint
+)"""
+
+
+# Порядок правил — по смыслу (сходство векторов). Совпадение слов с разговором
+# остаётся в трассе и подтягивает правило чуть ниже порога (qualifies в
+# retrieve_for_criteria_batch), но обогнать более близкое по смыслу не может.
+# Раньше порядок был слиянием рангов «смысл + слова» (RRF): список по словам
+# разреженный, и ЛЮБОЕ совпавшее слово («такси», «клиент») ставило правило выше
+# самого близкого по смыслу. На проде так три разбора модератора по звонку 11457
+# (№1–2 по смыслу) не попали ни в одну из четырёх переоценок (23.10.2026), а их
+# места заняли «клиент хотел вызвать такси» и «ссылка из ТикТока».
+_BATCH_RETRIEVAL_SQL = """
+WITH criteria_input AS (
+    SELECT criterion_id, criterion_idx
+      FROM jsonb_to_recordset(%s::jsonb)
+           AS x(criterion_id text, criterion_idx integer)
 ),
+query_vectors AS (
+    SELECT (ordinality - 1)::integer AS chunk_idx, raw_vector::vector AS embedding
+      FROM unnest(%s::text[]) WITH ORDINALITY AS q(raw_vector, ordinality)
+),
+""" + _RULES_CTE + """,
 dense_chunk_candidates AS (
     SELECT ci.criterion_id AS requested_criterion_id,
            ci.criterion_idx AS requested_criterion_idx,
@@ -409,65 +426,18 @@ lexical_ranked AS (
                         e.rule_id) AS lexical_rank
       FROM dense_best e
      WHERE %s <> '' AND e.search_document @@ to_tsquery('simple', %s)
-),
-fused AS (
-    SELECT d.*,
-           l.lexical_rank, l.lexical_score,
-           (1.0 / (60 + d.dense_rank))
-             + CASE WHEN l.lexical_rank IS NULL THEN 0
-                    ELSE 1.0 / (60 + l.lexical_rank) END AS fused_score
-      FROM dense_ranked d
-      LEFT JOIN lexical_ranked l
-        ON l.requested_criterion_id=d.requested_criterion_id AND l.rule_id=d.rule_id
-),
-ranked AS (
-    SELECT f.*, row_number() OVER (
-               PARTITION BY requested_criterion_id
-               ORDER BY fused_score DESC, similarity DESC, rule_id) AS final_rank
-      FROM fused f
 )
-SELECT requested_criterion_id,requested_criterion_idx,rule_id,rule_version_id,
-       source_type,legacy_adjudication_id,criterion_name,situation,excerpt,
-       correct_verdict,reason,not_covered,rule_version,content_hash,
-       chunk_idx,similarity,dense_rank,lexical_rank,lexical_score,fused_score,final_rank
-  FROM ranked
- WHERE final_rank <= %s
- ORDER BY requested_criterion_idx, final_rank
-"""
-
-
-_LEGACY_BATCH_RETRIEVAL_SQL = """
-WITH criteria_input AS (
-    SELECT criterion_id, criterion_idx
-      FROM jsonb_to_recordset(%s::jsonb)
-           AS x(criterion_id text, criterion_idx integer)
-),
-query_vectors AS (
-    SELECT (ordinality - 1)::integer AS chunk_idx, raw_vector::vector AS embedding
-      FROM unnest(%s::text[]) WITH ORDINALITY AS q(raw_vector, ordinality)
-),
-best AS (
-    SELECT ci.criterion_id,ci.criterion_idx,a.id,a.criterion_name,a.situation,a.excerpt,
-           a.correct_verdict,a.reason,a.not_covered,coalesce(a.rule_version,1),
-           a.content_hash::text,q.chunk_idx,
-           1-(a.embedding <=> q.embedding) AS similarity,
-           row_number() OVER (PARTITION BY ci.criterion_id,a.id
-                              ORDER BY a.embedding <=> q.embedding) AS chunk_rank
-      FROM criteria_input ci
-      JOIN qa_adjudications a ON a.direction_id=%s AND a.is_active
-       AND (a.criterion_id=ci.criterion_id OR
-            (a.criterion_id IS NULL AND a.criterion_idx=ci.criterion_idx))
-      CROSS JOIN query_vectors q
-     WHERE a.embedding IS NOT NULL
-), ranked AS (
-    SELECT *,row_number() OVER (PARTITION BY criterion_id ORDER BY similarity DESC,id) AS final_rank
-      FROM best WHERE chunk_rank=1
-)
-SELECT criterion_id,criterion_idx,('legacy:'||id),('legacy:'||id||':v'||coalesce),
-       'legacy',id,criterion_name,situation,excerpt,correct_verdict,reason,not_covered,
-       coalesce,content_hash,chunk_idx,similarity,final_rank,NULL,NULL,
-       (1.0/(60+final_rank)),final_rank
-  FROM ranked WHERE final_rank<=%s ORDER BY criterion_idx,final_rank
+SELECT d.requested_criterion_id,d.requested_criterion_idx,d.rule_id,d.rule_version_id,
+       d.source_type,d.legacy_adjudication_id,d.criterion_name,d.situation,d.excerpt,
+       d.correct_verdict,d.reason,d.not_covered,d.rule_version,d.content_hash,
+       d.chunk_idx,d.similarity,d.dense_rank,l.lexical_rank,l.lexical_score,
+       d.dense_rank AS final_rank,pv.created_at AS version_created_at
+  FROM dense_ranked d
+  LEFT JOIN lexical_ranked l
+    ON l.requested_criterion_id=d.requested_criterion_id AND l.rule_id=d.rule_id
+  LEFT JOIN qa_policy_rule_versions pv ON pv.id=d.rule_version_id::bigint
+ WHERE d.dense_rank <= %s
+ ORDER BY d.requested_criterion_idx, d.dense_rank
 """
 
 
@@ -476,7 +446,53 @@ _BATCH_COLUMNS = (
     "legacy_adjudication_id", "criterion_name", "situation", "excerpt",
     "correct_verdict", "reason", "not_covered", "rule_version", "content_hash",
     "best_chunk_idx", "similarity", "dense_rank", "lexical_rank", "lexical_score",
-    "fused_score", "rank",
+    "rank", "created_at",
+)
+
+
+# Правила, сделанные из САМОГО оцениваемого разговора (источник версии — разбор
+# этого субъекта), идут в промпт всегда и сверх тройки по смыслу. Переоценка после
+# разбора — это проверка модератора «учёл ли ИИ мой разбор», и правило именно этого
+# разговора не должно проигрывать соседям по критерию. Новые сверху: повторный
+# разбор того же разговора правит прежнее правило, а не плодит копию (api).
+_OWN_RULES_SQL = """
+WITH criteria_input AS (
+    SELECT criterion_id, criterion_idx
+      FROM jsonb_to_recordset(%s::jsonb)
+           AS x(criterion_id text, criterion_idx integer)
+),
+query_vectors AS (
+    SELECT raw_vector::vector AS embedding
+      FROM unnest(%s::text[]) AS q(raw_vector)
+),
+own_versions AS (
+    SELECT pv.id, pv.created_at
+      FROM qa_adjudication_cases c
+      JOIN qa_policy_rule_versions pv ON pv.source_case_id=c.id
+     WHERE c.subject_kind=%s AND c.call_id=%s
+),
+""" + _RULES_CTE + """
+SELECT ci.criterion_id,ci.criterion_idx,r.rule_id,r.rule_version_id,r.source_type,
+       r.legacy_adjudication_id,r.criterion_name,r.situation,r.excerpt,r.correct_verdict,
+       r.reason,r.not_covered,r.rule_version,r.content_hash,
+       (SELECT max(1 - (r.embedding <=> q.embedding)) FROM query_vectors q) AS similarity,
+       o.created_at
+  FROM rules r
+  JOIN own_versions o ON o.id=r.rule_version_id::bigint
+  JOIN criteria_input ci ON ci.criterion_id=r.criterion_id
+ WHERE r.direction_id=%s
+   AND r.index_status='ready' AND r.embedding IS NOT NULL
+   AND r.embedding_provider=%s AND r.embedding_model=%s
+   AND r.embedding_dim=%s AND r.embedding_config_hash=%s
+ ORDER BY ci.criterion_idx, o.created_at DESC, r.rule_id
+"""
+
+
+_OWN_COLUMNS = (
+    "criterion_id", "criterion_idx", "rule_id", "rule_version_id", "source_type",
+    "legacy_adjudication_id", "criterion_name", "situation", "excerpt",
+    "correct_verdict", "reason", "not_covered", "rule_version", "content_hash",
+    "similarity", "created_at",
 )
 
 
@@ -516,19 +532,76 @@ def _empty_batch_result(criteria: list[dict], *, status: str, query_batch: dict,
     }
 
 
+# Версия конвейера поиска. Входит в конфигурацию поиска (трасса, api._retrieval_config)
+# и в отпечаток оценки (fingerprint.RETRIEVAL_PIPELINE_VERSION): другой порядок
+# правил — другой промпт, и прежний кэш оценок не должен выдаваться за новый.
+PIPELINE_VERSION = "semantic-own-v3"
+
+
+def _float_or_none(value):
+    return float(value) if value is not None else None
+
+
+def _iso_or_none(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _same_rule(left: dict, right: dict) -> bool:
+    """Копия правила: тот же вердикт и та же формулировка (similar.same_wording —
+    те же слова, та же сила «должен/не обязан», те же числа). Копии одного разбора
+    не занимают несколько мест из тройки по смыслу."""
+    return (str(left.get("correct_verdict")) == str(right.get("correct_verdict"))
+            and similar_mod.same_wording(left.get("reason"), right.get("reason")))
+
+
+def _candidate(item: dict, criterion_idx: int, *, included: bool, reject_reason,
+               own_rule: bool = False) -> dict:
+    return {
+        **item,
+        "criterion_idx": int(criterion_idx),
+        "similarity": _float_or_none(item.get("similarity")),
+        "lexical_score": _float_or_none(item.get("lexical_score")),
+        # Трасса уходит в jsonb прогона и в манифест пакета — только JSON-типы.
+        "created_at": _iso_or_none(item.get("created_at")),
+        "own_rule": own_rule,
+        "included": included, "reject_reason": reject_reason,
+    }
+
+
+def _hit(candidate: dict) -> dict:
+    return {
+        "id": (candidate["legacy_adjudication_id"] if candidate["source_type"] == "legacy"
+               else candidate["rule_id"]),
+        "rule_id": candidate["rule_id"], "rule_version_id": candidate["rule_version_id"],
+        "source_type": candidate["source_type"], "criterion_name": candidate["criterion_name"],
+        "situation": candidate["situation"], "excerpt": candidate["excerpt"],
+        "correct_verdict": candidate["correct_verdict"], "reason": candidate["reason"],
+        "not_covered": candidate["not_covered"], "sim": candidate["similarity"],
+        "similarity": candidate["similarity"], "rank": int(candidate["rank"]),
+        "content_hash": candidate["content_hash"], "rule_version": candidate["rule_version"],
+        "created_at": candidate["created_at"], "own_rule": candidate["own_rule"],
+    }
+
+
 def retrieve_for_criteria_batch(*, direction_id: int, criteria: list[dict],
                                 query_batch: dict, k: int | None = None,
                                 min_similarity: float | None = None,
                                 knowledge_snapshot_id: int | None = None,
-                                query_text: str | None = None) -> dict:
-    """Retrieve all criteria/chunks with one SQL round trip and return an audit trace."""
+                                query_text: str | None = None,
+                                subject_kind: str | None = None,
+                                subject_id: int | None = None) -> dict:
+    """Правила по всем критериям оценки и трасса для аудита.
+
+    На критерий — до top_k правил, самых близких к разговору по смыслу, без копий
+    друг друга. subject_kind/subject_id — оцениваемый разговор: правила, сделанные
+    из его же разборов (_OWN_RULES_SQL), идут в промпт всегда, сверх top_k."""
     started = time.perf_counter()
     criteria = [item for item in (criteria or []) if item.get("criterion_id") and item.get("idx") is not None]
     top_k = max(1, int(k or config.RETRIEVAL_TOP_K))
     threshold = float(config.RETRIEVAL_MIN_SIMILARITY if min_similarity is None else min_similarity)
     candidate_limit = max(top_k, top_k * max(1, int(config.RETRIEVAL_CANDIDATE_MULTIPLIER)))
     cfg = {
-        "pipeline": "hybrid-set-v2", "top_k": top_k,
+        "pipeline": PIPELINE_VERSION, "top_k": top_k,
         "min_similarity": threshold,
         "candidate_multiplier": int(config.RETRIEVAL_CANDIDATE_MULTIPLIER),
         "lexical_min_score": float(getattr(config, "RETRIEVAL_LEXICAL_MIN_SCORE", 0.05)),
@@ -555,31 +628,44 @@ def retrieve_for_criteria_batch(*, direction_id: int, criteria: list[dict],
         return _empty_batch_result(criteria, status="degraded", query_batch=query_batch,
                                    config_payload=cfg, error="query embedding dimension mismatch")
 
-    criterion_payload = [{"criterion_id": str(item["criterion_id"]),
-                          "criterion_idx": int(item["idx"])} for item in criteria]
+    criterion_json = json.dumps([{"criterion_id": str(item["criterion_id"]),
+                                  "criterion_idx": int(item["idx"])} for item in criteria],
+                                ensure_ascii=False)
     vector_payload = [_vec(vector) for vector in vectors]
+    contract = (provider["provider"], provider["model"], int(provider["dim"]),
+                provider["config_hash"])
     lexical = _lexical_query(query_text or "")
     sql_queries = 0
-    rows = []
+    rows, own_rows, errors = [], [], []
     error = None
     try:
+        # A partial schema must fail closed: falling back to legacy ``is_active``
+        # rows would bypass evidence quarantine and the exact provider contract.
         conn = config.connect_ro(); cur = conn.cursor()
         try:
             sql_queries += 1
             cur.execute(
                 _batch_sql_for_dim(int(provider["dim"])),
-                (json.dumps(criterion_payload, ensure_ascii=False), vector_payload,
+                (criterion_json, vector_payload,
                  knowledge_snapshot_id, knowledge_snapshot_id, knowledge_snapshot_id,
-                 int(direction_id), provider["provider"], provider["model"], int(provider["dim"]),
-                 provider["config_hash"], candidate_limit,
+                 int(direction_id), *contract, candidate_limit,
                  lexical, lexical, lexical, lexical, candidate_limit),
             )
             rows = cur.fetchall()
-        except Exception as exc:
-            # A partial schema must fail closed.  Falling back to legacy
-            # ``is_active`` rows would bypass evidence quarantine and the exact
-            # provider/model/config contract.
-            raise
+            if subject_kind and subject_id is not None:
+                sql_queries += 1
+                try:
+                    cur.execute(_OWN_RULES_SQL, (
+                        criterion_json, vector_payload, str(subject_kind), int(subject_id),
+                        knowledge_snapshot_id, knowledge_snapshot_id, knowledge_snapshot_id,
+                        int(direction_id), *contract))
+                    own_rows = cur.fetchall()
+                except Exception as exc:
+                    # Правила разговора — добавка к поиску: её сбой не оставляет
+                    # оценку без базы разборов, но виден в трассе и в логе.
+                    logging.exception("ai-qa: правила разговора %s %s не прочитаны",
+                                      subject_kind, subject_id)
+                    errors.append(f"own rules: {type(exc).__name__}: {str(exc)[:300]}")
         finally:
             cur.close(); conn.close()
     except Exception as exc:
@@ -593,49 +679,69 @@ def retrieve_for_criteria_batch(*, direction_id: int, criteria: list[dict],
         result["trace"]["query"]["sql_queries"] = sql_queries
         return result
 
-    by_id = {str(item["criterion_id"]): item for item in criteria}
-    candidates = []
-    hits = {item["idx"]: [] for item in criteria}
-    selected_count = {}
-    lexical_min = float(getattr(config, "RETRIEVAL_LEXICAL_MIN_SCORE", 0.05))
-    lexical_margin = float(getattr(config, "RETRIEVAL_LEXICAL_DENSE_MARGIN", 0.08))
+    known = {str(item["criterion_id"]) for item in criteria}
+    found_by_criterion, own_by_criterion = {}, {}
     for raw in rows:
         item = dict(zip(_BATCH_COLUMNS, raw))
-        criterion = by_id.get(str(item["criterion_id"]))
-        if not criterion:
-            continue
-        similarity = float(item["similarity"]) if item["similarity"] is not None else None
-        lexical_score = float(item["lexical_score"]) if item["lexical_score"] is not None else None
-        qualifies = similarity is not None and similarity >= threshold
-        if (not qualifies and similarity is not None and lexical_score is not None
-                and lexical_score >= lexical_min and similarity >= threshold - lexical_margin):
-            qualifies = True
-        used = selected_count.get(item["criterion_id"], 0)
-        included = qualifies and used < top_k
-        if included:
-            selected_count[item["criterion_id"]] = used + 1
-        reject_reason = None if included else ("top_k_exceeded" if qualifies else "below_threshold")
-        candidate = {
-            **item,
-            "criterion_idx": int(criterion["idx"]),
-            "similarity": similarity,
-            "lexical_score": lexical_score,
-            "fused_score": float(item["fused_score"]) if item["fused_score"] is not None else None,
-            "included": included, "reject_reason": reject_reason,
-        }
-        candidates.append(candidate)
-        if included:
-            hit = {
-                "id": item["legacy_adjudication_id"] if item["source_type"] == "legacy" else item["rule_id"],
-                "rule_id": item["rule_id"], "rule_version_id": item["rule_version_id"],
-                "source_type": item["source_type"], "criterion_name": item["criterion_name"],
-                "situation": item["situation"], "excerpt": item["excerpt"],
-                "correct_verdict": item["correct_verdict"], "reason": item["reason"],
-                "not_covered": item["not_covered"], "sim": similarity,
-                "similarity": similarity, "rank": int(item["rank"]),
-                "content_hash": item["content_hash"], "rule_version": item["rule_version"],
-            }
-            hits[int(criterion["idx"])].append(hit)
+        if str(item["criterion_id"]) in known:
+            found_by_criterion.setdefault(str(item["criterion_id"]), []).append(item)
+    for raw in own_rows:
+        item = dict(zip(_OWN_COLUMNS, raw))
+        if str(item["criterion_id"]) in known:
+            own_by_criterion.setdefault(str(item["criterion_id"]), {}).setdefault(
+                str(item["rule_id"]), item)
+
+    candidates = []
+    hits = {item["idx"]: [] for item in criteria}
+    lexical_min = float(getattr(config, "RETRIEVAL_LEXICAL_MIN_SCORE", 0.05))
+    lexical_margin = float(getattr(config, "RETRIEVAL_LEXICAL_DENSE_MARGIN", 0.08))
+    for criterion in criteria:
+        criterion_id, idx = str(criterion["criterion_id"]), int(criterion["idx"])
+        found = found_by_criterion.get(criterion_id, [])
+        own = own_by_criterion.get(criterion_id, {})
+        found_by_rule = {str(item["rule_id"]): item for item in found}
+        next_rank = max((int(item["rank"]) for item in found), default=0)
+        chosen = []
+        for rule_id, own_item in own.items():
+            item = found_by_rule.get(rule_id)
+            if item is None:
+                # Правило разговора дальше окна поиска по смыслу: ранг — за окном.
+                next_rank += 1
+                item = {**own_item, "best_chunk_idx": None, "dense_rank": None,
+                        "lexical_rank": None, "lexical_score": None, "rank": next_rank}
+            # Новые сверху: из копий одного разбора остаётся последняя.
+            duplicate = any(_same_rule(item, other) for other in chosen)
+            candidate = _candidate(item, idx, included=not duplicate,
+                                   reject_reason="duplicate_rule" if duplicate else None,
+                                   own_rule=True)
+            candidates.append(candidate)
+            if not duplicate:
+                chosen.append(candidate)
+        used = 0
+        for item in found:
+            if str(item["rule_id"]) in own:
+                continue
+            similarity = _float_or_none(item["similarity"])
+            lexical_score = _float_or_none(item["lexical_score"])
+            qualifies = similarity is not None and similarity >= threshold
+            if (not qualifies and similarity is not None and lexical_score is not None
+                    and lexical_score >= lexical_min and similarity >= threshold - lexical_margin):
+                qualifies = True
+            if not qualifies:
+                reject_reason = "below_threshold"
+            elif any(_same_rule(item, other) for other in chosen):
+                reject_reason = "duplicate_rule"
+            elif used >= top_k:
+                reject_reason = "top_k_exceeded"
+            else:
+                reject_reason = None
+            candidate = _candidate(item, idx, included=reject_reason is None,
+                                   reject_reason=reject_reason)
+            candidates.append(candidate)
+            if reject_reason is None:
+                used += 1
+                chosen.append(candidate)
+        hits[idx] = [_hit(candidate) for candidate in chosen]
     status = "ok" if any(hits.values()) else "no_match"
     trace = {
         "status": status, "config": cfg, "embedding": provider,
@@ -646,7 +752,7 @@ def retrieve_for_criteria_batch(*, direction_id: int, criteria: list[dict],
         "criteria": [{"criterion_id": item["criterion_id"], "criterion_idx": item["idx"],
                       "retrieved_count": sum(1 for c in candidates if c["criterion_id"] == item["criterion_id"]),
                       "included_count": len(hits[item["idx"]])} for item in criteria],
-        "candidates": candidates, "errors": [], "latency_ms": elapsed_ms,
+        "candidates": candidates, "errors": errors, "latency_ms": elapsed_ms,
     }
     return {"status": status, "hits_by_criterion": hits, "trace": trace}
 

@@ -61,12 +61,13 @@ class RetrievalTests(unittest.TestCase):
     def test_batch_retrieval_is_one_set_based_query_with_threshold(self):
         rule_id = "24f8ad15-888b-4ee0-8f91-5ebd3b301b31"
         rows = [
+            # ..., similarity, dense_rank, lexical_rank, lexical_score, rank, created_at
             ("c1", 0, rule_id, "11", "canonical", None, "Greeting", "late greeting",
              "hello", "Correct", "allowed after name check", None, 2, "a" * 64,
-             1, .82, 1, 1, .12, .032, 1),
+             1, .82, 1, 1, .12, 1, None),
             ("c1", 0, "55d67ad5-61d1-4efe-90a9-2cfc0d6dce08", "12", "canonical", None,
              "Greeting", "unrelated", "bye", "Incorrect", "different case", None, 1,
-             "b" * 64, 0, .31, 2, None, None, .016, 2),
+             "b" * 64, 0, .31, 2, None, None, 2, None),
         ]
         conn = _Connection(rows)
         query_batch = {"status": "ok", "vectors": [[.1, .2]],

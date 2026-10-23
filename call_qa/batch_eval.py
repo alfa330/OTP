@@ -776,6 +776,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             prepared = evaluator.prepare_rag_context(
                 info["direction"], info["t_crits"], rec["asm"]["text"],
                 use_rag=True, knowledge_snapshot_id=snapshot["id"],
+                subject_kind=subject_kind, subject_id=call["id"],
             )
             body = evaluator.build_eval_body(
                 rec["asm"]["text"], info["direction"], info["t_crits"],
@@ -976,6 +977,7 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         use_rag=True, knowledge_snapshot_id=snapshot["id"],
                         prepared_rag=entry["prepared_rag"], primary_result=parsed,
                         primary_llm_meta=primary_meta, subject_kind=subject_kind,
+                        subject_id=cid,
                         # Манифест мог быть создан прежней версией — там ключа
                         # ещё нет; тогда считаем отдел по направлению прогона.
                         department=entry.get("department") or _direction_department_code(

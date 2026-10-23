@@ -753,6 +753,10 @@ export default function CallQaView(props) {
         if (!apiBaseUrl || !callData) return null;
         try {
             const r = await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate/refine`, {
+                // Разговор и прогон: сервер берёт из прогона сам текст разговора,
+                // и правило описывает то, что в нём было.
+                call_id: callData.id, subject_kind: callData.subject_kind || 'call',
+                evaluation_run_id: callData._evaluation_run_id || null,
                 direction_id: callData.direction_id, criterion_idx: c.idx, criterion_name: c.name,
                 ai_verdict: c.ai, ai_comment: c.comment || '', correct_verdict: d.verdict,
                 reason: d.reason || '',

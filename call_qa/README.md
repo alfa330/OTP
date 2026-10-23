@@ -135,7 +135,7 @@ source fingerprint ──► Soniox ASR ──► immutable ai_transcript_cache
        scale revision + knowledge snapshot                  exact cached run
                  │                                                      │
                  ▼                                                      ▼
-   query chunks ──► embedding ──► hybrid retrieval ──► Claude ──► evaluation run
+   query chunks ──► embedding ──► semantic retrieval ──► Claude ──► evaluation run
                                       │                         │
                                       ▼                         ▼
                               retrieval run/hits          review interface
@@ -154,7 +154,7 @@ source fingerprint ──► Soniox ASR ──► immutable ai_transcript_cache
 - `evaluation/fingerprint.py` — канонические content hashes и полный fingerprint оценки.
 - `evaluation/runtime_store.py` — immutable-кэш транскриптов и оценок, блокировка параллельной обработки, запись LLM/retrieval-метрик.
 - `rag/knowledge.py` — ревизии шкалы, snapshot базы знаний, доказательные кейсы и lifecycle правил.
-- `rag/store.py` — chunking, query embeddings и set-based hybrid retrieval.
+- `rag/store.py` — chunking, query embeddings и set-based semantic retrieval.
 - `evaluation/evaluator.py` — один retrieval на оценку и повторное использование одного RAG-контекста во всех LLM-проходах.
 - `evaluation/benchmark.py` — парные RAG-off/on метрики, retrieval-метрики, temporal split и quality gates.
 - `rag/schema.sql` — идемпотентная production-схема PostgreSQL/pgvector.
@@ -231,15 +231,16 @@ source fingerprint ──► Soniox ASR ──► immutable ai_transcript_cache
 
 Immutable-таблицы защищены триггерами от `UPDATE`/`DELETE`. Изменения правил записываются как новые версии и события.
 
-## Hybrid retrieval
+## Retrieval
 
 Production retrieval выполняется так:
 
 1. Транскрипт разбивается на перекрывающиеся окна. Если звонок очень длинный, окна выбираются равномерно по всей записи, включая середину, а не только начало и конец.
 2. Все окна эмбеддятся одним batch-вызовом с ролью `query`. Правила индексируются отдельно с ролью `document`; для E5 используются разные префиксы, для Vertex — разные `task_type`.
 3. Один set-based SQL-запрос обрабатывает все критерии и все query-векторы. Для каждого chunk/criterion HNSW сначала выбирает ограниченный ANN top-M, поэтому стоимость не растёт как полный `rules × chunks` scan.
-4. ANN-кандидаты уточняются по cosine similarity и сохранённому PostgreSQL `tsvector`; dense/lexical ранги объединяются через reciprocal-rank fusion.
-5. В промпт проходят не более `RETRIEVAL_TOP_K` правил на критерий и только после relevance gate. Lexical match может поддержать близкий dense-кандидат, но не обходит semantic threshold для нерелевантного правила.
+4. ANN-кандидаты уточняются по cosine similarity и упорядочиваются ПО СМЫСЛУ. Совпадение слов (PostgreSQL `tsvector`) остаётся в трассе и подтягивает правило чуть ниже порога, но обогнать более близкое по смыслу не может. До 23.10.2026 ранги объединялись reciprocal-rank fusion: список по словам разреженный, и любое совпавшее слово («такси», «клиент») ставило правило выше самого близкого по смыслу — разборы модератора не доходили до промпта.
+5. В промпт проходят не более `RETRIEVAL_TOP_K` правил на критерий и только после relevance gate; копии одного правила (тот же вердикт и та же формулировка, `similar.same_wording`) занимают одно место. Сверх них — всегда — правила, сделанные из разборов самого оцениваемого разговора (`subject_kind`/`subject_id`): переоценка после разбора показывает, как ИИ применил именно это правило. У каждого прецедента в промпте дата версии; при расхождении прецедентов действует более поздний.
+   Повторный разбор того же разговора тем же проверяющим по тому же критерию правит его прежнее правило (новая версия), а прежние попытки выводит из оценки — копии не копятся.
 6. Запрос ограничен выбранным direction, стабильным `criterion_id`, конкретным knowledge snapshot и точным контрактом `(embedding provider, model, dimension)`.
 
 Retrieval возвращает явный статус:
@@ -442,8 +443,8 @@ SELECT rule_status, index_status, count(*)
 - embedding provider/model/dimension;
 - безопасный chunk manifest с offsets;
 - число embedding/SQL запросов;
-- dense, lexical и fused ranks/scores;
-- выбранные и отклонённые кандидаты с причиной (`below_threshold`, `top_k_exceeded`);
+- dense и lexical ranks/scores (fused больше не считается);
+- выбранные и отклонённые кандидаты с причиной (`below_threshold`, `top_k_exceeded`, `duplicate_rule`) и отметкой `own_rule` у правил самого разговора;
 - `ok`/`no_match`/`degraded` и диагностическую ошибку.
 
 Raw query/transcript не дублируется в retrieval trace: там хранится hash и manifest, а авторитетный текст остаётся в `ai_transcript_cache`.

@@ -109,6 +109,21 @@ test('save toast reports what was actually switched on, not a blanket promise', 
     assert.equal(held, 'Исправлений: 1 сохранено · ждёт включения в «Базе разборов»: 1');
 });
 
+test('a copy of a rule the model already got is explained as a copy, not as below threshold', () => {
+    // Поиск склеивает копии одного разбора (тот же вердикт и та же формулировка).
+    assert.equal(runNote(rule({ run: { code: 'duplicate', similarity: 0.79, threshold: 0.68 } })).text,
+        'Не попало: ИИ уже получил такое же правило');
+});
+
+test('repeat review of the same conversation reports the rule as updated, not as a new one', () => {
+    const text = adjudicationSummary(1, { activated: 1, rag_mode: 'active',
+        rules: [{ status: 'active', ready: true, revised: true }] });
+    assert.equal(text, 'Исправлений: 1 — ИИ учтёт их в следующих оценках · '
+        + 'прежнее правило по этому разговору обновлено: 1');
+    assert.doesNotMatch(adjudicationSummary(1, { activated: 1, rag_mode: 'active',
+        rules: [{ status: 'active', ready: true }] }), /обновлено/);
+});
+
 test('save toast does not promise evaluation when the direction runs without rules', () => {
     for (const mode of ['shadow', 'off']) {
         const text = adjudicationSummary(1, { activated: 1, rag_mode: mode });

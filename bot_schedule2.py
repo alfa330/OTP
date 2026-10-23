@@ -6707,7 +6707,9 @@ def api_ai_qa_adjudicate_refine():
     if err:
         return err
     try:
-        from call_qa.api import direction_in_scope, refine_adjudication
+        from call_qa import config as _qa_config
+        from call_qa.api import (call_in_scope, direction_in_scope, refine_adjudication,
+                                 run_transcript_text, subject_direction_id)
         body = request.get_json(force=True) or {}
         scope = _ai_qa_direction_scope(requester_id)
         # Уточнение формулирует ПРАВИЛО направления и тратит платные токены,
@@ -6716,7 +6718,19 @@ def api_ai_qa_adjudicate_refine():
         # не хватает.
         if (scope is not None and not direction_in_scope(body.get('direction_id'), scope)) or                 not _ai_qa_direction_department_allowed(requester_id, body.get('direction_id')):
             return jsonify({"error": "направление вне вашего доступа"}), 403
-        proposal = refine_adjudication(body)
+        # Правило пишется по самому разговору: его текст сервер берёт из прогона
+        # (клиенту не верим), сверив доступ к разговору, как у карточки.
+        transcript = None
+        if body.get('call_id') is not None and body.get('evaluation_run_id'):
+            subject = _ai_qa_subject_kind(body.get('subject_kind') or body.get('subject'),
+                                          default=_qa_config.SUBJECT_CALL)
+            call_id = int(body.get('call_id'))
+            if not call_in_scope(call_id, scope, subject) or \
+                    not _ai_qa_direction_department_allowed(
+                        requester_id, subject_direction_id(call_id, subject)):
+                return jsonify({"error": "субъект вне ваших направлений"}), 403
+            transcript = run_transcript_text(call_id, subject, body.get('evaluation_run_id'))
+        proposal = refine_adjudication(body, transcript=transcript)
         return jsonify({"status": "success", "proposal": proposal}), 200
     except Exception as error:
         logging.exception("ai-qa adjudicate refine failed")

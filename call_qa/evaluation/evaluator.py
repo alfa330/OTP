@@ -8,6 +8,7 @@ system_api проверяются провайдером данных (пока 
 from __future__ import annotations
 import os
 import json
+from datetime import datetime, timedelta, timezone
 
 from .. import config
 from .. import llm
@@ -190,6 +191,33 @@ def build_system(criteria: list[dict], subject_kind: str = config.SUBJECT_CALL,
     return f"{system}{separator}{_GUIDANCE_HEADER}\n{text}\n"
 
 
+# Заголовок блока разборов в сообщении оценщику. Правила копятся годами, и один
+# модератор со временем меняет решение по той же ситуации: на 23.10.2026 у критерия
+# «Информация по акциям» 52 её правила, 20 «ошибка» против 26 «не требовалось».
+# Дата у каждого прецедента и это указание дают модели правило выбора — действует
+# последнее решение человека. Блок — в сообщении, а не в системном промпте: prompt_hash
+# не меняется, а отпечаток оценки меняет версия конвейера поиска (store.PIPELINE_VERSION).
+_RAG_HEADER = ("РАЗБОРЫ (согласованные прецеденты; если прецеденты одного критерия "
+               "расходятся между собой — действует более поздний по дате):")
+
+# Даты прецедентов — по Алматы, как их видит модератор (UTC+5 круглый год).
+_ALMATY = timezone(timedelta(hours=5))
+
+
+def _rule_date(hit: dict) -> str:
+    """Дата версии правила «ДД.ММ.ГГГГ»; нет даты (старая трасса) — пусто."""
+    raw = hit.get("created_at")
+    if not raw:
+        return ""
+    try:
+        moment = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(_ALMATY).strftime("%d.%m.%Y")
+
+
 def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) -> tuple[str, dict]:
     """Render one frozen retrieval result globally and per criterion."""
     fallback = ("(retrieval недоступен; не применяй никакие правила из памяти)"
@@ -199,8 +227,10 @@ def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) ->
     for criterion in criteria:
         chunks = []
         for hit in hits_by_idx.get(criterion["idx"]) or []:
+            date = _rule_date(hit)
             chunk = (f"[критерий {criterion['idx']}; правило {hit.get('rule_id')}; "
-                     f"сходство {float(hit.get('similarity') or 0):.3f}]\n"
+                     f"сходство {float(hit.get('similarity') or 0):.3f}"
+                     + (f"; от {date}" if date else "") + "]\n"
                      f"ситуация применения: {hit.get('situation') or hit.get('excerpt') or '—'}")
             if hit.get("situation") and hit.get("excerpt"):
                 chunk += ("\n  исторический фрагмент источника (НЕ является доказательством "
@@ -215,12 +245,17 @@ def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) ->
 
 
 def _prepare_rag(direction_id: int, criteria: list[dict], transcript: str,
-                 *, knowledge_snapshot_id=None) -> tuple[str, dict, dict]:
-    """Retrieve once for the entire evaluation and build a safe prompt block."""
+                 *, knowledge_snapshot_id=None, subject_kind=None,
+                 subject_id=None) -> tuple[str, dict, dict]:
+    """Retrieve once for the entire evaluation and build a safe prompt block.
+
+    subject_kind/subject_id — оцениваемый разговор: правила из его же разборов
+    поиск отдаёт всегда (store._OWN_RULES_SQL)."""
     query_batch = store.embed_query_chunks(transcript, return_batch=True)
     retrieved = store.retrieve_for_criteria_batch(
         direction_id=direction_id, criteria=criteria, query_batch=query_batch,
         knowledge_snapshot_id=knowledge_snapshot_id, query_text=transcript,
+        subject_kind=subject_kind, subject_id=subject_id,
     )
     hits_by_idx = retrieved["hits_by_criterion"]
     used_ids = []
@@ -240,7 +275,8 @@ def _rag_block(direction_id: int, criteria: list[dict], transcript: str) -> str:
 
 
 def prepare_rag_context(direction: dict, criteria: list[dict], transcript: str, *,
-                        use_rag: bool = True, knowledge_snapshot_id=None) -> dict:
+                        use_rag: bool = True, knowledge_snapshot_id=None,
+                        subject_kind=None, subject_id=None) -> dict:
     """Freeze the retrieval result so online and Batch retries use one snapshot.
 
     The returned object is JSON-serialisable and can therefore be stored in a
@@ -252,6 +288,7 @@ def prepare_rag_context(direction: dict, criteria: list[dict], transcript: str, 
         rag_text, trace, hits_by_idx = _prepare_rag(
             direction["id"], criteria, transcript,
             knowledge_snapshot_id=knowledge_snapshot_id,
+            subject_kind=subject_kind, subject_id=subject_id,
         )
         matched = sorted(int(idx) for idx, hits in hits_by_idx.items() if hits)
         _, rag_text_by_criterion = _render_rag_context(
@@ -287,7 +324,7 @@ def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: 
 def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model,
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
                     subject_kind=config.SUBJECT_CALL, cache_ttl=None,
-                    department=None, call_end_party=None) -> dict:
+                    department=None, call_end_party=None, subject_id=None) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API).
 
     cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
@@ -299,7 +336,8 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     данные звонка, а системный промпт закреплён эталонным хэшем и кэшируется."""
     if use_rag and rag_text is None:
         rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
-                                     knowledge_snapshot_id=knowledge_snapshot_id)
+                                     knowledge_snapshot_id=knowledge_snapshot_id,
+                                     subject_kind=subject_kind, subject_id=subject_id)
         if retrieval_trace_out is not None:
             retrieval_trace_out.update(trace)
     else:
@@ -309,7 +347,7 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     # У переписки трубку не кладут; неизвестная сторона даёт '' — вход прежний.
     end = (call_end.prompt_block(call_end_party)
            if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
-    user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
+    user = (f"{_RAG_HEADER}\n{rag}\n\n"
             f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}\n\nОцени по всем перечисленным критериям.")
     # Указания направления — в системный блок, как и критерии: это правила шкалы, а не
     # данные звонка, и GLM кэширует системный блок сам. Тот же текст обязан получить
@@ -396,9 +434,12 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
              call_context=None, knowledge_snapshot_id=None, prepared_rag=None,
              primary_result=None, primary_llm_meta=None,
              subject_kind=config.SUBJECT_CALL, department=None,
-             call_end_party=None) -> dict:
+             call_end_party=None, subject_id=None) -> dict:
     """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
-    критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику."""
+    критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику.
+
+    subject_id — id оцениваемого разговора (вместе с subject_kind): правила из его же
+    разборов идут в промпт всегда."""
     cc.apply_to_direction(direction)
     crit_by_idx = {c["idx"]: c for c in direction["criteria"]}
     t_crits = [c for c in direction["criteria"] if c["eval_source"] == cc.TRANSCRIPT]
@@ -412,6 +453,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
         prepared_rag = prepare_rag_context(
             direction, t_crits, transcript, use_rag=True,
             knowledge_snapshot_id=knowledge_snapshot_id,
+            subject_kind=subject_kind, subject_id=subject_id,
         )
         rag_text = prepared_rag["rag_text"]
         retrieval_trace = prepared_rag["retrieval_trace"]

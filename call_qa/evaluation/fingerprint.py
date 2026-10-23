@@ -12,7 +12,10 @@ from typing import Any
 
 
 FINGERPRINT_VERSION = 2
-RETRIEVAL_PIPELINE_VERSION = "hybrid-set-v2"
+# То же значение, что rag.store.PIPELINE_VERSION (отсюда store не импортировать —
+# цикл через rag.similar; равенство сверяет тест). semantic-own-v3: правила по
+# смыслу, без копий, правила самого разговора — всегда, даты у прецедентов.
+RETRIEVAL_PIPELINE_VERSION = "semantic-own-v3"
 
 
 def canonical_json(value: Any) -> str:

@@ -60,6 +60,8 @@ export function runNote(item) {
         };
     case 'top_k':
         return { tone: 'text-slate-500', text: 'Не попало: по критерию ИИ получает три самых близких правила' };
+    case 'duplicate':
+        return { tone: 'text-slate-500', text: 'Не попало: ИИ уже получил такое же правило' };
     case 'not_retrieved':
         return { tone: 'text-slate-500', text: 'Не попало в поиск: другие правила критерия ближе к разговору' };
     case 'missing_from_snapshot':
@@ -118,6 +120,9 @@ function RuleRow({ item, linkTarget }) {
 export function adjudicationSummary(count, result) {
     const activated = Number(result?.activated || 0);
     const linked = Number(result?.linked || 0);
+    // Повторный разбор того же разговора правит прежнее правило проверяющего, а не
+    // добавляет копию рядом (call_qa/api.py · _revise_own_rule).
+    const revised = (result?.rules || []).filter((rule) => rule.revised).length;
     const auto = result?.auto_activation !== false;
     const pending = auto ? Number(result?.pending_index || 0) : 0;
     const drafts = (result?.rules || []).filter((rule) => rule.status === 'draft').length - pending;
@@ -131,6 +136,7 @@ export function adjudicationSummary(count, result) {
         parts.push(`Исправлений: ${count} сохранено`);
         if (activated) parts.push(`уже в оценке: ${activated}`);
     }
+    if (revised) parts.push(`прежнее правило по этому разговору обновлено: ${revised}`);
     if (linked) parts.push(`повтор правила, которое ИИ уже получал: ${linked}`);
     if (live && pending) parts.push(`включится после подготовки к поиску: ${pending}`);
     if (live && drafts > 0) parts.push(`ждёт включения в «Базе разборов»: ${drafts}`);

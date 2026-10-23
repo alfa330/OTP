@@ -306,13 +306,16 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
   included } }` — «такой разбор уже был?» (пороги в `call_qa/rag/similar.py`) и что ИИ
   получил по критерию в ЭТОЙ оценке (текст — из трассы прогона); `run.code`: `included`,
   `below_threshold` (порог — этого прогона, сходство округлено вниз), `top_k`,
+  `duplicate` (копия правила, которое ИИ в этой оценке уже получил),
   `not_retrieved` (в базе оценки было, но в окно поиска не вошло — другие правила ближе),
   `missing_from_snapshot` (действовало, но ни в один снимок ревизии шкалы этой оценки не
   попало — сбой публикации), `inactive_at_run` (тогда не действовало или опубликовано
   после того, как оценка взяла снимок), `rag_off`, `retrieval_failed`. Доступ сверяется
   по направлению прогона.
-- `POST /api/ai-qa/adjudicate/refine` ← `{ direction_id, criterion_idx, criterion_name,
+- `POST /api/ai-qa/adjudicate/refine` ← `{ call_id, subject_kind, evaluation_run_id,
+  direction_id, criterion_idx, criterion_name,
   ai_verdict, ai_comment, correct_verdict, reason, excerpt, excerpt_verified, evidence_status }`
+  (текст разговора сервер берёт из прогона — правило пишется по нему)
   → `{ proposal: { rule, situation, not_covered, note_to_reviewer } }` (подсказка; сохраняет человек).
 - `GET /api/ai-qa/stats` → метрики дашборда.
 - `GET/POST /api/ai-qa/criteria-config?direction_id=` ↔ `criterion_config`.

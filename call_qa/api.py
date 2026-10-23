@@ -27,8 +27,8 @@ from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
 from .evaluation import evaluator
 from .evaluation import runtime_store
-from .evaluation.fingerprint import (build_evaluation_fingerprint, content_hash,
-                                     transcript_fingerprint)
+from .evaluation.fingerprint import (RETRIEVAL_PIPELINE_VERSION, build_evaluation_fingerprint,
+                                     content_hash, transcript_fingerprint)
 from .review import queue as review_queue
 from .review.evidence import (EvidenceValidationError, VALID_VERDICTS,
                               locate_excerpt, validate_evidence)
@@ -1496,7 +1496,7 @@ def _retrieval_config(*, enabled: bool) -> dict:
     from .embeddings.provider import configured_contract
     embedding_contract = configured_contract()
     return {
-        "enabled": bool(enabled), "pipeline": "hybrid-set-v2",
+        "enabled": bool(enabled), "pipeline": RETRIEVAL_PIPELINE_VERSION,
         "embedding_provider": embedding_contract["provider"],
         "embedding_model": embedding_contract["model"],
         "embedding_dim": embedding_contract["dim"],
@@ -2758,7 +2758,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             asm["text"], direction, asr_low_spans=asm["low_conf_spans"],
             use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"],
             subject_kind=subject_kind, department=department_code,
-            call_end_party=fingerprint_components["call_end_party"])
+            call_end_party=fingerprint_components["call_end_party"], subject_id=call_id)
         completed_at = runtime_store.now_utc()
     except Exception as exc:
         completed_at = runtime_store.now_utc()
@@ -2911,7 +2911,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
             asm["text"], direction, asr_low_spans=asm.get("low_conf_spans") or [],
             use_rag=True, knowledge_snapshot_id=snapshot["id"],
             subject_kind=subject_kind, department=department,
-            call_end_party=components["call_end_party"])
+            call_end_party=components["call_end_party"], subject_id=call_id)
         completed = runtime_store.now_utc()
         shadow_payload = {
             "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,
@@ -4017,23 +4017,41 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                                  key=lambda t: str(t["rule_id"])):
                 if target["rule_id"] not in still_valid:
                     still_valid[target["rule_id"]] = _lock_link_target(conn, target)
+            # Свои прежние правила из этого же разговора по критерию: повторный
+            # разбор правит последнее, а не ложится копией рядом. Блокировка — до
+            # строки модели эмбеддингов, в том же порядке, что у цели привязки.
+            own_rules = [_own_review_rules(conn, subject_kind=subject_kind, call_id=int(call_id),
+                                           direction_id=authoritative_direction,
+                                           criterion_id=item["criterion_id"],
+                                           reviewer_id=reviewer_id)
+                         for item in validated]
             text_model_id = None
             if meaning_vectors and embedding_meta:
                 text_model_id = knowledge.ensure_embedding_model(
                     conn, provider=embedding_meta["provider"], model=embedding_meta["model"],
                     embedding_dim=embedding_meta["dim"])
+            republish = False
             for index, item in enumerate(validated):
                 start_ms, end_ms = _evidence_time_range(payload, item["excerpt"])
                 found = similar_found[index]
                 duplicate = targets[index]
                 if duplicate and not still_valid.get(duplicate["rule_id"]):
                     duplicate = None    # выключили или переписали, пока сохраняли
+                own = own_rules[index]
+                own_target = own[0] if own else None
+                same_as_own = own_target is not None and _same_rule_content(own_target, item)
+                if own_target is not None:
+                    duplicate = None
                 case_metadata = {"source": "ai_qa_review_v2",
                                  "similar": similar_mod.summary(found, target=duplicate)}
                 if duplicate:
                     # Разбор — повтор правила, которое ИИ получил и всё равно
                     # ошибся: оно ложится к правилу свидетельством этой ошибки.
                     case_metadata["duplicate_of_rule_id"] = duplicate["rule_id"]
+                elif same_as_own:
+                    case_metadata["duplicate_of_rule_id"] = own_target["rule_id"]
+                elif own_target is not None:
+                    case_metadata["revises_rule_id"] = own_target["rule_id"]
                 case_id = knowledge.create_adjudication_case(
                     conn, direction_id=authoritative_direction,
                     criterion_id=item["criterion_id"], criterion_idx=item["criterion_idx"],
@@ -4058,6 +4076,12 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                     existing_rule = cur.fetchone()
                 if existing_rule:
                     continue
+                if same_as_own:
+                    linked.append({"rule_id": own_target["rule_id"],
+                                   "criterion_id": item["criterion_id"],
+                                   "status": "linked", "ready": True, "score": 1.0})
+                    saved += 1
+                    continue
                 if duplicate:
                     linked.append({"rule_id": duplicate["rule_id"],
                                    "criterion_id": item["criterion_id"],
@@ -4065,19 +4089,35 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                                    "score": duplicate["score"]})
                     saved += 1
                     continue
-                rule = knowledge.create_draft_policy_rule(
-                    conn, case_id=case_id, direction_id=authoritative_direction,
-                    criterion_id=item["criterion_id"], criterion_idx=item["criterion_idx"],
-                    criterion_name=item["criterion_name"], situation=item.get("situation"),
-                    rule_text=item["reason"], correct_verdict=item["correct_verdict"],
-                    not_covered=item.get("not_covered"), excerpt=item["excerpt"] or None,
-                    verified_excerpt=item["excerpt_verified"],
-                    evidence_status=item["evidence_status"],
-                    evidence_start_offset=item["excerpt_start"],
-                    evidence_end_offset=item["excerpt_end"], created_by=reviewer_id,
-                    # auto_activate: правило без готового вектора включит в оценку
-                    # фоновая переиндексация, как только вектор посчитается.
-                    metadata={"source": "ai_qa_review_v2", "auto_activate": True})
+                rule = None
+                if own_target is not None:
+                    rule = _revise_own_rule(conn, own_target, item, actor_id=reviewer_id)
+                    if rule is not None:
+                        # Прежние попытки того же разговора выводятся из оценки: их
+                        # место заняла эта версия.
+                        for stale in own[1:]:
+                            knowledge.transition_policy_rule(
+                                conn, rule_id=stale["rule_id"], to_status="deprecated",
+                                actor_id=reviewer_id, reason=_OWN_RULE_REVISION_REASON,
+                                publish_snapshot=False)
+                        knowledge.release_auto_activation(
+                            conn, rule_ids=[stale["rule_id"] for stale in own[1:]])
+                        republish = republish or any(
+                            row["rule_status"] == "active" for row in own)
+                if rule is None:
+                    rule = knowledge.create_draft_policy_rule(
+                        conn, case_id=case_id, direction_id=authoritative_direction,
+                        criterion_id=item["criterion_id"], criterion_idx=item["criterion_idx"],
+                        criterion_name=item["criterion_name"], situation=item.get("situation"),
+                        rule_text=item["reason"], correct_verdict=item["correct_verdict"],
+                        not_covered=item.get("not_covered"), excerpt=item["excerpt"] or None,
+                        verified_excerpt=item["excerpt_verified"],
+                        evidence_status=item["evidence_status"],
+                        evidence_start_offset=item["excerpt_start"],
+                        evidence_end_offset=item["excerpt_end"], created_by=reviewer_id,
+                        # auto_activate: правило без готового вектора включит в оценку
+                        # фоновая переиндексация, как только вектор посчитается.
+                        metadata={"source": "ai_qa_review_v2", "auto_activate": True})
                 if embedding_error:
                     knowledge.mark_rule_index_error(
                         conn, rule_version_id=rule["rule_version_id"],
@@ -4105,8 +4145,15 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
                                                 exc_info=True)
                 created.append({"rule_id": rule["rule_id"],
                                 "criterion_id": item["criterion_id"],
-                                "ready": not embedding_error})
+                                "ready": not embedding_error,
+                                "revised": rule.get("rule_version", 1) > 1})
                 saved += 1
+            if republish:
+                # Действовавшие версии ушли в черновик или из оценки — снимок теряет
+                # их сразу, а новую версию включит _activate_review_rules ниже.
+                knowledge.publish_direction_snapshots(
+                    conn, direction_id=authoritative_direction, created_by=reviewer_id,
+                    reason=_OWN_RULE_REVISION_REASON)
     finally:
         conn.close()
 
@@ -4144,6 +4191,97 @@ def _save_adjudications_locked(call_id, direction_id, items, reviewer_id=None, *
             "rag_mode": rollout["mode"],
             "auto_activation": auto_activation,
             "rules": created + linked}
+
+
+_OWN_RULE_REVISION_REASON = "повторный разбор того же разговора"
+
+# Свои прежние правила проверяющего из ЭТОГО разговора по критерию, новые сверху.
+# Повторный разбор того же разговора правит последнее (новая версия правила), а
+# остальные выводит из оценки: на звонке 11457 три попытки модератора за 20 минут
+# легли тремя правилами, и копии теснили друг друга в тройке поиска (23.10.2026).
+# Правило, которое после него правил кто-то другой (администратор в «Базе
+# разборов»), не трогаем: тогда разбор ляжет новым правилом, как раньше.
+_OWN_REVIEW_RULES_SQL = """
+SELECT r.id::text, r.rule_status, r.current_version_id, v.situation, v.rule_text,
+       v.not_covered, v.correct_verdict, v.excerpt
+  FROM qa_policy_rules r
+  JOIN qa_policy_rule_versions v ON v.id = r.current_version_id
+  JOIN qa_adjudication_cases c ON c.id = v.source_case_id
+ WHERE c.subject_kind = %s AND c.call_id = %s AND c.created_by = %s
+   AND v.created_by = %s
+   AND r.direction_id = %s AND r.criterion_id = %s
+   AND r.rule_status IN ('active', 'draft')
+ ORDER BY r.created_at DESC, r.id
+   FOR UPDATE OF r
+"""
+
+_OWN_REVIEW_RULE_KEYS = ("rule_id", "rule_status", "version_id", "situation", "rule_text",
+                         "not_covered", "correct_verdict", "excerpt")
+
+
+def _own_review_rules(conn, *, subject_kind, call_id, direction_id, criterion_id,
+                      reviewer_id) -> list[dict]:
+    """Свои действующие правила проверяющего из разговора по критерию (под блокировкой)."""
+    if reviewer_id is None:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(_OWN_REVIEW_RULES_SQL, (
+            str(subject_kind), int(call_id), int(reviewer_id), int(reviewer_id),
+            int(direction_id), str(criterion_id)))
+        return [dict(zip(_OWN_REVIEW_RULE_KEYS, row)) for row in cur.fetchall()]
+
+
+def _rule_situation(item: dict) -> str:
+    """Ситуация правила из разбора — так же, как её достраивает create_draft_policy_rule."""
+    return str(item.get("situation") or item.get("excerpt") or item.get("reason") or "").strip()
+
+
+def _same_rule_content(rule: dict, item: dict) -> bool:
+    """Разбор повторяет правило слово в слово (пробелы не в счёт)."""
+    from .rag import similar as similar_mod
+    norm = similar_mod.meaning_text
+    return (norm(rule["rule_text"]) == norm(item["reason"])
+            and norm(rule["situation"]) == norm(_rule_situation(item))
+            and norm(rule["not_covered"]) == norm(item.get("not_covered"))
+            and str(rule["correct_verdict"]) == str(item["correct_verdict"])
+            and norm(rule["excerpt"]) == norm(item.get("excerpt")))
+
+
+def _revise_own_rule(conn, own: dict, item: dict, *, actor_id) -> dict | None:
+    """Новая версия своего правила из этого разговора; включится, как новое правило
+    разбора, когда будет вектор (отметка auto_activate). None — у правила уже была
+    версия с таким содержимым или его успели изменить: тогда разбор ляжет новым
+    правилом, как раньше."""
+    import psycopg2
+    from .rag import knowledge
+    changes = {
+        "situation": _rule_situation(item), "rule_text": item["reason"],
+        "not_covered": item.get("not_covered"), "correct_verdict": item["correct_verdict"],
+        "excerpt": item["excerpt"] or None, "verified_excerpt": item["excerpt_verified"],
+        "evidence_status": item["evidence_status"],
+        "evidence_start_offset": item["excerpt_start"],
+        "evidence_end_offset": item["excerpt_end"],
+    }
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT revise_own_rule")
+    try:
+        rule = knowledge.revise_policy_rule(
+            conn, rule_id=own["rule_id"], changes=changes, actor_id=actor_id,
+            reason=_OWN_RULE_REVISION_REASON, expected_version_id=own["version_id"],
+            publish_snapshot=False)
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE qa_policy_rules
+                              SET metadata = metadata || '{"auto_activate": true}'::jsonb
+                            WHERE id = %s""", (own["rule_id"],))
+            cur.execute("RELEASE SAVEPOINT revise_own_rule")
+        return rule
+    except (psycopg2.IntegrityError, knowledge.KnowledgeConflict,
+            knowledge.KnowledgeValidationError):
+        with conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT revise_own_rule")
+        logging.warning("ai-qa: правило %s не переписано повторным разбором — будет новым",
+                        own["rule_id"], exc_info=True)
+        return None
 
 
 def _prompt_rule_ids(trace, criterion_id) -> set[str]:
@@ -4313,7 +4451,8 @@ def _rule_run_state(rule_id, *, candidates, in_snapshot, rag_enabled,
     elif seen and seen.get("included"):
         code = "included"
     elif seen:
-        code = "top_k" if seen.get("reject_reason") == "top_k_exceeded" else "below_threshold"
+        code = {"top_k_exceeded": "top_k",
+                "duplicate_rule": "duplicate"}.get(seen.get("reject_reason"), "below_threshold")
     elif str(rule_id) in in_snapshot:
         code = "not_retrieved"
     elif ((status_at_run or {}).get(str(rule_id)) == "active"
@@ -5015,15 +5154,39 @@ def _kick_reindex_worker() -> None:
     _reindex_executor.submit(_drain_reindex_jobs)
 
 
-def refine_adjudication(body: dict) -> dict:
-    """ИИ-подсказка формулировки разбора (человек редактирует и сохраняет сам)."""
+def refine_adjudication(body: dict, *, transcript=None) -> dict:
+    """ИИ-подсказка формулировки разбора (человек редактирует и сохраняет сам).
+    transcript — текст разговора (run_transcript_text): правило пишется по нему."""
     from .rag import refine as rag_refine
     return rag_refine.refine_adjudication(
         direction_id=body["direction_id"], criterion_idx=body["criterion_idx"],
         criterion_name=body.get("criterion_name"),
         ai_verdict=body.get("ai_verdict"), ai_comment=body.get("ai_comment"),
         correct_verdict=body["correct_verdict"], reason=body.get("reason", ""),
-        excerpt=body.get("excerpt"))
+        excerpt=body.get("excerpt"), transcript=transcript)
+
+
+def run_transcript_text(call_id, subject_kind, evaluation_run_id) -> str | None:
+    """Текст разговора, который видела оценка (транскрипт прогона). Прогон должен
+    быть прогоном ЭТОГО разговора: id прогона приходит с клиента, и чужой текст
+    по нему не отдаём. Нет прогона или транскрипта — None."""
+    try:
+        run_id = str(uuid.UUID(str(evaluation_run_id)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT transcript_cache_id FROM ai_evaluation_runs
+                            WHERE id = %s AND call_id = %s AND subject_kind = %s""",
+                        (run_id, int(call_id), str(subject_kind)))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row or row[0] is None:
+        return None
+    record = runtime_store.get_transcript_by_id(int(row[0]))
+    return str(record["text"]) if record and record.get("text") else None
 
 
 def _pick_filters_predicate(filters, *, operator_col, day_expr, direction_expr):
