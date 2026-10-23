@@ -42,6 +42,7 @@ const NAMES = [
     'DISCIPLINE_ROLLOUT_USER_IDS',
     'canAccessDisciplineSectionForUser',
     'isDisciplineOperatorUser',
+    'isDisciplineMenuVisibleFor',
 ];
 
 const build = (flagOn) => {
@@ -50,7 +51,8 @@ const build = (flagOn) => {
     return new Function('deps', `
         const { isDepartmentHead, normalizeRole } = deps;
         ${code}
-        return { canAccessDisciplineSectionForUser, isDisciplineOperatorUser, DISCIPLINE_SUPER_ADMIN_ONLY };
+        return { canAccessDisciplineSectionForUser, isDisciplineOperatorUser, isDisciplineMenuVisibleFor,
+                 DISCIPLINE_SUPER_ADMIN_ONLY };
     `)({ isDepartmentHead, normalizeRole });
 };
 
@@ -87,4 +89,29 @@ test('флаг снят — поимённый список ничего не л
         assert.equal(canAccessDisciplineSectionForUser(user), visible, who);
         if (visible) assert.equal(isDisciplineOperatorUser(user), operatorView, who);
     }
+});
+
+test('пункт меню: поимённому — сразу, остальным операторам — когда есть записи', () => {
+    /* Владелец, 23.10.2026, скриншот меню поимённого оператора: «всё ещё не
+       выходит» — записей на нём не было, а пункт оператору показывался только
+       при записях. Поимённым выкладки он виден сразу; остальным — как раньше. */
+    const flagOn = build(true).isDisciplineMenuVisibleFor;
+    const named = { id: 56, role: 'operator', ...SZOV };
+    const other = { id: 57, role: 'operator', ...SZOV };
+    assert.equal(flagOn(named, 0), true);
+    assert.equal(flagOn(named, null), true);
+    assert.equal(flagOn(other, 5), false);
+    assert.equal(flagOn({ id: 1, role: 'super_admin' }, null), true);
+    assert.equal(flagOn({ id: 56, role: 'operator', department_id: 4, department_code: 'remote_cc' }, 0), false);
+    // Раздел открыт всем — поимённые как все операторы: пункт при записях.
+    const flagOff = build(false).isDisciplineMenuVisibleFor;
+    assert.equal(flagOff(named, 0), false);
+    assert.equal(flagOff(named, 2), true);
+    assert.equal(flagOff(other, 0), false);
+    assert.equal(flagOff(other, 1), true);
+    assert.equal(flagOff({ id: 300, role: 'sv', ...SZOV }, null), true);
+});
+
+test('компонент показывает пункт по той же функции', () => {
+    assert.ok(source.includes('const showDisciplineMenu = isDisciplineMenuVisibleFor(user, disciplineOwnTotal);'));
 });

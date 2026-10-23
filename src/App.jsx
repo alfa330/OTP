@@ -2717,6 +2717,14 @@ const isDisciplineOperatorUser = (userLike) => {
         && !(isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some((code) => DISCIPLINE_DEPARTMENT_CODES.includes(code)));
 };
 
+/* Пункт меню «Дисциплина». Оператору — когда у него есть записи (ownTotal из
+   /ping): пустой раздел у каждого оператора был бы шумом. Поимённым выкладки —
+   сразу, пока стоит флаг: раздел им открыли, чтобы посмотреть его и до первой
+   записи (владелец, 23.10.2026: «всё ещё не выходит» — записей на нём не было). */
+const isDisciplineMenuVisibleFor = (userLike, ownTotal) => canAccessDisciplineSectionForUser(userLike)
+    && (!isDisciplineOperatorUser(userLike) || ownTotal > 0
+        || (DISCIPLINE_SUPER_ADMIN_ONLY && DISCIPLINE_ROLLOUT_USER_IDS.has(Number(userLike?.id))));
+
 /* «Термокороба» (#363) — условия выдачи термокоробов по фронт-офисам.
 
    Фронт-офисы заполняют остатки и условия, колл-центр СЗоВ смотрит и по ним
@@ -43394,8 +43402,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessDisciplineSection = canAccessDisciplineSectionForUser(user);
-            // Оператору пункт «Дисциплина» — только если у него есть записи:
-            // число своих записей сервер отдаёт в /ping без QR (сами записи — за QR).
+            // Оператору пункт «Дисциплина» — только если у него есть записи (поимённым
+            // выкладки — сразу, isDisciplineMenuVisibleFor): число своих записей
+            // сервер отдаёт в /ping без QR (сами записи — за QR).
             const [disciplineOwnTotal, setDisciplineOwnTotal] = useState(null);
             const [disciplinePingNonce, setDisciplinePingNonce] = useState(0);
             const disciplinePingAtRef = useRef(0);
@@ -43428,7 +43437,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 document.addEventListener('visibilitychange', onVisible);
                 return () => document.removeEventListener('visibilitychange', onVisible);
             }, [user?.id, disciplineOperator]);
-            const showDisciplineMenu = canAccessDisciplineSection && (!disciplineOperator || disciplineOwnTotal > 0);
+            const showDisciplineMenu = isDisciplineMenuVisibleFor(user, disciplineOwnTotal);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
             const canAccessTestNumbersSection = canAccessTestNumbersSectionForUser(user);
             const canAccessBaigaSection = canAccessBaigaSectionForUser(user);
