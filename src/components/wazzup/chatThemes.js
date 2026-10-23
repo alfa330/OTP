@@ -22,8 +22,9 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
  * остальных её нет ни в меню, ни по сохранённому значению. У владельца она
  * включается сама, один раз; дальше выбор за ним, как у любой темы.
  *
- * Учёткам из STANDARD_ONLY — только стандартная тема: кнопки «Тема» у них
- * нет, сохранённый выбор не действует. */
+ * Учёткам из STANDARD_ONLY — только стандартная тема и без своих обоев
+ * (chatWallpaper.js; сервер держит тот же список — wazzup/appearance.py):
+ * кнопки «Кастомизация» у них нет, сохранённый выбор не действует. */
 
 export const DEFAULT_CHAT_THEME = 'standard';
 
@@ -85,6 +86,9 @@ export function chatThemesFor(owner) {
     if (STANDARD_ONLY.includes(Number(owner))) return STANDARD_THEMES;
     return ALL_THEMES.filter((theme) => !theme.owners || theme.owners.includes(Number(owner)));
 }
+// Свои обои — у всех, кроме STANDARD_ONLY; без учётки — ни у кого.
+export const wallpaperAllowed = (owner) => owner != null && owner !== ''
+    && !STANDARD_ONLY.includes(Number(owner));
 
 export const chatThemeById = (id) => ALL_THEMES.find((theme) => theme.id === id) || ALL_THEMES[0];
 
@@ -198,7 +202,7 @@ export function useChatTheme(owner) {
         choose: (id) => setChatTheme(owner, id) };
 }
 
-/* Меню раздела (тема, статус смены) рисуются в портал — вне окна. В теме на
+/* Меню раздела (статус смены) рисуются в портал — вне окна. В теме на
    всё окно метка на body даёт им ту же палитру, пока раздел открыт
    (chatThemeNight.css, chatThemeRose.css, chatThemes.css): светлое меню над
    тёмным окном было бы вторым видом на одном экране. */

@@ -5,7 +5,7 @@ import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
-    IdCard, LogOut,
+    IdCard, LogOut, Palette,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -29,9 +29,10 @@ import {
 } from './sendQueue';
 import { chatListDraft, useChatDrafts } from './chatDrafts';
 import { applyDeliveryToRows, mergeChatRow, orderChatList, waitingCount } from './chatListOrder';
-import ChatThemeMenu from './ChatThemeMenu';
 import ChatChannelsOfNumber from './ChatChannelsOfNumber';
-import { chatThemeStyle, useChatTheme, usePortalDark, useThemeMenus } from './chatThemes';
+import { chatThemeStyle, useChatTheme, usePortalDark, useThemeMenus, wallpaperAllowed } from './chatThemes';
+import { useChatWallpaper } from './chatWallpaper';
+import ChatWallpaperLayer from './ChatWallpaperLayer';
 import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
@@ -61,9 +62,10 @@ import ShiftWriteLock from './ShiftWriteLock';
 import { shiftWriteLock } from './workspaceStatus';
 import { configureWorkspace, loadWorkspace, useWorkspace } from './workspaceStore';
 import { attachmentCache } from './attachmentCache';
-import { normalizeRole } from '../../utils/roles';
+import { isAdminLikeRole, normalizeRole } from '../../utils/roles';
 import './chatThread.css';
 import './chatThemes.css';
+import './chatWallpaper.css';
 import './workspace.css';
 
 let attachmentViewerModule;
@@ -285,7 +287,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
             className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
             <div className={`flex min-w-0 max-w-[85%] flex-col sm:max-w-[min(78%,720px)] ${out ? 'items-end' : 'items-start'}`}>
                 {out && showAuthor && msg.authorName && (
-                    <div className="mb-1 max-w-full truncate px-1 text-[11px] font-medium leading-4 text-slate-500"
+                    <div className="wz-wall-label mb-1 max-w-full truncate px-1 text-[11px] font-medium leading-4 text-slate-500"
                         title={msg.authorName}>
                         {msg.authorName}
                     </div>
@@ -330,7 +332,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                 </div>
             </div>
             {stuck && <div role="alert" data-testid="wazzup-send-problem"
-                className="mt-1 flex max-w-full flex-wrap items-center justify-end gap-x-2.5 gap-y-0.5 px-1 text-[12px] leading-4">
+                className="wz-wall-label mt-1 flex max-w-full flex-wrap items-center justify-end gap-x-2.5 gap-y-0.5 px-1 text-[12px] leading-4">
                 <span className={stuck === 'failed' ? 'text-rose-600' : 'text-amber-700'}>
                     {msg.local.error || (stuck === 'failed' ? 'Не отправлено' : 'Отправка не подтверждена')}
                 </span>
@@ -966,6 +968,10 @@ function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
     );
 }
 
+// Окно «Кастомизация» открывают редко — его код грузится по первому наведению.
+const loadCustomizeSheet = () => import('./ChatCustomizeSheet');
+const ChatCustomizeSheet = lazyWithRetry(loadCustomizeSheet);
+
 /* Сам раздел: каналы, список чатов, лента и всё, что вокруг них.
  *
  * operator — раздел открыт верификатору в режиме обработки (OperatorWorkspace
@@ -1139,6 +1145,26 @@ function ChatsWorkspace(props) {
     const chatTheme = useChatTheme(user?.id ?? null);
     const themed = !portalDark && chatTheme.applied.id !== 'standard';
     useThemeMenus(themed ? chatTheme.applied.id : null);
+    /* Обои (chatWallpaper.js) — тоже личные и, как темы, только в светлом
+       портале. Тема, обои и их вид настраиваются в одном окне «Кастомизация»;
+       кнопки нет, когда настраивать нечего. */
+    const wallpaper = useChatWallpaper(!portalDark && wallpaperAllowed(user?.id) ? user?.id ?? null : null,
+        { apiBaseUrl, headers });
+    const wallpaperShown = Boolean(wallpaper.wallpaper && wallpaper.url);
+    const admin = isAdminLikeRole(user?.role);
+    const customizable = !portalDark && (chatTheme.themes.length > 1 || wallpaper.mayUpload
+        || Boolean(wallpaper.wallpaper) || admin);
+    const chatPane = useRef(null);
+    /* Превью в окне — копия окна переписки тех же пропорций: размер берём в
+       момент открытия. Окно остаётся смонтированным после первого открытия —
+       иначе закрытию нечем было бы сыграть. */
+    const [customize, setCustomize] = useState({ open: false, mounted: false, pane: null });
+    const openCustomize = () => {
+        const box = chatPane.current?.getBoundingClientRect();
+        setCustomize({ open: true, mounted: true, pane: box && box.width > 200 && box.height > 200
+            ? { width: Math.round(box.width), height: Math.round(box.height) } : null });
+    };
+    const closeCustomize = useCallback(() => setCustomize((current) => ({ ...current, open: false })), []);
     const outbox = useChatOutbox(account === 'op' && mayProcess ? selectedKey : '');
     // Свои сообщения, которые архив ещё не подтвердил (sendQueue.js).
     const localMessages = useMemo(() => outboxMessages(thread, outbox), [thread, outbox]);
@@ -1942,6 +1968,7 @@ function ChatsWorkspace(props) {
     return (
         <div className={`wz-workspace flex h-full min-h-0 w-full flex-col ${entering ? 'wz-workspace-enter' : ''}`}
              data-chat-theme={themed ? chatTheme.applied.id : undefined}
+             data-chat-wallpaper={wallpaperShown ? '' : undefined}
              style={{ fontFamily: APPLE_FONT, '--wz-mobile-header-space': operator ? '154px' : '170px',
                       ...(themed ? chatThemeStyle(chatTheme.applied) : {}) }}>
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:pl-11 sm:pr-6">
@@ -1998,8 +2025,14 @@ function ChatsWorkspace(props) {
                         </div>
                     )}
                     {toolbar}
-                    {mainTab === 'chats' && !portalDark &&
-                        <ChatThemeMenu selected={chatTheme.selected} themes={chatTheme.themes} onChoose={chatTheme.choose} />}
+                    {mainTab === 'chats' && customizable && (
+                        <button type="button" onClick={openCustomize} className={iosBtnGhost}
+                            onPointerEnter={() => loadCustomizeSheet().catch(() => {})}
+                            onFocus={() => loadCustomizeSheet().catch(() => {})}
+                            aria-haspopup="dialog" aria-expanded={customize.open}>
+                            <Palette size={13} /> Кастомизация
+                        </button>
+                    )}
                     {mainTab === 'chats' && (
                         <button onClick={refreshAll} className={iosBtnGhost}>
                             <RefreshCw size={13} /> Обновить
@@ -2166,55 +2199,66 @@ function ChatsWorkspace(props) {
                     </div>
                 </div>
 
-                {/* Лента переписки */}
-                <div className="wz-chat-pane flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
+                {/* Лента переписки. isolate — слой обоев ложится под всё её
+                    содержимое (ChatWallpaperLayer.jsx). */}
+                <div ref={chatPane} className="wz-chat-pane relative isolate flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
+                    {wallpaperShown && <ChatWallpaperLayer url={wallpaper.url} settings={wallpaper.settings} className="-z-10" />}
                     {/* Пришли по ссылке с одним номером: пока он разрешается в чат,
-                        «Выберите чат слева» читалось бы как «ссылка не работает». */}
+                        «Выберите чат слева» читалось бы как «ссылка не работает».
+                        wz-wall-card — подложка-стекло, когда стоят обои (chatWallpaper.css). */}
                     {!selected && deepLinkResolving && (
-                        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-400">
-                            <Loader2 size={26} className="animate-spin" strokeWidth={1.5} />
-                            <span className="text-sm">Открываем чат по ссылке…</span>
+                        <div className="flex flex-1 items-center justify-center px-6">
+                            <div className="wz-wall-card flex flex-col items-center gap-2 text-slate-400">
+                                <Loader2 size={26} className="animate-spin" strokeWidth={1.5} />
+                                <span className="text-sm">Открываем чат по ссылке…</span>
+                            </div>
                         </div>
                     )}
                     {/* Номер подошёл нескольким чатам. Без этой плашки экран
                         совпадал с обычным входом, и ссылка читалась как битая. */}
                     {!selected && !deepLinkResolving && deepLinkMany && (
-                        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
-                            <MessageSquare size={28} strokeWidth={1.5} className="text-blue-500" />
-                            <span className="text-sm font-semibold text-slate-700">
-                                Номер {deepLinkMany} писал в несколько каналов
-                            </span>
-                            <span className="max-w-sm text-[12.5px] text-slate-500">
-                                Список слева уже отфильтрован по этому номеру — выберите нужный чат.
-                            </span>
+                        <div className="flex flex-1 items-center justify-center px-8">
+                            <div className="wz-wall-card flex flex-col items-center gap-2 text-center">
+                                <MessageSquare size={28} strokeWidth={1.5} className="text-blue-500" />
+                                <span className="text-sm font-semibold text-slate-700">
+                                    Номер {deepLinkMany} писал в несколько каналов
+                                </span>
+                                <span className="max-w-sm text-[12.5px] text-slate-500">
+                                    Список слева уже отфильтрован по этому номеру — выберите нужный чат.
+                                </span>
+                            </div>
                         </div>
                     )}
                     {!selected && !deepLinkResolving && !deepLinkMany && deepLinkMiss && (
-                        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-                            <AlertCircle size={28} strokeWidth={1.5} className="text-amber-500" />
-                            <span className="text-sm font-semibold text-slate-700">
-                                Чат {deepLinkMiss} не найден
-                            </span>
-                            {/* Причин две, и назвать одну как единственную нельзя:
-                                человек с опечаткой в номере уходил искать в Wazzup
-                                переписку, которой там тоже нет. */}
-                            <span className="max-w-md text-[12.5px] text-slate-500">
-                                Либо переписки с этим номером не было, либо она старше срока
-                                хранения в портале и осталась только в самом Wazzup. Стоит
-                                проверить номер и поискать вручную.
-                            </span>
-                            {!operator && (
-                            <a href={deepLinkChatUrl || workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
-                               className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
-                                <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
-                            </a>
-                            )}
+                        <div className="flex flex-1 items-center justify-center px-6">
+                            <div className="wz-wall-card flex flex-col items-center gap-2 text-center">
+                                <AlertCircle size={28} strokeWidth={1.5} className="text-amber-500" />
+                                <span className="text-sm font-semibold text-slate-700">
+                                    Чат {deepLinkMiss} не найден
+                                </span>
+                                {/* Причин две, и назвать одну как единственную нельзя:
+                                    человек с опечаткой в номере уходил искать в Wazzup
+                                    переписку, которой там тоже нет. */}
+                                <span className="max-w-md text-[12.5px] text-slate-500">
+                                    Либо переписки с этим номером не было, либо она старше срока
+                                    хранения в портале и осталась только в самом Wazzup. Стоит
+                                    проверить номер и поискать вручную.
+                                </span>
+                                {!operator && (
+                                <a href={deepLinkChatUrl || workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
+                                   className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
+                                    <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
+                                </a>
+                                )}
+                            </div>
                         </div>
                     )}
                     {!selected && !deepLinkResolving && !deepLinkMiss && !deepLinkMany && (
-                        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-400">
-                            <MessageSquare size={32} strokeWidth={1.5} />
-                            <span className="text-sm">Выберите чат слева</span>
+                        <div className="flex flex-1 items-center justify-center px-6">
+                            <div className="wz-wall-card flex flex-col items-center gap-2 text-slate-400">
+                                <MessageSquare size={32} strokeWidth={1.5} />
+                                <span className="text-sm">Выберите чат слева</span>
+                            </div>
                         </div>
                     )}
                     {selected && (
@@ -2286,8 +2330,10 @@ function ChatsWorkspace(props) {
                             <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
                             <div className="mx-auto w-full max-w-[1040px] space-y-2">
                                 {thread === null && (
-                                    <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
-                                        <Loader2 size={15} className="animate-spin" /> Загрузка переписки…
+                                    <div className="flex justify-center py-8">
+                                        <span className="wz-wall-note inline-flex items-center gap-2 text-sm text-slate-400">
+                                            <Loader2 size={15} className="animate-spin" /> Загрузка переписки…
+                                        </span>
                                     </div>
                                 )}
                                 {thread !== null && threadHasMore && (
@@ -2300,9 +2346,11 @@ function ChatsWorkspace(props) {
                                         </button>
                                     </div>
                                 )}
-                                {notes.error && <div role="alert" className="px-4 text-center text-xs text-amber-700">
-                                    {notes.error} <button type="button" onClick={() => notes.refresh().catch(() => {})}
-                                        className="font-semibold underline">Повторить</button>
+                                {notes.error && <div role="alert" className="flex justify-center px-4">
+                                    <span className="wz-wall-label text-center text-xs text-amber-700">
+                                        {notes.error} <button type="button" onClick={() => notes.refresh().catch(() => {})}
+                                            className="font-semibold underline">Повторить</button>
+                                    </span>
                                 </div>}
                                 {threadWithDays.map((m, index) => m._day ? (
                                     <div key={m.messageId} className="flex justify-center py-1.5">
@@ -2336,7 +2384,9 @@ function ChatsWorkspace(props) {
                                     </React.Fragment>
                                 ))}
                                 {thread !== null && thread.length === 0 && notes.items.length === 0 && localMessages.length === 0 && (
-                                    <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
+                                    <div className="flex justify-center py-8">
+                                        <span className="wz-wall-note text-sm text-slate-400">Сообщений нет</span>
+                                    </div>
                                 )}
                             </div>
                             </div>
@@ -2383,6 +2433,13 @@ function ChatsWorkspace(props) {
                         onClose={() => setCardPanelOpen(false)} />
                 )}
             </div>
+            {customize.mounted && (
+                <Suspense fallback={null}>
+                    <ChatCustomizeSheet open={customize.open} onClose={closeCustomize} pane={customize.pane}
+                        themes={chatTheme.themes} selectedTheme={chatTheme.selected} onChooseTheme={chatTheme.choose}
+                        wallpaper={wallpaper} admin={admin} author={user?.name || ''} />
+                </Suspense>
+            )}
             {attachmentAllowed &&
                 <Suspense fallback={<AttachmentViewerFallback message={attachmentSelection.message} onClose={() => setAttachmentSelection(null)} />}>
                     <ChatAttachmentViewer key={attachmentSelection.key}

@@ -1,0 +1,54 @@
+/* Обои «Чатов ОП» (chatWallpaper.js, ChatWallpaperLayer.jsx).
+ *
+ * Подписи, что лежат прямо на фоне переписки — плашки дат, имя автора над
+ * своим пузырём, «Сообщений нет», кнопка «Ответить», — на картинке не читались
+ * бы. С обоями они получают стекло: подложку цвета плашек темы и размытие того,
+ * что под ней, как подписи поверх обоев в мессенджерах. Без обоев (атрибута
+ * data-chat-wallpaper нет) ни одно правило ниже не действует.
+ *
+ * В селекторах .wz-columns: правило плашек «Вишнёвого биома» того же веса и с
+ * !important, а его слой грузится позже — по порядку файлов победил бы он. */
+
+.wz-workspace[data-chat-wallpaper] {
+    --wz-glass: var(--wz-pill, rgba(255, 255, 255, 0.8));
+    --wz-glass-ink: var(--wz-pill-ink, #475569);
+}
+
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-chat-pane :is(.wz-day-pill, .wz-wall-label, .wz-wall-note, .wz-wall-card, .wazzup-message-reply) {
+    background-color: var(--wz-glass) !important;
+    color: var(--wz-glass-ink) !important;
+    -webkit-backdrop-filter: blur(16px) saturate(1.6);
+    backdrop-filter: blur(16px) saturate(1.6);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-chat-pane .wz-wall-label {
+    border-radius: 999px;
+    padding: 1px 8px !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-chat-pane .wz-wall-note {
+    border-radius: 999px;
+    padding: 6px 14px !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-chat-pane .wz-wall-card {
+    border-radius: 20px;
+    padding: 18px 24px !important;
+}
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-chat-pane .wazzup-message-reply:hover {
+    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.22);
+}
+/* Пейзаж «Вишнёвого биома» рисуется на подложке ленты — поверх слоя обоев. */
+html:not([data-otp-theme='dark']) .wz-workspace[data-chat-wallpaper] .wz-columns .wz-thread-surface {
+    background: transparent !important;
+}
+
+/* Обои проявляются, а не выскакивают: картинка приходит позже окна. */
+.wz-wallpaper {
+    animation: wz-wallpaper-in 280ms ease-out both;
+}
+@keyframes wz-wallpaper-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .wz-wallpaper { animation: none; }
+}

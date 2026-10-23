@@ -8,7 +8,7 @@ export default function ChatInternalNote({ note }) {
     return (
         <div className="mx-auto w-fit min-w-0 max-w-[92%] sm:max-w-[78%] lg:max-w-[640px]"
             data-internal-note-id={note.id}>
-            <div className="mb-1 px-2 text-xs font-medium text-slate-500">{note.authorName || 'Сотрудник'}</div>
+            <div className="wz-wall-label mb-1 w-fit max-w-full px-2 text-xs font-medium text-slate-500">{note.authorName || 'Сотрудник'}</div>
             <div className="wazzup-internal-note rounded-2xl border border-[#e9e3d5] bg-[#faf7ef] px-3 py-2 text-slate-800">
                 <div className="mb-1 flex items-center gap-1 text-[11px] font-medium leading-4 text-slate-500">
                     <StickyNote size={11} aria-hidden="true" />

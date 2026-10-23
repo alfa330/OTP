@@ -72,6 +72,7 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-50 { background-color: #fdedf3 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-500 { background-color: #d0568b !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-500\/10 { background-color: rgba(208, 86, 139, 0.1) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-50\/70 { background-color: rgba(253, 237, 243, 0.7) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-blue-600 { background-color: #bb4078 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-gray-100 { background-color: #f9e4ec !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .bg-gray-50 { background-color: #fdf0f5 !important; }
@@ -98,6 +99,7 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-100 { border-color: #f5e0e8 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200 { border-color: #eed0dc !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200\/70 { border-color: rgba(238, 208, 220, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-300 { border-color: #e3bccc !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #f5e0e8 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:bg-blue-50:focus-visible { background-color: #fdedf3 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:ring-blue-400:focus-visible { --tw-ring-color: #e07ca4 !important; }
@@ -108,9 +110,11 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-100:focus { --tw-ring-color: #fadbe7 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-500\/60:focus { --tw-ring-color: rgba(208, 86, 139, 0.6) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus\:ring-blue-500\/70:focus { --tw-ring-color: rgba(208, 86, 139, 0.7) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .group:hover .group-hover\:ring-slate-900\/25 { --tw-ring-color: rgba(90, 56, 73, 0.25) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-100:hover { background-color: #fadbe7 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-500\/15:hover { background-color: rgba(208, 86, 139, 0.15) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-50:hover { background-color: #fdedf3 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-50\/40:hover { background-color: rgba(253, 237, 243, 0.4) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-600:hover { background-color: #bb4078 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-blue-700:hover { background-color: #9e3263 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-gray-100:hover { background-color: #f9e4ec !important; }
@@ -122,6 +126,7 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-300\/80:hover { background-color: rgba(232, 191, 208, 0.8) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-50:hover { background-color: #fdf0f5 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:bg-slate-50\/80:hover { background-color: rgba(253, 240, 245, 0.8) !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:border-blue-400:hover { border-color: #e07ca4 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:border-gray-400:hover { border-color: #d1a0b5 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:border-slate-400:hover { border-color: #d1a0b5 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .hover\:text-blue-600:hover { color: #ad3a6e !important; }
@@ -160,4 +165,5 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 
 @media (min-width: 768px) {
     :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .md\:border-slate-200 { border-color: #eed0dc !important; }
+    :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .md\:border-slate-200\/70 { border-color: rgba(238, 208, 220, 0.7) !important; }
 }

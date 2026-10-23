@@ -9752,6 +9752,18 @@ app.register_blueprint(build_pilot_blueprint(
 ))
 wazzup_syntony.start_worker(db)
 
+# Кастомизация «Чатов ОП»: свои обои на фоне переписки (wazzup/appearance.py).
+# Свои — каждому, кому раздел открыт; у кого какие стоят — видят админы.
+from wazzup import appearance as wazzup_appearance  # noqa: E402
+
+app.register_blueprint(wazzup_appearance.build_appearance_blueprint(
+    db=db, require_api_key=require_api_key, preflight=_build_cors_preflight_response,
+    chat_access=_wazzup_chat_access,
+    is_admin=lambda user_id: _is_admin_role((db.get_user(id=user_id) or (None,) * 4)[3]),
+    gcs={'client': get_gcs_client, 'bucket_name': lambda: (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()},
+))
+
 
 def _wazzup_chat_mode_for(user_id):
     """Режим «Чатов ОП» чужой учётки ('full' / 'operator' / 'potok' / None) — тем же
