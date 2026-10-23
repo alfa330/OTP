@@ -551,6 +551,22 @@ class CheckNowTests(unittest.TestCase):
     NOW = datetime(2026, 10, 11, 9, 0, tzinfo=timezone.utc)
     BASE = date(2026, 10, 1)
 
+    def setUp(self):
+        self._executors = []
+        executor_class = sign_check.ThreadPoolExecutor
+
+        def executor(*args, **kwargs):
+            pool = executor_class(*args, **kwargs)
+            self._executors.append(pool)
+            # check_now не ждёт потоки по контракту. Тест обязан дождаться своих:
+            # иначе поздняя lane попадёт под _new_session следующего теста.
+            self.addCleanup(pool.shutdown, wait=True)
+            return pool
+
+        patch = unittest.mock.patch.object(sign_check, 'ThreadPoolExecutor', executor)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def _checker(self, fetch, configured=True):
         checker = sign_check.SignChecker(db=None, fetch=fetch, configured=lambda: configured, sleep=lambda s: None)
         written, resolved = [], []
@@ -563,14 +579,10 @@ class CheckNowTests(unittest.TestCase):
         params.update(kwargs)
         return checker.check_now(leads, **params)
 
-    @staticmethod
-    def _wait_lanes():
-        """Дождаться, пока потоки проверки доработают (их не ждёт сама проверка)."""
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if not any(t.name.startswith('dial-sign-now') and t.is_alive() for t in threading.enumerate()):
-                return
-            time.sleep(0.01)
+    def _wait_lanes(self):
+        """Дождаться именно своих пулов, включая ещё не начавшие работу lane."""
+        for executor in self._executors:
+            executor.shutdown(wait=True)
 
     def test_not_configured_asks_nothing(self):
         calls = []
