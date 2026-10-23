@@ -33,6 +33,10 @@ HANDLERS = ('get_trainings', 'get_training_rejections')
 UNDER_TEST = HANDLERS + (
     '_operator_item_id',
     '_filter_operators_for_requester_scope',
+    '_filter_operators_for_requester_role',
+    '_work_schedule_granted_departments',
+    '_work_schedule_granted_department_ids',
+    '_work_schedule_granted_member_ids',
     '_work_schedule_operator_ids',
     '_work_schedule_scope_requested',
     '_widen_to_work_schedule_scope',
@@ -72,9 +76,12 @@ class _Portal:
     }
     HEADS = {2: (1,), 30: (1, 2)}
     TRAINER_PLANNER = {518, 700}      # СЗоВ + ОП у тренера в разделе
+    DEPARTMENTS = [{'id': 1, 'code': 'szov'}, {'id': 2, 'code': 'op'}, {'id': 3, 'code': 'tez'}]
 
-    def __init__(self):
+    def __init__(self, grants=None):
         self.queries = []
+        # Поимённые допуски к «Графикам работы»: id → коды отделов.
+        self.grants = dict(grants or {})
 
     def department_of(self, user_id):
         return self.PEOPLE[int(user_id)][1]
@@ -113,6 +120,7 @@ def _load(portal, requester_id, args):
 
     db = SimpleNamespace(
         _get_cursor=portal.cursor,
+        get_departments=lambda: [dict(item) for item in portal.DEPARTMENTS],
         get_user_department_id=portal.department_of,
         get_department_member_ids=portal.members,
         get_user=lambda *, id: _user(int(id), portal.PEOPLE[int(id)][0]),
@@ -139,6 +147,8 @@ def _load(portal, requester_id, args):
             next(iter(headed(user_id)), None) or portal.department_of(user_id)),
         '_trainer_work_schedule_member_ids': lambda: set(portal.TRAINER_PLANNER),
         '_load_target_user_with_scope': load_target,
+        'WORK_SCHEDULE_SUPERVISOR_GRANTS': portal.grants,
+        'g': SimpleNamespace(),
     }
     module = source_cache.parse(_read('bot_schedule2.py'))
     by_name = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
@@ -157,13 +167,13 @@ def _main_query(queries):
     return ' '.join(main[0][0].split()), main[0][1]
 
 
-def _ask(handler, requester_id, **args):
+def _ask(handler, requester_id, grants=None, **args):
     """Позвать ручку и вернуть (WHERE основного запроса, параметры, все запросы).
 
     Месяц в запросах теста есть всегда, и его условие стоит в WHERE первым —
     по нему внешний WHERE и отличается от WHERE вложенного поиска группы.
     """
-    portal = _Portal()
+    portal = _Portal(grants)
     payload, status = _load(portal, requester_id, args)[handler]()
     assert status == 200, payload
     sql, params = _main_query(portal.queries)
@@ -294,6 +304,24 @@ class PlannerScopeTests(unittest.TestCase):
                     for index, value in enumerate(params):
                         if isinstance(value, list):
                             self.assertEqual(index, len(params) - 1, (handler, requester_id, extra))
+
+    def test_a_granted_department_is_added_to_the_head(self):
+        """Поимённый допуск (глава ООЗ ведёт графики Тез КЦ, 23.10.2026):
+        интервал «Тренинг» оператору отдела допуска она подтверждает в разделе —
+        значит, и тренинги его раздел обязан ей отдать."""
+        for handler in HANDLERS:
+            where, params, _ = _ask(handler, 2, grants={2: ('op',)}, month='2026-10', scope='work_schedules')
+            self.assertEqual(
+                where, self._where(handler, '(u.department_id = %s OR t.operator_id = ANY(%s))'), handler)
+            self.assertEqual(params, ['2026-10', 1, [500, 518, 700, 900, 901]], handler)
+
+    def test_a_grant_changes_nothing_without_the_scope(self):
+        """«Тренинги» и «Учёт часов» шлют запрос без scope — их граница прежняя."""
+        for handler in HANDLERS:
+            where, params, queries = _ask(handler, 2, grants={2: ('op',)}, month='2026-10')
+            self.assertEqual(where, self._where(handler, 'u.department_id = %s'), handler)
+            self.assertEqual(params, ['2026-10', 1], handler)
+            self.assertFalse(_asked_for_staff(queries), handler)
 
     def test_the_scope_value_is_exact(self):
         for handler in HANDLERS:

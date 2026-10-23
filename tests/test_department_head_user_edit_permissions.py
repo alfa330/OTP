@@ -519,9 +519,15 @@ class OperatorScopeHelpersTests(unittest.TestCase):
         )
         return _load_functions(
             "_operator_item_id",
+            "_filter_operators_for_requester_role",
+            "_work_schedule_granted_departments",
+            "_work_schedule_granted_department_ids",
+            "_work_schedule_granted_member_ids",
             *function_names,
             namespace={
                 "db": fake_db,
+                # Поимённых допусков к «Графикам работы» в этих проверках нет.
+                "WORK_SCHEDULE_SUPERVISOR_GRANTS": {},
                 "_normalize_user_role": normalize_role,
                 "_headed_department_id": headed_department_id,
                 "_is_employee_accounting_manager": lambda *_a, **_k: False,

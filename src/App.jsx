@@ -16491,6 +16491,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // эффект ниже (свой отдел), когда список отделов уже известен.
             const [plannerDepartmentId, setPlannerDepartmentId] = useState('');
             const plannerDepartmentTouchedRef = useRef(false);
+            /* Отделы, графики которых зритель ведёт поимённо с правами СВ этого
+               отдела (WORK_SCHEDULE_SUPERVISOR_GRANTS на сервере). Приходят с
+               /operators: справочник отделов главе режется до её отдела. */
+            const [plannerGrantedDepartments, setPlannerGrantedDepartments] = useState([]);
+            const plannerGrantedDepartmentIds = useMemo(
+                () => new Set(plannerGrantedDepartments.map(dep => String(dep.id))),
+                [plannerGrantedDepartments]
+            );
             const [daySortMode, setDaySortMode] = useState('default');
             const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
@@ -16520,9 +16528,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             });
             // Окно дня открыто на строке СВ: операторские санкции (штраф, тренинг,
             // тех. сбой) к СВ неприменимы — сервер штраф СВ не примет (задача #352).
-            const plannerModalIsSupervisorRow = isPlannerSupervisorRow(
-                operators.find(o => String(o?.id) === String(modalState?.opId))
-            );
+            const plannerModalOperator = operators.find(o => String(o?.id) === String(modalState?.opId));
+            const plannerModalIsSupervisorRow = isPlannerSupervisorRow(plannerModalOperator);
+            // Отдел открыт поимённо с правами СВ — а СВ из ЧС не убирает.
+            const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist
+                && !plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [modalActiveTab, setModalActiveTab] = useState('shifts');
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
@@ -17292,6 +17302,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     return merged;
                 });
             }, [plannerOperatorIdKey, plannerStatusPeriodMergeKey]);
+            // Ответ без поля (старый сервер) прежний список не сбрасывает.
+            const rememberPlannerGrantedDepartments = useCallback((list) => {
+                if (!Array.isArray(list)) return;
+                const next = list
+                    .filter(dep => Number.isFinite(Number(dep?.id)) && Number(dep.id) > 0)
+                    .map(dep => ({ id: Number(dep.id), name: String(dep?.name || ''), code: normalizeDepartmentCode(dep?.code) }));
+                setPlannerGrantedDepartments(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+            }, []);
             const fetchPlannerSchedulesByMonths = useCallback(async (monthKeys = [], { force = false, signal } = {}) => {
                 if (!user?.id || user?.role === 'operator') return null;
                 const uniqueMonthKeys = Array.from(new Set(
@@ -17340,6 +17358,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                     const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
                     mergePlannerOperatorsFromServer(serverOperators);
+                    rememberPlannerGrantedDepartments(data?.granted_departments);
                     monthKeysToFetch.forEach(key => plannerLoadedMonthKeysRef.current.add(key));
                     // Принудительная перезагрузка сетки идёт ровно после правки
                     // графика — значит, и сводка истории устарела. Один общий
@@ -17352,7 +17371,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         setIsLoading(false);
                     }
                 }
-            }, [user?.id, user?.role, plannerMonthBoundsByKey, mergePlannerOperatorsFromServer]);
+            }, [user?.id, user?.role, plannerMonthBoundsByKey, mergePlannerOperatorsFromServer, rememberPlannerGrantedDepartments]);
             // Тренинги и отклонения месяца. scope=work_schedules — по всем, кого раздел
             // показывает строкой, а не только по подчинённым: иначе интервал,
             // подтверждённый оператору другого супервайзера, оставался «Ожидает».
@@ -17490,12 +17509,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                     const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
                     mergePlannerOperatorsFromServer(serverOperators);
+                    rememberPlannerGrantedDepartments(data?.granted_departments);
                     plannerLoadedStatusRangeKeysRef.current.add(rangeKey);
                     return data;
                 } finally {
                     plannerLoadingStatusRangeKeysRef.current.delete(rangeKey);
                 }
-            }, [user?.id, user?.role, plannerStatusRangeKey, mergePlannerOperatorsFromServer]);
+            }, [user?.id, user?.role, plannerStatusRangeKey, mergePlannerOperatorsFromServer, rememberPlannerGrantedDepartments]);
 
             // ── История изменений графика ──────────────────────────────────
             //
@@ -18189,11 +18209,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         .map(op => String(op?.department_id ?? ''))
                         .filter(Boolean)
                 );
-                return (departments || [])
+                // Справочник + отделы поимённого допуска: у главы справочник — только её отдел.
+                const known = new Map();
+                [...(departments || []), ...plannerGrantedDepartments].forEach(dep => {
+                    const key = String(dep?.id ?? '');
+                    if (key && !known.has(key)) known.set(key, dep);
+                });
+                return Array.from(known.values())
                     .filter(dep => present.has(String(dep?.id ?? '')))
                     .map(dep => ({ value: String(dep.id), label: String(dep.name || '').trim() || `Отдел ${dep.id}`, code: normalizeDepartmentCode(dep.code) }))
                     .sort((a, b) => a.label.localeCompare(b.label, 'ru'));
-            }, [departments, operators]);
+            }, [departments, plannerGrantedDepartments, operators]);
             const plannerCanSwitchDepartment = plannerDepartmentOptions.length > 1;
             const plannerOwnDepartmentId = useMemo(() => {
                 const headed = user?.headed_department_id ?? user?.headedDepartmentId;
@@ -19475,9 +19501,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             };
 
-            const isPlannerRowLocked = (opId) => (
+            // Строки СВ ведёт глава отдела (РОП). Рядовому СВ и тому, кому отдел
+            // открыт поимённо с правами СВ, — только смотреть: сервер запись отклонит.
+            const isPlannerSupervisorRowLocked = (op) => isPlannerSupervisorRow(op) && (
                 plannerViewerIsPlainSupervisor
-                && isPlannerSupervisorRow(operators.find(o => String(o?.id) === String(opId)))
+                || plannerGrantedDepartmentIds.has(String(op?.department_id ?? ''))
+            );
+            const isPlannerRowLocked = (opId) => (
+                isPlannerSupervisorRowLocked(operators.find(o => String(o?.id) === String(opId)))
             );
 
             const openEditModal = (opId, date, editIndex = null) => {
@@ -32870,7 +32901,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     note={modalActiveScheduleStatus.comment || null}
                                                 />
                                                 {modalActiveScheduleStatus.id && modalActiveScheduleStatus.statusCode === 'dismissal'
-                                                    && modalActiveScheduleStatus.isBlacklist && plannerViewerCanRemoveBlacklist && !plannerReadOnly ? (
+                                                    && modalActiveScheduleStatus.isBlacklist && plannerModalCanRemoveBlacklist && !plannerReadOnly ? (
                                                     <WsPhoneRow
                                                         title="Убрать из ЧС"
                                                         subtitle="Увольнение останется обычным"
@@ -35456,7 +35487,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                             </div>
                             <div className="flex items-center gap-2">
-                                {modalActiveScheduleStatus?.id && modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist && plannerViewerCanRemoveBlacklist ? (
+                                {modalActiveScheduleStatus?.id && modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist && plannerModalCanRemoveBlacklist ? (
                                     <button
                                         type="button"
                                         onClick={removeScheduleDismissalBlacklist}

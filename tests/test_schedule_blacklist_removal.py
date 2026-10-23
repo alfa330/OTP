@@ -96,8 +96,14 @@ class _Request:
 
 
 class RemoveBlacklistRouteTests(unittest.TestCase):
-    def _call(self, requester, *, heads=(), body=None, scope_error=None, db=None):
+    def _call(self, requester, *, heads=(), body=None, scope_error=None, db=None, scope_calls=None):
         db = db or _RouteDB()
+        scope_calls = [] if scope_calls is None else scope_calls
+
+        def resolve_scoped(user_data, requester_id, operator_id, *, allow_grant=True):
+            scope_calls.append({"operator_id": operator_id, "allow_grant": allow_grant})
+            return (None, scope_error) if scope_error else (_user(int(operator_id), "operator"), None)
+
         namespace = {
             "ROLE_HIERARCHY": _bot_constant("ROLE_HIERARCHY"),
             "jsonify": lambda payload: payload,
@@ -107,10 +113,7 @@ class RemoveBlacklistRouteTests(unittest.TestCase):
             "_get_authenticated_requester": lambda: (requester[0], requester, None),
             "_headed_department_id": lambda requester_id: (sorted(heads)[0] if heads else None),
             "_headed_department_ids": lambda requester_id: frozenset(heads),
-            "_resolve_scoped_operator_for_requester": (
-                lambda user_data, requester_id, operator_id:
-                (None, scope_error) if scope_error else (_user(int(operator_id), "operator"), None)
-            ),
+            "_resolve_scoped_operator_for_requester": resolve_scoped,
         }
         _bot_functions(
             "_normalize_user_role",
@@ -160,6 +163,13 @@ class RemoveBlacklistRouteTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"], "Forbidden for this operator")
         self.assertEqual(db.remove_calls, [])
+
+    def test_a_named_grant_does_not_reach_the_blacklist(self):
+        """Поимённый допуск к графикам чужого отдела даёт права СВ этого отдела,
+        а СВ ЧС не снимает: роут просит границу без допуска."""
+        scope_calls = []
+        self._call(_user(15, "admin"), heads={3}, scope_calls=scope_calls)
+        self.assertEqual(scope_calls, [{"operator_id": 50, "allow_grant": False}])
 
     def test_not_blacklisted_is_404(self):
         payload, status, _ = self._call(_user(15, "admin"), db=_RouteDB(removed=[]))
@@ -315,11 +325,19 @@ class FrontendWiringTests(unittest.TestCase):
         )
         # Флаги стоят в самих условиях показа, а не только объявлены:
         # окно дня на компьютере, на телефоне (там ещё и не в режиме просмотра)...
-        self.assertIn("modalActiveScheduleStatus?.isBlacklist && plannerViewerCanRemoveBlacklist ? (", app)
+        # Флаг окна — тот же, но без отделов поимённого допуска (права СВ).
         self.assertIn(
-            "modalActiveScheduleStatus.isBlacklist && plannerViewerCanRemoveBlacklist && !plannerReadOnly ? (",
+            "const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist\n"
+            "                && !plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));",
             app,
         )
+        self.assertIn("modalActiveScheduleStatus?.isBlacklist && plannerModalCanRemoveBlacklist ? (", app)
+        self.assertIn(
+            "modalActiveScheduleStatus.isBlacklist && plannerModalCanRemoveBlacklist && !plannerReadOnly ? (",
+            app,
+        )
+        self.assertNotIn("&& plannerViewerCanRemoveBlacklist ? (", app)
+        self.assertNotIn("&& plannerViewerCanRemoveBlacklist && !plannerReadOnly ? (", app)
         # ...и действие «Учета сотрудников» — во всех трёх его списках.
         self.assertIn("const employeeUnblacklistAction = (employee) => canRemoveEmployeeBlacklist", app)
         self.assertIn("&& isEmployeeBlacklistDismissal(employee) && {", app)

@@ -500,8 +500,15 @@ class SupervisorTargetRolesTest(unittest.TestCase):
         start = source.index('def add_training():')
         end = source.index('def get_training_rejections():', start)
         body = source[start:end]
-        self.assertEqual(body.count('supervisor_target_roles=TRAINING_TARGET_ROLES'), 4)
+        # Все четыре идут через одну проверку цели — с этим набором ролей и для
+        # обычной границы, и для поимённого допуска к «Графикам работы».
+        self.assertEqual(body.count('_load_training_target_with_scope('), 4)
+        self.assertNotIn('_load_target_user_with_scope(', body)
         self.assertNotIn("supervisor_target_roles=('operator',)", body)
+        helper = source[source.index('def _load_training_target_with_scope('):start]
+        self.assertEqual(helper.count('supervisor_target_roles=TRAINING_TARGET_ROLES'), 1)
+        self.assertIn(
+            '_work_schedule_granted_target(requester_id, operator_id, TRAINING_TARGET_ROLES)', helper)
 class GroupBranchOutcomeTest(unittest.TestCase):
     """Ветка ?group_id= прогоняется как код — по одной роли за раз.
 

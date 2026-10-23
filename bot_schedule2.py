@@ -2646,7 +2646,105 @@ def _trainer_work_schedule_member_ids():
     return member_ids
 
 
+# Поимённый допуск к «Графикам работы» чужого отдела: users.id → коды отделов,
+# графики которых человек ведёт с правами СВ этого отдела — видит всех его
+# сотрудников, правит графики операторов, но не снимает ЧС и не трогает строки
+# СВ. Решение владельца 23.10.2026: главе ООЗ (476) открыть графики Тез КЦ на
+# просмотр и правку, «как СВ этого отдела». Допуск только расширяет границу
+# управленца — сам раздел он не открывает, и в других разделах её не меняет.
+WORK_SCHEDULE_SUPERVISOR_GRANTS = {476: ('tez',)}
+
+
+def _work_schedule_granted_departments(requester_id):
+    """Отделы поимённого допуска requester в «Графиках работы»: [{id, code, name}].
+
+    Отдел, которым он сам руководит, сюда не входит — там у него права главы,
+    они шире. Кэш в g на запрос: массовые правки зовут проверку на каждую строку.
+    """
+    try:
+        codes = WORK_SCHEDULE_SUPERVISOR_GRANTS.get(int(requester_id))
+    except (TypeError, ValueError):
+        codes = None
+    if not codes:
+        return []
+
+    cache = None
+    try:
+        cache = getattr(g, '_ws_granted_departments_cache', None)
+        if cache is None:
+            cache = {}
+            g._ws_granted_departments_cache = cache
+    except RuntimeError:
+        cache = None
+    if cache is not None and requester_id in cache:
+        return cache[requester_id]
+
+    wanted = {str(code).strip().lower() for code in codes}
+    headed = set(_headed_department_ids(requester_id) or ())
+    granted = []
+    for dept in (db.get_departments() or []):
+        code = str(dept.get('code') or '').strip().lower()
+        if code not in wanted or dept.get('id') is None or dept.get('is_active') is False:
+            continue
+        if int(dept['id']) in headed:
+            continue
+        granted.append({'id': int(dept['id']), 'code': code, 'name': str(dept.get('name') or '')})
+    if cache is not None:
+        cache[requester_id] = granted
+    return granted
+
+
+def _work_schedule_granted_department_ids(requester_id):
+    return frozenset(item['id'] for item in _work_schedule_granted_departments(requester_id))
+
+
+def _work_schedule_granted_member_ids(requester_id):
+    """Сотрудники отделов поимённого допуска — вся строка отдела, как у его СВ."""
+    member_ids = set()
+    for department_id in _work_schedule_granted_department_ids(requester_id):
+        member_ids |= set(db.get_department_member_ids(department_id) or set())
+    return member_ids
+
+
+def _work_schedule_granted_target(requester_id, target_user_id, target_roles):
+    """Сотрудник, которого requester правит по поимённому допуску, или None.
+
+    Граница СВ этого отдела: только перечисленные роли и только люди отдела —
+    админы и СВ отдела допуском не открываются.
+    """
+    granted = _work_schedule_granted_department_ids(requester_id)
+    if not granted:
+        return None
+    try:
+        target_user = db.get_user(id=int(target_user_id))
+    except (TypeError, ValueError):
+        return None
+    if not target_user or _normalize_user_role(target_user[3]) not in set(target_roles):
+        return None
+    department_id = db.get_user_department_id(int(target_user[0]))
+    try:
+        in_granted = department_id is not None and int(department_id) in granted
+    except (TypeError, ValueError):
+        in_granted = False
+    return target_user if in_granted else None
+
+
 def _filter_operators_for_requester_scope(requester, requester_id, operators):
+    """Кого requester видит в «Графиках работы»: граница его роли + отделы
+    поимённого допуска (WORK_SCHEDULE_SUPERVISOR_GRANTS)."""
+    items = list(operators or [])
+    visible = _filter_operators_for_requester_role(requester, requester_id, items)
+    granted_ids = _work_schedule_granted_member_ids(requester_id)
+    if not granted_ids:
+        return visible
+    visible_ids = {_operator_item_id(item) for item in visible}
+    return [
+        item for item in items
+        if _operator_item_id(item) in visible_ids or _operator_item_id(item) in granted_ids
+    ]
+
+
+def _filter_operators_for_requester_role(requester, requester_id, operators):
     requester_role = _normalize_user_role(requester[3])
     items = list(operators or [])
     # Видят всех: супер-админ, админы
@@ -2777,8 +2875,13 @@ def _resolve_work_schedule_viewer():
     return None, None, ("Forbidden", 403)
 
 
-def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id):
-    return _load_target_user_with_scope(
+def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id, *, allow_grant=True):
+    """Чей график requester правит в «Графиках работы».
+
+    allow_grant=False — для действий, которых у СВ отдела нет (снять ЧС):
+    поимённый допуск их не открывает.
+    """
+    target_user, scope_error = _load_target_user_with_scope(
         requester,
         requester_id,
         operator_id,
@@ -2787,6 +2890,11 @@ def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id)
         not_found_message="Operator not found",
         forbidden_message="Forbidden for this operator"
     )
+    if scope_error and scope_error[1] == 403 and allow_grant:
+        granted_target = _work_schedule_granted_target(requester_id, operator_id, ('operator',))
+        if granted_target is not None:
+            return granted_target, None
+    return target_user, scope_error
 
 
 def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
@@ -3108,6 +3216,27 @@ def _normalize_management_role(role):
 def _effective_management_scope(requester, requester_id):
     role = _effective_scoped_manager_role(requester[3], requester_id)
     scope_department_id = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)
+    return role, scope_department_id
+
+
+def _management_scope_for_targets(requester, requester_id, operator_ids=(), direction_ids=()):
+    """_effective_management_scope для записи из окна дня «Графиков работы».
+
+    Если все операторы и направления запроса — из одного отдела поимённого
+    допуска (WORK_SCHEDULE_SUPERVISOR_GRANTS), запись идёт с правами СВ этого
+    отдела. Смешанный запрос остаётся при обычной границе — и база отвергнет
+    чужих, как и раньше.
+    """
+    role, scope_department_id = _effective_management_scope(requester, requester_id)
+    granted = _work_schedule_granted_department_ids(requester_id)
+    if not granted or scope_department_id is None:
+        return role, scope_department_id
+    departments = {db.get_user_department_id(op_id) for op_id in _normalize_int_id_list(operator_ids)}
+    departments |= {db.get_direction_department_id(dir_id) for dir_id in _normalize_int_id_list(direction_ids)}
+    if len(departments) == 1:
+        only = next(iter(departments))
+        if only is not None and int(only) in granted:
+            return 'sv', int(only)
     return role, scope_department_id
 
 
@@ -33792,6 +33921,29 @@ def get_trainings():
 TRAINING_TARGET_ROLES = ('operator', 'trainee', 'sv', 'trainer')
 
 
+def _load_training_target_with_scope(requester, requester_id, operator_id):
+    """Чей тренинг requester записывает, правит и удаляет.
+
+    Обычная граница — плюс отдел поимённого допуска к «Графикам работы»
+    (WORK_SCHEDULE_SUPERVISOR_GRANTS): тренинг записывается из окна дня, и СВ
+    того отдела это делать вправе.
+    """
+    operator, scope_error = _load_target_user_with_scope(
+        requester,
+        requester_id,
+        operator_id,
+        allow_self=False,
+        supervisor_target_roles=TRAINING_TARGET_ROLES,
+        not_found_message="Operator not found",
+        forbidden_message="Forbidden for this operator"
+    )
+    if scope_error and scope_error[1] == 403:
+        granted_target = _work_schedule_granted_target(requester_id, operator_id, TRAINING_TARGET_ROLES)
+        if granted_target is not None:
+            return granted_target, None
+    return operator, scope_error
+
+
 def _training_reason_catalog():
     """Справочник базовых тем — из одного места, а не копией в каждом роуте.
 
@@ -34040,14 +34192,8 @@ def add_training():
                     logging.warning("Blocked group training creation: requester=%s operator=%s group=%s error=%s", requester_id, operator_ids[0], group_id, message)
                     return jsonify({"error": message}), status_code
             else:
-                operator, scope_error = _load_target_user_with_scope(
-                    requester,
-                    requester_id,
-                    operator_ids[0],
-                    allow_self=False,
-                    supervisor_target_roles=TRAINING_TARGET_ROLES,
-                    not_found_message="Operator not found",
-                    forbidden_message="Forbidden for this operator"
+                operator, scope_error = _load_training_target_with_scope(
+                    requester, requester_id, operator_ids[0]
                 )
                 if scope_error:
                     message, status_code = scope_error
@@ -34116,14 +34262,8 @@ def add_training():
                         })
                         continue
                 else:
-                    operator, scope_error = _load_target_user_with_scope(
-                        requester,
-                        requester_id,
-                        raw_operator_id,
-                        allow_self=False,
-                        supervisor_target_roles=TRAINING_TARGET_ROLES,
-                        not_found_message="Operator not found",
-                        forbidden_message="Forbidden for this operator"
+                    operator, scope_error = _load_training_target_with_scope(
+                        requester, requester_id, raw_operator_id
                     )
                     if scope_error:
                         message, status_code = scope_error
@@ -34263,14 +34403,8 @@ def update_training(training_id):
                 message, status_code = group_scope_error
                 return jsonify({"error": message}), status_code
         else:
-            operator, scope_error = _load_target_user_with_scope(
-                requester,
-                requester_id,
-                training[1],
-                allow_self=False,
-                supervisor_target_roles=TRAINING_TARGET_ROLES,
-                not_found_message="Operator not found",
-                forbidden_message="Forbidden for this operator"
+            operator, scope_error = _load_training_target_with_scope(
+                requester, requester_id, training[1]
             )
             if scope_error:
                 message, status_code = scope_error
@@ -34389,15 +34523,7 @@ def delete_training(training_id):
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
 
-        _, scope_error = _load_target_user_with_scope(
-            requester,
-            requester_id,
-            training[1],
-            allow_self=False,
-            supervisor_target_roles=TRAINING_TARGET_ROLES,
-            not_found_message="Operator not found",
-            forbidden_message="Forbidden for this operator"
-        )
+        _, scope_error = _load_training_target_with_scope(requester, requester_id, training[1])
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -34815,6 +34941,8 @@ def create_technical_issue():
         direction_ids = _normalize_int_id_list(payload.get('direction_ids'))
         direction_ids.extend(_normalize_int_id_list(payload.get('direction_id')))
         direction_ids = _normalize_int_id_list(direction_ids)
+        effective_role, scope_department_id = _management_scope_for_targets(
+            requester, requester_id, operator_ids, direction_ids)
 
         result = db.create_operator_technical_issues(
             requester_id=requester_id,
@@ -36164,6 +36292,10 @@ def create_offline_activity():
             operator_ids = _normalize_int_id_list(payload.get('operator_ids'))
             if operator_ids:
                 operator_id = operator_ids[0]
+        if payload.get('group_id') in (None, ''):
+            # Запись по группе проверяет группу отдела — допуск её не трогает.
+            effective_role, scope_department_id = _management_scope_for_targets(
+                requester, requester_id, [operator_id])
 
         result = db.create_operator_offline_activity(
             requester_id=requester_id,
@@ -52919,13 +53051,17 @@ def get_operators_with_schedules():
         )
         _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
-        
+
         return jsonify({
             "operators": operators,
             "range": {
                 "start_date": start_date,
                 "end_date": end_date
-            }
+            },
+            # Отделы поимённого допуска: справочник отделов главе режется до
+            # своего, и без этого списка выбор отдела в шапке их не предложит;
+            # по нему же интерфейс запирает в них строки СВ и «Убрать из ЧС».
+            "granted_departments": _work_schedule_granted_departments(user_id)
         }), 200
     
     except ValueError as e:
@@ -53198,6 +53334,29 @@ def supervisor_manual_mark_item(mark_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _with_granted_break_rules(requester_id, direction_rules):
+    """Правила перерывов + правила направлений отделов поимённого допуска.
+
+    Перерывы смены сетка считает на клиенте по этим правилам: без них правка
+    смены в отделе допуска уходила бы без автоперерывов, а окно правил после
+    сохранения теряло бы их с экрана.
+    """
+    granted = _work_schedule_granted_department_ids(requester_id)
+    if not granted:
+        return direction_rules
+    merged = {}
+    for item in list(direction_rules or []):
+        key = str((item or {}).get('direction') or '').strip().lower()
+        if key:
+            merged.setdefault(key, item)
+    for department_id in sorted(granted):
+        for item in (db.get_work_schedule_break_rules(department_id=department_id) or []):
+            key = str((item or {}).get('direction') or '').strip().lower()
+            if key:
+                merged.setdefault(key, item)
+    return [merged[key] for key in sorted(merged)]
+
+
 @app.route('/api/work_schedules/break_rules', methods=['GET'])
 @require_api_key
 def get_work_schedule_break_rules():
@@ -53224,6 +53383,8 @@ def get_work_schedule_break_rules():
             scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
 
         direction_rules = db.get_work_schedule_break_rules(department_id=scope_dept)
+        if scope_dept is not None:
+            direction_rules = _with_granted_break_rules(requester_id, direction_rules)
         return jsonify({"direction_rules": direction_rules}), 200
 
     except ValueError as e:
@@ -53278,9 +53439,12 @@ def save_work_schedule_break_rules():
             scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
             if scope_dept is None:
                 return jsonify({"error": "Forbidden"}), 403
+            # Отделы поимённого допуска — как у их СВ: правила своих направлений он правит.
+            scope_department_ids = [scope_dept, *sorted(_work_schedule_granted_department_ids(requester_id))]
             allowed_names = {
                 str(d.get('name') or '').strip().lower()
-                for d in (db.get_directions(department_id=scope_dept) or [])
+                for department_id in scope_department_ids
+                for d in (db.get_directions(department_id=department_id) or [])
             }
             allowed_names.discard('')
             direction_rules = [
@@ -53292,6 +53456,8 @@ def save_work_schedule_break_rules():
         db.save_work_schedule_break_rules(direction_rules)
         # Возвращаем правила в рамках того же скоупа, что и GET (без утечки чужих отделов).
         saved = db.get_work_schedule_break_rules(department_id=scope_dept)
+        if scope_dept is not None:
+            saved = _with_granted_break_rules(requester_id, saved)
         return jsonify({
             "message": "Break rules saved successfully",
             "direction_rules": saved
@@ -53698,7 +53864,9 @@ def remove_work_schedule_dismissal_blacklist():
         if not operator_id:
             return jsonify({"error": "Missing operator_id"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        # Поимённый допуск даёт права СВ отдела, а СВ ЧС не снимает.
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(
+            user_data, requester_id, operator_id, allow_grant=False)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
