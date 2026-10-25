@@ -274,8 +274,7 @@ function AudioPlayer({ src, label = 'Аудиосообщение' }) {
             : playing ? 'Приостановить аудио' : 'Воспроизвести аудио';
     const progress = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
 
-    return <div ref={playerRef} className="wazzup-audio" role="group" aria-label={label}
-        onDoubleClick={(event) => event.stopPropagation()}>
+    return <div ref={playerRef} className="wazzup-audio" role="group" aria-label={label}>
         <audio ref={audioRef} preload="none" className="hidden" aria-hidden="true"
             onLoadedMetadata={syncTime} onDurationChange={syncTime} onTimeUpdate={syncTime}
             onSeeked={() => { pendingSeek.current = false; syncTime(); }}

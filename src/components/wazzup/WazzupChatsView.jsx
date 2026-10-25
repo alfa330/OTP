@@ -33,7 +33,7 @@ import ChatChannelsOfNumber from './ChatChannelsOfNumber';
 import { chatThemeStyle, useChatTheme, usePortalDark, useThemeMenus, wallpaperAllowed } from './chatThemes';
 import { useChatWallpaper } from './chatWallpaper';
 import ChatWallpaperLayer from './ChatWallpaperLayer';
-import { canReplyOnDoubleClick, firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
+import { firstVisibleMessage, messageQuote, shouldShowMessageAuthor } from './threadPresentation';
 import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import { buildAttachmentGroup } from './chatAttachmentGroups';
 import { latestInboundTime } from './useWabaWindowExpired';
@@ -292,12 +292,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                         {msg.authorName}
                     </div>
                 )}
-            <div onDoubleClick={(event) => {
-                if (onReply && !msg.isDeleted && canReplyOnDoubleClick(event)) {
-                    event.preventDefault();
-                    onReply(msg);
-                }
-            }} className={`wazzup-message-bubble min-w-0 max-w-full rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
+            <div className={`wazzup-message-bubble min-w-0 max-w-full rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
                 out ? 'wazzup-message-outgoing rounded-br-md bg-[#dcf8c6] text-slate-900'
                     : 'wazzup-message-incoming rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>

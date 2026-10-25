@@ -19,7 +19,6 @@ await build({ stdin: { contents: `
     import { Headset, Ban, Clock3, Reply } from 'lucide-react';
     import MessageDeliveryStatus from './MessageDeliveryStatus';
     import ChatMessageText from './ChatMessageText';
-    import { canReplyOnDoubleClick } from './threadPresentation';
     const MEDIA_LABELS={image:'Фото'};
     const MediaContent=()=>null;
     const lateDeliveryNote=()=>null;
@@ -79,17 +78,14 @@ test('a message still in the queue or just accepted by Wazzup shows one gray che
     }
 });
 
-test('double click on a message chooses the reply without activating embedded media or deleted messages', () => {
+test('a reply is chosen only with the button next to the message: double click does nothing', () => {
     const replies = [];
     const tree = Bubble.type({ msg, onReply: (item) => replies.push(item) });
-    const body = find(tree, (node) => node.props?.onDoubleClick);
-    body.props.onDoubleClick({ target: { closest: () => null }, preventDefault() {} });
+    assert.equal(find(tree, (node) => node.props?.onDoubleClick), null);
+    find(tree, (node) => node.props?.['aria-label'] === 'Ответить на сообщение').props.onClick();
     assert.deepEqual(replies, [msg]);
-    body.props.onDoubleClick({ target: { closest: () => ({ tagName: 'BUTTON' }) }, preventDefault() {} });
-    assert.equal(replies.length, 1);
     const deleted = Bubble.type({ msg: { ...msg, isDeleted: true }, onReply: (item) => replies.push(item) });
-    find(deleted, (node) => node.props?.onDoubleClick).props.onDoubleClick({ target: {}, preventDefault() {} });
-    assert.equal(replies.length, 1);
+    assert.equal(find(deleted, (node) => node.props?.['aria-label'] === 'Ответить на сообщение'), null);
 });
 
 test('continuing an operator group hides only the author label and aligns the reply button with the bubble', () => {
