@@ -20,7 +20,8 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
  *
  * Личная тема (owners — id учёток) есть только у названных сотрудников: у
  * остальных её нет ни в меню, ни по сохранённому значению. У владельца она
- * включается сама, один раз; дальше выбор за ним, как у любой темы.
+ * включается сама, один раз; дальше выбор за ним, как у любой темы. Личная
+ * тема с quiet сама не включается: владелец выбирает её, как любую другую.
  *
  * Учёткам из STANDARD_ONLY — только стандартная тема и без своих обоев
  * (chatWallpaper.js; сервер держит тот же список — wazzup/appearance.py):
@@ -56,7 +57,7 @@ const ALL_THEMES = Object.freeze([
     },
     // Подложку переписки украшает мозаика (chatThemeRose.svg в слое темы).
     {
-        id: 'rose', name: 'Роза',
+        id: 'rose', name: 'Роза', owners: Object.freeze([241]), quiet: true,
         wall: 'linear-gradient(160deg, #fcf3f6 0%, #f6e3ea 100%)', swatch: '#f8e8ee',
         incoming: '#ffffff', incomingLine: 'rgba(150, 64, 104, 0.14)', outgoing: '#f9dae6',
         accent: '#c0447a', quote: 'rgba(192, 68, 122, 0.1)', quoteInk: '#6a1f42', read: '#1d63c9', meta: '#7b5063',
@@ -122,7 +123,7 @@ function readChatTheme(owner) {
     let id = DEFAULT_CHAT_THEME;
     try {
         const store = storage();
-        const personal = themes.find((theme) => theme.owners);
+        const personal = themes.find((theme) => theme.owners && !theme.quiet);
         // Сначала метка: не записалась — выбор человека остаётся нетронутым.
         if (personal && store && store.getItem(PERSONAL + owner) !== personal.id) {
             store.setItem(PERSONAL + owner, personal.id);
