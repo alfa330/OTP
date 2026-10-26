@@ -467,9 +467,48 @@ class ScanWindowWiringTests(unittest.TestCase):
     def test_scanner_uses_the_tested_decisions(self):
         # Решения вынесены в docScan.js и покрыты node-тестом; окно их только зовёт.
         for call in ("scanOutputType(encoded.length, formats) === 'jpeg'", 'for (const { quality, maxSide } of SCAN_QUALITY_STEPS)',
-                     'keepScannedPage(pages, shot, `p${pageSeq}`)', 'scannerBack({ step, pages: pages.length, busy, confirm: confirmDiscard })',
-                     'cropUsable(shot.corners, shot.width, shot.height)', 'turnedSize(size.width, size.height, page.rotation)'):
+                     'keepScannedPage(pagesRef.current, shot, `p${pageSeq}`)', 'keepScannedPage(pagesRef.current, next, `p${pageSeq}`)',
+                     'scannerBack({ step, pages: pages.length, busy, confirm: confirmDiscard })',
+                     'cropUsable(shot.corners, shot.width, shot.height)', 'turnedSize(size.width, size.height, page.rotation)',
+                     'shutterRef.current.push(found, fw, fh, performance.now())', 'sheetHint(found, fw, fh)'):
             self.assertIn(call, self.SCANNER)
+
+    def test_live_search_runs_in_its_own_thread_with_a_fallback(self):
+        # Живой поиск — в потоке docScanWorker.js; не завёлся или молчит — в главном.
+        self.assertIn("new Worker(new URL('./docScanWorker.js', import.meta.url), { type: 'module' })", self.SCANNER)
+        self.assertIn('watchdog = setTimeout(() => {', self.SCANNER)
+        self.assertIn('handle(detectDocument(frame.data, frame.width, frame.height), frame.width, frame.height, vw, vh);',
+                      self.SCANNER)
+        worker = (self.DIR / 'docScanWorker.js').read_text(encoding='utf-8')
+        self.assertIn('frame = halveRGBA(new Uint8ClampedArray(data), width, height);', worker)
+        self.assertIn('found = detectDocument(frame.data, frame.width, frame.height);', worker)
+
+    def test_auto_shot_goes_to_the_stack_and_manual_to_the_edges(self):
+        # «Авто» снимает сам и только в своём режиме; снятое им — сразу в стопку,
+        # снятое кнопкой — на «Края листа». Тот же лист второй раз не снимается.
+        self.assertIn("if (auto && next.state === 'fire' && !busyRef.current && !confirmRef.current) captureRef.current?.({ auto: true });",
+                      self.SCANNER)
+        self.assertIn('if (auto) addPage(next);\n            else openCrop(next);', self.SCANNER)
+        self.assertIn('shutterRef.current.took(scaleCorners(corners, size.fw / vw, size.fh / vh));', self.SCANNER)
+        # Углы снимка — поиск по кадру с подсказкой видоискателя и уточнение в две
+        # ступени: кадр вдвое крупнее кадра поиска, затем копия REFINE_SIDE.
+        self.assertIn('const corners = locateSheet(frame, vw, vh, hintCorners) || defaultCorners(vw, vh);', self.SCANNER)
+        self.assertIn('rough = scaleCorners(refineQuad(image.data, image.width, image.height, scaleCorners(rough, kx, ky), { search: 6 }), 1 / kx, 1 / ky);',
+                      self.SCANNER)
+        self.assertIn('refineQuad(ctx.getImageData(0, 0, rw, rh).data, rw, rh, scaleCorners(rough, rw / w, rh / h), { search: REFINE_SEARCH });',
+                      self.SCANNER)
+
+    def test_one_capture_at_a_time(self):
+        # Флаг снимка — в ref и до первого await: два ответа поиска подряд с
+        # «fire» не успевают дождаться перерисовки с busy и сняли бы лист дважды.
+        body = self.SCANNER[self.SCANNER.index('const capture = async'):self.SCANNER.index('captureRef.current = capture;')]
+        self.assertIn('if (busyRef.current || !video?.videoWidth', body)
+        self.assertLess(body.index("busyRef.current = 'capture';"), body.index('await '))
+
+    def test_escape_leaves_an_open_menu_to_itself(self):
+        # Меню выбора камеры закрывается своим Esc; сканер под ним остаётся.
+        self.assertIn('''if (document.querySelector('[role="menu"]')) return;''', self.SCANNER)
+        self.assertIn('''querySelector('button[aria-expanded="true"]:not([aria-haspopup])')''', self.SCANNER)
 
     def test_white_on_dark_steps_survives_the_dark_layer(self):
         # Тёмный слой портала перекрашивает .bg-white и .text-slate-900 — у

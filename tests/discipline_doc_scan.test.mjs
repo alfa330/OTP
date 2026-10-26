@@ -7,16 +7,24 @@
  * с шумом и неровным светом. Кадр рисуется здесь же, точной моделью
  * проектирования: углы листа известны, и найденные сверяются с ними.
  *
+ * Поиск листа переписан 26.10.2026 («документ на столе он никак не
+ * распознает»): на настоящих кадрах камеры (набор SmartDoc 2015) прежний
+ * находил лист в 54 % кадров, на светлом офисном столе — ни разу. Сцены «по
+ * мотивам» тех провалов — голубоватый лист на тёплом столе почти той же
+ * яркости, тёмная фотография у края листа, журнал у края кадра — прежний
+ * поиск проваливает, новый проходит.
+ *
  * Запуск: node --test tests/discipline_doc_scan.test.mjs
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    applyHomography, buildPdf, createQuadTracker, cropUsable, defaultCorners, detectDocument, documentAspect, enhancePage,
-    homography, insetCorners, isConvexQuad, keepScannedPage, orderCorners, outputSize, quadArea, SCAN_FILTERS,
-    SCAN_FILTER_HINT, SCAN_MAX_SIDE, SCAN_QUALITY_STEPS, scanFileName, scanFormats, scannerBack, scanOutputType, toGray,
-    turnedSize, warpPerspective,
+    applyHomography, AUTO_CONFIDENCE, AUTO_HOLD_MS, buildPdf, createAutoShutter, createQuadTracker, cropUsable, defaultCorners,
+    detectDocument, documentAspect, enhancePage, halveRGBA, homography, insetCorners, isConvexQuad, keepScannedPage,
+    MIN_CONFIDENCE, orderCorners, outputSize, quadArea, refineQuad, SCAN_FILTERS, SCAN_FILTER_HINT, SCAN_MAX_SIDE,
+    SCAN_MODE_HINT, SCAN_MODES, SCAN_QUALITY_STEPS, scanFileName, scanFormats, scannerBack, scanOutputType, sheetHint,
+    SHOW_CONFIDENCE, turnedSize, warpPerspective,
 } from '../src/components/discipline/docScan.js';
 
 /* ── Синтетический кадр ───────────────────────────────────────────────── */
@@ -52,10 +60,12 @@ const docInk = (seed, { table = false, blue = false } = {}) => {
     return boxes;
 };
 
-/* Кадр w×h RGBA: стол (base, текстура), лист по углам corners, «текст», свет и шум.
-   occlude(x, y) — цвет предмета поверх кадра (палец, клавиатура) или null. */
+/* Кадр w×h RGBA: стол (base или цвет deskRgb, текстура), лист по углам corners
+   (paper или цвет paperRgb), «текст», свет и шум. photo — тёмная фотография в
+   листе [u0, v0, u1, v1] (мм листа). occlude(x, y) — цвет предмета поверх кадра
+   (палец, клавиатура, журнал) или null. */
 const renderScene = ({ w, h, corners, base = 70, texture = 'noise', paper = 228, seed = 1, table = false, light = 0,
-    occlude = null }) => {
+    occlude = null, deskRgb = null, paperRgb = null, photo = null }) => {
     const rand = rng(seed);
     const data = new Uint8ClampedArray(w * h * 4);
     const toDoc = corners ? homography(corners, [[0, 0], [DOC_W, 0], [DOC_W, DOC_H], [0, DOC_H]]) : null;
@@ -75,9 +85,9 @@ const renderScene = ({ w, h, corners, base = 70, texture = 'noise', paper = 228,
                 }
                 if (hits) docPoint = { cover: hits / 4, uv: applyHomography(toDoc, x + 0.5, y + 0.5) };
             }
-            let deskR = base;
-            let deskG = base;
-            let deskB = base;
+            let deskR = deskRgb ? deskRgb[0] : base;
+            let deskG = deskRgb ? deskRgb[1] : base;
+            let deskB = deskRgb ? deskRgb[2] : base;
             if (texture === 'wood') {
                 const grain = 18 * Math.sin(y * 0.21 + Math.sin(x * 0.03) * 3) + 10 * Math.sin(y * 0.05);
                 deskR = base + 25 + grain;
@@ -96,11 +106,15 @@ const renderScene = ({ w, h, corners, base = 70, texture = 'noise', paper = 228,
             if (docPoint) {
                 const [u, v] = docPoint.uv;
                 const shade = 1 - light * (u / DOC_W);
-                let pr = paper * shade;
-                let pg = paper * shade;
-                let pb = (paper - 6) * shade;
-                const box = ink.find((item) => u >= item.u0 && u <= item.u1 && v >= item.v0 && v <= item.v1);
-                if (box) {
+                let pr = (paperRgb ? paperRgb[0] : paper) * shade;
+                let pg = (paperRgb ? paperRgb[1] : paper) * shade;
+                let pb = (paperRgb ? paperRgb[2] : paper - 6) * shade;
+                const inPhoto = photo && u >= photo[0] && u <= photo[2] && v >= photo[1] && v <= photo[3];
+                const box = !inPhoto && ink.find((item) => u >= item.u0 && u <= item.u1 && v >= item.v0 && v <= item.v1);
+                if (inPhoto) {
+                    const t = 40 + 25 * Math.sin(u * 0.4) * Math.sin(v * 0.3);
+                    pr = t + 10; pg = t + 18; pb = t + 30;
+                } else if (box) {
                     if (box.blue) { pr = 45; pg = 70; pb = 175; } else { pr = 35; pg = 35; pb = 45; }
                 }
                 const c = docPoint.cover;
@@ -150,9 +164,18 @@ const rotated = (cx, cy, w, h, deg) => {
 const diag = (w, h) => Math.hypot(w, h);
 const cornerError = (found, truth) => Math.max(...found.map((p, i) => Math.hypot(p[0] - truth[i][0], p[1] - truth[i][1])));
 
-const detectIn = (scene) => {
-    const rgba = renderScene(scene);
-    return detectDocument(toGray(rgba, scene.w, scene.h), scene.w, scene.h);
+const detectIn = (scene) => detectDocument(renderScene(scene), scene.w, scene.h);
+
+/* Журнал у края кадра: тёмная пёстрая обложка, левый край за кадром. */
+const MAGAZINE = [[-30, 30], [92, 14], [110, 196], [-12, 214]];
+const TO_MAGAZINE = homography(MAGAZINE, [[0, 0], [1, 0], [1, 1], [0, 1]]);
+const magazine = (x, y) => {
+    const [u, v] = applyHomography(TO_MAGAZINE, x + 0.5, y + 0.5);
+    if (u < 0 || v < 0 || u > 1 || v > 1) return null;
+    if (v < 0.18) return [210, 214, 220];
+    const spot = Math.sin(u * 9) * Math.cos(v * 7);
+    if (spot > 0.3) return [180, 60, 50];
+    return spot < -0.4 ? [40, 90, 170] : [32, 36, 48];
 };
 
 /* ── Поиск листа ─────────────────────────────────────────────────────── */
@@ -187,6 +210,19 @@ const SCENES = [
         base: 215, paper: 236, seed: 5 },
     { name: 'клавиатура рядом на светлом столе', w: 320, h: 240, corners: [[60, 20], [170, 24], [174, 220], [56, 216]],
         base: 175, paper: 236, seed: 16, occlude: (x, y) => (x > 200 && x < 310 && y > 40 && y < 200 ? [40, 40, 44] : null) },
+    // Светлый офисный стол SmartDoc: голубоватая бумага на тёплом столе, по
+    // яркости разница 3–4 из 255 — серый кадр кромку не видел вовсе, и
+    // прежний поиск не находил здесь лист ни разу (26.10.2026).
+    { name: 'голубоватый лист на тёплом светлом столе той же яркости', w: 320, h: 240,
+        corners: [[96, 22], [212, 28], [220, 222], [90, 214]], deskRgb: [232, 220, 208], paperRgb: [221, 228, 242], seed: 9 },
+    // Журнал с фотографией во всю ширину у верха: у верхней стороны внутри
+    // не бумага, а тёмное фото — прежний поиск резал лист по краю фото.
+    { name: 'тёмная фотография у верхнего края листа', w: 320, h: 240,
+        corners: [[96, 22], [212, 28], [220, 222], [90, 214]], base: 150, photo: [8, 6, 202, 80], seed: 21 },
+    // Заваленный стол: рядом журнал — тоже прямоугольник; лист — тот, что
+    // ближе к середине и светлый внутри.
+    { name: 'журнал у края кадра на светлом столе', w: 320, h: 240,
+        corners: [[128, 34], [236, 40], [244, 226], [118, 220]], base: 210, seed: 31, occlude: magazine },
 ];
 
 for (const scene of SCENES) {
@@ -196,8 +232,18 @@ for (const scene of SCENES) {
         const error = cornerError(found.corners, scene.corners);
         assert.ok(error < 0.025 * diag(scene.w, scene.h), `угол дальше допуска: ${error.toFixed(1)} px`);
         assert.ok(found.coverage > 0.5);
+        assert.ok(found.confidence >= SHOW_CONFIDENCE, `уверенность ${found.confidence.toFixed(2)} — рамку не покажет видоискатель`);
     });
 }
+
+test('углы — в координатах холста: без сдвига на полпикселя', () => {
+    // Пиксель i — отрезок [i, i+1], как у SVG и drawImage: рамка с кадра
+    // поиска, умноженная на 12 для 4K-снимка, не должна съезжать влево-вверх.
+    const scene = SCENES[0];
+    const found = detectIn(scene);
+    const shift = found.corners.reduce((acc, p, i) => [acc[0] + p[0] - scene.corners[i][0], acc[1] + p[1] - scene.corners[i][1]], [0, 0]);
+    assert.ok(Math.abs(shift[0] / 4) < 0.3 && Math.abs(shift[1] / 4) < 0.3, `средний сдвиг углов ${shift.map((v) => (v / 4).toFixed(2))}`);
+});
 
 /* Клавиатура во весь кадр: тёмные клавиши со светлыми щелями. */
 const keyboard = (x, y) => {
@@ -224,19 +270,72 @@ test('на кадре без листа рамки нет', () => {
 
 test('пустой и крошечный кадр не роняют поиск', () => {
     assert.equal(detectDocument(null, 0, 0), null);
-    assert.equal(detectDocument(new Uint8Array(16 * 16), 16, 16), null);
+    assert.equal(detectDocument(new Uint8ClampedArray(16 * 16 * 4), 16, 16), null);
+    assert.equal(detectDocument(new Uint8ClampedArray(320 * 240 * 4).fill(128), 320, 240), null);
+    // Серый кадр вместо RGBA (прежний вызов) — не падает и молчит.
     assert.equal(detectDocument(new Uint8Array(320 * 240).fill(128), 320, 240), null);
 });
 
 test('живой поиск укладывается в бюджет кадра', () => {
     const scene = SCENES[1];
-    const gray = toGray(renderScene(scene), scene.w, scene.h);
-    detectDocument(gray, scene.w, scene.h);
+    const rgba = renderScene(scene);
+    detectDocument(rgba, scene.w, scene.h);
     const started = performance.now();
-    for (let i = 0; i < 10; i += 1) detectDocument(gray, scene.w, scene.h);
+    for (let i = 0; i < 10; i += 1) detectDocument(rgba, scene.w, scene.h);
     const each = (performance.now() - started) / 10;
-    // На стенде ~5–15 мс; телефон медленнее в 3–5 раз, кадр поиска — раз в 180 мс.
+    // На стенде ~5–10 мс; телефон медленнее в 3–5 раз, поиск — в своём потоке.
     assert.ok(each < 40, `${each.toFixed(1)} мс на кадр`);
+});
+
+test('кадр поиска вдвое меньше — средним по 2×2', () => {
+    const src = new Uint8ClampedArray([
+        0, 0, 0, 255, 100, 50, 10, 255, 200, 200, 200, 255, 0, 0, 0, 255, 9, 9, 9, 255,
+        100, 100, 100, 255, 0, 50, 30, 255, 40, 40, 40, 255, 255, 255, 255, 255, 9, 9, 9, 255,
+    ]);
+    const out = halveRGBA(src, 5, 2);
+    assert.equal(out.width, 2);
+    assert.equal(out.height, 1);
+    assert.deepEqual(Array.from(out.data), [50, 50, 35, 255, 124, 124, 124, 255]);
+});
+
+/* ── Углы снимка с долей пикселя ─────────────────────────────────────── */
+
+test('уточнение углов: сдвинутая на 3 px рамка встаёт на кромку с долей пикселя', () => {
+    const w = 960;
+    const h = 720;
+    const corners = [[354, 90], [666, 132], [708, 642], [276, 615]];
+    const rgba = boxBlur(renderScene({ w, h, corners, seed: 7 }), w, h);
+    // Рамка шире листа и рамка уже листа — пик перепада ищется с обеих сторон.
+    for (const sign of [1, -1]) {
+        const rough = corners.map(([x, y], i) => [x + sign * (i % 2 ? 3 : -3), y + sign * (i < 2 ? 2 : -2)]);
+        const refined = refineQuad(rgba, w, h, rough, { search: 6 });
+        assert.ok(cornerError(refined, corners) < 0.3, `ошибка угла ${cornerError(refined, corners).toFixed(2)} px (сдвиг ${sign > 0 ? 'наружу' : 'внутрь'})`);
+        assert.ok(cornerError(rough, corners) > 3, 'проверка устарела: исходная рамка и так точна');
+    }
+});
+
+test('уточнение: сторона, легшая на тёмную полосу у края листа, уходит на кромку', () => {
+    // Журнал со стенда: верхняя сторона рамки легла на край фотографии у верха
+    // листа. Знак перепада «стол → лист» общий для сторон — у края фото он
+    // обратный («бумага → тёмное»), и сторона ищет настоящую кромку.
+    const w = 960;
+    const h = 720;
+    const corners = [[354, 90], [666, 132], [708, 642], [276, 615]];
+    const rgba = boxBlur(renderScene({ w, h, corners, base: 165, seed: 7, photo: [4, 4, 206, 22] }), w, h);
+    const toImage = homography([[0, 0], [210, 0], [210, 297], [0, 297]], corners);
+    const rough = [applyHomography(toImage, 0, 4), applyHomography(toImage, 210, 4), corners[2], corners[3]];
+    assert.ok(cornerError(rough, corners) > 4, 'проверка устарела: рамка и так на кромке');
+    const refined = refineQuad(rgba, w, h, rough, { search: 6 });
+    assert.ok(cornerError(refined, corners) < 0.5, `угол остался на краю фото: ${cornerError(refined, corners).toFixed(2)} px`);
+});
+
+test('уточнение не уводит рамку, когда опереться не на что', () => {
+    const w = 400;
+    const h = 300;
+    const flat = new Uint8ClampedArray(w * h * 4).fill(180);
+    const corners = [[60, 40], [340, 50], [330, 260], [70, 250]];
+    assert.deepEqual(refineQuad(flat, w, h, corners, { search: 6 }), corners);
+    assert.deepEqual(refineQuad(flat, w, h, [[0, 0], [10, 10], [5, 0], [0, 10]], { search: 6 }), [[0, 0], [10, 10], [5, 0], [0, 10]]);
 });
 
 /* ── Геометрия ───────────────────────────────────────────────────────── */
@@ -390,14 +489,17 @@ test('размер страницы: потолок по длинной стор
 
 /* ── Живая рамка ─────────────────────────────────────────────────────── */
 
-test('живая рамка не мигает: два согласных кадра, сглаживание, угасание', () => {
+test('живая рамка не мигает: два согласных кадра, подтягивание, угасание', () => {
     const tracker = createQuadTracker({ hold: 3 });
     const quad = [[10, 10], [100, 10], [100, 140], [10, 140]];
     const shifted = quad.map(([x, y]) => [x + 4, y + 2]);
     const elsewhere = quad.map(([x, y]) => [x + 120, y]);
     assert.equal(tracker.push(quad, 320, 240), null, 'одного кадра мало');
     assert.deepEqual(tracker.push(quad, 320, 240), quad);
-    assert.deepEqual(tracker.push(shifted, 320, 240), quad.map(([x, y]) => [x + 2, y + 1]), 'близкое — сглаживается');
+    const pulled = tracker.push(shifted, 320, 240);
+    pulled.forEach((p, i) => {
+        assert.ok(Math.abs(p[0] - (quad[i][0] + 2.8)) < 1e-9 && Math.abs(p[1] - (quad[i][1] + 1.4)) < 1e-9, 'близкое — подтягивается на 70 %');
+    });
     const before = tracker.current;
     assert.deepEqual(tracker.push(elsewhere, 320, 240), before, 'одиночный выброс не двигает рамку');
     assert.deepEqual(tracker.push(elsewhere, 320, 240), elsewhere);
@@ -405,6 +507,69 @@ test('живая рамка не мигает: два согласных кад�
     tracker.push(null, 320, 240);
     assert.ok(tracker.current, 'два пустых кадра — рамка ещё видна');
     assert.equal(tracker.push(null, 320, 240), null);
+});
+
+/* ── Автоснимок ──────────────────────────────────────────────────────── */
+
+const SHEET = [[40, 30], [280, 34], [284, 214], [36, 210]];
+const shifted = (quad, dx, dy) => quad.map(([x, y]) => [x + dx, y + dy]);
+
+test('автоснимок: лист найден, крупный и неподвижный — снимок один раз', () => {
+    const shutter = createAutoShutter();
+    const sure = (corners) => ({ corners, confidence: 1 });
+    assert.equal(shutter.push(null, 320, 240, 0).state, 'search');
+    // Мелкий лист — поднести камеру ближе.
+    assert.equal(shutter.push(sure([[150, 110], [180, 110], [180, 140], [150, 140]]), 320, 240, 10).state, 'closer');
+    // Найден, но не уверенно — держать, кольцо не идёт.
+    assert.deepEqual(shutter.push({ corners: SHEET, confidence: (SHOW_CONFIDENCE + AUTO_CONFIDENCE) / 2 }, 320, 240, 20),
+        { state: 'steady', progress: 0 });
+    assert.equal(shutter.push(sure(SHEET), 320, 240, 100).progress, 0);
+    assert.ok(Math.abs(shutter.push(sure(shifted(SHEET, 2, 1)), 320, 240, 100 + AUTO_HOLD_MS / 2).progress - 0.5) < 1e-9,
+        'дрожь руки в пару пикселей — не сдвиг');
+    // Лист сдвинули — отсчёт заново.
+    assert.equal(shutter.push(sure(shifted(SHEET, 20, 0)), 320, 240, 100 + AUTO_HOLD_MS).progress, 0);
+    const start = 100 + AUTO_HOLD_MS;
+    assert.equal(shutter.push(sure(shifted(SHEET, 20, 0)), 320, 240, start + AUTO_HOLD_MS - 1).state, 'steady');
+    assert.equal(shutter.push(sure(shifted(SHEET, 20, 0)), 320, 240, start + AUTO_HOLD_MS).state, 'fire');
+    // Тот же лист больше не снимается.
+    for (let t = 1; t <= 5; t += 1) {
+        assert.equal(shutter.push(sure(shifted(SHEET, 20, 0)), 320, 240, start + AUTO_HOLD_MS * (1 + t)).state, 'next');
+    }
+});
+
+test('автоснимок: следующий лист — после того, как прежний убрали или он уехал', () => {
+    const sure = (corners) => ({ corners, confidence: 1 });
+    // Лист убрали (рамка пропала на три кадра) — снова ищем.
+    const a = createAutoShutter();
+    a.took(SHEET);
+    assert.equal(a.push(sure(SHEET), 320, 240, 0).state, 'next');
+    assert.equal(a.push(null, 320, 240, 100).state, 'next');
+    assert.equal(a.push(null, 320, 240, 200).state, 'next');
+    assert.equal(a.push(null, 320, 240, 300).state, 'search');
+    assert.equal(a.push(sure(SHEET), 320, 240, 400).state, 'steady');
+    assert.equal(a.push(sure(SHEET), 320, 240, 400 + AUTO_HOLD_MS).state, 'fire');
+    // Лист сменили, не убирая из кадра, — рамка уехала далеко.
+    const b = createAutoShutter();
+    b.took(SHEET);
+    assert.equal(b.push(sure(shifted(SHEET, 8, 0)), 320, 240, 0).state, 'next');
+    assert.equal(b.push(sure(shifted(SHEET, 70, 10)), 320, 240, 100).state, 'steady');
+    // reset — снова готов (переключили режим, вернулись к камере).
+    b.reset();
+    assert.equal(b.push(sure(SHEET), 320, 240, 200).state, 'steady');
+});
+
+test('подсказка без автоснимка: нет листа, мелко, найден', () => {
+    assert.equal(sheetHint(null, 320, 240), 'search');
+    assert.equal(sheetHint({ corners: SHEET, confidence: SHOW_CONFIDENCE - 0.01 }, 320, 240), 'search');
+    assert.equal(sheetHint({ corners: [[150, 110], [180, 110], [180, 140], [150, 140]], confidence: 1 }, 320, 240), 'closer');
+    assert.equal(sheetHint({ corners: SHEET, confidence: SHOW_CONFIDENCE }, 320, 240), 'found');
+    assert.ok(MIN_CONFIDENCE < SHOW_CONFIDENCE && SHOW_CONFIDENCE < AUTO_CONFIDENCE);
+    assert.ok(quadArea(SHEET) > 0.1 * 320 * 240);
+});
+
+test('«Авто / Вручную» и подсказка «i» называют одни и те же варианты', () => {
+    assert.deepEqual(SCAN_MODES.map((m) => m.value), ['auto', 'manual']);
+    for (const { label } of SCAN_MODES) assert.ok(SCAN_MODE_HINT.includes(`${label} —`), label);
 });
 
 /* ── «Как скан» ──────────────────────────────────────────────────────── */

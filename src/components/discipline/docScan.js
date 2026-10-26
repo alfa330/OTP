@@ -9,11 +9,10 @@
  * проверяет node-тест на синтетических кадрах (tests/discipline_doc_scan.test.mjs).
  *
  * Почему своё, а не OpenCV.js: тот весит ~8 МБ, а оператор открывает раздел с
- * телефона по мобильной сети. Поиск листа здесь — классический: границы
- * (Канни) → прямые (Хаф, голос только вдоль градиента) → лучший
- * четырёхугольник из двух пар почти параллельных прямых, по доле границы,
- * которая действительно лежит на его сторонах. Ошибку поиска человек поправит
- * сам: углы рамки после снимка перетаскиваются.
+ * телефона по мобильной сети. Поиск листа — по перепадам цвета и яркости:
+ * отрезки → прямые → лучший четырёхугольник по доводам (как и почему — у
+ * detectDocument). Ошибку поиска человек поправит сам: углы рамки после снимка
+ * перетаскиваются.
  */
 
 /* ── Что умеет скан и куда он годится ─────────────────────────────────── */
@@ -28,6 +27,16 @@ export const SCAN_FILTER_HINT = 'Цвет — белый лист без тен�
     + 'остаётся синей. Ч/б — как ксерокопия. Фото — снимок без обработки, только выпрямлен по краям листа.';
 
 export const SCAN_DEFAULT_FILTER = 'color';
+
+/* Как снимать — как у сканера iOS. «Авто» — по умолчанию: он и есть то
+   удобство, ради которого сканер, а не фото. */
+export const SCAN_MODES = [
+    { value: 'auto', label: 'Авто' },
+    { value: 'manual', label: 'Вручную' },
+];
+
+export const SCAN_MODE_HINT = 'Авто — страница снимается сама, когда лист найден и камера не двигается; '
+    + 'можно снимать и кнопкой. Вручную — снимаете кнопкой и сразу проверяете края листа.';
 
 /* Страниц в одном скане. Одна страница уходит фото (JPEG), несколько — одним
    PDF: у объяснительной и акта сервер принимает один файл. */
@@ -343,460 +352,975 @@ export const warpPerspective = (src, sw, sh, corners, ow, oh) => {
 };
 
 /* ── Поиск листа на кадре ─────────────────────────────────────────────── */
+/*
+ * Переписан 26.10.2026 после слов владельца «документ на столе он никак не
+ * распознает». Замер на настоящих кадрах камеры — открытом наборе SmartDoc
+ * 2015 (2555 кадров: лист A4 на пяти столах, углы листа размечены): прежний
+ * поиск (серые границы Канни → прямые Хафа) находил лист верно в 54 % кадров,
+ * на светлом офисном столе — ни разу, а в 15 % кадров ставил уверенную
+ * неверную рамку. Причин три:
+ *   — на светлом столе кромка листа почти не отличается по яркости (перепад
+ *     3–5 из 255), зато хорошо видна по цвету: голубоватая бумага на тёплом
+ *     столе. Серый кадр её не видел вовсе;
+ *   — порог Канни «по большинству границ» задирали строки текста, и слабая
+ *     кромка выпадала из границ целиком;
+ *   — рамку из кабеля, края стола и строки текста ничто не проверяло на то,
+ *     что внутри неё бумага, а снаружи стол.
+ * Теперь: перепад цвета и яркости вместе → тонкие границы → отрезки по
+ * направлению перепада (как LSD) → прямые из отрезков → четырёхугольник из
+ * двух пар прямых, и у каждого — доводы: какая доля сторон лежит на кромке,
+ * разный ли материал по обе стороны каждой стороны (и одинаково ли разный у
+ * всех четырёх), не идут ли кромки дальше углов, светло ли внутри, близко ли к
+ * середине кадра. На том же наборе: верно 90 % кадров (столы 1–4 — 98–100 %),
+ * неверная рамка — 2 %. Стол, заваленный бумагами, кабелями и посудой,
+ * остаётся трудным (верно ~10 %), но там поиск чаще молчит, чем ошибается.
+ */
 
 /* Сторона кадра, на котором ищется лист: живой поиск идёт несколько раз в
-   секунду на телефоне, и больше пикселей точности почти не добавляют —
-   углы человек поправит на снимке. */
+   секунду на телефоне, и больше пикселей точности почти не добавляют — углы
+   снимка уточняет refineQuad на полном кадре. */
 export const DETECT_SIDE = 320;
 
-export const toGray = (rgba, w, h) => {
-    const out = new Uint8Array(w * h);
-    for (let i = 0, j = 0; i < out.length; i += 1, j += 4) {
-        out[i] = (rgba[j] * 77 + rgba[j + 1] * 150 + rgba[j + 2] * 29) >> 8;
+/* Кадр вдвое меньше — средним по квадрату 2×2. Кадр камеры рисуется в холст
+   вдвое крупнее кадра поиска и сжимается здесь: drawImage, сжимая 4K-кадр
+   разом в двенадцать раз, берёт по четыре соседних пикселя на точку, и строки
+   текста рассыпаются в шум, а замер поиска шёл на честно усреднённых кадрах. */
+export const halveRGBA = (data, w, h) => {
+    const hw = w >> 1;
+    const hh = h >> 1;
+    const out = new Uint8ClampedArray(hw * hh * 4);
+    for (let y = 0; y < hh; y += 1) {
+        const r0 = 2 * y * w * 4;
+        const r1 = r0 + w * 4;
+        for (let x = 0; x < hw; x += 1) {
+            const i = r0 + x * 8;
+            const j = r1 + x * 8;
+            const o = (y * hw + x) * 4;
+            out[o] = (data[i] + data[i + 4] + data[j] + data[j + 4] + 2) >> 2;
+            out[o + 1] = (data[i + 1] + data[i + 5] + data[j + 1] + data[j + 5] + 2) >> 2;
+            out[o + 2] = (data[i + 2] + data[i + 6] + data[j + 2] + data[j + 6] + 2) >> 2;
+            out[o + 3] = 255;
+        }
     }
-    return out;
+    return { data: out, width: hw, height: hh };
 };
 
-/* Размытие 5×5 (биномиальное ядро 1-4-6-4-1, по строкам и столбцам). */
-const blur5 = (src, w, h) => {
-    const tmp = new Uint16Array(w * h);
+/* Уверенность рамки 0…1 — доводы на единицу периметра. На наборе SmartDoc:
+   ниже MIN_CONFIDENCE поиск молчит (так он отсекает больше половины своих
+   неверных рамок и почти не теряет верных); с SHOW_CONFIDENCE рамка видна в
+   видоискателе (неверных — меньше 1 %); с AUTO_CONFIDENCE, неподвижная, она
+   повод для автоснимка. */
+export const MIN_CONFIDENCE = 0.4;
+export const SHOW_CONFIDENCE = 0.6;
+export const AUTO_CONFIDENCE = 0.9;
+const CONFIDENCE_FULL = 0.4;
+
+const angDiff = (a, b) => {
+    const d = Math.abs(a - b) % Math.PI;
+    return d > Math.PI / 2 ? Math.PI - d : d;
+};
+
+const blur3 = (src, w, h) => {
+    const tmp = new Float32Array(w * h);
+    const out = new Float32Array(w * h);
     for (let y = 0; y < h; y += 1) {
         const row = y * w;
         for (let x = 0; x < w; x += 1) {
-            const x0 = x > 1 ? x - 2 : 0;
-            const x1 = x > 0 ? x - 1 : 0;
-            const x3 = x < w - 1 ? x + 1 : w - 1;
-            const x4 = x < w - 2 ? x + 2 : w - 1;
-            tmp[row + x] = src[row + x0] + 4 * src[row + x1] + 6 * src[row + x] + 4 * src[row + x3] + src[row + x4];
+            const x0 = x > 0 ? x - 1 : 0;
+            const x2 = x < w - 1 ? x + 1 : w - 1;
+            tmp[row + x] = (src[row + x0] + 2 * src[row + x] + src[row + x2]) / 4;
         }
     }
-    const out = new Uint8Array(w * h);
     for (let y = 0; y < h; y += 1) {
-        const r0 = (y > 1 ? y - 2 : 0) * w;
-        const r1 = (y > 0 ? y - 1 : 0) * w;
-        const r2 = y * w;
-        const r3 = (y < h - 1 ? y + 1 : h - 1) * w;
-        const r4 = (y < h - 2 ? y + 2 : h - 1) * w;
-        for (let x = 0; x < w; x += 1) {
-            out[r2 + x] = (tmp[r0 + x] + 4 * tmp[r1 + x] + 6 * tmp[r2 + x] + 4 * tmp[r3 + x] + tmp[r4 + x] + 128) >> 8;
-        }
+        const r0 = (y > 0 ? y - 1 : 0) * w;
+        const r1 = y * w;
+        const r2 = (y < h - 1 ? y + 1 : h - 1) * w;
+        for (let x = 0; x < w; x += 1) out[r1 + x] = (tmp[r0 + x] + 2 * tmp[r1 + x] + tmp[r2 + x]) / 4;
     }
     return out;
 };
 
-const sobel = (p, w, h) => {
+/* Кадр для поиска: яркость L и две цветоразности (красный−зелёный A и
+   жёлтый−синий B), чуть размытые (3×3), и в каждой точке — сила и направление
+   перепада по трём каналам сразу (сумма тензоров структуры). Границы тонкие:
+   остаётся гребень перепада поперёк кромки, как у Канни. С размытием 5×5
+   кромка листа слипалась со строками текста у края в одну широкую полосу, и
+   та отбрасывалась (замер, 26.10.2026). */
+const MIN_EDGE = 0.5;
+const prepareFrame = (rgba, w, h) => {
     const n = w * h;
-    const gx = new Float32Array(n);
-    const gy = new Float32Array(n);
+    const L = new Float32Array(n);
+    const A = new Float32Array(n);
+    const B = new Float32Array(n);
+    for (let i = 0, j = 0; i < n; i += 1, j += 4) {
+        const r = rgba[j];
+        const g = rgba[j + 1];
+        const b = rgba[j + 2];
+        L[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+        A[i] = r - g;
+        B[i] = 0.5 * (r + g) - b;
+    }
+    const bl = blur3(L, w, h);
+    const ba = blur3(A, w, h);
+    const bb = blur3(B, w, h);
+    const raw = new Float32Array(n);
+    const ori = new Float32Array(n); // направление наибольшего перепада, 0…π
+    const dir = new Uint8Array(n); // оно же четвертями — для утончения
+    for (let y = 1; y < h - 1; y += 1) {
+        for (let x = 1; x < w - 1; x += 1) {
+            const i = y * w + x;
+            const a = i - w - 1; const b = i - w; const c = i - w + 1;
+            const d = i - 1; const e = i + 1;
+            const g = i + w - 1; const k = i + w; const m = i + w + 1;
+            const lx = (bl[c] + 2 * bl[e] + bl[m]) - (bl[a] + 2 * bl[d] + bl[g]);
+            const ly = (bl[g] + 2 * bl[k] + bl[m]) - (bl[a] + 2 * bl[b] + bl[c]);
+            const ax = (ba[c] + 2 * ba[e] + ba[m]) - (ba[a] + 2 * ba[d] + ba[g]);
+            const ay = (ba[g] + 2 * ba[k] + ba[m]) - (ba[a] + 2 * ba[b] + ba[c]);
+            const bx = (bb[c] + 2 * bb[e] + bb[m]) - (bb[a] + 2 * bb[d] + bb[g]);
+            const by = (bb[g] + 2 * bb[k] + bb[m]) - (bb[a] + 2 * bb[b] + bb[c]);
+            // ÷64: Собель даёт 8 × наклон, а здесь квадраты.
+            const gxx = (lx * lx + ax * ax + bx * bx) / 64;
+            const gyy = (ly * ly + ay * ay + by * by) / 64;
+            const gxy = (lx * ly + ax * ay + bx * by) / 64;
+            const dxy = gxx - gyy;
+            const v = Math.sqrt(Math.max(0, (gxx + gyy + Math.sqrt(dxy * dxy + 4 * gxy * gxy)) / 2));
+            raw[i] = v;
+            if (v < MIN_EDGE) continue;
+            let t = 0.5 * Math.atan2(2 * gxy, dxy);
+            if (t < 0) t += Math.PI;
+            ori[i] = t;
+            // Граница четвертей в 22,5° по направлению — это |2·gxy| = |gxx − gyy|.
+            const q2 = 2 * gxy;
+            if ((dxy < 0 ? -dxy : dxy) >= (q2 < 0 ? -q2 : q2)) dir[i] = dxy >= 0 ? 0 : 2;
+            else dir[i] = gxy > 0 ? 1 : 3;
+        }
+    }
     const mag = new Float32Array(n);
     for (let y = 1; y < h - 1; y += 1) {
         for (let x = 1; x < w - 1; x += 1) {
             const i = y * w + x;
-            const a = p[i - w - 1];
-            const b = p[i - w];
-            const c = p[i - w + 1];
-            const d = p[i - 1];
-            const f = p[i + 1];
-            const g = p[i + w - 1];
-            const k = p[i + w];
-            const m = p[i + w + 1];
-            const sx = (c + 2 * f + m) - (a + 2 * d + g);
-            const sy = (g + 2 * k + m) - (a + 2 * b + c);
-            gx[i] = sx;
-            gy[i] = sy;
-            mag[i] = Math.sqrt(sx * sx + sy * sy);
-        }
-    }
-    return { gx, gy, mag };
-};
-
-const HIST_BINS = 1500;
-/* Ширина края кадра, где границ листа не ищем. */
-const BORDER = 2;
-
-/* Границы Канни: тонкие линии (подавление немаксимумов) и два порога с
-   гистерезисом. Пороги — от распределения самих границ кадра (у листа на
-   тёмном столе и у листа на светлом они очень разные), но верхний — не выше
-   HIGH_CAP: штрихи текста контрастнее кромки листа, и порог «по большинству»
-   на исписанном листе уходил выше кромки — лист на светлом столе пропадал. */
-const HIGH_CAP = 90;
-const cannyEdges = (mag, gx, gy, w, h) => {
-    const n = w * h;
-    const thin = new Float32Array(n);
-    const hist = new Uint32Array(HIST_BINS);
-    let count = 0;
-    // Крайние пиксели кадра — не граница листа: у края нет соседа для
-    // подавления немаксимумов, и там рождались ложные «кромки» во всю сторону.
-    for (let y = BORDER; y < h - BORDER; y += 1) {
-        for (let x = BORDER; x < w - BORDER; x += 1) {
-            const i = y * w + x;
-            const m = mag[i];
-            if (m < 8) continue;
-            const ax = Math.abs(gx[i]);
-            const ay = Math.abs(gy[i]);
+            const v = raw[i];
+            if (v < MIN_EDGE) continue;
+            const q = dir[i];
             let m1;
             let m2;
-            if (ay <= ax * 0.4142) { m1 = mag[i - 1]; m2 = mag[i + 1]; }
-            else if (ay >= ax * 2.4142) { m1 = mag[i - w]; m2 = mag[i + w]; }
-            else if (gx[i] * gy[i] > 0) { m1 = mag[i - w - 1]; m2 = mag[i + w + 1]; }
-            else { m1 = mag[i - w + 1]; m2 = mag[i + w - 1]; }
-            if (m >= m1 && m > m2) {
-                thin[i] = m;
-                hist[Math.min(HIST_BINS - 1, m | 0)] += 1;
-                count += 1;
-            }
+            if (q === 0) { m1 = raw[i - 1]; m2 = raw[i + 1]; }
+            else if (q === 2) { m1 = raw[i - w]; m2 = raw[i + w]; }
+            else if (q === 1) { m1 = raw[i - w - 1]; m2 = raw[i + w + 1]; }
+            else { m1 = raw[i - w + 1]; m2 = raw[i + w - 1]; }
+            if (v >= m1 && v > m2) mag[i] = v;
         }
     }
-    const edges = new Uint8Array(n);
-    if (!count) return edges;
-    let seen = 0;
-    let high = HIST_BINS - 1;
-    for (let b = 0; b < HIST_BINS; b += 1) {
-        seen += hist[b];
-        if (seen >= count * 0.5) { high = b; break; }
+    return { w, h, L: bl, A: ba, B: bb, mag, raw, ori, rho: 0 };
+};
+
+/* Отрезки: связные области тонких границ с одним направлением перепада
+   (±22,5°), как у LSD. Порог силы — от шума кадра: у гладкого белого стола
+   он низкий, и слабая кромка проходит, у деревянного — выше волокон. Ось
+   отрезка — главная ось разброса его точек: средний наклон перепада ошибается
+   на градус, и у длинной кромки «ширина» выходила 7 px — кромку отбрасывало.
+   Ширина — среднеквадратичная, плотность — точек на длину: у тонкой линии под
+   углом α их len·max(|cos α|, |sin α|). */
+const SEG_TOLERANCE = (22.5 * Math.PI) / 180;
+const SEG_RHO_MIN = 0.8;
+const SEG_RHO_NOISE = 2.5;
+const SEG_MIN_LEN = 7;
+const SEG_MAX_RMS = 1.2;
+const SEG_MIN_DENSITY = 0.6;
+const EDGE_BORDER = 2;
+const ORDER_BINS = 1024;
+const findSegments = (f) => {
+    const { w, h, mag, raw, ori } = f;
+    const n = w * h;
+    const sample = [];
+    for (let i = 0; i < n; i += 7) sample.push(raw[i]);
+    sample.sort((a, b) => a - b);
+    const rho = Math.max(SEG_RHO_MIN, SEG_RHO_NOISE * (sample[sample.length >> 1] || 0));
+    f.rho = rho;
+    // Затравки — от сильных границ к слабым (сортировка корзинами).
+    let maxMag = 0;
+    for (let i = 0; i < n; i += 1) if (mag[i] > maxMag) maxMag = mag[i];
+    const scale = maxMag > 0 ? (ORDER_BINS - 1) / maxMag : 0;
+    const counts = new Int32Array(ORDER_BINS);
+    for (let y = EDGE_BORDER; y < h - EDGE_BORDER; y += 1) {
+        for (let x = EDGE_BORDER; x < w - EDGE_BORDER; x += 1) {
+            const v = mag[y * w + x];
+            if (v >= rho) counts[(v * scale) | 0] += 1;
+        }
     }
-    high = Math.min(HIGH_CAP, Math.max(28, high));
-    const low = Math.max(14, high * 0.45);
+    const fill = new Int32Array(ORDER_BINS);
+    let total = 0;
+    for (let b = ORDER_BINS - 1; b >= 0; b -= 1) { fill[b] = total; total += counts[b]; }
+    const order = new Int32Array(total);
+    for (let y = EDGE_BORDER; y < h - EDGE_BORDER; y += 1) {
+        for (let x = EDGE_BORDER; x < w - EDGE_BORDER; x += 1) {
+            const i = y * w + x;
+            if (mag[i] >= rho) order[fill[(mag[i] * scale) | 0]++] = i;
+        }
+    }
+    const used = new Uint8Array(n);
     const stack = new Int32Array(n);
-    for (let i = 0; i < n; i += 1) {
-        if (thin[i] < high || edges[i]) continue;
-        edges[i] = 1;
+    const region = new Int32Array(n);
+    const segs = [];
+    for (let k = 0; k < order.length; k += 1) {
+        const seed = order[k];
+        if (used[seed]) continue;
+        used[seed] = 1;
+        let size = 0;
+        region[size++] = seed;
         let top = 0;
-        stack[top++] = i;
+        stack[top++] = seed;
+        let c2 = Math.cos(2 * ori[seed]);
+        let s2 = Math.sin(2 * ori[seed]);
+        let theta = ori[seed];
         while (top) {
-            const j = stack[--top];
-            const y = (j / w) | 0;
-            const x = j - y * w;
+            const p = stack[--top];
+            const py = (p / w) | 0;
+            const px = p - py * w;
             for (let dy = -1; dy <= 1; dy += 1) {
-                const yy = y + dy;
-                if (yy < 1 || yy >= h - 1) continue;
+                const yy = py + dy;
+                if (yy < EDGE_BORDER || yy >= h - EDGE_BORDER) continue;
                 for (let dx = -1; dx <= 1; dx += 1) {
-                    const xx = x + dx;
-                    if (xx < 1 || xx >= w - 1) continue;
-                    const k = yy * w + xx;
-                    if (!edges[k] && thin[k] >= low) {
-                        edges[k] = 1;
-                        stack[top++] = k;
-                    }
+                    const xx = px + dx;
+                    if ((!dx && !dy) || xx < EDGE_BORDER || xx >= w - EDGE_BORDER) continue;
+                    const q = yy * w + xx;
+                    if (used[q] || mag[q] < rho || angDiff(ori[q], theta) > SEG_TOLERANCE) continue;
+                    used[q] = 1;
+                    region[size++] = q;
+                    stack[top++] = q;
+                    c2 += Math.cos(2 * ori[q]);
+                    s2 += Math.sin(2 * ori[q]);
+                    theta = 0.5 * Math.atan2(s2, c2);
+                    if (theta < 0) theta += Math.PI;
                 }
             }
         }
+        if (size < SEG_MIN_LEN) continue;
+        let sw = 0;
+        let sx = 0;
+        let sy = 0;
+        for (let r = 0; r < size; r += 1) {
+            const p = region[r];
+            const yy = (p / w) | 0;
+            const v = mag[p];
+            sw += v; sx += v * (p - yy * w); sy += v * yy;
+        }
+        const cx = sx / sw;
+        const cy = sy / sw;
+        let mxx = 0;
+        let myy = 0;
+        let mxy = 0;
+        for (let r = 0; r < size; r += 1) {
+            const p = region[r];
+            const yy = (p / w) | 0;
+            const ddx = p - yy * w - cx;
+            const ddy = yy - cy;
+            const v = mag[p];
+            mxx += v * ddx * ddx; myy += v * ddy * ddy; mxy += v * ddx * ddy;
+        }
+        const axis = 0.5 * Math.atan2(2 * mxy, mxx - myy);
+        const ux = Math.cos(axis);
+        const uy = Math.sin(axis);
+        let t0 = Infinity;
+        let t1 = -Infinity;
+        let ss = 0;
+        for (let r = 0; r < size; r += 1) {
+            const p = region[r];
+            const yy = (p / w) | 0;
+            const ddx = p - yy * w - cx;
+            const ddy = yy - cy;
+            const t = ddx * ux + ddy * uy;
+            const s = -ddx * uy + ddy * ux;
+            if (t < t0) t0 = t;
+            if (t > t1) t1 = t;
+            ss += s * s;
+        }
+        const len = t1 - t0 + 1;
+        if (len < SEG_MIN_LEN || Math.sqrt(ss / size) > SEG_MAX_RMS) continue;
+        if (size / (len * Math.max(Math.abs(ux), Math.abs(uy))) < SEG_MIN_DENSITY) continue;
+        let normal = axis + Math.PI / 2;
+        if (normal >= Math.PI) normal -= Math.PI;
+        if (normal < 0) normal += Math.PI;
+        segs.push({
+            x0: cx + ux * t0, y0: cy + uy * t0, x1: cx + ux * t1, y1: cy + uy * t1,
+            len, theta: normal, nx: Math.cos(normal), ny: Math.sin(normal),
+        });
     }
-    return edges;
+    return segs;
 };
 
-/* Граница «рядом»: к точке на стороне четырёхугольника засчитывается граница
-   в соседнем пикселе — прямая Хафа и настоящая кромка листа расходятся на 1 px. */
-const dilate = (edges, w, h) => {
-    const out = new Uint8Array(w * h);
-    for (let y = 1; y < h - 1; y += 1) {
-        for (let x = 1; x < w - 1; x += 1) {
-            const i = y * w + x;
-            if (edges[i] || edges[i - 1] || edges[i + 1] || edges[i - w] || edges[i + w]
-                || edges[i - w - 1] || edges[i - w + 1] || edges[i + w - 1] || edges[i + w + 1]) out[i] = 1;
+/* Прямые в нормальной форме (нормаль nx, ny; rho — от центра кадра) из
+   отрезков на одной линии: кромку листа рвут блик, тень, ручка поверх, и
+   каждая её часть — свой отрезок. ivs — промежутки опоры вдоль прямой. */
+const LINE_ANGLE = (3 * Math.PI) / 180;
+const MAX_LINES = 30;
+const refitLine = (line, cx, cy) => {
+    let sw = 0;
+    let sx = 0;
+    let sy = 0;
+    for (const s of line.segs) { sw += 2 * s.len; sx += s.len * (s.x0 + s.x1); sy += s.len * (s.y0 + s.y1); }
+    const mx = sx / sw;
+    const my = sy / sw;
+    let sxx = 0;
+    let syy = 0;
+    let sxy = 0;
+    for (const s of line.segs) {
+        for (const [x, y] of [[s.x0, s.y0], [s.x1, s.y1]]) {
+            sxx += s.len * (x - mx) ** 2; syy += s.len * (y - my) ** 2; sxy += s.len * (x - mx) * (y - my);
         }
     }
-    return out;
+    const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    let nx = -Math.sin(ang);
+    let ny = Math.cos(ang);
+    if (nx * line.nx + ny * line.ny < 0) { nx = -nx; ny = -ny; }
+    let theta = Math.atan2(ny, nx);
+    if (theta < 0) theta += Math.PI;
+    if (theta >= Math.PI) theta -= Math.PI;
+    Object.assign(line, { nx, ny, theta, rho: (mx - cx) * nx + (my - cy) * ny });
 };
-
-const THETA_BINS = 180;
-const COS = new Float64Array(THETA_BINS);
-const SIN = new Float64Array(THETA_BINS);
-for (let t = 0; t < THETA_BINS; t += 1) {
-    COS[t] = Math.cos((t * Math.PI) / THETA_BINS);
-    SIN[t] = Math.sin((t * Math.PI) / THETA_BINS);
-}
-const VOTE_SPREAD = 6;
-/* Сколько прямых идёт в перебор четырёхугольников. Перебор растёт как
-   квадрат числа пар: на пёстром кадре (тетрадь во весь кадр) 32 прямые давали
-   30 мс на кадр поиска, 24 — 13,5 мс (разбор, 23.10.2026). */
-const MAX_LINES = 24;
-const PARALLEL_GAP = 40;
-const MIN_AREA = 0.05;
-
-const angleGap = (a, b) => {
-    const d = Math.abs(a - b);
-    return d > 90 ? 180 - d : d;
-};
-
-/* Одна и та же прямая в двух записях: на всём протяжении кадра они не
-   расходятся дальше tolerance. Сравнивать только угол и расстояние до центра
-   нельзя: кромка листа и соседняя полоса древесины в 3° и 4 px от неё в центре
-   считались одной прямой, и кромка, набрав меньше голосов, выбрасывалась
-   (стенд, 23.10.2026). Под разными углами прямые к краям кадра расходятся. */
-const sameLine = (a, b, tolerance, reach) => {
-    if (angleGap(a.t, b.t) > 10) return false;
-    const px = a.rho * COS[a.t];
-    const py = a.rho * SIN[a.t];
-    const dx = -SIN[a.t];
-    const dy = COS[a.t];
-    for (const s of [-reach, reach]) {
-        const x = px + dx * s;
-        const y = py + dy * s;
-        if (Math.abs(x * COS[b.t] + y * SIN[b.t] - b.rho) >= tolerance) return false;
-    }
-    return true;
-};
-
-/* Прямые Хафа в нормальной форме (угол нормали t в градусах, расстояние rho
-   от центра кадра). Каждая точка границы голосует только за углы около своего
-   градиента: так быстрее в 13 раз и пики чище — штрихи текста под другими
-   углами не размазывают прямые кромки листа.
-
-   Голос весит по силе границы (до VOTE_FULL — полный). Иначе полоса на столе
-   во всю ширину кадра набирала больше, чем кромка листа втрое короче, хотя та
-   втрое контрастнее: на деревянном столе 32 места списка занимали волокна, и
-   сторона листа в него не попадала (стенд, 23.10.2026). */
-const VOTE_FULL = 160;
-const POLAR_BINS = 360;
-const COS360 = new Float64Array(POLAR_BINS);
-const SIN360 = new Float64Array(POLAR_BINS);
-for (let t = 0; t < POLAR_BINS; t += 1) {
-    COS360[t] = Math.cos((t * Math.PI) / 180);
-    SIN360[t] = Math.sin((t * Math.PI) / 180);
-}
-
-/* Голосуют по полному кругу (0–359°), с полярностью: у кромки листа все точки
-   смотрят градиентом в одну сторону (внутри светлее), а у строки текста и
-   полосы на столе — две кромки противоположной полярности на расстоянии пары
-   пикселей. Сложенные по модулю 180°, они набирали вдвое больше кромки листа,
-   и на светлом столе строки занимали весь список прямых, вытесняя слабую
-   кромку (разбор, 23.10.2026). Каждая половина такой пары голосует отдельно.
-
-   И голос точки тонкой тёмной полосы (строка текста, линия тетради или
-   таблицы) режется впятеро: если за тёмной стороной через несколько пикселей
-   снова светло, это не кромка листа — у кромки за тёмной стороной стол. */
-const BAND_PROBE = [3, 5, 8];
-const BAND_VOTE = 0.2;
-const houghLines = (edges, gx, gy, mag, gray, w, h) => {
+const mergeLines = (segs, w, h) => {
     const cx = w / 2;
     const cy = h / 2;
-    const R = Math.ceil(Math.hypot(cx, cy)) + 1;
-    const width = 2 * R + 1;
-    const acc = new Float32Array(POLAR_BINS * width);
-    for (let y = 1; y < h - 1; y += 1) {
-        for (let x = 1; x < w - 1; x += 1) {
-            const i = y * w + x;
-            if (!edges[i]) continue;
-            let t0 = Math.round((Math.atan2(gy[i], gx[i]) * 180) / Math.PI);
-            t0 = ((t0 % POLAR_BINS) + POLAR_BINS) % POLAR_BINS;
-            const px = x - cx;
-            const py = y - cy;
-            let vote = Math.min(1, mag[i] / VOTE_FULL);
-            // Градиент смотрит от тёмного к светлому: светлая сторона — +u, тёмная — −u.
-            const ux = gx[i] / (mag[i] || 1);
-            const uy = gy[i] / (mag[i] || 1);
-            const bx = Math.round(x + ux * 2);
-            const by = Math.round(y + uy * 2);
-            if (bx >= 0 && by >= 0 && bx < w && by < h) {
-                const bright = gray[by * w + bx];
-                for (const d of BAND_PROBE) {
-                    const fx = Math.round(x - ux * d);
-                    const fy = Math.round(y - uy * d);
-                    if (fx < 0 || fy < 0 || fx >= w || fy >= h) break;
-                    if (gray[fy * w + fx] >= bright - BAND_MARGIN) { vote *= BAND_VOTE; break; }
-                }
-            }
-            for (let d = -VOTE_SPREAD; d <= VOTE_SPREAD; d += 1) {
-                const t = (t0 + d + POLAR_BINS) % POLAR_BINS;
-                const rho = Math.round(px * COS360[t] + py * SIN360[t]);
-                acc[t * width + rho + R] += vote;
-            }
-        }
-    }
-    const minVotes = Math.max(6, Math.min(w, h) * 0.05);
-    const candidates = [];
-    for (let t = 0; t < POLAR_BINS; t += 1) {
-        const base = t * width;
-        for (let r = 1; r < width - 1; r += 1) {
-            const v = acc[base + r];
-            if (v < minVotes) continue;
-            let peak = true;
-            for (let dt = -1; dt <= 1 && peak; dt += 1) {
-                const tt = (t + dt + POLAR_BINS) % POLAR_BINS;
-                for (let dr = -1; dr <= 1; dr += 1) {
-                    if (!dt && !dr) continue;
-                    const u = acc[tt * width + r + dr];
-                    if (u > v || (u === v && (dt < 0 || (dt === 0 && dr < 0)))) { peak = false; break; }
-                }
-            }
-            // Дальше — прямая в обычной форме (угол нормали 0–179°): полярность
-            // нужна была только для честного счёта голосов.
-            if (peak) candidates.push(t < 180 ? { t, rho: r - R, votes: v } : { t: t - 180, rho: R - r, votes: v });
-        }
-    }
-    candidates.sort((a, b) => b.votes - a.votes);
-    const tolerance = Math.max(4, Math.max(w, h) * 0.02);
-    const reach = Math.hypot(cx, cy);
+    const near = Math.max(1.5, 0.008 * Math.hypot(w, h));
     const lines = [];
-    for (const candidate of candidates) {
-        if (lines.length >= MAX_LINES) break;
-        if (lines.some((line) => sameLine(line, candidate, tolerance, reach))) continue;
-        lines.push(candidate);
+    for (const s of [...segs].sort((a, b) => b.len - a.len)) {
+        const line = lines.find((item) => angDiff(item.theta, s.theta) <= LINE_ANGLE * (s.len < 15 ? 2 : 1)
+            && Math.abs((s.x0 - cx) * item.nx + (s.y0 - cy) * item.ny - item.rho) <= near
+            && Math.abs((s.x1 - cx) * item.nx + (s.y1 - cy) * item.ny - item.rho) <= near);
+        if (line) {
+            line.segs.push(s);
+            refitLine(line, cx, cy);
+        } else {
+            lines.push({ theta: s.theta, nx: s.nx, ny: s.ny, rho: (s.x0 - cx) * s.nx + (s.y0 - cy) * s.ny, segs: [s] });
+        }
     }
-    return lines;
-};
-
-const intersect = (a, b, cx, cy) => {
-    const det = COS[a.t] * SIN[b.t] - SIN[a.t] * COS[b.t];
-    if (Math.abs(det) < 0.25) return null;
-    const x = (a.rho * SIN[b.t] - b.rho * SIN[a.t]) / det;
-    const y = (b.rho * COS[a.t] - a.rho * COS[b.t]) / det;
-    return [x + cx, y + cy];
-};
-
-/* Сторона p→q кандидата: какая доля её точек лежит на границе (share), какая
-   доля внутри кадра (inside) и «вес» — длина, засчитанная точкам на границе,
-   где лист светлее того, что снаружи.
-
-   Контраст — в каждой точке, а не средним по стороне: лист светлее стола
-   почти всегда, и это отличает настоящую кромку от полосы на столе (волокно
-   дерева, край клавиатуры) и от строки текста внутри листа — у них по обе
-   стороны одно и то же. Без этого счёт выбирал рамку больше листа: стороны,
-   продлённые по столу за угол листа, и сторона по полосе древесины набирали
-   «длину» (стенд, 23.10.2026). Точку, где сравнить не с чем, считаем как без
-   контраста.
-
-   strength — средний вес по точкам кромки: сторона без контраста «лист
-   светлее стола» (MIN_SIDE_STRENGTH) кандидата отбрасывает — лучше «лист не
-   найден» и рамка по умолчанию, чем уверенная рамка по клавиатуре или клетке
-   тетради (разбор, 23.10.2026). Строки текста сюда почти не доходят: их голоса
-   режутся ещё в houghLines. */
-const BAND_MARGIN = 12;
-const MIN_SIDE_STRENGTH = 0.35;
-const contrastWeight = (contrast) => Math.min(1, Math.max(0.15, (contrast + 10) / 50));
-
-const sideScore = (p, q, support, gray, center, w, h) => {
-    const len = dist(p, q);
-    const steps = Math.max(8, Math.round(len / 1.5));
-    let nx = -(q[1] - p[1]);
-    let ny = q[0] - p[0];
-    const norm = Math.hypot(nx, ny) || 1;
-    nx /= norm;
-    ny /= norm;
-    const mx = (p[0] + q[0]) / 2;
-    const my = (p[1] + q[1]) / 2;
-    if ((center[0] - mx) * nx + (center[1] - my) * ny < 0) { nx = -nx; ny = -ny; } // нормаль — внутрь
-    const offset = Math.max(3, Math.min(w, h) * 0.02);
-    const maxX = w - 1 - BORDER;
-    const maxY = h - 1 - BORDER;
-    let hits = 0;
-    let valid = 0;
-    let weighted = 0;
-    let weights = 0;
-    for (let s = 0; s <= steps; s += 1) {
-        const fx = p[0] + ((q[0] - p[0]) * s) / steps;
-        const fy = p[1] + ((q[1] - p[1]) * s) / steps;
-        const x = Math.round(fx);
-        const y = Math.round(fy);
-        if (x < BORDER || y < BORDER || x > maxX || y > maxY) continue;
-        valid += 1;
-        if (!support[y * w + x]) continue;
-        hits += 1;
-        const xi = Math.round(fx + nx * offset);
-        const yi = Math.round(fy + ny * offset);
-        // Снаружи — прижатая к краю кадра точка, если она всё ещё по ту сторону
-        // кромки: у листа во весь кадр полоска стола в 3–4 px, и точка замера
-        // выходила за кадр — сторона теряла вес, и выигрывала рамка по строке текста.
-        const xo = Math.min(w - 1, Math.max(0, Math.round(fx - nx * offset)));
-        const yo = Math.min(h - 1, Math.max(0, Math.round(fy - ny * offset)));
-        const outward = (fx - xo) * nx + (fy - yo) * ny >= 1;
-        const known = outward && xi >= 0 && yi >= 0 && xi < w && yi < h;
-        const weight = contrastWeight(known ? gray[yi * w + xi] - gray[yo * w + xo] : 0);
-        weighted += weight;
-        weights += weight;
+    for (const line of lines) {
+        const ux = -line.ny;
+        const uy = line.nx;
+        const spans = line.segs.map((s) => {
+            const a = (s.x0 - cx) * ux + (s.y0 - cy) * uy;
+            const b = (s.x1 - cx) * ux + (s.y1 - cy) * uy;
+            return a < b ? [a, b] : [b, a];
+        }).sort((p, q) => p[0] - q[0]);
+        const ivs = [];
+        for (const span of spans) {
+            const last = ivs[ivs.length - 1];
+            if (last && span[0] <= last[1] + 1) last[1] = Math.max(last[1], span[1]);
+            else ivs.push([...span]);
+        }
+        line.ivs = ivs;
+        line.cover = ivs.reduce((sum, [a, b]) => sum + b - a, 0);
     }
-    return {
-        share: valid ? hits / valid : 0,
-        inside: valid / (steps + 1),
-        len,
-        weighted: (weighted * len) / steps,
-        strength: hits ? weights / hits : 0,
-    };
+    return lines.sort((a, b) => b.cover - a.cover).slice(0, MAX_LINES);
 };
 
-const interiorAngleOk = (corners) => {
+const crossNormal = (a, b, cx, cy) => {
+    const det = a.nx * b.ny - a.ny * b.nx;
+    if (Math.abs(det) < 0.2) return null;
+    return [(a.rho * b.ny - b.rho * a.ny) / det + cx, (b.rho * a.nx - a.rho * b.nx) / det + cy];
+};
+
+const lineThroughPoints = (a, b, cx, cy) => {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const nx = -(b[1] - a[1]) / len;
+    const ny = (b[0] - a[0]) / len;
+    let theta = Math.atan2(ny, nx);
+    if (theta < 0) theta += Math.PI;
+    if (theta >= Math.PI) theta -= Math.PI;
+    return { nx, ny, theta, rho: (a[0] - cx) * nx + (a[1] - cy) * ny, ivs: [], cover: 0, fitted: true };
+};
+
+const anglesOk = (q) => {
     for (let i = 0; i < 4; i += 1) {
-        const prev = corners[(i + 3) % 4];
-        const cur = corners[i];
-        const next = corners[(i + 1) % 4];
-        const ax = prev[0] - cur[0];
-        const ay = prev[1] - cur[1];
-        const bx = next[0] - cur[0];
-        const by = next[1] - cur[1];
+        const p = q[(i + 3) % 4];
+        const c = q[i];
+        const nn = q[(i + 1) % 4];
+        const ax = p[0] - c[0];
+        const ay = p[1] - c[1];
+        const bx = nn[0] - c[0];
+        const by = nn[1] - c[1];
         const cos = (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1);
         if (cos > 0.82 || cos < -0.82) return false; // угол вне 35°…145°
     }
     return true;
 };
 
-/* Лист на кадре серого gray (w×h): { corners: [ЛВ, ПВ, ПН, ЛН], coverage } или
-   null. coverage — средняя доля сторон, лежащая на найденной границе. */
-export const detectDocument = (gray, w, h) => {
-    if (!gray || w < 32 || h < 32) return null;
-    const blurred = blur5(gray, w, h);
-    const { gx, gy, mag } = sobel(blurred, w, h);
-    const edges = cannyEdges(mag, gx, gy, w, h);
-    const lines = houghLines(edges, gx, gy, mag, blurred, w, h);
-    if (lines.length < 4) return null;
-    const support = dilate(edges, w, h);
+// Длина пересечения промежутков опоры с отрезком [a, b].
+const coveredLength = (ivs, a, b) => {
+    let sum = 0;
+    for (const [s, e] of ivs) {
+        const lo = Math.max(s, a);
+        const hi = Math.min(e, b);
+        if (hi > lo) sum += hi - lo;
+    }
+    return sum;
+};
+
+// Видимая часть стороны p→q — промежуток параметра t ∈ [0, 1] внутри кадра.
+const visibleRange = (p, q, w, h) => {
+    let t0 = 0;
+    let t1 = 1;
+    const m = EDGE_BORDER;
+    // Ограничение вида num + den·t ≥ 0.
+    for (const [num, den] of [[p[0] - m, q[0] - p[0]], [w - m - p[0], p[0] - q[0]], [p[1] - m, q[1] - p[1]], [h - m - p[1], p[1] - q[1]]]) {
+        if (Math.abs(den) < 1e-9) {
+            if (num < 0) return null;
+        } else if (den > 0) t0 = Math.max(t0, -num / den);
+        else t1 = Math.min(t1, -num / den);
+    }
+    return t1 > t0 ? [t0, t1] : null;
+};
+
+const sampleAt = (arr, w, h, x, y) => {
+    if (x < 0 || y < 0 || x > w - 1 || y > h - 1) return NaN;
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(w - 1, x0 + 1);
+    const y1 = Math.min(h - 1, y0 + 1);
+    const fx = x - x0;
+    const fy = y - y0;
+    return (arr[y0 * w + x0] * (1 - fx) + arr[y0 * w + x1] * fx) * (1 - fy)
+        + (arr[y1 * w + x0] * (1 - fx) + arr[y1 * w + x1] * fx) * fy;
+};
+
+const quadCenter = (q) => [(q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4, (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4];
+
+/* Кандидат по углам ring и прямым сторон: видимая часть каждой стороны,
+   какая её доля лежит на кромке (cover) и сколько кромки идёт дальше углов
+   (over). У сторон, подогнанных по перепаду (fitted), своих отрезков нет — их
+   опора меряется прямо по кадру. */
+const CORNER_REACH = 0.15;
+const MIN_AREA = 0.03;
+const SIDE_MIN_COVER = 0.25;
+const MEAN_MIN_COVER = 0.45;
+const buildCandidate = (f, ring, sideLines) => {
+    const { w, h } = f;
     const cx = w / 2;
     const cy = h / 2;
-    const minSide = Math.min(w, h);
+    if (ring.some(([x, y]) => x < -CORNER_REACH * w || y < -CORNER_REACH * h || x > (1 + CORNER_REACH) * w || y > (1 + CORNER_REACH) * h)) return null;
+    if (!isConvexQuad(ring) || quadArea(ring) < w * h * MIN_AREA || !anglesOk(ring)) return null;
+    let score = 0;
+    let coverSum = 0;
+    const sides = [];
+    for (let k = 0; k < 4; k += 1) {
+        const p = ring[k];
+        const q = ring[(k + 1) % 4];
+        const line = sideLines[k];
+        const range = visibleRange(p, q, w, h);
+        const sideLen = dist(p, q);
+        if (!range || sideLen * (range[1] - range[0]) < Math.min(w, h) * 0.1) return null;
+        let cover;
+        let over = 0;
+        const vis = sideLen * (range[1] - range[0]);
+        if (line.fitted) {
+            cover = sampledCover(f, p, q, range);
+        } else {
+            const ux = -line.ny;
+            const uy = line.nx;
+            const tp = (p[0] - cx) * ux + (p[1] - cy) * uy;
+            const tq = (q[0] - cx) * ux + (q[1] - cy) * uy;
+            const ta = tp + (tq - tp) * range[0];
+            const tb = tp + (tq - tp) * range[1];
+            const lo = Math.min(ta, tb);
+            const hi = Math.max(ta, tb);
+            cover = coveredLength(line.ivs, lo, hi) / vis;
+            const ext = 0.25 * sideLen;
+            over = (coveredLength(line.ivs, lo - ext, lo) + coveredLength(line.ivs, hi, hi + ext)) / (2 * ext);
+        }
+        if (cover < SIDE_MIN_COVER) return null;
+        sides.push({ cover, over, range });
+        score += vis * cover;
+        coverSum += cover;
+    }
+    if (coverSum / 4 < MEAN_MIN_COVER) return null;
+    return { ring, sideLines, sides, score, cover: coverSum / 4 };
+};
+
+/* Опора стороны прямо по кадру: доля точек, у которых рядом (±1,5 px) есть
+   перепад того же направления. */
+const SAMPLE_TOLERANCE = (25 * Math.PI) / 180;
+const sampledCover = (f, p, q, range) => {
+    const { w, h, raw, ori } = f;
+    const len = dist(p, q);
+    const nx = -(q[1] - p[1]) / len;
+    const ny = (q[0] - p[0]) / len;
+    let normal = Math.atan2(ny, nx);
+    if (normal < 0) normal += Math.PI;
+    if (normal >= Math.PI) normal -= Math.PI;
+    const low = 0.7 * f.rho;
+    const steps = Math.max(4, Math.round((len * (range[1] - range[0])) / 1.2));
+    let hits = 0;
+    for (let s = 0; s <= steps; s += 1) {
+        const t = range[0] + ((range[1] - range[0]) * s) / steps;
+        const x = p[0] + (q[0] - p[0]) * t;
+        const y = p[1] + (q[1] - p[1]) * t;
+        for (let d = -1.5; d <= 1.5; d += 0.5) {
+            const xx = Math.round(x + nx * d);
+            const yy = Math.round(y + ny * d);
+            if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue;
+            const i = yy * w + xx;
+            if (raw[i] >= low && angDiff(ori[i], normal) < SAMPLE_TOLERANCE) { hits += 1; break; }
+        }
+    }
+    return hits / (steps + 1);
+};
+
+/* Прямая кромки около отрезка a→b: поперёк него ищется наибольший перепад
+   цвета (ближний — с поправкой на расстояние), по найденным точкам — прямая с
+   отбросом выбросов. */
+const fitEdgeLine = (f, a, b, center, search) => {
+    const { w, h } = f;
+    const len = dist(a, b);
+    if (len < 8) return null;
+    let nx = -(b[1] - a[1]) / len;
+    let ny = (b[0] - a[0]) / len;
+    if ((center[0] - (a[0] + b[0]) / 2) * nx + (center[1] - (a[1] + b[1]) / 2) * ny < 0) { nx = -nx; ny = -ny; }
+    const pts = [];
+    const n = Math.floor(len);
+    for (let s = 0; s <= n; s += 1) {
+        const t = s / n;
+        if (t < 0.08 || t > 0.92) continue;
+        const bx = a[0] + (b[0] - a[0]) * t;
+        const by = a[1] + (b[1] - a[1]) * t;
+        let best = 0;
+        let bestD = 0;
+        for (let d = -search; d <= search; d += 0.5) {
+            const xi = bx + nx * (d + 0.75);
+            const yi = by + ny * (d + 0.75);
+            const xo = bx + nx * (d - 0.75);
+            const yo = by + ny * (d - 0.75);
+            const dl = sampleAt(f.L, w, h, xi, yi) - sampleAt(f.L, w, h, xo, yo);
+            if (Number.isNaN(dl)) continue;
+            const da = sampleAt(f.A, w, h, xi, yi) - sampleAt(f.A, w, h, xo, yo);
+            const db = sampleAt(f.B, w, h, xi, yi) - sampleAt(f.B, w, h, xo, yo);
+            const v = Math.hypot(dl, da, db) * Math.exp(-(d * d) / (2 * search * search));
+            if (v > best) { best = v; bestD = d; }
+        }
+        if (best > 1) pts.push([bx + nx * bestD, by + ny * bestD, best]);
+    }
+    const line = robustLine(pts, 2.5, 1.5);
+    if (!line) return null;
+    return lineThroughPoints([line.mx, line.my], [line.mx + line.ux * 10, line.my + line.uy * 10], w / 2, h / 2);
+};
+
+/* Достройка: сторона k переносится туда, где кончаются кромки двух соседних
+   сторон. Внутренняя линия документа (нижний край фотографии в журнале,
+   линейка таблицы во всю ширину) рамку резала — а кромки листа идут через неё
+   дальше, до настоящего угла (замер на крупных кадрах SmartDoc: верных на
+   светлом столе 80 % → 87 %). */
+const REPAIR_MIN_REACH = 0.06;
+const supportEnd = (line, corner, along, cx, cy, gap) => {
+    const ux = -line.ny;
+    const uy = line.nx;
+    const sign = along[0] * ux + along[1] * uy >= 0 ? 1 : -1;
+    const tc = (corner[0] - cx) * ux + (corner[1] - cy) * uy;
+    let cur = sign * tc;
+    const spans = line.ivs.map(([a, b]) => (sign > 0 ? [a, b] : [-b, -a])).sort((p, q) => p[0] - q[0]);
+    for (const [a, b] of spans) {
+        if (b <= cur) continue;
+        if (a > cur + gap) break;
+        cur = Math.max(cur, b);
+    }
+    const t = sign * cur;
+    return { point: [cx + line.nx * line.rho + ux * t, cy + line.ny * line.rho + uy * t], reach: Math.abs(t - tc) };
+};
+const repairCandidate = (f, cand) => {
+    const { w, h } = f;
+    const cx = w / 2;
+    const cy = h / 2;
+    const out = [];
+    const lines = cand.sideLines;
+    for (let k = 0; k < 4; k += 1) {
+        const prev = lines[(k + 3) % 4];
+        const next = lines[(k + 1) % 4];
+        if (prev.fitted || next.fitted) continue;
+        const a = cand.ring[k];
+        const b = cand.ring[(k + 1) % 4];
+        const pa = cand.ring[(k + 3) % 4];
+        const nb = cand.ring[(k + 2) % 4];
+        const la = dist(pa, a) || 1;
+        const lb = dist(nb, b) || 1;
+        const ea = supportEnd(prev, a, [(a[0] - pa[0]) / la, (a[1] - pa[1]) / la], cx, cy, Math.max(4, 0.08 * la));
+        const eb = supportEnd(next, b, [(b[0] - nb[0]) / lb, (b[1] - nb[1]) / lb], cx, cy, Math.max(4, 0.08 * lb));
+        if (ea.reach < Math.max(3, REPAIR_MIN_REACH * la) && eb.reach < Math.max(3, REPAIR_MIN_REACH * lb)) continue;
+        const side = fitEdgeLine(f, ea.point, eb.point, quadCenter(cand.ring), 4) || lineThroughPoints(ea.point, eb.point, cx, cy);
+        const sideLines = lines.map((line, i) => (i === k ? side : line));
+        const ring = [];
+        for (let i = 0; i < 4; i += 1) {
+            const pt = crossNormal(sideLines[(i + 3) % 4], sideLines[i], cx, cy);
+            if (pt) ring.push(pt);
+        }
+        const fixed = ring.length === 4 ? buildCandidate(f, ring, sideLines) : null;
+        if (fixed) out.push(fixed);
+    }
+    return out;
+};
+
+/* Цвет поперёк стороны на offset пикселей внутрь и наружу: D — медиана
+   разницы «внутри − снаружи» по L, A, B, dE — её величина, O — цвет снаружи. */
+const SIDE_OFFSET = 3;
+const sideColors = (f, p, q, center, range) => {
+    const { w, h } = f;
+    const len = dist(p, q) || 1;
+    let nx = -(q[1] - p[1]) / len;
+    let ny = (q[0] - p[0]) / len;
+    if ((center[0] - (p[0] + q[0]) / 2) * nx + (center[1] - (p[1] + q[1]) / 2) * ny < 0) { nx = -nx; ny = -ny; }
+    const dl = [];
+    const da = [];
+    const db = [];
+    const ol = [];
+    const oa = [];
+    const ob = [];
+    const steps = Math.max(6, Math.round((len * (range[1] - range[0])) / 3));
+    for (let s = 0; s <= steps; s += 1) {
+        const t = range[0] + (range[1] - range[0]) * (0.08 + (0.84 * s) / steps);
+        const x = p[0] + (q[0] - p[0]) * t;
+        const y = p[1] + (q[1] - p[1]) * t;
+        const xi = x + nx * SIDE_OFFSET;
+        const yi = y + ny * SIDE_OFFSET;
+        const xo = x - nx * SIDE_OFFSET;
+        const yo = y - ny * SIDE_OFFSET;
+        const li = sampleAt(f.L, w, h, xi, yi);
+        const lo = sampleAt(f.L, w, h, xo, yo);
+        if (Number.isNaN(li) || Number.isNaN(lo)) continue;
+        const ao = sampleAt(f.A, w, h, xo, yo);
+        const bo = sampleAt(f.B, w, h, xo, yo);
+        dl.push(li - lo);
+        da.push(sampleAt(f.A, w, h, xi, yi) - ao);
+        db.push(sampleAt(f.B, w, h, xi, yi) - bo);
+        ol.push(lo); oa.push(ao); ob.push(bo);
+    }
+    if (!dl.length) return { D: [0, 0, 0], dE: 0, O: [0, 0, 0] };
+    const median = (arr) => arr.sort((a, b) => a - b)[arr.length >> 1];
+    const D = [median(dl), median(da), median(db)];
+    return { D, dE: Math.hypot(D[0], D[1], D[2]), O: [median(ol), median(oa), median(ob)] };
+};
+
+/* Яркость кадра и внутренности кандидата (сетка 11×11 точек). paper — доля
+   точек цвета бумаги: не темнее «белого» этого листа (его 90-й доли) больше
+   чем на 12 %. У листа с текстом это больше половины, у клавиатуры (тёмные
+   клавиши, светлые щели) — около трети. */
+const frameLight = (f) => {
+    const { w, h, L } = f;
+    const vals = [];
+    for (let y = 2; y < h - 2; y += 3) for (let x = 2; x < w - 2; x += 3) vals.push(L[y * w + x]);
+    vals.sort((a, b) => a - b);
+    return { q50: vals[vals.length >> 1] || 0, q95: vals[Math.floor(vals.length * 0.95)] || 0 };
+};
+const insideLight = (f, ring) => {
+    const { w, h, L } = f;
+    const [a, b, c, d] = ring;
+    const vals = [];
+    for (let i = 1; i < 12; i += 1) {
+        for (let j = 1; j < 12; j += 1) {
+            const u = i / 12;
+            const v = j / 12;
+            const x = (1 - u) * (1 - v) * a[0] + u * (1 - v) * b[0] + u * v * c[0] + (1 - u) * v * d[0];
+            const y = (1 - u) * (1 - v) * a[1] + u * (1 - v) * b[1] + u * v * c[1] + (1 - u) * v * d[1];
+            if (x >= 0 && y >= 0 && x <= w - 1 && y <= h - 1) vals.push(L[Math.round(y) * w + Math.round(x)]);
+        }
+    }
+    if (!vals.length) return { q75: 0, paper: 0 };
+    vals.sort((p, q) => p - q);
+    const top = vals[Math.floor(vals.length * 0.9)];
+    const lim = top - Math.max(10, 0.12 * top);
+    return { q75: vals[Math.floor(vals.length * 0.75)], paper: vals.filter((v) => v >= lim).length / vals.length };
+};
+
+const ramp = (x, lo, hi) => Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
+
+/* Итоговая оценка кандидата: опора сторон × доводы.
+   — Материал. Внутри стороны один материал (лист), снаружи другой (стол), и у
+     всех четырёх сторон разница «внутри − снаружи» смотрит в одну сторону. Знак
+     не задан: голубоватый лист бывает «цветнее» тёплого стола, а светлый стол —
+     светлее листа. Сторону с тёмной фотографией у края выручает то, что
+     снаружи у неё то же, что у остальных сторон, — стол.
+   — Углы. Кромка, идущая дальше угла, — признак, что угол не настоящий (рамку
+     режет линия внутри документа или край стола).
+   — Внутри светло и много точек цвета бумаги; рамка ближе к середине кадра:
+     на лист наводят, журнал и клавиатура у края кадра — соседи. */
+const verifyCandidate = (f, cand, light) => {
+    const { w, h } = f;
+    const center = quadCenter(cand.ring);
+    const sides = cand.sides.map((side, k) => sideColors(f, cand.ring[k], cand.ring[(k + 1) % 4], center, side.range));
+    const sum = [0, 0, 0];
+    for (const c of sides) if (c.dE > 0) for (let j = 0; j < 3; j += 1) sum[j] += c.D[j] / c.dE;
+    const norm = Math.hypot(sum[0], sum[1], sum[2]) || 1;
+    let material = 1;
+    let corners = 1;
+    let strong = 0;
+    sides.forEach((c, k) => {
+        const agree = c.dE > 0 ? (c.D[0] * sum[0] + c.D[1] * sum[1] + c.D[2] * sum[2]) / (c.dE * norm) : 0;
+        const others = sides.filter((_, j) => j !== k);
+        const outside = [0, 1, 2].map((j) => others.reduce((acc, o) => acc + o.O[j], 0) / 3);
+        const spread = Math.max(6, others.reduce((acc, o) => acc + o.dE, 0) / 3);
+        const sameOutside = Math.max(0, 1 - Math.hypot(c.O[0] - outside[0], c.O[1] - outside[1], c.O[2] - outside[2]) / (0.6 * spread));
+        const r = ramp(c.dE, 3, 12) * Math.max(ramp(agree, 0.3, 0.9), sameOutside);
+        if (r > 0.5) strong += 1;
+        material *= 0.3 + 0.7 * r;
+        corners *= Math.max(0, 1 - cand.sides[k].over) ** 1.5;
+    });
+    const inner = insideLight(f, cand.ring);
+    const white = 0.6 + 0.4 * ramp(inner.q75 - light.q50, 0, Math.max(8, light.q95 - light.q50));
+    const paper = 0.3 + 0.7 * ramp(inner.paper, 0.3, 0.6);
+    const off = dist(center, [w / 2, h / 2]) / (0.5 * Math.hypot(w, h));
+    const middle = 1 - 0.5 * Math.min(1, off * off);
+    cand.strong = strong;
+    cand.final = cand.score * material * corners * white * paper * middle;
+    return cand;
+};
+
+/* Лист на кадре RGBA rgba (w×h): { corners: [ЛВ, ПВ, ПН, ЛН], confidence,
+   coverage } или null. Каждый кадр — заново, без рамки прошлого кадра:
+   подогнанная к кромкам этого кадра прошлая рамка прилипала к соседней
+   кромке посильнее (столбец фотографий у края листа, край фото в журнале) и
+   держала сама себя — на стенде вся пауза перед автоснимком стояла с ошибкой
+   угла 15–18 px, а точности на наборе SmartDoc она не прибавляла. От мигания
+   рамки в видоискателе бережёт createQuadTracker.
+   Углы — в координатах холста (пиксель i — отрезок [i, i+1]), как у SVG,
+   drawImage и warpPerspective; внутри поиск считает центр пикселя целым.
+   Без поправки на полпикселя рамка с кадра поиска на 4K-снимке съезжала бы на
+   6 px влево-вверх. */
+const PIXEL_CENTER = 0.5;
+const toIndex = (corners) => corners.map(([x, y]) => [x - PIXEL_CENTER, y - PIXEL_CENTER]);
+const fromIndex = (corners) => corners.map(([x, y]) => [x + PIXEL_CENTER, y + PIXEL_CENTER]);
+const VERIFY_TOP = 16;
+const REPAIR_TOP = 4;
+const REPAIR_MARGIN = 1.1;
+export const detectDocument = (rgba, w, h) => {
+    if (!rgba || w < 32 || h < 32 || rgba.length < w * h * 4) return null;
+    const f = prepareFrame(rgba, w, h);
+    const lines = mergeLines(findSegments(f), w, h);
+    const cx = w / 2;
+    const cy = h / 2;
     const pairs = [];
     for (let i = 0; i < lines.length; i += 1) {
         for (let j = i + 1; j < lines.length; j += 1) {
             const a = lines[i];
             const b = lines[j];
             // Противоположные стороны в сильной перспективе расходятся до ~35°.
-            if (angleGap(a.t, b.t) > PARALLEL_GAP) continue;
-            const gap = Math.abs(a.t - b.t) > 90 ? Math.abs(a.rho + b.rho) : Math.abs(a.rho - b.rho);
-            if (gap < minSide * 0.18) continue;
-            pairs.push([a, b]);
+            if (angDiff(a.theta, b.theta) > (40 * Math.PI) / 180) continue;
+            const gap = Math.abs(a.nx * b.nx + a.ny * b.ny >= 0 ? a.rho - b.rho : a.rho + b.rho);
+            if (gap >= Math.min(w, h) * 0.12) pairs.push([a, b]);
         }
     }
-    const area = w * h;
-    const scored = [];
+    const cands = [];
     for (let i = 0; i < pairs.length; i += 1) {
         for (let j = i + 1; j < pairs.length; j += 1) {
             const [a1, a2] = pairs[i];
             const [b1, b2] = pairs[j];
-            if (angleGap(a1.t, b1.t) < 45) continue;
-            const p11 = intersect(a1, b1, cx, cy);
-            const p12 = intersect(a1, b2, cx, cy);
-            const p22 = intersect(a2, b2, cx, cy);
-            const p21 = intersect(a2, b1, cx, cy);
-            if (!p11 || !p12 || !p22 || !p21) continue;
-            const ring = [p11, p12, p22, p21];
-            if (ring.some(([x, y]) => x < -0.08 * w || y < -0.08 * h || x > 1.08 * w || y > 1.08 * h)) continue;
-            if (!isConvexQuad(ring) || quadArea(ring) < area * MIN_AREA || !interiorAngleOk(ring)) continue;
-            let total = 0;
-            let shares = 0;
-            let ok = true;
-            const center = [ring.reduce((sum, pt) => sum + pt[0], 0) / 4, ring.reduce((sum, pt) => sum + pt[1], 0) / 4];
-            for (let k = 0; k < 4; k += 1) {
-                // Сторона листа может уходить за край кадра (угол не влез) —
-                // засчитывается только её видимая часть. Иначе такую сторону
-                // отбрасывало, и рамку достраивало по строке текста внутри листа.
-                const side = sideScore(ring[k], ring[(k + 1) % 4], support, blurred, center, w, h);
-                if (side.len < minSide * 0.15 || side.inside < 0.3 || side.share < 0.3
-                    || side.strength < MIN_SIDE_STRENGTH) { ok = false; break; }
-                total += side.weighted;
-                shares += side.share;
-            }
-            if (!ok || shares / 4 < 0.5) continue;
-            scored.push({ ring, score: total, coverage: shares / 4 });
+            if (angDiff(a1.theta, b1.theta) < Math.PI / 4) continue;
+            const ring = [crossNormal(a1, b1, cx, cy), crossNormal(a1, b2, cx, cy), crossNormal(a2, b2, cx, cy), crossNormal(a2, b1, cx, cy)];
+            if (ring.some((p) => !p)) continue;
+            const cand = buildCandidate(f, ring, [a1, b2, a2, b1]);
+            if (cand) cands.push(cand);
         }
     }
-    if (!scored.length) return null;
-    let best = scored[0];
-    for (const candidate of scored) if (candidate.score > best.score) best = candidate;
-    return { corners: orderCorners(best.ring), coverage: best.coverage };
+    const light = frameLight(f);
+    const verified = [];
+    let best = null;
+    cands.sort((a, b) => b.score - a.score);
+    for (const cand of cands.slice(0, VERIFY_TOP)) {
+        verified.push(verifyCandidate(f, cand, light));
+        if (!best || cand.final > best.final) best = cand;
+    }
+    verified.sort((a, b) => b.final - a.final);
+    // Достроенная рамка побеждает с запасом: почти равная найденной она —
+    // та же рамка с одной стороной, подогнанной к соседней кромке (край
+    // заголовка у верха журнала), а не срезанная, ради которой достройка.
+    const found = best;
+    for (const cand of verified.slice(0, REPAIR_TOP)) {
+        for (const fixed of repairCandidate(f, cand)) {
+            verifyCandidate(f, fixed, light);
+            if (fixed.final > best.final && fixed.final > found.final * REPAIR_MARGIN) best = fixed;
+        }
+    }
+    if (!best || !(best.final > 0) || best.strong < 3) return null;
+    let perimeter = 0;
+    for (let k = 0; k < 4; k += 1) perimeter += dist(best.ring[k], best.ring[(k + 1) % 4]);
+    const confidence = Math.min(1, best.final / perimeter / CONFIDENCE_FULL);
+    if (confidence < MIN_CONFIDENCE) return null;
+    return { corners: fromIndex(orderCorners(best.ring)), confidence, coverage: best.cover };
 };
 
+/* ── Уточнение рамки ──────────────────────────────────────────────────── */
+
+const robustLine = (pts, wide, narrow) => {
+    const fit = (weights) => {
+        let sw = 0;
+        let sx = 0;
+        let sy = 0;
+        pts.forEach(([x, y], i) => { sw += weights[i]; sx += weights[i] * x; sy += weights[i] * y; });
+        if (sw <= 0) return null;
+        const mx = sx / sw;
+        const my = sy / sw;
+        let sxx = 0;
+        let syy = 0;
+        let sxy = 0;
+        pts.forEach(([x, y], i) => {
+            sxx += weights[i] * (x - mx) ** 2; syy += weights[i] * (y - my) ** 2; sxy += weights[i] * (x - mx) * (y - my);
+        });
+        const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+        return { mx, my, ux: Math.cos(ang), uy: Math.sin(ang) };
+    };
+    if (pts.length < 6) return null;
+    let line = fit(pts.map((p) => p[2]));
+    // Выбросы (строка текста у края, тень) теряют вес по расстоянию до прямой.
+    for (let it = 0; it < 3 && line; it += 1) {
+        const lim = it === 0 ? wide : narrow;
+        const current = line;
+        line = fit(pts.map(([x, y, wt]) => {
+            const r = Math.abs((x - current.mx) * -current.uy + (y - current.my) * current.ux) / lim;
+            return r < 1 ? wt * (1 - r * r) ** 2 : 0;
+        })) || current;
+    }
+    return line;
+};
+
+/* Углы снимка с долей пикселя (rgba — тот же кадр крупнее, углы в его
+   пикселях). Каждая сторона притягивается к своей кромке: поперёк стороны
+   ищется наибольший перепад цвета — в ту же сторону, что у этой кромки в
+   целом, и ближе к исходной прямой (так не перескакивает на строку текста у
+   края или на тень листа); по точкам — прямая с отбросом выбросов, углы —
+   пересечения прямых. search — полуширина поиска в пикселях этого кадра. На
+   кадрах SmartDoc 960×540 (поиск на 320): медианная ошибка угла 2,5 → 1,4 px,
+   у 90 % углов — не больше 3,6 px вместо 4,5. Если сторону не на что
+   опереть, углы остаются прежними. */
+const sampleColor = (rgba, w, h, x, y, out) => {
+    const cx = Math.min(w - 1, Math.max(0, x));
+    const cy = Math.min(h - 1, Math.max(0, y));
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    const x1 = Math.min(w - 1, x0 + 1);
+    const y1 = Math.min(h - 1, y0 + 1);
+    const fx = cx - x0;
+    const fy = cy - y0;
+    const i00 = (y0 * w + x0) * 4;
+    const i10 = (y0 * w + x1) * 4;
+    const i01 = (y1 * w + x0) * 4;
+    const i11 = (y1 * w + x1) * 4;
+    const w00 = (1 - fx) * (1 - fy);
+    const w10 = fx * (1 - fy);
+    const w01 = (1 - fx) * fy;
+    const w11 = fx * fy;
+    const r = rgba[i00] * w00 + rgba[i10] * w10 + rgba[i01] * w01 + rgba[i11] * w11;
+    const g = rgba[i00 + 1] * w00 + rgba[i10 + 1] * w10 + rgba[i01 + 1] * w01 + rgba[i11 + 1] * w11;
+    const b = rgba[i00 + 2] * w00 + rgba[i10 + 2] * w10 + rgba[i01 + 2] * w01 + rgba[i11 + 2] * w11;
+    out[0] = 0.299 * r + 0.587 * g + 0.114 * b;
+    out[1] = r - g;
+    out[2] = 0.5 * (r + g) - b;
+};
+export const refineQuad = (rgba, w, h, input, { search = 3 } = {}) => {
+    if (!isConvexQuad(input)) return input;
+    const corners = toIndex(input);
+    const reach = Math.max(1, Math.round(search));
+    const size = 2 * reach + 3;
+    const pl = new Float32Array(size);
+    const pa = new Float32Array(size);
+    const pb = new Float32Array(size);
+    const color = [0, 0, 0];
+    const center = quadCenter(corners);
+    const sigma = Math.max(1.5, reach / 2);
+    // Профили поперёк каждой стороны: производная цвета снаружи → внутрь.
+    const sides = [];
+    for (let k = 0; k < 4; k += 1) {
+        const p = corners[k];
+        const q = corners[(k + 1) % 4];
+        const len = dist(p, q);
+        if (len < 8) return input;
+        let nx = -(q[1] - p[1]) / len;
+        let ny = (q[0] - p[0]) / len;
+        if ((center[0] - (p[0] + q[0]) / 2) * nx + (center[1] - (p[1] + q[1]) / 2) * ny < 0) { nx = -nx; ny = -ny; }
+        // Длинную сторону большого снимка хватает пройти через пиксель.
+        const step = Math.max(1, len / 600);
+        const profiles = [];
+        for (let s = 0; s <= len; s += step) {
+            const t = s / len;
+            if (t < 0.06 || t > 0.94) continue;
+            const bx = p[0] + (q[0] - p[0]) * t;
+            const by = p[1] + (q[1] - p[1]) * t;
+            if (bx < 1 || by < 1 || bx > w - 2 || by > h - 2) continue;
+            for (let d = -reach - 1; d <= reach + 1; d += 1) {
+                sampleColor(rgba, w, h, bx + nx * d, by + ny * d, color);
+                pl[d + reach + 1] = color[0];
+                pa[d + reach + 1] = color[1];
+                pb[d + reach + 1] = color[2];
+            }
+            const der = [];
+            for (let i = 1; i <= 2 * reach + 1; i += 1) der.push([pl[i + 1] - pl[i - 1], pa[i + 1] - pa[i - 1], pb[i + 1] - pb[i - 1]]);
+            profiles.push({ bx, by, der });
+        }
+        if (profiles.length < 6) return input;
+        sides.push({ nx, ny, profiles });
+    }
+    /* Направление перемены цвета «стол → лист» — общее для четырёх сторон:
+       у каждой стороны — сумма производных у исходной прямой, и голос
+       каждой стороны равный. Сторона, легшая на край заголовка или фото
+       внутри листа («бумага → тёмное»), смотрит против остальных и одна их
+       не перетянет: её пики противоположного знака отбрасываются, и она
+       ищет настоящую кромку (журнал на стенде: угол уходил на 16 px). */
+    const ref = [0, 0, 0];
+    for (const { profiles } of sides) {
+        const own = [0, 0, 0];
+        for (const { der } of profiles) {
+            for (let i = reach - 1; i <= reach + 1; i += 1) for (let j = 0; j < 3; j += 1) own[j] += der[i][j];
+        }
+        const n = Math.hypot(own[0], own[1], own[2]) || 1;
+        for (let j = 0; j < 3; j += 1) ref[j] += own[j] / n;
+    }
+    const refLen = Math.hypot(ref[0], ref[1], ref[2]) || 1;
+    const lines = [];
+    for (const { nx, ny, profiles } of sides) {
+        const pts = [];
+        for (const { bx, by, der } of profiles) {
+            // Какой пик брать — решает близость к исходной прямой; где он — сам
+            // перепад: вес близости, умноженный до уточнения, тянул пик к
+            // исходной прямой на треть пикселя.
+            const vals = der.map((v) => Math.max(0, (v[0] * ref[0] + v[1] * ref[1] + v[2] * ref[2]) / refLen));
+            let best = -1;
+            let bestW = 0;
+            vals.forEach((v, i) => {
+                const d = i - reach;
+                const weighted = v * Math.exp(-(d * d) / (2 * sigma * sigma));
+                if (weighted > bestW) { bestW = weighted; best = i; }
+            });
+            while (best > 0 && vals[best - 1] > vals[best]) best -= 1;
+            while (best >= 0 && best < vals.length - 1 && vals[best + 1] > vals[best]) best += 1;
+            if (best < 1 || best > vals.length - 2 || vals[best] < 1) continue;
+            const a = vals[best - 1];
+            const b = vals[best + 1];
+            const peak = vals[best];
+            const den = a - 2 * peak + b;
+            const d = best - reach + (den < 0 ? (0.5 * (a - b)) / den : 0);
+            pts.push([bx + nx * d, by + ny * d, peak]);
+        }
+        const line = robustLine(pts, Math.max(2.5, 0.8 * reach), Math.max(1.5, 0.5 * reach));
+        if (!line) return input;
+        lines.push(line);
+    }
+    const out = [];
+    for (let k = 0; k < 4; k += 1) {
+        const a = lines[(k + 3) % 4];
+        const b = lines[k];
+        const det = a.ux * b.uy - a.uy * b.ux;
+        if (Math.abs(det) < 1e-6) return input;
+        const t = ((b.mx - a.mx) * b.uy - (b.my - a.my) * b.ux) / det;
+        const pt = [a.mx + a.ux * t, a.my + a.uy * t];
+        // Поправка, а не новый поиск: далеко уехавший угол — признак, что
+        // сторона прилипла не к той кромке.
+        if (!Number.isFinite(pt[0]) || !Number.isFinite(pt[1]) || dist(pt, corners[k]) > reach * 3) return input;
+        out.push(pt);
+    }
+    return isConvexQuad(out) ? fromIndex(out) : input;
+};
+
+/* ── Живая рамка и автоснимок ─────────────────────────────────────────── */
+
 /* Живая рамка в видоискателе: не мигает от кадра к кадру. Новое положение
-   принимается после двух согласных кадров, близкое — сглаживается, рамка
-   гаснет после нескольких кадров без листа. */
+   принимается после двух согласных кадров, близкое — подтягивается на
+   FOLLOW пути (половина отставала от листа в руке на полсекунды — рамку плавно
+   ведёт ещё и экран), рамка гаснет после нескольких кадров без листа. */
+const FOLLOW = 0.7;
 export const createQuadTracker = ({ hold = 3, tolerance = 0.06 } = {}) => {
     let shown = null;
     let pending = null;
@@ -812,7 +1336,7 @@ export const createQuadTracker = ({ hold = 3, tolerance = 0.06 } = {}) => {
             }
             misses = 0;
             if (shown && near(shown, quad, size)) {
-                shown = shown.map((p, i) => [p[0] + (quad[i][0] - p[0]) * 0.5, p[1] + (quad[i][1] - p[1]) * 0.5]);
+                shown = shown.map((p, i) => [p[0] + (quad[i][0] - p[0]) * FOLLOW, p[1] + (quad[i][1] - p[1]) * FOLLOW]);
                 pending = null;
                 return shown;
             }
@@ -826,6 +1350,67 @@ export const createQuadTracker = ({ hold = 3, tolerance = 0.06 } = {}) => {
         },
         reset() { shown = null; pending = null; misses = 0; },
         get current() { return shown; },
+    };
+};
+
+/* Автоснимок — режим «Авто», как у сканера iOS: страница снимается сама,
+   когда лист найден уверенно, занимает заметную часть кадра и рамка стоит на
+   месте AUTO_HOLD_MS. Потом — пауза до следующего листа: рамка пропала (лист
+   убрали, накрыли рукой, перевернули) или уехала далеко. Иначе тот же лист
+   снимался бы раз в секунду.
+
+   push(found, w, h, now) → { state, progress }:
+     'search' — листа нет;   'closer' — лист мелкий, поднести камеру ближе;
+     'steady' — держать неподвижно (progress 0…1 — сколько уже простояло);
+     'fire'   — снимать (один раз);   'next' — снято, ждём следующий лист. */
+export const AUTO_HOLD_MS = 900;
+export const AUTO_MIN_AREA = 0.1;
+const AUTO_STILL = 0.025;
+const AUTO_REARM_MISSES = 3;
+const AUTO_NEW_SHEET = 0.15;
+const maxShift = (a, b) => Math.max(...a.map((p, i) => dist(p, b[i])));
+
+/* Подсказка над кадром без автоснимка (режим «Вручную»): 'search' — листа
+   нет, 'closer' — лист мелкий, 'found' — рамка видна, можно снимать. */
+export const sheetHint = (found, w, h) => {
+    if (!found || found.confidence < SHOW_CONFIDENCE) return 'search';
+    return quadArea(found.corners) < AUTO_MIN_AREA * w * h ? 'closer' : 'found';
+};
+
+export const createAutoShutter = ({ hold = AUTO_HOLD_MS } = {}) => {
+    let anchor = null;
+    let since = 0;
+    let armed = true;
+    let misses = 0;
+    let taken = null;
+    return {
+        push(found, w, h, now) {
+            const diag = Math.hypot(w, h);
+            if (!found || found.confidence < SHOW_CONFIDENCE) {
+                misses += 1;
+                anchor = null;
+                if (!armed && misses >= AUTO_REARM_MISSES) { armed = true; taken = null; }
+                return { state: armed ? 'search' : 'next', progress: 0 };
+            }
+            misses = 0;
+            if (!armed) {
+                if (!taken || maxShift(taken, found.corners) < AUTO_NEW_SHEET * diag) return { state: 'next', progress: 0 };
+                armed = true;
+                taken = null;
+            }
+            if (quadArea(found.corners) < AUTO_MIN_AREA * w * h) { anchor = null; return { state: 'closer', progress: 0 }; }
+            if (found.confidence < AUTO_CONFIDENCE) { anchor = null; return { state: 'steady', progress: 0 }; }
+            if (!anchor || maxShift(anchor, found.corners) > AUTO_STILL * diag) { anchor = found.corners; since = now; }
+            const progress = Math.min(1, (now - since) / hold);
+            if (progress < 1) return { state: 'steady', progress };
+            armed = false;
+            taken = found.corners;
+            anchor = null;
+            return { state: 'fire', progress: 1 };
+        },
+        /* Снимок сделан не автоснимком (кнопкой) — тоже ждать следующий лист. */
+        took(corners) { armed = false; taken = corners; anchor = null; misses = 0; },
+        reset() { anchor = null; armed = true; misses = 0; taken = null; },
     };
 };
 

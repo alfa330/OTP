@@ -173,7 +173,9 @@ export const IosSection = ({ title, hint, children, right = null }) => (
  * Тёмный пузырёк на светлой карточке выбран намеренно: белая подсказка поверх
  * белой карточки читается как часть содержимого, а не как всплывающее пояснение.
  */
-export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) => {
+/* onDark — «i» на тёмном фоне (видоискатель сканера документа): серый кружок
+   светлых карточек там читался как пятно. */
+export const IosHint = ({ text, label = 'Подробнее', align = 'left', onDark = false }) => {
     // Наведение и клик — разные состояния, а не одно. Пока они делили один флаг,
     // клик по «i» ГАСИЛ подсказку: мышь уже открыла её наведением, а клик
     // переключал в закрытое. На мыши это выглядело как «кнопка не работает»,
@@ -244,7 +246,11 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
                 onClick={(event) => { event.preventDefault(); setPinned((v) => !v); }}
                 onKeyDown={(event) => { if (event.key === 'Escape') setPinned(false); }}
                 onBlur={() => setPinned(false)}
-                className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full bg-slate-200/70 text-[11px] font-semibold leading-none text-slate-500 transition hover:bg-slate-300/80 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[11px] font-semibold leading-none transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+                    onDark
+                        ? 'bg-[rgba(255,255,255,0.16)] text-[rgba(255,255,255,0.85)] hover:bg-[rgba(255,255,255,0.28)]'
+                        : 'bg-slate-200/70 text-slate-500 hover:bg-slate-300/80 hover:text-slate-700'
+                }`}
             >
                 i
             </button>
