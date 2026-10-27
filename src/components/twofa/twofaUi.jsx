@@ -1,6 +1,7 @@
 import React from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { Search, ShieldCheck, X } from 'lucide-react';
 import { IosHint } from '../ui/ios';
+import { edgeMask, monogramOf } from './twofaMeta';
 
 /*
  * Мелкие детали интерфейса «Кодов 2FA» — одни на экран и окна.
@@ -108,4 +109,98 @@ export const EmptyState = ({ icon: Icon, title, children, action }) => (
         {children && <p className="mt-1 max-w-sm text-[13px] text-slate-500">{children}</p>}
         {action && <div className="mt-4">{action}</div>}
     </div>
+);
+
+/* Карточка, которая открывается щелчком: под мышью приподнимается с тенью, под нажимом
+   чуть проседает — как ячейки macOS. «Уменьшить движение» — без сдвига, только тень. */
+export const LIFT = 'transition duration-200 ease-out hover:shadow-[0_8px_24px_rgba(15,23,42,0.08)] '
+    + 'motion-safe:hover:-translate-y-px motion-safe:active:scale-[0.99]';
+
+/* Плитка аккаунта: буква сервиса на мягком цвете (twofaMeta: monogramOf), как у сайтов в
+   «Паролях» iOS. */
+export const Monogram = ({ account, size = 'md' }) => {
+    const { letter, tone } = monogramOf(account);
+    const box = size === 'sm' ? 'h-8 w-8 rounded-[10px] text-[13px]' : 'h-10 w-10 rounded-xl text-[15px]';
+    return <span aria-hidden="true" className={`grid shrink-0 place-items-center font-semibold ${box} ${tone}`}>{letter}</span>;
+};
+
+/* Поиск в строке инструментов — как поле поиска в панели macOS: лупа слева, крестик
+   «очистить», когда что-то набрано. */
+export const SearchField = ({ value, onChange, placeholder, className = '' }) => (
+    <label className={`relative flex min-w-0 items-center ${className}`}>
+        <Search size={15} className="pointer-events-none absolute left-3 text-slate-400" />
+        <input type="text" inputMode="search" enterKeyHint="search" value={value} placeholder={placeholder}
+               aria-label={placeholder} onChange={(event) => onChange(event.target.value)}
+               className="h-9 w-full rounded-xl border-0 bg-white pl-9 pr-8 text-[13.5px] text-slate-900 placeholder-slate-400 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition focus:outline-none focus:ring-2 focus:ring-blue-500/60" />
+        {value && (
+            <button type="button" onClick={() => onChange('')} aria-label="Очистить поиск"
+                    className="absolute right-2 grid h-5 w-5 place-items-center rounded-full bg-slate-300 text-white transition hover:bg-slate-400">
+                <X size={11} strokeWidth={3} />
+            </button>
+        )}
+    </label>
+);
+
+/* Разделы плитками: плитка — и отбор, и счётчик. Выбранная — мягкой голубой заливкой
+   (владелец 16.10.2026: выбранное голубым, не чёрным), наведение — лёгкий фон. На телефоне
+   — одна строка с прокруткой вбок: оболочка телефона сама переносит ряды с gap, поэтому
+   !flex-nowrap; с sm — переносятся рядами. */
+export const SectionTiles = ({ tiles, value, onChange }) => {
+    const rowRef = React.useRef(null);
+    const [edges, setEdges] = React.useState({ left: false, right: false });
+    const measure = React.useCallback(() => {
+        const row = rowRef.current;
+        if (!row) return;
+        const left = row.scrollLeft > 1;
+        const right = row.scrollLeft + row.clientWidth < row.scrollWidth - 1;
+        setEdges((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+    }, []);
+    // До отрисовки: первый кадр уже с маской, а не без неё.
+    React.useLayoutEffect(() => {
+        measure();
+        const row = rowRef.current;
+        if (!row || typeof ResizeObserver === 'undefined') return undefined;
+        const observer = new ResizeObserver(measure);
+        observer.observe(row);
+        return () => observer.disconnect();
+    }, [measure, tiles]);
+    // Выбор сменился не касанием («Искать во всех разделах», вход с запомненным разделом) —
+    // выбранная плитка доезжает в вид. Двигается только лента, страница стоит: scrollIntoView
+    // подтянул бы и её, если человек прокрутил ниже плиток.
+    React.useEffect(() => {
+        const row = rowRef.current;
+        const tile = row?.querySelector('[aria-selected="true"]');
+        if (!row || !tile || row.scrollWidth <= row.clientWidth) return;
+        const box = row.getBoundingClientRect();
+        const place = tile.getBoundingClientRect();
+        const shift = place.left < box.left ? place.left - box.left - 12 : place.right > box.right ? place.right - box.right + 12 : 0;
+        if (shift) row.scrollBy({ left: shift, behavior: 'smooth' });
+    }, [value]);
+    return (
+        <div ref={rowRef} role="tablist" aria-label="Разделы" onScroll={measure} style={edgeMask(edges.left, edges.right)}
+             className="thin-scroll flex !flex-nowrap gap-2 overflow-x-auto pb-1 sm:!flex-wrap sm:overflow-visible sm:pb-0">
+            {tiles.map((tile) => {
+                const selected = tile.key === value;
+                return (
+                    <button key={tile.key} type="button" role="tab" aria-selected={selected} onClick={() => onChange(tile.key)}
+                            className={`flex max-w-[280px] shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-left ring-1 transition duration-200 motion-safe:active:scale-[0.97] sm:max-w-[400px] ${
+                                selected ? 'bg-[#eef4ff] text-[#1d4ed8] ring-[#bfd4fb]' : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'
+                            }`}>
+                        <span className="min-w-0 truncate text-[13px] font-semibold">{tile.title}</span>
+                        <span className={`shrink-0 rounded-full px-1.5 text-[12px] font-medium tabular-nums ${
+                            selected ? 'bg-white text-[#1d4ed8]' : 'bg-slate-100 text-slate-500'
+                        }`}>
+                            {tile.count}
+                        </span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
+/* Заготовка до первого ответа сервера — того же роста, что настоящее: раздел при входе не
+   перестраивается на глазах (память «раздел при входе не перестраивается», 13.10.2026). */
+export const Shimmer = ({ className = '' }) => (
+    <span aria-hidden="true" className={`block rounded-xl bg-slate-200/70 motion-safe:animate-pulse ${className}`} />
 );

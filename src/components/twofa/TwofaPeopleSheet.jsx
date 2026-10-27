@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Loader2, Search, Send } from 'lucide-react';
-import { IosModal, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
-import { errorOf, groupAccounts } from './twofaMeta';
-import { GroupLabel } from './twofaUi';
+import { IosModal, IosPager, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
+import { TILES_PAGE_SIZE, errorOf, filterAccounts, groupAccounts, pageOf } from './twofaMeta';
+import { GroupLabel, SearchField } from './twofaUi';
 
 /*
  * Окна «Доступов» «Кодов 2FA»: найти сотрудника и выбрать, к каким аккаунтам ему можно
@@ -99,21 +99,62 @@ export const AccountTile = ({ account, checked, onToggle }) => (
 );
 
 /* Плитки по разделам: заголовки — когда разделов больше одного (иначе это шум) или когда
-   важно, откуда аккаунт (labelled — состав раздела: отмеченный из другого раздела переедет). */
+   важно, откуда аккаунт (labelled — состав раздела: отмеченный из другого раздела переедет).
+   Длинный список — с поиском и страницами по TILES_PAGE_SIZE; у подписи раздела — сколько в
+   нём отмечено: отмеченное на другой странице не теряется из виду. */
 export const AccountTiles = ({ accounts, groups, isChecked, onToggle, labelled = false }) => {
-    const sections = groupAccounts(accounts, groups);
-    const tiles = (list) => list.map((account) => (
-        <AccountTile key={account.id} account={account} checked={isChecked(account.id)} onToggle={() => onToggle(account.id)} />
-    ));
-    if (sections.length < 2 && !labelled) return <div className="space-y-2">{tiles(accounts)}</div>;
-    return (
-        <div className="space-y-4">
-            {sections.map((section) => (
-                <div key={section.id ?? 'none'}>
-                    <GroupLabel>{section.title}</GroupLabel>
-                    <div className="space-y-2">{tiles(section.accounts)}</div>
+    const [query, setQuery] = useState('');
+    const [pages, setPages] = useState({});
+    const matched = filterAccounts(accounts, query);
+    const sections = groupAccounts(matched, groups);
+    const block = (key, list) => {
+        const view = pageOf(list, pages[key], TILES_PAGE_SIZE);
+        return (
+            <>
+                <div key={view.page} className="space-y-2 motion-safe:animate-fade-in-soft">
+                    {view.items.map((account) => (
+                        <AccountTile key={account.id} account={account} checked={isChecked(account.id)} onToggle={() => onToggle(account.id)} />
+                    ))}
                 </div>
-            ))}
+                {view.pageCount > 1 && (
+                    <div className="mt-1.5">
+                        <IosPager page={view.page} pageCount={view.pageCount} total={view.total} from={view.from} to={view.to}
+                                  onPage={(next) => setPages((prev) => ({ ...prev, [key]: next }))} unit="аккаунты" />
+                    </div>
+                )}
+            </>
+        );
+    };
+    let body;
+    if (!matched.length) {
+        body = <p className="px-1 py-3 text-[13px] text-slate-500">Аккаунтов с «{query.trim()}» нет</p>;
+    } else if (sections.length < 2 && !labelled) {
+        body = block('all', matched);
+    } else {
+        body = (
+            <div className="space-y-4">
+                {sections.map((section) => {
+                    const marked = section.accounts.filter((account) => isChecked(account.id)).length;
+                    return (
+                        <div key={section.id ?? 'none'}>
+                            <GroupLabel right={(
+                                <span className="text-[11px] tabular-nums text-slate-400">отмечено {marked} из {section.accounts.length}</span>
+                            )}>
+                                {section.title}
+                            </GroupLabel>
+                            {block(section.id ?? 'none', section.accounts)}
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    }
+    return (
+        <div className="space-y-3">
+            {(accounts || []).length > TILES_PAGE_SIZE && (
+                <SearchField value={query} placeholder="Найти аккаунт" onChange={(value) => { setQuery(value); setPages({}); }} />
+            )}
+            {body}
         </div>
     );
 };

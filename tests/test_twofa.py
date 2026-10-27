@@ -38,6 +38,7 @@ DATABASE_PY = ROOT / 'database.py'
 SOURCES_PY = ROOT / 'notifications' / 'sources.py'
 FA_ICON = ROOT / 'src' / 'components' / 'common' / 'FaIcon.jsx'
 VIEW_JSX = ROOT / 'src' / 'components' / 'twofa' / 'TwofaView.jsx'
+HISTORY_JSX = ROOT / 'src' / 'components' / 'twofa' / 'TwofaHistory.jsx'
 
 RFC_SECRET = b'12345678901234567890'
 
@@ -531,14 +532,33 @@ class WiringTest(unittest.TestCase):
         """Разделы аккаунтов: окно раздела подключено, разделы доходят до всех окон, где
         выбирают аккаунты, журнал называет систему «Системой», а не «Разделом»."""
         view = _read(VIEW_JSX)
+        history = _read(HISTORY_JSX)
         self.assertIn("import { GroupSheet } from './TwofaGroupSheet';", view)
         self.assertIn('<GroupSheet', view)
         self.assertEqual(view.count('groups={data.groups || []}'), 4)  # добавление, аккаунт, раздел, доступы
-        self.assertIn("item.system ? 'Система'", view)
-        self.assertNotIn("item.system ? 'Раздел'", view)
+        self.assertIn("item.system ? 'Система'", history)
+        self.assertNotIn("? 'Раздел'", view + history)
         # Колонка minmax(0, 1fr): длинная почта в названии не выталкивает карточку за край телефона.
         self.assertIn('className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3"', view)
         self.assertNotIn('className="grid gap-3 md:grid-cols-2', view)
+
+    def test_screen_is_paged_and_remembered_per_person(self):
+        """Вид раздела (владелец 27.10.2026, «не забудь использовать пагинацию»): история и
+        журнал — страницами с сервера, аккаунты и люди — страницами на экране; повторный вход
+        рисуется из памяти по человеку — userId доходит из App.jsx."""
+        view = _read(VIEW_JSX)
+        history = _read(HISTORY_JSX)
+        self.assertIn("useServerPages(api, '/history'", history)
+        self.assertIn("useServerPages(api, '/journal'", history)
+        self.assertIn('<PagedGrid', view)
+        self.assertIn('pageOf(matchedPeople, peoplePage, PEOPLE_PAGE_SIZE)', view)
+        self.assertIn('SCREEN_MEMORY.get(memoryKey)', view)
+        self.assertNotIn('localStorage', view + history)  # в ответе имена — только память страницы
+        mount = self.app[self.app.index('<TwofaView'):]
+        self.assertIn('userId={user?.id}', mount[:mount.index('/>')])
+        # Вкладки — переезжающей плашкой, ждущие запросы — числом на вкладке.
+        self.assertIn('options={tabOptions} ariaLabel="Вкладка раздела" slide', view)
+        self.assertNotIn('.code}', history)
 
 
 if __name__ == '__main__':
@@ -753,6 +773,8 @@ class RouteGatesWithoutDbTest(unittest.TestCase):
             self.assertEqual(self.call(20, method, path, {})[1], 'TWOFA_MANAGE_FORBIDDEN', path)
         for name in ('create_group', 'update_group', 'delete_group', 'update_account', 'add_accounts'):
             getattr(self.service, name).assert_not_called()
+        # Чужая история запросов — только тем, кто ведёт раздел; свою (mine=1) видит каждый.
+        self.assertEqual(self.call(20, 'get', '/history'), (403, 'TWOFA_MANAGE_FORBIDDEN'))
 
     def test_other_department_does_not_open_the_section(self):
         for method, path in (('get', ''), ('post', '/requests')):

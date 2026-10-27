@@ -1305,3 +1305,39 @@ def test_sections_through_the_routes(client, env):
     assert items['group_renamed']['details'] == {'from': 'Общий маркетинг', 'to': 'Общий'}
     assert items['account_moved']['details'] == {'from_group': 'Общий маркетинг', 'to_group': None}
     assert not items['group_deleted']['system'] and items['group_deleted']['actor_name'] == 'Глава Маркетинга'
+
+
+# ─── Страницы истории и журнала ──────────────────────────────────────────────
+
+def test_history_and_journal_come_in_pages(client, env):
+    """Вид раздела (владелец 27.10.2026, «не забудь использовать пагинацию»): история и журнал
+    — страницами с общим числом строк, а не первыми N без конца."""
+    service = env['service']
+    head = service.context(HEAD)
+    for _ in range(12):
+        request_id = _request(env)['request']['id']
+        assert service.decide(head, request_id, 'reject', 'portal')['outcome'] == 'rejected'
+    waiting = _request(env)['request']['id']  # ждущий — у главы карточкой наверху, не в истории
+    client.as_user(HEAD)
+    first = client.get('/api/twofa/history').get_json()
+    assert (first['total'], first['page'], first['page_size'], len(first['items'])) == (12, 1, 10, 10)
+    assert waiting not in [item['id'] for item in first['items']]
+    second = client.get('/api/twofa/history?page=2').get_json()
+    assert len(second['items']) == 2 and not set(i['id'] for i in first['items']) & set(i['id'] for i in second['items'])
+    assert client.get('/api/twofa/history?page=3').get_json()['items'] == []
+    assert client.get('/api/twofa/history?page=-4').get_json()['page'] == 1
+    # Сотрудник: своя история — со ждущим; чужая — закрыта.
+    client.as_user(ANNA)
+    mine = client.get('/api/twofa/history?mine=1').get_json()
+    assert mine['total'] == 13 and mine['items'][0]['id'] == waiting
+    assert client.get('/api/twofa/history').status_code == 403
+    # Журнал: страницы по 20 без повторов, от новых к старым; старый вызов «before» жив.
+    client.as_user(HEAD)
+    page1 = client.get('/api/twofa/journal').get_json()
+    page2 = client.get('/api/twofa/journal?page=2').get_json()
+    events = _rows(env['db'], 'SELECT count(*) FROM twofa_events')[0][0]
+    assert page1['total'] == events > 20 and page1['page_size'] == 20 and page1['has_more'] is True
+    ids = [item['id'] for item in page1['items'] + page2['items']]
+    assert ids == sorted(ids, reverse=True) and len(ids) == len(set(ids)) == min(40, events)
+    legacy = client.get('/api/twofa/journal?before=%d' % page1['items'][-1]['id']).get_json()
+    assert legacy['total'] is None and legacy['items'][0]['id'] == page2['items'][0]['id']

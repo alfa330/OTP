@@ -491,6 +491,23 @@ def requests_list(cursor, *, requester_id=None, limit=30):
     return [_request(row) for row in cursor.fetchall()]
 
 
+def requests_page(cursor, *, requester_id=None, settled_only=False, offset=0, limit=10):
+    """Страница истории запросов от новых к старым и сколько их всего. requester_id — только
+    свои; settled_only — без ждущих: у главы они стоят наверху карточками с кнопками."""
+    where, params = ['TRUE'], []
+    if requester_id is not None:
+        where.append('r.requester_id = %s')
+        params.append(int(requester_id))
+    if settled_only:
+        where.append("r.status <> 'pending'")
+    clause = ' AND '.join(where)
+    cursor.execute('SELECT count(*) FROM twofa_requests r WHERE %s' % clause, params)
+    total = int(cursor.fetchone()[0])
+    cursor.execute("SELECT %s %s WHERE %s ORDER BY r.created_at DESC, r.id DESC LIMIT %%s OFFSET %%s"
+                   % (_REQUEST_COLUMNS, _REQUEST_FROM, clause), params + [int(limit), int(offset)])
+    return [_request(row) for row in cursor.fetchall()], total
+
+
 def pending_requests(cursor, now):
     cursor.execute("SELECT %s %s WHERE r.status = 'pending' AND r.expires_at > %%s "
                    "ORDER BY r.created_at, r.id" % (_REQUEST_COLUMNS, _REQUEST_FROM), (now,))
@@ -602,28 +619,42 @@ def log_event(cursor, kind, *, now, request_id=None, account_id=None, account_ti
           Json(details or {}), now))
 
 
+_EVENT_COLUMNS = """
+    e.id, e.kind, e.request_id, e.account_id, e.account_title, e.actor_id, e.actor_name,
+    e.subject_id, e.subject_name, e.details, e.created_at
+"""
+
+
+def _event(r):
+    return {
+        'id': int(r[0]), 'kind': r[1], 'request_id': r[2], 'account_id': r[3], 'account_title': r[4],
+        'actor_id': r[5], 'actor_name': r[6], 'subject_id': r[7], 'subject_name': r[8],
+        'details': r[9] or {}, 'created_at': r[10],
+    }
+
+
 def journal(cursor, *, before_id=None, limit=50):
+    """Журнал от новых к старым порциями «до такой-то строки» — так листал экран до страниц
+    (27.10.2026); оставлен для открытой во время выкладки старой вкладки."""
     params = []
     where = "TRUE"
     if before_id:
         where = "e.id < %s"
         params.append(int(before_id))
     params.append(int(limit) + 1)
-    cursor.execute("""
-        SELECT e.id, e.kind, e.request_id, e.account_id, e.account_title, e.actor_id, e.actor_name,
-               e.subject_id, e.subject_name, e.details, e.created_at
-          FROM twofa_events e
-         WHERE %s
-         ORDER BY e.id DESC
-         LIMIT %%s
-    """ % where, params)
+    cursor.execute("SELECT %s FROM twofa_events e WHERE %s ORDER BY e.id DESC LIMIT %%s" % (_EVENT_COLUMNS, where),
+                   params)
     rows = cursor.fetchall()
-    items = [{
-        'id': int(r[0]), 'kind': r[1], 'request_id': r[2], 'account_id': r[3], 'account_title': r[4],
-        'actor_id': r[5], 'actor_name': r[6], 'subject_id': r[7], 'subject_name': r[8],
-        'details': r[9] or {}, 'created_at': r[10],
-    } for r in rows[:limit]]
-    return items, len(rows) > limit
+    return [_event(r) for r in rows[:limit]], len(rows) > limit
+
+
+def journal_page(cursor, *, offset=0, limit=20):
+    """Страница журнала от новых к старым и сколько в нём всего строк — для листалки."""
+    cursor.execute("SELECT count(*) FROM twofa_events")
+    total = int(cursor.fetchone()[0])
+    cursor.execute("SELECT %s FROM twofa_events e ORDER BY e.id DESC LIMIT %%s OFFSET %%s" % _EVENT_COLUMNS,
+                   (int(limit), int(offset)))
+    return [_event(r) for r in cursor.fetchall()], total
 
 
 # ─── Колокол ───────────────────────────────────────────────────────────────────

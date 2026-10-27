@@ -13,7 +13,8 @@ Blueprint собирается фабрикой и получает зависи
     GET    ''                              экран: права, аккаунты, запросы, люди
     POST   /requests                       запросить код (сотрудник с доступом)
     POST   /requests/<id>/approve|reject   решение главы маркетинга
-    GET    /journal                        журнал (глава, супер-админ), порциями
+    GET    /history?page=&mine=1           история запросов страницами: свои — или все решённые
+    GET    /journal?page=                  журнал (глава, супер-админ) страницами
     POST   /accounts/preview               разобрать QR или ключ — без записи
     POST   /accounts                       сохранить аккаунты из того же текста — в раздел
     PATCH  /accounts/<id>                  название, сервис, раздел
@@ -37,6 +38,10 @@ from .service import KEEP, public_request
 
 # Экспорт Google Authenticator — до 10 аккаунтов в одном QR; полсотни — заведомо не QR.
 _MAX_IMPORT = 50
+
+# Строк на странице: история под карточками — короче, журнал — длиннее (его читают подряд).
+HISTORY_PAGE_SIZE = 10
+JOURNAL_PAGE_SIZE = 20
 
 _ERRORS = {
     'forbidden': ('Этот аккаунт вам не выдан', 'TWOFA_REQUEST_FORBIDDEN', 403),
@@ -159,12 +164,13 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
                     account['user_ids'] = grants.get(account['id'], [])
                 people = queries.people_with_access(cursor)
                 pending = queries.pending_requests(cursor, now_dt)
-                recent = queries.requests_list(cursor, limit=30)
             else:
                 accounts = queries.list_accounts(cursor, ids=access.granted_ids(ctx))
                 # Сотруднику — только разделы его аккаунтов: заголовки над карточками.
                 groups = queries.list_groups(cursor, ids=[a['group_id'] for a in accounts if a['group_id']])
-                people, pending, recent = [], [], []
+                people, pending = [], []
+            # Свои последние — для строки состояния на карточке аккаунта; вся история —
+            # страницами (/history).
             mine = queries.requests_list(cursor, requester_id=ctx['user_id'], limit=10) if caps['can_request'] else []
         for account in accounts:
             account['created_at'] = rules.iso(account['created_at'])
@@ -189,7 +195,6 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'groups': groups,
             'people': people,
             'pending': [public_request(r) for r in pending],
-            'recent': [public_request(r) for r in recent],
             'my_requests': [public_request(r) for r in mine],
             'server_time': rules.iso(now_dt),
         })
@@ -243,14 +248,43 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     # ─── Журнал ──────────────────────────────────────────────────────────────
 
+    def _page_arg():
+        page = _int(request.args.get('page'))
+        return page if page and page > 0 else 1
+
+    @twofa_route('/history')
+    def twofa_history(ctx):
+        """mine=1 — свои запросы (сотрудник, «Мои коды»), иначе все решённые — только тем, кто
+        ведёт раздел. Ждущие у главы — карточками наверху, в истории их нет."""
+        mine = request.args.get('mine') in ('1', 'true')
+        if not mine and not access.can_manage(ctx):
+            return _bad('Аккаунты и доступы ведёт глава маркетинга', 'TWOFA_MANAGE_FORBIDDEN', 403)
+        page = _page_arg()
+        with db._get_cursor() as cursor:
+            items, total = queries.requests_page(
+                cursor, requester_id=ctx['user_id'] if mine else None, settled_only=not mine,
+                offset=(page - 1) * HISTORY_PAGE_SIZE, limit=HISTORY_PAGE_SIZE)
+        return jsonify({'items': [public_request(item) for item in items], 'total': total, 'page': page,
+                        'page_size': HISTORY_PAGE_SIZE})
+
     @twofa_route('/journal', need='manage')
     def twofa_journal(ctx):
         before = _int(request.args.get('before'))
+        page = _page_arg()
+        total = None
         with db._get_cursor() as cursor:
-            items, has_more = queries.journal(cursor, before_id=before, limit=50)
+            if before:
+                items, has_more = queries.journal(cursor, before_id=before, limit=50)
+            else:
+                items, total = queries.journal_page(cursor, offset=(page - 1) * JOURNAL_PAGE_SIZE,
+                                                    limit=JOURNAL_PAGE_SIZE)
+                has_more = page * JOURNAL_PAGE_SIZE < total
         allowed_details = ('via', 'valid_until', 'error', 'from', 'to', 'service',
                            'group', 'from_group', 'to_group', 'accounts')
         return jsonify({
+            'total': total,
+            'page': page,
+            'page_size': JOURNAL_PAGE_SIZE,
             'items': [{
                 'id': item['id'],
                 'kind': item['kind'],

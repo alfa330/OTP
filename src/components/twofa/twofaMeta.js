@@ -170,6 +170,125 @@ export const journalGroupNote = (item) => {
     }
 };
 
+/* ── Страницы и поиск (владелец 27.10.2026: «не забудь использовать пагинацию») ── */
+
+// Карточек аккаунтов на страницу раздела: делится и на две колонки, и на три.
+export const ACCOUNTS_PAGE_SIZE = 12;
+// Строк сотрудников во «Доступах» и плиток аккаунтов в окнах (доступы, состав раздела).
+export const PEOPLE_PAGE_SIZE = 10;
+export const TILES_PAGE_SIZE = 8;
+
+/* Страница списка: номер вне диапазона прижимается к краю — после удаления последней
+   строки страницы человек не остаётся на пустой странице. */
+export const pageOf = (list, page, size) => {
+    const items = list || [];
+    const total = items.length;
+    const pageCount = Math.max(1, Math.ceil(total / size));
+    const current = Math.min(Math.max(1, Number(page) || 1), pageCount);
+    const start = (current - 1) * size;
+    return {
+        items: items.slice(start, start + size),
+        page: current,
+        pageCount,
+        total,
+        from: total ? start + 1 : 0,
+        to: Math.min(start + size, total),
+    };
+};
+
+/* Поиск без учёта регистра и «ё»: «Аккаунты Ёлки» находятся по «елки». */
+const fold = (text) => String(text || '').toLowerCase().replace(/ё/g, 'е');
+
+export const matchesQuery = (query, ...fields) => {
+    const needle = fold(query).trim();
+    if (!needle) return true;
+    return fields.some((field) => fold(field).includes(needle));
+};
+
+export const filterAccounts = (accounts, query) => (accounts || [])
+    .filter((account) => matchesQuery(query, account.title, account.service));
+
+export const filterPeople = (people, query) => (people || [])
+    .filter((person) => matchesQuery(query, person.name, person.department));
+
+/* Плитки-разделы над аккаунтами: «Все», разделы по порядку и «Без раздела», если там есть
+   что-то. Счётчики — по найденному поиском: видно, в каком разделе совпадения. */
+export const ALL_SECTIONS = 'all';
+export const UNGROUPED = 'none';
+
+export const sectionTiles = (accounts, groups, matched = accounts) => {
+    const counts = new Map();
+    let loose = 0;
+    const known = new Set((groups || []).map((group) => group.id));
+    (matched || []).forEach((account) => {
+        if (account.group_id != null && known.has(account.group_id)) {
+            counts.set(account.group_id, (counts.get(account.group_id) || 0) + 1);
+        } else {
+            loose += 1;
+        }
+    });
+    const hasLoose = (accounts || []).some((account) => account.group_id == null || !known.has(account.group_id));
+    return [
+        { key: ALL_SECTIONS, title: 'Все', count: (matched || []).length },
+        ...(groups || []).map((group) => ({ key: String(group.id), id: group.id, title: group.title, count: counts.get(group.id) || 0 })),
+        ...(hasLoose ? [{ key: UNGROUPED, id: null, title: UNGROUPED_TITLE, count: loose }] : []),
+    ];
+};
+
+/* Плитка аккаунта — буква сервиса на мягком цвете, как у сайтов в «Паролях» iOS: одинаковый
+   сервис — одинаковый цвет, на любом экране и у любого человека. */
+// Без розового: в разделе он значит «мешает получить код» («Код не дошёл», «Telegram не привязан»).
+export const MONOGRAM_TONES = [
+    'bg-blue-50 text-blue-700', 'bg-emerald-50 text-emerald-700', 'bg-amber-50 text-amber-700',
+    'bg-violet-50 text-violet-700', 'bg-sky-50 text-sky-700', 'bg-teal-50 text-teal-700',
+    'bg-indigo-50 text-indigo-700',
+];
+
+/* Край ленты, которая листается вбок (плитки разделов на телефоне), гаснет маской — и только
+   с той стороны, где за ним что-то есть: обрезанная посреди плитка выглядит браком. Тот же
+   приём, что edgeFade у доски «Оплаты счетов». */
+export const EDGE_MASK = 20;
+
+export const edgeMask = (left, right, size = EDGE_MASK) => {
+    if (!left && !right) return undefined;
+    const image = `linear-gradient(to right, ${left ? 'transparent' : '#000'} 0, #000 ${left ? size : 0}px, `
+        + `#000 calc(100% - ${right ? size : 0}px), ${right ? 'transparent' : '#000'} 100%)`;
+    return { maskImage: image, WebkitMaskImage: image };
+};
+
+export const monogramOf = (account) => {
+    const source = String(account?.service || account?.title || '').trim();
+    const letter = (source.match(/[\p{L}\p{N}]/u) || ['•'])[0].toUpperCase();
+    let hash = 0;
+    for (const char of fold(source)) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+    return { letter, tone: MONOGRAM_TONES[hash % MONOGRAM_TONES.length] };
+};
+
+/* Строка журнала: значок и цвет по виду события — глаз находит выдачи, отказы и правки
+   доступа, не читая подписи. */
+const JOURNAL_KINDS = {
+    requested: { icon: 'request', tone: 'blue' },
+    approved: { icon: 'approve', tone: 'green' },
+    code_sent: { icon: 'code', tone: 'green' },
+    code_resent: { icon: 'code', tone: 'green' },
+    rejected: { icon: 'reject', tone: 'slate' },
+    expired: { icon: 'clock', tone: 'slate' },
+    cancelled: { icon: 'reject', tone: 'slate' },
+    code_failed: { icon: 'alert', tone: 'red' },
+    account_added: { icon: 'account', tone: 'blue' },
+    account_renamed: { icon: 'edit', tone: 'slate' },
+    account_removed: { icon: 'remove', tone: 'red' },
+    account_moved: { icon: 'folder', tone: 'slate' },
+    access_granted: { icon: 'access', tone: 'blue' },
+    access_revoked: { icon: 'access', tone: 'slate' },
+    group_created: { icon: 'folder', tone: 'blue' },
+    group_renamed: { icon: 'edit', tone: 'slate' },
+    group_deleted: { icon: 'remove', tone: 'red' },
+    groups_introduced: { icon: 'folder', tone: 'slate' },
+};
+
+export const journalKind = (kind) => JOURNAL_KINDS[kind] || { icon: 'dot', tone: 'slate' };
+
 /* Порядок проверки формы добавления: первое, чего не хватает, — туда и прокрутка. */
 export const manualErrors = ({ title, secret }) => {
     const errors = {};
