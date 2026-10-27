@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
@@ -33,6 +33,8 @@ import {
  */
 
 const SOURCE_META = {
+    // «Коды 2FA» (#373): запрос кода ждёт главу маркетинга и сгорает через 10 минут.
+    twofa: { label: 'Коды 2FA', icon: KeyRound, tint: 'text-indigo-600 bg-indigo-50' },
     wiki_ack: { label: 'Ознакомление', icon: BookLock, tint: 'text-amber-600 bg-amber-50' },
     tasks: { label: 'Задачи', icon: ListChecks, tint: 'text-blue-600 bg-blue-50' },
     payments: { label: 'Оплата счетов', icon: Receipt, tint: 'text-emerald-700 bg-emerald-50' },

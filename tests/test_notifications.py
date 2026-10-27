@@ -1044,7 +1044,10 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'payment_notifications',
                            # «Дисциплина» (#254): нарушения, объяснительные, акты
                            # и особый контроль — адресно, как у «Оплаты счетов».
-                           'discipline_notifications')
+                           'discipline_notifications',
+                           # «Коды 2FA» (#373): ждущий запрос и есть уведомление
+                           # главе маркетинга; решение и сгорание его гасят.
+                           'twofa_requests')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

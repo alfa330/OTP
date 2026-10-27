@@ -1,0 +1,349 @@
+# -*- coding: utf-8 -*-
+"""Раздел «Коды 2FA» (#373): код, разбор QR, шифрование, права, тексты и проводка.
+
+Что сторожится:
+  * код считается ровно как в Google Authenticator — контрольные значения RFC 6238;
+  * правило ТЗ п. 5: меньше 10 секунд до смены — выдаётся следующий код;
+  * экспорт Google Authenticator разбирается (несколько аккаунтов, части экспорта, '+' без
+    %2B), а то, что бот посчитал бы неверно (HOTP, 8 цифр, SHA256), — отсекается с причиной;
+  * ключи шифруются AES-256-GCM ключом из окружения; подмену шифротекста видно;
+  * права: подтверждает только глава маркетинга, супер-админ ведёт, но не подтверждает,
+    уволенный не получает ничего, без ключа шифрования раздел виден только супер-админу;
+  * раздел подключён: схема до триггеров колокола, Blueprint, кнопки бота ПЕРВЫМИ среди
+    callback-хендлеров, флаг профиля, пункт меню, гарды и источник колокола.
+
+Процесс на настоящей базе — tests/test_twofa_postgres.py.
+"""
+
+import base64
+import os
+import re
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+from urllib.parse import quote
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from twofa import access, crypto, otpauth, rules, totp  # noqa: E402
+
+APP_JSX = ROOT / 'src' / 'App.jsx'
+BOT_PY = ROOT / 'bot_schedule2.py'
+DATABASE_PY = ROOT / 'database.py'
+SOURCES_PY = ROOT / 'notifications' / 'sources.py'
+FA_ICON = ROOT / 'src' / 'components' / 'common' / 'FaIcon.jsx'
+VIEW_JSX = ROOT / 'src' / 'components' / 'twofa' / 'TwofaView.jsx'
+
+RFC_SECRET = b'12345678901234567890'
+
+
+def _read(path):
+    return path.read_text(encoding='utf-8-sig')
+
+
+def _varint(n):
+    out = b''
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        if n:
+            out += bytes([byte | 0x80])
+        else:
+            return out + bytes([byte])
+
+
+def _field(number, wire, value):
+    key = _varint((number << 3) | wire)
+    return key + (_varint(len(value)) + value if wire == 2 else _varint(value))
+
+
+def _otp(secret, name, issuer, algorithm=1, digits=1, kind=2):
+    return (_field(1, 2, secret) + _field(2, 2, name.encode()) + _field(3, 2, issuer.encode())
+            + _field(4, 0, algorithm) + _field(5, 0, digits) + _field(6, 0, kind))
+
+
+def migration_uri(*params, size=1, index=0, encode=True):
+    payload = b''.join(_field(1, 2, p) for p in params) + _field(2, 0, 1) + _field(3, 0, size) + _field(4, 0, index)
+    data = base64.b64encode(payload).decode()
+    return 'otpauth-migration://offline?data=' + (quote(data, safe='') if encode else data)
+
+
+class TotpTest(unittest.TestCase):
+    def test_rfc6238_reference_values(self):
+        """RFC 6238, приложение B (SHA1): 8-значные значения; 6 цифр — их хвост."""
+        for unix_time, code8 in ((59, '94287082'), (1111111109, '07081804'), (1111111111, '14050471'),
+                                 (1234567890, '89005924'), (2000000000, '69279037'), (20000000000, '65353130')):
+            self.assertEqual(totp.hotp(RFC_SECRET, unix_time // 30, digits=8), code8)
+            self.assertEqual(totp.code_at(RFC_SECRET, unix_time), code8[-6:])
+
+    def test_ten_seconds_or_more_left_gives_the_current_code(self):
+        issued = totp.issue(RFC_SECRET, 600 + 20)  # до смены ровно 10 с
+        self.assertFalse(issued['is_next'])
+        self.assertEqual((issued['valid_from'], issued['valid_until']), (600, 630))
+        self.assertEqual(issued['code'], totp.code_at(RFC_SECRET, 620))
+
+    def test_less_than_ten_seconds_left_gives_the_next_code(self):
+        issued = totp.issue(RFC_SECRET, 600 + 20.5)
+        self.assertTrue(issued['is_next'])
+        self.assertEqual((issued['valid_from'], issued['valid_until']), (630, 660))
+        self.assertEqual(issued['code'], totp.code_at(RFC_SECRET, 630))
+
+    def test_secret_is_read_the_way_services_show_it(self):
+        b32 = base64.b32encode(RFC_SECRET).decode()
+        grouped = ' '.join(b32[i:i + 4].lower() for i in range(0, len(b32), 4))
+        self.assertEqual(totp.normalize_secret(grouped), RFC_SECRET)
+        self.assertEqual(totp.normalize_secret(b32.rstrip('=')), RFC_SECRET)
+
+    def test_not_a_key_is_refused(self):
+        for text in ('', '   ', 'ключ', 'AB1!', 'AAAA', 'A' * 200):
+            with self.assertRaises(ValueError, msg=text):
+                totp.normalize_secret(text)
+
+    def test_group(self):
+        self.assertEqual(totp.group('123456'), '123 456')
+
+
+class OtpauthTest(unittest.TestCase):
+    b32 = base64.b32encode(RFC_SECRET).decode().rstrip('=')
+
+    def test_service_qr_with_issuer_in_label(self):
+        parsed = otpauth.parse('otpauth://totp/Google%3Aads%40company.kz?secret=' + self.b32)
+        [entry] = parsed['entries']
+        self.assertEqual((parsed['kind'], entry['issuer'], entry['name']), ('single', 'Google', 'ads@company.kz'))
+        self.assertTrue(entry['supported'])
+        self.assertEqual(entry['secret'], RFC_SECRET)
+
+    def test_what_the_bot_would_count_wrong_is_marked_unsupported(self):
+        for query, word in (('&digits=8', 'цифр'), ('&algorithm=SHA256', 'SHA256'), ('&period=60', '60')):
+            [entry] = otpauth.parse('otpauth://totp/X?secret=' + self.b32 + query)['entries']
+            self.assertFalse(entry['supported'])
+            self.assertIn(word, entry['reason'])
+        [entry] = otpauth.parse('otpauth://hotp/X?secret=' + self.b32 + '&counter=3')['entries']
+        self.assertIn('HOTP', entry['reason'])
+
+    def test_google_authenticator_export_with_several_accounts(self):
+        uri = migration_uri(_otp(RFC_SECRET, 'ads@company.kz', 'Google'),
+                            _otp(b'abcdefghij0123456789', 'shop', 'Meta', kind=1),
+                            _otp(b'0123456789abcdefghij', 'tt', 'TikTok', digits=2), size=3, index=1)
+        parsed = otpauth.parse(uri)
+        self.assertEqual(parsed['kind'], 'migration')
+        self.assertEqual(parsed['batch'], {'size': 3, 'index': 1})
+        self.assertEqual([e['supported'] for e in parsed['entries']], [True, False, False])
+        self.assertEqual(parsed['entries'][0]['secret'], RFC_SECRET)
+
+    def test_plus_in_export_data_survives_without_percent_encoding(self):
+        # Ключ подбирается так, чтобы в base64 экспорта оказался '+': часть сканеров отдаёт
+        # его как есть, без %2B, а parse_qs превратил бы его в пробел.
+        secret = next(bytes([b]) * 20 for b in range(256)
+                      if '+' in migration_uri(_otp(bytes([b]) * 20, 'plus', 'P'), encode=False))
+        uri = migration_uri(_otp(secret, 'plus', 'P'), encode=False)
+        self.assertIn('+', uri)
+        self.assertEqual(otpauth.parse(uri)['entries'][0]['secret'], secret)
+
+    def test_unknown_fields_of_newer_app_versions_are_skipped(self):
+        params = _otp(RFC_SECRET, 'n', 'I') + _field(8, 2, b'unique-id') + _field(9, 0, 5)
+        self.assertTrue(otpauth.parse(migration_uri(params))['entries'][0]['supported'])
+
+    def test_raw_key(self):
+        parsed = otpauth.parse('jbsw y3dp ehpk 3pxp')
+        self.assertEqual(parsed['kind'], 'single')
+        self.assertEqual(parsed['entries'][0]['secret'], base64.b32decode('JBSWY3DPEHPK3PXP'))
+
+    def test_refusals(self):
+        for text in ('', 'https://example.com/login', 'otpauth-migration://offline?data=',
+                     'otpauth-migration://offline?data=' + quote(base64.b64encode(b'\x0a\x7f').decode(), safe=''),
+                     'otpauth://totp/X?issuer=Y', 'x' * 9000):
+            with self.assertRaises(otpauth.ParseError, msg=text[:40]):
+                otpauth.parse(text)
+
+    def test_public_entry_has_no_key(self):
+        [entry] = otpauth.parse('otpauth://totp/X?secret=' + self.b32)['entries']
+        self.assertNotIn('secret', otpauth.public(entry))
+
+
+class CryptoTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'z' * 32).decode()})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_roundtrip_and_fresh_nonce(self):
+        first, second = crypto.encrypt(RFC_SECRET), crypto.encrypt(RFC_SECRET)
+        self.assertNotEqual(first, second)
+        self.assertEqual(crypto.decrypt(first), RFC_SECRET)
+        self.assertNotIn(base64.b32encode(RFC_SECRET).decode()[:8], first)
+
+    def test_tampering_and_another_key_are_detected(self):
+        token = crypto.encrypt(RFC_SECRET)
+        blob = bytearray(base64.b64decode(token[3:]))
+        blob[-1] ^= 1
+        with self.assertRaises(ValueError):
+            crypto.decrypt('v1:' + base64.b64encode(bytes(blob)).decode())
+        with mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'y' * 32).decode()}):
+            with self.assertRaises(ValueError):
+                crypto.decrypt(token)
+
+    def test_key_status(self):
+        self.assertEqual(crypto.key_status(), 'ok')
+        with mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'short').decode()}):
+            self.assertEqual(crypto.key_status(), 'invalid')
+            with self.assertRaises(crypto.KeyMissing):
+                crypto.encrypt(RFC_SECRET)
+        with mock.patch.dict(os.environ, {crypto.ENV_KEY: ''}):
+            self.assertEqual(crypto.key_status(), 'missing')
+
+    def test_aes_256_not_portal_fernet(self):
+        source = (ROOT / 'twofa' / 'crypto.py').read_text(encoding='utf-8')
+        self.assertIn('AESGCM', source)
+        self.assertNotIn('import Fernet', source)
+
+
+def ctx(user_id, role='marketing_manager', status='working', approver=10, granted=(), key='ok'):
+    return {'user_id': user_id, 'name': 'X', 'role': role, 'status': status, 'telegram_id': 1,
+            'approver_id': approver, 'granted_account_ids': list(granted), 'key_status': key}
+
+
+class AccessTest(unittest.TestCase):
+    def test_head_of_marketing_approves_and_manages(self):
+        head = ctx(10, role='admin')
+        self.assertTrue(access.can_approve(head) and access.can_manage(head) and access.can_open_section(head))
+        self.assertFalse(access.can_request(head))
+
+    def test_super_admin_manages_but_never_approves(self):
+        sup = ctx(1, role='super_admin')
+        self.assertTrue(access.can_manage(sup))
+        self.assertFalse(access.can_approve(sup))
+        self.assertTrue(access.can_open_section(ctx(1, role='super_admin', key='missing')))
+
+    def test_employee_requests_only_granted_accounts(self):
+        anna = ctx(20, granted=[5])
+        self.assertTrue(access.can_request(anna, 5))
+        self.assertFalse(access.can_request(anna, 6))
+        self.assertFalse(access.can_manage(anna) or access.can_approve(anna))
+        self.assertFalse(access.can_open_section(ctx(21)))
+
+    def test_fired_gets_nothing(self):
+        for status in ('fired', 'dismissal'):
+            self.assertFalse(access.can_open_section(ctx(20, status=status, granted=[5])))
+            self.assertFalse(access.can_open_section(ctx(10, role='admin', status=status)))
+
+    def test_without_the_key_only_super_admin_sees_the_section(self):
+        self.assertFalse(access.can_open_section(ctx(10, role='admin', key='missing')))
+        self.assertFalse(access.can_open_section(ctx(20, granted=[5], key='invalid')))
+
+    def test_capabilities_promise_nothing_to_the_closed(self):
+        self.assertEqual(access.capabilities(ctx(21)),
+                         {'can_open': False, 'can_manage': False, 'can_approve': False, 'can_request': False})
+
+
+class RulesTest(unittest.TestCase):
+    def test_terms_from_the_tz(self):
+        self.assertEqual((rules.REQUEST_TTL_SECONDS, rules.RESEND_WINDOW_SECONDS, rules.CODE_VISIBLE_SECONDS),
+                         (600, 180, 60))
+        self.assertEqual(totp.NEXT_CODE_THRESHOLD_SECONDS, 10)
+
+    def test_almaty_clock(self):
+        self.assertEqual(rules.clock(1761553800), '13:30:00')
+        self.assertAlmostEqual(rules.epoch(rules.almaty(1761553800.25)), 1761553800.25, places=5)
+        self.assertEqual(rules.iso(rules.almaty(1761553800)), '2025-10-27T13:30:00+05:00')
+
+    def test_names_are_escaped_in_telegram_html(self):
+        text = rules.approval_text(requester_name='<b>Анна</b>', account_title='A&B', service='<i>',
+                                   created_at=0, expires_at=600)
+        self.assertNotIn('<b>Анна</b>', text)
+        self.assertIn('&lt;b&gt;Анна&lt;/b&gt;', text)
+        self.assertIn('A&amp;B', text)
+
+    def test_code_message_says_until_when(self):
+        issued = totp.issue(RFC_SECRET, 1761553805)
+        text = rules.code_text(account_title='Google Ads', issued=issued, now=1761553805)
+        self.assertIn('<code>%s</code>' % totp.group(issued['code']), text)
+        self.assertIn('Действует до <b>13:30:30</b>', text)
+        self.assertNotIn('Начнёт', text)
+
+    def test_every_status_has_a_label_and_a_closed_mark(self):
+        for status in ('pending', 'approved', 'rejected', 'expired', 'cancelled'):
+            self.assertIn(status, rules.STATUS_LABELS)
+        for status in ('approved', 'rejected', 'expired', 'cancelled'):
+            text = rules.approval_closed_text(requester_name='A', account_title='B', status=status, decided_at=0)
+            self.assertNotIn(status, text)
+
+    def test_buttons_fit_telegram_callback_limit(self):
+        markup = rules.approval_markup(2 ** 31 - 1)
+        for button in markup['inline_keyboard'][0] + rules.resend_markup(2 ** 31 - 1)['inline_keyboard'][0]:
+            self.assertLessEqual(len(button['callback_data'].encode()), 64)
+
+    def test_titles(self):
+        self.assertEqual(rules.clean_title('  Google   Ads '), 'Google Ads')
+        with self.assertRaises(ValueError):
+            rules.clean_title('  ')
+        with self.assertRaises(ValueError):
+            rules.clean_title('x' * 121)
+        self.assertIsNone(rules.clean_service(' '))
+        self.assertEqual(rules.suggested_title({'issuer': 'Google', 'name': 'ads@c.kz'}), 'Google · ads@c.kz')
+        self.assertEqual(rules.suggested_title({'issuer': 'Meta', 'name': 'Meta'}), 'Meta')
+
+
+class WiringTest(unittest.TestCase):
+    """Раздел подключён — сверка текстом, как у соседних разделов."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = _read(APP_JSX)
+        cls.bot = _read(BOT_PY)
+        cls.database = _read(DATABASE_PY)
+
+    def test_schema_goes_before_the_bell_triggers(self):
+        init = self.database.index('self._init_twofa_schema_tx(cursor)')
+        bell = self.database.index('self._init_bell_notify_schema_tx(cursor)')
+        self.assertLess(init, bell)
+        self.assertIn("ELSIF TG_TABLE_NAME = 'twofa_requests' THEN", self.database)
+        self.assertIn("('trg_bell_twofa_requests_insert', 'twofa_requests', 'AFTER INSERT', '')", self.database)
+
+    def test_bot_wiring(self):
+        self.assertIn('app.register_blueprint(build_twofa_blueprint(', self.bot)
+        self.assertIn('"twofa_access": twofa_access,', self.bot)
+        handler = self.bot.index("c.data.startswith('twofa:'), state='*')")
+        first_state_handler = self.bot.index('@dp.callback_query_handler(state=')
+        self.assertLess(handler, first_state_handler, 'кнопки 2FA должны стоять раньше хендлеров со state=')
+        first_callback = self.bot.index('@dp.callback_query_handler(')
+        self.assertLess(handler - first_callback, 200)
+        # Будильник — только в __main__: импорт монолита в тестах не поднимает нить.
+        main = self.bot.index("if __name__ == '__main__':")
+        self.assertGreater(self.bot.index('    _twofa_start_alarm()'), main)
+        self.assertNotIn('.start()', self.bot[self.bot.index("_TWOFA = {'service': None"):
+                                              self.bot.index('def _twofa_section_open_for')])
+
+    def test_menu_and_guards(self):
+        self.assertIn('const canAccessTwofaSectionForUser = (userLike) => userLike?.twofa_access === true;', self.app)
+        self.assertEqual(self.app.count("{canAccessTwofaSection && ("), 1)
+        self.assertEqual(self.app.count('<span className="sidebar-text">Коды 2FA</span>'), 1)
+        self.assertIn("(requestedViewFromUrl !== 'twofa' || canAccessTwofaSection) &&", self.app)
+        self.assertIn("if (view === 'twofa' && canAccessTwofaSection) return;", self.app)
+        self.assertIn("if (view === 'twofa' && !canAccessTwofaSection) {", self.app)
+        self.assertIn("{view === 'twofa' && canAccessTwofaSection && (", self.app)
+        self.assertIn('|| canAccessTwofaSection\n', self.app)
+        self.assertIn("'fa-shield-halved': 'ShieldCheck'", _read(FA_ICON))
+
+    def test_bell_source(self):
+        from notifications import sources
+
+        self.assertIn('twofa', sources.SOURCES)
+        self.assertEqual(sources.SOURCE_VIEWS['twofa'], ('twofa',))
+        self.assertIn('twofa', sources.OWN_CIRCLE_VIEWS)
+        self.assertIn("'source': 'twofa'", _read(SOURCES_PY))
+
+    def test_screen_never_shows_the_code(self):
+        """Выбор владельца: код — только в Telegram. На экране нет ни поля с кодом, ни ручки,
+        которая бы его отдавала."""
+        view = _read(VIEW_JSX)
+        self.assertNotIn('.code}', view)
+        routes = (ROOT / 'twofa' / 'routes.py').read_text(encoding='utf-8')
+        self.assertNotIn("'code':", routes)
+        self.assertNotIn('secret_enc', routes)
+
+
+if __name__ == '__main__':
+    unittest.main()

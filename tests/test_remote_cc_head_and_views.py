@@ -957,6 +957,8 @@ class ProfileCarriesHeadedDepartmentsTests(unittest.TestCase):
             '_baiga_section_open_for': lambda _user_id, _profile=None: False,
             # Флаг раздела «Продакшн» (задача #316) — тоже часть профиля.
             '_production_section_open_for': lambda _user_id, _role=None, **_known: False,
+            # Флаг раздела «Коды 2FA» (#373) — тоже часть профиля.
+            '_twofa_section_open_for': lambda _user_id: False,
             # Флаг окна «Чатов ОП» в CRM читает сессию запроса из flask.g; вне окна он пуст.
             'g': SimpleNamespace(),
         }

@@ -1362,6 +1362,11 @@ def _get_user_payload(user):
     production_access = _production_section_open_for(
         user_id, role, department_code=department_code, headed_codes=headed_department_codes)
 
+    # Открыт ли раздел «Коды 2FA» (#373): глава маркетинга, супер-админ и те, кому глава
+    # выдал аккаунты в самом разделе. Пункт меню экран рисует по флагу
+    # (canAccessTwofaSectionForUser), границу держат роуты раздела.
+    twofa_access = _twofa_section_open_for(user_id) if user_id is not None else False
+
     return {
         "role": role,
         "id": user_id,
@@ -1374,6 +1379,7 @@ def _get_user_payload(user):
         "dial_list_line_member": dial_list_line_member,
         "baiga_access": baiga_access,
         "production_access": production_access,
+        "twofa_access": twofa_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -57687,6 +57693,27 @@ def get_operator_keyboard():
     kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
+# «Коды 2FA» (#373): «Подтвердить / Отклонить» у главы маркетинга и «Код не подошёл» у
+# сотрудника. Объявлен ПЕРВЫМ из callback-хендлеров и со state='*': хендлеры со state=…
+# ниже ловят любые нажатия человека, застрявшего в диалоге бота, — глава посреди чужого
+# диалога иначе нажимал бы «Подтвердить» впустую. Сервис синхронный (база + Bot API с
+# коротким таймаутом, twofa/telegram.py), поэтому — в общий пул.
+@dp.callback_query_handler(lambda c: bool(c.data) and c.data.startswith('twofa:'), state='*')
+async def handle_twofa_callback(callback_query: types.CallbackQuery):
+    service = _TWOFA.get('service')
+    if service is None:
+        await callback_query.answer('Раздел «Коды 2FA» не подключён', show_alert=True)
+        return
+    loop = asyncio.get_event_loop()
+    try:
+        text, alert = await loop.run_in_executor(
+            executor_pool, service.handle_callback, callback_query.from_user.id, callback_query.data)
+    except Exception:
+        logging.exception('twofa: нажатие кнопки не обработано')
+        text, alert = 'Не получилось — попробуйте ещё раз', True
+    await callback_query.answer(text, show_alert=alert)
+
+
 @dp.message_handler(regexp='Отмена ❌', state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
     logging.info(f"User {message.from_user.id} canceled the operation.")
@@ -67636,6 +67663,67 @@ except Exception:
     logging.exception("Раздел «Термокороба»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Коды 2FA» (коды Google Authenticator маркетингу, #373) ──────────────
+# Сотрудник запрашивает код в разделе, глава маркетинга подтверждает кнопкой в Telegram
+# или в разделе, код уходит сотруднику в Telegram и стирается через минуту (twofa/).
+# Сроки ведёт будильник twofa/timer.py; стартует он в __main__ вместе с планировщиком, а
+# не при импорте: тесты, импортирующие монолит, не должны поднимать нить.
+_TWOFA = {'service': None, 'alarm': None}
+try:
+    from twofa.routes import build_twofa_blueprint  # noqa: E402
+    from twofa.service import Twofa as _TwofaService  # noqa: E402
+    from twofa.telegram import BotApi as _TwofaBotApi  # noqa: E402
+    from twofa.timer import Alarm as _TwofaAlarm  # noqa: E402
+
+    _TWOFA['service'] = _TwofaService(
+        cursor_factory=db._get_cursor,
+        tg=_TwofaBotApi(API_TOKEN),
+        wake=lambda: _TWOFA['alarm'].wake() if _TWOFA['alarm'] else None,
+    )
+    _TWOFA['alarm'] = _TwofaAlarm(_TWOFA['service'].run_due)
+    app.register_blueprint(build_twofa_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        service=_TWOFA['service'],
+    ))
+    logging.info("Раздел «Коды 2FA»: Blueprint подключён на /api/twofa")
+except Exception:
+    logging.exception("Раздел «Коды 2FA»: Blueprint НЕ подключён")
+
+
+def _twofa_section_open_for(user_id):
+    """Открыт ли раздел «Коды 2FA» — то же правило, что у его ручек (twofa/access.py).
+
+    Глава маркетинга, супер-админ и те, кому глава выдал аккаунты. Выдачи правят в самом
+    разделе, поэтому пункт меню экран рисует только по этому флагу. Отказ базы вход не
+    роняет: без флага пункта просто не будет, а границу держит каждый роут.
+    """
+    if user_id is None:
+        return False
+    try:
+        from twofa import access as twofa_access
+        from twofa import crypto as twofa_crypto
+        from twofa import queries as twofa_queries
+
+        with db._get_cursor() as cursor:
+            ctx = twofa_queries.load_access_context(cursor, user_id, twofa_crypto.key_status())
+        return bool(ctx and twofa_access.can_open_section(ctx))
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Кодам 2FA» пользователя %s", user_id)
+        return False
+
+
+def _twofa_start_alarm():
+    alarm = _TWOFA.get('alarm')
+    if alarm is None:
+        logging.warning("Коды 2FA: будильник не запущен — раздел не подключён")
+        return
+    alarm.start()
+    logging.info("⏰ Коды 2FA: будильник сроков запущен")
+
+
 # ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
 # Номера, с которых сотрудники проверяют линии и чаты; их звонки и чаты не входят
 # ни в один расчёт (test_numbers/keys.py). Реестр ведут админы и главы отделов.
@@ -73048,6 +73136,10 @@ if __name__ == '__main__':
                                                args=(lambda: psycopg2.connect(**_build_postgres_connection_params()),))
     _chat_search_index_timer.daemon = True
     _chat_search_index_timer.start()
+
+    # «Коды 2FA»: будильник сроков (сгорание запросов, стирание кодов). Фонового опроса нет —
+    # спит до ближайшего срока; при старте сразу доделывает просроченное за время выкладки.
+    _twofa_start_alarm()
 
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")

@@ -36,7 +36,9 @@ from datetime import datetime, time as day_time, timedelta
 #
 # «Оплата счетов» — сразу за задачами: это те же «сделайте к сроку» (согласовать,
 # оплатить, приложить чек), только из процесса закупа.
-SOURCES = ('wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'shift_requests',
+#
+# «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
+SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'shift_requests',
            'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events', 'four_you',
            'birthdays')
 
@@ -48,6 +50,7 @@ SOURCES = ('wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'sh
 # человека, которому портал показывает один раздел, колокол не должен звать в
 # остальные. Тест сверяет карту с тем, что источники пишут в 'view' на деле.
 SOURCE_VIEWS = {
+    'twofa': ('twofa',),
     'wiki_ack': ('wiki',),
     'tasks': ('tasks',),
     'payments': ('payments',),
@@ -70,7 +73,7 @@ SOURCE_VIEWS = {
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
 # «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
 # набор, а _notifications_viewer_context: тому, кто в раздел не входит.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline'})
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa'})
 
 
 def sources_outside_views(allowed_views):
@@ -665,6 +668,29 @@ def payments(cursor, viewer, limit):
     } for row in rows]
 
 
+def twofa(cursor, viewer, limit):
+    """«Коды 2FA» (#373): запросы кода, которые ждут главу маркетинга.
+
+    Строк своих у источника нет: ждущий запрос и есть уведомление. Виден только главе —
+    подтверждает он один; гаснет, когда он решил (в Telegram или в разделе) или запрос
+    сгорел через 10 минут (его закрывает будильник раздела, и триггер будит колокол).
+    """
+    from twofa import queries as twofa_queries
+
+    total, rows = twofa_queries.bell(cursor, viewer['user_id'], _almaty_now(), limit)
+    return total, [{
+        'source': 'twofa',
+        'id': row['id'],
+        'title': 'Запрос кода · %s' % row['account_title'],
+        'body': '%s · сгорит в %s' % (row['requester_name'] or 'Сотрудник',
+                                     row['expires_at'].strftime('%H:%M')),
+        'at': _iso(row['created_at']),
+        'view': 'twofa',
+        'target': row['id'],
+        'tone': 'warning',
+    } for row in rows]
+
+
 def discipline(cursor, viewer, limit):
     """«Дисциплина» (#254): нарушения, объяснительные, акты, особый контроль.
 
@@ -1097,6 +1123,7 @@ def wiki_questions(cursor, viewer, limit):
 
 
 _HANDLERS = {
+    'twofa': twofa,
     'wiki_ack': wiki_ack,
     'tasks': tasks,
     'payments': payments,

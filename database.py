@@ -7199,6 +7199,7 @@ class Database:
             self._init_thermoboxes_schema_tx(cursor)
             self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
+            self._init_twofa_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -7536,6 +7537,14 @@ class Database:
                     -- «Дисциплина» (#254): так же адресно — строку пишет сам
                     -- процесс одному человеку, будим только его.
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'twofa_requests' THEN
+                    -- «Коды 2FA» (#373): запрос ждёт главу маркетинга, решение и
+                    -- сгорание гасят строку у него. Сотрудника будим тоже: открытый у
+                    -- него раздел перечитает статус своего запроса.
+                    targets := ARRAY[NEW.requester_id] || ARRAY(
+                        SELECT d.head_user_id FROM departments d
+                         WHERE lower(d.code) = 'marketing' AND d.is_active
+                           AND d.head_user_id IS NOT NULL);
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -7668,6 +7677,15 @@ class Database:
                 'discipline_notifications',
                 'AFTER UPDATE OF read_at',
                 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
+            ),
+            # «Коды 2FA» (#373): новый запрос и смена его статуса (решение, сгорание,
+            # отмена). Остальные UPDATE (отметка доставки кода) сводку не меняют.
+            ('trg_bell_twofa_requests_insert', 'twofa_requests', 'AFTER INSERT', ''),
+            (
+                'trg_bell_twofa_requests',
+                'twofa_requests',
+                'AFTER UPDATE OF status',
+                'WHEN (OLD.status IS DISTINCT FROM NEW.status)',
             ),
             # Смена состава исполнителей саму задачу не трогает (UPDATE tasks не
             # происходит), поэтому trg_bell_tasks об этом не узнает — нужен свой
@@ -65404,6 +65422,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT thermoboxes_schema")
+
+    def _init_twofa_schema_tx(self, cursor):
+        """Схема раздела «Коды 2FA» (#373) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете twofa/schema.py, как у «Термокоробов»; импорт локальный, иначе
+        цикл. Стоит ДО триггеров колокола: trg_bell_twofa_requests вешается на
+        twofa_requests. Не развернулась — раздел недоступен, остальное работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT twofa_schema")
+        try:
+            from twofa.schema import init_twofa_schema
+            init_twofa_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT twofa_schema")
+            logging.exception(
+                "Схема раздела «Коды 2FA» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT twofa_schema")
 
     def update_cdr_call_end_parties(self):
         """Кто положил трубку — звонкам отдела продаж (FreePBX) в пуле и в оценках.
