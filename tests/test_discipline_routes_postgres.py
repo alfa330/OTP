@@ -847,3 +847,35 @@ def test_audit_pages_by_the_requested_size(client, db):
     import openpyxl
     sheet = openpyxl.load_workbook(io.BytesIO(xlsx.data))['Журнал действий']
     assert sum(1 for row in sheet.iter_rows(min_row=2, values_only=True) if any(row)) == 23
+
+
+def test_request_body_cap_on_the_real_routes(client):
+    """Потолок тела запроса (разбор 23.10.2026: файл оператора читался в память
+    целиком и лишь потом получал «больше 10 МБ»). Объяснительная ровно на 10 МБ
+    проходит; тело больше потолка — 413, в хранилище ничего; «доказательства» от
+    оператора упираются в потолок JSON. Что тело при этом не читается —
+    tests/test_discipline_request_size.py."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    record_id = _create(client, SV_A, OP_A, now - timedelta(hours=1)).get_json()['id']
+    limit = catalog.FILE_KINDS['explanation']['max_bytes']
+    exact = b'%PDF-1.4\n' + b'0' * (limit - 9)
+
+    def explanation(data):
+        return client.post('/api/discipline/records/%d/explanation' % record_id, headers=h(OP_A),
+                           data={'file': (io.BytesIO(data), 'объяснительная.pdf')}, content_type='multipart/form-data')
+
+    response = explanation(exact)
+    assert response.status_code == 200, response.get_json()
+    assert [len(blob) for blob in client.store.values()] == [limit]
+    over = explanation(exact + b'0' * catalog.REQUEST_RESERVE_BYTES)
+    assert (over.status_code, over.get_json()['code']) == (413, 'DISCIPLINE_REQUEST_TOO_LARGE')
+    pushed = client.post('/api/discipline/records/%d/evidence' % record_id, headers=h(OP_A),
+                         data={'files': (io.BytesIO(PDF + b'0' * (2 * catalog.MB)), 'док.pdf')},
+                         content_type='multipart/form-data')
+    assert (pushed.status_code, pushed.get_json()['error']) == (413, 'Запрос слишком большой')
+    # СВ тот же файл прикладывает — его потолок «доказательств».
+    added = client.post('/api/discipline/records/%d/evidence' % record_id, headers=h(SV_A),
+                        data={'files': (io.BytesIO(PDF + b'0' * (2 * catalog.MB)), 'док.pdf')},
+                        content_type='multipart/form-data')
+    assert added.status_code == 200, added.get_json()
+    assert len(client.store) == 2

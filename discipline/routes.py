@@ -30,7 +30,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                send_telegram=None, web_app_base_url=None, gcs=None, avatar_url=None):
     bp = Blueprint('discipline', __name__, url_prefix='/api/discipline')
 
-    def route(rule, methods=('GET',), manager=False):
+    def route(rule, methods=('GET',), manager=False, upload=None):
+        """upload — вид вложений роута (catalog.FILE_KINDS): по нему потолок тела."""
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -61,6 +62,12 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                     if manager and not access.is_manager(ctx):
                         return jsonify({"error": "Это доступно руководителю отдела",
                                         "code": "DISCIPLINE_FORBIDDEN"}), 403
+                    # До первого обращения к форме или JSON: тело больше честного
+                    # не читается вовсе. `or 0` — запрос без тела заголовка не шлёт.
+                    kind = upload if upload and access.can_send_files(ctx, upload) else None
+                    if (request.content_length or 0) > catalog.request_max_bytes(kind):
+                        return jsonify({"error": catalog.request_too_large_text(kind),
+                                        "code": "DISCIPLINE_REQUEST_TOO_LARGE"}), 413
                     response = handler(*args, ctx=ctx, today=today, outbox=outbox, uploaded=uploaded, **kwargs)
                     _flush(outbox)
                     return response
@@ -110,7 +117,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             raise files.FileError('Не больше %d файлов за раз' % spec['max_files'])
         prepared = []
         for item in items:
-            data = item.read()
+            # Байт сверх границы вида хватает, чтобы files.check сказал «больше N МБ».
+            data = item.read(catalog.file_max_bytes(kind) + 1)
             name, _ext, content_type = files.check(kind, filename=item.filename, data=data)
             prepared.append((name, content_type, data))
         result = []
@@ -447,7 +455,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             payload['measures'] = [_measure_payload(m) for m in queries.list_measures(cursor, [department_id])]
         return jsonify(payload)
 
-    @route('/records', methods=('POST',))
+    @route('/records', methods=('POST',), upload='evidence')
     def discipline_create(ctx, today, outbox, uploaded, **_kw):
         now = service.now_almaty()
         payload = _payload()
@@ -496,7 +504,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             service.set_comment(cursor, ctx, record, _payload().get('comment'))
         return jsonify({'ok': True})
 
-    @route('/records/<int:record_id>/explanation', methods=('POST',))
+    @route('/records/<int:record_id>/explanation', methods=('POST',), upload='explanation')
     def discipline_explanation(ctx, today, record_id, uploaded, **_kw):
         now = service.now_almaty()
         upload = _take_files('explanation', field='file', required=True, uploaded=uploaded)[0]
@@ -505,7 +513,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             file_id = service.add_explanation(cursor, ctx, record, upload, now=now)
         return jsonify({'ok': True, 'file_id': file_id})
 
-    @route('/records/<int:record_id>/refusal', methods=('POST',))
+    @route('/records/<int:record_id>/refusal', methods=('POST',), upload='refusal_act')
     def discipline_refusal(ctx, today, record_id, outbox, uploaded, **_kw):
         now = service.now_almaty()
         payload = _payload()
@@ -519,7 +527,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                    outbox=outbox)
         return jsonify({'ok': True})
 
-    @route('/records/<int:record_id>/evidence', methods=('POST',))
+    @route('/records/<int:record_id>/evidence', methods=('POST',), upload='evidence')
     def discipline_evidence(ctx, today, record_id, uploaded, **_kw):
         now = service.now_almaty()
         uploads = _take_files('evidence', required=True, uploaded=uploaded)
@@ -640,7 +648,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             service.update_act(cursor, ctx, act, record, _payload(), now=now)
         return jsonify({'ok': True})
 
-    @route('/acts/<int:act_id>/file', methods=('POST',))
+    @route('/acts/<int:act_id>/file', methods=('POST',), upload='act')
     def discipline_act_file(ctx, today, act_id, uploaded, **_kw):
         now = service.now_almaty()
         upload = _take_files('act', field='file', required=True, uploaded=uploaded)[0]
@@ -963,7 +971,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                    if (before or {}).get(key) != value})
         return jsonify({'ok': True, 'id': saved})
 
-    @route('/settings/template', methods=('POST',), manager=True)
+    @route('/settings/template', methods=('POST',), manager=True, upload='act_template')
     def discipline_template_upload(ctx, today, uploaded, **_kw):
         now = service.now_almaty()
         department_id = _settings_department(ctx, request.form.get('department_id'))

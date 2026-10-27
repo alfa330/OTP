@@ -223,6 +223,40 @@ FILE_KINDS = {
                     'max_files': 1},
     'act_template': {'label': 'Шаблон акта', 'ext': ('docx',), 'max_bytes': 5 * MB, 'max_files': 1},
 }
+
+# Потолок тела запроса: каркас роутов сверяет его с Content-Length до разбора
+# формы. Глобального MAX_CONTENT_LENGTH в приложении нет, waitress пропускает до
+# 1 ГБ — без потолка файл читался в память целиком, и «больше 10 МБ» звучало уже
+# после. Честный запрос — все файлы вида по верхней границе и запас на поля
+# формы и заголовки частей; без вложений тело раздела — JSON в несколько КБ.
+REQUEST_RESERVE_BYTES = 1 * MB
+JSON_MAX_BYTES = 1 * MB
+
+
+def file_max_bytes(kind):
+    """Верхняя граница одного файла вида: у доказательств это видео."""
+    spec = FILE_KINDS[kind]
+    return max(spec['max_bytes'], spec.get('video_max_bytes') or 0)
+
+
+def request_max_bytes(kind=None):
+    if kind not in FILE_KINDS:
+        return JSON_MAX_BYTES
+    return FILE_KINDS[kind]['max_files'] * file_max_bytes(kind) + REQUEST_RESERVE_BYTES
+
+
+def request_too_large_text(kind=None):
+    spec = FILE_KINDS.get(kind)
+    if not spec:
+        return 'Запрос слишком большой'
+    if spec['max_files'] == 1:
+        return 'Файл больше %d МБ' % (spec['max_bytes'] // MB)
+    text = 'Не больше %d файлов за раз, файл — до %d МБ' % (spec['max_files'], spec['max_bytes'] // MB)
+    if spec.get('video_max_bytes'):
+        text += ', видео — до %d МБ' % (spec['video_max_bytes'] // MB)
+    return text
+
+
 REFUSAL_MIN_WITNESSES = 2
 DESCRIPTION_MIN_CHARS = 30
 
