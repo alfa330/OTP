@@ -58874,6 +58874,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                    userId={user?.id}
                                 />
                             </Suspense>
                         )}
