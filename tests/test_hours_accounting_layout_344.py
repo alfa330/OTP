@@ -91,10 +91,43 @@ class MacStyleLayoutTests(unittest.TestCase):
 
     def test_filters_are_segmented_controls_without_colour_fills(self):
         markup = _desktop_markup()
-        self.assertIn('ariaLabel="Тип отчёта"', markup)
         self.assertIn("{ value: 'active', label: 'Активные', count: activeCount }", markup)
         self.assertNotIn("bg-green-600 text-white shadow", markup)
         self.assertNotIn("bg-red-600 text-white shadow", markup)
+
+    def test_report_kind_is_chosen_in_a_window_not_in_the_filter_row(self):
+        """Владелец 27.10.2026: «По СВ / Общий» — не переключателем в ряду отбора
+        (он читался как фильтр таблицы и гасил выбор группы), а в окне по
+        нажатию «Сформировать отчёт», с описанием каждого отчёта сразу."""
+        markup = _desktop_markup()
+        self.assertNotIn('ariaLabel="Тип отчёта"', markup)
+        self.assertNotIn("disabled={reportScope === 'all'}", APP)
+        button = markup.index("{isDownloadingReport ? 'Формируется…' : 'Сформировать отчёт'}")
+        self.assertIn("onClick={() => setIsReportDialogOpen(true)}", markup[button - 700:button])
+        self.assertIn("{hoursReportDialog}", APP)
+        self.assertIn("async function downloadMonthlyReport(scope = reportScope, signal = undefined)", APP)
+
+    def test_closing_the_report_window_cancels_the_download(self):
+        """«Отмена» во время «Формируется…» закрывала окно, а файл всё равно
+        скачивался с тостом «Отчет загружен» (разбор 27.10.2026)."""
+        start = APP.index("async function downloadMonthlyReport(")
+        download = APP[start:APP.index("// ======= RENDER =======", start)]
+        self.assertIn("signal,", download[:download.index("headers: withAccessTokenHeader(")])
+        self.assertIn("if (err?.name === 'AbortError') return false;", download)
+        close = download[download.index("const closeReportDialog = () => {"):]
+        close = close[:close.index("};")]
+        self.assertIn("reportAbortRef.current?.abort();", close)
+        self.assertIn("onClose={closeReportDialog}", download)
+        self.assertIn("downloadMonthlyReport(scope, controller.signal)", download)
+
+    def test_report_scope_matches_the_server_department_boundary(self):
+        """«Общий» сервер ограничивает возглавляемым отделом, иначе своим; у кого нет
+        ни того, ни другого, в файл идёт вся компания — описание не должно обещать отдел."""
+        self.assertIn(
+            "const reportDepartmentId = hoursDepartmentScopeId ?? (user?.department_id ?? user?.departmentId ?? null);",
+            APP)
+        self.assertIn("companyWide: isGlobalAdminUser(user) || reportDepartmentId == null,", APP)
+        self.assertIn("group: selectedGroupId ? { name: selectedHoursGroup?.name || '' } : null,", APP)
 
     def test_header_and_totals_stay_on_screen(self):
         markup = _desktop_markup()

@@ -123,7 +123,7 @@ class PhoneBranchTests(unittest.TestCase):
             'updateField: updateCellField',
             'bonusAmount: computeBonusAmountByType',
             'onRefresh: fetchDailyHoursAndTrainings',
-            'onDownloadReport: downloadMonthlyReport',
+            'onOpenReport: () => setIsReportDialogOpen(true)',
             'onNormChange: handleNormChange',
             'trainingHours: computeUniqueTrainingDurationHours',
             'noPhoneHours: computeNoPhoneHoursFromDaily',
@@ -181,6 +181,49 @@ class PhoneScreenTests(unittest.TestCase):
     def test_fired_tab_is_a_segmented_control(self):
         self.assertIn('ariaLabel="Сотрудники"', PHONE)
         self.assertIn("{ value: 'fired', label: 'Уволенные', count: scope.firedCount }", PHONE)
+
+    def test_transferred_tab_comes_only_with_a_group(self):
+        """Раздел передаёт число переведённых только в режиме группы, иначе null."""
+        self.assertIn("{ value: 'transferred', label: 'Переведённые', count: scope.transferredCount }", PHONE)
+        self.assertIn('Number.isFinite(scope.transferredCount)', PHONE)
+        branch = hours_view()
+        branch = branch[branch.index('if (isHoursPhone) {'):]
+        self.assertIn('transferredCount: hoursTransfersTracked ? transferredCount : null,', branch)
+        self.assertIn('operatorsTab: shownOperatorsTab,', branch)
+
+    def test_report_is_chosen_in_the_shared_window(self):
+        """Строки «Отчёт» в отборе больше нет: «Сформировать отчёт» открывает то
+        же окно, что на компьютере, — на телефоне оно экран."""
+        self.assertNotIn('title="Отчёт"', PHONE)
+        self.assertNotIn('reportScope', PHONE)
+        self.assertIn('onClick={actions.onOpenReport}', PHONE)
+        branch = hours_view()
+        branch = branch[branch.index('if (isHoursPhone) {'):]
+        self.assertIn('{hoursReportDialog}', branch[:branch.index('</Suspense>')])
+
+    def test_report_window_works_from_the_keyboard(self):
+        """Общий IosModal фокус не переносит и Esc не ловит: Tab шёл по странице под
+        затемнением (до плиток — двести нажатий), Esc окно не закрывал."""
+        dialog = (HOURS / 'HoursReportDialog.jsx').read_text(encoding='utf-8')
+        self.assertIn("useEscapeClose(open, onClose);", dialog)
+        self.assertIn("ref={checked ? selectedRef : undefined}", dialog)
+        self.assertIn("if (open) selectedRef.current?.focus({ preventScroll: true });", dialog)
+
+    def test_report_window_avoids_the_traps_of_the_shared_section_layer(self):
+        """На телефоне окно стоит внутри .main-content: ряд items-start с потомком
+        .flex-1 общий слой ставит колонкой — галочка выбора уезжала под текст."""
+        dialog = strip_comments((HOURS / 'HoursReportDialog.jsx').read_text(encoding='utf-8'))
+        self.assertNotIn('flex-1', dialog)
+        self.assertIsNone(re.search(r'(?:-actions|-tabs|-filters|toolbar|topbar)\b', dialog))
+
+    def test_three_people_tabs_fit_a_narrow_phone(self):
+        """«Переведённые» не влезали в треть ширины на 375 px: ширина — по
+        содержимому, число — под подписью, на совсем узком экране мельче шрифт."""
+        self.assertIn('className="ha-m-people"', PHONE)
+        rule = CSS[CSS.index('.ha-m-people > button {'):]
+        rule = rule[:rule.index('}')]
+        for declaration in ('flex: 1 1 auto;', 'flex-direction: column;', 'font-size: min(13.5px, 3.75vw);'):
+            self.assertIn(declaration, rule)
 
 
 if __name__ == '__main__':

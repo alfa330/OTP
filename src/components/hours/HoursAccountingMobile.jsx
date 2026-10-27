@@ -558,7 +558,9 @@ export const HoursAccountingPhone = ({
   const monthOptions = useMemo(() => hoursPhoneMonthOptions(month), [month]);
   const selectedTabLabel = (metrics.tabs.find((tab) => tab.key === metrics.selectedTab) || {}).label || '';
   const groupName = (scope.groups.find((group) => String(group.id) === String(scope.selectedGroupId)) || {}).name || '';
-  const scopeLabel = scope.reportScope === 'all' ? 'Общий отчёт' : (groupName || 'Отчёт по СВ');
+  /* Вид отчёта выбирают в окне «Сформировать отчёт», страницу он не меняет —
+     в подписи шапки только то, что показывает список. */
+  const scopeLabel = groupName || 'Без группы';
 
   /* Итоги операторов считаем один раз на рендер: одни и те же числа стоят в
      строке списка, в шапке экрана оператора и в подвале раздела. */
@@ -666,10 +668,15 @@ export const HoursAccountingPhone = ({
         ariaLabel="Сотрудники"
         stretch
         size="lg"
+        className="ha-m-people"
         value={scope.operatorsTab}
         onChange={scope.onOperatorsTab}
         options={[
           { value: 'active', label: 'Активные', count: scope.activeCount },
+          /* Переводы видны только у выбранной группы — без неё раздел передаёт null. */
+          Number.isFinite(scope.transferredCount)
+            ? { value: 'transferred', label: 'Переведённые', count: scope.transferredCount }
+            : null,
           { value: 'fired', label: 'Уволенные', count: scope.firedCount },
         ]}
       />
@@ -680,11 +687,6 @@ export const HoursAccountingPhone = ({
       )}
 
       <AuctionPhoneGroup label="Отбор">
-        <HoursPhoneFilterRow
-          title="Отчёт"
-          value={scope.reportScope === 'all' ? 'Общий' : 'По СВ'}
-          onClick={() => setPicker('scope')}
-        />
         {scope.peopleKinds ? (
           <HoursPhoneFilterRow
             title="Сотрудники"
@@ -696,7 +698,6 @@ export const HoursAccountingPhone = ({
           <HoursPhoneFilterRow
             title="Группа"
             value={groupName || 'Без группы'}
-            disabled={scope.reportScope === 'all'}
             onClick={() => setPicker('group')}
           />
         ) : null}
@@ -752,7 +753,7 @@ export const HoursAccountingPhone = ({
         </button>
         <button
           type="button"
-          onClick={actions.onDownloadReport}
+          onClick={actions.onOpenReport}
           disabled={actions.isDownloadingReport}
           className="sa-m-row flex w-full items-center gap-3 px-4 py-3 text-left disabled:opacity-50"
           style={NO_WRAP}
@@ -765,16 +766,6 @@ export const HoursAccountingPhone = ({
           </span>
         </button>
       </AuctionPhoneGroup>
-
-      <HoursPhonePicker
-        open={picker === 'scope'}
-        onClose={closePicker}
-        title="Тип отчёта"
-        options={[{ value: 'by_sv', label: 'По СВ' }, { value: 'all', label: 'Общий' }]}
-        isSelected={(value) => value === scope.reportScope}
-        onPick={(value) => { scope.onReportScope(value); closePicker(); }}
-        hint="Общий отчёт собирает всех операторов сразу и не спрашивает группу."
-      />
 
       {scope.peopleKinds ? (
         <HoursPhonePicker

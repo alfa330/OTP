@@ -24,7 +24,7 @@ class HoursFiredTabFrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = APP_PATH.read_text(encoding="utf-8-sig")
-        start = cls.src.index("const { filteredOperators, activeCount, firedCount } = useMemo(")
+        start = cls.src.index("const { filteredOperators, activeCount, transferredCount, firedCount } = useMemo(")
         end = cls.src.index("// Group operators by direction", start)
         cls.memo = cls.src[start:end]
 
@@ -56,6 +56,70 @@ class HoursFiredTabFrontendTests(unittest.TestCase):
         self.assertIn("isFiredLikeOperator(op)", block)
         self.assertIn("Уволен", block)
         self.assertIn("Уволен(а) с ${formatDismissalDate(op)}", block)
+
+
+class HoursTransferredTabTests(unittest.TestCase):
+    """Вкладка «Переведённые» (владелец, 27.10.2026): ушедшие из выбранной группы
+    до конца месяца — отдельно от «Активных». Само правило «ушёл» проверяет
+    tests/hours_group_leave.test.mjs на настоящем модуле; здесь — как раздел его
+    применяет."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = APP_PATH.read_text(encoding="utf-8-sig")
+        start = cls.src.index("const { filteredOperators, activeCount, transferredCount, firedCount } = useMemo(")
+        end = cls.src.index("// Group operators by direction", start)
+        cls.memo = cls.src[start:end]
+
+    def test_fired_rule_is_decided_before_the_transfer(self):
+        """Уволенный раньше месяца остаётся в «Уволенных», даже если ушёл из группы."""
+        self.assertLess(self.memo.index("firedList.push(op);"), self.memo.index("getHoursGroupLeave(op, rowsMonth)"))
+
+    def test_transfer_is_read_only_in_the_group_mode(self):
+        self.assertIn("hoursTransfersTracked ? getHoursGroupLeave(op, rowsMonth) : null", self.memo)
+        start = self.src.index("const hoursTransfersTracked = ")
+        rule = self.src[start:self.src.index(";", start)]
+        self.assertIn("Boolean(selectedGroupId)", rule)
+        self.assertIn("Boolean(loadedHoursScope.groupId)", rule)
+        self.assertIn("hoursPeopleKind === 'supervisors'", rule)
+
+    def test_transfer_is_judged_by_the_month_the_rows_were_loaded_for(self):
+        """Пока грузится новый месяц, в таблице строки прошлого: сентябрьское членство
+        «до 30-го» в октябре читалось бы как уход, и вся группа на миг становилась
+        переведённой (разбор 27.10.2026, сеть с задержкой)."""
+        self.assertIn("const rowsMonth = loadedHoursScope.month;", self.memo)
+        self.assertIn("loadedHoursScope.month", self.memo[self.memo.rindex("}, ["):])
+        fetch = self.src[self.src.index("async function fetchDailyHoursAndTrainings()"):]
+        fetch = fetch[:fetch.index("\n        }\n")]
+        self.assertIn("const requestScope = { month, groupId: String(selectedGroupId || '') };", fetch)
+        # Строки и их месяц меняются одним тактом — и при успехе, и при сбое.
+        self.assertEqual(fetch.count("setLoadedHoursScope(requestScope);"), 2)
+        self.assertLess(fetch.index("setOperators(hoursResp.data.operators);"), fetch.index("setLoadedHoursScope(requestScope);"))
+
+    def test_fired_operator_removed_without_new_group_is_not_transferred(self):
+        """Уволенного в этом месяце вывели из группы — это увольнение, не перевод.
+        Уволенный позже месяца (статус сегодняшний, записи в истории нет) в этом
+        месяце ещё работал — его уход из группы остаётся переводом."""
+        self.assertIn("groupLeave && (groupLeave.movedToGroup || !firedThisMonth)", self.memo)
+        self.assertIn("const firedThisMonth = isFiredLike && (firedMonth === null || firedMonth <= rowsMonth);", self.memo)
+
+    def test_hidden_tab_falls_back_to_active(self):
+        self.assertIn("operatorsViewTab === 'transferred' && !hoursTransfersTracked", self.src)
+        self.assertIn("listByTab[shownOperatorsTab]", self.memo)
+        deps = self.memo[self.memo.rindex("}, ["):]
+        self.assertIn("shownOperatorsTab", deps)
+        self.assertIn("hoursTransfersTracked", deps)
+
+    def test_segmented_control_shows_three_tabs_in_the_group_mode(self):
+        start = self.src.index('ariaLabel="Операторы"')
+        control = self.src[start:start + 700]
+        self.assertIn("value={shownOperatorsTab}", control)
+        active = control.index("label: 'Активные'")
+        transferred = control.index(
+            "hoursTransfersTracked ? { value: 'transferred', label: 'Переведённые', count: transferredCount } : null")
+        fired = control.index("label: 'Уволенные'")
+        self.assertLess(active, transferred)
+        self.assertLess(transferred, fired)
 
 
 class HoursFiredTabBackendTests(unittest.TestCase):
@@ -91,6 +155,15 @@ class HoursFiredTabBackendTests(unittest.TestCase):
                     '"dismissal_date": self._dismissal_date_iso(dismissal_dates, op_id),',
                     block,
                 )
+
+    def test_group_payload_marks_segments_of_the_viewed_group(self):
+        """Вкладка «Переведённые» читает is_current как «сегмент выбранной группы»
+        (src/components/hours/hoursGroupLeave.js) — в ответе «Учёта часов» с
+        группой поле значит именно это, а не «открытое членство»."""
+        start = self.src.index("def get_daily_hours_by_supervisor_month")
+        block = self.src[start:self.src.index("def get_daily_hours_for_all_month", start)]
+        self.assertIn('seg["is_current"] = int(seg.get("group_id") or 0) == int(group_id)', block)
+        self.assertIn('"group_segments": segments_by_operator.get(op_id, []),', block)
 
     def test_dismissal_date_is_serialized_as_iso(self):
         start = self.src.index("def _dismissal_date_iso")

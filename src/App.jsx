@@ -134,6 +134,9 @@ import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmploye
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
+import HoursReportDialog from './components/hours/HoursReportDialog';
+import { buildHoursReportOptions } from './components/hours/hoursReportOptions';
+import { getHoursGroupLeave } from './components/hours/hoursGroupLeave';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -4464,6 +4467,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const isHoursPhone = useIsMobileShell();
 
         const [operators, setOperators] = useState([]);
+        // Месяц и группа, за которые загружены operators. Вкладка «Переведённые»
+        // раскладывает строки по ним, а не по только что выбранным: пока грузится
+        // новый месяц, сентябрьские строки (членство до 30-го) в октябре читались
+        // бы как ушедшие из группы, и вся группа на миг становилась переведённой.
+        const [loadedHoursScope, setLoadedHoursScope] = useState({ month: '', groupId: '' });
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
         const [technicalIssuesMap, setTechnicalIssuesMap] = useState({}); // { operatorId: { dayNum: [technicalIssues...] } }
         const [offlineActivitiesMap, setOfflineActivitiesMap] = useState({}); // { operatorId: { dayNum: [offlineActivities...] } }
@@ -4494,11 +4502,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         // выпадашки «Работа», чтобы не занимать место в таблице часов.
         const [salesOverlay, setSalesOverlay] = useState(null); // null | 'plan' | 'leads'
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
-        const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
+        const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' — последний выбор в окне отчёта
+        const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
+        const reportAbortRef = useRef(null); // выгрузка из окна отчёта — «Отмена» её прерывает
         const [isLoading, setIsLoading] = useState(false);
 
         // NEW: filter active/fired + counters
-        const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
+        const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'transferred' | 'fired'
 
         // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
         const [selectedGroupId, setSelectedGroupId] = useState(''); // '' = legacy-режим по СВ
@@ -5678,6 +5688,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         async function fetchDailyHoursAndTrainings() {
             if (!user || (!selectedSvId && !isHoursDepartmentHead)) return;
             setIsLoading(true);
+            // За какой месяц и группу придут строки — запоминается вместе с ними.
+            const requestScope = { month, groupId: String(selectedGroupId || '') };
             try {
             const hoursParams = new URLSearchParams();
             hoursParams.append('month', month);
@@ -5752,6 +5764,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setOperators([]);
                 fallbackToast('Не удалось загрузить daily hours', 'error');
             }
+            setLoadedHoursScope(requestScope);
 
             const visibleOperatorIds = new Set(
                 (loadedOperators || [])
@@ -5930,6 +5943,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             console.error('fetchDailyHoursAndTrainings error', err);
             fallbackToast('Ошибка загрузки данных', 'error');
             setOperators([]);
+            setLoadedHoursScope(requestScope);
             setTrainingsMap({});
             setTechnicalIssuesMap({});
             setOfflineActivitiesMap({});
@@ -6885,13 +6899,27 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             return false;
         };
 
+        // «Переведённые» считаются относительно выбранной группы: только в её режиме
+        // сервер отдаёт членства месяца (group_segments). Без группы список строится
+        // по нынешнему СВ или отделу, ушедших в нём нет — и вкладки нет. У строк СВ
+        // членств нет вовсе. Группа нужна и выбранная, и у загруженных строк: после
+        // «Без группы» вкладка появляется вместе с данными группы, а не раньше них.
+        const hoursTransfersTracked = Boolean(selectedGroupId) && Boolean(loadedHoursScope.groupId)
+            && !(showSupervisorHoursTabs && hoursPeopleKind === 'supervisors');
+        const shownOperatorsTab = operatorsViewTab === 'transferred' && !hoursTransfersTracked
+            ? 'active'
+            : operatorsViewTab;
+
         // FILTERED OPERATORS + COUNTERS (NEW)
-        const { filteredOperators, activeCount, firedCount } = useMemo(() => {
+        const { filteredOperators, activeCount, transferredCount, firedCount } = useMemo(() => {
             const activeList = [];
+            const transferredList = [];
             const firedList = [];
+            const rowsMonth = loadedHoursScope.month;
             for (const op of hoursPeopleRows) {
             const status = String(op?.status || '').trim().toLowerCase();
             const isFiredLike = status === 'fired' || status === 'dismissal';
+            const firedMonth = getDismissalMonth(op);
             if (isFiredLike) {
                 // Уволенный остаётся в «Активных» только если увольнение пришлось на
                 // просматриваемый месяц или позже: месяц отработан частично и его нельзя
@@ -6899,22 +6927,30 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // вкладке «Уволенные», даже если импорт задним числом записал ему
                 // какие-то показатели. hasAnyHoursIndicators — фолбэк на случай, когда
                 // бэкенд не отдал dismissal_date (старый ответ/кэш): поведение прежнее.
-                const firedMonth = getDismissalMonth(op);
                 const keepInActive = firedMonth === null
                     ? hasAnyHoursIndicators(op)
                     : firedMonth >= month;
-                if (keepInActive) {
-                activeList.push(op);
+                if (!keepInActive) {
+                firedList.push(op);
                 continue;
                 }
-                firedList.push(op);
+            }
+            // Ушёл из выбранной группы до конца месяца — «Переведённые». Уволенного в
+            // этом месяце, которого вывели из группы без новой, туда не кладём: это не
+            // перевод, а увольнение, и для него действует правило выше. Уволенный ПОЗЖЕ
+            // месяца (статус сегодняшний, записи в истории нет) в этом месяце ещё работал.
+            const groupLeave = hoursTransfersTracked ? getHoursGroupLeave(op, rowsMonth) : null;
+            const firedThisMonth = isFiredLike && (firedMonth === null || firedMonth <= rowsMonth);
+            if (groupLeave && (groupLeave.movedToGroup || !firedThisMonth)) {
+                transferredList.push(op);
                 continue;
             }
             activeList.push(op);
             }
 
-            // start from active or fired list
-            let list = operatorsViewTab === 'active' ? activeList.slice() : firedList.slice();
+            // start from the list of the shown tab
+            const listByTab = { active: activeList, transferred: transferredList, fired: firedList };
+            let list = (listByTab[shownOperatorsTab] || activeList).slice();
 
             // apply directions multi-filter when set (exclude 'all')
             if (selectedDirections && selectedDirections.length > 0 && !selectedDirections.includes('all')) {
@@ -6928,9 +6964,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             return {
             filteredOperators: list,
             activeCount: activeList.length,
+            transferredCount: transferredList.length,
             firedCount: firedList.length
             };
-        }, [hoursPeopleRows, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap, month]);
+        }, [hoursPeopleRows, shownOperatorsTab, hoursTransfersTracked, loadedHoursScope.month, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap, month]);
 
         // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
         const groupedByDirection = useMemo(() => {
@@ -8253,20 +8290,23 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }
         }
 
-        async function downloadMonthlyReport() {
+        // Вид отчёта выбирают в окне «Сформировать отчёт» (HoursReportDialog), а не
+        // переключателем на странице: «По СВ / Общий» в ряду отбора читался как
+        // фильтр таблицы, хотя менял только файл. true — файл скачан.
+        async function downloadMonthlyReport(scope = reportScope, signal = undefined) {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
-            return;
+            return false;
             }
             if (!month) {
             fallbackToast('Выберите месяц', 'error');
-            return;
+            return false;
             }
 
             // If admin requested per-SV report, ensure a supervisor or group is selected
-            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && reportScope === 'by_sv' && !selectedSvId && !selectedGroupId) {
+            if (isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && scope === 'by_sv' && !selectedSvId && !selectedGroupId) {
             fallbackToast('Выберите супервайзера или группу для отчёта', 'error');
-            return;
+            return false;
             }
 
             const params = new URLSearchParams();
@@ -8274,9 +8314,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
             // Если выбрана группа — выгружаем строго по группе (одна модель расчёта → корректные
             // листы: чат-группа без «Звонки»/«Эффективность»). Иначе — по супервайзеру.
-            if (reportScope === 'by_sv' && selectedGroupId) {
+            if (scope === 'by_sv' && selectedGroupId) {
                 params.append('group_id', selectedGroupId);
-            } else if (reportScope === 'by_sv' && selectedSvId) {
+            } else if (scope === 'by_sv' && selectedSvId) {
                 params.append('supervisor_id', selectedSvId);
             }
 
@@ -8288,6 +8328,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const resp = await fetch(url, {
                 method: 'GET',
                 credentials: 'include',
+                signal,
                 headers: withAccessTokenHeader({
                 'X-User-Id': String(user.id)
                 })
@@ -8302,7 +8343,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 errText = await resp.text();
                 }
                 fallbackToast(`Не удалось получить файл: ${errText}`, 'error');
-                return;
+                return false;
             }
 
             const blob = await resp.blob();
@@ -8325,13 +8366,71 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             window.URL.revokeObjectURL(urlBlob);
 
             fallbackToast('Отчет загружен', 'success');
+            return true;
             } catch (err) {
+            // «Отмена» в окне отчёта прерывает выгрузку — это не ошибка.
+            if (err?.name === 'AbortError') return false;
             console.error('downloadMonthlyReport error', err);
             fallbackToast(err.message || 'Ошибка при скачивании отчёта', 'error');
+            return false;
             } finally {
             setIsDownloadingReport(false);
             }
         }
+
+        // Окно «Сформировать отчёт» — одно на компьютер и телефон. «По СВ» с группой
+        // строится по ней, даже если её нет в списке групп (архивная или группа
+        // чужого отдела, куда перешли щелчком по чужому дню). Без группы — по
+        // выбранному СВ, как и таблица: у главы отдела без группы таблица показывает
+        // весь отдел, поэтому его СВ здесь не в счёт.
+        const reportSupervisorId = (selectedGroupId || isHoursDepartmentHead) ? '' : String(selectedSvId || '');
+        const reportSupervisorName = (() => {
+            if (!reportSupervisorId) return '';
+            const fromList = (Array.isArray(svList) ? svList : []).find(sv => String(sv?.id) === reportSupervisorId);
+            if (fromList?.name) return fromList.name;
+            for (const group of (groupsList || [])) {
+                const sv = (Array.isArray(group?.supervisors) ? group.supervisors : []).find(item => String(item?.id) === reportSupervisorId);
+                if (sv?.name) return sv.name;
+            }
+            return '';
+        })();
+        // «Общий» сервер ограничивает отделом, который человек возглавляет, иначе его
+        // собственным (_department_scope_id_for_requester). Нет ни того, ни другого —
+        // или глобальный админ — в файл идёт вся компания.
+        const reportDepartmentId = hoursDepartmentScopeId ?? (user?.department_id ?? user?.departmentId ?? null);
+        const reportOptions = buildHoursReportOptions({
+            group: selectedGroupId ? { name: selectedHoursGroup?.name || '' } : null,
+            supervisor: reportSupervisorId
+                ? { name: reportSupervisorName, isMe: reportSupervisorId === String(user?.id) }
+                : null,
+            companyWide: isGlobalAdminUser(user) || reportDepartmentId == null,
+            withSupervisorRows: isGlobalAdminUser(user) || headsSupervisorHoursDepartment(user),
+        });
+        // Закрыть окно во время «Формируется…» — значит отказаться от файла: выгрузка
+        // прерывается, файл не скачивается.
+        const closeReportDialog = () => {
+            reportAbortRef.current?.abort();
+            reportAbortRef.current = null;
+            setIsReportDialogOpen(false);
+        };
+        const hoursReportDialog = (
+            <HoursReportDialog
+                open={isReportDialogOpen}
+                onClose={closeReportDialog}
+                month={month}
+                options={reportOptions}
+                value={reportScope}
+                onChange={setReportScope}
+                isDownloading={isDownloadingReport}
+                onDownload={async (scope) => {
+                    const controller = new AbortController();
+                    reportAbortRef.current = controller;
+                    const downloaded = await downloadMonthlyReport(scope, controller.signal);
+                    if (reportAbortRef.current === controller) reportAbortRef.current = null;
+                    if (downloaded) setIsReportDialogOpen(false);
+                }}
+            />
+        );
 
         // ======= RENDER =======
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId;
@@ -8383,8 +8482,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         isLoading={isLoading}
                         emptyText={hoursNeedGroupChoice ? 'Выберите группу' : 'Операторы не найдены'}
                         scope={{
-                            reportScope,
-                            onReportScope: setReportScope,
                             groups: (groupsList || []).filter(g => g.status !== 'archived'),
                             selectedGroupId,
                             onSelectGroup: (value) => {
@@ -8401,9 +8498,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             selectedDirections,
                             onSelectDirections: setSelectedDirections,
                             onToggleDirection: toggleDirectionSelection,
-                            operatorsTab: operatorsViewTab,
+                            operatorsTab: shownOperatorsTab,
                             onOperatorsTab: setOperatorsViewTab,
                             activeCount,
+                            transferredCount: hoursTransfersTracked ? transferredCount : null,
                             firedCount,
                             peopleKinds: showSupervisorHoursTabs ? HOURS_PEOPLE_KIND_OPTIONS : null,
                             peopleKind: hoursPeopleKind,
@@ -8458,7 +8556,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         }}
                         actions={{
                             onRefresh: fetchDailyHoursAndTrainings,
-                            onDownloadReport: downloadMonthlyReport,
+                            onOpenReport: () => setIsReportDialogOpen(true),
                             isDownloadingReport,
                             onNormChange: handleNormChange,
                             isNormLocked: (op) => isClocksterHoursRow(op) && !isHoursDepartmentHead,
@@ -8538,6 +8636,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     dateStr={supervisorDayMarks?.dateStr}
                     onChanged={() => setSupervisorHoursReloadKey(key => key + 1)}
                 />
+                {hoursReportDialog}
                 </Suspense>
             );
         }
@@ -8974,9 +9073,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     <MonthPicker value={month} onChange={setMonth} allowFuture />
                     <button
                         type="button"
-                        onClick={downloadMonthlyReport}
+                        onClick={() => setIsReportDialogOpen(true)}
                         disabled={isDownloadingReport}
-                        title="Скачать месячный отчёт в XLSX"
+                        title="Выбрать отчёт за месяц и скачать в Excel"
                         className="inline-flex h-[34px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 text-[13px] font-semibold text-slate-700 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
                     >
                         <FaIcon className={`fas ${isDownloadingReport ? 'fa-spinner fa-spin' : 'fa-file-excel'} text-slate-500`} />
@@ -8987,18 +9086,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
             {/* Второй ряд: отбор строк слева, показатель справа */}
             <div className="mx-5 mb-4 flex flex-wrap items-center justify-between gap-2">
-                {/* === Отбор: вид отчёта, группа, статус, направления === */}
+                {/* === Отбор: группа, статус, направления. Вид отчёта — в окне «Сформировать отчёт» === */}
                 <div className="flex flex-wrap items-center gap-2">
-                    <IosSegmented
-                        ariaLabel="Тип отчёта"
-                        value={reportScope}
-                        onChange={(v) => setReportScope(v)}
-                        options={[
-                            { value: 'by_sv', label: 'По СВ' },
-                            { value: 'all', label: 'Общий' },
-                        ]}
-                    />
-
                     {(groupsList || []).length > 0 && (
                     <HoursCustomSelect
                         value={selectedGroupId || ''}
@@ -9021,7 +9110,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         placeholder="Выберите группу"
                         leadIcon="fa-layer-group"
                         searchable
-                        disabled={reportScope === 'all'}
                         ariaLabel="Группа"
                         className="w-[248px]"
                     />
@@ -9038,10 +9126,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                     <IosSegmented
                         ariaLabel="Операторы"
-                        value={operatorsViewTab}
+                        value={shownOperatorsTab}
                         onChange={setOperatorsViewTab}
                         options={[
                             { value: 'active', label: 'Активные', count: activeCount },
+                            hoursTransfersTracked ? { value: 'transferred', label: 'Переведённые', count: transferredCount } : null,
                             { value: 'fired', label: 'Уволенные', count: firedCount },
                         ]}
                     />
@@ -10797,6 +10886,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 dateStr={supervisorDayMarks?.dateStr}
                 onChanged={() => setSupervisorHoursReloadKey(key => key + 1)}
             />
+
+            {/* Окно «Сформировать отчёт»: какой отчёт и кто в нём */}
+            {hoursReportDialog}
 
             {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
             {selectedCell && cellModel && (
