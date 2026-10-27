@@ -65,7 +65,13 @@ def load_access_context(cursor, user_id):
     row = cursor.fetchone()
     if not row or row[1] is None:
         return None
-    name, role, department_id, department_code, direction_model, status, headed, headed_codes = row
+    return _access_context(user_id, *row)
+
+
+def _access_context(user_id, name, role, department_id, department_code, direction_model,
+                    status, headed, headed_codes):
+    """Контекст человека для access.py. Один на гейт раздела и список «Настроек»:
+    собранные в двух местах, они разошлись бы на первом же новом поле правила."""
     return {
         'user_id': int(user_id),
         'name': name,
@@ -572,6 +578,167 @@ def store_messages(cursor, client_id, phone, messages, window_from, window_to):
         'window_from': window_from,
         'window_to': window_to,
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Суточный лимит поисков и поиски сверх него
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Сутки — по Алматы, как и всё в журнале: created_at лежит стенными часами
+# Алматы, и граница «сегодня» обязана считаться в тех же часах, иначе лимит
+# обновлялся бы в пять утра, а добавленное вчера вечером доставалось бы
+# сегодняшнему утру.
+
+_SEARCH_USAGE_SQL = """
+SELECT
+    (SELECT count(*) FROM dch_events
+      WHERE user_id = %(user_id)s AND kind = 'search'
+        AND created_at >= date_trunc('day', {now})),
+    COALESCE((SELECT extra FROM dch_search_grants
+               WHERE user_id = %(user_id)s AND day = ({now})::date), 0)
+""".format(now=_NOW)
+
+
+def search_usage_today(cursor, user_id):
+    """(сколько поисков человек сделал сегодня, сколько ему добавили сверх лимита).
+
+    Одним запросом: счётчик читается на КАЖДОМ поиске тем же курсором, что и
+    всё остальное до вендора, и лишний круг до базы человек ждал бы наравне с
+    самим поиском.
+    """
+    cursor.execute(_SEARCH_USAGE_SQL, {'user_id': int(user_id)})
+    row = cursor.fetchone() or (0, 0)
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+# Люди отдела с расходом за сегодня. Главы отделов — тем же LATERAL, что в
+# _ACCESS_CONTEXT_SQL: без них access не отличит главу СЗоВ, который сам
+# добавляет поиски, от рядового оператора.
+_GRANT_PEOPLE_SQL = """
+SELECT u.id, u.name, u.role, u.department_id, d.code, dir.calculation_model_code,
+       u.status, COALESCE(h.ids, '{{}}'), COALESCE(h.codes, '{{}}'),
+       COALESCE(s.used, 0), COALESCE(g.extra, 0), g.granted_by_name, g.updated_at
+  FROM users u
+  JOIN departments d ON d.id = u.department_id
+  LEFT JOIN directions dir ON dir.id = u.direction_id
+  LEFT JOIN LATERAL (
+        SELECT array_agg(hd.id) AS ids, array_agg(hd.code) AS codes
+          FROM departments hd
+         WHERE hd.head_user_id = u.id AND hd.is_active
+  ) h ON TRUE
+  LEFT JOIN (
+        SELECT user_id, count(*) AS used
+          FROM dch_events
+         WHERE kind = 'search' AND created_at >= date_trunc('day', {now})
+         GROUP BY user_id
+  ) s ON s.user_id = u.id
+  LEFT JOIN dch_search_grants g ON g.user_id = u.id AND g.day = ({now})::date
+ WHERE lower(d.code) = %(department_code)s
+   AND (u.status IS NULL OR NOT (u.status = ANY(%(inactive)s)))
+ ORDER BY u.name
+""".format(now=_NOW)
+
+
+def extra_search_people(cursor):
+    """Кому «СВ и выше» могут добавить поиски сегодня — с расходом за сегодня.
+
+    SQL отбирает живых людей отдела, а КОМУ из них можно добавить, решает
+    access.can_receive_extra_searches по тому же контексту, что и гейт раздела.
+    Правило периметра, переписанное на SQL, разъехалось бы с настоящим на
+    ближайшей правке: у чат-менеджера, тренера и стажёра здесь у каждого своя
+    история.
+    """
+    cursor.execute(_GRANT_PEOPLE_SQL, {
+        'department_code': access.SECTION_DEPARTMENT_CODE,
+        'inactive': list(access.INACTIVE_STATUSES),
+    })
+    people = []
+    for row in cursor.fetchall():
+        person = _access_context(*row[:9])
+        if not access.can_receive_extra_searches(person):
+            continue
+        used, extra, granted_by_name, granted_at = row[9:13]
+        people.append({
+            'user_id': person['user_id'],
+            'name': person['name'],
+            'role': person['role'],
+            'used_today': int(used or 0),
+            'extra_today': int(extra or 0),
+            'granted_by_name': granted_by_name,
+            'granted_at': granted_at.isoformat() if granted_at else None,
+        })
+    return people
+
+
+# Текущая добавка — под блокировкой строки: второй супервайзер, меняющий её в
+# ту же секунду, дождётся первого и увидит уже его число.
+_GRANT_CURRENT_SQL = """
+SELECT extra, granted_by_name, updated_at
+  FROM dch_search_grants
+ WHERE user_id = %(user_id)s AND day = ({now})::date
+   FOR UPDATE
+""".format(now=_NOW)
+
+# Обновление — только если в строке всё ещё то, что прочитано выше. Блокировка
+# не спасает, когда строки ещё нет: тогда два первых «+» за день вставляли бы
+# её оба, и второй молча затирал бы первого. С условием второй не обновит
+# ничего, RETURNING придёт пустым — и это расхождение, а не успех.
+_GRANT_UPSERT_SQL = """
+INSERT INTO dch_search_grants (user_id, day, extra, granted_by, granted_by_name, updated_at)
+VALUES (%(user_id)s, ({now})::date, %(extra)s, %(granted_by)s, %(granted_by_name)s, {now})
+ON CONFLICT (user_id, day) DO UPDATE
+   SET extra = EXCLUDED.extra,
+       granted_by = EXCLUDED.granted_by,
+       granted_by_name = EXCLUDED.granted_by_name,
+       updated_at = EXCLUDED.updated_at
+ WHERE dch_search_grants.extra = %(previous)s
+RETURNING extra, granted_by_name, updated_at
+""".format(now=_NOW)
+
+
+def _grant_row(row):
+    if not row:
+        return {'extra_today': 0, 'granted_by_name': None, 'granted_at': None}
+    return {
+        'extra_today': int(row[0] or 0),
+        'granted_by_name': row[1],
+        'granted_at': row[2].isoformat() if row[2] else None,
+    }
+
+
+def set_extra_searches(cursor, user_id, extra, granted_by, expected=None):
+    """Сколько поисков добавлено человеку на сегодня — ИТОГОМ, а не прибавкой.
+
+    Итог, а не «+1»: степпер в «Настройках» шлёт число, которое видит человек,
+    и повтор того же запроса (двойной щелчок, переотправка после сбоя сети)
+    ничего не удваивает.
+
+    expected — сколько было, по мнению экрана. Итог без него опасен: список у
+    супервайзера мог устареть, пока был открыт, и «+» по старому нулю снял бы
+    «+3», которые минутой раньше дал другой. Не совпало — ничего не пишем и
+    отдаём настоящее значение: экран покажет его, и человек решит сам.
+
+    Возвращает (сохранённое, сколько было) или (None, текущее) при расхождении.
+    Ноль строку не удаляет: последним её менял тот, кто снял добавку.
+    """
+    params = {'user_id': int(user_id)}
+    cursor.execute(_GRANT_CURRENT_SQL, params)
+    current = _grant_row(cursor.fetchone())
+    if expected is not None and current['extra_today'] != int(expected):
+        return None, current
+    cursor.execute(_GRANT_UPSERT_SQL, {
+        **params,
+        'extra': int(extra),
+        'previous': current['extra_today'],
+        'granted_by': int(granted_by['user_id']),
+        'granted_by_name': granted_by.get('name'),
+    })
+    saved = cursor.fetchone()
+    if not saved:
+        # Строку только что вставил кто-то другой — отдаём его число.
+        cursor.execute(_GRANT_CURRENT_SQL, params)
+        return None, _grant_row(cursor.fetchone())
+    return _grant_row(saved), current['extra_today']
 
 
 # ─────────────────────────────────────────────────────────────────────────────

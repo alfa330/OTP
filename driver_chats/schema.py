@@ -1,4 +1,5 @@
-"""Схема раздела «Чаты водителей». Таблицы dch_events и dch_message_cache.
+"""Схема раздела «Чаты водителей». Таблицы dch_events, dch_message_cache и
+dch_search_grants.
 
 Идемпотентно: CREATE TABLE / INDEX IF NOT EXISTS. Разворачивается один раз при
 старте из Database._init_db через init_driver_chats_schema(cursor).
@@ -53,7 +54,11 @@
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 # Виды событий журнала. Порядок = порядок жизни: искал -> открыл -> передал.
-EVENT_KINDS = ('search', 'open', 'handoff')
+# Последний — действие «СВ и выше» во вкладке «Настройки» (27.10.2026): кто кому
+# и сколько поисков добавил сверх лимита. Без него в журнале было бы «43 поиска
+# при лимите 40» без объяснения, а строка добавки за день хранит только
+# последнего, кто её менял.
+EVENT_KINDS = ('search', 'open', 'handoff', 'extra_searches')
 
 # Сколько держим журнал. Год: вопрос «кто вынес переписку» задают постфактум и
 # редко, а объём копеечный (строка на действие).
@@ -127,6 +132,36 @@ DDL = (
     # ещё не видел.
     "CREATE INDEX IF NOT EXISTS idx_dch_cache_phone ON dch_message_cache (phone)",
 
+    # ── Поиски сверх лимита на сегодня ───────────────────────────────────────
+    #
+    # «СВ и выше» добавляют оператору до пяти поисков сверх суточного лимита —
+    # только на сегодня (владелец 27.10.2026). Строка — человек × сутки по
+    # Алматы, поэтому завтра лимит снова обычный сам собой: ни ночной джобы,
+    # которая обнуляла бы вчерашнее, ни «забыли снять» здесь не бывает.
+    #
+    # Число в строке — сколько добавлено ВСЕГО на этот день, а не прибавка
+    # одного нажатия: степпер шлёт итог, и повтор того же запроса ничего не
+    # удваивает. Кто менял последним — снимком имени, как в журнале: вопрос
+    # «кто добавил» задают про тот день, а не про сегодняшний состав отдела.
+    #
+    # CHECK на потолок не ставим — та же причина, что у вида события в журнале:
+    # «пять» назвал владелец, и поднять число не должно стоить миграции живой
+    # базы. Потолок держит сервер (routes.MAX_EXTRA_SEARCHES).
+    """
+    CREATE TABLE IF NOT EXISTS dch_search_grants (
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day              DATE NOT NULL,
+        extra            INTEGER NOT NULL DEFAULT 0,
+        granted_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        granted_by_name  TEXT,
+        updated_at       TIMESTAMP NOT NULL DEFAULT {now},
+        PRIMARY KEY (user_id, day)
+    )
+    """.format(now=_NOW),
+    # Ключ начинается с человека — под вопрос «сколько добавлено ему сегодня»
+    # на каждом поиске. «Настройки» и ночная чистка спрашивают по дню.
+    "CREATE INDEX IF NOT EXISTS idx_dch_search_grants_day ON dch_search_grants (day)",
+
     # ── Хвост номера в чужой таблице ─────────────────────────────────────────
     #
     # Индекс по ВЫРАЖЕНИЮ на c2d_requests — единственная строка схемы раздела,
@@ -173,11 +208,17 @@ CLEANUP_SQL = (
     f"WHERE created_at < {_NOW} - make_interval(days => %(days)s)",
     f"DELETE FROM dch_message_cache "
     f"WHERE fetched_at < {_NOW} - make_interval(days => %(days)s)",
+    # Добавленные поиски живут столько же, сколько журнал: «почему у него
+    # сорок три поиска при лимите сорок» спрашивают по журналу, и ответ должен
+    # лежать рядом с ним.
+    f"DELETE FROM dch_search_grants "
+    f"WHERE day < ({_NOW})::date - %(days)s",
 )
 
 
 def cleanup(cursor, events_days=EVENTS_RETENTION_DAYS, cache_days=CACHE_RETENTION_DAYS):
-    """Ежедневная чистка журнала и кеша. Зовётся из database.py.
+    """Ежедневная чистка журнала, кеша и добавленных поисков. Зовётся из
+    database.py.
 
     Возвращает, сколько строк удалено — чтобы джоба писала это в лог, а не
     молчала (по молчанию ретеншна не отличить «нечего чистить» от «джоба не
@@ -187,4 +228,6 @@ def cleanup(cursor, events_days=EVENTS_RETENTION_DAYS, cache_days=CACHE_RETENTIO
     removed_events = cursor.rowcount or 0
     cursor.execute(CLEANUP_SQL[1], {'days': int(cache_days)})
     removed_cache = cursor.rowcount or 0
-    return {'events': removed_events, 'cache': removed_cache}
+    cursor.execute(CLEANUP_SQL[2], {'days': int(events_days)})
+    removed_grants = cursor.rowcount or 0
+    return {'events': removed_events, 'cache': removed_cache, 'grants': removed_grants}

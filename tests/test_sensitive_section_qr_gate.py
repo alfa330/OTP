@@ -472,7 +472,10 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
                             # Выгрузка журнала — та же дверь, что у экрана: файл
                             # с телефонами водителей уносят с собой, и мягче
                             # гейта раздела он быть не может.
-                            ('get', '/api/driver_chats/journal/export')):
+                            ('get', '/api/driver_chats/journal/export'),
+                            # «Настройки» (поиски сверх лимита) — за той же дверью.
+                            ('get', '/api/driver_chats/settings'),
+                            ('put', '/api/driver_chats/settings/extra/31')):
             response = getattr(client, method)(url, json={})
             self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
             self.assertEqual(response.get_json().get('code'), QR_CODE, url)

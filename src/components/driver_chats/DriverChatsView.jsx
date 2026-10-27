@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, Loader2, AlertCircle, Send, Check, Lock, Eye, X,
-    MessageSquare, Download, Phone, Clock, ImageIcon, Building2, RefreshCw,
+    MessageSquare, Download, Phone, Clock, ImageIcon, Building2, RefreshCw, Gauge,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
+import DriverChatsSettings from './DriverChatsSettings';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangeCalendar, IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import {
@@ -16,6 +17,7 @@ import {
     dayKeyOf, exportFileName, pluralChats, pluralDays, rangeDays, shiftDaysBack,
     todayISO, EXPORT_MAX_DAYS, KIND_TONE,
 } from './journalMeta';
+import { recallTabs, rememberTabs, sectionTabs } from './settingsMeta';
 
 /* Раздел «Чаты водителей» (задача #271).
  *
@@ -46,7 +48,7 @@ import {
 const emptyResult = { chats: [], phone: '', clientId: null, clientName: '',
                       notFound: false, fetchedAt: null };
 
-const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId = null }) => {
     const headers = useCallback(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -62,6 +64,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     }, []);
 
     const [context, setContext] = useState(null);
+    const [recalledTabs] = useState(() => recallTabs(userId));
     const [tab, setTab] = useState('search');
 
     const [query, setQuery] = useState('');
@@ -107,16 +110,64 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     return;
                 }
                 setContext(data);
+                rememberTabs(userId, data.capabilities);
             } catch {
                 if (!cancelled) setSearchError('Не удалось открыть раздел');
             }
         })();
         return () => { cancelled = true; };
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, userId]);
 
     useEffect(() => { inputRef.current?.focus(); }, []);
 
-    const canViewJournal = Boolean(context?.capabilities?.can_view_journal);
+    /* Вкладки — по правам из /context, до ответа — по памяти прошлого входа
+       (settingsMeta.sectionTabs). «Настройки» — поиски сверх лимита на
+       сегодня; добавляют «СВ и выше» (владелец 27.10.2026), круг тот же, что у
+       журнала. Пропала вкладка (права сняли) — стоим на поиске, а не на
+       сегменте, которого больше нет. */
+    const tabs = useMemo(
+        () => sectionTabs(context?.capabilities, recalledTabs),
+        [context?.capabilities, recalledTabs]);
+    const activeTab = tabs.some((item) => item.value === tab) ? tab : 'search';
+
+    /* Упёрся в лимит — ждёт, пока супервайзер добавит поиски. Просят его в
+       мессенджере, то есть из другого окна: вернулся в окно портала —
+       перечитываем остаток, и если поиски появились, отказ уходит с экрана
+       сам. Иначе висели бы «Осталось поисков: 0» и «попросите супервайзера»,
+       хотя искать уже можно. */
+    const [limitReached, setLimitReached] = useState(false);
+    useEffect(() => {
+        if (!limitReached) return undefined;
+        let busy = false;
+        const recheck = async () => {
+            if (busy || document.visibilityState === 'hidden') return;
+            busy = true;
+            try {
+                const response = await fetch(`${apiBaseUrl}/api/driver_chats/context`, {
+                    headers: headers(), credentials: 'include',
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) return;
+                setContext(data);
+                const limits = data.limits || {};
+                if (typeof limits.searches_per_day !== 'number'
+                    || limits.used_today < limits.searches_per_day) {
+                    setLimitReached(false);
+                    setSearchError('');
+                }
+            } catch {
+                /* сеть — проверим при следующем возвращении в окно */
+            } finally {
+                busy = false;
+            }
+        };
+        window.addEventListener('focus', recheck);
+        document.addEventListener('visibilitychange', recheck);
+        return () => {
+            window.removeEventListener('focus', recheck);
+            document.removeEventListener('visibilitychange', recheck);
+        };
+    }, [limitReached, apiBaseUrl, headers]);
 
     // ── Поиск и обновление ──────────────────────────────────────────────────
     //
@@ -138,6 +189,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 { headers: headers(), credentials: 'include' });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
+                if (data.code === 'DAILY_LIMIT_REACHED') setLimitReached(true);
                 if (refresh) {
                     toast(data.error || 'Не удалось обновить переписку', 'error');
                     return;
@@ -147,6 +199,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 return;
             }
             const chats = data.chats || [];
+            setLimitReached(false);
             setSearchError('');
             // Заметка доехала от вендора — своя копия больше не нужна. Ключ
             // склейки тот же, что на сервере: id сообщения.
@@ -333,22 +386,21 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
-            {canViewJournal && (
+            {tabs.length > 1 && (
                 <div className="flex justify-center">
                     <IosSegmented
-                        value={tab}
+                        value={activeTab}
                         onChange={setTab}
                         ariaLabel="Разделы"
-                        options={[
-                            { value: 'search', label: 'Поиск чатов' },
-                            { value: 'journal', label: 'Журнал' },
-                        ]}
+                        options={tabs}
                     />
                 </div>
             )}
 
-            {tab === 'journal' && canViewJournal ? (
+            {activeTab === 'journal' ? (
                 <JournalPanel apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
+            ) : activeTab === 'settings' ? (
+                <DriverChatsSettings apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
             ) : (
                 <>
                     {/* Поиск — ОДИН узел на оба состояния экрана. «Уход наверх»
@@ -892,9 +944,12 @@ const KIND_OPTIONS = [
     { value: 'handoff', label: kindLabel('handoff') },
     { value: 'open', label: kindLabel('open') },
     { value: 'search', label: kindLabel('search') },
+    /* Добавки «СВ и выше» из вкладки «Настройки» (27.10.2026): у строки нет
+       водителя и парка, кому и сколько — в комментарии. */
+    { value: 'extra_searches', label: kindLabel('extra_searches') },
 ];
 
-const KIND_ICONS = { search: Search, open: Eye, handoff: Send };
+const KIND_ICONS = { search: Search, open: Eye, handoff: Send, extra_searches: Gauge };
 
 const EMPTY_FILTERS = { kind: 'all', userId: 'all', phone: '' };
 

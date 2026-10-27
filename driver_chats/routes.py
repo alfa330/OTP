@@ -29,7 +29,7 @@ from functools import wraps
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, chat2desk, queries, report
+from . import access, chat2desk, queries, report, schema
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -42,19 +42,26 @@ CACHE_TTL_SECONDS = 300
 # месячной квоты Chat2Desk роняет НЕ этот раздел, а ежедневный синк метрик — то
 # есть табло СЗоВ, зарплатные метрики чат-менеджеров и учёт часов.
 #
-# ТРИДЦАТЬ (решение владельца 08.09.2026, было 150). Прежнее число ставилось,
+# СОРОК (решение владельца 27.10.2026, было 30). История числа: 150 ставились,
 # когда разделом пользовался один супер-админ; после открытия отделу в периметре
-# 54 человека, и 150 на каждого — это до 8100 поисков в сутки, то есть втрое
-# больше всего месячного пула вендора (замер 08.09: 100 326 вызовов в месяц,
-# из них половина уже съедена ночным синком к восьмому числу). Тридцать на
-# человека — это 1620 поисков в сутки в самом худшем случае, когда лимит выберут
-# ВСЕ, а по факту за первые дни весь отдел делал 3-63 поиска в сутки.
+# стало 54 человека, и 150 на каждого — это до 8100 поисков в сутки, втрое
+# больше всего месячного пула вендора (замер 08.09: 100 326 вызовов в месяц, из
+# них половина съедена ночным синком к восьмому числу), — поэтому 08.09.2026
+# владелец опустил до тридцати. Сорок на человека — 2160 поисков в сутки в самом
+# худшем случае, когда лимит выберут ВСЕ, а по факту за первые дни весь отдел
+# делал 3-63 поиска в сутки.
 #
 # Один поиск стоит в среднем полтора вызова к вендору: 65 % водителей уже есть в
 # нашей базе (тогда вызов один, за сообщениями), 35 % пишут впервые (плюс поиск
 # клиента, 1-3 вызова). Повторный поиск того же номера в пределах пяти минут
-# бесплатен — отвечает кеш.
-DAILY_SEARCH_LIMIT = 30
+# бесплатен — отвечает кеш, а пока жив поток вебхуков, вендора не спрашивают вовсе.
+DAILY_SEARCH_LIMIT = 40
+
+# Сколько поисков «СВ и выше» могут добавить человеку сверх лимита — на
+# сегодня, до полуночи по Алматы (владелец 27.10.2026: «до 5 попыток»). Это
+# ИТОГ на день, а не прибавка одного нажатия: добавить пять, а потом ещё пять
+# нельзя. Худший случай отдела растёт на 54 × 5 = 270 поисков в сутки.
+MAX_EXTRA_SEARCHES = 5
 
 # Сколько минут после отправки лента показывает НАШУ копию заметки «Передан».
 # Вендор принимает её мгновенно и сразу возвращает message_id, но в выборке
@@ -69,6 +76,52 @@ EXPORT_ROW_CAP = 20000
 
 JOURNAL_PAGE_SIZE = 50
 JOURNAL_MAX_PAGE_SIZE = 200
+
+
+def plural_searches(count):
+    """«1 поиск», «3 поиска», «5 поисков» — тексты про лимит видит оператор."""
+    value = abs(int(count))
+    tail = value % 100
+    last = value % 10
+    if 11 <= tail <= 14 or last == 0 or last >= 5:
+        word = 'поисков'
+    elif last == 1:
+        word = 'поиск'
+    else:
+        word = 'поиска'
+    return '%d %s' % (value, word)
+
+
+def small_int(value):
+    """Целое из JSON-тела: число без дроби или строка из цифр.
+
+    bool отвергается (подкласс int: True молча стал бы «одним поиском»), как и
+    дробь, бесконечность и NaN: ручка принимает число со степпера, и любое
+    другое — это не «округлить», а «не понял».
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def extra_searches_note(person, extra, previous):
+    """Строка журнала о добавке: «Ван Ли: +3 поиска на сегодня (было +1)».
+
+    Имя получателя — снимком, как всё в журнале: вопрос «кому добавили»
+    задают про тот день, а человек потом может смениться фамилией или уйти.
+    Кто добавил — это сама строка журнала (её автор).
+    """
+    person = person or {}
+    name = person.get('name') or '№%s' % person.get('user_id')
+    note = ('%s: +%s на сегодня' % (name, plural_searches(extra)) if extra
+            else '%s: добавка снята' % name)
+    if previous:
+        note += ' (было +%d)' % previous
+    return note
 
 
 def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_response,
@@ -101,12 +154,13 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
     def _ua():
         return (request.headers.get('User-Agent') or '')[:500] or None
 
-    def dch_route(rule, methods=('GET',), journal=False):
+    def dch_route(rule, methods=('GET',), journal=False, settings=False):
         """Общий каркас роута: preflight, авторизация, контекст, гейты, ошибки.
 
         journal=True — роут показывает журнал: доступен супервайзерам СЗоВ, главе
-        отдела и суперадминам. Проверка здесь, чтобы не повторять её в каждом
-        обработчике и не забыть в новом.
+        отдела и суперадминам. settings=True — роут «Настроек» (поиски сверх
+        лимита): «СВ и выше», тот же круг. Проверки здесь, чтобы не повторять их
+        в каждом обработчике и не забыть в новом.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -153,6 +207,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                             "error": "Журнал доступен супервайзерам СЗоВ",
                             "code": "DRIVER_CHATS_JOURNAL_CLOSED",
                         }), 403
+                    if settings and not access.can_grant_extra_searches(ctx):
+                        return jsonify({
+                            "error": "Настройки раздела доступны супервайзерам СЗоВ",
+                            "code": "DRIVER_CHATS_SETTINGS_CLOSED",
+                        }), 403
                     return handler(*args, ctx=ctx, **kwargs)
                 except chat2desk.Chat2DeskError as exc:
                     # Ошибку вендора показываем как есть: «превышен лимит
@@ -179,19 +238,42 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         except (TypeError, ValueError):
             return None
 
+    def _limit_reached_message(ctx, extra):
+        """Текст отказа по лимиту — с тем, что человеку делать дальше.
+
+        «Обратитесь к супервайзеру» теперь не пустая фраза: супервайзер может
+        добавить поисков на сегодня. Но только тому, кому их вообще добавляют, и
+        только пока не добавлено всё, — иначе текст отправлял бы человека за
+        тем, чего ему не дадут.
+        """
+        if extra:
+            # «+3 сверх него», а не «3 добавленных»: с числом впереди
+            # прилагательное пришлось бы склонять («1 добавленный»).
+            reached = 'На сегодня поиски закончились: %d по лимиту и +%d сверх него.' % (
+                DAILY_SEARCH_LIMIT, extra)
+        else:
+            reached = 'На сегодня исчерпан лимит поисков (%d).' % DAILY_SEARCH_LIMIT
+        why = (' Лимит защищает общую квоту запросов к Chat2Desk, от которой '
+               'зависят табло и метрики отдела.')
+        if access.can_receive_extra_searches(ctx) and extra < MAX_EXTRA_SEARCHES:
+            left = MAX_EXTRA_SEARCHES - extra
+            if left == 1:
+                more = 'ещё один поиск'
+            else:
+                # «до N поисков» — родительный падеж при любом N от двух.
+                more = ('ещё до %d поисков' if extra else 'до %d поисков') % left
+            return reached + why + (' Если поиски ещё нужны, супервайзер может '
+                                    'добавить %s на сегодня.' % more)
+        return reached + why + ' Завтра лимит снова %d.' % DAILY_SEARCH_LIMIT
+
     # ── Контекст раздела ─────────────────────────────────────────────────────
 
     @dch_route('/context')
     def driver_chats_context(ctx):
         window_from, window_to = chat2desk.window_bounds()
         with db._get_cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM dch_events "
-                "WHERE user_id = %(user_id)s AND kind = 'search' "
-                "  AND created_at >= date_trunc('day', "
-                "      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))",
-                {'user_id': ctx['user_id']})
-            used_today = int((cursor.fetchone() or [0])[0] or 0)
+            used_today, extra_today = queries.search_usage_today(cursor, ctx['user_id'])
+        limited = access.is_search_limited(ctx)
         return jsonify({
             'capabilities': access.capabilities(ctx),
             'window': {'from': window_from.isoformat(), 'to': window_to.isoformat(),
@@ -199,9 +281,14 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             # Супер-админу потолка нет, и в limits вместо числа уходит null:
             # экран рисует остаток по числу, а «осталось поисков: —» было бы
             # шумом там, где считать нечего.
+            #
+            # searches_per_day — потолок СЕГОДНЯ, уже с добавленными поисками:
+            # остаток на экране считается от него, и второе число рядом экрану
+            # не понадобилось бы ни для чего, кроме ошибки.
             'limits': {
-                'searches_per_day': DAILY_SEARCH_LIMIT if access.is_search_limited(ctx) else None,
+                'searches_per_day': (DAILY_SEARCH_LIMIT + extra_today) if limited else None,
                 'used_today': used_today,
+                'extra_today': extra_today if limited else 0,
             },
             'comment_max_length': chat2desk.MAX_COMMENT_LENGTH,
             'me': {'user_id': ctx['user_id'], 'name': ctx.get('name')},
@@ -250,15 +337,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # значит держать его дольше нужного.
         ambiguous_tail = False
         with db._get_cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM dch_events "
-                "WHERE user_id = %(user_id)s AND kind = 'search' "
-                "  AND created_at >= date_trunc('day', "
-                "      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))",
-                {'user_id': ctx['user_id']})
-            used_today = int((cursor.fetchone() or [0])[0] or 0)
+            # Потолок сегодня — лимит плюс добавленное «СВ и выше» на этот день.
+            used_today, extra_today = queries.search_usage_today(cursor, ctx['user_id'])
+            limit_today = DAILY_SEARCH_LIMIT + extra_today
             limited = access.is_search_limited(ctx)
-            if not limited or used_today < DAILY_SEARCH_LIMIT:
+            if not limited or used_today < limit_today:
                 # Клиент вендора: сначала своя память о паре телефон-клиент,
                 # потом ночной срез заявок, и только потом — API.
                 # Точные записи спрашиваем, только если номер собрался
@@ -325,12 +408,9 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "code": "PHONE_AMBIGUOUS",
             }), 400
 
-        if limited and used_today >= DAILY_SEARCH_LIMIT:
+        if limited and used_today >= limit_today:
             return jsonify({
-                "error": "На сегодня исчерпан лимит поисков (%d). Он защищает "
-                         "общий лимит запросов к Chat2Desk, от которого зависят "
-                         "табло и метрики отдела. Обратитесь к супервайзеру."
-                         % DAILY_SEARCH_LIMIT,
+                "error": _limit_reached_message(ctx, extra_today),
                 "code": "DAILY_LIMIT_REACHED",
             }), 429
 
@@ -459,7 +539,7 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             # Возраст ленты — с сервера, а не с часов браузера: на кеше они
             # расходятся на его возраст, и подпись «обновлено» врала бы.
             'fetched_at': fetched_at.isoformat() if fetched_at else None,
-            'searches_left': (max(0, DAILY_SEARCH_LIMIT - used_today - 1)
+            'searches_left': (max(0, limit_today - used_today - 1)
                               if limited else None),
         }), 200
 
@@ -568,7 +648,7 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             # Верхняя граница — начало СЛЕДУЮЩИХ суток: иначе «по 3 сентября»
             # молча теряло бы всё, что было в этот день после полуночи.
             'date_to': (date_to + timedelta(days=1)) if date_to else None,
-            'kinds': [k for k in kinds if k in ('search', 'open', 'handoff')] or None,
+            'kinds': [k for k in kinds if k in schema.EVENT_KINDS] or None,
             'user_id': _int_or_none(request.args.get('user_id')),
             'phone': chat2desk.normalize_phone(request.args.get('phone')),
             'raw_from': date_from.date() if date_from else None,
@@ -682,6 +762,77 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             stream, mimetype=XLSX_MIME, as_attachment=True,
             download_name=report.export_file_name(filters.get('raw_from'),
                                                   filters.get('raw_to')))
+
+    # ── «Настройки»: поиски сверх лимита на сегодня ──────────────────────────
+    #
+    # Владелец 27.10.2026: «св и выше добавь в настройках возможность добавлять
+    # дополнительные попытки операторам до 5 попыток», и на уточнение — только
+    # на сегодня. Оператор упёрся в лимит, пишет супервайзеру, тот добавляет
+    # +1…+5 до полуночи по Алматы; завтра лимит снова обычный сам собой.
+
+    @dch_route('/settings', settings=True)
+    def driver_chats_settings(ctx):
+        with db._get_cursor() as cursor:
+            people = queries.extra_search_people(cursor)
+        return jsonify({
+            'daily_limit': DAILY_SEARCH_LIMIT,
+            'max_extra': MAX_EXTRA_SEARCHES,
+            'people': people,
+        }), 200
+
+    @dch_route('/settings/extra/<int:user_id>', methods=('PUT',), settings=True)
+    def driver_chats_set_extra(ctx, user_id):
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        extra = small_int(body.get('extra'))
+        # expected — сколько было на экране у нажавшего. Необязателен (ручку
+        # можно позвать и руками), но если пришёл — обязан быть числом: молча
+        # пропустить сломанный значило бы снять защиту от устаревшего списка.
+        expected = small_int(body['expected']) if 'expected' in body else None
+        if (extra is None or not 0 <= extra <= MAX_EXTRA_SEARCHES
+                or ('expected' in body and expected is None)):
+            return jsonify({
+                "error": "Добавить можно от 0 до %d поисков" % MAX_EXTRA_SEARCHES,
+                "code": "EXTRA_OUT_OF_RANGE",
+            }), 400
+        with db._get_cursor() as cursor:
+            # Право получателя проверяем на сервере, а не списком на экране:
+            # ручку зовут и напрямую, а список мог устареть, пока окно было
+            # открыто (человека перевели, уволили, назначили супервайзером).
+            person = queries.load_access_context(cursor, user_id)
+            if not person:
+                return jsonify({"error": "Сотрудник не найден",
+                                "code": "USER_NOT_FOUND"}), 404
+            if not access.can_receive_extra_searches(person):
+                return jsonify({
+                    "error": "Добавить поиски можно только операторам, стажёрам "
+                             "и тренерам раздела",
+                    "code": "EXTRA_NOT_ALLOWED",
+                }), 403
+            saved, previous = queries.set_extra_searches(
+                cursor, user_id, extra, ctx, expected=expected)
+            if saved and saved['extra_today'] != previous:
+                # Журнал — той же транзакцией: добавка без строки в журнале —
+                # это «43 поиска при лимите 40» без объяснения, а у самой
+                # добавки за день хранится только последний, кто её менял.
+                queries.log_event(cursor, ctx, 'extra_searches',
+                                  comment_text=extra_searches_note(person, extra, previous),
+                                  ip_address=_ip(), user_agent=_ua())
+            used_today, _ = queries.search_usage_today(cursor, user_id)
+        if saved is None:
+            current = previous
+            shown = ('+%d' % current['extra_today']) if current['extra_today'] else '0'
+            who = (' (%s)' % current['granted_by_name']
+                   if current['extra_today'] and current['granted_by_name'] else '')
+            return jsonify({
+                "error": "Пока список был открыт, добавку уже поменяли: сейчас %s%s. "
+                         "Строка обновлена." % (shown, who),
+                "code": "EXTRA_CHANGED",
+                'user_id': user_id, 'used_today': used_today, **current,
+            }), 409
+        logging.info('driver_chats: %s поставил(а) %s доп. поисков на сегодня — %s',
+                     ctx.get('name'), extra, person.get('name'))
+        return jsonify({'user_id': user_id, 'used_today': used_today, **saved}), 200
 
     @dch_route('/ping')
     def driver_chats_ping(ctx):

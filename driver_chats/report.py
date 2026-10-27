@@ -57,6 +57,7 @@ KIND_LABELS = {
     'search': 'Искал номер',
     'open': 'Открыл переписку',
     'handoff': 'Передал чат-менеджеру',
+    'extra_searches': 'Поиски сверх лимита',
 }
 
 ROLE_LABELS = {

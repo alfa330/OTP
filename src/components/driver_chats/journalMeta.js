@@ -14,6 +14,7 @@ export const KIND_LABELS = {
     search: 'Искал номер',
     open: 'Открыл переписку',
     handoff: 'Передал чат-менеджеру',
+    extra_searches: 'Поиски сверх лимита',
 };
 
 export const ROLE_LABELS = {
@@ -33,6 +34,7 @@ export const KIND_TONE = {
     search: 'slate',
     open: 'slate',
     handoff: 'blue',
+    extra_searches: 'slate',
 };
 
 export const kindLabel = (kind) => KIND_LABELS[kind] || kind || '—';

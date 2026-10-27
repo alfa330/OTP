@@ -1862,7 +1862,6 @@ class SearchRouteForeignPhoneTests(unittest.TestCase):
         seen = {'tail': [], 'variants': [], 'vendor': [], 'logged': []}
 
         cursor = MagicMock()
-        cursor.fetchone.return_value = (0,)          # поисков за сегодня — ноль
         db = MagicMock()
 
         @contextmanager
@@ -1892,6 +1891,8 @@ class SearchRouteForeignPhoneTests(unittest.TestCase):
             seen['logged'].append((kind, kwargs.get('phone')))
 
         _patch(queries, 'load_access_context', lambda _c, _uid: dict(context))
+        # Поисков за сегодня — ноль, добавленных сверх лимита — ноль.
+        _patch(queries, 'search_usage_today', lambda _c, _uid: (0, 0))
         _patch(queries, 'cached_client_id', lambda _c, _phone: None)
         _patch(queries, 'local_client_id', _local)
         _patch(queries, 'local_client_by_tail', _tail)
@@ -1994,25 +1995,25 @@ class SearchRouteForeignPhoneTests(unittest.TestCase):
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
 class DailySearchLimitTests(unittest.TestCase):
-    """Суточный потолок поисков: 30 на человека, супер-админ вне лимита.
+    """Суточный потолок поисков: 40 на человека, супер-админ вне лимита.
 
     Потолок защищает не деньги, а месячную квоту Chat2Desk, общую с ночным
     синком метрик отдела: исчерпав её, встают табло СЗоВ, зарплатные метрики
-    чат-менеджеров и учёт часов. Число снижено со 150 до 30 владельцем
-    08.09.2026 — 150 ставились, когда разделом пользовался один супер-админ, а
-    сейчас в периметре 54 человека.
+    чат-менеджеров и учёт часов. История числа: 150 ставились, когда разделом
+    пользовался один супер-админ; 08.09.2026 владелец опустил до 30 (в
+    периметре 54 человека), 27.10.2026 поднял до 40 и разрешил «СВ и выше»
+    добавлять оператору до пяти поисков на сегодня.
     """
 
-    def build(self, *, role='operator', used_today=0):
+    def build(self, *, role='operator', used_today=0, extra_today=0):
         context = {'user_id': 7, 'name': 'Тест', 'role': role,
                    'department_id': 1,
                    'department_code': '' if role == 'super_admin' else 'szov',
-                   'direction_model': None,
+                   'direction_model': None, 'status': 'working',
                    'headed_department_ids': [], 'headed_department_codes': []}
         seen = {'vendor': [], 'logged': []}
 
         cursor = MagicMock()
-        cursor.fetchone.return_value = (used_today,)
         db = MagicMock()
 
         @contextmanager
@@ -2031,6 +2032,7 @@ class DailySearchLimitTests(unittest.TestCase):
             return {'id': 500, 'name': 'Водитель', 'phone': phone}
 
         _patch(queries, 'load_access_context', lambda _c, _uid: dict(context))
+        _patch(queries, 'search_usage_today', lambda _c, _uid: (used_today, extra_today))
         _patch(queries, 'cached_client_id', lambda _c, _phone: None)
         _patch(queries, 'local_client_id', lambda *_a, **_k: None)
         _patch(queries, 'local_client_by_tail', lambda *_a, **_k: None)
@@ -2055,10 +2057,14 @@ class DailySearchLimitTests(unittest.TestCase):
             sensitive_access_granted=lambda _uid: True))
         return app.test_client(), seen
 
-    def test_the_limit_is_thirty(self):
-        """Число названо владельцем словами. Двойника у него нет: экран берёт
-        потолок из ответа сервера, а не хранит свою копию."""
-        self.assertEqual(routes_module.DAILY_SEARCH_LIMIT, 30)
+    def search(self, client):
+        return client.get('/api/driver_chats/search?phone=87071234567')
+
+    def test_the_limit_is_forty(self):
+        """Число названо владельцем словами (27.10.2026, было 30). Двойника у
+        него нет: экран берёт потолок из ответа сервера, а не хранит свою копию."""
+        self.assertEqual(routes_module.DAILY_SEARCH_LIMIT, 40)
+        self.assertEqual(routes_module.MAX_EXTRA_SEARCHES, 5)
 
     def test_everyone_but_the_super_admin_is_counted(self):
         for role in ('operator', 'trainee', 'sv', 'admin'):
@@ -2067,25 +2073,80 @@ class DailySearchLimitTests(unittest.TestCase):
         self.assertFalse(access.is_search_limited(
             ctx(role='super_admin', department_code='')))
 
-    def test_the_thirtieth_search_still_goes_through(self):
-        """Потолок — это «не больше тридцати», а не «двадцать девять»."""
-        client, seen = self.build(role='sv', used_today=29)
-        response = client.get('/api/driver_chats/search?phone=87071234567')
+    def test_the_fortieth_search_still_goes_through(self):
+        """Потолок — это «не больше сорока», а не «тридцать девять»."""
+        client, seen = self.build(role='sv', used_today=39)
+        response = self.search(client)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['searches_left'], 0)
         self.assertEqual(seen['vendor'], ['77071234567'])
 
-    def test_the_thirty_first_is_refused_before_the_vendor(self):
+    def test_the_forty_first_is_refused_before_the_vendor(self):
         """Отказ обязан прийти РАНЬШЕ обращения к вендору — иначе потолок
         защищает квоту уже после того, как её потратили."""
-        client, seen = self.build(role='sv', used_today=30)
-        response = client.get('/api/driver_chats/search?phone=87071234567')
+        client, seen = self.build(role='sv', used_today=40)
+        response = self.search(client)
         self.assertEqual(response.status_code, 429)
         payload = response.get_json()
         self.assertEqual(payload['code'], 'DAILY_LIMIT_REACHED')
-        self.assertIn('30', payload['error'])
+        self.assertIn('(40)', payload['error'])
         self.assertEqual(seen['vendor'], [], 'вендора не спрашивали')
         self.assertEqual(seen['logged'], [], 'и поиск в журнал не писали')
+
+    def test_added_searches_lift_todays_ceiling(self):
+        """Добавленное «СВ и выше» сдвигает потолок СЕГОДНЯ: при +3 проходит
+        сорок третий поиск, а не сороковой."""
+        client, seen = self.build(used_today=42, extra_today=3)
+        response = self.search(client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['searches_left'], 0)
+        self.assertEqual(seen['vendor'], ['77071234567'])
+
+        client, seen = self.build(used_today=43, extra_today=3)
+        response = self.search(client)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(seen['vendor'], [], 'и сверх добавленного — до вендора')
+
+    def test_searches_left_counts_from_todays_ceiling(self):
+        """Остаток после поиска — от потолка СЕГОДНЯ: с +3 после сорок первого
+        поиска остаётся два, а не ноль. Это число рисует «Осталось поисков»."""
+        client, _ = self.build(used_today=40, extra_today=3)
+        response = self.search(client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['searches_left'], 2)
+
+    def test_operator_out_of_searches_is_told_the_supervisor_can_add(self):
+        """«Обратитесь к супервайзеру» перестало быть пустой фразой: супервайзер
+        может добавить. Текст называет, сколько ещё можно, — и по-русски при
+        любом числе."""
+        cases = (
+            ({'used_today': 40}, ['лимит поисков (40)',
+                                  'супервайзер может добавить до 5 поисков на сегодня']),
+            ({'used_today': 41, 'extra_today': 1}, ['40 по лимиту и +1 сверх него',
+                                                     'ещё до 4 поисков']),
+            ({'used_today': 42, 'extra_today': 2}, ['40 по лимиту и +2 сверх него',
+                                                     'ещё до 3 поисков']),
+            ({'used_today': 44, 'extra_today': 4}, ['+4 сверх него', 'ещё один поиск на сегодня']),
+        )
+        for kwargs, phrases in cases:
+            with self.subTest(**kwargs):
+                client, _ = self.build(**kwargs)
+                error = self.search(client).get_json()['error']
+                for phrase in phrases:
+                    self.assertIn(phrase, error)
+                self.assertNotIn('добавленных', error, 'число с прилагательным не склонялось')
+                self.assertNotIn('до 1 ', error)
+
+    def test_nobody_is_sent_for_searches_they_cannot_get(self):
+        """Всё добавлено — или это сам супервайзер, которому добавлять некому, —
+        тогда честно: лимит обновится завтра."""
+        for kwargs in ({'used_today': 45, 'extra_today': 5},
+                       {'role': 'sv', 'used_today': 40}):
+            with self.subTest(**kwargs):
+                client, _ = self.build(**kwargs)
+                error = self.search(client).get_json()['error']
+                self.assertNotIn('супервайзер может', error)
+                self.assertIn('Завтра лимит снова 40', error)
 
     def test_super_admin_passes_far_past_the_limit(self):
         """Он не ведёт линию, а разбирает жалобы и проверяет сам раздел."""
@@ -2098,22 +2159,550 @@ class DailySearchLimitTests(unittest.TestCase):
 
     def test_context_hides_the_ceiling_from_the_super_admin(self):
         """Экран рисует остаток по числу; «осталось поисков: —» было бы шумом."""
-        client, _ = self.build(role='super_admin', used_today=999)
+        client, _ = self.build(role='super_admin', used_today=999, extra_today=2)
         limits = client.get('/api/driver_chats/context').get_json()['limits']
         self.assertIsNone(limits['searches_per_day'])
+        self.assertEqual(limits['extra_today'], 0, 'добавлять к отсутствующему потолку нечего')
 
         client, _ = self.build(role='operator', used_today=4)
         limits = client.get('/api/driver_chats/context').get_json()['limits']
-        self.assertEqual(limits['searches_per_day'], 30)
+        self.assertEqual(limits['searches_per_day'], 40)
         self.assertEqual(limits['used_today'], 4)
+        self.assertEqual(limits['extra_today'], 0)
+
+    def test_context_counts_the_added_searches_into_todays_ceiling(self):
+        """Остаток на экране считается от потолка из ответа — значит, потолок
+        приходит уже с добавленным, иначе экран занижал бы остаток."""
+        client, _ = self.build(role='operator', used_today=4, extra_today=2)
+        limits = client.get('/api/driver_chats/context').get_json()['limits']
+        self.assertEqual(limits['searches_per_day'], 42)
+        self.assertEqual(limits['extra_today'], 2)
 
     def test_refresh_costs_a_search_too(self):
         """«Обновить» — то же обращение к вендору мимо кеша. Кнопка, ходящая
         мимо счётчика, обошла бы защиту квоты."""
-        client, seen = self.build(role='sv', used_today=30)
+        client, seen = self.build(role='sv', used_today=40)
         response = client.get('/api/driver_chats/search?phone=87071234567&refresh=1')
         self.assertEqual(response.status_code, 429)
         self.assertEqual(seen['vendor'], [])
+
+
+class ExtraSearchesAccessTests(unittest.TestCase):
+    """Кто добавляет поиски сверх лимита и кому. Владелец 27.10.2026: «св и выше
+    добавь в настройках возможность добавлять дополнительные попытки операторам
+    до 5 попыток» — на сегодня."""
+
+    def test_supervisors_head_and_super_admin_can_add(self):
+        for person in (ctx(role='sv'), ctx(role='supervisor'),
+                       ctx(role='sv', direction_model='chat_manager'),
+                       ctx(role='admin', department_code='szov', headed=('szov',)),
+                       ctx(role='super_admin', department_code='')):
+            with self.subTest(role=person['role'], model=person['direction_model']):
+                self.assertTrue(access.can_grant_extra_searches(person))
+                self.assertTrue(access.capabilities(person)['can_grant_extra_searches'])
+
+    def test_line_staff_and_strangers_cannot(self):
+        for person in (ctx(role='operator'), ctx(role='trainee'), ctx(role='trainer'),
+                       ctx(role='sv', department_code='op'),
+                       ctx(role='admin', department_code='szov')):
+            with self.subTest(role=person['role'], dept=person['department_code']):
+                self.assertFalse(access.can_grant_extra_searches(person))
+                self.assertFalse(access.capabilities(person)['can_grant_extra_searches'])
+
+    def test_grant_circle_is_the_journal_circle(self):
+        """Кто добавил поисков, тот видит в журнале, на что они ушли."""
+        people = [ctx(role=role) for role in
+                  ('operator', 'trainee', 'trainer', 'sv', 'supervisor', 'admin',
+                   'super_admin', 'невиданная_роль')]
+        people += [ctx(role='sv', department_code='op'),
+                   ctx(role='admin', department_code='szov', headed=('szov',))]
+        for person in people:
+            with self.subTest(role=person['role'], dept=person['department_code']):
+                self.assertEqual(access.can_grant_extra_searches(person),
+                                 access.can_view_journal(person))
+
+    def test_operators_trainees_and_the_trainer_receive(self):
+        for role in ('operator', 'trainee', 'trainer', 'невиданная_роль'):
+            with self.subTest(role=role):
+                self.assertTrue(access.can_receive_extra_searches(ctx(role=role)))
+
+    def test_nobody_adds_searches_to_himself_or_his_peers(self):
+        """Супервайзер, добавляющий поиски себе, — потолок на честном слове."""
+        for person in (ctx(role='sv'), ctx(role='sv', direction_model='chat_manager'),
+                       ctx(role='admin', department_code='szov', headed=('szov',))):
+            with self.subTest(role=person['role']):
+                self.assertFalse(access.can_receive_extra_searches(person))
+
+    def test_heads_of_other_departments_are_not_line_staff(self):
+        """Журнал смотрит лишь на то, возглавляет ли человек СЗоВ, и супервайзер
+        СЗоВ, назначенный главой другого отдела, журнала лишается. Получателем
+        добавок он от этого не становится — как и любой глава."""
+        for role in ('sv', 'operator', 'admin'):
+            with self.subTest(role=role):
+                person = {**ctx(role=role), 'headed_department_ids': [168],
+                          'headed_department_codes': ['hr']}
+                self.assertFalse(access.can_receive_extra_searches(person))
+
+    def test_super_admin_has_no_ceiling_to_lift(self):
+        self.assertFalse(access.can_receive_extra_searches(
+            ctx(role='super_admin', department_code='')))
+
+    def test_people_outside_the_section_receive_nothing(self):
+        for person in (ctx(role='operator', direction_model='chat_manager'),
+                       ctx(role='operator', department_code='op'),
+                       ctx(role='admin', department_code='szov')):
+            with self.subTest(role=person['role'], dept=person['department_code']):
+                self.assertFalse(access.can_receive_extra_searches(person))
+
+    def test_fired_people_receive_nothing(self):
+        for status in ('fired', 'dismissal', ' Fired '):
+            with self.subTest(status=status):
+                self.assertFalse(access.can_receive_extra_searches(
+                    {**ctx(role='operator'), 'status': status}))
+        for status in (None, '', 'working', 'unpaid_leave'):
+            with self.subTest(status=status):
+                self.assertTrue(access.can_receive_extra_searches(
+                    {**ctx(role='operator'), 'status': status}))
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class SettingsRouteTests(unittest.TestCase):
+    """Ручки вкладки «Настройки»: список людей и «добавить поисков на сегодня».
+
+    Граница — на сервере: кнопку в интерфейсе можно обойти, ручку зовут
+    напрямую. Потолок «пять», круг получателей и защита от устаревшего списка
+    проверяются здесь, а не степпером на экране.
+    """
+
+    SV = {'user_id': 7, 'name': 'Супервайзер СЗоВ', 'role': 'sv', 'department_id': 1,
+          'department_code': 'szov', 'direction_model': None, 'status': 'working',
+          'headed_department_ids': [], 'headed_department_codes': []}
+    OPERATOR = {**SV, 'user_id': 31, 'name': 'Оператор Линии', 'role': 'operator'}
+
+    def build(self, requester=None, people=None, stored=0, conflict=None):
+        """stored — добавка в базе; conflict — строка, которую «вернёт» база,
+        если ожидание экрана с ней не сошлось."""
+        requester = requester or self.SV
+        people = {p['user_id']: p for p in (people or [self.OPERATOR])}
+        people[requester['user_id']] = requester
+        seen = {'saved': [], 'listed': 0, 'logged': []}
+
+        cursor = MagicMock()
+        db = MagicMock()
+
+        @contextmanager
+        def _get_cursor():
+            yield cursor
+
+        db._get_cursor = _get_cursor
+
+        def _patch(module, name, value):
+            original = getattr(module, name)
+            setattr(module, name, value)
+            self.addCleanup(setattr, module, name, original)
+
+        def _people(_c):
+            seen['listed'] += 1
+            return [{'user_id': 31, 'name': 'Оператор Линии', 'role': 'operator',
+                     'used_today': 40, 'extra_today': 0,
+                     'granted_by_name': None, 'granted_at': None}]
+
+        def _save(_c, user_id, extra, granted_by, expected=None):
+            seen['saved'].append((user_id, extra, granted_by['user_id'], expected))
+            if conflict is not None:
+                return None, conflict
+            return ({'extra_today': extra, 'granted_by_name': granted_by['name'],
+                     'granted_at': '2026-10-27T14:05:00'}, stored)
+
+        def _log(_c, _ctx, kind, **fields):
+            seen['logged'].append((kind, fields.get('comment_text')))
+
+        _patch(queries, 'load_access_context',
+               lambda _c, uid: dict(people[uid]) if uid in people else None)
+        _patch(queries, 'extra_search_people', _people)
+        _patch(queries, 'set_extra_searches', _save)
+        _patch(queries, 'log_event', _log)
+        # Расход зависит от человека: в ответе PUT обязан стоять расход
+        # ПОЛУЧАТЕЛЯ, а не того, кто нажал.
+        _patch(queries, 'search_usage_today',
+               lambda _c, uid: ({31: 40}.get(uid, 3), 0))
+
+        app = Flask(__name__)
+        app.register_blueprint(build_driver_chats_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (requester['user_id'], None, None),
+            sensitive_access_granted=lambda _uid: True))
+        return app.test_client(), seen
+
+    def put(self, client, user_id, body):
+        return client.put('/api/driver_chats/settings/extra/%s' % user_id,
+                          data=body if isinstance(body, str) else json.dumps(body),
+                          content_type='application/json')
+
+    def test_line_staff_does_not_get_the_settings(self):
+        for role in ('operator', 'trainee', 'trainer'):
+            with self.subTest(role=role):
+                client, seen = self.build(requester={**self.SV, 'role': role})
+                for response in (client.get('/api/driver_chats/settings'),
+                                 self.put(client, 31, {'extra': 1})):
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(response.get_json()['code'],
+                                     'DRIVER_CHATS_SETTINGS_CLOSED')
+                self.assertEqual(seen, {'saved': [], 'listed': 0, 'logged': []},
+                                 'в базу не ходили')
+
+    def test_supervisor_sees_the_people_and_the_numbers(self):
+        client, seen = self.build()
+        response = client.get('/api/driver_chats/settings')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['daily_limit'], 40)
+        self.assertEqual(payload['max_extra'], 5)
+        self.assertEqual([p['user_id'] for p in payload['people']], [31])
+
+    def test_from_zero_to_five_is_saved_as_a_total(self):
+        client, seen = self.build()
+        for extra in (1, 5, '3'):
+            with self.subTest(extra=extra):
+                response = self.put(client, 31, {'extra': extra, 'expected': 0})
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload['extra_today'], int(extra))
+                self.assertEqual(payload['used_today'], 40,
+                                 'расход получателя (31), а не супервайзера (7)')
+        self.assertEqual(seen['saved'], [(31, 1, 7, 0), (31, 5, 7, 0), (31, 3, 7, 0)])
+
+    def test_without_expected_the_total_is_written_as_is(self):
+        """Ручку можно позвать и руками — тогда проверки устаревшего списка нет."""
+        client, seen = self.build()
+        self.assertEqual(self.put(client, 31, {'extra': 2}).status_code, 200)
+        self.assertEqual(seen['saved'], [(31, 2, 7, None)])
+
+    def test_every_change_lands_in_the_journal(self):
+        """Строка добавки за день хранит только последнего, кто её менял; журнал
+        хранит каждого — той же транзакцией, что и сама добавка."""
+        client, seen = self.build(stored=1)
+        self.put(client, 31, {'extra': 3, 'expected': 1})
+        self.assertEqual(seen['logged'],
+                         [('extra_searches', 'Оператор Линии: +3 поиска на сегодня (было +1)')])
+
+        client, seen = self.build(stored=3)
+        self.put(client, 31, {'extra': 0, 'expected': 3})
+        self.assertEqual(seen['logged'],
+                         [('extra_searches', 'Оператор Линии: добавка снята (было +3)')])
+
+    def test_no_change_no_journal_line(self):
+        client, seen = self.build(stored=2)
+        self.assertEqual(self.put(client, 31, {'extra': 2, 'expected': 2}).status_code, 200)
+        self.assertEqual(seen['logged'], [])
+
+    def test_stale_screen_gets_the_real_number_instead_of_overwriting(self):
+        """Список у СВ мог устареть: «+» по старому нулю снял бы чужие «+3»."""
+        current = {'extra_today': 3, 'granted_by_name': 'Другой Супервайзер',
+                   'granted_at': '2026-10-27T14:05:00'}
+        client, seen = self.build(conflict=current)
+        response = self.put(client, 31, {'extra': 1, 'expected': 0})
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload['code'], 'EXTRA_CHANGED')
+        self.assertEqual(payload['extra_today'], 3)
+        self.assertEqual(payload['used_today'], 40)
+        self.assertIn('+3 (Другой Супервайзер)', payload['error'])
+        self.assertEqual(seen['logged'], [], 'ничего не поменялось — в журнал не пишем')
+
+    def test_out_of_range_and_garbage_are_refused_before_the_database(self):
+        client, seen = self.build()
+        bodies = ({'extra': 6}, {'extra': -1}, {'extra': 'пять'}, {'extra': True},
+                  {'extra': None}, {}, {'extra': 2.7}, {'extra': 2.0},
+                  {'extra': 1, 'expected': 'x'}, {'extra': 1, 'expected': True},
+                  {'extra': 1, 'expected': None},
+                  '[1]', '"5"', '{"extra": Infinity}', '{"extra": NaN}', 'не json')
+        for body in bodies:
+            with self.subTest(body=body):
+                response = self.put(client, 31, body)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['code'], 'EXTRA_OUT_OF_RANGE')
+        self.assertEqual(seen['saved'], [])
+
+    def test_searches_go_only_to_the_line(self):
+        """Себе, коллеге-супервайзеру, чат-менеджеру, чужому отделу и уволенному —
+        нельзя, даже если ручку позвали в обход экрана."""
+        strangers = [
+            {**self.OPERATOR, 'user_id': 32, 'role': 'sv'},
+            {**self.OPERATOR, 'user_id': 33, 'direction_model': 'chat_manager'},
+            {**self.OPERATOR, 'user_id': 34, 'department_code': 'op'},
+            {**self.OPERATOR, 'user_id': 35, 'status': 'fired'},
+            {**self.OPERATOR, 'user_id': 36, 'role': 'super_admin', 'department_code': ''},
+        ]
+        client, seen = self.build(people=strangers)
+        for user_id in (7, 32, 33, 34, 35, 36):
+            with self.subTest(user_id=user_id):
+                response = self.put(client, user_id, {'extra': 2})
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.get_json()['code'], 'EXTRA_NOT_ALLOWED')
+        self.assertEqual(seen['saved'], [])
+
+    def test_unknown_person_is_not_found(self):
+        client, seen = self.build()
+        response = self.put(client, 999, {'extra': 2})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(seen['saved'], [])
+
+    def test_journal_note_reads_well_at_every_number(self):
+        person = {'user_id': 31, 'name': 'Ван Ли'}
+        self.assertEqual(routes_module.extra_searches_note(person, 1, 0),
+                         'Ван Ли: +1 поиск на сегодня')
+        self.assertEqual(routes_module.extra_searches_note(person, 4, 2),
+                         'Ван Ли: +4 поиска на сегодня (было +2)')
+        self.assertEqual(routes_module.extra_searches_note(person, 5, 0),
+                         'Ван Ли: +5 поисков на сегодня')
+        self.assertEqual(routes_module.extra_searches_note({'user_id': 31}, 0, 5),
+                         '№31: добавка снята (было +5)')
+
+
+class ExtraSearchesQueriesTests(unittest.TestCase):
+    """SQL поисков сверх лимита: сутки по Алматы, итог вместо прибавки.
+
+    Postgres в CI нет, поэтому условия SQL сверяются ЦЕЛЫМИ фрагментами, до
+    закрывающей скобки: проверка подстроки из середины пропускала «::date - 1»
+    (вчерашняя добавка на сегодня) и «OR TRUE» (расход за всё время).
+    """
+
+    NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+
+    class _Cursor:
+        def __init__(self, one=None, rows=None, ones=None):
+            self.one, self.rows = one, rows or []
+            self.ones = list(ones) if ones is not None else None
+            self.sql, self.params = None, None
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, params
+            self.executed.append((sql, params))
+
+        def fetchone(self):
+            return self.ones.pop(0) if self.ones is not None else self.one
+
+        def fetchall(self):
+            return self.rows
+
+    def flat(self, sql):
+        return ' '.join(sql.split())
+
+    def test_usage_counts_todays_searches_and_todays_grant(self):
+        cursor = self._Cursor(one=(12, 3))
+        self.assertEqual(queries.search_usage_today(cursor, 31), (12, 3))
+        sql = self.flat(cursor.sql)
+        self.assertIn("WHERE user_id = %(user_id)s AND kind = 'search' "
+                      "AND created_at >= date_trunc('day', " + self.NOW + ")),", sql)
+        self.assertIn("WHERE user_id = %(user_id)s AND day = (" + self.NOW + ")::date), 0)",
+                      sql, 'добавка — СЕГОДНЯШНЯЯ, без сдвига дня')
+        self.assertEqual(queries.search_usage_today(self._Cursor(one=None), 31), (0, 0))
+
+    def test_people_list_counts_today_only(self):
+        sql = self.flat(queries._GRANT_PEOPLE_SQL)
+        self.assertIn("WHERE kind = 'search' AND created_at >= date_trunc('day', "
+                      + self.NOW + ") GROUP BY user_id", sql)
+        self.assertIn("LEFT JOIN dch_search_grants g ON g.user_id = u.id AND g.day = ("
+                      + self.NOW + ")::date WHERE", sql)
+
+    def test_grant_is_stored_as_a_total_not_an_increment(self):
+        """Повтор того же запроса ничего не удваивает, а «добавить пять, потом
+        ещё пять» не выходит за потолок. И «кто и когда» — последнего."""
+        sql = self.flat(queries._GRANT_UPSERT_SQL)
+        for fragment in ('ON CONFLICT (user_id, day) DO UPDATE',
+                         'SET extra = EXCLUDED.extra,',
+                         'granted_by = EXCLUDED.granted_by,',
+                         'granted_by_name = EXCLUDED.granted_by_name,',
+                         'updated_at = EXCLUDED.updated_at',
+                         'WHERE dch_search_grants.extra = %(previous)s RETURNING'):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sql)
+        self.assertNotRegex(sql, r'extra\s*\+', 'прибавка вместо итога')
+        self.assertIn('FOR UPDATE', queries._GRANT_CURRENT_SQL)
+
+    def test_first_grant_of_the_day_is_inserted(self):
+        when = datetime(2026, 10, 27, 14, 5)
+        cursor = self._Cursor(ones=[None, (3, 'Супервайзер', when)])
+        saved, previous = queries.set_extra_searches(
+            cursor, 31, 3, {'user_id': 7, 'name': 'Супервайзер'}, expected=0)
+        self.assertEqual(saved, {'extra_today': 3, 'granted_by_name': 'Супервайзер',
+                                 'granted_at': '2026-10-27T14:05:00'})
+        self.assertEqual(previous, 0)
+        upsert = cursor.executed[1][1]
+        self.assertEqual((upsert['extra'], upsert['previous'], upsert['granted_by']), (3, 0, 7))
+
+    def test_stale_expectation_writes_nothing(self):
+        """Экран думал «0», а в базе уже «+3» от другого: не пишем, отдаём «+3»."""
+        when = datetime(2026, 10, 27, 14, 5)
+        cursor = self._Cursor(ones=[(3, 'Другой', when)])
+        saved, current = queries.set_extra_searches(
+            cursor, 31, 1, {'user_id': 7, 'name': 'Супервайзер'}, expected=0)
+        self.assertIsNone(saved)
+        self.assertEqual(current['extra_today'], 3)
+        self.assertEqual(len(cursor.executed), 1, 'до записи не дошли')
+
+    def test_parallel_first_insert_is_a_conflict_not_a_silent_overwrite(self):
+        """Строки ещё не было, и её вставил другой — RETURNING пуст: расхождение."""
+        when = datetime(2026, 10, 27, 14, 5)
+        cursor = self._Cursor(ones=[None, None, (2, 'Другой', when)])
+        saved, current = queries.set_extra_searches(
+            cursor, 31, 1, {'user_id': 7, 'name': 'Супервайзер'}, expected=0)
+        self.assertIsNone(saved)
+        self.assertEqual(current['extra_today'], 2)
+
+    def test_people_list_keeps_only_those_who_can_receive(self):
+        """SQL отбирает живых людей отдела, а кому можно добавить — решает
+        access, тем же правилом, что и гейт раздела."""
+        def row(uid, role, model=None, headed=(), used=0, extra=0):
+            return (uid, 'Человек %s' % uid, role, 1, 'szov', model, 'working',
+                    list(headed), ['szov'] if headed else [], used, extra, None, None)
+
+        cursor = self._Cursor(rows=[
+            row(31, 'operator', used=40),
+            row(32, 'trainee'),
+            row(33, 'trainer', extra=2),
+            row(34, 'sv'),
+            row(35, 'operator', model='chat_manager'),
+            row(36, 'admin', headed=(1,)),
+        ])
+        people = queries.extra_search_people(cursor)
+        self.assertEqual([p['user_id'] for p in people], [31, 32, 33])
+        self.assertEqual(people[0]['used_today'], 40)
+        self.assertEqual(people[2]['extra_today'], 2)
+        self.assertEqual(cursor.params['department_code'], 'szov')
+        self.assertEqual(cursor.params['inactive'], ['fired', 'dismissal'])
+
+    def test_grants_live_as_long_as_the_journal(self):
+        joined = '\n'.join(schema.DDL)
+        self.assertIn('CREATE TABLE IF NOT EXISTS dch_search_grants', joined)
+        self.assertIn('PRIMARY KEY (user_id, day)', joined)
+        grants = joined.split('dch_search_grants (')[1].split(')\n')[0]
+        self.assertNotIn('CHECK', grants, 'потолок держит сервер, а не миграция')
+        # Знак условия — главное: «day >» стёр бы и сегодняшние добавки.
+        self.assertIn("DELETE FROM dch_search_grants WHERE day < (" + self.NOW
+                      + ")::date - %(days)s", self.flat(' '.join(schema.CLEANUP_SQL)))
+
+        cursor = MagicMock()
+        cursor.rowcount = 2
+        removed = schema.cleanup(cursor, events_days=365, cache_days=2)
+        self.assertEqual(removed.get('grants'), 2)
+        calls = [c.args for c in cursor.execute.call_args_list]
+        grants_cleanup = [args for args in calls if 'dch_search_grants' in args[0]]
+        self.assertEqual(len(grants_cleanup), 1)
+        self.assertEqual(grants_cleanup[0][1], {'days': 365})
+
+    def test_grant_changes_are_a_journal_kind_with_a_label(self):
+        self.assertIn('extra_searches', schema.EVENT_KINDS)
+        self.assertEqual(report.KIND_LABELS['extra_searches'], 'Поиски сверх лимита')
+
+
+class SettingsScreenTests(unittest.TestCase):
+    """Вкладка «Настройки» (27.10.2026): поиски сверх лимита на сегодня.
+
+    Поведение очереди сохранения и правил экрана — в
+    tests/driver_chats_settings.test.mjs (node --test); здесь — устройство,
+    которое легко потерять при доработке.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.view = VIEW_JSX.read_text(encoding='utf-8')
+        cls.settings = (VIEW_JSX.parent / 'DriverChatsSettings.jsx').read_text(encoding='utf-8')
+        cls.meta = (VIEW_JSX.parent / 'settingsMeta.js').read_text(encoding='utf-8')
+
+    def test_tab_is_drawn_by_the_server_capability(self):
+        """Вкладку рисует право из /context, а не роль на фронте: правило одно,
+        и живёт оно в access.can_grant_extra_searches."""
+        self.assertIn('sectionTabs(context?.capabilities, recalledTabs)', self.view)
+        self.assertIn('capabilities.can_grant_extra_searches', self.meta)
+        self.assertIn("activeTab === 'settings' ?", self.view)
+
+    def test_tab_bar_is_drawn_from_the_first_frame(self):
+        """Полоса вкладок у супервайзера не должна появляться через полсекунды
+        и сдвигать экран: права прошлого входа помним по учётке."""
+        self.assertIn('recallTabs(userId)', self.view)
+        self.assertIn('rememberTabs(userId, data.capabilities)', self.view)
+        app = APP_JSX.read_text(encoding='utf-8-sig')
+        block = app.split('<DriverChatsView')[1].split('/>')[0]
+        self.assertIn('userId={user?.id}', block)
+
+    def test_change_is_saved_at_once_with_what_the_screen_saw(self):
+        """Как степпер iOS: без «Сохранить». Уходит итог и то, что было на
+        экране, — сервер отвечает 409, если список устарел."""
+        self.assertIn("method: 'PUT'", self.settings)
+        self.assertIn('JSON.stringify({ extra, expected })', self.settings)
+        self.assertIn('extraSaver.set(person.user_id, next)', self.settings)
+        self.assertNotRegex(self.settings, r'>\s*Сохранить\s*<', 'кнопки «Сохранить» нет')
+
+    def test_the_list_is_never_drawn_from_memory(self):
+        """Список из памяти прошлого открытия переставлял строки между группами
+        через долю секунды и утром показывал вчерашние добавки."""
+        self.assertNotIn('let memo', self.settings)
+        self.assertIn('<SettingsSkeleton count={lastCount} />', self.settings)
+        skeleton = self.settings.split('const SettingsSkeleton')[1]
+        self.assertIn('SEARCH_FIELD', skeleton, 'заготовка держит место под поле поиска')
+        self.assertIn('count === null || count === undefined || count >= SEARCH_FROM', skeleton,
+                      'и при первом открытии, когда число людей ещё неизвестно')
+        self.assertIn('iosGroupLabel', skeleton, 'и подпись группы теми же буквами')
+        self.assertIn('h-[18px] w-[18px]', skeleton, 'и место под «i» той же высоты')
+
+    def test_a_burst_of_presses_is_one_request(self):
+        """Каждое изменение пишется в журнал; шесть «+» подряд — одна строка."""
+        saver = (VIEW_JSX.parent / 'extraSaver.js').read_text(encoding='utf-8')
+        self.assertIn('export const extraSaver = createExtraSaver({ settleMs: 400 });', saver)
+
+    def test_row_height_does_not_change_with_the_first_plus(self):
+        """«Кто добавил» — подсказка у степпера, а не третья строка: та
+        появлялась с первым «+» и двигала всё ниже на 19 px."""
+        row = self.settings.split('const PersonRow')[1].split('const SettingsSkeleton')[0]
+        self.assertIn('title={note || undefined}', row)
+        self.assertEqual(row.count('{note &&'), 0)
+
+    def test_stepper_edges_keep_the_keyboard_focus(self):
+        """Погашенная `disabled` кнопка теряет фокус: дойдя до «+5» с
+        клавиатуры, человек выпадал бы в начало страницы."""
+        row = self.settings.split('const PersonRow')[1].split('const SettingsSkeleton')[0]
+        self.assertIn('aria-disabled={extra >= maxExtra || undefined}', row)
+        self.assertIn('aria-disabled={extra <= 0 || undefined}', row)
+        self.assertNotRegex(row, r'\sdisabled=\{')
+
+    def test_wide_screens_get_a_third_column(self):
+        self.assertIn("const GRID = 'grid xl:grid-cols-2 2xl:grid-cols-3';", self.settings)
+        self.assertIn("index === 2 ? '2xl:border-t-0' : ''", self.settings)
+
+    def test_open_list_is_refreshed_without_reshuffling(self):
+        """Вернулись в окно — числа свежие, строки на местах (mergeRefresh)."""
+        self.assertIn("document.addEventListener('visibilitychange', refresh)", self.settings)
+        self.assertIn('mergeRefresh(prev.people, payload.people)', self.settings)
+
+    def test_operator_sees_the_added_searches_without_reloading(self):
+        """Упёрся в лимит, попросил СВ в мессенджере, вернулся в окно — отказ
+        уходит сам, если поиски добавили."""
+        self.assertIn("if (data.code === 'DAILY_LIMIT_REACHED') setLimitReached(true);", self.view)
+        recheck = self.view.split('const [limitReached, setLimitReached]')[1].split(
+            '// ── Поиск и обновление')[0]
+        self.assertIn('/api/driver_chats/context', recheck)
+        self.assertIn("document.addEventListener('visibilitychange', recheck)", recheck)
+        self.assertIn("setSearchError('')", recheck)
+
+    def test_the_explanation_hides_under_the_i(self):
+        """Пояснение — под «i» у подписи, а не строкой под списком (правило
+        владельца про шум)."""
+        self.assertIn('<IosHint text={hintText(', self.settings)
+
+    def test_row_does_not_break_on_the_phone(self):
+        """Оболочка телефона переводит `flex-nowrap` в перенос — запрет
+        переноса стоит инлайн-стилем."""
+        self.assertIn("const NOWRAP = { flexWrap: 'nowrap' };", self.settings)
+        self.assertIn('style={NOWRAP}', self.settings)
+
+    def test_journal_filter_knows_the_new_kind(self):
+        self.assertIn("{ value: 'extra_searches', label: kindLabel('extra_searches') }", self.view)
+        self.assertIn('extra_searches: Gauge', self.view)
 
 
 class SearchScreenTests(unittest.TestCase):
