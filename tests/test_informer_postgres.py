@@ -307,6 +307,24 @@ def test_campaign_rate_and_window(env):
     assert poll(svc, big)['calls'] == []
 
 
+def test_dispatcher_polls_once_a_minute_while_nothing_may_call(env):
+    """Без рассылки в своём окне диспетчер стучался раз в 10 с круглые сутки (27.10.2026).
+    Теперь — раз в минуту; пока рассылка вправе звонить — как раньше."""
+    from informer import service as informer_service
+    svc, clock, _ = env
+    big = {'939': {'capacity': 4, 'active': 0}, '940': {'capacity': 4, 'active': 0}}
+    clock.now = datetime(2026, 10, 15, 5, 30, tzinfo=timezone.utc)      # 10:30 по Алматы
+    assert poll(svc, big)['next_poll_sec'] == informer_service.POLL_QUIET_SEC        # рассылок нет вовсе
+    campaign = make_campaign(svc, phones(2), max_per_minute=3, window_start='10:00', window_end='11:00')
+    assert poll(svc, big)['next_poll_sec'] == informer_service.POLL_QUIET_SEC        # черновик не звонит
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    first = poll(svc, big)
+    assert len(first['calls']) == 2 and first['next_poll_sec'] == informer_service.POLL_SOON_SEC
+    assert poll(svc, big)['next_poll_sec'] == informer_service.POLL_IDLE_SEC         # в окне, ждём итоги
+    clock.tick(hours=1)                                                              # 11:30 — окно кончилось
+    assert poll(svc, big)['next_poll_sec'] == informer_service.POLL_QUIET_SEC
+
+
 def test_answered_and_stages(env):
     svc, clock, _ = env
     campaign = make_campaign(svc, phones(3))

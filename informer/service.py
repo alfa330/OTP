@@ -23,6 +23,11 @@ DETAIL_TARGETS_LIMIT = 500
 DETAILS_MAX_CHARS = 8000
 POLL_SOON_SEC = 2
 POLL_IDLE_SEC = 10
+# Ни одной рассылки в своём окне (или все остывают) — набирать нечего, а раз в 10 с диспетчер
+# стучался круглые сутки: 8,6 тыс. запросов в сутки впустую (27.10.2026). Раз в минуту запуск
+# рассылки или открытие её окна он заметит за минуту, а в разделе робот остаётся «на связи»
+# (ROBOT_ONLINE_SECONDS). Потолок ожидания у диспетчера — те же 60 с (cdr_bridge/informer.py).
+POLL_QUIET_SEC = 60
 POLL_AMI_DOWN_SEC = 15
 
 
@@ -515,6 +520,8 @@ class InformerService:
             campaigns = cur.fetchall()
             issued = []
             more_due = False
+            # Есть ли рассылка, которая сейчас вправе звонить: в своём окне и не остывает.
+            working = False
             pace_ms = 0
             for (cid, w_start, w_end, per_minute, sha, audio_ms, issued_last_minute, campaign_warm, last_issued,
                  cooldown_until, cooldown_count) in campaigns:
@@ -541,6 +548,7 @@ class InformerService:
                     log.warning("Автоинформатор: рассылка %s — сеть не пропускает звонки, остывание до %s (№%s)",
                                 cid, until.isoformat(), count)
                     continue
+                working = True
                 # Простой дольше WARMUP_IDLE_MINUTES (открылось окно дня, долгая пауза) — прогрев заново.
                 idle_since = last_issued or campaign_warm
                 if idle_since and (now - idle_since) >= timedelta(minutes=rules.WARMUP_IDLE_MINUTES) \
@@ -585,8 +593,11 @@ class InformerService:
                 if room_total - len(issued) <= 0:
                     more_due = True
                     break
-        return {"calls": issued, "next_poll_sec": POLL_SOON_SEC if (issued or more_due) else POLL_IDLE_SEC,
-                "dial_gap_ms": pace_ms if issued else 0}
+        if issued or more_due:
+            next_poll = POLL_SOON_SEC
+        else:
+            next_poll = POLL_IDLE_SEC if working else POLL_QUIET_SEC
+        return {"calls": issued, "next_poll_sec": next_poll, "dial_gap_ms": pace_ms if issued else 0}
 
     @staticmethod
     def _effective_rate(per_minute, campaign_warm, agent_warm, now):

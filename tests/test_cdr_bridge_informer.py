@@ -460,3 +460,16 @@ def test_events_of_other_channels_are_ignored(tmp_path):
     d.on_event({'Event': 'Hangup', 'Uniqueid': '1792.55', 'Cause': '16'})
     d.on_event({'Event': 'Hangup', 'Uniqueid': 'inf-999', 'Cause': '16'})
     assert list(d.pending) == []
+
+
+def test_quiet_poll_fits_the_dispatcher_and_the_online_badge():
+    """Портал без рассылок просит раз в минуту (informer/service.py POLL_QUIET_SEC): диспетчер
+    обязан ждать столько, а не зажимать в меньшее, и раздел не должен успеть показать робота
+    «не на связи» между двумя такими заходами."""
+    import re
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'informer' / 'service.py').read_text(encoding='utf-8')
+    quiet = int(re.search(r'^POLL_QUIET_SEC = (\d+)', source, re.M).group(1))
+    online = int(re.search(r'^ROBOT_ONLINE_SECONDS = (\d+)', source, re.M).group(1))
+    assert quiet <= informer.MAX_POLL_S
+    assert quiet + 15 < online, 'запас на сам запрос и сеть'
