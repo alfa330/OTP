@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from twofa import access, crypto, otpauth, rules, totp  # noqa: E402
+from twofa import access, crypto, otpauth, rules, timer, totp  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 BOT_PY = ROOT / 'bot_schedule2.py'
@@ -170,27 +170,42 @@ class CryptoTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_roundtrip_and_fresh_nonce(self):
-        first, second = crypto.encrypt(RFC_SECRET), crypto.encrypt(RFC_SECRET)
+        first, second = crypto.encrypt(RFC_SECRET, 7), crypto.encrypt(RFC_SECRET, 7)
         self.assertNotEqual(first, second)
-        self.assertEqual(crypto.decrypt(first), RFC_SECRET)
+        self.assertTrue(first.startswith('v2:'))
+        self.assertEqual(crypto.decrypt(first, 7), RFC_SECRET)
         self.assertNotIn(base64.b32encode(RFC_SECRET).decode()[:8], first)
 
-    def test_tampering_and_another_key_are_detected(self):
-        token = crypto.encrypt(RFC_SECRET)
+    def test_tampering_another_key_and_another_row_are_detected(self):
+        token = crypto.encrypt(RFC_SECRET, 7)
         blob = bytearray(base64.b64decode(token[3:]))
         blob[-1] ^= 1
         with self.assertRaises(ValueError):
-            crypto.decrypt('v1:' + base64.b64encode(bytes(blob)).decode())
+            crypto.decrypt('v2:' + base64.b64encode(bytes(blob)).decode(), 7)
         with mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'y' * 32).decode()}):
             with self.assertRaises(ValueError):
-                crypto.decrypt(token)
+                crypto.decrypt(token, 7)
+        # Шифротекст, переписанный в строку другого аккаунта, не расшифровывается (разбор 27.10).
+        with self.assertRaises(ValueError):
+            crypto.decrypt(token, 8)
+
+    def test_first_release_format_is_still_readable(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = b'n' * 12
+        sealed = AESGCM(b'z' * 32).encrypt(nonce, RFC_SECRET, b'icore-twofa-account-secret:v1')
+        legacy = 'v1:' + base64.b64encode(nonce + sealed).decode()
+        self.assertEqual(crypto.decrypt(legacy, 123), RFC_SECRET)
 
     def test_key_status(self):
         self.assertEqual(crypto.key_status(), 'ok')
         with mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'short').decode()}):
             self.assertEqual(crypto.key_status(), 'invalid')
             with self.assertRaises(crypto.KeyMissing):
-                crypto.encrypt(RFC_SECRET)
+                crypto.encrypt(RFC_SECRET, 1)
+        # 32 символа — это 24 байта, а не 32: так ключ вставили 27.10.2026, раздел его отверг.
+        with mock.patch.dict(os.environ, {crypto.ENV_KEY: 'A' * 32}):
+            self.assertEqual(crypto.key_status(), 'invalid')
         with mock.patch.dict(os.environ, {crypto.ENV_KEY: ''}):
             self.assertEqual(crypto.key_status(), 'missing')
 
@@ -203,6 +218,17 @@ class CryptoTest(unittest.TestCase):
 def ctx(user_id, role='marketing_manager', status='working', approver=10, granted=(), key='ok'):
     return {'user_id': user_id, 'name': 'X', 'role': role, 'status': status, 'telegram_id': 1,
             'approver_id': approver, 'granted_account_ids': list(granted), 'key_status': key}
+
+
+class TimerTest(unittest.TestCase):
+    def test_sleep_is_capped_so_deadlines_of_another_instance_are_not_missed(self):
+        """При выкладке срок, заведённый старым экземпляром, будит только его нить: новый
+        будильник обязан проснуться сам не позже чем через минуту (разбор 27.10.2026)."""
+        self.assertEqual(timer.Alarm.sleep_for(None, 1000), timer.MAX_SLEEP_SECONDS)
+        self.assertEqual(timer.Alarm.sleep_for(1000 + 3600, 1000), timer.MAX_SLEEP_SECONDS)
+        self.assertAlmostEqual(timer.Alarm.sleep_for(1005, 1000), 5.2)
+        self.assertAlmostEqual(timer.Alarm.sleep_for(990, 1000), 0.2)
+        self.assertLessEqual(timer.MAX_SLEEP_SECONDS, 60)
 
 
 class AccessTest(unittest.TestCase):
@@ -327,6 +353,34 @@ class WiringTest(unittest.TestCase):
         self.assertIn('|| canAccessTwofaSection\n', self.app)
         self.assertIn("'fa-shield-halved': 'ShieldCheck'", _read(FA_ICON))
 
+    def test_bell_wakes_the_screen_on_delivery_result_and_the_requester_too(self):
+        """Отметка «код не дошёл» пишется после смены статуса — триггер обязан будить и по ней,
+        и будить сотрудника, а не только главу."""
+        self.assertIn("""'AFTER UPDATE OF status, delivery_error, codes_sent',""", self.database)
+        self.assertIn('OR OLD.delivery_error IS DISTINCT FROM NEW.delivery_error', self.database)
+        branch = self.database.split("ELSIF TG_TABLE_NAME = 'twofa_requests' THEN", 1)[1].split('ELSIF', 1)[0]
+        self.assertIn('targets := ARRAY[NEW.requester_id] || ARRAY(', branch)
+        self.assertIn("lower(d.code) = 'marketing'", branch)
+
+    def test_trainer_with_a_grant_is_not_bounced(self):
+        allowed = self.app.split('const TRAINER_ALLOWED_VIEWS = Object.freeze([', 1)[1].split(']);', 1)[0]
+        self.assertRegex(allowed, r"^\s*'twofa',$|\n\s*'twofa',\n")
+
+    def test_section_flag_and_menu_item_place(self):
+        self.assertIn('            const canAccessTwofaSection = canAccessTwofaSectionForUser(user);\n', self.app)
+        # Пункт — в общем блоке рядом с «Продакшн», до первой ролевой ветки после него:
+        # внутри {isAdminLikeRole && (…)} сотрудники его потеряли бы.
+        production = self.app.index('<span className="sidebar-text">Продакшн</span>')
+        item = self.app.index('<span className="sidebar-text">Коды 2FA</span>')
+        next_branch = self.app.index('{isAdminLikeRole && (', production)
+        self.assertLess(production, item)
+        self.assertLess(item, next_branch)
+
+    def test_buttons_run_in_their_own_pool(self):
+        handler = self.bot.split('async def handle_twofa_callback', 1)[1].split('\n\n\n', 1)[0]
+        self.assertIn('_TWOFA_CALLBACK_POOL, service.handle_callback', handler)
+        self.assertNotIn('executor_pool', handler)
+
     def test_bell_source(self):
         from notifications import sources
 
@@ -347,3 +401,156 @@ class WiringTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ─── Права без базы — идут и в CI (тесты на Postgres там пропускаются) ──────────
+
+def _ctx(user_id, role='marketing_manager', approver=10, granted=(), status='working', telegram=1):
+    return {'user_id': user_id, 'name': 'Человек %d' % user_id, 'role': role, 'status': status,
+            'telegram_id': telegram, 'approver_id': approver, 'granted_account_ids': list(granted),
+            'key_status': 'ok'}
+
+
+class _NoDb:
+    """Ручки, которые не должны дойти до базы: любой курсор — провал теста."""
+
+    def _get_cursor(self):
+        raise AssertionError('ручка полезла в базу, хотя должна была отказать раньше')
+
+
+class RouteGatesWithoutDbTest(unittest.TestCase):
+    """Гейт каждой ручки: кому отказ ещё ДО работы. Без Postgres — в CI тоже."""
+
+    def setUp(self):
+        from flask import Flask
+
+        from twofa.routes import build_twofa_blueprint
+
+        self.users = {
+            1: _ctx(1, role='super_admin'), 10: _ctx(10, role='admin'),
+            20: _ctx(20, granted=[5]), 30: _ctx(30, role='operator'),
+        }
+        self.current = {'id': 20}
+        service = mock.MagicMock()
+        service.context.side_effect = lambda uid: self.users.get(uid)
+        service.tg = mock.MagicMock()
+        self.service = service
+        app = Flask(__name__)
+        app.register_blueprint(build_twofa_blueprint(
+            db=_NoDb(), require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (self.current['id'], None, None), service=service))
+        self.client = app.test_client()
+        patcher = mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'z' * 32).decode()})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def call(self, user_id, method, path, body=None):
+        self.current['id'] = user_id
+        response = getattr(self.client, method)('/api/twofa' + path, json=body)
+        return response.status_code, (response.get_json() or {}).get('code')
+
+    def test_only_the_head_decides(self):
+        for user_id in (1, 20, 30):
+            for action in ('approve', 'reject'):
+                status, code = self.call(user_id, 'post', '/requests/5/%s' % action)
+                self.assertEqual(status, 403, (user_id, action))
+        self.service.decide.assert_not_called()
+
+    def test_employee_manages_nothing(self):
+        for method, path in (('get', '/journal'), ('post', '/accounts/preview'), ('post', '/accounts'),
+                             ('patch', '/accounts/5'), ('delete', '/accounts/5'), ('get', '/people'),
+                             ('put', '/people/20/grants')):
+            self.assertEqual(self.call(20, method, path, {})[1], 'TWOFA_MANAGE_FORBIDDEN', path)
+
+    def test_other_department_does_not_open_the_section(self):
+        for method, path in (('get', ''), ('post', '/requests')):
+            self.assertEqual(self.call(30, method, path, {'account_id': 5}),
+                             (403, 'TWOFA_SECTION_CLOSED'))
+        self.service.request_code.assert_not_called()
+
+
+class ServiceRechecksAccessWithoutDbTest(unittest.TestCase):
+    """decide и resend перепроверяют доступ сотрудника под блокировкой — без базы, в CI."""
+
+    def setUp(self):
+        from contextlib import contextmanager
+
+        from twofa import queries, service
+
+        self.queries = queries
+        self.tg = mock.MagicMock()
+        self.tg.send.return_value = (777, None)
+
+        @contextmanager
+        def cursor():
+            yield mock.MagicMock(rowcount=1)
+
+        self.svc = service.Twofa(cursor_factory=cursor, tg=self.tg, clock=lambda: 1761553805.0)
+        self.request = {
+            'id': 9, 'account_id': 5, 'account_title': 'Google Ads', 'service': None, 'requester_id': 20,
+            'requester_name': 'Анна', 'requester_telegram_id': 9020, 'status': 'pending',
+            'created_at': rules.almaty(1761553800), 'expires_at': rules.almaty(1761554400),
+            'decided_at': None, 'decided_by': None, 'decided_by_name': None, 'decided_via': None,
+            'resend_until': None, 'codes_sent': 0, 'delivery_error': None, 'last_counter': None,
+            'last_issued_at': None,
+        }
+        patcher = mock.patch.dict(os.environ, {crypto.ENV_KEY: base64.b64encode(b'z' * 32).decode()})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _patch(self, requester_ctx, account_active=True, request=None):
+        req = dict(self.request, **(request or {}))
+        account = {'id': 5, 'title': 'Google Ads', 'service': None, 'is_active': account_active,
+                   'created_at': None, 'secret_enc': crypto.encrypt(RFC_SECRET, 5)}
+        patches = [
+            mock.patch.object(self.queries, 'get_request', return_value=req),
+            mock.patch.object(self.queries, 'load_access_context', return_value=requester_ctx),
+            mock.patch.object(self.queries, 'get_account', return_value=account),
+            mock.patch.object(self.queries, 'decide', return_value=True),
+            mock.patch.object(self.queries, 'log_event'),
+            mock.patch.object(self.queries, 'mark_issued'),
+            mock.patch.object(self.queries, 'mark_delivery'),
+            mock.patch.object(self.queries, 'insert_message'),
+            mock.patch.object(self.queries, 'claim_messages', return_value=[]),
+            mock.patch.object(self.queries, 'claim_expired', return_value=[]),
+            mock.patch.object(self.queries, 'code_message_ids', return_value=[]),
+            mock.patch.object(self.queries, 'claim_message_ids', return_value=[]),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _codes_sent(self):
+        return [c for c in self.tg.send.call_args_list if '<code>' in str(c)]
+
+    def test_code_is_not_sent_when_access_was_revoked_while_waiting(self):
+        self._patch(_ctx(20, granted=[]))
+        result = self.svc.decide(_ctx(10, role='admin'), 9, 'approve', 'portal')
+        self.assertEqual(result['outcome'], 'cancelled')
+        self.assertEqual(self._codes_sent(), [])
+
+    def test_code_is_not_sent_to_a_fired_employee(self):
+        self._patch(_ctx(20, granted=[5], status='fired'))
+        self.assertEqual(self.svc.decide(_ctx(10, role='admin'), 9, 'approve', 'portal')['outcome'], 'cancelled')
+        self.assertEqual(self._codes_sent(), [])
+
+    def test_code_is_sent_when_everything_holds(self):
+        self._patch(_ctx(20, granted=[5]), request={'resend_until': rules.almaty(1761553985)})
+        with mock.patch.object(self.queries, 'get_request', side_effect=[
+                dict(self.request), dict(self.request, status='approved', resend_until=rules.almaty(1761553985)),
+                dict(self.request, status='approved'), dict(self.request, status='approved')]):
+            self.svc.decide(_ctx(10, role='admin'), 9, 'approve', 'portal')
+        self.assertEqual(len(self._codes_sent()), 1)
+
+    def test_super_admin_cannot_decide(self):
+        self._patch(_ctx(20, granted=[5]))
+        self.assertEqual(self.svc.decide(_ctx(1, role='super_admin'), 9, 'approve', 'portal')['outcome'],
+                         'forbidden')
+        self.tg.send.assert_not_called()
+
+    def test_resend_refused_after_access_was_revoked(self):
+        self._patch(_ctx(20, granted=[]), request={'status': 'approved',
+                                                   'resend_until': rules.almaty(1761553985)})
+        self.assertEqual(self.svc.resend(20, 9)['outcome'], 'forbidden')
+        self.tg.send.assert_not_called()
+

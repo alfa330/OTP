@@ -151,7 +151,31 @@ _STATEMENTS = [
 
 # Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами — порядок держит
 # init_twofa_schema (у «Обращений» обратный порядок уронил прод 17.08.2026).
-_MIGRATIONS = []
+#
+# Колонку добавляем, только если её нет: голый ALTER … ADD COLUMN IF NOT EXISTS берёт
+# AccessExclusiveLock на каждом старте, даже когда колонка давно есть.
+def _add_column(table, column, ddl):
+    return """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = '%s'
+                          AND column_name = '%s') THEN
+            ALTER TABLE %s ADD COLUMN %s %s;
+        END IF;
+    END
+    $$
+    """ % (table, column, table, column, ddl)
+
+
+_MIGRATIONS = [
+    # 27.10.2026, разбор после выкладки: момент последней выдачи кода — под блокировкой
+    # запроса отсекает второе нажатие «Код не подошёл» (два сообщения с цифрами).
+    _add_column('twofa_requests', 'last_issued_at', 'TIMESTAMP'),
+    # Сколько раз Telegram не принял «стереть цифры» / «убрать сообщение»: повторяем, но не
+    # вечно (бота заблокировали — править его сообщения больше нельзя никогда).
+    _add_column('twofa_messages', 'attempts', 'INTEGER NOT NULL DEFAULT 0'),
+]
 
 
 def _is_table(statement):

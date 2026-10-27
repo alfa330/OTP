@@ -1,10 +1,10 @@
 """Процесс «Кодов 2FA»: запрос → решение главы → код в Telegram → сроки.
 
-Один класс на все входы: роуты раздела (портал), нажатия кнопок в Telegram (пул потоков
-бота) и будильник сроков. Порядок в каждом шаге один и тот же:
+Один класс на все входы: роуты раздела (портал), нажатия кнопок в Telegram (отдельный пул
+раздела) и будильник сроков. Порядок в каждом шаге один и тот же:
 
     1. транзакция: проверить всё, записать решение и журнал, зафиксировать;
-    2. после фиксации — Telegram: отправить, поправить, стереть;
+    2. после фиксации — Telegram: сначала код сотруднику, потом отметки у главы и уборка;
     3. итог отправки — второй короткой транзакцией (id сообщения, «код не дошёл»).
 
 Telegram строго после фиксации: иначе откат оставил бы у сотрудника код без записи о
@@ -12,14 +12,22 @@ Telegram строго после фиксации: иначе откат ост�
 «исключить потерю записей в журнале»). Обратный сбой — решение записано, а Telegram не
 ответил — виден: в журнале «код не дошёл», в разделе — причина.
 
-Самих цифр нет ни в базе, ни в журнале, ни в логе: код считается в момент отправки и
-живёт только в сообщении Telegram, которое стирается через минуту.
+Самих цифр нет ни в базе, ни в журнале, ни в логе: код считается в момент отправки — прямо
+перед вызовом Telegram, а не при решении: медленная правка сообщения главы не должна съедать
+его 10 секунд запаса (ТЗ п. 5) — и живёт только в сообщении, которое стирается через минуту.
 """
 
 import logging
 import time
 
 from . import access, crypto, otpauth, queries, rules, totp
+
+# Второе нажатие «Код не подошёл» в эти секунды — то же нажатие, а не новая просьба: без этого
+# два быстрых нажатия присылали два сообщения с цифрами.
+RESEND_GUARD_SECONDS = 3
+
+# Telegram не стёр или не удалил сообщение — повторить через столько секунд.
+MESSAGE_RETRY_SECONDS = 30
 
 
 def _iso(moment):
@@ -121,8 +129,11 @@ class Twofa:
         with self._cursor() as cursor:
             queries.insert_message(cursor, request_id=request['id'], kind='approval', chat_id=lead['telegram_id'],
                                    message_id=message_id, now=rules.almaty(self.now()))
+        # Глава мог решить в портале, пока сообщение летело. Статус читаем ПОСЛЕ фиксации
+        # вставки, отдельной транзакцией: решение, зафиксированное между вставкой и её
+        # фиксацией, своего сообщения ещё не видело, и кнопки у главы остались бы.
+        with self._cursor() as cursor:
             current = queries.get_request(cursor, request['id'])
-        # Глава мог решить в портале, пока сообщение летело: тогда кнопки снимаем сразу.
         if current and current['status'] != 'pending':
             self._close_approvals(current)
 
@@ -131,16 +142,20 @@ class Twofa:
     def decide(self, ctx, request_id, decision, via):
         """Подтвердить или отклонить. Первое нажатие решает; второе — outcome 'already'.
 
-        outcome: approved / rejected / already / expired / cancelled / forbidden / not_found /
-        key_error.
+        outcome: approved / rejected / already / expired / cancelled / forbidden / key_missing /
+        not_found / key_error.
         """
         if decision not in ('approve', 'reject'):
             raise ValueError(decision)
         if not access.can_approve(ctx):
+            # Глава, у которого раздел закрыт только из-за ключа шифрования, должен узнать
+            # настоящую причину, а не «подтверждает только глава».
+            if access.is_working(ctx) and access.is_approver(ctx) and not access.key_ready(ctx):
+                return {'outcome': 'key_missing'}
             return {'outcome': 'forbidden'}
         now = self.now()
         now_dt = rules.almaty(now)
-        issued = None
+        secret = None
         with self._cursor() as cursor:
             request = queries.get_request(cursor, request_id, for_update=True)
             if not request:
@@ -162,15 +177,15 @@ class Twofa:
                     outcome = {'outcome': 'cancelled'}
                 elif decision == 'approve':
                     try:
-                        secret = crypto.decrypt(account['secret_enc'])
+                        secret = crypto.decrypt(account['secret_enc'], account['id'])
                     except (crypto.KeyMissing, ValueError):
                         logging.exception('twofa: ключ аккаунта %s не расшифрован', account['id'])
                         return {'outcome': 'key_error', 'request': request}
-                    issued = totp.issue(secret, now)
                     ok = queries.decide(cursor, request_id, status='approved', actor_id=ctx['user_id'], via=via,
                                         now=now_dt, resend_until=rules.almaty(now + rules.RESEND_WINDOW_SECONDS))
                     if not ok:
                         return {'outcome': 'already', 'request': queries.get_request(cursor, request_id)}
+                    queries.mark_issued(cursor, request_id, now_dt)
                     queries.log_event(cursor, 'approved', now=now_dt, request_id=request['id'],
                                       account_id=request['account_id'], account_title=request['account_title'],
                                       actor_id=ctx['user_id'], actor_name=ctx['name'],
@@ -190,14 +205,16 @@ class Twofa:
         if outcome and outcome['outcome'] == 'expired':
             self.expire_due(now)
             return {'outcome': 'expired', 'request': request}
-        self._close_approvals(request)
         if outcome and outcome['outcome'] == 'cancelled':
+            self._close_approvals(request)
             return {'outcome': 'cancelled', 'request': request}
         delivered = None
+        # Сначала код сотруднику: он ждёт его прямо сейчас, а отметка у главы подождёт.
         if request['status'] == 'approved':
-            delivered = self._send_code(request, issued, now, 'code_sent')
+            delivered, _issued = self._send_code(request, secret, 'code_sent')
         elif request['status'] == 'rejected' and request['requester_telegram_id']:
             self.tg.send(request['requester_telegram_id'], rules.rejected_text(account_title=request['account_title']))
+        self._close_approvals(request)
         self.wake()
         with self._cursor() as cursor:
             request = queries.get_request(cursor, request_id)
@@ -242,8 +259,13 @@ class Twofa:
 
     # ─── Код ─────────────────────────────────────────────────────────────────
 
-    def _send_code(self, request, issued, now, event_kind):
-        """Код сотруднику в Telegram + сроки «стереть цифры» и «убрать сообщение»."""
+    def _send_code(self, request, secret, event_kind):
+        """Код сотруднику в Telegram + сроки «стереть цифры» и «убрать сообщение».
+
+        Код считается здесь, прямо перед вызовом Telegram. Возвращает (дошёл ли, выданный код).
+        """
+        now = self.now()
+        issued = totp.issue(secret, now)
         resend_until = rules.epoch(request['resend_until']) if request['resend_until'] else now
         chat_id = request['requester_telegram_id']
         message_id, error = (None, 'У сотрудника не привязан Telegram')
@@ -272,12 +294,16 @@ class Twofa:
                                   account_id=request['account_id'], account_title=request['account_title'],
                                   subject_id=request['requester_id'], subject_name=request['requester_name'],
                                   details={'error': error})
-        return bool(message_id)
+        return bool(message_id), issued
 
     def resend(self, user_id, request_id):
         """«Код не подошёл»: новый код без главы, 3 минуты после подтверждения.
 
-        outcome: resent / same_code / window_closed / forbidden / not_found / key_error.
+        Новый код уходит ПЕРВЫМ; старое сообщение удаляется только после того, как новое
+        дошло, — иначе сбой отправки оставлял сотрудника и без кода, и без кнопки.
+
+        outcome: resent / same_code / just_sent / window_closed / forbidden / not_found /
+        key_error / failed.
         """
         now = self.now()
         now_dt = rules.almaty(now)
@@ -289,6 +315,9 @@ class Twofa:
                 return {'outcome': 'forbidden'}
             if not request['resend_until'] or request['resend_until'] <= now_dt:
                 return {'outcome': 'window_closed'}
+            last = request['last_issued_at']
+            if last is not None and (rules.epoch(now_dt) - rules.epoch(last)) < RESEND_GUARD_SECONDS:
+                return {'outcome': 'just_sent'}
             requester = queries.load_access_context(cursor, user_id, crypto.key_status())
             account = queries.get_account(cursor, request['account_id'], with_secret=True)
             # Сняли доступ или удалили аккаунт после подтверждения — повторного кода нет.
@@ -296,19 +325,26 @@ class Twofa:
                     and access.can_request(requester, request['account_id'])):
                 return {'outcome': 'forbidden'}
             try:
-                secret = crypto.decrypt(account['secret_enc'])
+                secret = crypto.decrypt(account['secret_enc'], account['id'])
             except (crypto.KeyMissing, ValueError):
                 logging.exception('twofa: ключ аккаунта %s не расшифрован', account['id'])
                 return {'outcome': 'key_error'}
-            issued = totp.issue(secret, now)
-            old = queries.claim_messages(cursor, request['id'], 'code', to_state='deleted')
+            queries.mark_issued(cursor, request_id, now_dt)
+            old_ids = queries.code_message_ids(cursor, request_id)
+        delivered, issued = self._send_code(request, secret, 'code_resent')
+        if not delivered:
+            # Новый код не ушёл — отметку «только что выдан» вернуть, иначе следующее нажатие
+            # в те же 3 секунды ответило бы «код уже отправлен», а его нет.
+            with self._cursor() as cursor:
+                cursor.execute("UPDATE twofa_requests SET last_issued_at = %s WHERE id = %s",
+                               (last, int(request_id)))
+            return {'outcome': 'failed'}
+        with self._cursor() as cursor:
+            old = queries.claim_message_ids(cursor, old_ids, to_state='deleted')
         for message in old:
             self.tg.delete(message['chat_id'], message['message_id'])
-        same = request['last_counter'] is not None and issued['counter'] == request['last_counter']
-        delivered = self._send_code(request, issued, now, 'code_resent')
         self.wake()
-        if not delivered:
-            return {'outcome': 'failed'}
+        same = request['last_counter'] is not None and issued['counter'] == request['last_counter']
         return {'outcome': 'same_code' if same else 'resent',
                 'seconds_left': max(0, int(issued['valid_until'] - now)),
                 'starts_in': max(0, int(round(issued['valid_from'] - now)))}
@@ -338,23 +374,33 @@ class Twofa:
         return expired
 
     def hide_due(self, now):
+        """Стереть цифры через минуту. Telegram не ответил — повторить (queries.retry_hide)."""
         with self._cursor() as cursor:
             rows = queries.claim_due_hide(cursor, rules.almaty(now))
+        retry_at = rules.almaty(now + MESSAGE_RETRY_SECONDS)
         for row in rows:
-            resend_until = rules.epoch(row['resend_until']) if row['resend_until'] else 0
-            if resend_until > now:
-                self.tg.edit(row['chat_id'], row['message_id'],
-                             rules.code_hidden_text(account_title=row['account_title'], resend_until=resend_until),
-                             rules.resend_markup(row['request_id']))
-            else:
-                self.tg.delete(row['chat_id'], row['message_id'])
+            if row['state'] == 'hidden':
+                resend_until = rules.epoch(row['resend_until'])
+                done = self.tg.edit(row['chat_id'], row['message_id'],
+                                    rules.code_hidden_text(account_title=row['account_title'],
+                                                           resend_until=resend_until),
+                                    rules.resend_markup(row['request_id']))
+                if not done:
+                    with self._cursor() as cursor:
+                        queries.retry_hide(cursor, row['id'], retry_at)
+            elif not self.tg.delete(row['chat_id'], row['message_id']):
+                with self._cursor() as cursor:
+                    queries.retry_delete(cursor, row['id'], retry_at)
         return rows
 
     def delete_due(self, now):
         with self._cursor() as cursor:
             rows = queries.claim_due_delete(cursor, rules.almaty(now))
+        retry_at = rules.almaty(now + MESSAGE_RETRY_SECONDS)
         for row in rows:
-            self.tg.delete(row['chat_id'], row['message_id'])
+            if not self.tg.delete(row['chat_id'], row['message_id']):
+                with self._cursor() as cursor:
+                    queries.retry_delete(cursor, row['id'], retry_at)
         return rows
 
     def run_due(self):
@@ -375,10 +421,25 @@ class Twofa:
         'expired': 'Запрос уже сгорел: прошло 10 минут',
         'cancelled': 'Запрос отменён: у сотрудника нет доступа к аккаунту',
         'forbidden': 'Подтверждает только глава маркетинга',
+        'key_missing': 'Ключ шифрования раздела не задан — подтвердить нельзя',
         'not_found': 'Запрос не найден',
         'key_error': 'Ключ аккаунта не расшифровывается — код не выдан',
         'no_user': 'Ваш Telegram не привязан к учётке портала',
     }
+
+    @staticmethod
+    def delivery_reason(error):
+        """Почему код не дошёл — словами для главы, а не ответом Bot API."""
+        text = str(error or '').lower()
+        if 'blocked' in text:
+            return 'сотрудник остановил бота портала'
+        if 'chat not found' in text or 'not found' in text:
+            return 'сотрудник ни разу не открывал бота портала'
+        if 'не привязан' in text:
+            return 'у сотрудника не привязан Telegram'
+        if 'не ответил' in text:
+            return 'Telegram не ответил — код мог дойти, уточните у сотрудника'
+        return 'Telegram не принял сообщение'
 
     def handle_callback(self, telegram_user_id, data):
         """twofa:ok:<id> / twofa:no:<id> — глава; twofa:new:<id> — сотрудник.
@@ -405,13 +466,16 @@ class Twofa:
                 when = rules.clock(rules.epoch(request['decided_at']), seconds=False) if request['decided_at'] else ''
                 return 'Уже решено: %s %s' % (rules.STATUS_LABELS.get(request['status'], '').lower(), when), False
             if outcome == 'approved' and result.get('delivered') is False:
-                return 'Подтверждено, но код не дошёл: у сотрудника не открыт бот', True
-            return self._TOASTS.get(outcome, 'Готово'), outcome in ('forbidden', 'key_error', 'cancelled')
+                return 'Подтверждено, но код не дошёл: %s' % self.delivery_reason(
+                    result['request'].get('delivery_error')), True
+            return self._TOASTS.get(outcome, 'Готово'), outcome in ('forbidden', 'key_missing', 'key_error', 'cancelled')
         if action == 'new':
             result = self.resend(ctx['user_id'], request_id)
             outcome = result['outcome']
             if outcome == 'resent':
                 return 'Новый код отправлен', False
+            if outcome == 'just_sent':
+                return 'Код уже отправлен — посмотрите сообщение ниже', False
             if outcome == 'same_code':
                 # Выдан следующий код (до смены было меньше 10 с): строгий сервис примет его
                 # только с начала его шага — так и сказать, а не «действует ещё 30 с».
@@ -423,7 +487,7 @@ class Twofa:
             if outcome == 'window_closed':
                 return 'Прошло 3 минуты — запросите код заново в разделе «Коды 2FA»', True
             if outcome == 'failed':
-                return 'Код не отправился — попробуйте ещё раз', True
+                return 'Код не отправился — нажмите ещё раз', True
             if outcome == 'key_error':
                 return self._TOASTS['key_error'], True
             return 'Кнопка не ваша или доступ к аккаунту снят', True
@@ -431,20 +495,52 @@ class Twofa:
 
     # ─── Аккаунты и доступы ──────────────────────────────────────────────────
 
+    def duplicates(self, cursor, secrets):
+        """{индекс: название живого аккаунта с тем же ключом} — для предпросмотра и сохранения.
+
+        Ключи живых аккаунтов расшифровываются здесь же, в памяти: их не больше пары десятков
+        (ТЗ: 50), а хранить рядом с шифротекстом что-то, что выдаёт совпадение ключей, не стоит.
+        Повтор внутри одного списка (тот же аккаунт дважды в экспорте) — тоже дубль.
+        """
+        known = {}
+        for account_id, title, secret_enc in queries.active_secrets(cursor):
+            try:
+                known.setdefault(crypto.decrypt(secret_enc, account_id), title)
+            except (crypto.KeyMissing, ValueError):
+                logging.warning('twofa: ключ аккаунта %s не расшифрован при сверке дублей', account_id)
+        found, seen = {}, {}
+        for index, secret in enumerate(secrets):
+            if not secret:
+                continue
+            if secret in known:
+                found[index] = known[secret]
+            elif secret in seen:
+                found[index] = seen[secret]
+            else:
+                seen[secret] = None
+        return found
+
     def add_accounts(self, ctx, entries):
-        """Сохранить аккаунты: [{'title', 'service', 'secret': bytes}]. Ключи шифруются здесь."""
+        """Сохранить аккаунты: [{'title', 'service', 'secret': bytes}]. Ключи шифруются здесь,
+        каждый — со своим id (crypto: AAD). outcome: ok (created) / duplicate (index, title)."""
         now_dt = rules.almaty(self.now())
         created = []
         with self._cursor() as cursor:
+            clashes = self.duplicates(cursor, [entry['secret'] for entry in entries])
+            if clashes:
+                index = min(clashes)
+                return {'outcome': 'duplicate', 'index': index,
+                        'title': clashes[index] or entries[index]['title']}
             for entry in entries:
-                account_id = queries.insert_account(
-                    cursor, title=entry['title'], service=entry['service'],
-                    secret_enc=crypto.encrypt(entry['secret']), actor_id=ctx['user_id'], now=now_dt)
+                account_id = queries.next_account_id(cursor)
+                queries.insert_account(
+                    cursor, account_id=account_id, title=entry['title'], service=entry['service'],
+                    secret_enc=crypto.encrypt(entry['secret'], account_id), actor_id=ctx['user_id'], now=now_dt)
                 queries.log_event(cursor, 'account_added', now=now_dt, account_id=account_id,
                                   account_title=entry['title'], actor_id=ctx['user_id'], actor_name=ctx['name'],
                                   details={'service': entry['service']} if entry['service'] else None)
                 created.append(account_id)
-        return created
+        return {'outcome': 'ok', 'created': created}
 
     def rename_account(self, ctx, account_id, title, service):
         now_dt = rules.almaty(self.now())

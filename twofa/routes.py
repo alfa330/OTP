@@ -44,6 +44,7 @@ _ERRORS = {
     'expired': ('Запрос уже сгорел: прошло 10 минут', 'TWOFA_EXPIRED', 409),
     'cancelled': ('Запрос отменён: у сотрудника больше нет доступа к аккаунту', 'TWOFA_CANCELLED', 409),
     'key_error': ('Ключ аккаунта не расшифровывается — код не выдан', 'TWOFA_KEY_ERROR', 409),
+    'key_missing': ('Ключ шифрования раздела не задан — подтвердить нельзя', 'TWOFA_KEY_MISSING', 409),
 }
 
 
@@ -198,8 +199,10 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
         result = service.decide(ctx, request_id, decision, 'portal')
         outcome = result['outcome']
         if outcome in ('approved', 'rejected'):
-            return jsonify({'request': public_request(result['request']),
-                            'delivered': result.get('delivered')})
+            delivered = result.get('delivered')
+            return jsonify({'request': public_request(result['request']), 'delivered': delivered,
+                            'delivery_reason': (service.delivery_reason(result['request'].get('delivery_error'))
+                                                if delivered is False else None)})
         if outcome == 'already':
             req = result['request']
             return _bad('Запрос уже решён: %s' % rules.STATUS_LABELS.get(req['status'], req['status']).lower(),
@@ -251,10 +254,17 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
         parsed, error = _parsed(_payload().get('text'))
         if error:
             return error
+        # Уже добавленный ключ (тот же QR экспорта отсканировали второй раз) — отмечаем в
+        # предпросмотре, чтобы не завести дубль. Без ключа шифрования сверить нечем.
+        duplicates = {}
+        if crypto.key_status() == 'ok':
+            with db._get_cursor() as cursor:
+                duplicates = service.duplicates(cursor, [entry['secret'] for entry in parsed['entries']])
         return jsonify({
             'kind': parsed['kind'],
             'batch': parsed['batch'],
-            'entries': [dict(otpauth.public(entry), index=index, title=rules.suggested_title(entry))
+            'entries': [dict(otpauth.public(entry), index=index, title=rules.suggested_title(entry),
+                             duplicate_of=duplicates.get(index))
                         for index, entry in enumerate(parsed['entries'])],
         })
 
@@ -286,8 +296,11 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             except ValueError as exc:
                 return _bad(str(exc), 'TWOFA_BAD_INPUT', index=index)
             entries.append({'title': title, 'service': service_name, 'secret': entry['secret']})
-        created = service.add_accounts(ctx, entries)
-        return jsonify({'created': created}), 201
+        result = service.add_accounts(ctx, entries)
+        if result['outcome'] == 'duplicate':
+            position = items[result['index']].get('index')
+            return _bad('Этот ключ уже добавлен как «%s»' % result['title'], 'TWOFA_DUPLICATE', 409, index=position)
+        return jsonify({'created': result['created']}), 201
 
     @twofa_route('/accounts/<int:account_id>', methods=('PATCH', 'DELETE'), need='manage')
     def twofa_account_edit(ctx, account_id):

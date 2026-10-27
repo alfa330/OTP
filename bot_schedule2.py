@@ -57700,8 +57700,13 @@ def get_operator_keyboard():
 # «Коды 2FA» (#373): «Подтвердить / Отклонить» у главы маркетинга и «Код не подошёл» у
 # сотрудника. Объявлен ПЕРВЫМ из callback-хендлеров и со state='*': хендлеры со state=…
 # ниже ловят любые нажатия человека, застрявшего в диалоге бота, — глава посреди чужого
-# диалога иначе нажимал бы «Подтвердить» впустую. Сервис синхронный (база + Bot API с
-# коротким таймаутом, twofa/telegram.py), поэтому — в общий пул.
+# диалога иначе нажимал бы «Подтвердить» впустую. Сервис синхронный (база + цепочка вызовов
+# Bot API по 8 с таймаута, twofa/telegram.py), поэтому — в СВОЙ пул на два потока, а не в
+# общий executor_pool: при медленном Telegram четыре нажатия заняли бы весь общий пул, и
+# встали бы все остальные хендлеры бота (разбор 27.10.2026).
+_TWOFA_CALLBACK_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='twofa-callback')
+
+
 @dp.callback_query_handler(lambda c: bool(c.data) and c.data.startswith('twofa:'), state='*')
 async def handle_twofa_callback(callback_query: types.CallbackQuery):
     service = _TWOFA.get('service')
@@ -57711,7 +57716,7 @@ async def handle_twofa_callback(callback_query: types.CallbackQuery):
     loop = asyncio.get_event_loop()
     try:
         text, alert = await loop.run_in_executor(
-            executor_pool, service.handle_callback, callback_query.from_user.id, callback_query.data)
+            _TWOFA_CALLBACK_POOL, service.handle_callback, callback_query.from_user.id, callback_query.data)
     except Exception:
         logging.exception('twofa: нажатие кнопки не обработано')
         text, alert = 'Не получилось — попробуйте ещё раз', True

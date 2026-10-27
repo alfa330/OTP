@@ -80,14 +80,16 @@ class _Db:
 
 
 class FakeTelegram:
-    """Записывает вызовы Bot API и выдаёт id сообщений по порядку."""
+    """Записывает вызовы Bot API (и их порядок) и выдаёт id сообщений по порядку."""
 
     def __init__(self):
-        self.sent, self.edited, self.deleted = [], [], []
+        self.sent, self.edited, self.deleted, self.calls = [], [], [], []
         self.fail_chats = set()
+        self.fail_edit = self.fail_delete = False
         self._next = 100
 
     def send(self, chat_id, text, markup=None):
+        self.calls.append(('send', chat_id))
         if chat_id in self.fail_chats:
             return None, 'Forbidden: bot was blocked by the user'
         self._next += 1
@@ -95,10 +97,16 @@ class FakeTelegram:
         return self._next, None
 
     def edit(self, chat_id, message_id, text, markup=None):
+        self.calls.append(('edit', chat_id))
+        if self.fail_edit:
+            return False
         self.edited.append({'chat_id': chat_id, 'message_id': message_id, 'text': text, 'markup': markup})
         return True
 
     def delete(self, chat_id, message_id):
+        self.calls.append(('delete', chat_id))
+        if self.fail_delete:
+            return False
         self.deleted.append({'chat_id': chat_id, 'message_id': message_id})
         return True
 
@@ -156,7 +164,7 @@ def env(db):
     wakes = []
     service = Twofa(cursor_factory=db._get_cursor, tg=tg, clock=clock, wake=lambda: wakes.append(clock.now))
     head = service.context(HEAD)
-    [account_id] = service.add_accounts(head, [{'title': 'Google Ads', 'service': 'Google', 'secret': SECRET}])
+    [account_id] = service.add_accounts(head, [{'title': 'Google Ads', 'service': 'Google', 'secret': SECRET}])['created']
     assert service.set_person_grants(head, ANNA, [account_id])['outcome'] == 'ok'
     return {'db': db, 'tg': tg, 'clock': clock, 'service': service, 'account_id': account_id, 'wakes': wakes}
 
@@ -264,7 +272,8 @@ def test_without_telegram_the_request_is_refused_before_bothering_anyone(env):
 
 def test_not_granted_account_is_refused(env):
     service = env['service']
-    [other] = service.add_accounts(service.context(HEAD), [{'title': 'Meta', 'service': None, 'secret': SECRET}])
+    [other] = service.add_accounts(service.context(HEAD), [{'title': 'Meta', 'service': None,
+                                                             'secret': b'abcdefghij0123456789'}])['created']
     assert service.request_code(service.context(ANNA), other)['outcome'] == 'forbidden'
 
 
@@ -327,6 +336,7 @@ def test_blocked_bot_is_recorded_as_not_delivered(env):
     result = _approve(env, request['id'])
     assert result['outcome'] == 'approved' and result['delivered'] is False
     assert 'blocked' in result['request']['delivery_error']
+    assert env['service'].delivery_reason(result['request']['delivery_error']) == 'сотрудник остановил бота портала'
     kinds = [row[0] for row in _rows(env['db'], "SELECT kind FROM twofa_events ORDER BY id")]
     assert kinds[-2:] == ['approved', 'code_failed']
 
@@ -412,13 +422,124 @@ def test_resend_in_the_same_step_says_the_code_is_the_same(env):
     assert result['outcome'] == 'same_code' and result['seconds_left'] == 22
 
 
-def test_resend_of_a_next_code_says_when_it_starts(env):
-    env['clock'].now = T0 + 22  # 13:30:27 — выдан код следующего шага
+def test_code_reaches_the_employee_before_the_head_message_is_marked(env):
+    """Код — первым: медленная правка сообщения главы не съедает 10 секунд запаса (п. 5)."""
+    request = _request(env)['request']
+    env['tg'].calls.clear()
+    _approve(env, request['id'])
+    assert env['tg'].calls[:2] == [('send', ANNA_TG), ('edit', HEAD_TG)]
+
+
+def test_code_is_counted_at_send_time_not_at_decision(env):
+    request = _request(env)['request']
+    clock = env['clock']
+    original_send = env['tg'].send
+
+    def late_send(chat_id, text, markup=None):
+        clock.now += 15  # отправка ушла на 15 секунд позже решения
+        return original_send(chat_id, text, markup)
+
+    env['tg'].send = late_send
+    clock.now = T0  # решение в 13:30:05, отправка в 13:30:20 — до смены 10 с
+    _approve(env, request['id'])
+    [code_message] = env['tg'].to(ANNA_TG)
+    assert _code_in(code_message['text']) == totp.code_at(SECRET, T0 + 15)
+
+
+def test_digits_window_closed_means_one_delete_not_hide_then_delete(env):
     request = _request(env)['request']
     _approve(env, request['id'])
-    env['clock'].now = T0 + 23
+    code_message = env['tg'].to(ANNA_TG)[0]
+    # Будильник проспал оба срока (выкладка): окно «Код не подошёл» уже закрыто.
+    env['clock'].now = T0 + 200
+    env['tg'].calls.clear()
+    env['service'].run_due()
+    assert env['tg'].calls == [('delete', ANNA_TG)]
+    assert env['tg'].deleted[-1]['message_id'] == code_message['message_id']
+    assert _rows(env['db'], "SELECT state FROM twofa_messages WHERE kind = 'code'") == [('deleted',)]
+
+
+def test_failed_hide_and_delete_are_retried_not_forgotten(env):
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    env['tg'].fail_edit = True
+    env['clock'].now = T0 + 60
+    next_at = env['service'].run_due()
+    assert _rows(env['db'], "SELECT state, attempts FROM twofa_messages WHERE kind = 'code'") == [('shown', 1)]
+    assert next_at == pytest.approx(T0 + 90)
+    env['tg'].fail_edit = False
+    env['clock'].now = T0 + 90
+    env['service'].run_due()
+    assert 'стёрт' in env['tg'].edited[-1]['text']
+    env['tg'].fail_delete = True
+    env['clock'].now = T0 + 180
+    env['service'].run_due()
+    assert _rows(env['db'], "SELECT state, attempts FROM twofa_messages WHERE kind = 'code'") == [('hidden', 2)]
+    env['tg'].fail_delete = False
+    env['clock'].now = T0 + 210
+    env['service'].run_due()
+    assert _rows(env['db'], "SELECT state FROM twofa_messages WHERE kind = 'code'") == [('deleted',)]
+
+
+def test_retries_stop_after_the_limit(env):
+    """Telegram не принимает ни правку, ни удаление (бота остановили навсегда): повторы
+    кончаются на MAX_MESSAGE_ATTEMPTS, а не идут каждые 30 секунд вечно."""
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    env['tg'].fail_edit = env['tg'].fail_delete = True
+    for step in range(20):
+        env['clock'].now = T0 + 60 + step * 30
+        env['service'].run_due()
+    assert _rows(env['db'], "SELECT state, attempts FROM twofa_messages WHERE kind = 'code'") == [
+        ('deleted', queries.MAX_MESSAGE_ATTEMPTS)]
+    tries = [call for call in env['tg'].calls if call[0] in ('edit', 'delete') and call[1] == ANNA_TG]
+    assert len(tries) == queries.MAX_MESSAGE_ATTEMPTS + 1
+    assert env['service'].run_due() is None
+
+
+def test_resend_of_a_next_code_says_when_it_starts(env):
+    env['clock'].now = T0 + 20  # 13:30:25 — до смены 5 с, выдан код следующего шага
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    env['clock'].now = T0 + 23.2  # больше 3 с после выдачи — не двойное нажатие
     text, alert = env['service'].handle_callback(ANNA_TG, 'twofa:new:%d' % request['id'])
     assert alert and text.startswith('Код тот же — он начнёт действовать через 2 с')
+
+
+def test_resend_sends_the_new_code_before_removing_the_old(env):
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    env['clock'].now = T0 + 30
+    env['tg'].calls.clear()
+    env['service'].resend(ANNA, request['id'])
+    assert env['tg'].calls == [('send', ANNA_TG), ('delete', ANNA_TG)]
+
+
+def test_failed_resend_keeps_the_old_message_and_allows_another_press(env):
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    first = env['tg'].to(ANNA_TG)[0]
+    env['clock'].now = T0 + 30
+    env['tg'].fail_chats.add(ANNA_TG)
+    assert env['service'].resend(ANNA, request['id'])['outcome'] == 'failed'
+    assert env['tg'].deleted == []
+    assert _rows(env['db'], "SELECT state FROM twofa_messages WHERE kind = 'code'") == [('shown',)]
+    env['tg'].fail_chats.clear()
+    env['clock'].now = T0 + 31
+    assert env['service'].resend(ANNA, request['id'])['outcome'] == 'resent'
+    assert env['tg'].deleted[-1]['message_id'] == first['message_id']
+
+
+def test_double_press_of_resend_sends_one_code(env):
+    request = _request(env)['request']
+    _approve(env, request['id'])
+    env['clock'].now = T0 + 30
+    assert env['service'].resend(ANNA, request['id'])['outcome'] == 'resent'
+    env['clock'].now = T0 + 31
+    assert env['service'].resend(ANNA, request['id'])['outcome'] == 'just_sent'
+    assert len(env['tg'].to(ANNA_TG)) == 2  # код при подтверждении + один повтор
+    env['clock'].now = T0 + 35
+    assert env['service'].resend(ANNA, request['id'])['outcome'] in ('resent', 'same_code')
 
 
 def test_resend_after_the_window_needs_a_new_request(env):
@@ -464,6 +585,42 @@ def test_grant_removed_while_pending_by_other_path_still_blocks_the_code(env):
     result = _approve(env, request['id'])
     assert result['outcome'] == 'cancelled'
     assert env['tg'].to(ANNA_TG) == []
+
+
+def test_ciphertext_moved_to_another_account_does_not_decrypt(env):
+    """Шифротекст привязан к своей строке: перенос в базе в чужой аккаунт кода не даёт."""
+    service = env['service']
+    head = service.context(HEAD)
+    [other] = service.add_accounts(head, [{'title': 'Meta', 'service': None,
+                                           'secret': b'abcdefghij0123456789'}])['created']
+    service.set_person_grants(head, ANNA, [env['account_id'], other])
+    with env['db']._get_cursor() as cur:
+        cur.execute("UPDATE twofa_accounts SET secret_enc = (SELECT secret_enc FROM twofa_accounts WHERE id = %s) "
+                    "WHERE id = %s", (env['account_id'], other))
+    request = service.request_code(service.context(ANNA), other)['request']
+    result = service.decide(service.context(HEAD), request['id'], 'approve', 'portal')
+    assert result['outcome'] == 'key_error'
+    assert env['tg'].to(ANNA_TG) == []
+
+
+def test_same_key_cannot_be_added_twice(env):
+    service = env['service']
+    result = service.add_accounts(service.context(HEAD), [{'title': 'Копия', 'service': None, 'secret': SECRET}])
+    assert result == {'outcome': 'duplicate', 'index': 0, 'title': 'Google Ads'}
+    twin = service.add_accounts(service.context(HEAD), [
+        {'title': 'A', 'service': None, 'secret': b'0123456789abcdefghij'},
+        {'title': 'B', 'service': None, 'secret': b'0123456789abcdefghij'}])
+    assert twin['outcome'] == 'duplicate' and twin['index'] == 1
+    assert _rows(env['db'], "SELECT count(*) FROM twofa_accounts") == [(1,)]
+
+
+def test_key_missing_gives_the_head_the_real_reason(env, monkeypatch):
+    request = _request(env)['request']
+    monkeypatch.setenv(crypto.ENV_KEY, base64.b64encode(b'short').decode())
+    text, alert = env['service'].handle_callback(HEAD_TG, 'twofa:ok:%d' % request['id'])
+    assert alert and 'Ключ шифрования' in text
+    with env['db']._get_cursor() as cur:
+        assert queries.bell(cur, HEAD, rules.almaty(T0), 5) == (0, [])
 
 
 def test_removing_an_account_destroys_its_key(env):
@@ -629,9 +786,14 @@ def test_import_from_a_qr_through_the_routes(client, env):
     text = 'otpauth://totp/Meta:ads@company.kz?secret=%s&issuer=Meta' % secret_b32
     preview = client.post('/api/twofa/accounts/preview', json={'text': text}).get_json()
     assert preview['entries'] == [{'name': 'ads@company.kz', 'issuer': 'Meta', 'supported': True, 'reason': None,
-                                   'index': 0, 'title': 'Meta · ads@company.kz'}]
+                                   'index': 0, 'title': 'Meta · ads@company.kz', 'duplicate_of': None}]
     response = client.post('/api/twofa/accounts', json={'text': text, 'items': [{'index': 0, 'title': 'Meta Ads', 'service': 'Meta'}]})
     assert response.status_code == 201
+    # Тот же QR второй раз: в предпросмотре — «уже добавлен», сохранить — нельзя.
+    again = client.post('/api/twofa/accounts/preview', json={'text': text}).get_json()
+    assert again['entries'][0]['duplicate_of'] == 'Meta Ads'
+    twice = client.post('/api/twofa/accounts', json={'text': text, 'items': [{'index': 0, 'title': 'Ещё раз'}]})
+    assert twice.status_code == 409 and twice.get_json()['code'] == 'TWOFA_DUPLICATE' and twice.get_json()['index'] == 0
     titles = [a['title'] for a in client.get('/api/twofa').get_json()['accounts']]
     assert titles == ['Google Ads', 'Meta Ads']
     bad = client.post('/api/twofa/accounts', json={'text': 'https://example.com', 'items': [{'index': 0, 'title': 'x'}]})

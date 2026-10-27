@@ -9,7 +9,10 @@
 
 from psycopg2 import errors as pg_errors
 
-from . import access
+from . import access, crypto
+
+# Сколько раз повторять «стереть цифры» / «убрать сообщение», если Telegram не ответил.
+MAX_MESSAGE_ATTEMPTS = 5
 
 _WORKING = "COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')"
 
@@ -119,13 +122,25 @@ def list_accounts(cursor, ids=None):
     return [_account(row) for row in cursor.fetchall()]
 
 
-def insert_account(cursor, *, title, service, secret_enc, actor_id, now):
-    cursor.execute("""
-        INSERT INTO twofa_accounts (title, service, secret_enc, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING id
-    """, (title, service, secret_enc, actor_id, now, now))
+def next_account_id(cursor):
+    """id будущего аккаунта — до вставки: шифротекст ключа привязан к id (crypto: AAD)."""
+    cursor.execute("SELECT nextval(pg_get_serial_sequence('twofa_accounts', 'id'))")
     return int(cursor.fetchone()[0])
+
+
+def insert_account(cursor, *, account_id, title, service, secret_enc, actor_id, now):
+    cursor.execute("""
+        INSERT INTO twofa_accounts (id, title, service, secret_enc, created_by, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (int(account_id), title, service, secret_enc, actor_id, now, now))
+    return int(cursor.fetchone()[0])
+
+
+def active_secrets(cursor):
+    """[(id, title, secret_enc)] живых аккаунтов — для проверки «этот ключ уже добавлен»."""
+    cursor.execute("SELECT id, title, secret_enc FROM twofa_accounts WHERE is_active ORDER BY id")
+    return [(int(row[0]), row[1], row[2]) for row in cursor.fetchall()]
 
 
 def rename_account(cursor, account_id, *, title, service, now):
@@ -263,7 +278,7 @@ def set_user_grants(cursor, user_id, account_ids, *, actor_id, now):
 _REQUEST_COLUMNS = """
     r.id, r.account_id, a.title, a.service, r.requester_id, ru.name, ru.telegram_id,
     r.status, r.created_at, r.expires_at, r.decided_at, r.decided_by, du.name, r.decided_via,
-    r.resend_until, r.codes_sent, r.delivery_error, r.last_counter
+    r.resend_until, r.codes_sent, r.delivery_error, r.last_counter, r.last_issued_at
 """
 
 _REQUEST_FROM = """
@@ -283,6 +298,7 @@ def _request(row):
         'decided_by': int(row[11]) if row[11] else None, 'decided_by_name': row[12],
         'decided_via': row[13], 'resend_until': row[14], 'codes_sent': int(row[15] or 0),
         'delivery_error': row[16], 'last_counter': int(row[17]) if row[17] is not None else None,
+        'last_issued_at': row[18],
     }
 
 
@@ -339,6 +355,18 @@ def claim_expired(cursor, now):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def mark_issued(cursor, request_id, now):
+    """Момент выдачи кода — пишется ПОД блокировкой запроса, до отправки: второе нажатие
+    «Код не подошёл» в ту же секунду увидит его и не пришлёт второе сообщение с цифрами."""
+    cursor.execute("UPDATE twofa_requests SET last_issued_at = %s WHERE id = %s", (now, int(request_id)))
+
+
+def code_message_ids(cursor, request_id):
+    cursor.execute("SELECT id FROM twofa_messages WHERE request_id = %s AND kind = 'code' "
+                   "AND state IN ('shown', 'hidden')", (int(request_id),))
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
 def mark_delivery(cursor, request_id, *, counter=None, error=None):
     """Итог отправки кода: счётчик выданных, шаг последнего кода, ошибка доставки."""
     if error:
@@ -391,16 +419,49 @@ def claim_messages(cursor, request_id, kind, *, to_state, from_states=('shown', 
     return [{'id': int(r[0]), 'chat_id': int(r[1]), 'message_id': int(r[2])} for r in cursor.fetchall()]
 
 
-def claim_due_hide(cursor, now):
+def claim_message_ids(cursor, ids, *, to_state):
+    """Перевести названные сообщения; вернуть те, что перевёл именно этот вызов."""
+    if not ids:
+        return []
     cursor.execute("""
-        UPDATE twofa_messages m SET state = 'hidden'
+        UPDATE twofa_messages SET state = %s
+         WHERE id = ANY(%s) AND state IN ('shown', 'hidden')
+        RETURNING id, chat_id, message_id
+    """, (to_state, [int(x) for x in ids]))
+    return [{'id': int(r[0]), 'chat_id': int(r[1]), 'message_id': int(r[2])} for r in cursor.fetchall()]
+
+
+def claim_due_hide(cursor, now):
+    """Пора стереть цифры. Если окно «Код не подошёл» уже закрыто, кнопка не нужна — сообщение
+    сразу уходит в 'deleted' (одно удаление вместо «стереть», а следом «удалить»)."""
+    cursor.execute("""
+        UPDATE twofa_messages m
+           SET state = CASE WHEN r.resend_until IS NOT NULL AND r.resend_until > %(now)s
+                            THEN 'hidden' ELSE 'deleted' END
           FROM twofa_requests r, twofa_accounts a
-         WHERE m.state = 'shown' AND m.hide_at IS NOT NULL AND m.hide_at <= %s
+         WHERE m.state = 'shown' AND m.hide_at IS NOT NULL AND m.hide_at <= %(now)s
            AND r.id = m.request_id AND a.id = r.account_id
-        RETURNING m.id, m.request_id, m.chat_id, m.message_id, r.resend_until, a.title
-    """, (now,))
+        RETURNING m.id, m.request_id, m.chat_id, m.message_id, r.resend_until, a.title, m.state
+    """, {'now': now})
     return [{'id': int(r[0]), 'request_id': int(r[1]), 'chat_id': int(r[2]), 'message_id': int(r[3]),
-             'resend_until': r[4], 'account_title': r[5]} for r in cursor.fetchall()]
+             'resend_until': r[4], 'account_title': r[5], 'state': r[6]} for r in cursor.fetchall()]
+
+
+def retry_hide(cursor, message_id, due):
+    """Telegram не стёр цифры — вернуть сообщение в очередь «стереть» на due (не больше
+    MAX_MESSAGE_ATTEMPTS раз; дальше его уберёт срок удаления)."""
+    cursor.execute("""
+        UPDATE twofa_messages SET state = 'shown', hide_at = %s, attempts = attempts + 1
+         WHERE id = %s AND state = 'hidden' AND attempts < %s
+    """, (due, int(message_id), MAX_MESSAGE_ATTEMPTS))
+
+
+def retry_delete(cursor, message_id, due):
+    """Telegram не удалил сообщение — повторить на due (не больше MAX_MESSAGE_ATTEMPTS раз)."""
+    cursor.execute("""
+        UPDATE twofa_messages SET state = 'hidden', delete_at = %s, attempts = attempts + 1
+         WHERE id = %s AND state = 'deleted' AND attempts < %s
+    """, (due, int(message_id), MAX_MESSAGE_ATTEMPTS))
 
 
 def claim_due_delete(cursor, now):
@@ -467,20 +528,13 @@ def journal(cursor, *, before_id=None, limit=50):
 # ─── Колокол ───────────────────────────────────────────────────────────────────
 
 def bell(cursor, viewer_id, now, limit):
-    """Ждущие запросы — главе маркетинга, и только ему: подтверждает он один."""
+    """Ждущие запросы — главе маркетинга, и только ему: подтверждает он один. И только пока ключ
+    шифрования годен: без него раздел главе закрыт (access.can_approve), и строка звала бы туда,
+    куда его не пустят. Сгорание строку гасит само: будильник закрывает запрос, триггер будит."""
+    if crypto.key_status() != 'ok':
+        return 0, []
     lead = approver(cursor)
     if not lead or int(lead['id']) != int(viewer_id):
         return 0, []
     rows = pending_requests(cursor, now)
     return len(rows), rows[:max(0, int(limit))]
-
-
-def bell_next_change(cursor, viewer_id, now):
-    """Когда сводка главы изменится сама: ближайший запрос сгорит."""
-    lead = approver(cursor)
-    if not lead or int(lead['id']) != int(viewer_id):
-        return None
-    cursor.execute("SELECT MIN(expires_at) FROM twofa_requests WHERE status = 'pending' AND expires_at > %s",
-                   (now,))
-    row = cursor.fetchone()
-    return row[0] if row else None

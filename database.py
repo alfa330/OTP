@@ -7678,14 +7678,21 @@ class Database:
                 'AFTER UPDATE OF read_at',
                 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
             ),
-            # «Коды 2FA» (#373): новый запрос и смена его статуса (решение, сгорание,
-            # отмена). Остальные UPDATE (отметка доставки кода) сводку не меняют.
+            # «Коды 2FA» (#373): новый запрос, смена его статуса (решение, сгорание, отмена) и
+            # итог отправки кода. Последний колокол главы не меняет, но открытый раздел у
+            # сотрудника и главы по этому тычку перечитывается: отметка «код не дошёл» пишется
+            # ПОСЛЕ смены статуса, и без неё экран навсегда остался бы на «Код отправлен».
+            # Отметку выдачи (last_issued_at) WHEN отсекает — экрану она ничего не говорит.
             ('trg_bell_twofa_requests_insert', 'twofa_requests', 'AFTER INSERT', ''),
             (
                 'trg_bell_twofa_requests',
                 'twofa_requests',
-                'AFTER UPDATE OF status',
-                'WHEN (OLD.status IS DISTINCT FROM NEW.status)',
+                'AFTER UPDATE OF status, delivery_error, codes_sent',
+                """WHEN (
+                    OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.delivery_error IS DISTINCT FROM NEW.delivery_error
+                    OR OLD.codes_sent IS DISTINCT FROM NEW.codes_sent
+                )""",
             ),
             # Смена состава исполнителей саму задачу не трогает (UPDATE tasks не
             # происходит), поэтому trg_bell_tasks об этом не узнает — нужен свой

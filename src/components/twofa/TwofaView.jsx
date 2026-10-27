@@ -140,17 +140,27 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             setData(screen);
             setError('');
         } catch (requestError) {
-            setError(errorOf(requestError, 'Раздел не открылся — попробуйте обновить страницу'));
+            // Доступ сняли, пока раздел был открыт: старый экран («ждёт подтверждения», кнопки)
+            // врал бы, что всё по-прежнему. Показываем причину вместо него.
+            if (requestError?.response?.data?.code === 'TWOFA_SECTION_CLOSED') {
+                setData(null);
+                setError('Раздел «Коды 2FA» вам больше не открыт. Если доступ нужен, обратитесь к главе маркетинга.');
+                return;
+            }
+            setError(errorOf(requestError, 'Раздел не обновился — проверьте связь'));
         }
     }, [api]);
 
-    useEffect(() => { load(); }, [load]);
-    useEffect(() => subscribeNewsPoke(createCoalescedReload(() => load())), [load]);
+    /* Один перезапуск на все входы: тычок колокола и возврат на вкладку приходят почти разом,
+       и два параллельных GET могли прийти не по порядку — старый ответ затёр бы новый. */
+    const reload = useMemo(() => createCoalescedReload(() => load()), [load]);
+    useEffect(() => { reload(); }, [reload]);
+    useEffect(() => subscribeNewsPoke(reload), [reload]);
     useEffect(() => {
-        const onVisible = () => { if (document.visibilityState === 'visible') load(); };
+        const onVisible = () => { if (document.visibilityState === 'visible') reload(); };
         document.addEventListener('visibilitychange', onVisible);
         return () => document.removeEventListener('visibilitychange', onVisible);
-    }, [load]);
+    }, [reload]);
 
     const caps = data?.capabilities || {};
     const tabs = useMemo(() => tabsFor(caps), [caps.can_manage, caps.can_request]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -197,7 +207,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             toast(errorOf(requestError, 'Запрос не отправился'), 'error');
         } finally {
             setBusy((prev) => ({ ...prev, [`req:${account.id}`]: false }));
-            load();
+            reload();
         }
     };
 
@@ -208,7 +218,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             if (decision === 'reject') {
                 toast('Запрос отклонён', 'success');
             } else if (result.delivered === false) {
-                toast(`Подтверждено, но код не дошёл: ${result.request?.delivery_error || 'Telegram не принял сообщение'}`, 'error');
+                toast(`Подтверждено, но код не дошёл: ${result.delivery_reason || 'Telegram не принял сообщение'}`, 'error');
             } else {
                 toast('Подтверждено — код отправлен в Telegram', 'success');
             }
@@ -216,7 +226,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             toast(errorOf(requestError, 'Не получилось'), 'error');
         } finally {
             setBusy((prev) => ({ ...prev, [`dec:${request.id}`]: '' }));
-            load();
+            reload();
         }
     };
 
@@ -230,6 +240,11 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     if (error && !data) {
         return shell(<div className={`${iosCard} p-6 text-center text-[13.5px] text-slate-600`}>{error}</div>);
     }
+    // Перечитка не удалась, а прежние данные есть: показываем их, но честно говорим, что они
+    // могли устареть.
+    const staleNotice = error ? (
+        <Notice key="stale" tone="amber" icon={CircleAlert} title="Данные могли устареть">{error}</Notice>
+    ) : null;
     if (!data) {
         return shell(
             <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-slate-500">
@@ -238,7 +253,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         );
     }
 
-    const notices = [];
+    const notices = staleNotice ? [staleNotice] : [];
     if (data.key_status !== 'ok') {
         notices.push(
             <Notice key="key" tone="red" icon={KeyRound} title="Не задан ключ шифрования">
@@ -246,16 +261,29 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             </Notice>,
         );
     }
+    // Подсказка — тому, кто может по ней что-то сделать: главу назначает руководство, а войти
+    // в бота может только сам глава.
     if (!data.approver) {
         notices.push(
             <Notice key="lead" tone="amber" icon={CircleAlert} title="У отдела маркетинга нет главы">
-                Подтверждать запросы некому — назначьте главу отдела в «Отделах».
+                {caps.can_manage
+                    ? 'Подтверждать запросы некому — назначьте главу отдела в «Отделах».'
+                    : 'Подтверждать запросы сейчас некому — обратитесь к руководству.'}
+            </Notice>,
+        );
+    } else if (caps.can_approve && !data.approver.telegram_linked) {
+        notices.push(
+            <Notice key="lead-tg" tone="amber" icon={Send} title="У вас не привязан Telegram"
+                    action={botLink && (
+                        <a href={botLink} target="_blank" rel="noopener noreferrer" className={TOOLBAR_BTN}>Открыть бота</a>
+                    )}>
+                Запросы видны только здесь и в колоколе портала. Чтобы подтверждать с телефона, войдите в бота портала своим логином и паролем.
             </Notice>,
         );
     } else if (caps.can_manage && !data.approver.telegram_linked) {
         notices.push(
             <Notice key="lead-tg" tone="amber" icon={Send} title="У главы маркетинга не привязан Telegram">
-                Запросы видны только здесь и в колоколе портала. Чтобы подтверждать с телефона, войдите в бота портала своим логином и паролем.
+                Запросы он видит только в портале. Чтобы подтверждать с телефона, ему нужно войти в бота портала своим логином и паролем.
             </Notice>,
         );
     }
@@ -284,9 +312,13 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     /* ── Мои коды ─────────────────────────────────────────────────────── */
     const myLatest = latestByAccount(data.my_requests);
+    const myAccounts = caps.can_manage
+        ? (data.accounts || []).filter((a) => (a.user_ids || []).includes(data.me.id))
+        : (data.accounts || []);
+    const myCardIds = new Set(myAccounts.map((account) => account.id));
     const codesTab = (
         <>
-            {(caps.can_manage ? (data.accounts || []).filter((a) => (a.user_ids || []).includes(data.me.id)) : data.accounts).length === 0 ? (
+            {myAccounts.length === 0 ? (
                 <div className={iosCard}>
                     <EmptyState icon={KeyRound} title="Вам пока не выдан ни один аккаунт">
                         Доступ к аккаунтам выдаёт глава маркетинга в этом разделе.
@@ -294,8 +326,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 </div>
             ) : (
                 <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                    {(caps.can_manage ? (data.accounts || []).filter((a) => (a.user_ids || []).includes(data.me.id)) : data.accounts)
-                        .map((account) => {
+                    {myAccounts.map((account) => {
                             const latest = myLatest[account.id];
                             const line = accountStateLine(latest, serverTime);
                             const pending = latest?.status === 'pending';
@@ -327,9 +358,12 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         })}
                 </div>
             )}
-            {/* Последний запрос по аккаунту уже сказан на его карточке — в истории его нет. */}
+            {/* Последний запрос по аккаунту уже сказан на его карточке — в истории его нет. Но только
+                если карточка есть: по снятому или удалённому аккаунту карточки нет, и его последний
+                запрос («Отменён») иначе пропал бы бесследно. */}
             <History title="История запросов"
-                     requests={(data.my_requests || []).filter((request) => myLatest[request.account_id]?.id !== request.id)}
+                     requests={(data.my_requests || []).filter((request) => !(
+                         myCardIds.has(request.account_id) && myLatest[request.account_id]?.id === request.id))}
                      serverTime={serverTime} />
         </>
     );
@@ -510,7 +544,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     toast(more
                         ? `Добавлено: ${accountsCount(count)}. Это QR ${batch.index + 1} из ${batch.size} — отсканируйте следующий`
                         : `Добавлено: ${accountsCount(count)}`, 'success');
-                    load();
+                    reload();
                 }}
             />
             <AccountSheet
@@ -518,8 +552,8 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 onClose={() => setOpenedAccount(null)}
                 api={api}
                 peopleNames={peopleNames}
-                onSaved={() => { toast('Сохранено', 'success'); load(); }}
-                onRemoved={(account) => { toast(`Аккаунт «${account.title}» удалён вместе с ключом`, 'success'); load(); }}
+                onSaved={() => { toast('Сохранено', 'success'); reload(); }}
+                onRemoved={(account) => { toast(`Аккаунт «${account.title}» удалён вместе с ключом`, 'success'); reload(); }}
             />
             <PeoplePicker
                 open={picking}
@@ -537,7 +571,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 onClose={() => setOpenedPerson(null)}
                 api={api}
                 botLink={botLink}
-                onSaved={() => { toast('Доступ сохранён', 'success'); load(); }}
+                onSaved={() => { toast('Доступ сохранён', 'success'); reload(); }}
             />
         </>,
     );

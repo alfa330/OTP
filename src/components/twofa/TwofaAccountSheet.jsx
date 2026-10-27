@@ -30,9 +30,14 @@ const detectorOrNull = () => {
 };
 
 /* Фото с телефона — 12 Мп: jsQR на таком кадре думает секунды. Пробуем в двух размерах:
-   плотный QR экспорта читается крупным, размытый — мельче. */
-const decodeWithJsQr = (source, width, height) => {
-    for (const limit of [1600, 900]) {
+   плотный QR экспорта читается крупным, размытый — мельче. Кадр камеры — один размер и без
+   инверсии: jsQR синхронный, и четыре прохода на кадр раз в 250 мс на iPhone (где нет
+   BarcodeDetector) подвешивали окно. */
+const PHOTO_SIZES = [1600, 900];
+const VIDEO_SIZES = [800];
+
+const decodeWithJsQr = (source, width, height, sizes = PHOTO_SIZES, inversion = 'attemptBoth') => {
+    for (const limit of sizes) {
         const scale = Math.min(1, limit / Math.max(width, height));
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(width * scale));
@@ -40,7 +45,7 @@ const decodeWithJsQr = (source, width, height) => {
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
         const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(frame.data, frame.width, frame.height, { inversionAttempts: 'attemptBoth' });
+        const code = jsQR(frame.data, frame.width, frame.height, { inversionAttempts: inversion });
         if (code?.data) return String(code.data);
     }
     return null;
@@ -70,12 +75,16 @@ const useQrCamera = (onCode) => {
     const streamRef = useRef(null);
     const timerRef = useRef(null);
     const busyRef = useRef(false);
+    // Номер запуска: окно закрыли или сменили режим, пока браузер спрашивал разрешение, —
+    // пришедший потом поток надо сразу погасить, а не оставлять гореть индикатор камеры.
+    const runRef = useRef(0);
     const onCodeRef = useRef(onCode);
     const [active, setActive] = useState(false);
     const [error, setError] = useState('');
     useEffect(() => { onCodeRef.current = onCode; }, [onCode]);
 
     const stop = useCallback(() => {
+        runRef.current += 1;
         clearInterval(timerRef.current);
         timerRef.current = null;
         streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -90,27 +99,38 @@ const useQrCamera = (onCode) => {
             setError('Камера в этом браузере недоступна — загрузите фото QR');
             return;
         }
+        const run = runRef.current + 1;
+        runRef.current = run;
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
             });
+            const video = videoRef.current;
+            if (run !== runRef.current || !video) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
             streamRef.current = stream;
             setActive(true);
-            const video = videoRef.current;
-            if (!video) return;
             video.srcObject = stream;
             await video.play();
-            const detector = detectorOrNull();
+            let detector = detectorOrNull();
             timerRef.current = setInterval(async () => {
                 if (busyRef.current || !video.videoWidth) return;
                 busyRef.current = true;
                 try {
                     let text = null;
                     if (detector) {
-                        const found = await detector.detect(video);
-                        text = found?.[0]?.rawValue ? String(found[0].rawValue) : null;
+                        try {
+                            const found = await detector.detect(video);
+                            text = found?.[0]?.rawValue ? String(found[0].rawValue) : null;
+                        } catch (detectError) {
+                            // Детектор есть, но не работает (Android без сервисов Google):
+                            // дальше читаем кадры jsQR, а не смотрим впустую.
+                            detector = null;
+                        }
                     } else {
-                        text = decodeWithJsQr(video, video.videoWidth, video.videoHeight);
+                        text = decodeWithJsQr(video, video.videoWidth, video.videoHeight, VIDEO_SIZES, 'dontInvert');
                     }
                     if (text) {
                         stop();
@@ -135,9 +155,9 @@ const useQrCamera = (onCode) => {
     return { videoRef, active, error, start, stop };
 };
 
-const EntryRow = ({ entry, pick, onChange }) => {
+const EntryRow = ({ entry, pick, onChange, error, inputRef }) => {
     const checked = Boolean(pick?.checked);
-    const disabled = !entry.supported;
+    const disabled = !entry.supported || Boolean(entry.duplicate_of);
     return (
         <div className={`rounded-xl px-3 py-2.5 ring-1 transition ${
             disabled ? 'bg-slate-50 ring-slate-200/70' : checked ? 'bg-blue-50/70 ring-blue-200' : 'bg-white ring-slate-200/70'
@@ -157,17 +177,22 @@ const EntryRow = ({ entry, pick, onChange }) => {
                     {entry.issuer && entry.name && (
                         <span className="block truncate text-[12.5px] text-slate-500">{entry.name}</span>
                     )}
-                    {disabled && <span className="mt-0.5 block text-[12px] text-rose-600">{entry.reason}</span>}
+                    {!entry.supported && <span className="mt-0.5 block text-[12px] text-rose-600">{entry.reason}</span>}
+                    {entry.supported && entry.duplicate_of && (
+                        <span className="mt-0.5 block text-[12px] text-slate-500">Уже добавлен как «{entry.duplicate_of}»</span>
+                    )}
                 </span>
             </label>
             {checked && (
                 <div className="mt-2.5 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.6fr)]">
-                    <input className={`${iosInput} !py-2`} value={pick.title} maxLength={120} aria-label="Название"
+                    <input ref={inputRef} className={`${iosInput} !py-2 ${error ? 'ring-2 ring-rose-300' : ''}`}
+                           value={pick.title} maxLength={120} aria-label="Название"
                            placeholder="Название в разделе" onChange={(event) => onChange({ ...pick, title: event.target.value })} />
                     <input className={`${iosInput} !py-2`} value={pick.service} maxLength={80} aria-label="Сервис"
                            placeholder="Сервис" onChange={(event) => onChange({ ...pick, service: event.target.value })} />
                 </div>
             )}
+            {error && <p className="mt-1.5 px-1 text-[12px] text-rose-600">{error}</p>}
         </div>
     );
 };
@@ -181,6 +206,9 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
     const [errors, setErrors] = useState({});
     const [busy, setBusy] = useState('');
     const [problem, setProblem] = useState('');
+    // Ошибки строк экспорта по индексу: «чего не хватает — красным у поля», а не текстом внизу.
+    const [rowErrors, setRowErrors] = useState({});
+    const rowRefs = useRef({});
     const fileRef = useRef(null);
     const titleRef = useRef(null);
     const secretRef = useRef(null);
@@ -191,6 +219,7 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
         setPicks({});
         setManual({ title: '', service: '', secret: '' });
         setErrors({});
+        setRowErrors({});
         setProblem('');
         setBusy('');
     }, []);
@@ -204,7 +233,8 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
             setPreview(data);
             const next = {};
             (data.entries || []).forEach((entry) => {
-                next[entry.index] = { checked: entry.supported, title: entry.title || '', service: entry.issuer || '' };
+                next[entry.index] = { checked: entry.supported && !entry.duplicate_of,
+                                      title: entry.title || '', service: entry.issuer || '' };
             });
             setPicks(next);
         } catch (requestError) {
@@ -246,10 +276,19 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
 
     const chosen = Object.entries(picks).filter(([, pick]) => pick.checked);
 
+    const focusRow = (index) => {
+        const input = rowRefs.current[index];
+        input?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+        input?.focus?.();
+    };
+
     const saveQr = async () => {
-        const missing = chosen.find(([, pick]) => !String(pick.title || '').trim());
-        if (missing) {
-            setProblem('У каждого выбранного аккаунта должно быть название');
+        const missing = {};
+        chosen.forEach(([index, pick]) => { if (!String(pick.title || '').trim()) missing[index] = 'Укажите название'; });
+        setRowErrors(missing);
+        const first = Object.keys(missing)[0];
+        if (first !== undefined) {
+            focusRow(first);
             return;
         }
         setBusy('save');
@@ -262,7 +301,15 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
             reset();
             onClose();
         } catch (requestError) {
-            setProblem(errorOf(requestError, 'Аккаунты не сохранились'));
+            // Ответ сервера про конкретную строку (дубль, неподходящий код, название) — к ней.
+            const index = requestError?.response?.data?.index;
+            const message = errorOf(requestError, 'Аккаунты не сохранились');
+            if (index !== undefined && index !== null && picks[index]) {
+                setRowErrors({ [index]: message });
+                focusRow(index);
+            } else {
+                setProblem(message);
+            }
             setBusy('');
         }
     };
@@ -283,7 +330,7 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
             onClose();
         } catch (requestError) {
             const message = errorOf(requestError, 'Аккаунт не сохранился');
-            if (requestError?.response?.data?.code === 'TWOFA_PARSE') {
+            if (['TWOFA_PARSE', 'TWOFA_UNSUPPORTED', 'TWOFA_DUPLICATE'].includes(requestError?.response?.data?.code)) {
                 setErrors({ secret: message });
                 secretRef.current?.focus();
             } else {
@@ -375,7 +422,12 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
                         </div>
                         {(preview.entries || []).map((entry) => (
                             <EntryRow key={entry.index} entry={entry} pick={picks[entry.index]}
-                                      onChange={(pick) => setPicks((prev) => ({ ...prev, [entry.index]: pick }))} />
+                                      error={rowErrors[entry.index]}
+                                      inputRef={(node) => { rowRefs.current[entry.index] = node; }}
+                                      onChange={(pick) => {
+                                          setPicks((prev) => ({ ...prev, [entry.index]: pick }));
+                                          setRowErrors((prev) => ({ ...prev, [entry.index]: undefined }));
+                                      }} />
                         ))}
                         {problem && <p className={FIELD_ERROR}>{problem}</p>}
                     </div>
