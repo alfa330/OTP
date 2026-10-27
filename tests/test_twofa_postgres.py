@@ -116,6 +116,10 @@ class FakeTelegram:
     def to(self, chat_id):
         return [m for m in self.sent if m['chat_id'] == chat_id]
 
+    def forget(self):
+        for log in (self.sent, self.edited, self.deleted, self.calls):
+            log.clear()
+
 
 class Clock:
     def __init__(self, now):
@@ -169,6 +173,11 @@ def env(db):
     # Уведомления по умолчанию выключены (тесты ниже — test_notifications_*); здесь глава их
     # включил, чтобы процесс шёл через его Telegram, как в жизни.
     assert service.set_notify(head, True) is True
+    # Анне открыт доступ — бот прислал ей меню с кнопкой (тесты test_first_grant_*). Дальше
+    # тесты считают сообщения сами, с чистого листа.
+    [welcome] = tg.sent
+    assert welcome['chat_id'] == ANNA_TG and rules.REQUEST_BUTTON in str(welcome['markup'])
+    tg.forget()
     return {'db': db, 'tg': tg, 'clock': clock, 'service': service, 'account_id': account_id, 'wakes': wakes}
 
 
@@ -894,6 +903,205 @@ def test_saving_accounts_without_the_key_is_refused(client, env, monkeypatch):
     secret_b32 = base64.b32encode(b'abcdefghij0123456789').decode()
     response = client.post('/api/twofa/accounts', json={'text': secret_b32, 'items': [{'index': 0, 'title': 'X'}]})
     assert response.status_code == 409 and response.get_json()['code'] == 'TWOFA_KEY_MISSING'
+
+
+# ─── Запрос из бота: «Запросить код 🔐» → выбор аккаунта → запрос ────────────
+
+SECRET_2 = b'abcdefghijabcdefghij'
+OPERATOR_MENU = {'keyboard': [[{'text': 'Моя статистика📊'}]], 'resize_keyboard': True}
+
+
+def _offer(env, tg_id=ANNA_TG):
+    """Нажать «Запросить код 🔐»: (outcome, что бот прислал в ответ)."""
+    outcome = env['service'].offer_accounts(tg_id)['outcome']
+    return outcome, env['tg'].to(tg_id)[-1]
+
+
+def _choose(env, offer, account_id, tg_id=ANNA_TG):
+    return env['service'].handle_callback(tg_id, 'twofa:req:%d' % account_id,
+                                          (offer['chat_id'], offer['message_id']))
+
+
+def _second_account(env, grant_to_anna=True):
+    service = env['service']
+    head = service.context(HEAD)
+    [account_id] = service.add_accounts(
+        head, [{'title': 'ads@company.kz', 'service': 'Meta', 'secret': SECRET_2}])['created']
+    if grant_to_anna:
+        service.set_person_grants(head, ANNA, [env['account_id'], account_id])
+    return account_id
+
+
+def _with_menu(env, menu):
+    return Twofa(cursor_factory=env['db']._get_cursor, tg=env['tg'], clock=env['clock'], menu=menu)
+
+
+def test_request_button_offers_only_the_granted_accounts(env):
+    meta = _second_account(env, grant_to_anna=False)
+    outcome, offer = _offer(env)
+    assert outcome == 'shown'
+    assert offer['text'] == rules.choose_text()
+    assert offer['markup']['inline_keyboard'] == [
+        [{'text': 'Google Ads', 'callback_data': 'twofa:req:%d' % env['account_id']}],
+        [{'text': 'Отмена', 'callback_data': 'twofa:x:0'}],
+    ]
+    assert 'twofa:req:%d' % meta not in str(offer['markup'])
+
+
+def test_choosing_an_account_sends_the_request_and_turns_the_choice_into_a_receipt(env):
+    _outcome, offer = _offer(env)
+    assert _choose(env, offer, env['account_id']) == ('Запрос отправлен', False)
+    [(request_id, status)] = _rows(env['db'], "SELECT id, status FROM twofa_requests")
+    assert status == 'pending'
+    # Дальше — тот же путь, что у кнопки портала: подтверждающему с уведомлениями — кнопки.
+    [approval] = env['tg'].to(HEAD_TG)
+    assert approval['markup'] == rules.approval_markup(request_id)
+    # Выбор стал отметкой «отправлен» и потерял кнопки — второй раз по нему не нажать.
+    [receipt] = env['tg'].edited
+    assert (receipt['chat_id'], receipt['message_id']) == (ANNA_TG, offer['message_id'])
+    assert 'отправлен в 13:30' in receipt['text'] and 'сгорит в 13:40' in receipt['text']
+    assert receipt['markup'] is None
+    # В журнале видно, откуда пришёл запрос.
+    assert _rows(env['db'], "SELECT details FROM twofa_events WHERE kind = 'requested'") == [({'via': 'telegram'},)]
+    # Подтвердили — код пришёл в тот же чат.
+    env['service'].handle_callback(HEAD_TG, 'twofa:ok:%d' % request_id)
+    assert _code_in(env['tg'].to(ANNA_TG)[-1]['text'])
+
+
+def test_portal_request_is_marked_in_the_journal_too(env):
+    _request(env)
+    assert _rows(env['db'], "SELECT details FROM twofa_events WHERE kind = 'requested'") == [({'via': 'portal'},)]
+
+
+def test_second_choice_while_pending_makes_no_second_request(env):
+    _outcome, offer = _offer(env)
+    _choose(env, offer, env['account_id'])
+    _outcome, again = _offer(env)
+    assert _choose(env, again, env['account_id']) == ('Запрос уже ждёт подтверждения — сгорит в 13:40', False)
+    assert len(_rows(env['db'], "SELECT id FROM twofa_requests")) == 1
+    assert len(env['tg'].to(HEAD_TG)) == 1
+
+
+def test_choice_left_in_the_chat_follows_revoked_access(env):
+    meta = _second_account(env)
+    _outcome, offer = _offer(env)
+    head = env['service'].context(HEAD)
+    env['service'].set_person_grants(head, ANNA, [meta])  # Google Ads сняли, пока выбор висел
+    assert _choose(env, offer, env['account_id']) == ('Этот аккаунт вам больше не выдан', True)
+    assert env['tg'].edited[-1]['markup'] == rules.choose_markup(
+        [{'id': meta, 'title': 'ads@company.kz', 'service': 'Meta'}])
+    env['service'].set_person_grants(head, ANNA, [])
+    assert _choose(env, offer, meta) == ('Запрос кодов вам больше не открыт', True)
+    assert env['tg'].edited[-1]['text'] == rules.request_closed_text()
+    assert env['tg'].edited[-1]['markup'] is None
+    assert _rows(env['db'], "SELECT id FROM twofa_requests") == []
+
+
+def test_button_without_access_answers_with_the_menu_that_has_no_button(env):
+    asked = []
+
+    def menu(user_id):
+        asked.append(user_id)
+        return OPERATOR_MENU
+
+    assert _with_menu(env, menu).offer_accounts(OTHER_TG) == {'outcome': 'closed'}
+    [reply] = env['tg'].to(OTHER_TG)
+    assert reply['text'] == rules.request_closed_text() and reply['markup'] == OPERATOR_MENU
+    assert asked == [OTHER]
+    # У роли нет своего меню — кнопку убрать целиком.
+    assert env['service'].offer_accounts(OTHER_TG) == {'outcome': 'closed'}
+    assert env['tg'].to(OTHER_TG)[-1]['markup'] == {'remove_keyboard': True}
+
+
+def test_button_from_an_unknown_telegram_points_at_the_login(env):
+    assert env['service'].offer_accounts(777) == {'outcome': 'no_user'}
+    assert env['tg'].to(777)[-1]['text'] == rules.no_user_text()
+
+
+def test_button_when_nobody_can_approve_says_so_before_the_choice(env):
+    with env['db']._get_cursor() as cur:
+        cur.execute("UPDATE departments SET head_user_id = NULL WHERE code = 'marketing'")
+        cur.execute("UPDATE users SET status = 'fired' WHERE id = %s", (SUPER,))
+    assert env['service'].offer_accounts(ANNA_TG) == {'outcome': 'no_approver'}
+    [reply] = env['tg'].to(ANNA_TG)
+    assert reply['text'] == rules.no_approver_text() and reply['markup'] is None
+
+
+def test_cancel_removes_the_choice(env):
+    _outcome, offer = _offer(env)
+    assert env['service'].handle_callback(ANNA_TG, 'twofa:x:0', (ANNA_TG, offer['message_id'])) == ('', False)
+    assert env['tg'].deleted == [{'chat_id': ANNA_TG, 'message_id': offer['message_id']}]
+    assert _rows(env['db'], "SELECT id FROM twofa_requests") == []
+
+
+def test_first_grant_sends_the_menu_with_the_button_once(env):
+    menu = {'keyboard': [[{'text': 'Моя статистика📊'}], [{'text': rules.REQUEST_BUTTON}]], 'resize_keyboard': True}
+    service = _with_menu(env, lambda _user_id: menu)
+    head = service.context(HEAD)
+    service.set_person_grants(head, OTHER, [env['account_id']])
+    [welcome] = env['tg'].to(OTHER_TG)
+    assert '«Google Ads»' in welcome['text'] and '«%s»' % rules.REQUEST_BUTTON in welcome['text']
+    assert welcome['markup'] == menu
+    # Ещё один аккаунт к уже открытому доступу — без нового сообщения: кнопка у человека есть.
+    meta = _second_account(env, grant_to_anna=False)
+    service.set_person_grants(head, OTHER, [env['account_id'], meta])
+    assert len(env['tg'].to(OTHER_TG)) == 1
+    # Сняли всё и выдали снова — доступ открылся заново, и сообщение тоже.
+    service.set_person_grants(head, OTHER, [])
+    service.set_person_grants(head, OTHER, [meta])
+    assert len(env['tg'].to(OTHER_TG)) == 2
+    assert '«ads@company.kz»' in env['tg'].to(OTHER_TG)[-1]['text']
+
+
+def test_first_grant_without_telegram_or_key_sends_nothing(env, monkeypatch):
+    service = env['service']
+    service.set_person_grants(service.context(HEAD), BORIS, [env['account_id']])  # Telegram не привязан
+    monkeypatch.delenv(crypto.ENV_KEY)
+    # Без ключа доступы ведёт только супер-админ, а кнопка не сработала бы — и не обещаем её.
+    assert service.set_person_grants(service.context(SUPER), OTHER, [env['account_id']])['outcome'] == 'ok'
+    assert env['tg'].sent == []
+
+
+def test_bot_menu_runs_the_real_functions_from_the_bot(env):
+    """_main_menu_keyboard, _twofa_can_request_for и _twofa_reply_menu — настоящие, из
+    bot_schedule2, на этой базе: кнопка появляется с выдачей, а сервис получает меню словарём."""
+    import ast
+    import logging
+    from pathlib import Path
+
+    from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+    names = {'_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_is_admin_role',
+             'get_admin_keyboard', 'get_sv_keyboard', 'get_operator_keyboard', '_main_menu_keyboard',
+             '_twofa_can_request_for', '_twofa_reply_menu'}
+    bot = Path(__file__).resolve().parents[1] / 'bot_schedule2.py'
+    body = [node for node in ast.parse(bot.read_text(encoding='utf-8-sig')).body
+            if (isinstance(node, ast.FunctionDef) and node.name in names)
+            or (isinstance(node, ast.Assign) and any(getattr(t, 'id', None) in names for t in node.targets))]
+
+    class Users:
+        """db.get_user(id=…) бота — те поля кортежа, что читает меню: id, telegram_id, имя, роль."""
+
+        def get_user(self, id):
+            found = _rows(env['db'], "SELECT id, telegram_id, name, role FROM users WHERE id = %s", (id,))
+            return found[0] if found else None
+
+    namespace = {'db': Users(), 'logging': logging, 'ReplyKeyboardMarkup': ReplyKeyboardMarkup,
+                 'KeyboardButton': KeyboardButton, 'TWOFA_REQUEST_BUTTON': rules.REQUEST_BUTTON,
+                 '_TWOFA': {'service': env['service']}}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(bot), 'exec'), namespace)
+    assert names <= set(namespace)
+    reply_menu = namespace['_twofa_reply_menu']
+    assert reply_menu(ANNA) == {'keyboard': [[{'text': rules.REQUEST_BUTTON}]], 'resize_keyboard': True}
+    assert reply_menu(BORIS) is None  # роль без меню и без кодов
+    operator_rows = [[{'text': 'Моя статистика📊'}], [{'text': 'Мои оценки📝'}], [{'text': 'Доступ🔑'}]]
+    assert reply_menu(OTHER)['keyboard'] == operator_rows
+    # Сервис с настоящим меню бота: первая выдача приносит оператору его меню и кнопку под ним.
+    service = _with_menu(env, reply_menu)
+    service.set_person_grants(service.context(HEAD), OTHER, [env['account_id']])
+    [welcome] = env['tg'].to(OTHER_TG)
+    assert welcome['markup']['keyboard'] == operator_rows + [[{'text': rules.REQUEST_BUTTON}]]
+    assert not namespace['_twofa_can_request_for'](None)
 
 
 # ─── Флаг профиля — настоящая функция из bot_schedule2 ───────────────────────

@@ -23,6 +23,13 @@ CODE_VISIBLE_SECONDS = 60
 TITLE_MAX = 120
 SERVICE_MAX = 80
 
+# Кнопка главного меню бота у тех, кому выданы аккаунты (bot_schedule2::_main_menu_keyboard).
+# Подпись — она же фильтр обработчика нажатия: бот получает её обычным текстом.
+REQUEST_BUTTON = 'Запросить код 🔐'
+
+# Подпись кнопки аккаунта в выборе: длинное название Telegram всё равно обрежет, но по-своему.
+ACCOUNT_BUTTON_MAX = 60
+
 _ALMATY = timedelta(hours=5)
 
 STATUS_LABELS = {
@@ -179,5 +186,67 @@ def rejected_text(*, account_title):
 def expired_text(*, account_title):
     return (
         '⏱ Запрос кода для «%s» сгорел: за 10 минут его не подтвердили.\n'
-        'Если код ещё нужен, запросите его заново в разделе «Коды 2FA».'
-    ) % _esc(account_title)
+        'Если код ещё нужен, запросите его заново — кнопкой «%s» или в разделе «Коды 2FA».'
+    ) % (_esc(account_title), REQUEST_BUTTON)
+
+
+# ─── Запрос из бота: «Запросить код 🔐» → выбор аккаунта → запрос ──────────────
+
+def account_button_label(account):
+    """Подпись аккаунта в выборе: название, и сервис — если его в названии нет."""
+    title = ' '.join(str(account.get('title') or '').split())
+    service = ' '.join(str(account.get('service') or '').split())
+    if service and service.lower() not in title.lower():
+        title = '%s · %s' % (title, service)
+    if len(title) > ACCOUNT_BUTTON_MAX:
+        title = title[:ACCOUNT_BUTTON_MAX - 1].rstrip() + '…'
+    return title
+
+
+def choose_text():
+    return '🔐 <b>Какой код нужен?</b>\nВыберите аккаунт — запрос уйдёт на подтверждение, а код придёт сюда.'
+
+
+def choose_markup(accounts):
+    """По аккаунту в строке — как список, а не плитка: подписи — почты, им нужна ширина."""
+    rows = [[{'text': account_button_label(account), 'callback_data': 'twofa:req:%d' % int(account['id'])}]
+            for account in accounts]
+    rows.append([{'text': 'Отмена', 'callback_data': 'twofa:x:0'}])
+    return {'inline_keyboard': rows}
+
+
+def request_sent_text(*, account_title, created_at, expires_at):
+    """Выбор аккаунта после нажатия. Остаётся в чате, поэтому — о том, что было, а не «ждём»:
+    к моменту, когда его перечитают, запрос уже решён."""
+    return (
+        '📨 Запрос кода для «%s» отправлен в %s.\n'
+        'Код придёт сюда после подтверждения. Без ответа запрос сгорит в %s.'
+    ) % (_esc(account_title), clock(created_at, seconds=False), clock(expires_at, seconds=False))
+
+
+def request_closed_text():
+    return 'Запрос кодов 2FA вам больше не открыт. Если код нужен, обратитесь к главе маркетинга.'
+
+
+def no_approver_text():
+    return 'Подтвердить запрос сейчас некому — обратитесь к руководству отдела маркетинга.'
+
+
+def no_user_text():
+    return 'Ваш Telegram не привязан к учётке портала. Нажмите /start и «Вход👤».'
+
+
+def request_button_menu():
+    """Меню из одной кнопки — если меню человека от бота не пришло (service._reply_menu)."""
+    return {'keyboard': [[{'text': REQUEST_BUTTON}]], 'resize_keyboard': True}
+
+
+def access_opened_text(*, account_titles):
+    """Первый выданный аккаунт: сообщение несёт главное меню с кнопкой — без него кнопка
+    появилась бы у человека только после /start."""
+    names = ', '.join('«%s»' % _esc(title) for title in account_titles)
+    return (
+        '🔐 Вам открыт запрос кодов 2FA: %s.\n'
+        'Когда понадобится код, нажмите «%s» под полем ввода — запрос уйдёт на подтверждение, '
+        'а код придёт сюда.'
+    ) % (names, REQUEST_BUTTON)

@@ -57697,6 +57697,27 @@ def get_operator_keyboard():
     kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
+
+def _main_menu_keyboard(user_id, role):
+    """Главное меню человека: кнопки его роли и «Запросить код 🔐», если ему выданы аккаунты
+    «Кодов 2FA» (#373). Бот возвращает человека в главное меню из десятка мест — все берут
+    меню отсюда: иначе кнопка кодов пропадала бы после «Отмены» или отчёта.
+
+    None — меню нет: у роли нет своих кнопок (маркетинг, HR, бухгалтерия, тренер), а кодов ей
+    не выдано."""
+    if _is_admin_role(role):
+        kb = get_admin_keyboard()
+    elif role == 'sv':
+        kb = get_sv_keyboard()
+    elif role == 'operator':
+        kb = get_operator_keyboard()
+    else:
+        kb = None
+    if TWOFA_REQUEST_BUTTON and _twofa_can_request_for(user_id):
+        kb = kb or ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton(TWOFA_REQUEST_BUTTON))
+    return kb
+
 # «Коды 2FA» (#373): «Подтвердить / Отклонить» у главы маркетинга и «Код не подошёл» у
 # сотрудника. Объявлен ПЕРВЫМ из callback-хендлеров и со state='*': хендлеры со state=…
 # ниже ловят любые нажатия человека, застрявшего в диалоге бота, — глава посреди чужого
@@ -57706,6 +57727,13 @@ def get_operator_keyboard():
 # встали бы все остальные хендлеры бота (разбор 27.10.2026).
 _TWOFA_CALLBACK_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='twofa-callback')
 
+try:
+    from twofa.rules import REQUEST_BUTTON as TWOFA_REQUEST_BUTTON  # noqa: E402
+except Exception:
+    # Раздел не подключится и сам (ниже, у Blueprint); меню просто останется без кнопки.
+    logging.exception("Коды 2FA: подпись кнопки «Запросить код» не загружена")
+    TWOFA_REQUEST_BUTTON = None
+
 
 @dp.callback_query_handler(lambda c: bool(c.data) and c.data.startswith('twofa:'), state='*')
 async def handle_twofa_callback(callback_query: types.CallbackQuery):
@@ -57714,13 +57742,39 @@ async def handle_twofa_callback(callback_query: types.CallbackQuery):
         await callback_query.answer('Раздел «Коды 2FA» не подключён', show_alert=True)
         return
     loop = asyncio.get_event_loop()
+    # Выбор аккаунта (twofa:req) сервис правит на месте — ему нужно, где сообщение с кнопкой.
+    pressed = callback_query.message
+    where = (pressed.chat.id, pressed.message_id) if pressed else None
     try:
         text, alert = await loop.run_in_executor(
-            _TWOFA_CALLBACK_POOL, service.handle_callback, callback_query.from_user.id, callback_query.data)
+            _TWOFA_CALLBACK_POOL, service.handle_callback, callback_query.from_user.id, callback_query.data, where)
     except Exception:
         logging.exception('twofa: нажатие кнопки не обработано')
         text, alert = 'Не получилось — попробуйте ещё раз', True
     await callback_query.answer(text, show_alert=alert)
+
+
+# «Запросить код 🔐» в главном меню (_main_menu_keyboard): бот присылает выбор из выданных
+# человеку аккаунтов, нажатие на аккаунт отправляет запрос (twofa:req — обработчик выше).
+# Первый из message_handler и со state='*' — по той же причине, что кнопки выше: посреди
+# диалога бота подпись кнопки иначе досталась бы обработчику этого диалога как ответ.
+@dp.message_handler(lambda m: bool(TWOFA_REQUEST_BUTTON) and m.chat.type == 'private'
+                    and m.text == TWOFA_REQUEST_BUTTON, state='*')
+async def handle_twofa_request_button(message: types.Message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    service = _TWOFA.get('service')
+    if service is None:
+        await message.answer('Раздел «Коды 2FA» не подключён')
+        return
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(_TWOFA_CALLBACK_POOL, service.offer_accounts, message.from_user.id)
+    except Exception:
+        logging.exception('twofa: «Запросить код» не обработано')
+        await message.answer('Не получилось — попробуйте ещё раз')
 
 
 @dp.message_handler(regexp='Отмена ❌', state='*')
@@ -57731,14 +57785,7 @@ async def cancel_handler(message: types.Message, state: FSMContext):
         return
     await state.finish()
     user = db.get_user(telegram_id=message.from_user.id)
-    if user and _is_admin_role(user[3]):
-        kb = get_admin_keyboard()
-    elif user and user[3] == 'sv':
-        kb = get_sv_keyboard()
-    elif user and user[3] == 'operator':
-        kb = get_operator_keyboard()
-    else:
-        kb = ReplyKeyboardRemove()
+    kb = (_main_menu_keyboard(user[0], user[3]) if user else None) or ReplyKeyboardRemove()
     await bot.send_message(
         chat_id=message.from_user.id,
         text="Действие отменено.",
@@ -58259,14 +58306,14 @@ async def start_command(message: types.Message):
                 chat_id=message.from_user.id,
                 text="<b>Добро пожаловать!</b>\nЭто бот для прослушки прослушек.",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         elif user[3] == 'sv':
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text=f"<b>Добро пожаловать, {user[2]}!</b>",
                 parse_mode='HTML',
-                reply_markup=get_sv_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         elif user[3] == 'operator':
             await bot.send_message(
@@ -58274,7 +58321,16 @@ async def start_command(message: types.Message):
                 text=f"<b>Добро пожаловать, оператор {user[2]}!</b>\n\n"
                     "Используйте кнопки ниже для просмотра вашей статистики.",
                 parse_mode='HTML',
-                reply_markup=get_operator_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
+            )
+        else:
+            # Роли без своего меню (маркетинг, HR, бухгалтерия, тренер): раньше /start им молчал.
+            # Кнопки — только «Запросить код 🔐», если выданы коды; иначе убрать устаревшие.
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"<b>Добро пожаловать, {html.escape(user[2] or '')}!</b>",
+                parse_mode='HTML',
+                reply_markup=_main_menu_keyboard(user[0], user[3]) or ReplyKeyboardRemove()
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -58294,7 +58350,7 @@ async def start_auth(message: types.Message):
             chat_id=message.from_user.id,
             text=f"<b>Вы уже авторизованы как {user[2]} ({user[3]})</b>.\n\n",
             parse_mode='HTML',
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=_main_menu_keyboard(user[0], user[3]) or ReplyKeyboardRemove()
         )
         await message.delete()
         return
@@ -58391,20 +58447,28 @@ async def process_password(message: types.Message, state: FSMContext):
             await message.answer(
                 "<b>Добро пожаловать!</b>\nЭто бот для управления прослушками.",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user['id'], role)
             )
         elif role == 'sv':
             await message.answer(
                 f"<b>Добро пожаловать, {name}!</b>",
                 parse_mode='HTML',
-                reply_markup=get_sv_keyboard()
+                reply_markup=_main_menu_keyboard(user['id'], role)
             )
         elif role == 'operator':
             await message.answer(
                 text=f"<b>Добро пожаловать, оператор {name}!</b>\n\n"
                     "Используйте кнопки ниже для просмотра вашей статистики.",
                 parse_mode='HTML',
-                reply_markup=get_operator_keyboard()
+                reply_markup=_main_menu_keyboard(user['id'], role)
+            )
+        else:
+            # Роли без своего меню: раньше вход заканчивался молча, и человек не знал, вошёл ли.
+            # Убираем и «Отмена ❌» шага входа — если кодов нет, кнопок не остаётся вовсе.
+            await message.answer(
+                f"<b>Добро пожаловать, {html.escape(name or '')}!</b>",
+                parse_mode='HTML',
+                reply_markup=_main_menu_keyboard(user['id'], role) or ReplyKeyboardRemove()
             )
 
         logging.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
@@ -58454,21 +58518,21 @@ async def back_to_admin(message: types.Message):
             chat_id=message.from_user.id,
             text='<b>Главное меню</b>',
             parse_mode='HTML',
-            reply_markup=get_admin_keyboard()
+            reply_markup=_main_menu_keyboard(user[0], user[3])
         )
     elif user and user[3] == 'sv':
         await bot.send_message(
             chat_id=message.from_user.id,
             text=f'<b>Главное меню</b>',
             parse_mode='HTML',
-            reply_markup=get_sv_keyboard()
+            reply_markup=_main_menu_keyboard(user[0], user[3])
         )
     elif user and user[3] == 'operator':
         await bot.send_message(
             chat_id=message.from_user.id,
             text=f'<b>Главное меню</b>',
             parse_mode='HTML',
-            reply_markup=get_operator_keyboard()
+            reply_markup=_main_menu_keyboard(user[0], user[3])
         )
     await message.delete()
 
@@ -58816,7 +58880,7 @@ async def view_hours_data(message: types.Message):
                 chat_id=message.from_user.id,
                 text="<b>Нет доступных супервайзеров</b>",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
             return
         
@@ -58893,7 +58957,7 @@ async def view_evaluations(message: types.Message):
                 chat_id=message.from_user.id,
                 text="<b>Нет доступных супервайзеров</b>",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
             return
         
@@ -59172,7 +59236,7 @@ async def handle_monthly_report(message: types.Message, state: FSMContext):
                 chat_id=message.from_user.id,
                 text="✅ Отчет успешно сгенерирован и отправлен!",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         except Exception as e:
             logging.error(f"Ошибка генерации отчета: {e}")
@@ -59180,7 +59244,7 @@ async def handle_monthly_report(message: types.Message, state: FSMContext):
                 chat_id=message.from_user.id,
                 text=f"❌ Ошибка генерации отчета: {str(e)}",
                 parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
     else:
         await bot.send_message(
@@ -59642,7 +59706,7 @@ async def process_credential_change(message: types.Message, state: FSMContext):
                 chat_id=message.from_user.id,
                 text=f"✅ {msg}\n\nОператор: {operator[2]}",
                 parse_mode='HTML',
-                reply_markup=get_sv_keyboard()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         else:
             await bot.send_message(
@@ -59800,7 +59864,7 @@ async def select_hours_direction(callback: types.CallbackQuery, state: FSMContex
         chat_id=callback.from_user.id,
         text=f"""<b>Таблица часов сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
         parse_mode='HTML',
-        reply_markup=get_sv_keyboard()
+        reply_markup=_main_menu_keyboard(user[0], user[3])
     )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
@@ -67688,6 +67752,7 @@ try:
         cursor_factory=db._get_cursor,
         tg=_TwofaBotApi(API_TOKEN),
         wake=lambda: _TWOFA['alarm'].wake() if _TWOFA['alarm'] else None,
+        menu=lambda user_id: _twofa_reply_menu(user_id),
     )
     _TWOFA['alarm'] = _TwofaAlarm(_TWOFA['service'].run_due)
     app.register_blueprint(build_twofa_blueprint(
@@ -67722,6 +67787,30 @@ def _twofa_section_open_for(user_id):
     except Exception:
         logging.exception("Не удалось определить доступ к «Кодам 2FA» пользователя %s", user_id)
         return False
+
+
+def _twofa_can_request_for(user_id):
+    """Положена ли человеку кнопка «Запросить код 🔐» в меню бота: выдан хоть один аккаунт
+    (twofa/access.py::can_request). Отказ базы меню не роняет — кнопки просто не будет."""
+    service = _TWOFA.get('service')
+    if service is None or user_id is None:
+        return False
+    try:
+        from twofa import access as twofa_access
+
+        ctx = service.context(user_id)
+        return bool(ctx and twofa_access.can_request(ctx))
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Кодам 2FA» пользователя %s", user_id)
+        return False
+
+
+def _twofa_reply_menu(user_id):
+    """Главное меню человека словарём Bot API — для сообщений, которые раздел шлёт сам:
+    «вам открыт запрос кодов» (меню уже с кнопкой) и «запрос больше не открыт» (уже без неё)."""
+    user = db.get_user(id=user_id)
+    kb = _main_menu_keyboard(user[0], user[3]) if user else None
+    return kb.to_python() if kb else None
 
 
 def _twofa_start_alarm():

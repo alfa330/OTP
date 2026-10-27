@@ -1,7 +1,8 @@
 """Процесс «Кодов 2FA»: запрос → решение главы → код в Telegram → сроки.
 
-Один класс на все входы: роуты раздела (портал), нажатия кнопок в Telegram (отдельный пул
-раздела) и будильник сроков. Порядок в каждом шаге один и тот же:
+Один класс на все входы: роуты раздела (портал), кнопки в Telegram (отдельный пул раздела) —
+и «Подтвердить» у главы, и «Запросить код 🔐» в меню сотрудника с выбором аккаунта, — и
+будильник сроков. Порядок в каждом шаге один и тот же:
 
     1. транзакция: проверить всё, записать решение и журнал, зафиксировать;
     2. после фиксации — Telegram: сначала код сотруднику, потом отметки у главы и уборка;
@@ -57,11 +58,15 @@ def public_request(request):
 
 
 class Twofa:
-    def __init__(self, *, cursor_factory, tg, clock=time.time, wake=None):
+    def __init__(self, *, cursor_factory, tg, clock=time.time, wake=None, menu=None):
+        """menu(user_id) — главное меню человека в боте словарём Bot API (кнопки его роли и
+        «Запросить код 🔐», если она ему положена) или None. Меню знает только бот
+        (bot_schedule2::_twofa_reply_menu): раздел шлёт его, когда доступ открылся или снят."""
         self._cursor = cursor_factory
         self.tg = tg
         self._clock = clock
         self._wake = wake or (lambda: None)
+        self._menu = menu or (lambda _user_id: None)
 
     # ─── Общее ───────────────────────────────────────────────────────────────
 
@@ -80,11 +85,18 @@ class Twofa:
         except Exception:  # noqa: BLE001 — будильник доберётся сам при следующем сроке
             logging.exception('twofa: не разбудил будильник')
 
+    def _reply_menu(self, user_id):
+        try:
+            return self._menu(user_id)
+        except Exception:  # noqa: BLE001 — без меню сообщение всё равно нужно
+            logging.exception('twofa: не собрал меню бота для %s', user_id)
+            return None
+
     # ─── Запрос кода ─────────────────────────────────────────────────────────
 
-    def request_code(self, ctx, account_id):
-        """Сотрудник просит код. outcome: created / pending / forbidden / no_telegram /
-        no_approver / not_found."""
+    def request_code(self, ctx, account_id, via='portal'):
+        """Сотрудник просит код — кнопкой в портале или выбором в боте (via, пишется в журнал).
+        outcome: created / pending / forbidden / no_telegram / no_approver / not_found."""
         if not access.can_request(ctx, account_id):
             return {'outcome': 'forbidden'}
         if not ctx.get('telegram_id'):
@@ -110,7 +122,8 @@ class Twofa:
             if request_id is None:
                 return {'outcome': 'pending', 'request': queries.pending_of(cursor, account_id, ctx['user_id'], now_dt)}
             queries.log_event(cursor, 'requested', now=now_dt, request_id=request_id, account_id=account['id'],
-                              account_title=account['title'], actor_id=ctx['user_id'], actor_name=ctx['name'])
+                              account_title=account['title'], actor_id=ctx['user_id'], actor_name=ctx['name'],
+                              details={'via': via})
             request = queries.get_request(cursor, request_id)
         # Уведомление — только включившим тумблер «уведомления о запросах» (по умолчанию он
         # выключен) и только тем, у кого есть Telegram; колокол им покажет запрос сам.
@@ -143,6 +156,91 @@ class Twofa:
             current = queries.get_request(cursor, request['id'])
         if current and current['status'] != 'pending':
             self._close_approvals(current)
+
+    # ─── Запрос из бота ──────────────────────────────────────────────────────
+
+    def offer_accounts(self, telegram_user_id):
+        """«Запросить код 🔐» в меню бота: прислать выбор из выданных человеку аккаунтов.
+
+        Нажатие на аккаунт (twofa:req:<id>, handle_callback) отправляет запрос тем же
+        request_code, что и кнопка портала. Бот пишет только в личку, поэтому чат — это сам
+        человек. outcome: shown / closed / no_user / no_approver / failed.
+        """
+        chat_id = int(telegram_user_id)
+        accounts, outcome = [], None
+        with self._cursor() as cursor:
+            user_id = queries.user_id_by_telegram(cursor, chat_id)
+            ctx = queries.load_access_context(cursor, user_id, crypto.key_status()) if user_id else None
+            if not ctx:
+                outcome = 'no_user'
+            elif access.can_request(ctx):
+                accounts = queries.list_accounts(cursor, ids=access.granted_ids(ctx))
+                if accounts and not queries.approvers(cursor):
+                    outcome = 'no_approver'
+            if ctx and not accounts:
+                outcome = 'closed'
+        if outcome == 'no_user':
+            self.tg.send(chat_id, rules.no_user_text())
+        elif outcome == 'closed':
+            # Доступ сняли, а кнопка в меню осталась: ответ несёт меню уже без неё.
+            self.tg.send(chat_id, rules.request_closed_text(), self._reply_menu(user_id) or {'remove_keyboard': True})
+        elif outcome == 'no_approver':
+            # Сразу, а не после выбора: запрос, который некому подтвердить, только сгорел бы.
+            self.tg.send(chat_id, rules.no_approver_text())
+        else:
+            message_id, _error = self.tg.send(chat_id, rules.choose_text(), rules.choose_markup(accounts))
+            outcome = 'shown' if message_id else 'failed'
+        return {'outcome': outcome}
+
+    def _request_from_bot(self, ctx, account_id, message):
+        """Аккаунт выбран в боте. Создан запрос — выбор становится строкой «отправлен»."""
+        result = self.request_code(ctx, account_id, via='telegram')
+        outcome = result['outcome']
+        request = result.get('request')
+        if outcome == 'created':
+            if message:
+                self.tg.edit(message[0], message[1], rules.request_sent_text(
+                    account_title=request['account_title'], created_at=rules.epoch(request['created_at']),
+                    expires_at=rules.epoch(request['expires_at'])))
+            return 'Запрос отправлен', False
+        if outcome == 'pending':
+            if request:
+                return 'Запрос уже ждёт подтверждения — сгорит в %s' % rules.clock(
+                    rules.epoch(request['expires_at']), seconds=False), False
+            return 'Запрос уже ждёт подтверждения', False
+        if outcome == 'no_approver':
+            return 'Подтвердить запрос сейчас некому — обратитесь к руководству', True
+        if outcome in ('forbidden', 'not_found'):
+            # Пока выбор висел в чате, аккаунт сняли или удалили: показать то, что выдано сейчас.
+            if self._refresh_offer(ctx['user_id'], message):
+                return 'Этот аккаунт вам больше не выдан', True
+            return 'Запрос кодов вам больше не открыт', True
+        return 'Не получилось — попробуйте ещё раз', True
+
+    def _refresh_offer(self, user_id, message):
+        """Переписать выбор по нынешним выдачам. True — что-то ещё выдано."""
+        with self._cursor() as cursor:
+            ctx = queries.load_access_context(cursor, user_id, crypto.key_status())
+            accounts = (queries.list_accounts(cursor, ids=access.granted_ids(ctx))
+                        if ctx and access.can_request(ctx) else [])
+        if message:
+            if accounts:
+                self.tg.edit(message[0], message[1], rules.choose_text(), rules.choose_markup(accounts))
+            else:
+                self.tg.edit(message[0], message[1], rules.request_closed_text())
+        return bool(accounts)
+
+    def _announce_access(self, user_id):
+        """Человеку впервые выдали аккаунты: сообщение в бот с меню, где уже есть
+        «Запросить код 🔐». Без него кнопка появилась бы только после /start."""
+        with self._cursor() as cursor:
+            ctx = queries.load_access_context(cursor, user_id, crypto.key_status())
+            if not (ctx and ctx['telegram_id'] and access.can_request(ctx)):
+                return False
+            titles = [account['title'] for account in queries.list_accounts(cursor, ids=access.granted_ids(ctx))]
+        message_id, _error = self.tg.send(ctx['telegram_id'], rules.access_opened_text(account_titles=titles),
+                                          self._reply_menu(user_id) or rules.request_button_menu())
+        return bool(message_id)
 
     # ─── Решение главы ───────────────────────────────────────────────────────
 
@@ -450,23 +548,31 @@ class Twofa:
             return 'Telegram не ответил — код мог дойти, уточните у сотрудника'
         return 'Telegram не принял сообщение'
 
-    def handle_callback(self, telegram_user_id, data):
-        """twofa:ok:<id> / twofa:no:<id> — глава; twofa:new:<id> — сотрудник.
+    def handle_callback(self, telegram_user_id, data, message=None):
+        """twofa:ok:<id> / twofa:no:<id> — подтверждающий; twofa:new:<id> — «Код не подошёл»;
+        twofa:req:<id аккаунта> — сотрудник выбрал аккаунт в боте; twofa:x:0 — закрыть выбор.
 
-        Возвращает (текст всплывашки, показать ли окном). Права проверяются по учётке, к
-        которой привязан Telegram нажавшего, а не по тому, кому ушло сообщение: переслать
-        сообщение с кнопкой можно, а подтвердить чужим аккаунтом — нельзя.
+        message — (chat_id, message_id) сообщения с нажатой кнопкой: выбор аккаунта правится
+        на месте. Возвращает (текст всплывашки, показать ли окном). Права проверяются по
+        учётке, к которой привязан Telegram нажавшего, а не по тому, кому ушло сообщение:
+        переслать сообщение с кнопкой можно, а подтвердить чужим аккаунтом — нельзя.
         """
         try:
             _prefix, action, raw_id = str(data or '').split(':', 2)
             request_id = int(raw_id)
         except ValueError:
             return 'Неверная кнопка', True
+        if action == 'x':
+            if message:
+                self.tg.delete(message[0], message[1])
+            return '', False
         with self._cursor() as cursor:
             user_id = queries.user_id_by_telegram(cursor, telegram_user_id)
             ctx = queries.load_access_context(cursor, user_id, crypto.key_status()) if user_id else None
         if not ctx:
             return self._TOASTS['no_user'], True
+        if action == 'req':
+            return self._request_from_bot(ctx, account_id=int(raw_id), message=message)
         if action in ('ok', 'no'):
             result = self.decide(ctx, request_id, 'approve' if action == 'ok' else 'reject', 'telegram')
             outcome = result['outcome']
@@ -494,7 +600,7 @@ class Twofa:
                 return 'Код тот же — он действует ещё %d с. Проверьте, что ввели его без ошибок' % (
                     result['seconds_left']), True
             if outcome == 'window_closed':
-                return 'Прошло 3 минуты — запросите код заново в разделе «Коды 2FA»', True
+                return 'Прошло 3 минуты — запросите код заново кнопкой «%s»' % rules.REQUEST_BUTTON, True
             if outcome == 'failed':
                 return 'Код не отправился — нажмите ещё раз', True
             if outcome == 'key_error':
@@ -603,6 +709,9 @@ class Twofa:
             if wanted and not target['working']:
                 return {'outcome': 'not_working'}
             added, removed = queries.set_user_grants(cursor, user_id, wanted, actor_id=ctx['user_id'], now=now_dt)
+            # До сохранения не было выдано ничего — доступ открылся впервые, и человеку нужна
+            # кнопка «Запросить код 🔐» в меню бота (_announce_access ниже).
+            opened = bool(added) and not ((set(wanted) - set(added)) | set(removed))
             for account_id in added:
                 queries.log_event(cursor, 'access_granted', now=now_dt, account_id=account_id,
                                   account_title=live.get(account_id), actor_id=ctx['user_id'], actor_name=ctx['name'],
@@ -618,6 +727,8 @@ class Twofa:
                 pending = [int(row[0]) for row in cursor.fetchall()]
                 self._cancel(cursor, pending, now_dt)
         self.finish_cancelled(pending)
+        if opened:
+            self._announce_access(user_id)
         return {'outcome': 'ok', 'added': added, 'removed': removed}
 
     @staticmethod

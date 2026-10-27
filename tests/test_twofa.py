@@ -15,6 +15,7 @@
 Процесс на настоящей базе — tests/test_twofa_postgres.py.
 """
 
+import ast
 import base64
 import os
 import re
@@ -42,6 +43,16 @@ RFC_SECRET = b'12345678901234567890'
 
 def _read(path):
     return path.read_text(encoding='utf-8-sig')
+
+
+def _function_source(source, name):
+    """Текст функции верхнего уровня из bot_schedule2 — по ast, а не по поиску строки."""
+    from tests import source_cache
+
+    for node in source_cache.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return '\n'.join(source.splitlines()[node.lineno - 1:node.end_lineno])
+    raise AssertionError('нет функции %s' % name)
 
 
 def _varint(n):
@@ -312,6 +323,35 @@ class RulesTest(unittest.TestCase):
         for button in markup['inline_keyboard'][0] + rules.resend_markup(2 ** 31 - 1)['inline_keyboard'][0]:
             self.assertLessEqual(len(button['callback_data'].encode()), 64)
 
+    def test_account_choice_is_a_list_with_a_cancel(self):
+        rows = rules.choose_markup([
+            {'id': 2 ** 31 - 1, 'title': 'Google Ads', 'service': 'Google'},
+            {'id': 7, 'title': 'ads@company.kz', 'service': 'Meta'},
+        ])['inline_keyboard']
+        self.assertEqual([len(row) for row in rows], [1, 1, 1])
+        self.assertEqual(rows[0][0]['text'], 'Google Ads')  # сервис уже в названии
+        self.assertEqual(rows[1][0], {'text': 'ads@company.kz · Meta', 'callback_data': 'twofa:req:7'})
+        self.assertEqual(rows[-1][0], {'text': 'Отмена', 'callback_data': 'twofa:x:0'})
+        for row in rows:
+            self.assertLessEqual(len(row[0]['callback_data'].encode()), 64)
+
+    def test_account_label_is_plain_text_and_short(self):
+        # Подпись кнопки Telegram не разбирает как HTML: экранировать — значит показать «&amp;».
+        self.assertEqual(rules.account_button_label({'title': 'A & <B>', 'service': None}), 'A & <B>')
+        long = rules.account_button_label({'title': 'x' * 120, 'service': None})
+        self.assertEqual(len(long), rules.ACCOUNT_BUTTON_MAX)
+        self.assertTrue(long.endswith('…'))
+
+    def test_bot_texts_name_the_button_and_escape_titles(self):
+        self.assertIn('«%s»' % rules.REQUEST_BUTTON, rules.expired_text(account_title='G'))
+        opened = rules.access_opened_text(account_titles=['A&B', 'Meta'])
+        self.assertIn('«A&amp;B», «Meta»', opened)
+        self.assertIn('«%s»' % rules.REQUEST_BUTTON, opened)
+        sent = rules.request_sent_text(account_title='<G>', created_at=1761553800, expires_at=1761554400)
+        self.assertIn('«&lt;G&gt;» отправлен в 13:30', sent)
+        self.assertIn('сгорит в 13:40', sent)
+        self.assertEqual(rules.request_button_menu()['keyboard'], [[{'text': rules.REQUEST_BUTTON}]])
+
     def test_titles(self):
         self.assertEqual(rules.clean_title('  Google   Ads '), 'Google Ads')
         with self.assertRaises(ValueError):
@@ -394,6 +434,29 @@ class WiringTest(unittest.TestCase):
         handler = self.bot.split('async def handle_twofa_callback', 1)[1].split('\n\n\n', 1)[0]
         self.assertIn('_TWOFA_CALLBACK_POOL, service.handle_callback', handler)
         self.assertNotIn('executor_pool', handler)
+        # Выбор аккаунта правится на месте — сервису нужно, где сообщение с кнопкой.
+        self.assertIn('callback_query.from_user.id, callback_query.data, where)', handler)
+
+    def test_request_button_is_the_first_message_handler_and_works_from_any_state(self):
+        """Посреди диалога бота подпись кнопки должна остаться кнопкой, а не стать ответом."""
+        handler = self.bot.index("@dp.message_handler(lambda m: bool(TWOFA_REQUEST_BUTTON) and m.chat.type == 'private'\n"
+                                 "                    and m.text == TWOFA_REQUEST_BUTTON, state='*')")
+        self.assertEqual(self.bot.index('@dp.message_handler('), handler)
+        body = self.bot.split('async def handle_twofa_request_button', 1)[1].split('\n\n\n', 1)[0]
+        self.assertIn('_TWOFA_CALLBACK_POOL, service.offer_accounts, message.from_user.id', body)
+        self.assertNotIn('executor_pool', body)
+        self.assertIn('from twofa.rules import REQUEST_BUTTON as TWOFA_REQUEST_BUTTON', self.bot)
+        self.assertIn('menu=lambda user_id: _twofa_reply_menu(user_id),', self.bot)
+
+    def test_main_menu_is_built_in_one_place(self):
+        """Кнопка «Запросить код 🔐» живёт в главном меню, поэтому каждое возвращение в него идёт
+        через _main_menu_keyboard: иначе кнопка пропадала бы после «Отмены» или отчёта."""
+        for name in ('get_admin_keyboard()', 'get_sv_keyboard()', 'get_operator_keyboard()'):
+            # def и единственный вызов — внутри _main_menu_keyboard.
+            self.assertEqual(self.bot.count(name), 2, name)
+            self.assertIn('kb = ' + name, _function_source(self.bot, '_main_menu_keyboard'))
+        for handler in ('start_command', 'start_auth', 'process_password', 'back_to_admin', 'cancel_handler'):
+            self.assertIn('_main_menu_keyboard(', _function_source(self.bot, handler), handler)
 
     def test_bell_source(self):
         from notifications import sources
@@ -423,6 +486,153 @@ def _ctx(user_id, role='marketing_manager', approver=10, granted=(), status='wor
     return {'user_id': user_id, 'name': 'Человек %d' % user_id, 'role': role, 'status': status,
             'telegram_id': telegram, 'approver_id': approver, 'granted_account_ids': list(granted),
             'key_status': 'ok'}
+
+
+class MainMenuTest(unittest.TestCase):
+    """Главное меню бота — настоящие функции bot_schedule2 (через ast) на настоящих кнопках aiogram.
+    Подменён только ответ «выданы ли человеку коды»."""
+
+    NAMES = ('_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_is_admin_role',
+             'get_admin_keyboard', 'get_sv_keyboard', 'get_operator_keyboard', '_main_menu_keyboard')
+    OPERATOR_ROWS = [['Моя статистика📊'], ['Мои оценки📝'], ['Доступ🔑']]
+
+    @classmethod
+    def setUpClass(cls):
+        from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+        from tests import source_cache
+
+        body = [node for node in source_cache.parse(_read(BOT_PY)).body
+                if (isinstance(node, ast.FunctionDef) and node.name in cls.NAMES)
+                or (isinstance(node, ast.Assign) and any(getattr(t, 'id', None) in cls.NAMES for t in node.targets))]
+        cls.granted = set()
+        namespace = {'ReplyKeyboardMarkup': ReplyKeyboardMarkup, 'KeyboardButton': KeyboardButton,
+                     'TWOFA_REQUEST_BUTTON': rules.REQUEST_BUTTON,
+                     '_twofa_can_request_for': lambda user_id: user_id in cls.granted}
+        exec(compile(ast.Module(body=body, type_ignores=[]), str(BOT_PY), 'exec'), namespace)
+        missing = [name for name in cls.NAMES if name not in namespace]
+        if missing:
+            raise AssertionError('не найдено в bot_schedule2.py: %s' % missing)
+        cls.menu = staticmethod(namespace['_main_menu_keyboard'])
+
+    def setUp(self):
+        self.granted.clear()
+
+    @staticmethod
+    def _rows(kb):
+        return [[button['text'] for button in row] for row in kb.to_python()['keyboard']]
+
+    def test_without_codes_the_menu_is_the_role_menu(self):
+        self.assertEqual(self._rows(self.menu(30, 'operator')), self.OPERATOR_ROWS)
+        self.assertIsNone(self.menu(20, 'marketing_manager'))
+
+    def test_codes_add_one_button_under_the_role_menu(self):
+        self.granted.update({1, 20, 30})
+        self.assertEqual(self._rows(self.menu(30, 'operator')), self.OPERATOR_ROWS + [[rules.REQUEST_BUTTON]])
+        self.assertEqual(self._rows(self.menu(20, 'marketing_manager')), [[rules.REQUEST_BUTTON]])
+        admin = self._rows(self.menu(1, 'super_admin'))
+        self.assertEqual(admin[0], ['Редактор СВ📝', 'Операторы👷'])
+        self.assertEqual(admin[-1], [rules.REQUEST_BUTTON])
+
+    def test_the_button_does_not_stick_to_someone_else_s_menu(self):
+        self.granted.add(30)
+        self.menu(30, 'operator')
+        self.assertEqual(self._rows(self.menu(31, 'operator')), self.OPERATOR_ROWS)
+
+
+class BotHandlersTest(unittest.TestCase):
+    """Обработчики кнопок в bot_schedule2 — их настоящий код (через ast) с подставным сервисом:
+    фильтр нажатия, пул раздела и что уходит сервису. Импортировать монолит тесты не могут."""
+
+    NAMES = ('handle_twofa_request_button', 'handle_twofa_callback')
+
+    @classmethod
+    def setUpClass(cls):
+        import asyncio
+        import copy
+        import logging
+        from concurrent.futures import ThreadPoolExecutor
+
+        from tests import source_cache
+
+        # Дерево общее на весь набор (tests/source_cache.py) — декораторы снимаем с копии.
+        nodes = {node.name: copy.deepcopy(node) for node in source_cache.parse(_read(BOT_PY)).body
+                 if isinstance(node, ast.AsyncFunctionDef) and node.name in cls.NAMES}
+        cls.filters = {}
+        for name, node in nodes.items():
+            [decorator] = node.decorator_list
+            cls.filters[name] = (decorator.args[0], {k.arg: ast.literal_eval(k.value) for k in decorator.keywords})
+            node.decorator_list = []
+        cls.pool = ThreadPoolExecutor(max_workers=1)
+        cls.namespace = {'asyncio': asyncio, 'logging': logging, 'types': mock.MagicMock(),
+                         '_TWOFA_CALLBACK_POOL': cls.pool, '_TWOFA': {}}
+        exec(compile(ast.Module(body=list(nodes.values()), type_ignores=[]), str(BOT_PY), 'exec'), cls.namespace)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.pool.shutdown()
+
+    def _filter(self, name, button=rules.REQUEST_BUTTON):
+        expression, keywords = self.filters[name]
+        self.assertEqual(keywords.get('state'), '*')
+        return eval(compile(ast.Expression(expression), str(BOT_PY), 'eval'), {'TWOFA_REQUEST_BUTTON': button})
+
+    @staticmethod
+    def _message(text=rules.REQUEST_BUTTON, chat='private'):
+        from types import SimpleNamespace
+
+        message = SimpleNamespace(text=text, chat=SimpleNamespace(type=chat, id=9020),
+                                  from_user=SimpleNamespace(id=9020), message_id=55)
+        message.delete = mock.AsyncMock()
+        message.answer = mock.AsyncMock()
+        return message
+
+    def _run(self, handler, *args):
+        import asyncio
+
+        asyncio.run(self.namespace[handler](*args))
+
+    def test_button_filter_takes_only_the_button_in_a_private_chat(self):
+        matches = self._filter('handle_twofa_request_button')
+        self.assertTrue(matches(self._message()))
+        self.assertFalse(matches(self._message(chat='group')))
+        self.assertFalse(matches(self._message(text='Запросить код')))
+        self.assertFalse(matches(self._message(text=None)))
+        # Подпись не загрузилась (раздел не подключён) — фильтр молчит, а не падает на каждом сообщении.
+        self.assertFalse(self._filter('handle_twofa_request_button', button=None)(self._message(text=None)))
+
+    def test_button_asks_the_service_for_the_choice_and_tidies_the_chat(self):
+        service = mock.MagicMock()
+        message = self._message()
+        with mock.patch.dict(self.namespace['_TWOFA'], {'service': service}):
+            self._run('handle_twofa_request_button', message)
+        service.offer_accounts.assert_called_once_with(9020)
+        message.delete.assert_awaited_once()  # подпись кнопки из чата убираем, как соседние кнопки
+        message.answer.assert_not_awaited()
+
+    def test_button_answers_when_the_section_is_off_or_fails(self):
+        message = self._message()
+        with mock.patch.dict(self.namespace['_TWOFA'], {'service': None}):
+            self._run('handle_twofa_request_button', message)
+        message.answer.assert_awaited_once_with('Раздел «Коды 2FA» не подключён')
+        broken = mock.MagicMock()
+        broken.offer_accounts.side_effect = RuntimeError('база')
+        message = self._message()
+        with mock.patch.dict(self.namespace['_TWOFA'], {'service': broken}), self.assertLogs(level='ERROR'):
+            self._run('handle_twofa_request_button', message)
+        message.answer.assert_awaited_once_with('Не получилось — попробуйте ещё раз')
+
+    def test_callback_hands_over_where_the_pressed_message_is(self):
+        from types import SimpleNamespace
+
+        service = mock.MagicMock()
+        service.handle_callback.return_value = ('Запрос отправлен', False)
+        callback = SimpleNamespace(data='twofa:req:5', from_user=SimpleNamespace(id=9020),
+                                   message=self._message(), answer=mock.AsyncMock())
+        with mock.patch.dict(self.namespace['_TWOFA'], {'service': service}):
+            self._run('handle_twofa_callback', callback)
+        service.handle_callback.assert_called_once_with(9020, 'twofa:req:5', (9020, 55))
+        callback.answer.assert_awaited_once_with('Запрос отправлен', show_alert=False)
 
 
 class _NoDb:
@@ -575,5 +785,14 @@ class ServiceRechecksAccessWithoutDbTest(unittest.TestCase):
         self._patch(_ctx(20, granted=[]), request={'status': 'approved',
                                                    'resend_until': rules.almaty(1761553985)})
         self.assertEqual(self.svc.resend(20, 9)['outcome'], 'forbidden')
+        self.tg.send.assert_not_called()
+
+    def test_cancel_of_the_choice_only_deletes_it(self):
+        from twofa import service
+
+        untouched = mock.MagicMock(side_effect=AssertionError('«Отмена» не ходит в базу'))
+        svc = service.Twofa(cursor_factory=untouched, tg=self.tg)
+        self.assertEqual(svc.handle_callback(9020, 'twofa:x:0', (9020, 55)), ('', False))
+        self.tg.delete.assert_called_once_with(9020, 55)
         self.tg.send.assert_not_called()
 
