@@ -3328,6 +3328,31 @@ def _normalize_int_id_list(values):
     return result
 
 
+CALIBRATION_FORBIDDEN_ERROR = "Калибровка доступна руководителям и супервайзерам"
+
+
+def _calibration_role(requester_id, requester):
+    """Роль человека в калибровке звонков: 'admin', 'sv' или None (нет доступа).
+
+    Калибровка открыта руководителям и супервайзерам (решение владельца
+    27.10.2026). 'admin' — ведущий комнаты: админ или глава отдела по
+    назначению с любой базовой ролью; создаёт комнаты, добавляет звонки, правит
+    эталон и видит результаты без своей оценки. 'sv' — участник: входит в
+    комнату, оценивает вслепую и видит результаты после своей оценки. Глава с
+    базовой ролью sv остаётся участником: журнал ведёт его как супервайзера.
+    Звонок, эталон и общий комментарий каждый добавляет и правит только по
+    своим операторам (_authorize_operator_scope); удаляет комнаты и звонки
+    только глобальный админ.
+    Зеркало — canUseCalibration в src/call_evaluation/main.jsx.
+    """
+    role = _normalize_user_role(requester[3] if requester else None)
+    if _is_supervisor_role(role):
+        return 'sv'
+    if _is_admin_role(role) or _headed_department_id(requester_id) is not None:
+        return 'admin'
+    return None
+
+
 def _normalize_calibration_score_value(value):
     raw = str(value or '').strip().lower()
     mapping = {
@@ -21425,9 +21450,9 @@ def list_call_calibration_rooms():
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        role = _normalize_user_role(requester[3])
-        if not _is_admin_role(role) and not _is_supervisor_role(role):
-            return jsonify({"error": "Forbidden: only admin and supervisors can access calibration rooms"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         month = (request.args.get('month') or '').strip()
         if month and not re.match(r'^\d{4}-\d{2}$', month):
@@ -21493,7 +21518,7 @@ def list_call_calibration_rooms():
                 "room_title": row[2] or f"Комната #{row[0]}",
                 "created_at": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] and hasattr(row[3], "strftime") else None,
                 "benchmark_admin": {"id": row[4], "name": row[5]},
-                "joined": True if _is_admin_role(role) else bool(row[6] or is_creator),
+                "joined": True if calibration_role == 'admin' else bool(row[6] or is_creator),
                 "calls_count": calls_count,
                 "evaluated_count": int(row[8] or 0),
                 "evaluation_rows_count": int(row[9] or 0),
@@ -21518,8 +21543,8 @@ def create_call_calibration_room():
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if not _is_admin_role(requester[3]) and not _is_supervisor_role(requester[3]):
-            return jsonify({"error": "Only admin and supervisors can create calibration rooms"}), 403
+        if _calibration_role(requester_id, requester) is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         data = request.form if request.form else (request.get_json(silent=True) or {})
         month = str(data.get('month') or '').strip()
@@ -21567,7 +21592,9 @@ def delete_calibration_room(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if not _is_admin_role(requester[3]):
+        # Удаляет только глобальный админ — как и кнопка в журнале. Глава
+        # отдела в калибровке ведущий, но общую комнату другого отдела не снесёт.
+        if not _is_global_admin_requester(requester[3], requester_id):
             return jsonify({"error": "Only admin can delete calibration rooms"}), 403
 
         with db._get_cursor() as cursor:
@@ -21595,9 +21622,9 @@ def update_calibration_room(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role) and not _is_supervisor_role(requester_role):
-            return jsonify({"error": "Only admin and supervisors can update calibration rooms"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         data = request.form if request.form else (request.get_json(silent=True) or {})
         room_title = str(data.get('room_title') or data.get('title') or '').strip()
@@ -21614,7 +21641,7 @@ def update_calibration_room(room_id):
             if not room_row:
                 return jsonify({"error": "Комната не найдена"}), 404
 
-            if _is_supervisor_role(requester_role):
+            if calibration_role == 'sv':
                 room_creator_id = int(room_row[1]) if room_row[1] is not None else None
                 if int(requester_id) != int(room_creator_id or 0):
                     cursor.execute("""
@@ -21660,9 +21687,9 @@ def add_call_to_calibration_room(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role) and not _is_supervisor_role(requester_role):
-            return jsonify({"error": "Only admin and supervisors can add calls to calibration room"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         data = request.form if request.form else (request.get_json(silent=True) or {})
         required_fields = ['operator_id', 'phone_number', 'appeal_date', 'direction', 'scores', 'criterion_comments']
@@ -21718,7 +21745,7 @@ def add_call_to_calibration_room(room_id):
                 return jsonify({"error": "Calibration room not found"}), 404
 
             room_creator_id = room_row[2]
-            if _is_supervisor_role(requester_role) and int(room_creator_id or 0) != int(requester_id):
+            if calibration_role == 'sv' and int(room_creator_id or 0) != int(requester_id):
                 cursor.execute("""
                     SELECT id
                     FROM calibration_room_members
@@ -21841,7 +21868,7 @@ def delete_call_from_calibration_room(room_id, call_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        if not _is_admin_role(requester[3]):
+        if not _is_global_admin_requester(requester[3], requester_id):
             return jsonify({"error": "Only admin can delete calls from calibration room"}), 403
 
         with db._get_cursor() as cursor:
@@ -21904,9 +21931,9 @@ def get_call_calibration_room(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        role = _normalize_user_role(requester[3])
-        if not _is_admin_role(role) and not _is_supervisor_role(role):
-            return jsonify({"error": "Forbidden: only admin and supervisors can access calibration room"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         requested_call_id = None
         requested_call_id_raw = request.args.get('call_id')
@@ -21933,7 +21960,7 @@ def get_call_calibration_room(room_id):
             if not room_row:
                 return jsonify({"error": "Calibration room not found"}), 404
 
-            if _is_supervisor_role(role):
+            if calibration_role == 'sv':
                 is_creator = int(room_row[4] or 0) == int(requester_id)
                 cursor.execute("""
                     SELECT id FROM calibration_room_members
@@ -22035,7 +22062,14 @@ def get_call_calibration_room(room_id):
                 """, (selected_call_id, requester_id))
                 my_eval_row = cursor.fetchone()
 
-            can_view_results = _is_admin_role(role) or bool(my_eval_row)
+            can_view_results = calibration_role == 'admin' or bool(my_eval_row)
+            # Эталон и общий комментарий правят только по своим операторам (та же
+            # граница, что в ручках правки): фронт по этому признаку не рисует
+            # редактор, который отдал бы 403 — общий список комнат видят все.
+            can_edit_call = bool(
+                selected_call_row
+                and _authorize_operator_scope(requester, requester_id, selected_call_row[12])
+            )
             evaluation_rows = []
             evaluator_columns = []
             if selected_call_id is not None and can_view_results:
@@ -22170,8 +22204,9 @@ def get_call_calibration_room(room_id):
             "selected_call_id": selected_call_id,
             "selected_call": selected_call_payload,
             "joined": joined,
-            "can_evaluate": bool(_is_supervisor_role(role) and selected_call_id is not None and not my_eval_row),
+            "can_evaluate": bool(calibration_role == 'sv' and selected_call_id is not None and not my_eval_row),
             "can_view_results": bool(can_view_results and selected_call_id is not None),
+            "can_edit_call": can_edit_call,
             "my_evaluation": my_evaluation,
             "results": results,
             "evaluators": evaluator_columns
@@ -22192,9 +22227,9 @@ def export_call_calibration_room_excel(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        role = _normalize_user_role(requester[3])
-        if not _is_admin_role(role) and not _is_supervisor_role(role):
-            return jsonify({"error": "Forbidden: only admin and supervisors can export calibration room"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         def _fmt_dt(value):
             if value is None:
@@ -22220,7 +22255,7 @@ def export_call_calibration_room_excel(room_id):
             if not room_row:
                 return jsonify({"error": "Calibration room not found"}), 404
 
-            if _is_supervisor_role(role):
+            if calibration_role == 'sv':
                 is_creator = int(room_row[4] or 0) == int(requester_id)
                 cursor.execute("""
                     SELECT id
@@ -22501,9 +22536,9 @@ def update_call_calibration_etalon(room_id, call_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role) and not _is_supervisor_role(requester_role):
-            return jsonify({"error": "Only admin and supervisors can update etalon"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         data = request.get_json() or {}
         scores = data.get('scores')
@@ -22526,9 +22561,12 @@ def update_call_calibration_etalon(room_id, call_id):
             call_operator_id = int(call_row[1]) if call_row[1] is not None else None
             room_creator_id = int(call_row[2]) if call_row[2] is not None else None
 
-            if _is_supervisor_role(requester_role):
-                if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
-                    return jsonify({"error": "Forbidden: you cannot update etalon for this operator"}), 403
+            # Граница оператора — для всех, как при добавлении звонка: глава
+            # отдела правит эталон только по своим операторам, глобальному
+            # админу _authorize_operator_scope и так открывает всех.
+            if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
+                return jsonify({"error": "Forbidden: you cannot update etalon for this operator"}), 403
+            if calibration_role == 'sv':
                 if int(requester_id) != room_creator_id:
                     cursor.execute("""
                         SELECT id
@@ -22590,9 +22628,9 @@ def update_call_calibration_general_comment(room_id, call_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        requester_role = _normalize_user_role(requester[3])
-        if not _is_admin_role(requester_role) and not _is_supervisor_role(requester_role):
-            return jsonify({"error": "Only admin and supervisors can update general comment"}), 403
+        calibration_role = _calibration_role(requester_id, requester)
+        if calibration_role is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         data = request.get_json() or {}
         general_comment = str(data.get('general_comment') or '').strip()
@@ -22608,11 +22646,12 @@ def update_call_calibration_general_comment(room_id, call_id):
             if not call_row:
                 return jsonify({"error": "Calibration call not found"}), 404
 
-            if _is_supervisor_role(requester_role):
-                call_operator_id = int(call_row[0]) if call_row[0] is not None else None
-                room_creator_id = int(call_row[1]) if call_row[1] is not None else None
-                if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
-                    return jsonify({"error": "Forbidden: you cannot update comment for this operator"}), 403
+            call_operator_id = int(call_row[0]) if call_row[0] is not None else None
+            room_creator_id = int(call_row[1]) if call_row[1] is not None else None
+            # Граница оператора — для всех, как у эталона и добавления звонка.
+            if call_operator_id is None or not _authorize_operator_scope(requester, requester_id, call_operator_id):
+                return jsonify({"error": "Forbidden: you cannot update comment for this operator"}), 403
+            if calibration_role == 'sv':
                 if int(requester_id) != room_creator_id:
                     cursor.execute("""
                         SELECT id FROM calibration_room_members
@@ -22771,9 +22810,8 @@ def get_calibration_room_history(room_id):
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
-        role = _normalize_user_role(requester[3])
-        if not _is_admin_role(role) and not _is_supervisor_role(role):
-            return jsonify({"error": "Forbidden"}), 403
+        if _calibration_role(requester_id, requester) is None:
+            return jsonify({"error": CALIBRATION_FORBIDDEN_ERROR}), 403
 
         events = []
 

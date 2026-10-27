@@ -744,6 +744,19 @@ const normalizeCalibrationScore = (value) => {
     return String(value ?? '').trim() || 'Correct';
 };
 
+// «1 комната», «2 комнаты», «5 комнат» — счётчик в подвале калибровки.
+const calibrationRoomsCountLabel = (count) => {
+    const n = Math.max(0, Math.trunc(Number(count) || 0));
+    const lastTwo = n % 100;
+    const last = n % 10;
+    let word = 'комнат';
+    if (lastTwo < 11 || lastTwo > 14) {
+        if (last === 1) word = 'комната';
+        else if (last >= 2 && last <= 4) word = 'комнаты';
+    }
+    return `${n} ${word}`;
+};
+
 const calibrationScoreLabel = (value) => {
     const v = normalizeCalibrationScore(value);
     if (v === 'Correct') return 'Корректно';
@@ -4597,8 +4610,14 @@ const App = ({ user, initialSelection }) => {
     const canManageFeedbackReportSetting = isGlobalAdminRole || isDepartmentHead;
     const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
     const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
-    const canUseCalibration = isGlobalAdminRole || isSupervisorRole;
-    const canManageCalibrationRooms = isGlobalAdminRole || isSupervisorRole;
+    /* Калибровка — руководителям и супервайзерам (решение владельца
+       27.10.2026). Руководитель — админ или глава отдела (isAdminRole): в
+       комнате он ведущий — ставит эталон и видит все результаты без своей
+       оценки; супервайзер — участник, оценивает вслепую. Удаление комнат и
+       звонков осталось за глобальным админом. Зеркало — _calibration_role в
+       bot_schedule2.py: разъедутся — вкладка нарисуется и отдаст 403. */
+    const canUseCalibration = isAdminRole || isSupervisorRole;
+    const canManageCalibrationRooms = isAdminRole || isSupervisorRole;
     const canUseAnalytics = isEvaluationViewer || isSupervisorRole;
     const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
     /* Раздел «Контроль» — тот же круг, что ставит обратную связь: админ,
@@ -5184,7 +5203,11 @@ const App = ({ user, initialSelection }) => {
     useEffect(() => {
         if (!userId) return;
         writeEmbedState({
-            user: { id: userId, role: userRole, name: userName },
+            // headed_department_id обязателен: журнал в отдельной вкладке после
+            // F5 читает пользователя только отсюда, и без него глава отдела
+            // становился глобальным админом (корзины в калибровке), а глава с
+            // ролью оператора терял вкладки руководителя.
+            user: { id: userId, role: userRole, name: userName, headed_department_id: headedDepartmentId },
             initialSelection: {
                 operatorId: selectedOperator?.id || null,
                 operatorName: selectedOperator?.name || '',
@@ -5195,7 +5218,7 @@ const App = ({ user, initialSelection }) => {
                 section: activeSection
             }
         });
-    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, analyticsSelectedGroupId, selectedMonth, activeSection]);
+    }, [userId, userRole, userName, headedDepartmentId, selectedOperator, selectedSupervisor, analyticsSelectedGroupId, selectedMonth, activeSection]);
 
     useEffect(() => {
         if (operatorFromToken && operators.length > 0) {
@@ -5507,6 +5530,8 @@ const App = ({ user, initialSelection }) => {
             selected_call_id: d?.selected_call_id || null,
             can_evaluate: !!d?.can_evaluate,
             can_view_results: !!d?.can_view_results,
+            // Нет признака (старый сервер) — правка открыта, как раньше.
+            can_edit_call: d?.can_edit_call !== false,
             joined: !!d?.joined,
             results: d?.results || null,
             evaluators: d?.evaluators || []
@@ -6147,6 +6172,16 @@ const App = ({ user, initialSelection }) => {
     const calibrationRows = calibrationResults?.criteria_rows || [];
     const calibrationEvaluators = calibrationDetail?.evaluators || [];
     const calibrationCriteria = calibrationCall?.direction?.criteria || [];
+    /* Эталон и общий комментарий правят только по своим операторам — сервер
+       присылает это признаком can_edit_call, иначе руководитель открыл бы
+       комнату другого отдела и упёрся в 403 при сохранении. Нет признака
+       (старый сервер) — ведём себя как раньше. */
+    const canEditCalibrationCall = canManageCalibrationRooms && calibrationDetail?.can_edit_call !== false;
+    /* Создавать комнаты и добавлять звонки есть смысл, только если есть кого
+       калибровать: у руководителя отдела без супервайзеров (IT, аналитика,
+       маркетинг, ООЗ) окно добавления звонка пустое, а созданную комнату он
+       потом не удалит — удаление у глобального админа. */
+    const canFillCalibrationRooms = canManageCalibrationRooms && (isGlobalAdminRole || isSupervisorRole || supervisors.length > 0);
     const calibrationRoomId = calibrationRoom?.id || null;
     const calibrationRoomTitleCurrent = String(calibrationRoom?.room_title || '').trim();
     const calibrationRoomTitleDisplay = calibrationRoom?.room_title || (calibrationRoomId ? `Комната #${calibrationRoomId}` : '');
@@ -6187,7 +6222,7 @@ const App = ({ user, initialSelection }) => {
         setGeneralCommentDraft(calibrationCall?.general_comment ?? '');
     }, [calibrationCall, calibrationCriteria.length]);
 
-    const isEtalonDirty = !!(canManageCalibrationRooms && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
+    const isEtalonDirty = !!(canEditCalibrationCall && calibrationCall && calibrationCriteria.length) && calibrationCriteria.some((_, idx) => {
         const srcScore = normalizeCalibrationScore(
             calibrationCall?.etalon_scores?.[idx] ?? calibrationCall?.scores?.[idx] ?? 'Correct'
         );
@@ -6198,7 +6233,7 @@ const App = ({ user, initialSelection }) => {
         const draftComment = String(etalonCommentsDraft[idx] ?? '');
         return draftScore !== srcScore || draftComment !== srcComment;
     });
-    const hasEtalonValidationError = !!(canManageCalibrationRooms && calibrationCriteria.length) && calibrationCriteria.some((criterion, idx) => {
+    const hasEtalonValidationError = !!(canEditCalibrationCall && calibrationCriteria.length) && calibrationCriteria.some((criterion, idx) => {
         const score = normalizeCalibrationScore(etalonScoresDraft[idx] ?? 'Correct');
         const comment = String(etalonCommentsDraft[idx] ?? '').trim();
         if (score === 'Error' || score === 'Incorrect') return !comment;
@@ -6208,7 +6243,7 @@ const App = ({ user, initialSelection }) => {
     });
 
     const handleSaveEtalon = useCallback(async () => {
-        if (!canManageCalibrationRooms || !calibrationCall?.id || !activeCalibrationRoomId) return;
+        if (!canEditCalibrationCall || !calibrationCall?.id || !activeCalibrationRoomId) return;
         if (hasEtalonValidationError) {
             emitCallEvaluationToast('Заполните комментарии по ошибкам/недочетам в эталоне', 'error');
             return;
@@ -6241,7 +6276,7 @@ const App = ({ user, initialSelection }) => {
             setIsSavingEtalon(false);
         }
     }, [
-        canManageCalibrationRooms,
+        canEditCalibrationCall,
         calibrationCall,
         activeCalibrationRoomId,
         userId,
@@ -6252,7 +6287,7 @@ const App = ({ user, initialSelection }) => {
         fetchCalibrationRooms
     ]);
 
-    const isGeneralCommentDirty = canManageCalibrationRooms && calibrationCall &&
+    const isGeneralCommentDirty = canEditCalibrationCall && calibrationCall &&
         (generalCommentDraft ?? '') !== (calibrationCall?.general_comment ?? '');
 
     const handleSaveGeneralComment = useCallback(async () => {
@@ -7584,7 +7619,7 @@ const App = ({ user, initialSelection }) => {
                                 <div className="empty-state">
                                     <div className="empty-state-icon"><FaIcon className="fas fa-door-open" /></div>
                                     <h3>Нет комнат калибровки</h3>
-                                    <p>{canManageCalibrationRooms ? 'Создайте первую комнату калибровки для выбранного месяца.' : 'Пока нет доступных комнат на выбранный месяц.'}</p>
+                                    <p>{canFillCalibrationRooms ? 'Создайте первую комнату калибровки для выбранного месяца.' : 'Пока нет доступных комнат на выбранный месяц.'}</p>
                                 </div>
                             ) : (
                                 <div className="calibration-cards">
@@ -7699,7 +7734,7 @@ const App = ({ user, initialSelection }) => {
                                                 >
                                                     <FaIcon className="fas fa-history" /> История
                                                 </button>
-                                                {canManageCalibrationRooms && (
+                                                {canFillCalibrationRooms && (
                                                     <button
                                                         className="btn btn-primary btn-sm"
                                                         onClick={() => {
@@ -7826,7 +7861,7 @@ const App = ({ user, initialSelection }) => {
                                                                     </span>
                                                                 </td>
                                                                 <td>
-                                                                    {canManageCalibrationRooms ? (
+                                                                    {canEditCalibrationCall ? (
                                                                         (() => {
                                                                             const criterionMeta = calibrationCriteria[row.criterion_index] || {};
                                                                             const etalonScore = normalizeCalibrationScore(
@@ -7968,7 +8003,7 @@ const App = ({ user, initialSelection }) => {
                                                             Есть расхождение по критическому критерию: итоговый процент = 0%.
                                                         </span>
                                                     )}
-                                                    {canManageCalibrationRooms && (
+                                                    {canEditCalibrationCall && (
                                                         <button
                                                             className="btn btn-primary btn-sm"
                                                             onClick={handleSaveEtalon}
@@ -7980,7 +8015,7 @@ const App = ({ user, initialSelection }) => {
                                                 </div>
                                                 <div className="calibration-general-comments">
                                                     <div className="calibration-general-comments-title">Общий комментарий</div>
-                                                    {canManageCalibrationRooms ? (
+                                                    {canEditCalibrationCall ? (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                                                             <textarea
                                                                 className="textarea"
@@ -8022,10 +8057,10 @@ const App = ({ user, initialSelection }) => {
                         </div>
                         <div className="panel-footer">
                             <span className="panel-footer-info">
-                                {`${calibrationRooms.length} комнат · ${months.find(m=>m.value===selectedMonth)?.label || selectedMonth}`}
+                                {`${calibrationRoomsCountLabel(calibrationRooms.length)} · ${months.find(m=>m.value===selectedMonth)?.label || selectedMonth}`}
                             </span>
                             <div style={{display:'flex',gap:8}}>
-                                {canManageCalibrationRooms && (
+                                {canFillCalibrationRooms && (
                                     <button
                                         className="btn btn-primary btn-sm"
                                         onClick={() => setShowCalibrationCreateModal(true)}

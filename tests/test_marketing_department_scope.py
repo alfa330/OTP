@@ -541,7 +541,7 @@ class EvaluationJournalObserverTests(unittest.TestCase):
         # Наблюдатель не админ, не СВ и не глава — три вкладки действий
         # выключаются сами; проверяем, что их условия остались на isAdminRole.
         self.assertIn("const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;", self.source)
-        self.assertIn("const canUseCalibration = isGlobalAdminRole || isSupervisorRole;", self.source)
+        self.assertIn("const canUseCalibration = isAdminRole || isSupervisorRole;", self.source)
         self.assertIn("const canUseCheckpoints = isAdminRole || isSupervisorRole || isDepartmentHead;", self.source)
         self.assertIn("const canUseAnalytics = isEvaluationViewer || isSupervisorRole;", self.source)
 
