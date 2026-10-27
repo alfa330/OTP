@@ -1,7 +1,11 @@
-import React, { memo, useCallback, useMemo, useRef } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DealBadge from './DealBadge';
 import TaxiPark from './TaxiPark';
-import { Languages, AlertTriangle, BookOpen, MessageSquare, Paperclip, PhoneOff } from 'lucide-react';
+import {
+    Languages, AlertTriangle, BookOpen, Check, Copy, MessageSquare, Paperclip, Phone, PhoneIncoming,
+    PhoneOff, PhoneOutgoing,
+} from 'lucide-react';
+import { prettyPhone } from '../cdr/touchMeta';
 import { buildRelativeArticleLink } from '../wiki/articleLink';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
@@ -230,6 +234,68 @@ function MetaRow({ evaluation, children }) {
     );
 }
 
+/* Маршрут звонка (call.call_route, call_qa/call_route.py): входящий или исходящий,
+   номер клиента и наш номер — набранный клиентом или тот, с которого звонил
+   оператор. Ячейкой шапки под записью, как сделка и сведения о записи. Чего
+   телефония не сообщила, того нет и здесь: у исходящих СЗоВ в Oktell нашего номера
+   нет, у Тез КЦ зеркало Binotel не хранит линию. */
+const CALL_ROUTE = {
+    in: { Icon: PhoneIncoming, label: 'Входящий', line: 'На номер', hint: 'Номер, который набрал клиент' },
+    out: { Icon: PhoneOutgoing, label: 'Исходящий', line: 'С номера', hint: 'Номер, с которого позвонили клиенту' },
+};
+const CALL_ROUTE_UNKNOWN = { Icon: Phone, label: '', line: 'Наш номер', hint: 'Номер компании в этом звонке' };
+
+// Десять цифр казахстанского номера → «+7…»: в таком виде его принимают поиск,
+// CRM и телефон. Чужой номер копируется как пришёл.
+const dialable = (digits) => (/^\d{10}$/.test(String(digits)) ? `+7${digits}` : String(digits));
+
+function CopyPhone({ value }) {
+    const [copied, setCopied] = useState(false);
+    useEffect(() => {
+        if (!copied) return undefined;
+        const timer = setTimeout(() => setCopied(false), 1500);
+        return () => clearTimeout(timer);
+    }, [copied]);
+    return (
+        <button type="button" title={copied ? 'Скопировано' : 'Скопировать номер'}
+                aria-label="Скопировать номер клиента"
+                onClick={() => { navigator.clipboard?.writeText?.(dialable(value))?.then(() => setCopied(true)).catch(() => {}); }}
+                className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+            {copied ? <Check size={13} className="text-emerald-600" aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+        </button>
+    );
+}
+
+function CallRoute({ route }) {
+    if (!route || !(route.direction || route.client || route.line)) return null;
+    const meta = CALL_ROUTE[route.direction] || CALL_ROUTE_UNKNOWN;
+    const { Icon } = meta;
+    return (
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-[12.5px] sm:px-5"
+             data-qa="call-route">
+            <span className="inline-flex items-center gap-1.5">
+                <Icon size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+                {meta.label && <span className="font-medium text-slate-700">{meta.label}</span>}
+            </span>
+            {/* Подпись с номером переносятся целиком: на телефоне строка ломается
+                между парами, а не посреди номера. */}
+            {route.client && (
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                    <span className="text-slate-400">Клиент</span>
+                    <span className="select-all tabular-nums text-slate-800">{prettyPhone(route.client)}</span>
+                    <CopyPhone value={route.client} />
+                </span>
+            )}
+            {route.line && (
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={meta.hint}>
+                    <span className="text-slate-400">{meta.line}</span>
+                    <span className="tabular-nums text-slate-700">{prettyPhone(route.line)}</span>
+                </span>
+            )}
+        </div>
+    );
+}
+
 const LANGUAGE = { ru: 'русский', kk: 'казахский', en: 'английский', uz: 'узбекский', ky: 'киргизский', tr: 'турецкий' };
 
 const CALL_END_LABEL = {
@@ -423,6 +489,9 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimil
                         )}
                     </div>
                     <div className="divide-y divide-slate-100 border-t border-slate-100">
+                        {/* Кто кому звонил — первой ячейкой: это сам звонок, а
+                            сделка и сведения о записи — уже о нём. */}
+                        {!isChat && <CallRoute route={call.call_route} />}
                         {/* Сделка amoCRM этого разговора (ТЗ #317) — под строкой
                             заголовка, а не рядом с баллами: там её сжимало. Только
                             когда связь есть: пустая «сделка не найдена» на каждой

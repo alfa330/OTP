@@ -76,10 +76,14 @@ def oktell_parks_sql(conn_ids):
     # Общий JOIN читает историю один раз на пакет. Коррелированный TOP 1
     # через OUTER APPLY сканировал её заново для каждого звонка: 50 строк
     # занимали больше 30 секунд и в UI превращались в неизвестные парки.
+    # Тип и номера соединения — из той же строки: по ним карточка оценки
+    # показывает маршрут звонка (call_route.py) без второго похода в Oktell.
     return (
-        "SELECT conn_id, taxi_park FROM ("
+        "SELECT conn_id, taxi_park, ct, a_out, b_out, a_dialed FROM ("
         "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
         "NULLIF(LTRIM(RTRIM(t.taxi_park)), '') AS taxi_park, "
+        "s.ConnectionType AS ct, s.AOutNumber AS a_out, s.BOutNumber AS b_out, "
+        "s.ANumberDialed AS a_dialed, "
         "ROW_NUMBER() OVER (PARTITION BY s.Id ORDER BY t.dt_insert DESC, t.Id DESC) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
         "LEFT JOIN oktell.dbo.Call_Systems_hst t "
@@ -89,7 +93,11 @@ def oktell_parks_sql(conn_ids):
     )
 
 
-def _oktell_parks(conn_ids, query):
+def oktell_connections(conn_ids, query):
+    """{conn_id: строка соединения Oktell или None} — таксопарк, тип и номера.
+
+    Один кэш на таксопарк и маршрут: карточка спрашивает оба про один звонок,
+    и второй ответ берётся из кэша, а не новым запросом к станции."""
     result, missing = {}, []
     now = monotonic()
     with _cache_lock:
@@ -102,20 +110,30 @@ def _oktell_parks(conn_ids, query):
                 missing.append(conn_id)
     if missing:
         try:
-            found = {_conn_id(row.get("conn_id")): _text(row.get("taxi_park"))
+            found = {_conn_id(row.get("conn_id")): {
+                         "taxi_park": _text(row.get("taxi_park")) or None,
+                         "connection_type": row.get("ct"),
+                         "a_out": _text(row.get("a_out")), "b_out": _text(row.get("b_out")),
+                         "a_dialed": _text(row.get("a_dialed"))}
                      for row in query(oktell_parks_sql(missing), timeout=5)}
         except Exception:
             logging.warning("ai-qa: таксопарки Oktell недоступны", exc_info=True)
             found = {}
         with _cache_lock:
             for conn_id in missing:
-                park = found.get(conn_id) or None
-                result[conn_id] = park
-                _oktell_cache[conn_id] = (now + (600 if park else 60), park)
+                facts = found.get(conn_id)
+                result[conn_id] = facts
+                ttl = 600 if facts and facts["taxi_park"] else 60
+                _oktell_cache[conn_id] = (now + ttl, facts)
                 _oktell_cache.move_to_end(conn_id)
             while len(_oktell_cache) > 4096:
                 _oktell_cache.popitem(last=False)
     return result
+
+
+def _oktell_parks(conn_ids, query):
+    return {conn_id: (facts or {}).get("taxi_park")
+            for conn_id, facts in oktell_connections(conn_ids, query).items()}
 
 
 def _cdr_parks(cur, linkedids):

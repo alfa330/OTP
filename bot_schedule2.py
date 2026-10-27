@@ -6824,6 +6824,10 @@ def api_ai_qa_call(call_id):
         payload = review_payload(call_id, refresh=refresh, subject_kind=subject,
                                  reviewer_id=requester_id)
         _ai_qa_attach_taxi_parks([payload])
+        # Маршрут звонка — входящий/исходящий, номер клиента и наш номер — для шапки
+        # карточки. После таксопарка: у СЗоВ строка соединения Oktell уже в кэше.
+        from call_qa import call_route as _qa_call_route
+        payload["call_route"] = _qa_call_route.load(subject, call_id, oktell_query=_oktell_query)
         # Сделка amoCRM этого разговора (ТЗ #317, п. 2.1 «обогащение записи
         # атрибутами сделки»). Отдельный запрос, а не часть review_payload:
         # оценка и без того тяжёлая, а сделка ей не нужна ни для чего.
