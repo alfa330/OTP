@@ -34,6 +34,13 @@ import { runSseStream } from '../common/sseClient';
 
 // Серверный TTL снимка — 10 с, мост досылает раз в 20 с: чаще опрашивать бессмысленно.
 export const OP_POLL_INTERVAL_MS = 10000;
+/*
+ * Пока живой поток на связи, снимок перечитывается по его кадру `refresh` (касания моста), а
+ * люди и очередь едут в нём самом. Таймер тогда — страховка, и раз в 10 с с каждой стены он
+ * стучался впустую (27.10.2026). Не реже 30 с — из-за плиток лидов: их поток не будит, а
+ * сервер и так держит их минуту (lead_ttl_seconds). Поток лёг — опрос снова раз в 10 с.
+ */
+export const OP_LIVE_POLL_GAP_MS = 30000;
 
 export const OP_WALLBOARD_SNAPSHOT_PATH = '/api/op_wallboard/snapshot';
 export const OP_WALLBOARD_LIVE_PATH = '/api/op_wallboard/live';
@@ -41,6 +48,7 @@ export const OP_WALLBOARD_LIVE_PATH = '/api/op_wallboard/live';
 const useBaseOpWallboardSnapshot = createSnapshotFeed({
     path: OP_WALLBOARD_SNAPSHOT_PATH,
     pollIntervalMs: OP_POLL_INTERVAL_MS,
+    pollGapMs: () => (liveStore.state.status === 'live' ? OP_LIVE_POLL_GAP_MS : 0),
 });
 
 /*

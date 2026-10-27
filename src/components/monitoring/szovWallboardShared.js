@@ -611,7 +611,20 @@ const isTabVisible = () => {
         : !document.hidden;
 };
 
-export function createSnapshotFeed({ path, pollIntervalMs }) {
+/*
+ * Опрашивать ли снимок на этом тике таймера. Скрытую вкладку — нет. gapMs — сколько свежему
+ * снимку можно не перечитываться (0 — каждый тик, как было всегда).
+ */
+export const snapshotTickDue = ({ visible, now, lastFetchAt, gapMs = 0 }) => (
+    Boolean(visible) && !(gapMs > 0 && now - lastFetchAt < gapMs)
+);
+
+/*
+ * pollGapMs — сколько снимку можно не перечитываться по таймеру, если он свежий (миллисекунды,
+ * спрашивается на каждом тике). Нужен табло с живым потоком: пока поток жив, он сам будит
+ * перечитку, и таймер остаётся только страховкой. Без него — каждый тик, как раньше.
+ */
+export function createSnapshotFeed({ path, pollIntervalMs, pollGapMs = null }) {
     const store = {
         state: { snapshot: null, error: null, loading: true, receivedAt: 0 },
         listeners: new Set(),
@@ -680,7 +693,9 @@ export function createSnapshotFeed({ path, pollIntervalMs }) {
         fetchSnapshot({ silent: Boolean(store.state.snapshot) });
         store.timer = window.setInterval(() => {
             // Скрытую вкладку не опрашиваем: незачем дёргать источник впустую.
-            if (isTabVisible()) fetchSnapshot({ silent: true });
+            if (!snapshotTickDue({ visible: isTabVisible(), now: Date.now(), lastFetchAt: store.lastFetchAt,
+                gapMs: pollGapMs ? pollGapMs() : 0 })) return;
+            fetchSnapshot({ silent: true });
         }, pollIntervalMs);
         document.addEventListener('visibilitychange', handleWake);
         window.addEventListener('focus', handleWake);
