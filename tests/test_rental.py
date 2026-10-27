@@ -425,6 +425,87 @@ class AccessTests(unittest.TestCase):
         self.assertFalse(access.capabilities({'role': 'operator',
                                               'department_code': 'request_processing_department'})['collect_any_time'])
 
+    def test_roles_of_tz_391(self):
+        sales_op = access.capabilities({'role': 'operator', 'department_code': 'op'})
+        rental = access.capabilities({'role': 'operator', 'department_code': 'car_rental'})
+        sales_head = access.capabilities({'role': 'admin', 'department_code': 'op', 'headed_codes': ['op']})
+        rental_head = access.capabilities({'role': 'operator', 'department_code': 'szov', 'headed_codes': ['car_rental']})
+        ooz = access.capabilities({'role': 'operator', 'department_code': 'request_processing_department'})
+        # Оператор ОП: машины, условия, направить; свои направления; ни статусов, ни карточек (ТЗ 6).
+        self.assertEqual((sales_op['fleet'], sales_op['send'], sales_op['all_directions'], sales_op['work_directions'],
+                          sales_op['edit_cards'], sales_op['night_report']), (True, True, False, False, False, False))
+        for caps in (rental, sales_head, rental_head):
+            self.assertTrue(caps['all_directions'] and caps['work_directions'] and caps['edit_cards']
+                            and caps['edit_conditions'])
+            self.assertFalse(caps['night_report'])
+        self.assertEqual((ooz['night_report'], ooz['fleet']), (True, False))
+        self.assertFalse(access.capabilities({'role': 'operator', 'department_code': 'op', 'status': 'fired'})['fleet'])
+
+
+class CatalogTests(unittest.TestCase):
+    def test_model_key_and_car_keys(self):
+        from rental import catalog
+        self.assertEqual(catalog.model_key('HongQi E-QM5'), 'hongqieqm5')
+        self.assertEqual(catalog.model_key('HONGQI EQM5 '), 'hongqieqm5')
+        self.assertEqual(catalog.car_keys({'brand': 'BYD', 'model': 'Seal 05', 'name': 'BYD Seal'}), {'bydseal05', 'bydseal'})
+        self.assertEqual(catalog.car_keys({'name': 'FAW HONGGQI H5'}), {'fawhonggqih5'})
+
+    def test_busy_counts_by_card_and_free_is_not_from_yume(self):
+        from rental import catalog
+        cards = [{'id': 1, 'yume_keys': ['hongqieqm5']}, {'id': 2, 'yume_keys': ['hongqieqm5']},
+                 {'id': 3, 'yume_keys': ['geelyemgrand']}]
+        cars = [{'keys': ['hongqieqm5'], 'status': 2}, {'keys': ['hongqieqm5'], 'status': 1},
+                {'keys': ['hongqieqm5'], 'status': 0}, {'keys': ['hongqieqm5'], 'status': 2, 'deleted': True},
+                {'keys': ['bydhan'], 'status': 2}]
+        busy = catalog.count_busy(cars, cards)
+        # Обе карточки E-QM5 видят занятых по модели: в аренде 1, в брони 1; свободная машина Yume не в счёт.
+        self.assertEqual(busy, {1: {'in_rent': 1, 'booked': 1}, 2: {'in_rent': 1, 'booked': 1},
+                                3: {'in_rent': 0, 'booked': 0}})
+
+    def test_phone_and_direction_rules(self):
+        from datetime import date as day
+        from rental import catalog
+        self.assertEqual(catalog.normalize_phone('8 707 123 45 67'), '+77071234567')
+        self.assertEqual(catalog.normalize_phone('+7 (707) 123-45-67'), '+77071234567')
+        self.assertEqual(catalog.normalize_phone('7071234567'), '+77071234567')
+        self.assertEqual(catalog.normalize_phone('+7 727 123 45 67'), '+77271234567')   # городской Алматы — тоже номер
+        for bad in ('+7 495 123 45 67', '12345', '', None):
+            self.assertIsNone(catalog.normalize_phone(bad), bad)
+        today = day(2026, 10, 28)
+        ok = {'phone': '87071234567', 'visit_date': '2026-10-29', 'visit_time': '15:30', 'park': 'iTaxi'}
+        fields, error = catalog.clean_direction(ok, today=today, parks={'iTaxi'})
+        self.assertIsNone(error)
+        self.assertEqual((fields['phone'], fields['visit_time'], fields['comment']), ('+77071234567', '15:30', None))
+        for change, expected in (({'visit_date': '2026-10-27'}, 'прошла'), ({'visit_date': '2026-12-31'}, 'месяц'),
+                                 ({'visit_time': '25:00'}, 'время'), ({'park': ''}, 'парк'),
+                                 ({'park': 'Чужой'}, 'справочник'), ({'phone': '123'}, 'Телефон')):
+            self.assertIn(expected, catalog.clean_direction(dict(ok, **change), today=today, parks={'iTaxi'})[1])
+
+    def test_card_free_count_and_blocks(self):
+        from rental import catalog
+        card, error = catalog.clean_card({'title': ' BYD  Han ', 'car_class': 'Бизнес', 'price': '23 000 ₸'})
+        self.assertIsNone(error)
+        self.assertEqual((card['title'], card['price'], card['yume_keys']), ('BYD Han', 23000, ['bydhan']))
+        self.assertIn('стоимость', catalog.clean_card({'title': 'X', 'car_class': 'Y', 'price': ''})[1])
+        self.assertIn('Класс', catalog.clean_card({'title': 'X', 'price': '15000'})[1])
+        self.assertEqual(catalog.clean_free_count('3'), (3, None))
+        self.assertIsNotNone(catalog.clean_free_count('-1')[1])
+        self.assertIsNotNone(catalog.clean_free_count('1000')[1])
+        blocks, error = catalog.clean_blocks([{'title': 'Условия', 'kind': 'list', 'text': 'a\nb'}])
+        self.assertEqual((blocks[0]['kind'], error), ('list', None))
+        self.assertIsNotNone(catalog.clean_blocks([{'title': '', 'text': 'x'}])[1])
+        self.assertIsNotNone(catalog.clean_blocks([])[1])
+
+    def test_seed_is_the_mockup(self):
+        from rental import catalog
+        cards = catalog.seed_cards()
+        self.assertEqual(len(cards), 15)
+        waybill = [c for c in cards if c['insurance'] == catalog.INSURANCE_WAYBILL]
+        self.assertEqual(sorted(c['title'] for c in waybill), ['Geely Emgrand', 'HongQi E-QM5'])
+        self.assertTrue(all(c['insurance_class'] == 'от 11 и выше' for c in waybill))
+        self.assertEqual(len(catalog.SEED_BLOCKS), 5)
+        self.assertIsNone(catalog.clean_blocks(catalog.SEED_BLOCKS)[1])
+
 
 class WiringTests(unittest.TestCase):
     @classmethod

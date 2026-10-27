@@ -100,7 +100,18 @@ class YumeSource:
         self.max_pages = max_pages
 
     def fetch(self):
-        """Весь парк: {госномер: {'status', 'deleted', 'model'}}."""
+        """Весь парк для ночного отчёта: {госномер: {'status', 'deleted', 'model'}}."""
+        return {car['plate']: {'status': car['status'], 'deleted': car['deleted'], 'model': car['model']}
+                for car in self.fetch_cars()}
+
+    def fetch_cars(self):
+        """Весь парк: по машине на госномер — {'plate', 'status', 'deleted', 'model', 'keys', 'label'}.
+
+        keys — ключи модели (catalog.car_keys): по ним карточки «Наличия авто» находят свои машины.
+        Клиент, который держит машину (current_client), не берётся вовсе.
+        """
+        from .catalog import car_keys
+
         if not self.login or not self.password:
             raise SourceError('не заданы YUME_CLOUD_LOGIN / YUME_CLOUD_PASSWORD')
         http = self.session or requests.Session()
@@ -127,8 +138,11 @@ class YumeSource:
                 plate = plates.normalize(car.get('number'))
                 if not plates.is_plate(plate):
                     continue
-                entry = {'status': item.get('status'), 'deleted': bool(item.get('deleted')),
-                         'model': yume_model(car, item.get('name'))}
+                model = yume_model(car, item.get('name'))
+                entry = {'plate': plate, 'status': item.get('status'), 'deleted': bool(item.get('deleted')),
+                         'model': model, 'label': model or 'Без названия',
+                         'keys': sorted(car_keys({'brand': car.get('brand'), 'model': car.get('model'),
+                                                  'name': item.get('name')}))}
                 current = cars.get(plate)
                 if current is None or _yume_better(entry, current):
                     cars[plate] = entry
@@ -136,7 +150,7 @@ class YumeSource:
                 break
         else:
             raise SourceError('Yume: страниц инвентаря больше %d' % self.max_pages)
-        return cars
+        return list(cars.values())
 
 
 # ─── Wialon ────────────────────────────────────────────────────────────────────

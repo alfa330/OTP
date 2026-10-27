@@ -30,6 +30,64 @@ export const slotLabel = (iso) => {
     return p ? `${p.day} ${MONTHS[p.month - 1]}, ${p.hour}:${p.minute}` : '';
 };
 
+/* ─── Наличие и направления (#391) ─────────────────────────────────────────── */
+
+/** Поля карточки — как rental/catalog.py CARD_FIELDS. */
+export const CARD_FIELDS = [
+    { key: 'title', label: 'Модель' },
+    { key: 'car_class', label: 'Класс' },
+    { key: 'price', label: 'Стоимость в сутки, ₸' },
+    { key: 'year', label: 'Год выпуска' },
+    { key: 'fuel', label: 'Топливо' },
+    { key: 'color', label: 'Цвет' },
+    { key: 'age', label: 'Возраст водителя' },
+    { key: 'insurance_class', label: 'Класс страховки' },
+    { key: 'insurance', label: 'Страховка' },
+    { key: 'first_day', label: 'Первый день' },
+    { key: 'office', label: 'Офис' },
+];
+
+export const INSURANCE_OPTIONS = [
+    { value: 'от водителя', label: 'от водителя' },
+    { value: 'Путевой лист', label: 'Путевой лист' },
+];
+
+/** «15 000 ₸ / сутки». */
+export const formatPrice = (price) => (price
+    ? `${String(price).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} ₸ / сутки` : '');
+
+/** Наличие карточки: свободные — только ручные (ТЗ 3.1). null — ни разу не указаны. */
+export const freeState = (card) => {
+    if (card?.free_count === null || card?.free_count === undefined) return { kind: 'unknown', label: 'Наличие не указано' };
+    if (card.free_count > 0) return { kind: 'free', label: `Свободно: ${card.free_count}` };
+    return { kind: 'none', label: 'Нет в наличии' };
+};
+
+/** «2026-10-28» + 31 день → «2026-11-28» (без поясов браузера). */
+export const addDays = (iso, days) => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+    if (!match) return '';
+    const moment = new Date(Date.UTC(+match[1], +match[2] - 1, +match[3] + days));
+    return moment.toISOString().slice(0, 10);
+};
+
+/** Цвет статуса направления: зелёный — пришёл и выдано, красный — не пришёл и отказы. */
+export const STATUS_TONES = {
+    waiting: 'blue',
+    came: 'green',
+    issued: 'green',
+    no_show: 'red',
+    client_refused: 'red',
+    company_refused: 'red',
+};
+
+/** «+7 707 123 45 67». */
+export const formatPhone = (phone) => {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length !== 11) return phone || '';
+    return `+${digits[0]} ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7, 9)} ${digits.slice(9)}`;
+};
+
 /** Время отчёта рядом с выбором даты: вид слота на сервере → подпись. */
 export const KIND_OPTIONS = [{ value: 'night', label: '01:00' }, { value: 'morning', label: '07:00' }];
 const KIND_CLOCK = { night: '01:00', morning: '07:00' };

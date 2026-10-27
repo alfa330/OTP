@@ -18,6 +18,19 @@ Blueprint собирается фабрикой и получает зависи
 
 История неприкосновенна: старый отчёт пересобрать нельзя — только отчёт, чей слот ещё
 идёт (rules.CATCH_UP_HOURS). Иначе «данные за 28.10 01:00» молча стали бы дневными.
+
+Ручки наличия и направлений (#391):
+    GET    /fleet                          карточки, свободные (ручные) и занятые по Yume, парки
+    POST   /fleet/refresh                  обновить снимок Yume сейчас
+    POST   /cards, PUT|DELETE /cards/<id>  карточка: завести, поправить, скрыть (аренда, руководители)
+    PUT    /cards/<id>/free                свободные машины карточки — вручную (ТЗ 3.1)
+    GET    /cards/<id>/log                 история правок карточки
+    GET    /directions                     реестр: оператору ОП — свои, аренде и руководителям — все
+    POST   /directions                     «Направить в офис»
+    PATCH  /directions/<id>                статус и комментарий (аренда, руководители)
+    GET    /directions/<id>/log            история статусов и комментариев
+    GET    /conditions, /conditions/<id>   «Условия работы»: текущая версия и прошлые
+    POST   /conditions                     новая версия (аренда, руководители)
 """
 
 import logging
@@ -27,7 +40,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, queries, report as report_xlsx, rules
+from . import access, catalog, queries, report as report_xlsx, rules
 from .service import Busy
 
 
@@ -138,8 +151,11 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     @rental_route('')
     def rental_screen(ctx):
-        """Экран: отчёт за выбранные дату и время (без выбора — последний), границы истории."""
+        """Экран: права раздела; ночному отчёту — ещё отчёт за выбранные дату и время (без выбора —
+        последний) и границы истории. Оператору ОП ночной отчёт не открыт — только права."""
         now = queries.now_almaty()
+        if not access.can_open_night_report(ctx):
+            return jsonify({'capabilities': access.capabilities(ctx), 'server_time': _iso(now)})
         requested = _requested_slot()
         with db._get_cursor() as cursor:
             queries.expire_stale(cursor, now)
@@ -244,5 +260,218 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         response.headers['Content-Disposition'] = "attachment; filename*=UTF-8''%s" % quote(filename)
         response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
         return response
+
+    # ═══ Наличие авто и направления (#391) ══════════════════════════════════
+
+    _OUTCOMES = {
+        'forbidden': ('Это действие вам не открыто', 'RENTAL_FORBIDDEN', 403),
+        'not_found': ('Не найдено — обновите страницу', 'RENTAL_NOT_FOUND', 404),
+        'no_card': ('Такой карточки машины уже нет — обновите наличие', 'RENTAL_NO_CARD', 404),
+        'no_free': ('Свободных машин нет — направить нельзя', 'RENTAL_NO_FREE', 409),
+    }
+
+    def _outcome(outcome, message=None):
+        if outcome == 'bad_input':
+            return _bad(message or 'Проверьте поля', 'RENTAL_BAD_INPUT', 400)
+        text, code, status = _OUTCOMES.get(outcome, ('Не получилось', 'RENTAL_FAILED', 409))
+        return _bad(text, code, status)
+
+    def _need(allowed):
+        return None if allowed else _bad('Это действие вам не открыто', 'RENTAL_FORBIDDEN', 403)
+
+    def public_card(card, busy, with_keys):
+        payload = {key: card.get(key) for key in ('id', 'title', 'car_class', 'price', 'year', 'fuel', 'color',
+                                                  'age', 'insurance_class', 'insurance', 'first_day', 'office')}
+        # Свободные — только ручные (ТЗ 3.1); ни разу не указаны — None, а не 0.
+        payload['free_count'] = card.get('free_count') if card.get('free_at') else None
+        payload['free_by'] = card.get('free_by_name') if card.get('free_at') else None
+        payload['free_at'] = _iso(card.get('free_at'))
+        payload['busy'] = busy.get(card['id'], {'in_rent': 0, 'booked': 0})
+        if with_keys:
+            payload['yume_keys'] = card.get('yume_keys') or []
+        return payload
+
+    def public_direction(item):
+        return {
+            'id': item['id'], 'card_id': item.get('card_id'), 'card_title': item['card_title'],
+            'card_class': item.get('card_class'), 'card_terms': item.get('card_terms'), 'office': item.get('office'),
+            'phone': item['phone'], 'park': item['park'], 'visit_at': _iso(item['visit_at']),
+            'comment': item.get('comment'), 'status': item['status'],
+            'status_label': catalog.STATUS_LABELS.get(item['status'], item['status']),
+            'created_by': item['created_by'], 'created_by_name': item.get('created_by_name'),
+            'created_at': _iso(item['created_at']), 'status_at': _iso(item.get('status_at')),
+        }
+
+    def public_log(entries, labels):
+        return [{'field': entry['field'], 'label': labels.get(entry['field'], entry['field']),
+                 'old': entry['old'], 'new': entry['new'], 'by': entry['by'], 'at': _iso(entry['at'])}
+                for entry in entries]
+
+    def _payload():
+        return request.get_json(silent=True) or {}
+
+    # ─── Наличие ─────────────────────────────────────────────────────────────
+
+    @rental_route('/fleet')
+    def rental_fleet(ctx):
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        try:
+            service.refresh_fleet()
+        except Exception:  # noqa: BLE001 — экран показывает прежний снимок, а не 500
+            logging.exception('rental: не поставилось обновление снимка Yume')
+        caps = access.capabilities(ctx)
+        with db._get_cursor() as cursor:
+            cards = queries.cards(cursor)
+            sync = queries.fleet_sync(cursor)
+            parks = queries.sales_parks(cursor) if caps['send'] else []
+        busy = catalog.count_busy(sync['cars'], cards)
+        return jsonify({
+            'capabilities': caps,
+            'cards': [public_card(card, busy, caps['edit_cards']) for card in cards],
+            'sync': {'synced_at': _iso(sync['synced_at']), 'error': sync['error'],
+                     'refreshing': service.fleet_refreshing()},
+            'parks': parks,
+            'office': {'name': catalog.OFFICE, 'phone': catalog.OFFICE_PHONE},
+            'server_time': _iso(queries.now_almaty()),
+        })
+
+    @rental_route('/fleet/refresh', methods=('POST',))
+    def rental_fleet_refresh(ctx):
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        return jsonify({'started': service.refresh_fleet(force=True)}), 202
+
+    # ─── Карточки ────────────────────────────────────────────────────────────
+
+    @rental_route('/cards', methods=('POST',))
+    def rental_card_create(ctx):
+        outcome, result = service.save_card(ctx, _payload())
+        if outcome != 'ok':
+            return _outcome(outcome, result)
+        return jsonify({'card': public_card(result, {}, True)}), 201
+
+    @rental_route('/cards/<int:card_id>', methods=('PUT', 'DELETE'))
+    def rental_card_update(card_id, ctx):
+        if request.method == 'DELETE':
+            outcome = service.hide_card(ctx, card_id)
+            return _outcome(outcome) if outcome != 'ok' else jsonify({'hidden': card_id})
+        outcome, result = service.save_card(ctx, _payload(), card_id)
+        if outcome != 'ok':
+            return _outcome(outcome, result)
+        return jsonify({'card': public_card(result, {}, True)})
+
+    @rental_route('/cards/<int:card_id>/free', methods=('PUT',))
+    def rental_card_free(card_id, ctx):
+        outcome, result = service.set_free_count(ctx, card_id, _payload().get('free_count'))
+        if outcome != 'ok':
+            return _outcome(outcome, result)
+        return jsonify({'card': public_card(result, {}, access.can_edit_cards(ctx))})
+
+    @rental_route('/cards/<int:card_id>/log')
+    def rental_card_log(card_id, ctx):
+        denied = _need(access.can_edit_cards(ctx))
+        if denied:
+            return denied
+        with db._get_cursor() as cursor:
+            entries = queries.card_log(cursor, card_id)
+        return jsonify({'items': public_log(entries, dict(catalog.CARD_LABELS, created='Карточка заведена',
+                                                          hidden='Карточка скрыта'))})
+
+    # ─── Направления ─────────────────────────────────────────────────────────
+
+    @rental_route('/directions', methods=('GET', 'POST'))
+    def rental_directions(ctx):
+        if request.method == 'POST':
+            outcome, result = service.create_direction(ctx, _payload())
+            if outcome != 'ok':
+                return _outcome(outcome, result)
+            return jsonify({'direction': public_direction(result)}), 201
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        see_all = access.can_see_all_directions(ctx)
+        args = request.args
+
+        def day(name):
+            try:
+                return date.fromisoformat(str(args.get(name) or ''))
+            except ValueError:
+                return None
+
+        status = args.get('status') if args.get('status') in catalog.STATUSES else None
+        page = max(1, _int(args.get('page')) or 1)
+        digits = ''.join(ch for ch in str(args.get('q') or '') if ch.isdigit())[-10:]
+        with db._get_cursor() as cursor:
+            items, total = queries.directions(
+                cursor, own_by=None if see_all else ctx['user_id'], date_from=day('from'), date_to=day('to'),
+                status=status, operator_id=_int(args.get('operator')) if see_all else None,
+                phone_digits=digits or None, limit=50, offset=(page - 1) * 50)
+            operators = queries.direction_operators(cursor) if see_all else []
+        return jsonify({
+            'items': [public_direction(item) for item in items], 'total': total, 'page': page, 'page_size': 50,
+            'operators': operators, 'all': see_all,
+            'statuses': [{'value': key, 'label': catalog.STATUS_LABELS[key]} for key in catalog.STATUSES],
+        })
+
+    @rental_route('/directions/<int:direction_id>', methods=('PATCH',))
+    def rental_direction_update(direction_id, ctx):
+        outcome, result = service.update_direction(ctx, direction_id, _payload())
+        if outcome != 'ok':
+            return _outcome(outcome, result)
+        return jsonify({'direction': public_direction(result)})
+
+    @rental_route('/directions/<int:direction_id>/log')
+    def rental_direction_log(direction_id, ctx):
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        with db._get_cursor() as cursor:
+            item = queries.get_direction(cursor, direction_id)
+            if not item or (not access.can_see_all_directions(ctx) and item['created_by'] != ctx['user_id']):
+                return _outcome('not_found')
+            entries = queries.direction_log(cursor, direction_id)
+        for entry in entries:
+            if entry['field'] == 'status':
+                entry['old'] = catalog.STATUS_LABELS.get(entry['old'], entry['old'])
+                entry['new'] = catalog.STATUS_LABELS.get(entry['new'], entry['new'])
+        return jsonify({'items': public_log(entries, {'status': 'Статус', 'comment': 'Комментарий'})})
+
+    # ─── Условия работы ──────────────────────────────────────────────────────
+
+    def _public_version(version):
+        return {'id': version['id'], 'blocks': version['blocks'], 'by': version['by'], 'at': _iso(version['at'])}
+
+    @rental_route('/conditions', methods=('GET', 'POST'))
+    def rental_conditions(ctx):
+        if request.method == 'POST':
+            outcome, result = service.save_conditions(ctx, _payload().get('blocks'))
+            if outcome != 'ok':
+                return _outcome(outcome, result)
+            return jsonify({'current': _public_version(result)})
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        with db._get_cursor() as cursor:
+            current = queries.conditions_current(cursor)
+            versions = queries.conditions_versions(cursor)
+        return jsonify({
+            'current': _public_version(current) if current else None,
+            'versions': [{'id': item['id'], 'by': item['by'], 'at': _iso(item['at'])} for item in versions],
+            'can_edit': access.can_edit_conditions(ctx),
+        })
+
+    @rental_route('/conditions/<int:version_id>')
+    def rental_conditions_version(version_id, ctx):
+        denied = _need(access.can_view_fleet(ctx))
+        if denied:
+            return denied
+        with db._get_cursor() as cursor:
+            version = queries.conditions_version(cursor, version_id)
+        if not version:
+            return _outcome('not_found')
+        return jsonify({'version': _public_version(version)})
 
     return bp

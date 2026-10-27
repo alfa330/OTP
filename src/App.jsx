@@ -2583,10 +2583,11 @@ const canAccessProductionForUser = (userLike) => userLike?.production_access ===
    прячет: у раздела свой круг, как у «Оплаты счетов». */
 const canAccessTwofaSectionForUser = (userLike) => userLike?.twofa_access === true;
 
-/* «Аренда авто» (#398, ночной отчёт по арендным машинам): ООЗ — сотрудники и глава отдела —
-   и супер-админ. Круг считает сервер (bot_schedule2.py: _rental_section_open_for — то же
-   правило, что у ручек rental/access.py) и отдаёт флагом в профиле. Строго true: профиль
-   без поля (старый кэш) — не доступ. */
+/* «Аренда авто»: ночной отчёт по арендным машинам (#398) — ООЗ, сотрудники и глава отдела;
+   наличие авто и направления в офис (#391) — отдел продаж и отдел аренды; плюс супер-админ.
+   Круг считает сервер (bot_schedule2.py: _rental_section_open_for — то же правило, что у
+   ручек rental/access.py) и отдаёт флагом в профиле. Строго true: профиль без поля (старый
+   кэш) — не доступ. */
 const canAccessRentalSectionForUser = (userLike) => userLike?.rental_access === true;
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
@@ -47561,7 +47562,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-                // «Аренда авто» — свой круг (ООЗ и супер-админ): ссылка ?view=rental у того, кому
+                // «Аренда авто» — свой круг (ООЗ, продажи, аренда и супер-админ): ссылка ?view=rental у того, кому
                 // раздел не открыт, иначе оставила бы пустой экран.
                 if (view === 'rental' && !canAccessRentalSection) {
                     if (isAdminLikeRole) redirectToView('sv_list');
@@ -53469,8 +53470,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Коды 2FA» — свой круг (выдачи главы маркетинга), а у «Маркетинга» есть
                 // allowlist: без этой строки проверка ниже выбросила бы сотрудника из раздела.
                 if (view === 'twofa' && canAccessTwofaSection) return;
-                // «Аренда авто» — свой круг (ООЗ), а у отдела ООЗ может быть allowlist: без этой
-                // строки проверка ниже выбросила бы ночную смену из раздела.
+                // «Аренда авто» — свой круг (ООЗ, продажи, аренда), а у ООЗ и продаж есть allowlist:
+                // без этой строки проверка ниже выбросила бы ночную смену и операторов ОП из раздела.
                 if (view === 'rental' && canAccessRentalSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
@@ -54943,9 +54944,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         </button>
                                     </li>
                                     )}
-                                    {/* «Аренда авто» (#398) — тоже один раз на все роли: круг — отдел ООЗ
-                                        и супер-админ, глава ООЗ по роли админ, и по ролевым ветвям пункт
-                                        легко потерять в одной из них. */}
+                                    {/* «Аренда авто» (#398, #391) — тоже один раз на все роли: круг — отделы
+                                        ООЗ, продаж и аренды и супер-админ, главы этих отделов бывают любой
+                                        роли, и по ролевым ветвям пункт легко потерять в одной из них. */}
                                     {canAccessRentalSection && (
                                     <li>
                                         <button

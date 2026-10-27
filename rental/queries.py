@@ -2,7 +2,7 @@
 """SQL раздела «Аренда авто». Время в таблицах — наивное время Алматы (rules.ALMATY)."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from psycopg2.extras import execute_values
 
@@ -227,3 +227,295 @@ def user_names(cursor, ids):
         return {}
     cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (ids,))
     return {int(user_id): name or '' for user_id, name in cursor.fetchall()}
+
+
+# ═══ Наличие авто и направления (#391) ══════════════════════════════════════════
+
+_CARD_COLUMNS = ('id', 'title', 'car_class', 'price', 'year', 'fuel', 'color', 'age', 'insurance_class',
+                 'insurance', 'first_day', 'office', 'yume_keys', 'position', 'is_active',
+                 'free_count', 'free_by_name', 'free_at')
+_CARD_EDITABLE = ('title', 'car_class', 'price', 'year', 'fuel', 'color', 'age', 'insurance_class',
+                  'insurance', 'first_day', 'office', 'yume_keys')
+
+
+def _card(row):
+    card = dict(zip(_CARD_COLUMNS, row))
+    card['yume_keys'] = list(card.get('yume_keys') or [])
+    return card
+
+
+def cards(cursor, *, active_only=True):
+    cursor.execute("SELECT " + ', '.join(_CARD_COLUMNS) + " FROM rental_cards"
+                   + (" WHERE is_active" if active_only else "") + " ORDER BY position, id")
+    return [_card(row) for row in cursor.fetchall()]
+
+
+def get_card(cursor, card_id, *, for_update=False):
+    cursor.execute("SELECT " + ', '.join(_CARD_COLUMNS) + " FROM rental_cards WHERE id = %s"
+                   + (" FOR UPDATE" if for_update else ""), (int(card_id),))
+    row = cursor.fetchone()
+    return _card(row) if row else None
+
+
+def _log_card(cursor, card_id, field, old, new, ctx, now):
+    cursor.execute("""
+        INSERT INTO rental_card_log (card_id, field, old_value, new_value, changed_by, changed_by_name, changed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (card_id, field, _log_text(old), _log_text(new), ctx['user_id'], ctx.get('name') or '', now))
+
+
+def _log_text(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(item) for item in value)
+    return str(value)
+
+
+def create_card(cursor, card, ctx, now):
+    cursor.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM rental_cards")
+    position = cursor.fetchone()[0]
+    cursor.execute("""
+        INSERT INTO rental_cards (title, car_class, price, year, fuel, color, age, insurance_class, insurance,
+                                  first_day, office, yume_keys, position, created_by, created_at, updated_at)
+        VALUES (%(title)s, %(car_class)s, %(price)s, %(year)s, %(fuel)s, %(color)s, %(age)s, %(insurance_class)s,
+                %(insurance)s, %(first_day)s, %(office)s, %(yume_keys)s, %(position)s, %(by)s, %(now)s, %(now)s)
+        RETURNING id
+    """, dict(card, position=position, by=ctx['user_id'], now=now))
+    card_id = cursor.fetchone()[0]
+    _log_card(cursor, card_id, 'created', None, card['title'], ctx, now)
+    return get_card(cursor, card_id)
+
+
+def update_card(cursor, current, card, ctx, now):
+    """Записать изменённые поля; в журнал — каждое поле отдельной строкой. Возвращает число правок."""
+    changed = [key for key in _CARD_EDITABLE if card.get(key) != current.get(key)]
+    if not changed:
+        return 0
+    assignments = ', '.join('%s = %%(%s)s' % (key, key) for key in changed)
+    cursor.execute("UPDATE rental_cards SET " + assignments + ", updated_at = %(now)s WHERE id = %(id)s",
+                   dict({key: card[key] for key in changed}, now=now, id=current['id']))
+    for key in changed:
+        _log_card(cursor, current['id'], key, current.get(key), card.get(key), ctx, now)
+    return len(changed)
+
+
+def set_free_count(cursor, current, count, ctx, now):
+    """Свободные машины карточки — вручную (ТЗ 3.1): кто и когда, и строка журнала."""
+    cursor.execute("""
+        UPDATE rental_cards SET free_count = %s, free_by = %s, free_by_name = %s, free_at = %s, updated_at = %s
+         WHERE id = %s
+    """, (count, ctx['user_id'], ctx.get('name') or '', now, now, current['id']))
+    _log_card(cursor, current['id'], 'free_count', current.get('free_count') if current.get('free_at') else None,
+              count, ctx, now)
+
+
+def hide_card(cursor, current, ctx, now):
+    cursor.execute("UPDATE rental_cards SET is_active = FALSE, updated_at = %s WHERE id = %s", (now, current['id']))
+    _log_card(cursor, current['id'], 'hidden', current['title'], None, ctx, now)
+
+
+def card_log(cursor, card_id, limit=200):
+    cursor.execute("""
+        SELECT field, old_value, new_value, changed_by_name, changed_at FROM rental_card_log
+         WHERE card_id = %s ORDER BY id DESC LIMIT %s
+    """, (int(card_id), int(limit)))
+    return [dict(zip(('field', 'old', 'new', 'by', 'at'), row)) for row in cursor.fetchall()]
+
+
+# ─── Снимок парка Yume ──────────────────────────────────────────────────────────
+
+def fleet_sync(cursor):
+    cursor.execute("SELECT cars, synced_at, attempted_at, error FROM rental_fleet_sync WHERE id = 1")
+    row = cursor.fetchone()
+    if not row:
+        return {'cars': [], 'synced_at': None, 'attempted_at': None, 'error': None}
+    cars = row[0]
+    if isinstance(cars, str):
+        cars = json.loads(cars or '[]')
+    return {'cars': cars or [], 'synced_at': row[1], 'attempted_at': row[2], 'error': row[3]}
+
+
+def mark_fleet_attempt(cursor, now):
+    cursor.execute("""
+        INSERT INTO rental_fleet_sync (id, attempted_at) VALUES (1, %s)
+        ON CONFLICT (id) DO UPDATE SET attempted_at = EXCLUDED.attempted_at
+    """, (now,))
+
+
+def save_fleet(cursor, cars, now):
+    """Новый снимок. В базу — только ключи модели, статус, «удалена» и подпись: без госномеров и клиентов."""
+    slim = [{'keys': car.get('keys') or [], 'status': car.get('status'), 'deleted': bool(car.get('deleted')),
+             'label': car.get('label') or ''} for car in cars]
+    cursor.execute("""
+        INSERT INTO rental_fleet_sync (id, cars, synced_at, attempted_at, error) VALUES (1, %s::jsonb, %s, %s, NULL)
+        ON CONFLICT (id) DO UPDATE SET cars = EXCLUDED.cars, synced_at = EXCLUDED.synced_at,
+                                       attempted_at = EXCLUDED.attempted_at, error = NULL
+    """, (json.dumps(slim, ensure_ascii=False), now, now))
+
+
+def save_fleet_error(cursor, error, now):
+    cursor.execute("""
+        INSERT INTO rental_fleet_sync (id, attempted_at, error) VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET attempted_at = EXCLUDED.attempted_at, error = EXCLUDED.error
+    """, (now, str(error)[:300]))
+
+
+# ─── Парки ──────────────────────────────────────────────────────────────────────
+
+def sales_parks(cursor):
+    """Парки для направления — общий справочник вики («Парки»), пространства отдела продаж.
+
+    Тот же источник, что у «Обращений» (crm/queries.taxi_parks): второй список парков значил бы,
+    что оператор выбирает из одного набора, а справочник компании живёт другим. В направлении
+    хранится название — реестр читается, даже если парк потом переименуют или уберут.
+    """
+    cursor.execute("""
+        SELECT p.name FROM wiki_taxi_parks p
+         WHERE p.status = 'active'
+           AND p.space_id IN (SELECT sd.space_id FROM wiki_space_departments sd
+                                JOIN departments d ON d.id = sd.department_id
+                               WHERE lower(d.code) = %s)
+         ORDER BY p.position, p.name
+    """, ('op',))
+    return [row[0] for row in cursor.fetchall()]
+
+
+# ─── Направления ────────────────────────────────────────────────────────────────
+
+_DIRECTION_COLUMNS = ('id', 'card_id', 'card_title', 'card_class', 'card_terms', 'office', 'phone', 'park',
+                      'visit_at', 'comment', 'status', 'created_by', 'created_by_name', 'created_at',
+                      'status_by', 'status_at')
+
+
+def _direction(row):
+    return dict(zip(_DIRECTION_COLUMNS, row))
+
+
+def card_terms(card):
+    """«Путевой лист, от 11 и выше» — по чему отличаются варианты одной модели."""
+    return ', '.join(part for part in (card.get('insurance'), card.get('insurance_class')) if part) or None
+
+
+def create_direction(cursor, fields, card, ctx, visit_at, now):
+    cursor.execute("""
+        INSERT INTO rental_directions (card_id, card_title, card_class, card_terms, office, phone, park, visit_at,
+                                       comment, status, created_by, created_by_name, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'waiting', %s, %s, %s, %s)
+        RETURNING id
+    """, (card['id'], card['title'], card.get('car_class'), card_terms(card), card.get('office'), fields['phone'],
+          fields['park'], visit_at, fields.get('comment'), ctx['user_id'], ctx.get('name') or '', now, now))
+    return get_direction(cursor, cursor.fetchone()[0])
+
+
+def get_direction(cursor, direction_id, *, for_update=False):
+    cursor.execute("SELECT " + ', '.join(_DIRECTION_COLUMNS) + " FROM rental_directions WHERE id = %s"
+                   + (" FOR UPDATE" if for_update else ""), (int(direction_id),))
+    row = cursor.fetchone()
+    return _direction(row) if row else None
+
+
+def directions(cursor, *, own_by=None, date_from=None, date_to=None, status=None, operator_id=None,
+               phone_digits=None, limit=50, offset=0):
+    """Реестр: свежие визиты сверху. own_by — только направления этого оператора (ТЗ 6)."""
+    where, params = [], []
+    if own_by is not None:
+        where.append('created_by = %s')
+        params.append(int(own_by))
+    if date_from is not None:
+        where.append('visit_at >= %s')
+        params.append(datetime(date_from.year, date_from.month, date_from.day))
+    if date_to is not None:
+        where.append('visit_at < %s')
+        params.append(datetime(date_to.year, date_to.month, date_to.day) + timedelta(days=1))
+    if status:
+        where.append('status = %s')
+        params.append(status)
+    if operator_id is not None:
+        where.append('created_by = %s')
+        params.append(int(operator_id))
+    if phone_digits:
+        where.append("regexp_replace(phone, '\\D', '', 'g') LIKE %s")
+        params.append('%' + phone_digits + '%')
+    clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+    cursor.execute("SELECT COUNT(*) FROM rental_directions" + clause, params)
+    total = int(cursor.fetchone()[0])
+    cursor.execute("SELECT " + ', '.join(_DIRECTION_COLUMNS) + " FROM rental_directions" + clause
+                   + " ORDER BY visit_at DESC, id DESC LIMIT %s OFFSET %s", params + [int(limit), int(offset)])
+    return [_direction(row) for row in cursor.fetchall()], total
+
+
+def direction_operators(cursor):
+    """Кто направлял — для отбора «Оператор» в реестре."""
+    cursor.execute("""
+        SELECT created_by, MAX(created_by_name) FROM rental_directions GROUP BY created_by ORDER BY 2
+    """)
+    return [{'id': int(row[0]), 'name': row[1] or ''} for row in cursor.fetchall()]
+
+
+def update_direction(cursor, current, changes, ctx, now):
+    """Статус и/или комментарий; каждое изменение — строка журнала (ТЗ 4: кто, когда, было и стало)."""
+    changed = {key: value for key, value in changes.items() if value != current.get(key)}
+    if not changed:
+        return {}
+    sets, params = [], []
+    for key, value in changed.items():
+        sets.append('%s = %%s' % key)
+        params.append(value)
+    if 'status' in changed:
+        sets += ['status_by = %s', 'status_at = %s']
+        params += [ctx['user_id'], now]
+    cursor.execute("UPDATE rental_directions SET " + ', '.join(sets) + ", updated_at = %s WHERE id = %s",
+                   params + [now, current['id']])
+    for key, value in changed.items():
+        cursor.execute("""
+            INSERT INTO rental_direction_log (direction_id, field, old_value, new_value, changed_by,
+                                              changed_by_name, changed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (current['id'], key, current.get(key), value, ctx['user_id'], ctx.get('name') or '', now))
+    return changed
+
+
+def direction_log(cursor, direction_id):
+    cursor.execute("""
+        SELECT field, old_value, new_value, changed_by_name, changed_at FROM rental_direction_log
+         WHERE direction_id = %s ORDER BY id
+    """, (int(direction_id),))
+    return [dict(zip(('field', 'old', 'new', 'by', 'at'), row)) for row in cursor.fetchall()]
+
+
+# ─── Условия работы ─────────────────────────────────────────────────────────────
+
+def _blocks(value):
+    return json.loads(value) if isinstance(value, str) else (value or [])
+
+
+def conditions_current(cursor):
+    cursor.execute("SELECT id, blocks, created_by_name, created_at FROM rental_conditions ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'id': int(row[0]), 'blocks': _blocks(row[1]), 'by': row[2], 'at': row[3]}
+
+
+def conditions_versions(cursor, limit=100):
+    cursor.execute("SELECT id, created_by_name, created_at FROM rental_conditions ORDER BY id DESC LIMIT %s",
+                   (int(limit),))
+    return [{'id': int(row[0]), 'by': row[1], 'at': row[2]} for row in cursor.fetchall()]
+
+
+def conditions_version(cursor, version_id):
+    cursor.execute("SELECT id, blocks, created_by_name, created_at FROM rental_conditions WHERE id = %s",
+                   (int(version_id),))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'id': int(row[0]), 'blocks': _blocks(row[1]), 'by': row[2], 'at': row[3]}
+
+
+def save_conditions(cursor, blocks, ctx, now):
+    cursor.execute("""
+        INSERT INTO rental_conditions (blocks, created_by, created_by_name, created_at)
+        VALUES (%s::jsonb, %s, %s, %s) RETURNING id
+    """, (json.dumps(blocks, ensure_ascii=False), ctx['user_id'], ctx.get('name') or '', now))
+    return conditions_version(cursor, cursor.fetchone()[0])
