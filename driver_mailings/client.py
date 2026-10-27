@@ -115,6 +115,16 @@ class MailingRefused(FleetError):
         super().__init__(self.message)
 
 
+class MailingMissing(FleetError):
+    """Кабинет не знает рассылку с таким id (404 not_found).
+
+    Отдельный класс, потому что это не сбой: так кабинет отвечает про рассылку,
+    которую принял и потом удалил, не разослав (с 09.10 по 26.10.2026 так ушли
+    все рассылки аккаунта). Отказ в правах (403) и сбой связи — другие случаи:
+    про них ничего не известно, и записывать рассылку потерянной по ним нельзя.
+    """
+
+
 def _parse_ts(value):
     """Метка времени кабинета в datetime с зоной. Без зоны считаем UTC: кабинет
     отдаёт время со смещением, а голая строка приходит только из наших же
@@ -432,6 +442,26 @@ class MailingsClient(FleetClient):
         """
         return self._request('GET', PATH_MAILINGS, park_id=park_id,
                              params={'id': str(mailing_id)}, attempts=3)
+
+    def mailing_summary(self, park_id, mailing_id):
+        """Сводка рассылки (`status`, `sent_at`, `sent_to_number`, прочтения) —
+        та же запись, что в журнале, но по id, без листания страниц.
+
+        Кабинет не знает такой рассылки — MailingMissing. Узнаём это по ответу
+        404 с кодом not_found: базовый транспорт кладёт тело неуспешного ответа
+        в текст ошибки, и только эта пара значит «рассылки нет».
+        """
+        try:
+            payload = self.mailing_detail(park_id, mailing_id)
+        except FleetSessionExpired:
+            raise
+        except FleetError as error:
+            text = str(error)
+            if ' 404' in text and _refusal_code(text) == 'not_found':
+                raise MailingMissing(text) from error
+            raise
+        summary = (payload or {}).get('mailing_summary') if isinstance(payload, dict) else None
+        return summary if isinstance(summary, dict) else {}
 
     def revoke_mailing(self, park_id, mailing_id):
         """Отозвать рассылку. Успех — 204 без тела.

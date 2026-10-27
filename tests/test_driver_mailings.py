@@ -19,7 +19,7 @@ from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from driver_mailings import access, catalog  # noqa: E402
-from driver_mailings.client import MailingRefused, MailingsClient  # noqa: E402
+from driver_mailings.client import MailingMissing, MailingRefused, MailingsClient  # noqa: E402
 from driver_mailings.schema import DRIVER_MAILINGS_SCHEMA_SQL  # noqa: E402
 from fleet_edm.client import FleetError  # noqa: E402
 
@@ -382,6 +382,35 @@ class ClientTests(unittest.TestCase):
         client = _client([_Response(200, {'count': 1144})])
         self.assertEqual(client.recipients_count(PARK, {}), 1144)
 
+    def test_summary_of_one_mailing_by_id(self):
+        session = _Session([_Response(200, {
+            'mailing_template': {'title': 'Т', 'message': 'М'},
+            'mailing_summary': {'id': 'm-1', 'status': 'sent', 'sent_to_number': 19799,
+                                'sent_at': '2026-10-27T07:00:47.478564+00:00'}})])
+        client = MailingsClient({'Session_id': 'x'}, 'UA', session=session)
+        summary = client.mailing_summary(PARK, 'm-1')
+        self.assertEqual(summary['status'], 'sent')
+        self.assertEqual(summary['sent_to_number'], 19799)
+        self.assertEqual(session.calls[0]['method'], 'GET')
+        self.assertEqual(session.calls[0]['params'], {'id': 'm-1'})
+
+    def test_mailing_the_cabinet_dropped_is_missing(self):
+        # Так кабинет отвечал про рассылки, которые принял с 16.10 по 25.10.2026
+        # и не разослал.
+        client = _client([_Response(404, {'code': 'not_found', 'message': 'Mailing not found'})])
+        with self.assertRaises(MailingMissing):
+            client.mailing_summary(PARK, 'gone')
+
+    def test_refusal_is_not_missing(self):
+        # 403 — нет прав (например, под общим аккаунтом ЭДО), иной 404 — не про
+        # рассылку: о ней ничего не известно, и потерянной её считать нельзя.
+        for response in (_Response(403, {'code': 'no_permissions'}),
+                         _Response(404, {'code': 'park_not_found'})):
+            client = _client([response])
+            with self.assertRaises(FleetError) as caught:
+                client.mailing_summary(PARK, 'm-1')
+            self.assertNotIsInstance(caught.exception, MailingMissing)
+
 
 class ResolveMailingIdTests(unittest.TestCase):
     """Кабинет не возвращает id отправленной рассылки — его ищут в журнале.
@@ -728,11 +757,80 @@ class SchemaTests(unittest.TestCase):
 
     def test_everything_is_idempotent(self):
         for statement in DRIVER_MAILINGS_SCHEMA_SQL.split(';'):
-            head = statement.strip().upper()
+            # Комментарии перед оператором — не часть его головы.
+            head = '\n'.join(line for line in statement.strip().splitlines()
+                             if not line.strip().startswith('--')).strip().upper()
             if head.startswith('CREATE TABLE'):
                 self.assertIn('IF NOT EXISTS', head)
             if head.startswith('CREATE INDEX') or head.startswith('CREATE UNIQUE INDEX'):
                 self.assertIn('IF NOT EXISTS', head)
+            if head.startswith('ALTER TABLE'):
+                self.assertIn('ADD COLUMN IF NOT EXISTS', head)
+
+    def test_cabinet_state_of_a_target_is_stored_and_shown(self):
+        # 27.10.2026: принятая кабинетом рассылка не значит разосланная — цель
+        # помнит, что о ней сказал кабинет, и это уходит в журнал.
+        from driver_mailings import queries
+        for column in ('fleet_status', 'delivered', 'fleet_sent_at', 'fleet_checked_at'):
+            self.assertIn('driver_mailing_targets ADD COLUMN IF NOT EXISTS {} '.format(column),
+                          DRIVER_MAILINGS_SCHEMA_SQL)
+            self.assertIn(column, queries.TARGET_COLUMNS)
+
+
+class _SqlCursor:
+    """Курсор без базы: собирает то, что execute_values отправил бы в Postgres.
+    Ловит ошибки сборки (второй %s, голый % в тексте), а не смысл SQL."""
+
+    def __init__(self, returning=()):
+        self.connection = type('Conn', (), {'encoding': 'UTF8'})()
+        self.executed = []
+        self._returning = list(returning)
+
+    def mogrify(self, template, args):
+        if isinstance(template, str):
+            template = template.encode('utf-8')
+        return template % tuple(
+            json.dumps(arg, default=str, ensure_ascii=False).encode('utf-8') for arg in args)
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql.decode('utf-8') if isinstance(sql, bytes) else sql)
+
+    def fetchall(self):
+        rows, self._returning = self._returning, []
+        return rows
+
+
+class CabinetStateQueriesTests(unittest.TestCase):
+    def test_states_are_saved_in_one_statement(self):
+        from datetime import datetime, timezone
+
+        from driver_mailings import queries
+        cursor = _SqlCursor()
+        stamp = datetime(2026, 10, 27, 7, 0, 47, tzinfo=timezone.utc)
+        saved = queries.save_fleet_states(cursor, [
+            (95, 'park-a', 'created', None, None),
+            (94, 'park-a', 'sent', 19799, stamp),
+        ])
+        self.assertEqual(saved, 2)
+        self.assertEqual(len(cursor.executed), 1)
+        sql = cursor.executed[0]
+        self.assertIn('UPDATE driver_mailing_targets AS t', sql)
+        self.assertIn('(95::bigint, "park-a"::text, "created"::text, null::integer, '
+                      'null::timestamptz)', sql)
+        self.assertIn('19799::integer', sql)
+        self.assertEqual(queries.save_fleet_states(_SqlCursor(), []), 0)
+
+    def test_lost_targets_become_failed_only_from_sent(self):
+        from driver_mailings import queries
+        cursor = _SqlCursor(returning=[(91,), (91,), (93,)])
+        touched = queries.mark_targets_lost(cursor, [(91, 'a'), (91, 'b'), (93, 'a')])
+        self.assertEqual(touched, {91, 93})
+        sql = cursor.executed[0]
+        self.assertIn("SET status = 'failed'", sql)
+        self.assertIn("AND t.status = 'sent'", sql)
+        self.assertIn('RETURNING t.mailing_id', sql)
+        self.assertIn(queries.LOST_ERROR_CODE, sql)
+        self.assertEqual(queries.mark_targets_lost(_SqlCursor(), []), set())
 
     def test_idempotency_key_is_unique(self):
         # Единственная защита от второй рассылки тем же людям при двойном клике.
@@ -863,6 +961,26 @@ class _FakeCabinet:
         # Снимок, снятый до отправок, обязан дойти до поиска id.
         assert before_ids == {'old-' + park_id}, before_ids
         return 'f-' + park_id
+
+    # ── журнал: страницы по парку и сводки по id ─────────────────────────────
+    journal_pages = {}      # park_id → [(строки, курсор дальше)]; ошибка — исключением
+    summaries = {}          # id → сводка | исключение
+
+    def list_mailings(self, park_id, limit=50, cursor=None):
+        _FakeCabinet.events.append('list:' + park_id)
+        pages = _FakeCabinet.journal_pages.get(park_id, [([], None)])
+        if isinstance(pages, Exception):
+            raise pages
+        index = int(cursor or 0)
+        rows, more = pages[min(index, len(pages) - 1)]
+        return list(rows), (str(index + 1) if more else None)
+
+    def mailing_summary(self, park_id, mailing_id):
+        _FakeCabinet.events.append('summary:' + str(mailing_id))
+        answer = _FakeCabinet.summaries.get(mailing_id)
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(answer or {})
 
 
 class _RouteHarness(unittest.TestCase):
@@ -1388,6 +1506,178 @@ class CountRouteTests(_RouteHarness):
         self.assertEqual(push.status_code, 200, push.get_json())
         self.count(['a'])
         self.assertEqual(self.parks_asked(), ['a'])
+
+
+class JournalCabinetStateTests(_RouteHarness):
+    """Журнал говорит, разослал ли кабинет то, что принял (27.10.2026).
+
+    С 09.10 по 26.10.2026 кабинет принимал рассылки ответом 204 и не рассылал
+    их, а потом удалял: по id — 404. Журнал всё это время писал «Отправлена».
+    """
+
+    def setUp(self):
+        super().setUp()
+        from datetime import datetime, timedelta, timezone
+        from unittest import mock
+
+        from driver_mailings import queries
+
+        self.now = datetime.now(timezone.utc)
+        self.ago = lambda **kw: self.now - timedelta(**kw)
+        _FakeCabinet.journal_pages = {}
+        _FakeCabinet.summaries = {}
+        self.items = []
+        self.saved = []
+        self.lost = []
+        self.finished = []
+
+        def journal(cursor, limit=20, offset=0):
+            return self.items, len(self.items)
+
+        def save_fleet_states(cursor, rows):
+            self.saved.extend(rows)
+            return len(rows)
+
+        def mark_targets_lost(cursor, pairs):
+            self.lost.extend(pairs)
+            return {mailing_id for mailing_id, _park in pairs}
+
+        def finish_mailing(cursor, mailing_id):
+            self.finished.append(mailing_id)
+            return 'failed'
+
+        for name, value in (('journal', journal), ('save_fleet_states', save_fleet_states),
+                            ('mark_targets_lost', mark_targets_lost),
+                            ('finish_mailing', finish_mailing)):
+            patch = mock.patch.object(queries, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def mailing(self, mailing_id, *targets):
+        item = {'id': mailing_id, 'title': 'МАҢЫЗДЫ!', 'status': 'sent', 'targets': list(targets)}
+        self.items.append(item)
+        return item
+
+    @staticmethod
+    def target(park_id, fleet_id, sent_at, **extra):
+        row = {'park_id': park_id, 'park_name': park_id, 'status': 'sent',
+               'fleet_mailing_id': fleet_id, 'sent_at': sent_at,
+               'fleet_status': None, 'delivered': None, 'fleet_sent_at': None}
+        row.update(extra)
+        return row
+
+    def journal(self):
+        response = self.http.get('/api/driver_mailings/journal')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()['items']
+
+    def summaries_asked(self):
+        return [event.split(':', 1)[1] for event in _FakeCabinet.events if event.startswith('summary:')]
+
+    def test_mailing_missing_from_the_cabinet_is_not_delivered(self):
+        self.mailing(93, self.target('a', 'gone', self.ago(days=2)))
+        # Журнал парка дочитан: после нашей отправки там только чужая старая запись.
+        _FakeCabinet.journal_pages = {'a': [([
+            {'id': 'old', 'status': 'sent', 'sent_at': self.ago(days=18).isoformat()},
+        ], False)]}
+        _FakeCabinet.summaries = {'gone': MailingMissing('Fleet вернул 404')}
+
+        item = self.journal()[0]
+
+        self.assertEqual(self.summaries_asked(), ['gone'])
+        self.assertEqual(self.lost, [(93, 'a')])
+        self.assertEqual(self.finished, [93])
+        self.assertEqual(item['status'], 'failed')
+        target = item['targets'][0]
+        self.assertEqual(target['status'], 'failed')
+        self.assertEqual(target['error_code'], 'lost_in_cabinet')
+        self.assertIn('не пришла', target['error'])
+
+    def test_queued_and_delivered_states_are_remembered(self):
+        self.mailing(95, self.target('a', 'q-1', self.ago(minutes=40)))
+        self.mailing(94, self.target('a', 's-1', self.ago(hours=5)))
+        _FakeCabinet.journal_pages = {'a': [([
+            {'id': 'q-1', 'status': 'created'},
+            {'id': 's-1', 'status': 'sent', 'sent_at': self.ago(hours=5).isoformat(),
+             'sent_to_number': 19799, 'read_by_number': 230},
+            {'id': 'old', 'status': 'sent', 'sent_at': self.ago(days=18).isoformat()},
+        ], False)]}
+
+        items = {item['id']: item for item in self.journal()}
+
+        self.assertEqual(self.summaries_asked(), [])
+        self.assertEqual(self.lost, [])
+        self.assertEqual(items[95]['targets'][0]['fleet_status'], 'created')
+        self.assertEqual(items[94]['targets'][0]['sent_to_number'], 19799)
+        self.assertEqual(items[94]['sent_total'], 19799)
+        saved = {(row[0], row[2]): row for row in self.saved}
+        self.assertIn((95, 'created'), saved)
+        self.assertEqual(saved[(94, 'sent')][3], 19799)
+        self.assertIsNotNone(saved[(94, 'sent')][4])
+
+    def test_unchanged_state_is_not_written_again(self):
+        stamp = self.ago(hours=5)
+        self.mailing(94, self.target('a', 's-1', stamp, fleet_status='sent', delivered=19799,
+                                     fleet_sent_at=stamp))
+        _FakeCabinet.journal_pages = {'a': [([
+            {'id': 's-1', 'status': 'sent', 'sent_at': stamp.isoformat(), 'sent_to_number': 19799},
+        ], False)]}
+        self.journal()
+        self.assertEqual(self.saved, [])
+
+    def test_not_listed_deep_enough_is_not_declared_lost(self):
+        # Журнал не долистан до нашей отправки (потолок страниц) — «не нашли»
+        # значит «не дошли», а не «её нет».
+        self.mailing(90, self.target('a', 'deep', self.ago(days=6)))
+        _FakeCabinet.journal_pages = {'a': [([
+            {'id': 'x', 'status': 'sent', 'sent_at': self.ago(days=1).isoformat()},
+        ], True)]}
+        item = self.journal()[0]
+        self.assertEqual(self.summaries_asked(), [])
+        self.assertEqual(self.lost, [])
+        self.assertEqual(item['targets'][0]['status'], 'sent')
+
+    def test_broken_journal_does_not_declare_lost(self):
+        self.mailing(90, self.target('a', 'any', self.ago(days=6)))
+        _FakeCabinet.journal_pages = {'a': FleetError('сеть')}
+        self.journal()
+        self.assertEqual(self.summaries_asked(), [])
+        self.assertEqual(self.lost, [])
+
+    def test_fresh_mailing_is_not_asked_by_id(self):
+        # Только что принятая рассылка в журнале кабинета есть всегда; гонка
+        # «спросили раньше, чем он записал» не должна объявить её потерянной.
+        self.mailing(96, self.target('a', 'fresh', self.ago(minutes=2)))
+        self.journal()
+        self.assertEqual(self.summaries_asked(), [])
+        self.assertEqual(self.lost, [])
+
+    def test_delivered_before_keeps_its_number_and_is_not_asked(self):
+        self.mailing(63, self.target('a', 'done', self.ago(days=18), fleet_status='sent',
+                                     delivered=2559))
+        item = self.journal()[0]
+        self.assertEqual(self.summaries_asked(), [])
+        self.assertEqual(self.lost, [])
+        self.assertEqual(item['targets'][0]['sent_to_number'], 2559)
+        self.assertEqual(item['sent_total'], 2559)
+
+    def test_refused_check_by_id_is_not_lost(self):
+        from fleet_edm.client import FleetAccessDenied
+        self.mailing(91, self.target('a', 'denied', self.ago(days=4)))
+        _FakeCabinet.summaries = {'denied': FleetAccessDenied('403')}
+        item = self.journal()[0]
+        self.assertEqual(self.summaries_asked(), ['denied'])
+        self.assertEqual(self.lost, [])
+        self.assertEqual(item['targets'][0]['status'], 'sent')
+
+    def test_found_by_id_takes_the_cabinet_state(self):
+        self.mailing(92, self.target('a', 'by-id', self.ago(days=3)))
+        _FakeCabinet.summaries = {'by-id': {'id': 'by-id', 'status': 'sent', 'sent_to_number': 812,
+                                            'sent_at': self.ago(days=3).isoformat()}}
+        item = self.journal()[0]
+        self.assertEqual(self.lost, [])
+        self.assertEqual(item['targets'][0]['sent_to_number'], 812)
+        self.assertEqual(item['targets'][0]['fleet_status'], 'sent')
 
 
 class CountWiringTests(unittest.TestCase):

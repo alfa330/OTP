@@ -267,12 +267,16 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
                     loadJournal(0);
                     return;
                 }
+                // «Принял», а не «ушла»: ответ кабинета значит только, что Яндекс
+                // взял рассылку в очередь. Разошлёт он позже — и с 09.10 по
+                // 26.10.2026 не разослал вовсе, хотя здесь писалось «ушла».
+                // Разослал ли — видно в журнале.
                 if (data.status === 'partial') {
-                    toast('Рассылка ушла не во все диспетчерские — смотрите журнал', 'error');
+                    toast('Яндекс принял рассылку не во всех диспетчерских — смотрите журнал', 'error');
                 } else if (data.repeated) {
                     toast('Эта рассылка уже была отправлена', 'error');
                 } else {
-                    toast(`Рассылка ушла: ${recipientsLabel(data.sent_total || 0)}`, 'success');
+                    toast(`Яндекс принял рассылку: ${recipientsLabel(data.sent_total || 0)}. Ход рассылки — в журнале`, 'success');
                 }
                 sendToken.current = null;
                 setDraft(EMPTY_DRAFT);

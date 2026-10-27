@@ -13,13 +13,16 @@ import {
 } from '../src/components/driver_mailings/mailingText.js';
 import {
   countActiveFilters,
+  deliveryProgress,
   describeAudience,
   describeFilters,
   formatCountdown,
+  mailingStateMeta,
   parksLabel,
   recipientsLabel,
   revokeSecondsLeft,
   statusMeta,
+  targetStateMeta,
   targetStatusMeta,
 } from '../src/components/driver_mailings/mailingMeta.js';
 
@@ -248,4 +251,35 @@ test('успешная отправка не красится, а частичн
   assert.equal(statusMeta('failed').tone, 'red');
   assert.equal(targetStatusMeta('failed').tone, 'red');
   assert.equal(targetStatusMeta('sent').tone, 'slate');
+});
+
+/* 27.10.2026: «принята» и «разослана» — разные вещи. С 09.10 по 26.10 кабинет
+   принимал рассылки и не рассылал их, а журнал писал «Ушла». */
+test('принятая рассылка не называется ушедшей, пока кабинет её не разослал', () => {
+  assert.equal(targetStateMeta({ status: 'sent', fleet_status: 'sent' }).label, 'Разослана');
+  assert.equal(targetStateMeta({ status: 'sent', fleet_status: 'created' }).label, 'В очереди Яндекса');
+  assert.equal(targetStateMeta({ status: 'sent' }).label, 'Принята Яндексом');
+  const lost = targetStateMeta({ status: 'failed', error_code: 'lost_in_cabinet' });
+  assert.equal(lost.label, 'Яндекс не разослал');
+  assert.equal(lost.tone, 'red');
+  assert.equal(targetStateMeta({ status: 'failed', error_code: 'no_permissions' }).label,
+    targetStatusMeta('failed').label);
+});
+
+test('плашка рассылки: идёт, потеряна целиком или обычный статус', () => {
+  const sent = (fleet) => ({ status: 'sent', fleet_status: fleet });
+  const going = { status: 'sent', targets: [sent('sent'), sent('created'), sent('created')] };
+  assert.deepEqual(deliveryProgress(going), { total: 3, delivered: 1, queued: 2, lost: 0 });
+  assert.equal(mailingStateMeta(going).label, 'Рассылается: 1 из 3');
+  assert.equal(mailingStateMeta(going).show, true);
+
+  const lostTarget = { status: 'failed', error_code: 'lost_in_cabinet' };
+  const lost = { status: 'failed', targets: [lostTarget, lostTarget] };
+  assert.equal(mailingStateMeta(lost).label, 'Яндекс не разослал');
+
+  const done = { status: 'sent', targets: [sent('sent'), sent('sent')] };
+  assert.equal(mailingStateMeta(done).show, false);
+  const partial = { status: 'partial', targets: [sent('sent'), lostTarget] };
+  assert.equal(mailingStateMeta(partial).label, statusMeta('partial').label);
+  assert.equal(mailingStateMeta({ status: 'sent' }).show, false);
 });

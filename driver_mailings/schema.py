@@ -39,6 +39,18 @@ fleet_mailing_id может остаться NULL, и это не поломка
 удалось, а отзыв для такой строки недоступен (отзывать нечего, id неизвестен).
 Врать «отправлено и всё в порядке» здесь нельзя.
 
+ЧТО ЗНАЕТ КАБИНЕТ (27.10.2026). 204 на отправку значит «Яндекс принял», а не
+«водители получили»: рассылка ложится в журнал кабинета со статусом created и
+расходится позже, когда кабинет её разошлёт (sent). С 09.10 по 26.10.2026 кабинет
+аккаунта рассылок принимал рассылки и не рассылал их, а потом удалял целиком —
+на запрос по id отвечал 404. Портал всё это время писал «Отправлена», потому
+что статус цели ставился по ответу на отправку и больше не менялся. Поэтому у
+цели есть второй статус — кабинетный: fleet_status (created, sent, deleted_by_*,
+lost), delivered (скольким разослано), fleet_sent_at (когда разослано на самом
+деле) и fleet_checked_at. Пропавшая из кабинета рассылка переводит цель в
+failed с кодом lost_in_cabinet: водителям она не пришла, и журнал обязан
+сказать это так же прямо, как отказ кабинета.
+
 ПОЧЕМУ КЭШИРУЕМ СПИСОК ПАРКОВ. У аккаунта 90 диспетчерских, а рассылка
 разрешена в пяти: остальные 85 отвечают 403 no_permissions на запрос лимитов.
 Узнать это можно только опросом — по запросу на парк. Список меняется на
@@ -96,6 +108,12 @@ CREATE TABLE IF NOT EXISTS driver_mailing_targets (
 );
 CREATE INDEX IF NOT EXISTS idx_driver_mailing_targets_fleet
     ON driver_mailing_targets(fleet_mailing_id);
+
+-- Что о цели в последний раз сказал кабинет (см. «ЧТО ЗНАЕТ КАБИНЕТ» выше).
+ALTER TABLE driver_mailing_targets ADD COLUMN IF NOT EXISTS fleet_status TEXT;
+ALTER TABLE driver_mailing_targets ADD COLUMN IF NOT EXISTS delivered INTEGER;
+ALTER TABLE driver_mailing_targets ADD COLUMN IF NOT EXISTS fleet_sent_at TIMESTAMPTZ;
+ALTER TABLE driver_mailing_targets ADD COLUMN IF NOT EXISTS fleet_checked_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS driver_mailing_templates (
     id              BIGSERIAL PRIMARY KEY,

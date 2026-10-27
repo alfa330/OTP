@@ -32,7 +32,14 @@ MAILING_COLUMNS = (
 TARGET_COLUMNS = (
     'mailing_id', 'park_id', 'park_name', 'park_city', 'recipients_estimate',
     'status', 'fleet_mailing_id', 'sent_at', 'revoked_at', 'error', 'error_code',
+    'fleet_status', 'delivered', 'fleet_sent_at', 'fleet_checked_at',
 )
+
+# Цель, которую кабинет принял и потом удалил, не разослав (см. schema.py,
+# «ЧТО ЗНАЕТ КАБИНЕТ»). Текст — для человека в журнале, код — для разбора.
+LOST_ERROR = 'Яндекс принял рассылку, но не разослал её и удалил — водителям она не пришла'
+LOST_ERROR_CODE = 'lost_in_cabinet'
+LOST_FLEET_STATUS = 'lost'
 
 TEMPLATE_COLUMNS = (
     'id', 'name', 'title', 'message_kk', 'message_ru', 'message', 'filters',
@@ -501,6 +508,69 @@ def mark_target_revoked(cursor, mailing_id, park_id):
         """,
         (int(mailing_id), str(park_id or '')),
     )
+
+
+def save_fleet_states(cursor, rows):
+    """Запомнить, что кабинет сказал о целях: [(mailing_id, park_id, fleet_status,
+    delivered, fleet_sent_at)].
+
+    Пачкой, одним запросом на сотню строк: журнал разом обновляет до 89 целей
+    рассылки, по UPDATE на каждую — это десятки обращений к базе на одно
+    открытие. Число и время рассылки кабинета не затираем пустым: у записи
+    created их ещё нет, а у разосланной они уже не меняются.
+    """
+    if not rows:
+        return 0
+    execute_values(
+        cursor,
+        """
+        UPDATE driver_mailing_targets AS t
+           SET fleet_status = v.fleet_status,
+               delivered = COALESCE(v.delivered, t.delivered),
+               fleet_sent_at = COALESCE(v.fleet_sent_at, t.fleet_sent_at),
+               fleet_checked_at = NOW()
+          FROM (VALUES %s) AS v(mailing_id, park_id, fleet_status, delivered, fleet_sent_at)
+         WHERE t.mailing_id = v.mailing_id AND t.park_id = v.park_id
+        """,
+        [(int(mailing_id), str(park_id or ''), _text(fleet_status), _int(delivered), fleet_sent_at)
+         for mailing_id, park_id, fleet_status, delivered, fleet_sent_at in rows],
+        template='(%s::bigint, %s::text, %s::text, %s::integer, %s::timestamptz)',
+    )
+    return len(rows)
+
+
+def mark_targets_lost(cursor, pairs):
+    """Кабинет потерял рассылку: [(mailing_id, park_id)] → цели становятся
+    неотправленными. Возвращает id рассылок, где что-то поменялось, — их сводный
+    статус надо пересчитать.
+
+    Только из 'sent': отозванную или уже упавшую цель «потерянной» не делаем,
+    её история другая. Это же условие делает повторный вызов безвредным.
+    """
+    if not pairs:
+        return set()
+    # Тексты едут в каждой строке VALUES, а не отдельными параметрами:
+    # execute_values подставляет только сам список значений.
+    changed = execute_values(
+        cursor,
+        """
+        UPDATE driver_mailing_targets AS t
+           SET status = 'failed',
+               error = v.error,
+               error_code = v.error_code,
+               fleet_status = v.fleet_status,
+               fleet_checked_at = NOW()
+          FROM (VALUES %s) AS v(mailing_id, park_id, error, error_code, fleet_status)
+         WHERE t.mailing_id = v.mailing_id AND t.park_id = v.park_id
+           AND t.status = 'sent'
+        RETURNING t.mailing_id
+        """,
+        [(int(mailing_id), str(park_id or ''), LOST_ERROR, LOST_ERROR_CODE, LOST_FLEET_STATUS)
+         for mailing_id, park_id in pairs],
+        template='(%s::bigint, %s::text, %s::text, %s::text, %s::text)',
+        fetch=True,
+    )
+    return {int(row[0]) for row in (changed or [])}
 
 
 def finish_mailing(cursor, mailing_id):

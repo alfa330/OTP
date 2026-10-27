@@ -9,7 +9,8 @@ import {
 import MailingPreview from './MailingPreview';
 import { formatCount, stripMailingMarkup } from './mailingText';
 import {
-    describeAudience, formatCountdown, revokeSecondsLeft, statusMeta, targetStatusMeta,
+    deliveryProgress, describeAudience, formatCountdown, mailingStateMeta, revokeSecondsLeft,
+    targetStateMeta,
 } from './mailingMeta';
 
 /*
@@ -86,6 +87,7 @@ const MailingCard = ({ item, revokeWindow, onRevoke, onRepeat, revoking, refs })
         : 0;
     const audience = describeAudience(item.filters, refs);
     const unresolved = (item.targets || []).some((target) => target.status === 'sent' && !target.fleet_mailing_id);
+    const progress = deliveryProgress(item);
 
     return (
         <div className="space-y-4">
@@ -117,8 +119,8 @@ const MailingCard = ({ item, revokeWindow, onRevoke, onRepeat, revoking, refs })
                                         {target.park_city && <span className="text-slate-400"> · {target.park_city}</span>}
                                     </td>
                                     <td className="px-3 py-2">
-                                        <IosBadge tone={targetStatusMeta(target.status).tone}>
-                                            {targetStatusMeta(target.status).label}
+                                        <IosBadge tone={targetStateMeta(target).tone}>
+                                            {targetStateMeta(target).label}
                                         </IosBadge>
                                         {/* Отозвать можно и мимо портала — прямо в кабинете,
                                             и так уже делали. Молчать об этом нельзя: иначе
@@ -141,6 +143,21 @@ const MailingCard = ({ item, revokeWindow, onRevoke, onRepeat, revoking, refs })
                         </tbody>
                     </table>
                 </div>
+                {progress.queued > 0 && (
+                    <div className="mt-1.5 px-1 text-[11.5px] text-slate-500">
+                        Яндекс принял рассылку и рассылает её сам: обычно это минуты, в крупных диспетчерских
+                        дольше. Состояние обновляется при каждом открытии журнала.
+                    </div>
+                )}
+                {progress.lost > 0 && (
+                    <div className="mt-1.5 flex items-start gap-1.5 px-1 text-[11.5px] text-rose-600">
+                        <AlertCircle size={13} className="mt-px shrink-0" />
+                        <span>
+                            Яндекс принял рассылку, но не разослал её и удалил — водители её не получили.
+                            Если она ещё нужна, отправьте заново кнопкой «Повторить».
+                        </span>
+                    </div>
+                )}
                 {unresolved && (
                     <div className="mt-1.5 flex items-start gap-1.5 px-1 text-[11.5px] text-amber-700">
                         <AlertCircle size={13} className="mt-px shrink-0" />
@@ -234,7 +251,7 @@ export default function MailingJournal({
                         </div>
                         <ul className="divide-y divide-slate-50">
                             {rows.map((item) => {
-                                const meta = statusMeta(item.status);
+                                const meta = mailingStateMeta(item);
                                 return (
                                     <li key={item.id}>
                                         <button
@@ -259,9 +276,9 @@ export default function MailingJournal({
                                                 </span>
                                             </span>
                                             <span className="flex shrink-0 flex-col items-end gap-1.5">
-                                                {/* Обычная успешная отправка не красится: цвет здесь означает
+                                                {/* Обычная разосланная рассылка не красится: цвет здесь означает
                                                     «посмотри», а не «состояние». */}
-                                                {item.status !== 'sent' && <IosBadge tone={meta.tone}>{meta.label}</IosBadge>}
+                                                {meta.show && <IosBadge tone={meta.tone}>{meta.label}</IosBadge>}
                                                 <ReadBar sent={item.sent_total} read={item.read_total} />
                                             </span>
                                         </button>

@@ -69,7 +69,7 @@ from fleet_edm import queries as fleet_session
 from fleet_edm.client import FleetError, FleetSessionExpired
 
 from . import access, catalog, memo, queries
-from .client import MailingRefused, MailingsClient
+from .client import MailingMissing, MailingRefused, MailingsClient
 
 # Сколько живёт список «где разрешена рассылка». Права на рассылку меняет Яндекс,
 # и меняет редко: за сутки промахнуться можно разве что в день подключения новой
@@ -121,6 +121,23 @@ REFS_TTL_SECONDS = 60 * 60
 # нашей собственной страницы журнала не бывает.
 STATS_MAX_PAGES = 4
 STATS_PAGE_LIMIT = 50
+
+# Цель, которой нет в журнале кабинета, проверяется по id — но только если журнал
+# парка просмотрен глубже нашей отправки с этим запасом. Кабинет ставит рассылку
+# в журнал по времени, когда разослал (оно позже нашего), отозванную — по времени
+# отзыва; записи «чуть раньше нашей отправки» дают только расхождение часов в
+# секунды. Десять минут — с большим запасом.
+COVER_MARGIN = timedelta(minutes=10)
+
+# Моложе этого цель по id не проверяем: только что принятая рассылка в журнале
+# есть всегда, и гонка «спросили раньше, чем кабинет записал» не должна объявить
+# её потерянной.
+LOST_MIN_AGE = timedelta(minutes=15)
+
+# Потолок проверок по id за одно открытие журнала. Проверенная цель запоминается
+# (fleet_status), так что очередь не копится: первый раз после сбоя кабинета —
+# сотни запросов, дальше — единицы. Остаток доберёт следующее открытие.
+LOST_PROBE_MAX = 400
 
 # Насколько шире окна поиска смотрим «уже занятые» идентификаторы. Кабинет не
 # возвращает id отправленной рассылки, и мы ищем её в журнале по заголовку. Если
@@ -645,11 +662,19 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         Ошибка здесь НЕ роняет журнал: прочтения — приятная добавка, а список
         отправленного человек должен видеть всегда, в том числе когда связь с
         кабинетом оборвалась.
+
+        Кроме прочтений отсюда же узнаём, РАЗОСЛАЛ ли кабинет то, что принял
+        (27.10.2026): статус записи кабинета и число разосланных запоминаются в
+        цели, а рассылка, которой в журнале кабинета больше нет, проверяется по
+        id и при 404 становится неотправленной (queries.mark_targets_lost).
         """
         wanted = {}
         oldest = {}
         # Цели, у которых связи с кабинетом нет: их будем лечить по заголовку.
         unlinked = {}
+        # Цели со связью — (рассылка, цель, наше время отправки): не найденные
+        # в журнале проверяются по id.
+        linked = []
         for item in items:
             for target in item.get('targets') or []:
                 park_id = target.get('park_id')
@@ -664,6 +689,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                             oldest[park_id] = stamp
                     continue
                 wanted.setdefault(park_id, set()).add(str(ident))
+                linked.append((item, target, stamp))
                 if stamp and (park_id not in oldest or stamp < oldest[park_id]):
                     oldest[park_id] = stamp
         if not wanted and not unlinked:
@@ -678,11 +704,17 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             return items
 
         def collect(park_id):
+            """Журнал парка страницами: найденные записи, все просмотренные
+            строки (для лечения) и докуда журнал просмотрен — (дочитан до конца,
+            самое раннее время среди строк) либо None, если листание сорвалось и
+            о глубине судить нельзя."""
             found = {}
             seen = []
             needed = set(wanted[park_id])
             heal = bool(unlinked.get(park_id))
             edge = oldest.get(park_id)
+            reached = None
+            complete = False
             cursor = None
             for _ in range(STATS_MAX_PAGES):
                 try:
@@ -690,7 +722,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                         park_id, limit=STATS_PAGE_LIMIT, cursor=cursor)
                 except FleetError as error:
                     logging.warning('Рассылки: журнал парка %s недоступен (%s)', park_id, error)
-                    break
+                    return park_id, found, seen, None
                 for row in page:
                     ident = str(row.get('id') or '')
                     if heal:
@@ -698,25 +730,34 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                     if ident in needed:
                         found[ident] = row
                         needed.discard(ident)
-                if (not needed and not heal) or not cursor or not page:
+                    row_stamp = _parse_stamp(row.get('sent_at') or row.get('deleted_at'))
+                    if row_stamp is not None and (reached is None or row_stamp < reached):
+                        reached = row_stamp
+                if not cursor or not page:
+                    complete = True
+                    break
+                if not needed and not heal:
                     break
                 # Дошли до рассылок старше самой старой нашей — дальше искать
                 # нечего. Сравниваем РАЗОБРАННОЕ время: кабинет отдаёт
                 # «2026-09-04T12:57:13.770911+00:00», а у нас в базе datetime, и
                 # сравнение их строковых видов не срабатывало никогда — цикл
-                # каждый раз выбирал все четыре страницы.
+                # каждый раз выбирал все четыре страницы. Запас COVER_MARGIN —
+                # чтобы «не нашли» значило «её в журнале нет», а не «не долистали».
                 last = _parse_stamp(page[-1].get('sent_at') or page[-1].get('deleted_at'))
-                if edge is not None and last is not None and last < edge:
+                if edge is not None and last is not None and last < edge - COVER_MARGIN:
                     break
-            return park_id, found, seen
+            return park_id, found, seen, (complete, reached)
 
         stats = {}
         pages = {}
+        coverage = {}
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
                                 thread_name_prefix='mailings-stats') as pool:
-            for park_id, found, seen in pool.map(collect, list(wanted)):
+            for park_id, found, seen, covered in pool.map(collect, list(wanted)):
                 stats[park_id] = found
                 pages[park_id] = seen
+                coverage[park_id] = covered
 
         # Лечим записи без связи с кабинетом. Такие остались от первой версии,
         # которая искала id по времени и потому не находила его никогда: у только
@@ -750,18 +791,80 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                                  item['id'], park_id, ident)
                     break
 
+        # Цели, которых нет в журнале кабинета, спрашиваем по id. Только там, где
+        # журнал парка ТОЧНО просмотрен глубже нашей отправки: иначе «не нашли»
+        # значило бы «не долистали». 404 — кабинет рассылку потерял: с 09.10 по
+        # 26.10.2026 так пропали все рассылки аккаунта, а журнал писал «Ушла».
+        # Цель, про которую кабинет уже говорил «разослана», не спрашиваем:
+        # разосланное водители получили, что бы с записью ни стало потом.
+        now = datetime.now(timezone.utc)
+        probe = []
+        for item, target, stamp in linked:
+            park_id = target.get('park_id')
+            if str(target.get('fleet_mailing_id')) in stats.get(park_id, {}):
+                continue
+            if target.get('status') != 'sent' or target.get('fleet_status') == 'sent':
+                continue
+            if stamp is None or now - stamp < LOST_MIN_AGE:
+                continue
+            covered = coverage.get(park_id)
+            if not covered:
+                continue
+            complete, reached = covered
+            if complete or (reached is not None and reached < stamp - COVER_MARGIN):
+                probe.append((item, target))
+        if len(probe) > LOST_PROBE_MAX:
+            logging.info('Рассылки: проверка по id — %s из %s, остальные при следующем открытии',
+                         LOST_PROBE_MAX, len(probe))
+            probe = probe[:LOST_PROBE_MAX]
+
+        def ask_by_id(pair):
+            _item, target = pair
+            try:
+                return pair, client.mailing_summary(target['park_id'], target['fleet_mailing_id']), False
+            except MailingMissing:
+                return pair, None, True
+            except FleetError as error:
+                logging.warning('Рассылки: рассылку %s в парке %s не проверили (%s)',
+                                target.get('fleet_mailing_id'), target.get('park_id'), error)
+                return pair, None, False
+
+        lost = []
+        if probe:
+            with ThreadPoolExecutor(max_workers=COUNT_WORKERS,
+                                    thread_name_prefix='mailings-probe') as pool:
+                for (item, target), summary, missing in pool.map(ask_by_id, probe):
+                    if missing:
+                        lost.append((item, target))
+                    elif summary:
+                        stats.setdefault(target['park_id'], {})[str(target['fleet_mailing_id'])] = summary
+
         revoked_outside = []
+        fleet_states = []
         for item in items:
             sent_total = 0
             read_total = 0
             for target in item.get('targets') or []:
                 row = stats.get(target.get('park_id'), {}).get(str(target.get('fleet_mailing_id') or ''))
                 if not row:
+                    # Кабинет сейчас о цели промолчал — показываем, что он
+                    # говорил раньше: разосланное число уже не меняется.
+                    if target.get('fleet_status') == 'sent' and target.get('delivered') is not None:
+                        target['sent_to_number'] = target['delivered']
+                        sent_total += int(target['delivered'] or 0)
                     continue
-                target['sent_to_number'] = row.get('sent_to_number')
+                fleet_status = str(row.get('status') or '').strip() or None
+                fleet_sent_at = _parse_stamp(row.get('sent_at'))
+                delivered = row.get('sent_to_number')
+                if (fleet_status != target.get('fleet_status')
+                        or (delivered is not None and delivered != target.get('delivered'))
+                        or (fleet_sent_at is not None and target.get('fleet_sent_at') is None)):
+                    fleet_states.append((item['id'], target.get('park_id'), fleet_status,
+                                         delivered, fleet_sent_at))
+                target['sent_to_number'] = delivered
                 target['read_by_number'] = row.get('read_by_number')
                 target['read_percent'] = row.get('read_percent')
-                target['fleet_status'] = row.get('status')
+                target['fleet_status'] = fleet_status
                 target['deleted_at'] = row.get('deleted_at')
                 # Отозвать рассылку можно и мимо портала — прямо в кабинете, и
                 # так уже делали. Наш журнал обязан это показывать, иначе он
@@ -780,14 +883,40 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             item['sent_total'] = sent_total
             item['read_total'] = read_total
 
-        # Отзывы, сделанные мимо портала, доносим до базы и пересчитываем сводный
-        # статус карточки. Без этого в списке стояло бы «Отправлена», а внутри
-        # карточки — «Отозвана» по каждой диспетчерской: одна запись, два разных
-        # ответа на один вопрос.
-        for item, park_id in revoked_outside:
-            with db._get_cursor() as cursor:
-                queries.mark_target_revoked(cursor, item['id'], park_id)
-                item['status'] = queries.finish_mailing(cursor, item['id'])
+        # Всё узнанное — в базу одной короткой транзакцией, уже после всех
+        # походов в кабинет.
+        #
+        # Отзывы, сделанные мимо портала, и потерянные кабинетом рассылки меняют
+        # сводный статус карточки. Без пересчёта в списке стояло бы
+        # «Отправлена», а внутри карточки — «Отозвана» или «Не ушла» по каждой
+        # диспетчерской: одна запись, два разных ответа на один вопрос.
+        #
+        # Сбой записи журнал не роняет: человек увидит то, что узнали сейчас, а
+        # в базу оно ляжет при следующем открытии.
+        if fleet_states or lost or revoked_outside:
+            by_id = {item['id']: item for item in items}
+            try:
+                with db._get_cursor() as cursor:
+                    queries.save_fleet_states(cursor, fleet_states)
+                    touched = queries.mark_targets_lost(
+                        cursor, [(item['id'], target['park_id']) for item, target in lost])
+                    for item, park_id in revoked_outside:
+                        queries.mark_target_revoked(cursor, item['id'], park_id)
+                        touched.add(item['id'])
+                    for mailing_id in touched:
+                        if mailing_id in by_id:
+                            by_id[mailing_id]['status'] = queries.finish_mailing(cursor, mailing_id)
+            except Exception:
+                logging.exception('Рассылки: статусы кабинета не записаны')
+            else:
+                for item, target in lost:
+                    target['status'] = 'failed'
+                    target['error'] = queries.LOST_ERROR
+                    target['error_code'] = queries.LOST_ERROR_CODE
+                    target['fleet_status'] = queries.LOST_FLEET_STATUS
+                if lost:
+                    logging.warning('Рассылки: кабинет потерял %s отправок в %s рассылках',
+                                    len(lost), len({item['id'] for item, _ in lost}))
 
         return items
 

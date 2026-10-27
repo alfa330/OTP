@@ -28,6 +28,61 @@ export const TARGET_STATUS = {
 export const statusMeta = (status) => MAILING_STATUS[status] || { label: status || '—', tone: 'slate' };
 export const targetStatusMeta = (status) => TARGET_STATUS[status] || { label: status || '—', tone: 'slate' };
 
+/* Код цели, которую Яндекс принял и потом удалил, не разослав (driver_mailings/
+   queries.LOST_ERROR_CODE). */
+export const LOST_ERROR_CODE = 'lost_in_cabinet';
+
+/*
+ * Состояние диспетчерской с учётом того, что сказал кабинет.
+ *
+ * Ответ на отправку значит «Яндекс принял», а рассылает он позже — и не всегда:
+ * с 09.10 по 26.10.2026 принятые рассылки пропадали, а журнал писал «Ушла».
+ * Поэтому для принятой рассылки показываем то, что известно на самом деле:
+ * разослана, ждёт в очереди Яндекса или только принята (кабинет пока молчит).
+ */
+export const targetStateMeta = (target) => {
+    const source = target || {};
+    if (source.status === 'sent') {
+        if (source.fleet_status === 'sent') return { label: 'Разослана', tone: 'slate' };
+        if (source.fleet_status === 'created') return { label: 'В очереди Яндекса', tone: 'blue' };
+        return { label: 'Принята Яндексом', tone: 'slate' };
+    }
+    if (source.error_code === LOST_ERROR_CODE) return { label: 'Яндекс не разослал', tone: 'red' };
+    return targetStatusMeta(source.status);
+};
+
+/** Сколько диспетчерских рассылки разослано, ждёт в очереди Яндекса и потеряно. */
+export const deliveryProgress = (item) => {
+    const targets = (item && item.targets) || [];
+    const accepted = targets.filter((target) => target.status === 'sent');
+    return {
+        total: targets.length,
+        delivered: accepted.filter((target) => target.fleet_status === 'sent').length,
+        queued: accepted.filter((target) => target.fleet_status === 'created').length,
+        lost: targets.filter((target) => target.error_code === LOST_ERROR_CODE).length,
+    };
+};
+
+/*
+ * Плашка рассылки в списке журнала. show = false — обычная разосланная
+ * рассылка: она не красится, цвет здесь значит «посмотри».
+ */
+export const mailingStateMeta = (item) => {
+    const progress = deliveryProgress(item);
+    if (progress.queued > 0) {
+        return {
+            label: `Рассылается: ${progress.delivered} из ${progress.total}`,
+            tone: 'blue',
+            show: true,
+        };
+    }
+    if (progress.total > 0 && progress.lost === progress.total) {
+        return { label: 'Яндекс не разослал', tone: 'red', show: true };
+    }
+    const status = item && item.status;
+    return { ...statusMeta(status), show: status !== 'sent' };
+};
+
 /**
  * Сколько секунд ещё можно отозвать рассылку.
  *
