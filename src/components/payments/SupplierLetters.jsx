@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, Search } from 'lucide-react';
-import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
+import { Check, Copy, Loader2, Mail, Search } from 'lucide-react';
+import { IosModal, IosSegmented, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import {
-    DICTIONARY_PAGE_SIZE, HINTS, LETTER_FORMS, changedLine, excludedLine, fmtDateTime, letterDay, letterInitials, letterMoment,
-    letterTime, mailingSummary, minutesWord, plural, recipientState, recipientsChosen, recipientsLine, toggleRecipient,
-    allRecipients, waitingMailboxLine,
+    DICTIONARY_PAGE_SIZE, HINTS, LETTER_FORMS, changedLine, composeLink, excludedLine, fmtDateTime, isPhoneDevice, letterAddresses,
+    letterDay, letterInitials, letterMoment, letterTime, mailingSummary, openedToast, recipientState, recipientsChosen,
+    recipientsLine, toggleRecipient, allRecipients,
 } from './paymentsMeta';
-import { Bone, FieldHint, GroupDivider, NoticeBox, Pager, TonePill, errorText } from './paymentsUi';
+import { Bone, FieldHint, GroupDivider, Pager, TonePill, copyRich, errorText } from './paymentsUi';
 
 /*
  * «Письма поставщикам» — письма о смене реквизитов наших компаний внутри раздела
@@ -15,18 +15,17 @@ import { Bone, FieldHint, GroupDivider, NoticeBox, Pager, TonePill, errorText } 
  * аккуратно и удобно в стиле ios/macos»). Устройство писем — payments/requisites_mail.py.
  *
  * Как «Почта» на Mac: список по дням — кружок с буквами компании, название, время,
- * что изменилось и чем кончилось; письмо открывается окном с шапкой «от кого, кому,
- * тема» и самим письмом в том виде, в каком его получает поставщик (HTML письма —
- * в изолированном фрейме без скриптов), рядом — кому ушло и кому нет. Оттуда же
- * «Не отправлять» и «Отправить ещё раз».
+ * что изменилось и что с письмом; письмо открывается окном с шапкой «от кого, кому,
+ * тема» и самим письмом в том виде, в каком его получит поставщик (HTML письма — в
+ * изолированном фрейме без скриптов), рядом — кому оно. Оттуда же «Не отправлять» и
+ * «Отправить письмо»: с 27.10.2026 письмо отправляет человек из почты компании
+ * (владелец: «пока убери автоотправку и сделай полу ручной») — SendLetterButton.
  *
  * Видит администратор раздела — тот, кто правит «Реквизиты компаний» (то же правило
  * у ручек: routes_directory._mailing_guard).
  */
 
-const POLL_MS = 30000;
 const FRAME_START = 560;
-const live = (item) => item?.status === 'pending' || item?.status === 'sending';
 
 /* Письмо как его видит поставщик. Фрейм без скриптов (sandbox без allow-scripts):
    HTML собирает сервер, но и чужое в нём не выполнилось бы. Рост — по содержимому. */
@@ -64,23 +63,19 @@ export const LetterFrame = ({ html, onHeight }) => {
     );
 };
 
-const toLine = (item, recipients) => {
+const toLine = (item) => {
     // Кому письмо адресовано — по алфавиту, как в «Почте»; убранные и отданные новому письму — не адресаты.
     const list = (item?.recipients || []).filter((recipient) => recipient.status !== 'removed' && recipient.status !== 'superseded')
         .slice().sort((a, b) => a.email.localeCompare(b.email));
     // Ждущее письмо: адресов ещё нет — кому оно уйдёт по галочкам.
-    if (!list.length && item?.candidates) return recipientsLine(item.candidates);
-    if (!list.length) {
-        const addresses = recipients?.addresses || 0;
-        return addresses ? `поставщикам с почтой — ${plural(addresses, ['адрес', 'адреса', 'адресов'])}` : 'адресов пока нет';
-    }
+    if (!list.length) return item?.candidates ? recipientsLine(item.candidates) : '—';
     const shown = list.slice(0, 2).map((recipient) => recipient.email).join(', ');
     return list.length > 2 ? `${shown} и ещё ${list.length - 2}` : shown;
 };
 
 /* Шапка письма, как в «Почте»: кружок отправителя, от кого, когда, кому, тема — и само письмо.
    `bare` — без своей карточки (внутри карточки письма в окне компании). */
-export const LetterView = ({ item, sender, recipients, bare = false, onHeight }) => {
+export const LetterView = ({ item, sender, bare = false, onHeight }) => {
     const name = sender?.name || item?.legal_entity_name || '';
     return (
         <div className={bare ? '' : `${iosCard} overflow-hidden`} data-letter-view>
@@ -94,8 +89,8 @@ export const LetterView = ({ item, sender, recipients, bare = false, onHeight })
                         <span className="min-w-0 truncate text-[14px] font-semibold text-slate-900">{name}</span>
                         <span className="shrink-0 text-[12px] tabular-nums text-slate-500">{fmtDateTime(letterMoment(item))}</span>
                     </div>
-                    <div className="truncate text-[12.5px] text-slate-500">{sender?.address || 'почта для писем не подключена'}</div>
-                    <div className="mt-1 truncate text-[12.5px] text-slate-600"><span className="text-slate-400">Кому: </span>{toLine(item, recipients)}</div>
+                    {sender?.address && <div className="truncate text-[12.5px] text-slate-500">{sender.address}</div>}
+                    <div className="mt-1 truncate text-[12.5px] text-slate-600"><span className="text-slate-400">Кому: </span>{toLine(item)}</div>
                     <div className="mt-1.5 text-[14px] font-medium leading-snug text-slate-900">{item?.letter?.subject}</div>
                 </div>
             </div>
@@ -104,16 +99,71 @@ export const LetterView = ({ item, sender, recipients, bare = false, onHeight })
     );
 };
 
-/* Кому ушло и кому нет — по адресу, с поставщиками и ответом сервера. */
-export const RecipientList = ({ item, recipients }) => {
+/* «Отправить письмо» (27.10.2026). Настоящая ссылка <a>: почтовую программу или вкладку
+   Gmail открывает сам браузер — без всплывающих окон, которые он мог бы заблокировать.
+   Тем же щелчком текст письма ложится в буфер с оформлением, а ждущее письмо
+   отмечается «открыто в почте» (`onOpened` получает адреса, вставленные в «Скрытую
+   копию»). У открытого письма — «Открыть в почте ещё раз»: то же письмо тем же адресам,
+   отметка не меняется. Адреса не влезают в ссылку — почта открывается без них, в буфер
+   идут адреса, а текст — отдельной кнопкой «Скопировать текст». */
+export const SendLetterButton = ({ item, sender, busy = false, onOpened, showToast, primary = true, className = '' }) => {
+    const [copied, setCopied] = useState(false);
+    const phone = isPhoneDevice();
+    const pending = item?.status === 'pending';
+    const bcc = letterAddresses(item);
+    const full = composeLink({ provider: sender?.provider, from: sender?.address, bcc, subject: item?.letter?.subject, phone });
+    const link = full.tooLong ? composeLink({ provider: sender?.provider, from: sender?.address, subject: item?.letter?.subject, phone, withBcc: false }) : full;
+    const open = (event) => {
+        if (busy) { event.preventDefault(); return; }
+        if (!bcc.length) {
+            // Чего не хватает — словами, а не серой кнопкой: кому письмо, выбирают в «Кому».
+            event.preventDefault();
+            showToast?.('Письмо некому отправить: отметьте поставщиков в «Кому»', 'error');
+            return;
+        }
+        const copying = full.tooLong
+            ? copyRich({ text: bcc.join(', ') })
+            : copyRich({ html: item.letter?.paste, text: item.letter?.text });
+        copying.then((done) => showToast?.(
+            openedToast({ copied: done, web: link.web, addressesCopied: full.tooLong && done, phone }), done ? 'success' : 'error'));
+        if (pending) onOpened?.(bcc);
+    };
+    const copyText = () => copyRich({ html: item.letter?.paste, text: item.letter?.text }).then((done) => {
+        if (done) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1600);
+        } else showToast?.('Текст скопировать не вышло — скопируйте его из окна письма', 'error');
+    });
+    return (
+        <>
+            {full.tooLong && (
+                <button type="button" onClick={copyText} className={`${iosBtnGhost} ${copied ? '!text-emerald-600' : ''}`} data-letter-copy-text>
+                    {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? 'Скопировано' : 'Скопировать текст'}
+                </button>
+            )}
+            <a
+                href={link.href}
+                target={link.web ? '_blank' : undefined}
+                rel={link.web ? 'noopener noreferrer' : undefined}
+                onClick={open}
+                aria-disabled={busy || undefined}
+                className={`${pending && primary ? iosBtnPrimary : iosBtnSecondary} shrink-0 no-underline ${busy ? 'pointer-events-none opacity-60' : ''} ${className}`}
+                data-letter-send={pending ? 'open' : 'again'}
+            >
+                {busy ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} aria-hidden="true" />}
+                {pending ? 'Отправить письмо' : 'Открыть в почте ещё раз'}
+            </a>
+        </>
+    );
+};
+
+/* Кому письмо — по адресу, с поставщиками; у писем, которые отправлял портал, — ушло или нет и почему. */
+export const RecipientList = ({ item }) => {
     const list = item?.recipients || [];
     if (!list.length) {
-        const without = recipients?.without_email || 0;
         return (
-            <div className={`${iosCard} px-4 py-3.5 text-[13px] leading-relaxed text-slate-600`} data-recipient-list="pending">
-                Адреса соберутся в момент отправки — у тех поставщиков, у кого к этому времени указана почта.
-                {' '}Сейчас это {plural(recipients?.addresses || 0, ['адрес', 'адреса', 'адресов'])}
-                {without ? `; без почты — ${plural(without, ['поставщик', 'поставщика', 'поставщиков'])}` : ''}.
+            <div className={`${iosCard} px-4 py-3.5 text-[13px] leading-relaxed text-slate-600`} data-recipient-list="empty">
+                {item?.status === 'cancelled' ? 'Письмо отменили — оно никому не ушло.' : 'Адресов у письма нет.'}
             </div>
         );
     }
@@ -218,7 +268,8 @@ const LetterSkeleton = () => (
     </div>
 );
 
-/* Окно письма: «Письмо» и «Кому», внизу — что с письмом можно сделать. */
+/* Окно письма: «Письмо» и «Кому», внизу — что с письмом можно сделать. Открывается и
+   из журнала, и само после сохранения новых реквизитов компании (PaymentsDictionaries). */
 export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToast, onChanged }) => {
     const [reply, setReply] = useState(null);
     const [tab, setTab] = useState('letter');
@@ -252,22 +303,14 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
     }, [mailingId, load]);
 
     const item = reply?.item;
-    useEffect(() => {
-        if (!live(item)) return undefined;
-        const timer = setInterval(() => {
-            if (typeof document === 'undefined' || document.visibilityState === 'visible') load({ quiet: true });
-        }, POLL_MS);
-        return () => clearInterval(timer);
-    }, [item, load]);
+    const base = item ? `${apiBaseUrl}/api/payments/dictionaries/legal_entities/${item.legal_entity_id}/mailings/${item.id}` : '';
 
-    const act = async (action, done) => {
+    const act = async (action, body, done) => {
         if (!item) return;
         setBusy(true);
         try {
-            const response = await axios.post(
-                `${apiBaseUrl}/api/payments/dictionaries/legal_entities/${item.legal_entity_id}/mailings/${item.id}/${action}`,
-                {}, { headers: headers() });
-            toastRef.current?.(done(response.data || {}), 'success');
+            const response = await axios.post(`${base}/${action}`, body, { headers: headers() });
+            if (done) toastRef.current?.(done(response.data || {}), 'success');
             onChanged?.();
         } catch (err) {
             toastRef.current?.(errorText(err, 'Не получилось'), 'error');
@@ -288,9 +331,7 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
         } : prev));
         setPicking(true);
         try {
-            await axios.post(
-                `${apiBaseUrl}/api/payments/dictionaries/legal_entities/${item.legal_entity_id}/mailings/${item.id}/recipients`,
-                { excluded }, { headers: headers() });
+            await axios.post(`${base}/recipients`, { excluded }, { headers: headers() });
             onChanged?.();
         } catch (err) {
             toastRef.current?.(errorText(err, 'Не удалось изменить, кому уходит письмо'), 'error');
@@ -300,10 +341,8 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
         }
     };
 
-    const ready = reply?.mail?.ready !== false;
-    const failed = (item?.recipients || []).filter((recipient) => recipient.status === 'failed' && !recipient.next_attempt_at);
     const pending = item?.status === 'pending';
-    const canRetry = item?.status === 'done' && item?.latest && failed.length > 0;
+    const again = item?.status === 'opened' && item?.latest;
     const count = pending && item?.candidates
         ? recipientsChosen(item.candidates).chosen
         : (item?.recipients || []).filter((recipient) => recipient.status !== 'superseded').length;
@@ -312,7 +351,7 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
             open={Boolean(mailingId)}
             onClose={onClose}
             title={item?.legal_entity_name || 'Письмо поставщикам'}
-            subtitle={item ? mailingSummary(item, { ready }) : ''}
+            subtitle={item ? mailingSummary(item) : ''}
             maxWidth="max-w-3xl"
             sizeKey={`${item ? 'ready' : 'loading'}:${tab}:${frameHeight}`}
             footer={(
@@ -320,7 +359,7 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
                     {pending && (confirm ? (
                         <div className="mr-auto flex items-center gap-2 text-[12.5px] text-slate-600">
                             Не отправлять письмо?
-                            <button type="button" className={`${iosBtnSecondary} !text-rose-700`} disabled={busy} onClick={() => act('cancel', () => 'Письмо не уйдёт')}>
+                            <button type="button" className={`${iosBtnSecondary} !text-rose-700`} disabled={busy} onClick={() => act('cancel', {}, () => 'Письмо не уйдёт')}>
                                 {busy && <Loader2 size={13} className="animate-spin" />} Да
                             </button>
                             <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setConfirm(false)}>Нет</button>
@@ -328,15 +367,14 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
                     ) : (
                         <button type="button" className={`${iosBtnSecondary} mr-auto`} disabled={busy} onClick={() => setConfirm(true)}>Не отправлять</button>
                     ))}
-                    {canRetry && (
-                        <button type="button" className={`${iosBtnSecondary} mr-auto`} disabled={busy}
-                            onClick={() => act('retry', (done) => (done.queued
-                                ? `Письмо уйдёт ещё раз: ${plural(done.queued, ['адрес', 'адреса', 'адресов'])}`
-                                : 'Отправлять некуда: адресов, до которых письмо не дошло, у поставщиков больше нет'))}>
-                            {busy && <Loader2 size={13} className="animate-spin" />} Отправить ещё раз
-                        </button>
+                    {again && (
+                        <SendLetterButton item={item} sender={reply?.sender} className="mr-auto" showToast={(text, kind) => toastRef.current?.(text, kind)} />
                     )}
-                    <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
+                    <button type="button" className={pending ? iosBtnSecondary : iosBtnPrimary} onClick={onClose}>{pending ? 'Закрыть' : 'Готово'}</button>
+                    {pending && !confirm && (
+                        <SendLetterButton item={item} sender={reply?.sender} busy={busy} showToast={(text, kind) => toastRef.current?.(text, kind)}
+                            onOpened={(addresses) => act('open', { addresses })} />
+                    )}
                 </>
             )}
         >
@@ -348,18 +386,15 @@ export const LetterWindow = ({ apiBaseUrl, headers, mailingId, onClose, showToas
                     ariaLabel="Письмо или кому"
                     options={[{ value: 'letter', label: 'Письмо' }, { value: 'recipients', label: 'Кому', count }]}
                 />
-                {item?.last_error && live(item) && (
-                    <NoticeBox tone="amber" text={`${item.last_error}. Попробуем снова через ${minutesWord(reply?.mail?.pause_minutes || 10)}.`} />
-                )}
                 {!item && <LetterSkeleton />}
                 {item && tab === 'letter' && (
-                    <LetterView item={item} sender={reply?.sender} recipients={reply?.mail?.recipients} onHeight={setFrameHeight} />
+                    <LetterView item={item} sender={reply?.sender} onHeight={setFrameHeight} />
                 )}
                 {item && tab === 'recipients' && (pending && item.candidates
                     ? <RecipientPicker candidates={item.candidates} busy={picking} onChange={pick} />
                     : (
                         <>
-                            <RecipientList item={item} recipients={reply?.mail?.recipients} />
+                            <RecipientList item={item} />
                             {excludedLine(item.excluded_names) && (
                                 <div className="px-1 text-[12.5px] leading-snug text-slate-500" data-excluded-names>{excludedLine(item.excluded_names)}</div>
                             )}
@@ -393,7 +428,7 @@ export const LetterRow = ({ item, onOpen }) => {
                 </span>
                 <span className="block truncate text-[12px] text-slate-500">
                     {/* Красным — только то, что не ушло; автор правки — серым. */}
-                    <span className={failed ? 'text-rose-700' : undefined}>{mailingSummary(item, { ready: item.mail_ready !== false })}</span>
+                    <span className={failed ? 'text-rose-700' : undefined}>{mailingSummary(item)}</span>
                     {(item.updated_by_name || item.created_by_name) && ` · ${item.updated_by_name || item.created_by_name}`}
                 </span>
             </span>
@@ -434,16 +469,6 @@ const SupplierLetters = ({ apiBaseUrl, headers, showToast }) => {
     }, [load]);
 
     const items = reply?.items || [];
-    const waiting = items.some(live);
-    // Письмо ждёт или уходит — список перечитывается сам.
-    useEffect(() => {
-        if (!waiting) return undefined;
-        const timer = setInterval(() => {
-            if (typeof document === 'undefined' || document.visibilityState === 'visible') load({ quiet: true });
-        }, POLL_MS);
-        return () => clearInterval(timer);
-    }, [waiting, load]);
-
     const groups = [];
     items.forEach((item) => {
         const day = letterDay(letterMoment(item));
@@ -453,10 +478,6 @@ const SupplierLetters = ({ apiBaseUrl, headers, showToast }) => {
 
     return (
         <div className="space-y-2" data-supplier-letters>
-            {/* Почта — у каждой компании своя: над журналом — чьи письма её ждут. */}
-            {waitingMailboxLine(reply?.waiting_mailbox) && (
-                <NoticeBox tone="amber" text={waitingMailboxLine(reply.waiting_mailbox)} />
-            )}
             {!reply && loading && (
                 <div className="space-y-1.5" aria-hidden="true">
                     {[0, 1, 2].map((index) => (
@@ -470,7 +491,7 @@ const SupplierLetters = ({ apiBaseUrl, headers, showToast }) => {
             {reply && !items.length && (
                 <div className={`${iosCard} px-4 py-10 text-center`} data-supplier-letters-empty>
                     <div className="text-[13.5px] font-medium text-slate-700">Писем пока не было</div>
-                    <div className="mt-1 text-[12.5px] text-slate-500">Письмо уходит само, когда меняются реквизиты компании в «Реквизитах компаний».</div>
+                    <div className="mt-1 text-[12.5px] text-slate-500">Письмо готовится само, когда меняются реквизиты компании в «Реквизитах компаний».</div>
                 </div>
             )}
             {groups.map((group) => (

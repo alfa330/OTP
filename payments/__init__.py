@@ -23,8 +23,7 @@
     fixed.py             регулярные платежи и импорт из Excel
     notices.py           уведомления в колокол портала
     notify.py            тексты Telegram
-    mail.py              почта: адреса поставщиков и отправка по SMTP
-    mailbox.py           почта для писем у каждой нашей компании: сервер, пароль, проверка
+    mail.py              почта: адреса поставщиков и какая почта у компании
     requisites_mail.py   письма поставщикам о смене реквизитов наших компаний
     report.py            выгрузка реестра в xlsx
     files.py             вложения в GCS
@@ -38,4 +37,4 @@ Blueprint собирается фабрикой и получает зависи
 """
 
 __all__ = ['schema', 'legacy', 'workflow', 'flow', 'access', 'privacy', 'queries', 'directory', 'assets', 'cards',
-           'fixed', 'notices', 'notify', 'mail', 'mailbox', 'requisites_mail', 'report', 'files']
+           'fixed', 'notices', 'notify', 'mail', 'requisites_mail', 'report', 'files']

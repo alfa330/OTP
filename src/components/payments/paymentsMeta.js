@@ -463,19 +463,19 @@ export const HINTS = {
     },
     supplierEmails: {
         intro: 'Почта поставщика: бухгалтерия, менеджер, общий ящик.',
-        outro: 'Когда меняются реквизиты наших компаний, сюда само уходит письмо с новыми реквизитами. Несколько адресов — через запятую, до пяти. Те же адреса с контактными лицами — в справочнике «Почта поставщиков».',
+        outro: 'Когда меняются реквизиты наших компаний, этот адрес попадает в письмо поставщикам с новыми реквизитами. Несколько адресов — через запятую, до пяти. Те же адреса с контактными лицами — в справочнике «Почта поставщиков».',
     },
     requisitesMail: {
-        intro: 'Изменились реквизиты компании — поставщикам с почтой само уходит письмо: что было, что стало и новые реквизиты целиком.',
-        outro: 'Письмо уходит через 10 минут после сохранения с почты компании (блок «Почта для писем»). Поправка в эти минуты попадёт в то же письмо, «Не отправлять» его отменит. Получают все поставщики с почтой; кому письмо не нужно — снимите галочку в «Кому». «Отправлено» — письмо принял почтовый сервер; если адреса не существует, отказ придёт позже в сам ящик.',
+        intro: 'Изменились реквизиты компании — для поставщиков с почтой готовится письмо: что было, что стало и новые реквизиты целиком.',
+        outro: '«Отправить письмо» открывает почту компании: поставщики уже в «Скрытой копии» и не видят адреса друг друга, тема вставлена, а текст скопирован — вставьте его в письмо (Ctrl+V, на Mac ⌘V) и отправьте. Поправка реквизитов до этого попадёт в то же письмо, «Не отправлять» его отменит. Кому письмо не нужно — снимите галочку в «Кому». Нажали ли «Отправить» в самой почте, портал не видит: открытое письмо считается ушедшим.',
     },
-    companyMailbox: {
-        intro: 'С этой почты уходят письма поставщикам о смене реквизитов компании. Письмо подписано названием компании, ответы поставщиков придут сюда же.',
-        outro: 'Gmail проще всего подключить кнопкой «Войти через Google»: выбрать аккаунт и разрешить отправку писем. Другую почту — адресом и паролем приложения (его создают в настройках безопасности почты, обычный пароль не подойдёт). Перед подключением уходит пробное письмо на этот же адрес. Пароль и доступ хранятся зашифрованными и больше нигде не показываются.',
+    lettersEmail: {
+        intro: 'Почта, с которой вы пишете поставщикам. Кнопка «Отправить письмо» открывает её с готовым письмом о смене реквизитов.',
+        outro: 'Gmail откроется в браузере — сразу в этом аккаунте. Другая почта (например, Outlook) и пустое поле — почтовой программой компьютера. На телефоне — почтой телефона.',
     },
     recipientsPick: {
         intro: 'Кому уйдёт это письмо: по умолчанию — всем поставщикам с почтой.',
-        outro: 'Снимите галочку — этому поставщику письмо не уйдёт. Выбрать можно, пока письмо ждёт отправки. Адрес, общий у двух поставщиков, получит письмо, если отмечен хотя бы один из них.',
+        outro: 'Снимите галочку — этому поставщику письмо не уйдёт. Выбрать можно, пока письмо не открыто в почте. Адрес, общий у двух поставщиков, попадёт в письмо, если отмечен хотя бы один из них.',
     },
 };
 
@@ -1842,6 +1842,13 @@ export const emailsIssue = (value) => {
     return tooMany ? `Не больше ${MAX_SUPPLIER_EMAILS} адресов у одного поставщика` : '';
 };
 
+/* «Почта для писем» компании (27.10.2026): один адрес или пусто. */
+export const lettersEmailIssue = (value) => {
+    const { emails, bad } = parseEmails(value);
+    if (bad) return `«${bad.slice(0, 80)}» — не похоже на адрес почты`;
+    return emails.length > 1 ? 'Укажите один адрес — ту почту, с которой пишете поставщикам' : '';
+};
+
 /* Почта поставщика в строке списка: первый адрес и «+N». */
 export const emailsShort = (emails) => {
     const list = emails || [];
@@ -1865,11 +1872,7 @@ const requisiteValue = (field, value) => {
 export const requisitesChanged = (before, after) => REQUISITE_FIELDS
     .filter((field) => requisiteValue(field, before?.[field]) !== requisiteValue(field, after?.[field]));
 
-/* «Сейчас» по часам Алматы строкой «YYYY-MM-DDTHH:MM:SS» — как время писем от сервера. */
-export const almatyNow = () => new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString().slice(0, 19);
-const dueBy = (value, now) => Boolean(value) && String(value).slice(0, 19) <= now;
-
-/* Когда уйдёт письмо: «в 14:35» сегодня, «21.10 в 14:35» — в другой день (часы Алматы). */
+/* Когда: «в 14:35» сегодня, «21.10 в 14:35» — в другой день (часы Алматы). */
 export const mailingWhen = (value, today = todayISO()) => {
     const parts = dateParts(value);
     if (!parts || !parts.hh) return '';
@@ -1877,46 +1880,36 @@ export const mailingWhen = (value, today = todayISO()) => {
     return `${parts.y}-${parts.m}-${parts.d}` === today ? `в ${time}` : `${parts.d}.${parts.m} в ${time}`;
 };
 
-/* Метка письма в строке компании — только то, что ждёт внимания: письмо скоро уйдёт,
-   уходит, не уходит (почта не подключена или не пускает) или ушло не на все адреса.
-   Ушедшее на все — без метки. Срок прошёл — «уходит», а не время в прошлом. */
-export const mailingPill = (state, { ready = true, today, now = almatyNow() } = {}) => {
-    if (!state) return null;
-    if (state.status === 'pending') {
-        if (!ready) return { tone: 'blocked', label: 'письмо ждёт почту' };
-        if (state.last_error) return { tone: 'blocked', label: 'письмо не уходит' };
-        return { tone: 'current', label: dueBy(state.send_after, now) ? 'письмо уходит' : `письмо ${mailingWhen(state.send_after, today)}` };
-    }
-    if (state.status === 'sending') return state.last_error || !ready ? { tone: 'blocked', label: 'письмо не уходит' } : { tone: 'current', label: 'письмо уходит' };
-    if (state.status === 'done' && state.failed > 0) return { tone: 'overdue', label: `письмо не ушло: ${state.failed}` };
-    return null;
-};
+/* Метка письма в строке компании — только то, что ждёт внимания: письмо готово, но его
+   ещё не открыли в почте (27.10.2026: письма портал сам не отправляет). Открытое — без метки. */
+export const mailingPill = (state) => (state?.status === 'pending' ? { tone: 'blocked', label: 'письмо не отправлено' } : null);
 
 const ADDRESS_FORMS = ['адрес', 'адреса', 'адресов'];
 // «из 1 адреса», «из 2 адресов», «из 21 адреса» — после «из» родительный падеж.
 const ADDRESS_FROM_FORMS = ['адреса', 'адресов', 'адресов'];
 const NOTICE_NAMES = 3;
 
-/* «через 1 минуту», «через 2 минуты», «через 10 минут». */
-export const minutesWord = (count) => plural(count, ['минуту', 'минуты', 'минут']);
-
 /* «Изменилось: ИИК, банк» — сокращения остаются заглавными. */
 export const changedLine = (labels) => (labels || [])
     .map((label) => (label === label.toUpperCase() ? label : label.toLowerCase()))
     .join(', ');
 
-/* Письмо из истории одной строкой: когда и чем кончилось. «Отправлено» — письмо
-   принял почтовый сервер; отказ «такого адреса нет» может прийти позже в сам ящик. */
-export const mailingSummary = (item, { ready = true, today, now = almatyNow() } = {}) => {
+/* Письмо из истории одной строкой: ждёт отправки, открыто в почте (с 27.10.2026 письмо
+   отправляет человек из своей почты), отменено. «Отправлено» — у писем, которые до
+   27.10.2026 отправлял сам портал: письмо принял почтовый сервер. */
+export const mailingSummary = (item, { today } = {}) => {
     const counts = item?.counts || {};
     const sent = counts.sent || 0;
     switch (item?.status) {
         case 'pending':
-            if (!ready) return 'Ждёт подключения почты';
-            if (item.last_error) return 'Не уходит';
-            return dueBy(item.send_after, now) ? 'Уходит' : `Уйдёт ${mailingWhen(item.send_after, today)}`;
+            return 'Ждёт отправки';
+        case 'opened': {
+            const when = mailingWhen(item.opened_at, today);
+            const parts = [when ? `Открыто в почте ${when}` : 'Открыто в почте'];
+            if (counts.opened) parts.push(plural(counts.opened, ADDRESS_FORMS));
+            return parts.join(' · ');
+        }
         case 'sending':
-            return `${item.last_error || !ready ? 'Не уходит' : 'Отправляется'}: ${sent} из ${plural(counts.total || 0, ADDRESS_FROM_FORMS)}`;
         case 'done': {
             const removed = counts.removed || 0;
             const superseded = counts.superseded || 0;
@@ -1935,10 +1928,10 @@ export const mailingSummary = (item, { ready = true, today, now = almatyNow() } 
     }
 };
 
-/* Строка перед сохранением изменённых реквизитов: уйдёт ли письмо и когда, сколько
-   адресов его получат и у кого почты нет. `waiting` — письмо уже ждёт отправки;
-   `reverting` — реквизиты вернутся к тем, что знают поставщики, и письма не будет. */
-export const mailNotice = ({ recipients, delayMinutes = 10, ready = true, waiting = false, reverting = false } = {}) => {
+/* Строка перед сохранением изменённых реквизитов: будет ли письмо, сколько адресов его
+   получат и у кого почты нет. `waiting` — письмо уже ждёт отправки; `reverting` —
+   реквизиты вернутся к тем, что знают поставщики, и письма не будет. */
+export const mailNotice = ({ recipients, waiting = false, reverting = false } = {}) => {
     if (reverting) {
         return waiting
             ? 'Реквизиты вернутся к тем, что знают поставщики, — ждущее письмо не уйдёт.'
@@ -1947,17 +1940,9 @@ export const mailNotice = ({ recipients, delayMinutes = 10, ready = true, waitin
     const addresses = recipients?.addresses || 0;
     const without = recipients?.without_email || 0;
     const names = recipients?.without_names || [];
-    let first;
-    if (!ready) {
-        first = waiting
-            ? 'Письмо, которое ждёт отправки, уйдёт уже с этими реквизитами, когда у компании заработает почта для писем.'
-            : 'После сохранения письмо о новых реквизитах уйдёт поставщикам, когда у компании заработает почта для писем: сейчас с неё отправлять нельзя.';
-    } else {
-        first = waiting
-            ? `Письмо, которое ждёт отправки, уйдёт уже с этими реквизитами — через ${minutesWord(delayMinutes)} после сохранения.`
-            : `После сохранения поставщикам уйдёт письмо о новых реквизитах — через ${minutesWord(delayMinutes)}.`;
-    }
-    const parts = [first];
+    const parts = [waiting
+        ? 'Письмо, которое ждёт отправки, будет уже с этими реквизитами.'
+        : 'После сохранения будет готово письмо поставщикам о новых реквизитах — его отправляют кнопкой «Отправить письмо».'];
     if (!addresses && recipients?.excluded) {
         parts.push('Но все поставщики с почтой сняты в «Кому» — письмо некому отправить.');
     } else if (!addresses) {
@@ -1984,10 +1969,12 @@ const shiftDay = (iso, days) => {
     return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 };
 
-/* Момент письма для списка: ждёт — когда уйдёт, отменено — когда отменили, иначе — когда ушло. */
+/* Момент письма для списка: ждёт — с какой правки реквизитов готово, отменено — когда
+   отменили, открыто в почте — когда открыли, иначе — когда ушло. */
 export const letterMoment = (item) => {
     if (item?.status === 'pending') return item.send_after;
     if (item?.status === 'cancelled') return item.cancelled_at || item.updated_at;
+    if (item?.status === 'opened') return item.opened_at || item.updated_at;
     return item?.started_at || item?.updated_at || item?.created_at;
 };
 
@@ -2016,17 +2003,18 @@ export const letterInitials = (name) => {
     return words.slice(0, 2).map((word) => word[0]).join('').toUpperCase() || '·';
 };
 
-/* Как дела у адреса: ушло, ждёт, повтор, не ушло, убран, ушло новым письмом. */
-export const recipientState = (recipient, { today } = {}) => {
+/* Как дела у адреса: в письме, открытом в почте; у писем, которые до 27.10.2026
+   отправлял портал, — ушло, не ушло, убран, ушло новым письмом. */
+export const recipientState = (recipient) => {
     switch (recipient?.status) {
+        case 'opened':
+            return { tone: 'neutral', label: 'в письме' };
         case 'sent': {
             const parts = dateParts(recipient.sent_at);
             return { tone: 'done', label: parts?.hh ? `ушло в ${parts.hh}:${parts.mm}` : 'ушло' };
         }
         case 'failed':
-            return recipient.next_attempt_at
-                ? { tone: 'blocked', label: `повтор ${mailingWhen(recipient.next_attempt_at, today)}` }
-                : { tone: 'overdue', label: 'не ушло' };
+            return { tone: 'overdue', label: 'не ушло' };
         case 'removed':
             return { tone: 'neutral', label: 'адрес убран' };
         case 'superseded':
@@ -2036,21 +2024,10 @@ export const recipientState = (recipient, { today } = {}) => {
     }
 };
 
-/* ── 21.10.2026: почта у каждой компании, галочки «Кому», «Почта поставщиков» ── */
+/* ── 21.10.2026: галочки «Кому», «Почта поставщиков» ── */
 
 const SUPPLIER_FORMS = ['поставщик', 'поставщика', 'поставщиков'];
 const SUPPLIER_FROM_FORMS = ['поставщика', 'поставщиков', 'поставщиков'];
-
-/* Строка под адресом подключённой почты: «Gmail · проверено в 11:40». */
-export const mailboxLine = (box, today = todayISO()) => {
-    if (!box) return '';
-    const server = box.method === 'google' ? 'Gmail · вход через Google' : (box.label || (box.host ? `${box.host}:${box.port}` : ''));
-    const checked = box.checked_at ? `проверено ${mailingWhen(box.checked_at, today)}` : '';
-    return [server, checked].filter(Boolean).join(' · ');
-};
-
-/* Какая это почта — подпись под адресом, пока его вводят: «Gmail · smtp.gmail.com». */
-export const serverLine = (server) => (server ? `${server.label} · ${server.host}` : '');
 
 /* Галочки «Кому» у ждущего письма: сколько поставщиков отмечено и сколько адресов получат. */
 export const recipientsChosen = (candidates) => {
@@ -2074,32 +2051,20 @@ export const recipientsLine = (candidates) => {
 /* Кому письмо не отправляли — у ушедшего письма. */
 export const excludedLine = (names) => (names?.length ? `Не отправляли: ${names.join(', ')}` : '');
 
-/* «Почта поставщиков»: чем кончилось последнее письмо на этот адрес. */
+/* «Почта поставщиков»: последнее письмо на этот адрес — в каком письме, открытом в
+   почте, он был (с 27.10.2026) либо чем кончилась отправка порталом (до 27.10.2026). */
 export const addressLetterState = (last, today = todayISO()) => {
     if (!last) return { tone: 'neutral', label: 'писем не было' };
     switch (last.status) {
+        case 'opened':
+            return { tone: 'done', label: last.sent_at ? `в письме ${mailingWhen(last.sent_at, today)}` : 'в письме' };
         case 'sent':
             return { tone: 'done', label: last.sent_at ? `ушло ${mailingWhen(last.sent_at, today)}` : 'ушло' };
         case 'failed':
-            return last.next_attempt_at
-                ? { tone: 'blocked', label: `повтор ${mailingWhen(last.next_attempt_at, today)}` }
-                : { tone: 'overdue', label: 'не дошло' };
+            return { tone: 'overdue', label: 'не дошло' };
         default:
-            return { tone: 'current', label: 'письмо уходит' };
+            return { tone: 'neutral', label: 'писем не было' };
     }
-};
-
-/* Письма ждут почту этих компаний — строкой над журналом писем. */
-export const waitingMailboxLine = (companies) => {
-    const list = companies || [];
-    if (!list.length) return '';
-    const missing = list.filter((item) => !item.connected).map((item) => item.name);
-    const broken = list.filter((item) => item.connected).map((item) => item.name);
-    const parts = [];
-    if (missing.length) parts.push(`Письма ждут почту: у ${missing.join(', ')} она не подключена.`);
-    if (broken.length) parts.push(`Почта ${broken.join(', ')} не пускает — введите пароль заново.`);
-    parts.push('Почту подключают в «Реквизитах компаний», в окне компании — блок «Почта для писем».');
-    return parts.join(' ');
 };
 
 /* Нажали галочку «Кому»: кого теперь не отправлять (так это хранит сервер). */
@@ -2113,3 +2078,56 @@ export const toggleRecipient = (candidates, id) => {
 
 /* «Отметить всех» — никого не исключать; «Снять всех» — исключить каждого. */
 export const allRecipients = (candidates, on) => (on ? [] : (candidates || []).map((item) => item.id));
+
+/* ── 27.10.2026: «Отправить письмо» открывает почту компании с готовым письмом
+   (владелец: «пока убери автоотправку и сделай полу ручной»). Устройство —
+   payments/requisites_mail.py, кнопка — SupplierLetters.jsx (SendLetterButton). ── */
+
+/* Телефон: Gmail в мобильном браузере письмо не открывает (уводит во входящие) — там
+   письмо открывает почта телефона. iPad представляется Mac'ом и открывает Gmail как компьютер. */
+export const isPhoneDevice = (ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '')) => /Android|iPhone|iPod/i.test(String(ua || ''));
+
+/* Ссылка длиннее — ненадёжна: почтовая программа на Windows (Outlook) берёт её примерно
+   до 2 тыс. знаков, Gmail на длинных отвечает ошибкой. Поэтому текст письма идёт через
+   буфер, а в ссылке — только адреса и тема. */
+export const MAILTO_LIMIT = 2000;
+export const GMAIL_LIMIT = 4000;
+
+/* Адреса письма: у ждущего — отмеченных поставщиков (общий адрес — один раз), у
+   открытого в почте — те, что тогда вставили в «Скрытую копию». */
+export const letterAddresses = (item) => {
+    if (item?.status === 'pending') {
+        return [...new Set((item.candidates || []).filter((entry) => entry.send).flatMap((entry) => entry.emails || []))].sort();
+    }
+    return (item?.recipients || []).filter((entry) => entry.status === 'opened').map((entry) => entry.email).sort();
+};
+
+// Адрес в ссылке: «@» и запятая между адресами остаются как есть — ссылка короче.
+const linkAddress = (value) => encodeURIComponent(String(value || '')).replace(/%40/g, '@');
+
+/* Новое письмо в почте компании. Gmail — в браузере, сразу в аккаунте компании
+   (/u/<адрес>/, tf=cm открывает окно письма); иначе и на телефоне — почтовой программой
+   (mailto:). «Кому» — почта самой компании: у неё останется копия, а у поставщика в
+   «Кому» не будет пусто; поставщики — в «Скрытой копии». Текста в ссылке нет: он идёт
+   буфером. `tooLong` — адреса не влезают в ссылку: тогда кнопка кладёт в буфер их. */
+export const composeLink = ({ provider, from, bcc = [], subject = '', phone = false, withBcc = true }) => {
+    const addresses = withBcc ? bcc.map(linkAddress).join(',') : '';
+    if (provider === 'gmail' && !phone) {
+        const query = [from ? `to=${linkAddress(from)}` : '', addresses ? `bcc=${addresses}` : '',
+            `su=${encodeURIComponent(subject)}`, 'tf=cm'].filter(Boolean).join('&');
+        const href = `https://mail.google.com/mail/u/${from ? linkAddress(from) : '0'}/?${query}`;
+        return { href, web: true, tooLong: href.length > GMAIL_LIMIT };
+    }
+    const query = [addresses ? `bcc=${addresses}` : '', `subject=${encodeURIComponent(subject)}`].filter(Boolean).join('&');
+    const href = `mailto:${from ? linkAddress(from) : ''}?${query}`;
+    return { href, web: false, tooLong: href.length > MAILTO_LIMIT };
+};
+
+/* Что сказать после «Отправить письмо»: где письмо и что сделать с буфером. */
+export const openedToast = ({ copied, web, addressesCopied = false, phone = false }) => {
+    const where = web ? 'Письмо открыто в Gmail' : 'Письмо открыто в почте';
+    const paste = phone ? 'вставьте его в письмо' : 'вставьте его в письмо: Ctrl+V, на Mac ⌘V';
+    if (addressesCopied) return `${where} без адресов: их слишком много для ссылки. Адреса скопированы — вставьте их в «Скрытую копию», потом нажмите «Скопировать текст».`;
+    if (!copied) return `${where}. Текст скопировать не вышло — скопируйте его из окна письма.`;
+    return `${where}. Текст скопирован — ${paste}.`;
+};

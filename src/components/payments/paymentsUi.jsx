@@ -883,6 +883,41 @@ export const CopyButton = ({ text, label = 'Скопировать', iconOnly = 
     );
 };
 
+/* Скопировать с оформлением (письмо поставщикам, 27.10.2026): в почте вставится
+   таблицей «Было / Стало», в простое поле — текстом. Сначала событием copy — синхронно,
+   внутри щелчка, пока ссылка на почту не увела фокус; Safari без выделения его не
+   пускает без отмены beforecopy, а не вышло и так — Clipboard API, всё ещё в том же
+   щелчке. Без `html` — только текст. Обещание: true — скопировано. */
+export const copyRich = ({ html = '', text = '' }) => {
+    let done = false;
+    const before = (event) => event.preventDefault();
+    const onCopy = (event) => {
+        if (!event.clipboardData) return;
+        if (html) event.clipboardData.setData('text/html', html);
+        event.clipboardData.setData('text/plain', text);
+        event.preventDefault();
+        done = true;
+    };
+    try {
+        document.addEventListener('beforecopy', before, true);
+        document.addEventListener('copy', onCopy, true);
+        document.execCommand('copy');
+    } catch { /* execCommand нет — ниже Clipboard API */ } finally {
+        document.removeEventListener('beforecopy', before, true);
+        document.removeEventListener('copy', onCopy, true);
+    }
+    if (done) return Promise.resolve(true);
+    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+    const plain = () => (clipboard?.writeText ? clipboard.writeText(text).then(() => true, () => false) : Promise.resolve(false));
+    if (html && clipboard?.write && typeof ClipboardItem === 'function') {
+        return clipboard.write([new ClipboardItem({
+            'text/html': new Blob([html], { type: 'text/html' }),
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+        })]).then(() => true, plain);
+    }
+    return plain();
+};
+
 /* Основание согласования под «i» (ТЗ, п. 6): маршрут выбирает система, а
    человек видит, что она проверила по порядку и почему не подошло остальное. */
 export const ApprovalHint = ({ basis }) => {

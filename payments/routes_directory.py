@@ -8,15 +8,11 @@
 Подключается из routes.build_payments_blueprint через `register(api)`.
 """
 
-import html as _html
-import json
-import logging
 from io import BytesIO
 
-from flask import Response, request, send_file
+from flask import request, send_file
 
-from . import (access, cards, directory, files, fixed, google_mail, mail, mailbox, queries, requisites_mail, schema,
-               workflow)
+from . import access, cards, directory, files, fixed, mail, queries, requisites_mail, schema, workflow
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   digits, jsonify, party_kind, payload as _payload)
 
@@ -62,21 +58,36 @@ def _emails(value):
         raise ApiError('Почта: %s' % exc, code='PAYMENTS_EMAIL_INVALID', extra={'field': 'emails'})
 
 
-def _mail_info(recipients, ready=None):
-    """Письма поставщикам: кому уйдёт и сколько ждать; `ready` — у компании работает
-    своя почта (у списка компаний — у каждой своя, в её строке)."""
-    info = {'recipients': recipients, 'delay_minutes': requisites_mail.SEND_DELAY_MINUTES,
-            'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}
-    if ready is not None:
-        info['ready'] = bool(ready)
-    return info
+def _mail_info(recipients):
+    """Письма поставщикам: сколько адресов получат письмо и у кого почты нет."""
+    return {'recipients': recipients}
 
 
-def _mailbox_error(exc):
-    extra = {'field': exc.field} if exc.field else {}
-    if exc.help_url:
-        extra['help_url'] = exc.help_url
-    return ApiError(str(exc), code=exc.code, status=400, extra=extra)
+def _letters_email(data, current=None):
+    """«Почта для писем» компании из формы: (адрес, какая это почта) или ('', None) —
+    поле стёрли; None — окно открыто до появления поля и его не прислало. Какая почта
+    у своего домена — по MX (до двух запросов DNS по HTTPS). Адрес прежний и почта уже
+    известна (`current` — строка компании) — DNS не спрашиваем: его сбой при правке
+    примечания превратил бы Gmail компании в «почтовую программу»."""
+    if 'letters_email' not in data:
+        return None
+    if not str(data.get('letters_email') or '').strip():
+        return '', None
+    try:
+        email = mail.one_email(data.get('letters_email'))
+    except mail.EmailError as exc:
+        raise ApiError('Почта для писем: %s' % exc, code='PAYMENTS_EMAIL_INVALID', extra={'field': 'letters_email'})
+    if current and email == current.get('letters_email') and current.get('letters_provider'):
+        return email, current['letters_provider']
+    return email, mail.provider_of(email)
+
+
+def _sender(entity, name=None):
+    """От кого письмо поставщикам: название компании, её «Почта для писем» и какая это
+    почта — по ней кнопка «Отправить письмо» решает, что открыть."""
+    entity = entity or {}
+    return {'name': ' '.join(str(name or entity.get('name') or '').split()),
+            'address': entity.get('letters_email'), 'provider': entity.get('letters_provider')}
 
 
 def _user(cursor, value, field):
@@ -144,20 +155,17 @@ def register(api):
         with db._get_cursor() as cursor:
             rows = _READERS[name](cursor, request.args)
             can_edit = access.can_save_dictionary(ctx, name, row_id=1, roles=ctx['roles'])
-            # Письма поставщикам о смене реквизитов и почту компании видит тот, кто реквизиты правит.
-            mailing = (requisites_mail.states(cursor), requisites_mail.recipients_overview(cursor),
-                       mailbox.views(cursor)) if name == 'legal_entities' and can_edit else None
+            # Письма поставщикам о смене реквизитов видит тот, кто реквизиты правит.
+            mailing = (requisites_mail.states(cursor), requisites_mail.recipients_overview(cursor)) \
+                if name == 'legal_entities' and can_edit else None
         body = {'items': rows, 'can_edit': can_edit}
         if name == 'legal_entities':
             for entity in rows:
                 entity['requisites_text'] = directory.requisites_text(entity)
                 if mailing:
-                    (latest, counts), _recipients, boxes = mailing
+                    (latest, counts), _recipients = mailing
                     entity['mailing'] = latest.get(entity['id'])
                     entity['mailings_count'] = counts.get(entity['id'], 0)
-                    entity['mailbox'] = boxes.get(entity['id'])
-                    # Кнопка «Войти через Google» — только если вход настроен на сервере.
-                    entity['google_mail'] = google_mail.enabled()
             if mailing:
                 body['mail'] = _mail_info(mailing[1])
         return jsonify(body)
@@ -175,7 +183,10 @@ def register(api):
             cursor, category_id=row_id, parent_id=as_int(data.get('parent_id'), 'parent_id'), name=title,
             position=as_int(data.get('position'), 'position') or 0, is_active=active, actor_id=ctx['user_id'])
 
-    def _save_legal_entity(cursor, data, row_id, ctx):
+    def _save_legal_entity(cursor, data, row_id, ctx, letters=None, current=None):
+        if letters is None:
+            # Окно, открытое до появления поля «Почта для писем», его не присылает — и не стирает.
+            letters = ((current or {}).get('letters_email'), (current or {}).get('letters_provider'))
         return directory.upsert_legal_entity(cursor, entity_id=row_id, fields={
             'name': as_text(data.get('name'), 'Название', required=True, limit=200),
             'bin': digits(data.get('bin')) or None,
@@ -189,6 +200,8 @@ def register(api):
             'requisites': as_text(data.get('requisites'), 'Прочие реквизиты', limit=4000),
             'note': as_text(data.get('note'), 'Примечание', limit=2000),
             'is_active': as_bool(data.get('is_active', True)),
+            'letters_email': letters[0] or None,
+            'letters_provider': letters[1] if letters[0] else None,
         }, actor_id=ctx['user_id'])
 
     def _save_counterparty(cursor, data, row_id, ctx):
@@ -380,7 +393,7 @@ def register(api):
         }, actor_id=ctx['user_id'])
 
     _SAVERS = {
-        'legal_entities': _save_legal_entity, 'counterparties': _save_counterparty,
+        'counterparties': _save_counterparty,
         'counterparty_accounts': _save_account, 'contracts': _save_contract, 'cards': _save_card,
         'limits': _save_limit, 'routes': _save_route, 'counterparty_emails': _save_counterparty_email,
     }
@@ -393,6 +406,14 @@ def register(api):
         row_id = as_int(data.get('id'), 'id')
         if not access.can_save_dictionary(ctx, name, row_id, ctx['roles']):
             raise ApiError('Это действие доступно администратору раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
+        letters = None
+        if name == 'legal_entities':
+            # Какая почта у компании — по сети: до транзакции, строку компании сеть не держит.
+            current = None
+            if row_id and str(data.get('letters_email') or '').strip():
+                with db._get_cursor() as cursor:
+                    current = directory.read_legal_entity(cursor, row_id)
+            letters = _letters_email(data, current)
         with db._get_cursor() as cursor:
             duplicate = directory.find_duplicate_name(
                 cursor, str(data.get('name') or '').strip(), dictionary=name, row_id=row_id,
@@ -404,7 +425,9 @@ def register(api):
             # строки: изменились — поставщикам уйдёт письмо (requisites_mail).
             before = directory.read_legal_entity(cursor, row_id, lock=True) \
                 if name == 'legal_entities' and row_id else None
-            if name in _SAVERS:
+            if name == 'legal_entities':
+                saved = _save_legal_entity(cursor, data, row_id, ctx, letters=letters, current=before)
+            elif name in _SAVERS:
                 saved = _SAVERS[name](cursor, data, row_id, ctx)
             else:
                 saved = _save_named(cursor, name, data, row_id, ctx)
@@ -497,20 +520,14 @@ def register(api):
         if not access.can_save_dictionary(ctx, 'legal_entities', 1, ctx['roles']):
             raise ApiError('Письма поставщикам ведёт администратор раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
 
-    def _sender(cursor, entity_id, name):
-        """От кого письмо компании: её название и адрес её почты (None — не подключена)."""
-        box = mailbox.view(mailbox.read(cursor, entity_id))
-        return box, {'name': ' '.join(str(name or '').split()), 'address': (box or {}).get('address')}
-
     def _mailing_reply(cursor, entity_id):
         items, total = requisites_mail.history(cursor, entity_id)
         entity = directory.read_legal_entity(cursor, entity_id)
-        box, sender = _sender(cursor, entity_id, (entity or {}).get('name'))
         return {'items': items, 'total': total,
                 # С чем форма сверяет правку: реквизиты, которые знают поставщики.
                 'known': requisites_mail.known_now(cursor, entity_id, entity),
-                'sender': sender, 'mailbox': box,
-                'mail': _mail_info(requisites_mail.recipients_overview(cursor), ready=mailbox.works(box))}
+                'sender': _sender(entity),
+                'mail': _mail_info(requisites_mail.recipients_overview(cursor))}
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings')
     def entity_mailings(ctx, entity_id):
@@ -536,9 +553,15 @@ def register(api):
     def entity_mailing_cancel(ctx, entity_id, mailing_id):
         return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.cancel)
 
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/retry', methods=('POST',))
-    def entity_mailing_retry(ctx, entity_id, mailing_id):
-        return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.retry)
+    @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/open', methods=('POST',))
+    def entity_mailing_open(ctx, entity_id, mailing_id):
+        """«Отправить письмо»: письмо открыли в почте компании, отправит его человек сам
+        (решение владельца 27.10.2026). `addresses` — что кнопка вставила в «Скрытую копию»."""
+        addresses = _payload().get('addresses')
+        if addresses is not None and not isinstance(addresses, list):
+            raise ApiError('Адреса письма — списком')
+        return _mailing_action(ctx, entity_id, mailing_id, lambda cursor, entity, mailing, actor: (
+            requisites_mail.open_in_mail(cursor, entity, mailing, actor, addresses)))
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/recipients', methods=('POST',))
     def entity_mailing_recipients(ctx, entity_id, mailing_id):
@@ -552,205 +575,6 @@ def register(api):
         return _mailing_action(ctx, entity_id, mailing_id, lambda cursor, entity, mailing, actor: (
             requisites_mail.set_recipients(cursor, entity, mailing, actor, [item for item in ids if item])))
 
-    # ── Почта для писем компании (решение владельца 21.10.2026) ─────────────
-
-    def _mailbox_reply(cursor, entity_id):
-        return {'status': 'success', 'mailbox': mailbox.view(mailbox.read(cursor, entity_id)),
-                'google': {'enabled': google_mail.enabled()}}
-
-    def _entity_or_404(cursor, entity_id):
-        entity = directory.read_legal_entity(cursor, entity_id)
-        if not entity:
-            raise ApiError('Компания не найдена', status=404)
-        return entity
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox')
-    def entity_mailbox(ctx, entity_id):
-        _mailing_guard(ctx)
-        with db._get_cursor() as cursor:
-            _entity_or_404(cursor, entity_id)
-            return jsonify(_mailbox_reply(cursor, entity_id))
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox/detect', methods=('POST',))
-    def entity_mailbox_detect(ctx, entity_id):
-        """Какая это почта и где взять пароль приложения — пока человек вводит адрес."""
-        _mailing_guard(ctx)
-        try:
-            return jsonify(mailbox.detect(_payload().get('address')))
-        except mailbox.MailboxError as exc:
-            raise _mailbox_error(exc)
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox', methods=('POST',))
-    def entity_mailbox_connect(ctx, entity_id):
-        """«Подключить»: пробное письмо на этот же адрес — и только потом записать.
-        С почтовым сервером говорим вне транзакции: вход и письмо — до 30 секунд."""
-        _mailing_guard(ctx)
-        data = _payload()
-        with db._get_cursor() as cursor:
-            entity = _entity_or_404(cursor, entity_id)
-            current = mailbox.read(cursor, entity_id)
-        try:
-            settings = mailbox.prepare(data, current=current, allow_local=mailbox.local_allowed())
-            mailbox.verify(settings, entity.get('name'))
-        except mailbox.MailboxError as exc:
-            raise _mailbox_error(exc)
-        with db._get_cursor() as cursor:
-            _entity_or_404(cursor, entity_id)
-            try:
-                mailbox.save(cursor, entity_id, settings, _actor(ctx))
-            except mailbox.MailboxError as exc:     # нечем зашифровать пароль
-                raise _mailbox_error(exc)
-            return jsonify(_mailbox_reply(cursor, entity_id))
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox/check', methods=('POST',))
-    def entity_mailbox_check(ctx, entity_id):
-        """«Проверить»: пробное письмо с сохранённой почты. Не вышло из-за пароля или
-        отправителя — беда записывается, планировщик в ящик не стучится."""
-        _mailing_guard(ctx)
-        with db._get_cursor() as cursor:
-            entity = _entity_or_404(cursor, entity_id)
-            row = mailbox.read(cursor, entity_id)
-        if not row:
-            raise ApiError('Почта для писем у компании не подключена', code='PAYMENTS_MAILBOX_MISSING', status=404)
-        settings = mailbox.settings_of(row)
-        failure = None
-        if settings is None:
-            failure = mailbox.MailboxError(mailbox.UNREADABLE, field='password', code='PAYMENTS_MAILBOX_PASSWORD')
-        else:
-            try:
-                mailbox.verify(settings, entity.get('name'))
-            except mailbox.MailboxError as exc:
-                failure = exc
-        with db._get_cursor() as cursor:
-            if failure is None:
-                mailbox.note_ok(cursor, entity_id)
-            elif failure.code in ('PAYMENTS_MAILBOX_LOGIN', 'PAYMENTS_MAILBOX_SENDER', 'PAYMENTS_MAILBOX_PASSWORD'):
-                mailbox.note_problem(cursor, entity_id, str(failure))
-        if failure is not None:
-            raise _mailbox_error(failure)
-        with db._get_cursor() as cursor:
-            return jsonify(_mailbox_reply(cursor, entity_id))
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox', methods=('DELETE',))
-    def entity_mailbox_remove(ctx, entity_id):
-        """«Отключить»: письма компании будут ждать новую почту. Вход через Google
-        отзывается и у Google: доступа портала к ящику больше нет."""
-        _mailing_guard(ctx)
-        with db._get_cursor() as cursor:
-            _entity_or_404(cursor, entity_id)
-            row = mailbox.read(cursor, entity_id)
-            mailbox.remove(cursor, entity_id)
-        token = mailbox.decrypt(row.get('password_enc')) if row and row.get('security') == mailbox.OAUTH else None
-        if token:
-            google_mail.revoke(token)
-        return jsonify({'status': 'success', 'mailbox': None})
-
-    # ── «Войти через Google» (решение владельца 21.10.2026, google_mail.py) ──
-
-    @route('/dictionaries/legal_entities/<int:entity_id>/mailbox/google', methods=('POST',))
-    def entity_mailbox_google(ctx, entity_id):
-        """Ссылка на выбор аккаунта Google. Ответ Google придёт на /mailbox/google/callback
-        без входа в портал — поэтому компания, человек и окно портала едут в подписанном state."""
-        _mailing_guard(ctx)
-        cfg = google_mail.config()
-        if not cfg:
-            raise ApiError('Вход через Google на сервере ещё не настроен', code='PAYMENTS_GOOGLE_OFF', status=503)
-        data = _payload()
-        with db._get_cursor() as cursor:
-            _entity_or_404(cursor, entity_id)
-        actor = _actor(ctx)
-        origin = google_mail.portal_origin(request.headers.get('Origin'))
-        back = str(data.get('return_to') or '').strip()
-        try:
-            state = google_mail.sign_state({'e': int(entity_id), 'u': actor.get('id'), 'n': actor.get('name'),
-                                            'o': origin, 'r': back if back.startswith(origin + '/') else ''})
-        except google_mail.GoogleError as exc:
-            raise ApiError(str(exc), code='PAYMENTS_GOOGLE_OFF', status=503)
-        hint = str(data.get('address') or '').strip().lower() or None
-        return jsonify({'url': google_mail.auth_url(cfg, state, login_hint=hint)})
-
-    def _google_page(title, text, state, ok):
-        """Страница после Google: итог словами, окну портала — сообщение, окно закрывается само."""
-        origin = google_mail.portal_origin((state or {}).get('o'))
-        back = (state or {}).get('r') or origin
-        note = json.dumps({'type': 'otp-payments-mailbox', 'ok': bool(ok), 'entity': (state or {}).get('e'),
-                           'title': title, 'text': text}, ensure_ascii=True).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
-        page = (
-            '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width, initial-scale=1"><title>%(title)s</title></head>'
-            '<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f5f7;'
-            'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;color:#0f172a">'
-            '<div style="max-width:420px;margin:16px;background:#fff;border-radius:18px;padding:28px 24px;text-align:center;'
-            'box-shadow:0 1px 2px rgba(15,23,42,.06)">'
-            '<div style="font-size:34px;line-height:1">%(icon)s</div>'
-            '<div style="margin-top:12px;font-size:17px;font-weight:600">%(title)s</div>'
-            '<div style="margin-top:8px;font-size:14px;line-height:1.5;color:#475569">%(text)s</div>'
-            '<a href="%(back)s" style="display:inline-block;margin-top:18px;font-size:14px;color:#2563eb;'
-            'text-decoration:none">Вернуться в портал</a></div>'
-            '<script>(function(){var note=%(note)s;try{if(window.opener){window.opener.postMessage(note,%(origin)s);'
-            'if(note.ok){setTimeout(function(){window.close()},1500)}}}catch(e){}})()</script>'
-            '</body></html>'
-        ) % {'title': _html.escape(title), 'text': _html.escape(text), 'icon': '✅' if ok else '⚠️',
-             'back': _html.escape(back, quote=True), 'note': note,
-             'origin': json.dumps(origin)}
-        response = Response(page, mimetype='text/html')
-        response.headers['Cache-Control'] = 'no-store'
-        response.headers['Referrer-Policy'] = 'no-referrer'
-        response.headers['X-Frame-Options'] = 'DENY'
-        return response
-
-    @api.bp.route('/mailbox/google/callback', methods=['GET'])
-    def mailbox_google_callback():
-        """Ответ Google: код → токены → пробное письмо на этот же ящик → почта компании."""
-        state = google_mail.read_state(request.args.get('state'))
-        if not state:
-            return _google_page('Ссылка входа устарела',
-                                'Откройте окно компании и нажмите «Войти через Google» ещё раз.', None, False)
-        if request.args.get('error'):
-            return _google_page('Вход отменён', 'Почта не подключена: в окне Google не разрешили отправку писем.',
-                                state, False)
-        cfg = google_mail.config()
-        if not cfg:
-            return _google_page('Вход через Google не настроен', 'Почта не подключена.', state, False)
-        entity_id = int(state.get('e') or 0)
-        try:
-            tokens = google_mail.exchange(cfg, request.args.get('code'))
-            email = google_mail.email_of(tokens)
-        except google_mail.GoogleError as exc:
-            return _google_page('Почта не подключена', str(exc), state, False)
-        settings = mailbox.google_settings(email, tokens['refresh_token'])
-        try:
-            with db._get_cursor() as cursor:
-                entity = directory.read_legal_entity(cursor, entity_id)
-                ctx = queries.load_access_context(cursor, state.get('u')) if state.get('u') else None
-                if ctx:
-                    ctx['roles'] = queries.roles_of_user(cursor, state['u'])
-                current = mailbox.read(cursor, entity_id)
-            if not entity:
-                return _google_page('Компания не найдена', 'Почта не подключена.', state, False)
-            # Подключает тот, кто ведёт справочник: права проверяются и сейчас, а не только при выдаче ссылки.
-            if not ctx or not access.can_save_dictionary(ctx, 'legal_entities', 1, ctx.get('roles') or ()):
-                return _google_page('Нет прав', 'Почту для писем подключает администратор раздела.', state, False)
-            try:
-                mailbox.verify(settings, entity.get('name'))
-            except mailbox.MailboxError as exc:
-                return _google_page('Почта не подключена', str(exc), state, False)
-            with db._get_cursor() as cursor:
-                mailbox.save(cursor, entity_id, settings, {'id': state.get('u'), 'name': state.get('n')})
-        except mailbox.MailboxError as exc:
-            return _google_page('Почта не подключена', str(exc), state, False)
-        except Exception:  # noqa: BLE001 — страница для человека, подробности — в журнал
-            logging.exception('payments: вход через Google не удался')
-            return _google_page('Почта не подключена', 'Внутренняя ошибка — попробуйте ещё раз.', state, False)
-        # Прежний вход через Google этой компании больше не нужен — Google его забывает.
-        old = mailbox.decrypt(current.get('password_enc')) if current and current.get('security') == mailbox.OAUTH else None
-        if old and old != settings.password:
-            google_mail.revoke(old)
-        name = ' '.join(str(entity.get('name') or '').split())
-        return _google_page('Почта подключена',
-                            '%s — с неё уйдут письма поставщикам о смене реквизитов %s. Пробное письмо — во входящих. '
-                            'Окно можно закрыть.' % (email, name), state, True)
-
     # ── «Письма поставщикам»: все письма раздела и одно письмо целиком ──────
 
     @route('/mailings')
@@ -760,11 +584,7 @@ def register(api):
         offset = max(as_int(request.args.get('offset'), 'offset') or 0, 0)
         with db._get_cursor() as cursor:
             items, total = requisites_mail.journal(cursor, limit=limit, offset=offset)
-            info = _mail_info(requisites_mail.recipients_overview(cursor))
-            waiting = requisites_mail.waiting_for_mailbox(cursor)
-        return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset, 'mail': info,
-                        # Чьи письма ждут почту компании — у них её нет или она не пускает.
-                        'waiting_mailbox': waiting})
+        return jsonify({'items': items, 'total': total, 'limit': limit, 'offset': offset})
 
     @route('/mailings/<int:mailing_id>')
     def mailing_detail(ctx, mailing_id):
@@ -774,10 +594,8 @@ def register(api):
                 item = requisites_mail.detail(cursor, mailing_id)
             except requisites_mail.MailingError as exc:
                 raise ApiError(str(exc), code=exc.code, status=exc.status)
-            box, sender = _sender(cursor, item['legal_entity_id'], item.get('legal_entity_name'))
-        return jsonify({'item': item, 'sender': sender, 'mailbox': box,
-                        'mail': {'ready': mailbox.works(box),
-                                 'pause_minutes': requisites_mail.TRANSPORT_PAUSE_SECONDS // 60}})
+            entity = directory.read_legal_entity(cursor, item['legal_entity_id'])
+        return jsonify({'item': item, 'sender': _sender(entity, item.get('legal_entity_name'))})
 
     @route('/dictionaries/cards/<int:card_id>/number')
     def card_number(ctx, card_id):

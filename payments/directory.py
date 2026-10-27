@@ -106,10 +106,12 @@ def upsert_asset_category(cursor, *, category_id=None, name, is_active=True, act
 
 # ─── Наши юр. лица: реквизиты компаний (п. 13.3) ─────────────────────────────
 
+# letters_email — «Почта для писем»: её кнопка «Отправить письмо» открывает с письмом
+# поставщикам о смене реквизитов, letters_provider — какая это почта (mail.provider_of).
 _ENTITY_FIELDS = ('id', 'name', 'bin', 'kind', 'vat_payer', 'legal_address', 'bank_name', 'iik', 'bik',
-                  'kbe', 'requisites', 'note', 'is_active')
+                  'kbe', 'requisites', 'note', 'is_active', 'letters_email', 'letters_provider')
 _ENTITY_WRITE = ('name', 'bin', 'kind', 'vat_payer', 'legal_address', 'bank_name', 'iik', 'bik', 'kbe',
-                 'requisites', 'note', 'is_active')
+                 'requisites', 'note', 'is_active', 'letters_email', 'letters_provider')
 
 
 def requisites_text(entity):

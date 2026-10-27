@@ -1,49 +1,24 @@
-"""Почта раздела «Оплата счетов»: адреса поставщиков и отправка писем по SMTP.
+"""Почта раздела «Оплата счетов»: адреса поставщиков и чья почта у нашей компании.
 
 Просьба владельца 20.10.2026: «добавление эмайла контрагентов поставщиков и тд,
-автомат рассылка по эмайлом при изменении реквизитов». Что пишем и кому —
-requisites_mail.py; здесь только адреса и сама отправка.
+автомат рассылка по эмайлом при изменении реквизитов». Решение 27.10.2026: «пока
+убери автоотправку и сделай полу ручной» — портал писем сам больше не отправляет:
+кнопка «Отправить письмо» открывает почту компании с готовым письмом, а отправляет
+человек (requisites_mail.py). Отправка по SMTP и вход через Google жили здесь и в
+mailbox.py / google_mail.py до 27.10.2026 — в git (коммиты 216f22ff, c1c023ba, 91cac050).
 
-Отправляет почта самой компании по SMTP: у каждой нашей компании свой ящик
-(решение владельца 21.10.2026), его подключают в окне компании — payments/mailbox.py
-(адрес, пароль приложения, сервер). Render на платном тарифе выпускает наружу
-порты 465 и 587, порт 25 закрыт всегда.
-
-Ошибки отправки делятся на четыре вида (MailError.kind), от вида зависит, что
-делать дальше:
-    temporary  — сеть, тайм-аут, ответ 4xx: письмо пробуем ещё раз позже;
-    permanent  — сервер не принял адрес или письмо (5xx): повтор не поможет;
-    throttled  — ящик упёрся в свой лимит или фильтр («sending quota exceeded»,
-                 «suspicion of spam»): остальные адреса не виноваты — прогон встаёт на
-                 паузу, а этому адресу засчитывается попытка (иначе отказ, который
-                 на деле про адрес, крутил бы паузы вечно);
-    transport  — не войти в ящик или ящик не пускает отправителя: виновата
-                 настройка — письма ждут, попытки не тратятся. Чем именно —
-                 MailError.reason: login (логин или пароль), connect (нет связи с
-                 сервером), sender (ящик не разрешает этот адрес отправителя).
-
-Сервер отправки (smtp.gmail.com, smtp.yandex.ru) принимает письма на чужие
-домены, не проверяя адрес: «такого ящика нет» придёт позже письмом-отказом в
-сам ящик. Поэтому «отправлено» здесь значит «принял сервер отправки».
+Здесь — адреса и какая это почта. Публичная (gmail.com, yandex.ru, mail.ru …) — по
+таблице, свой домен — по MX-записи (Google Workspace, Яндекс 360, VK WorkSpace,
+Microsoft 365). По ней кнопка решает, что открыть: Gmail — в браузере, сразу в
+аккаунте компании, остальное — почтовой программой компьютера.
 """
 
 import re
-import smtplib
-import socket
-import ssl
-from collections import namedtuple
-from email.headerregistry import Address
-from email.message import EmailMessage
-from email.utils import formatdate, make_msgid, parseaddr
+import time
 
 # Сколько адресов у одного поставщика: бухгалтерия, менеджер, общий ящик.
 MAX_EMAILS = 5
 MAX_EMAIL_LENGTH = 254
-# Терпение к почтовому серверу на одну операцию сокета. Отправка идёт из общего
-# пула потоков бота, и висящее соединение держало бы место в нём: прогон ещё и
-# урезает тайм-аут до остатка своего бюджета (requisites_mail.run, deadline()).
-TIMEOUT_SECONDS = 15
-QUIT_SECONDS = 3
 
 # Адрес латиницей: имя@домен.зона. Кириллические домены (почта.рф) не
 # принимаем — их понимает не каждый почтовый сервер на пути письма.
@@ -55,17 +30,22 @@ _EMAIL_RE = re.compile(
 # понимается по-разному, а форма (paymentsMeta.parseEmails) обязана решать так же.
 _INVISIBLE_RE = re.compile('[\u200b\u200c\u200d\u2060\ufeff\u00ad]')
 _SPLIT_RE = re.compile('[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000,;]+')
-LOCAL_HOSTS = ('127.0.0.1', 'localhost', '::1')
 
-# Отказ, в котором виноват сам ящик, а не адрес: суточный лимит отправки,
-# частота, подозрение на спам. Такой ответ приходит и на RCPT, и на DATA с кодом
-# 5xx, и если считать его «адрес не принят», за один прогон сгорел бы весь список.
-# «Over quota» без «sending» — переполненный ящик ПОЛУЧАТЕЛЯ: это про адрес.
-_SENDER_TROUBLE_RE = re.compile(
-    r'(\b5\.4\.5\b|\b4\.7\.0\b|sending (?:limit|quota)|daily [^.]{0,40}(?:limit|quota)|rate limit|'
-    r'too many (?:messages|mails|emails|connections|recipients)|spam|throttl)', re.IGNORECASE)
-
-Config = namedtuple('Config', 'host port user password sender reply_to security')
+# Публичная почта — по домену адреса.
+_PUBLIC = {
+    'gmail.com': 'gmail', 'googlemail.com': 'gmail',
+    'yandex.ru': 'yandex', 'yandex.kz': 'yandex', 'yandex.by': 'yandex', 'yandex.com': 'yandex',
+    'ya.ru': 'yandex', 'narod.ru': 'yandex',
+    'mail.ru': 'mailru', 'bk.ru': 'mailru', 'list.ru': 'mailru', 'inbox.ru': 'mailru', 'internet.ru': 'mailru',
+}
+# Почта на своём домене — по тому, куда указывает его MX-запись. MX спрашиваем у DNS
+# через HTTPS: своего резолвера MX у сервера нет.
+_MX = (('google.com', 'gmail'), ('googlemail.com', 'gmail'), ('yandex.net', 'yandex'), ('yandex.ru', 'yandex'),
+       ('mail.ru', 'mailru'), ('protection.outlook.com', 'microsoft'))
+_DOH = ('https://dns.google/resolve', 'https://cloudflare-dns.com/dns-query')
+MX_TIMEOUT_SECONDS = 3
+MX_CACHE_SECONDS = 3600
+_MX_CACHE = {}
 
 
 class EmailError(ValueError):
@@ -74,13 +54,6 @@ class EmailError(ValueError):
     def __init__(self, message, token=None):
         super().__init__(message)
         self.token = token
-
-
-class MailError(Exception):
-    def __init__(self, kind, message, reason=None):
-        super().__init__(message)
-        self.kind = kind
-        self.reason = reason
 
 
 def _tokens(value):
@@ -142,181 +115,49 @@ def one_email(value):
     return found[0]
 
 
-def build_message(cfg, *, to, subject, text, html, display_name=None):
-    """Письмо: текст и HTML одним сообщением. Имя отправителя — название нашей
-    компании: письмо уходит с её ящика (mailbox.py) и подписано ею."""
-    own_name, address = parseaddr(cfg.sender)
-    local, _at, domain = address.partition('@')
-    message = EmailMessage()
-    message['Subject'] = subject
-    message['From'] = Address(display_name=own_name or display_name or '', username=local, domain=domain)
-    message['To'] = to if isinstance(to, str) else ', '.join(to)
-    if cfg.reply_to:
-        message['Reply-To'] = cfg.reply_to
-    message['Date'] = formatdate(usegmt=True)
-    message['Message-ID'] = make_msgid(domain=domain or None)
-    # Письмо отправлено программой: автоответы «я в отпуске» сюда не нужны.
-    message['Auto-Submitted'] = 'auto-generated'
-    message['X-Auto-Response-Suppress'] = 'OOF, AutoReply'
-    message.set_content(text)
-    if html:
-        message.add_alternative(html, subtype='html')
-    return message
+# ─── Какая это почта ─────────────────────────────────────────────────────────
+
+def domain_of(address):
+    return str(address or '').rpartition('@')[2].strip().lower()
 
 
-def _reply_text(exc):
-    """Ответ сервера словами: код и первая строка без служебного мусора."""
-    code = getattr(exc, 'smtp_code', None)
-    raw = getattr(exc, 'smtp_error', b'') or b''
-    text = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)
-    text = ' '.join(text.split())[:300]
-    return ('%s %s' % (code, text)).strip() if code else (text or str(exc) or exc.__class__.__name__)
+def _mx_hosts(domain):
+    """MX-хосты домена через DNS по HTTPS. Не ответил ни один — пусто (почта не узнана)."""
+    import requests
 
-
-# Способы входа по старшинству — как у smtplib.login.
-_AUTH_METHODS = ('CRAM-MD5', 'PLAIN', 'LOGIN')
-
-
-def _login(smtp, user, password):
-    """Вход в ящик — как smtplib.login, но отказ в пароле не теряется.
-
-    Gmail на неверный пароль отвечает 535 и тут же закрывает соединение. smtplib.login
-    после отказа пробует следующий способ входа и падает «Connection unexpectedly
-    closed» (найдено 21.10.2026 на попытке подключить Gmail): окно сказало бы «нет связи
-    с сервером», а на деле не принят пароль. Здесь первый отказ и остаётся ответом."""
-    smtp.ehlo_or_helo_if_needed()
-    if not smtp.has_extn('auth'):
-        raise smtplib.SMTPNotSupportedError('Сервер не предлагает вход по паролю (SMTP AUTH)')
-    advertised = smtp.esmtp_features['auth'].upper().split()
-    methods = [method for method in _AUTH_METHODS if method in advertised]
-    if not methods:
-        raise smtplib.SMTPException('Сервер не предлагает знакомого способа входа: %s' % ' '.join(advertised))
-    smtp.user, smtp.password = user, password
-    refused = None
-    for method in methods:
+    cached = _MX_CACHE.get(domain)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    for url in _DOH:
         try:
-            code, _reply = smtp.auth(method, getattr(smtp, 'auth_' + method.lower().replace('-', '_')))
-        except smtplib.SMTPAuthenticationError as exc:
-            refused = refused or exc
+            response = requests.get(url, params={'name': domain, 'type': 'MX'},
+                                    headers={'accept': 'application/dns-json'}, timeout=MX_TIMEOUT_SECONDS)
+            if response.status_code != 200:
+                continue
+            answers = response.json().get('Answer') or []
+        except Exception:  # noqa: BLE001 — сеть, не JSON: спросим другой
             continue
-        except smtplib.SMTPServerDisconnected:
-            if refused is not None:
-                raise refused from None
-            raise
-        if code in (235, 503):
-            return
-    raise refused or smtplib.SMTPAuthenticationError(535, b'Authentication failed')
+        hosts = [str(item.get('data') or '').split()[-1].rstrip('.').lower()
+                 for item in answers if item.get('type') == 15 and str(item.get('data') or '').split()]
+        _MX_CACHE[domain] = (time.monotonic() + MX_CACHE_SECONDS, hosts)
+        return hosts
+    return []
 
 
-def refusal_kind(code, text):
-    """Чей это отказ: ящика (throttled), временный (temporary) или адреса (permanent)."""
-    if _SENDER_TROUBLE_RE.search(str(text or '')):
-        return 'throttled'
-    try:
-        code = int(code or 0)
-    except (TypeError, ValueError):
-        code = 0
-    return 'temporary' if 400 <= code < 500 else 'permanent'
+def provider_of(address, *, mx=None):
+    """Ключ почты (gmail, yandex, mailru, microsoft) по адресу либо None."""
+    return provider_of_domain(domain_of(address), mx=mx)
 
 
-class Transport:
-    """Одно соединение с почтовым сервером на весь прогон: войти один раз и
-    отправить несколько писем. `with Transport(cfg) as smtp: smtp.send(message)`."""
-
-    def __init__(self, cfg, timeout=TIMEOUT_SECONDS):
-        self.cfg = cfg
-        self.timeout = timeout
-        self.smtp = None
-
-    def __enter__(self):
-        cfg = self.cfg
-        try:
-            if cfg.security == 'ssl':
-                self.smtp = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=self.timeout,
-                                             context=ssl.create_default_context())
-            else:
-                self.smtp = smtplib.SMTP(cfg.host, cfg.port, timeout=self.timeout)
-                self.smtp.ehlo()
-                if cfg.security == 'starttls':
-                    self.smtp.starttls(context=ssl.create_default_context())
-                    self.smtp.ehlo()
-            if cfg.user:
-                _login(self.smtp, cfg.user, cfg.password)
-        except smtplib.SMTPAuthenticationError as exc:
-            self.close()
-            raise MailError('transport', 'Почта не приняла логин или пароль приложения (%s)' % _reply_text(exc),
-                            reason='login')
-        except UnicodeEncodeError:
-            # Логин и пароль почтовый сервер принимает только латиницей (smtplib кодирует их в ASCII).
-            self.close()
-            raise MailError('transport', 'Почта не приняла логин или пароль приложения (в пароле есть русские '
-                            'буквы или другие знаки не латиницей)', reason='login')
-        except (smtplib.SMTPException, OSError) as exc:
-            self.close()
-            raise MailError('transport', 'Нет связи с почтовым сервером %s:%s — %s'
-                            % (cfg.host, cfg.port, _reply_text(exc) if isinstance(exc, smtplib.SMTPException)
-                               else exc.__class__.__name__), reason='connect')
-        return self
-
-    def __exit__(self, *_exc):
-        self.close()
-        return False
-
-    @property
-    def closed(self):
-        """Связь оборвалась посреди прогона — остальные письма ждут следующего."""
-        return self.smtp is None
-
-    def deadline(self, seconds):
-        """Сколько ждать сервер на следующей операции: прогон отдаёт остаток бюджета."""
-        sock = getattr(self.smtp, 'sock', None)
-        if sock is not None:
-            sock.settimeout(max(1.0, float(seconds)))
-
-    def close(self):
-        smtp, self.smtp = self.smtp, None
-        if smtp is None:
-            return
-        try:
-            if getattr(smtp, 'sock', None) is not None:
-                smtp.sock.settimeout(QUIT_SECONDS)
-            smtp.quit()
-        except Exception:  # noqa: BLE001 — соединение и так закрывается
-            try:
-                smtp.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-    def _drop_if_closed(self):
-        # На ответ 421 smtplib сам закрывает сокет: следующее письмо не должно
-        # тратить попытку на «соединение закрыто».
-        if self.smtp is not None and getattr(self.smtp, 'sock', None) is None:
-            self.close()
-
-    def send(self, message):
-        """Отправить письмо. Возвращает Message-ID; не вышло — MailError."""
-        if self.smtp is None:
-            raise MailError('temporary', 'Соединение с почтовым сервером закрыто')
-        try:
-            refused = self.smtp.send_message(message)
-        except smtplib.SMTPRecipientsRefused as exc:
-            self._drop_if_closed()
-            code, reply = next(iter(exc.recipients.values()), (None, b''))
-            detail = ' '.join((reply.decode('utf-8', 'replace') if isinstance(reply, bytes) else str(reply)).split())
-            raise MailError(refusal_kind(code, detail), 'Сервер не принял адрес: %s %s' % (code, detail[:300]))
-        except smtplib.SMTPSenderRefused as exc:
-            self._drop_if_closed()
-            raise MailError('transport', 'Ящик не пускает отправителя %s (%s)' % (exc.sender, _reply_text(exc)),
-                            reason='sender')
-        except smtplib.SMTPResponseException as exc:
-            self._drop_if_closed()
-            reply = _reply_text(exc)
-            raise MailError(refusal_kind(exc.smtp_code, reply), 'Сервер не принял письмо: %s' % reply)
-        except (smtplib.SMTPServerDisconnected, smtplib.SMTPException, socket.timeout, OSError) as exc:
-            self.close()
-            raise MailError('temporary', 'Связь с почтовым сервером оборвалась (%s)' % exc.__class__.__name__)
-        if refused:
-            code, reply = next(iter(refused.values()))
-            detail = ' '.join((reply.decode('utf-8', 'replace') if isinstance(reply, bytes) else str(reply)).split())
-            raise MailError(refusal_kind(code, detail), 'Сервер не принял адрес: %s %s' % (code, detail[:300]))
-        return message['Message-ID']
+def provider_of_domain(domain, *, mx=None):
+    """То же по домену: публичная почта — по таблице, свой домен — по MX."""
+    domain = str(domain or '').strip().lower()
+    if not domain:
+        return None
+    if domain in _PUBLIC:
+        return _PUBLIC[domain]
+    for host in (mx or _mx_hosts)(domain):
+        for suffix, key in _MX:
+            if host == suffix or host.endswith('.' + suffix):
+                return key
+    return None

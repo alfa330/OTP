@@ -903,7 +903,7 @@ _STATEMENTS = [
     "ON payment_requisites_mailings (legal_entity_id) WHERE status = 'pending'",
     "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mailings_entity "
     "ON payment_requisites_mailings (legal_entity_id, id DESC)",
-    # Планировщик спрашивает раз в минуту, есть ли работа: по этому индексу.
+    # По нему раз в минуту спрашивал работу планировщик автоотправки (до 27.10.2026).
     "CREATE INDEX IF NOT EXISTS idx_payment_requisites_mailings_open "
     "ON payment_requisites_mailings (send_after) WHERE status IN ('pending', 'sending')",
     """
@@ -934,8 +934,8 @@ _STATEMENTS = [
     #     увидит те же адреса;
     #   * кому уходит письмо, выбирают галочками в окне письма, пока оно ждёт: снятые
     #     поставщики — в excluded_counterparty_ids;
-    #   * у каждой нашей компании своя почта для писем (payments/mailbox.py), пароль —
-    #     зашифрованным.
+    #   * у каждой нашей компании своя почта для писем (payments/mailbox.py до 27.10.2026),
+    #     пароль — зашифрованным.
     """
     CREATE TABLE IF NOT EXISTS payment_counterparty_emails (
         id               SERIAL PRIMARY KEY,
@@ -974,7 +974,8 @@ _STATEMENTS = [
         updated_by_name  VARCHAR(200)
     )
     """,
-    # Вход через Google (21.10.2026, google_mail.py): почта, созданная раньше, получает 'oauth' в проверке.
+    # Вход через Google (21.10.2026, google_mail.py до 27.10.2026): почта, созданная раньше, получает
+    # 'oauth' в проверке.
     """
     DO $$
     BEGIN
@@ -987,6 +988,16 @@ _STATEMENTS = [
         END IF;
     END $$
     """,
+    # 27.10.2026, владелец: «пока убери автоотправку и сделай полу ручной» (requisites_mail.py).
+    # Письмо открывают в почте компании кнопкой «Отправить письмо» — кто и когда; у компании —
+    # «Почта для писем» и какая это почта (Gmail кнопка открывает в браузере). Подключённые
+    # для автоотправки ящики (payment_entity_mailboxes) остаются как были: к ней могут вернуться.
+    "ALTER TABLE payment_requisites_mailings ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP",
+    "ALTER TABLE payment_requisites_mailings ADD COLUMN IF NOT EXISTS opened_by INTEGER "
+    "REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE payment_requisites_mailings ADD COLUMN IF NOT EXISTS opened_by_name VARCHAR(200)",
+    "ALTER TABLE payment_legal_entities ADD COLUMN IF NOT EXISTS letters_email VARCHAR(254)",
+    "ALTER TABLE payment_legal_entities ADD COLUMN IF NOT EXISTS letters_provider VARCHAR(32)",
 
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
@@ -1096,6 +1107,20 @@ def init_payments_schema(cursor):
         cursor.execute("ROLLBACK TO SAVEPOINT payments_counterparty_emails")
         import logging
         logging.exception('Оплата счетов: адреса поставщиков не перенесены в «Почту поставщиков»')
+    # 27.10.2026, автоотправка выключена: почта, подключённая у компании, один раз становится
+    # её «Почтой для писем», а письмо, которое портал не допослал, закрывается.
+    cursor.execute("SAVEPOINT payments_manual_letters")
+    try:
+        from . import requisites_mail
+        requisites_mail.adopt_mailbox_addresses(cursor)
+        requisites_mail.close_auto_sending(cursor)
+        cursor.execute("RELEASE SAVEPOINT payments_manual_letters")
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, 'pgcode', None) in ('55P03', '40P01'):
+            raise
+        cursor.execute("ROLLBACK TO SAVEPOINT payments_manual_letters")
+        import logging
+        logging.exception('Оплата счетов: почта для писем не перенесена из подключённой почты')
     # Заявки первой версии (12 шагов) переводятся на этапы и подзадачи. Под
     # своим SAVEPOINT: сбой переноса не должен оставить раздел без схемы —
     # непереведённую заявку перенос подберёт при следующем старте.
