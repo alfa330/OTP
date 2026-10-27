@@ -15,6 +15,10 @@ function harness(overrides = {}) {
     const slots = [], timers = new Map(), streams = [];
     let now = 0, timerId = 0, index = 0, dirty = true, mounted = true, effects = [], output;
     const calls = { capability: 0, thread: 0, list: 0 };
+    // refusals — статусы, которыми ответят следующие подключения к потоку;
+    // capabilityEnabled — ответ проверки возможностей (отозванный доступ — false).
+    const refusals = [], refused = [];
+    const access = { capabilityEnabled: true };
     const options = { apiBaseUrl: '/fixture', mayProcess: true, account: 'op', active: true,
         headers: () => ({ Authorization: 'fixture' }), selected: { channelId: 'c', chatId: 'one' },
         refreshThread: async () => { calls.thread++; }, refreshList: async () => { calls.list++; }, ...overrides };
@@ -25,10 +29,15 @@ function harness(overrides = {}) {
         const id = ++timerId; timers.set(id, { fn, at: now + delay, interval, delay }); return id;
     };
     const clear = (id) => timers.delete(id);
-    const fetch = async (url, { signal }) => {
+    const fetch = async (url, { signal, headers = {} }) => {
+        if (refusals.length) {
+            const status = refusals.shift();
+            refused.push({ url, headers, status });
+            return { ok: false, status, body: null };
+        }
         let pending;
         const frames = [];
-        const stream = { url, signal, emit(frame) {
+        const stream = { url, headers, signal, emit(frame) {
             const chunk = { done: false, value: new TextEncoder().encode(frame) };
             if (pending) { const resolve = pending.resolve; pending = null; resolve(chunk); }
             else frames.push(chunk);
@@ -61,7 +70,7 @@ function harness(overrides = {}) {
             const value = typeof next === 'function' ? next(slots[i].value) : next;
             if (!Object.is(value, slots[i].value)) { slots[i].value = value; dirty = true; }
         }];
-    }, { get: async () => { calls.capability++; return { data: { enabled: true, canSend: true } }; } },
+    }, { get: async () => { calls.capability++; return { data: { enabled: access.capabilityEnabled, canSend: true } }; } },
     splitPilotEvents, pilotChatKey, document, fetch, schedule, clear,
     (fn, delay) => schedule(fn, delay, true), clear, { now: () => now });
 
@@ -74,7 +83,7 @@ function harness(overrides = {}) {
             await Promise.resolve();
         }
     };
-    return { calls, streams, timers, options, flush,
+    return { calls, streams, timers, options, flush, refusals, refused, access,
         get output() { return output; },
         async emit(event, data = {}, id = null) {
             streams.at(-1).emit(`${id === null ? '' : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -153,7 +162,7 @@ test('typing frames share the stream without refreshing any pane or entering mes
     // Typing frames advance the resume point like any other frame.
     await h.emit('typing', { typing: [typing], serverTime: 1030 }, 22);
     await h.tick(5000); await h.end(); await h.tick(1);
-    assert.match(h.streams.at(-1).url, /epoch=e1&after=22$/);
+    assert.equal(h.streams.at(-1).headers['Last-Event-ID'], 'e1:22');
     const beforeHide = resets;
     await h.visible(false); assert.equal(resets, beforeHide + 1);
     await h.close();
@@ -176,7 +185,7 @@ test('driver card frames reach only the card and reconcile it after a reconnect'
     assert.equal(cardReads, 1);
     // Кадр карточки двигает точку возобновления, как любой другой.
     await h.tick(5000); await h.end(); await h.tick(1);
-    assert.match(h.streams.at(-1).url, /epoch=e1&after=1$/);
+    assert.equal(h.streams.at(-1).headers['Last-Event-ID'], 'e1:1');
     await h.close();
 });
 
@@ -285,13 +294,14 @@ test('a planned server close reconnects at once from the last frame, quietly and
     await h.tick(0);
     states.push(h.output.connection);
     assert.equal(h.streams.length, 2, 'reconnects immediately');
-    assert.match(h.streams[1].url, /[?&]epoch=process-1&after=7$/);
+    assert.equal(h.streams[1].headers['Last-Event-ID'], 'process-1:7');
+    assert.equal(h.streams[1].url, h.streams[0].url, 'адрес постоянный: браузер не повторяет OPTIONS');
     await h.emit('connected', { ready: true, epoch: 'process-1', seq: 7, resumed: true });
     states.push(h.output.connection);
     await h.tick(1500);
     assert.deepEqual(states, ['live', 'live', 'live'], 'no "Восстанавливаем связь…" for a planned close');
-    assert.deepEqual(h.calls, { ...reconciled, capability: reconciled.capability + 1 },
-        'only the auth/capability check; the gap was replayed by the server');
+    assert.deepEqual(h.calls, reconciled,
+        'no capability request: the stream checks access itself; the gap was replayed by the server');
     await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm2', statusOnly: true, status: 'read' }] }, 9);
     assert.deepEqual(applied.map((event) => event.messageId), ['m1', 'm2']);
     await h.close(); assert.equal(h.timers.size, 0);
@@ -308,13 +318,13 @@ test('a cursor the server no longer knows reconciles; a stream that dies young b
     assert.equal(h.streams.length, 1, 'no instant reconnect loop');
     await h.tick(1000);
     assert.equal(h.streams.length, 2);
-    assert.match(h.streams[1].url, /epoch=process-1&after=3$/);
+    assert.equal(h.streams[1].headers['Last-Event-ID'], 'process-1:3');
     // A deploy restarted the server: another epoch, the gap is unknown.
     await h.emit('connected', { ready: true, epoch: 'process-2', seq: 0, resumed: false });
     await h.tick(1000);
     assert.equal(h.calls.thread, 2); assert.equal(h.calls.list, 2);
     await h.visible(false); await h.visible(true);
-    assert.match(h.streams[2].url, /epoch=process-2&after=0$/, 'a hidden tab resumes too');
+    assert.equal(h.streams[2].headers['Last-Event-ID'], 'process-2:0', 'a hidden tab resumes too');
     await h.close(); assert.equal(h.timers.size, 0);
 });
 
@@ -326,7 +336,7 @@ test('a re-read asked for but not finished before the tab hides is not skipped b
     await h.visible(false);
     assert.deepEqual([h.calls.thread, h.calls.list], [0, 0]);
     await h.visible(true);
-    assert.doesNotMatch(h.streams.at(-1).url, /epoch=/, 'the next stream starts fresh');
+    assert.equal(h.streams.at(-1).headers['Last-Event-ID'], undefined, 'the next stream starts fresh');
     await h.emit('connected', { ready: true, epoch: 'process-1', seq: 9, resumed: false });
     await h.tick(1000);
     assert.deepEqual([h.calls.thread, h.calls.list], [1, 1]);
@@ -377,10 +387,63 @@ test('счётчик боковой панели (only=unread): поток то�
     await h.end();
     await h.tick(0);
     assert.equal(h.streams.length, 2);
-    assert.match(h.streams[1].url, /only=unread&epoch=process-1&after=11$/, 'продолжение — после кадра cursor');
+    assert.match(h.streams[1].url, /\/api\/wazzup\/pilot\/stream\?account=op&only=unread$/);
+    assert.equal(h.streams[1].headers['Last-Event-ID'], 'process-1:11', 'продолжение — после кадра cursor');
     await h.emit('connected', { ready: true, epoch: 'process-1', seq: 11, resumed: true });
     await h.tick(1500);
     assert.equal(unreadRefreshes.length, 1, 'продолженный поток снимок не перечитывает');
     assert.deepEqual({ thread: h.calls.thread, list: h.calls.list }, panes);
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('плановое переподключение с истёкшим токеном: один тихий повтор через проверку возможностей', async () => {
+    const h = harness();
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 5, resumed: false });
+    await h.tick(6000);
+    const before = { ...h.calls };
+    h.refusals.push(401);                 // access-токен истёк за время потока
+    const states = [];
+    await h.end(); states.push(h.output.connection);
+    await h.tick(0); states.push(h.output.connection);
+    assert.equal(h.refused.length, 1, 'сначала — сразу в поток, без проверки');
+    assert.equal(h.refused[0].headers['Last-Event-ID'], 'process-1:5');
+    assert.equal(h.calls.capability, before.capability + 1, 'повтор идёт через axios: он обновляет токен');
+    assert.equal(h.streams.length, 2);
+    assert.equal(h.streams[1].headers['Last-Event-ID'], 'process-1:5', 'и продолжает с того же места');
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 5, resumed: true });
+    states.push(h.output.connection);
+    assert.deepEqual(states, ['live', 'live', 'live'], 'без «Восстанавливаем связь…»');
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('плановое переподключение после отзыва доступа: одна проверка — и раздел закрыт', async () => {
+    const h = harness();
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 2, resumed: false });
+    await h.tick(6000);
+    h.refusals.push(403);                 // замок QR снова закрыт
+    h.access.capabilityEnabled = false;
+    await h.end(); await h.tick(0);
+    assert.equal(h.refused.length, 1);
+    assert.equal(h.streams.length, 1, 'нового потока нет');
+    assert.equal(h.output.connection, 'unavailable');
+    await h.tick(60000);
+    assert.equal(h.refused.length, 1, 'и по кругу не стучится');
+    assert.equal(h.streams.length, 1);
+    await h.close(); assert.equal(h.timers.size, 0);
+});
+
+test('отказ полной проверки после повтора не уходит в цикл', async () => {
+    const h = harness();
+    await h.flush();
+    await h.emit('connected', { ready: true, epoch: 'process-1', seq: 2, resumed: false });
+    await h.tick(6000);
+    h.refusals.push(401, 401);            // и после обновления токена поток не пускает
+    await h.end(); await h.tick(0);
+    assert.equal(h.refused.length, 2);
+    assert.equal(h.output.connection, 'unavailable');
+    await h.tick(60000);
+    assert.equal(h.refused.length, 2);
     await h.close(); assert.equal(h.timers.size, 0);
 });

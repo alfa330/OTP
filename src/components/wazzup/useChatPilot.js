@@ -87,28 +87,35 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
             }, lane.delay);
         };
         const reconcile = () => { enqueue('thread'); enqueue('list'); enqueue('unread'); enqueue('notes'); enqueue('cards'); };
-        const connect = async (planned = false) => {
+        /* quiet — переподключение, о котором не сообщаем: плановое (сервер
+           перепроверяет доступ раз в ~2 минуты) или его повтор с проверкой.
+           check — сначала спросить возможности через axios: он же обновляет
+           истёкший токен. Плановому переподключению это не нужно — доступ
+           проверяет сам поток, а 401/403 даёт один повтор с проверкой. Так цикл
+           стоит один запрос, а не три (27.10.2026). */
+        const connect = async ({ quiet = false, check = true } = {}) => {
             if (stopped) return;
             controller = new AbortController();
-            // A planned reconnect (the server re-checks access every ~2 minutes)
-            // is not news: the connection note stays hidden through it.
-            if (!planned) setConnection('connecting');
+            if (!quiet) setConnection('connecting');
             let denied = false;
             let ended = false;
             let openedAt = 0;
             let watchdog;
             const handshake = setTimeout(() => controller.abort(), 20000);
             try {
-                // axios performs the regular auth refresh before each SSE connection.
-                const { data } = await axios.get(`${apiBaseUrl}/api/wazzup/pilot`, {
-                    params: { account: 'op' }, headers: latest.current.headers(), signal: controller.signal, timeout: 15000,
-                });
-                if (!data.enabled) { denied = true; setCapability(data); return; }
+                if (check) {
+                    const { data } = await axios.get(`${apiBaseUrl}/api/wazzup/pilot`, {
+                        params: { account: 'op' }, headers: latest.current.headers(), signal: controller.signal, timeout: 15000,
+                    });
+                    if (!data.enabled) { denied = true; setCapability(data); return; }
+                }
+                // Точка возобновления — заголовком: адрес потока не меняется, и
+                // браузер не повторяет OPTIONS-запрос при каждом переподключении.
                 const { epoch, seq } = resume.current;
-                const from = epoch && Number.isInteger(seq) ? `&epoch=${encodeURIComponent(epoch)}&after=${seq}` : '';
+                const from = epoch && Number.isInteger(seq) ? { 'Last-Event-ID': `${epoch}:${seq}` } : {};
                 const subset = only ? `&only=${encodeURIComponent(only)}` : '';
-                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op${subset}${from}`, {
-                    headers: { ...latest.current.headers(), Accept: 'text/event-stream' },
+                const response = await fetch(`${apiBaseUrl}/api/wazzup/pilot/stream?account=op${subset}`, {
+                    headers: { ...latest.current.headers(), Accept: 'text/event-stream', ...from },
                     credentials: 'include', signal: controller.signal, cache: 'no-store',
                 });
                 if (!response.ok || !response.body) {
@@ -180,11 +187,14 @@ export default function useChatPilot({ apiBaseUrl, mayProcess, account, active, 
                     // The server closed a healthy stream itself: reconnect at once and
                     // quietly. A stream that dies young is a fault and backs off.
                     const replan = !denied && ended && Date.now() - openedAt >= 5000;
-                    if (replan) reconnectTimer = setTimeout(() => connect(true), 0);
+                    // Отказ без проверки может значить лишь истёкший токен: повтор
+                    // идёт через axios, он обновит токен или подтвердит отказ.
+                    const recheck = denied && !check;
+                    if (replan || recheck) reconnectTimer = setTimeout(() => connect({ quiet: true, check: recheck }), 0);
                     else {
                         latest.current.clearTyping?.();
                         setConnection(denied ? 'unavailable' : 'reconnecting');
-                        if (!denied) reconnectTimer = setTimeout(connect,
+                        if (!denied) reconnectTimer = setTimeout(() => connect(),
                             Math.min(15000, 1000 * 2 ** Math.min(failures++, 4)) + Math.random() * 300);
                     }
                 }
