@@ -8,7 +8,8 @@ Blueprint собирается фабрикой и получает зависи
 авторизация — общий require_api_key, ошибка — {"error": "...", "code": "..."}.
 
 Ручки ночного отчёта (#398):
-    GET    ''                              экран: права, список отчётов, выбранный отчёт со строками
+    GET    ''                              экран: права, отчёт за ?date=&kind= (без них — последний) со
+                                           строками, границы истории для календаря
     GET    /reports/<id>                   отчёт со строками (смена отчёта, опрос во время сбора)
     POST   /reports                        собрать отчёт текущего слота (пропустил планировщик)
     POST   /reports/<id>/refresh           собрать заново отчёт этой ночи; ручное «Состояние» остаётся
@@ -20,6 +21,7 @@ Blueprint собирается фабрикой и получает зависи
 """
 
 import logging
+from datetime import date
 from functools import wraps
 from urllib.parse import quote
 
@@ -54,7 +56,6 @@ def public_report(report):
         'slot_at': _iso(report['slot_at']), 'status': report['status'],
         'collected_at': _iso(report.get('collected_at')), 'started_at': _iso(report.get('started_at')),
         'sources': report.get('sources') or {}, 'error': report.get('error'),
-        'counts': report.get('counts'),
         'shows_rent': report['kind'] == rules.KIND_NIGHT,
     }
 
@@ -110,10 +111,10 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         names = queries.user_names(cursor, [row.get('state_by') for row in rows])
         return public_report(report), [public_row(row, names) for row in rows]
 
-    def _slot_info(ctx, now, reports):
+    def _slot_info(ctx, now, cursor):
         """Текущий слот: какой отчёт сейчас должен быть и можно ли его собрать кнопкой."""
         kind, slot = rules.current_slot(now)
-        existing = next((r for r in reports if r['kind'] == kind and r['slot_at'] == slot), None)
+        existing = queries.find_report(cursor, kind, slot)
         in_window = rules.can_catch_up(slot, now)
         next_kind, next_at = rules.next_slot(now)
         return {
@@ -126,21 +127,40 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     # ─── Экран ───────────────────────────────────────────────────────────────
 
+    def _requested_slot():
+        """?date=ГГГГ-ММ-ДД&kind=night|morning — отчёт за выбранные дату и время; иначе None."""
+        kind = request.args.get('kind')
+        try:
+            day = date.fromisoformat(str(request.args.get('date') or ''))
+        except ValueError:
+            return None
+        return (kind, day) if kind in rules.KINDS else None
+
     @rental_route('')
     def rental_screen(ctx):
+        """Экран: отчёт за выбранные дату и время (без выбора — последний), границы истории."""
         now = queries.now_almaty()
-        selected_id = _int(request.args.get('report'))
+        requested = _requested_slot()
         with db._get_cursor() as cursor:
             queries.expire_stale(cursor, now)
-            reports = queries.list_reports(cursor)
-            selected = next((r for r in reports if r['id'] == selected_id), None) or (reports[0] if reports else None)
+            if requested:
+                selected = queries.find_report(cursor, requested[0], rules.slot_at(requested[0], requested[1]))
+            else:
+                selected = queries.latest_report(cursor)
             report, rows = _report_payload(cursor, selected) if selected else (None, [])
+            first, last = queries.report_bounds(cursor)
+            slot = _slot_info(ctx, now, cursor)
         return jsonify({
             'capabilities': access.capabilities(ctx),
-            'reports': [public_report(r) for r in reports],
             'report': report,
             'rows': rows,
-            'slot': _slot_info(ctx, now, reports),
+            # Что выбрано: отчёта за выбранные дату и время может и не быть — экран так и скажет.
+            'selected': ({'date': requested[1].isoformat(), 'kind': requested[0]} if requested
+                         else ({'date': selected['slot_at'].date().isoformat(), 'kind': selected['kind']}
+                               if selected else None)),
+            'history': {'first': first.date().isoformat() if first else None,
+                        'last': last.date().isoformat() if last else None},
+            'slot': slot,
             'collecting': service.running(),
             'server_time': _iso(now),
             'states': [{'value': key, 'label': rules.STATE_LABELS[key]} for key in rules.STATES],

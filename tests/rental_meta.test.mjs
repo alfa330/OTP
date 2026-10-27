@@ -4,12 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    FILTERS, exportFileName, failedSources, gpsSourceFailed, matchesQuery, normalizePlate,
-    shortTime, silenceLabel, slotLabel,
+    FILTERS, KIND_OPTIONS, exportFileName, failedSources, gpsSourceFailed, matchesQuery, normalizePlate,
+    pickLabel, shortTime, silenceLabel, slotLabel,
 } from '../src/components/rental/rentalMeta.js';
 
 test('slot and signal time keep Almaty digits as they are', () => {
     assert.equal(slotLabel('2026-10-28T01:00:00'), '28 октября, 01:00');
+    assert.equal(pickLabel('2026-10-28', 'morning'), '28 октября, 07:00');
+    assert.deepEqual(KIND_OPTIONS.map((o) => o.label), ['01:00', '07:00']);
     assert.equal(shortTime('2026-07-07T18:39:12'), '07.07 18:39');
     assert.equal(shortTime(null), '');
 });

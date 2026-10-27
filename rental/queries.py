@@ -49,16 +49,13 @@ _REPORT_COLUMNS = ("r.id, r.kind, r.slot_at, r.status, r.collected_at, r.sources
                    "r.started_at, r.updated_at")
 
 
-def _report(row, counts=None):
+def _report(row):
     sources = row[5]
     if isinstance(sources, str):
         sources = json.loads(sources or '{}')
-    report = {'id': int(row[0]), 'kind': row[1], 'slot_at': row[2], 'status': row[3],
-              'collected_at': row[4], 'sources': sources or {}, 'error': row[6],
-              'created_by': row[7], 'started_at': row[8], 'updated_at': row[9]}
-    if counts is not None:
-        report['counts'] = counts
-    return report
+    return {'id': int(row[0]), 'kind': row[1], 'slot_at': row[2], 'status': row[3],
+            'collected_at': row[4], 'sources': sources or {}, 'error': row[6],
+            'created_by': row[7], 'started_at': row[8], 'updated_at': row[9]}
 
 
 def expire_stale(cursor, now):
@@ -71,19 +68,17 @@ def expire_stale(cursor, now):
     """, (now, now, STALE_COLLECTING_MINUTES))
 
 
-def list_reports(cursor, limit=90):
-    cursor.execute("""
-        SELECT """ + _REPORT_COLUMNS + """,
-               COUNT(w.id), COUNT(w.id) FILTER (WHERE w.gps_status = 'offline'),
-               COUNT(w.id) FILTER (WHERE w.gps_status = 'none')
-          FROM rental_night_reports r
-          LEFT JOIN rental_night_rows w ON w.report_id = r.id
-         GROUP BY r.id
-         ORDER BY r.slot_at DESC, r.id DESC
-         LIMIT %s
-    """, (int(limit),))
-    return [_report(row[:10], {'total': int(row[10]), 'offline': int(row[11]), 'no_gps': int(row[12])})
-            for row in cursor.fetchall()]
+def latest_report(cursor):
+    cursor.execute("SELECT " + _REPORT_COLUMNS + " FROM rental_night_reports r ORDER BY r.slot_at DESC, r.id DESC LIMIT 1")
+    row = cursor.fetchone()
+    return _report(row) if row else None
+
+
+def report_bounds(cursor):
+    """Первый и последний слоты истории — границы календаря на экране. (None, None) — отчётов нет."""
+    cursor.execute("SELECT MIN(slot_at), MAX(slot_at) FROM rental_night_reports")
+    first, last = cursor.fetchone()
+    return first, last
 
 
 def get_report(cursor, report_id, *, for_update=False):

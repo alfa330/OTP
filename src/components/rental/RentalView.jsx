@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Car, CircleAlert, Download, Loader2, RefreshCw, Search, X } from 'lucide-react';
-import CustomSelect from '../ui/CustomSelect';
+import IosDatePicker from '../ui/DatePicker';
 import { APPLE_FONT, IosHint, IosMenu, IosSegmented, iosCard } from '../ui/ios';
 import {
-    FILTERS, GPS_LABELS, RENT_LABELS, STATE_LABELS, STATES, clockTime, errorOf, exportFileName,
-    failedSources, gpsSourceFailed, matchesQuery, shortTime, silenceLabel, slotLabel,
+    FILTERS, GPS_LABELS, KIND_OPTIONS, RENT_LABELS, STATE_LABELS, STATES, clockTime, errorOf, exportFileName,
+    failedSources, gpsSourceFailed, matchesQuery, pickLabel, shortTime, silenceLabel,
 } from './rentalMeta';
 
 /*
@@ -142,20 +142,21 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
-    const [reportId, setReportId] = useState(null);
+    // Выбранные дата и время отчёта; null — последний отчёт (так раздел открывается).
+    const [pick, setPick] = useState(null);
     const [filter, setFilter] = useState('all');
     const [query, setQuery] = useState('');
     const [busy, setBusy] = useState({});
 
     const load = useCallback(async () => {
         try {
-            const { data: screen } = await api.get('', reportId ? { report: reportId } : undefined);
+            const { data: screen } = await api.get('', pick ? { date: pick.date, kind: pick.kind } : undefined);
             setData(screen);
             setError('');
         } catch (requestError) {
             setError(errorOf(requestError, 'Раздел не открылся — попробуйте обновить страницу'));
         }
-    }, [api, reportId]);
+    }, [api, pick]);
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => {
@@ -195,8 +196,8 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const collect = () => run('collect', async () => {
         try {
-            const { data: result } = await api.post('/reports');
-            setReportId(result.report?.id || null);
+            await api.post('/reports');
+            setPick(null);
             toast('Собираем отчёт — это меньше минуты', 'success');
         } catch (requestError) {
             toast(errorOf(requestError, 'Сбор не начался'), 'error');
@@ -258,15 +259,12 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     }
 
     const slot = data.slot || {};
-    const reports = data.reports || [];
+    const selected = data.selected || null;
+    const history = data.history || {};
+    const today = String(data.server_time || '').slice(0, 10);
     const canRefresh = report && slot.report_id === report.id && slot.in_window && !collecting;
     const showsRent = Boolean(report?.shows_rent);
     const failed = report ? failedSources(report.sources) : [];
-    const reportOptions = reports.map((item) => ({
-        value: item.id,
-        label: slotLabel(item.slot_at),
-        meta: item.status === 'collecting' ? 'собирается' : item.status === 'failed' ? 'не собран' : '',
-    }));
 
     const notices = [];
     if (slot.can_collect && !collecting) {
@@ -301,7 +299,8 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const header = (
         <header className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
             <div className="flex min-w-0 items-center gap-3">
-                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-[14px] bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-[0_6px_16px_rgba(79,70,229,0.25)]">
+                {/* Плитка без градиента — владелец 27.10.2026: «не нравится градиент, его надо убрать». */}
+                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-[14px] bg-blue-600 text-white shadow-sm">
                     <Car size={24} strokeWidth={2} />
                 </span>
                 <div className="min-w-0 grow basis-0">
@@ -312,24 +311,29 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     <p className="mt-0.5 text-[13px] text-slate-500">Ночной отчёт по арендным машинам</p>
                 </div>
             </div>
-            {report && (
+            {/* Прошлые отчёты — по дате и времени (ТЗ п. 4: данные за предыдущие даты и время
+                заполнения). Видно, как только есть хотя бы один отчёт. */}
+            {history.first && selected && (
                 <div className="flex flex-wrap items-center gap-2">
-                    {reportOptions.length > 1 && (
-                        <CustomSelect
-                            variant="ios"
-                            className="w-[210px]"
-                            ariaLabel="Отчёт"
-                            value={report.id}
-                            onChange={(value) => setReportId(value)}
-                            options={reportOptions}
-                        />
-                    )}
+                    <IosDatePicker
+                        ariaLabel="Дата отчёта"
+                        value={selected.date}
+                        min={history.first}
+                        max={today || undefined}
+                        onChange={(value) => value && setPick({ date: value, kind: selected.kind })}
+                    />
+                    <IosSegmented
+                        value={selected.kind}
+                        onChange={(kind) => setPick({ date: selected.date, kind })}
+                        options={KIND_OPTIONS}
+                        ariaLabel="Время отчёта"
+                    />
                     {canRefresh && (
                         <button type="button" className={TOOLBAR_BTN} onClick={refresh} disabled={busy.refresh}>
                             {busy.refresh ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />} Обновить
                         </button>
                     )}
-                    {report.status !== 'collecting' && rows.length > 0 && (
+                    {report && report.status !== 'collecting' && rows.length > 0 && (
                         <button type="button" className={TOOLBAR_BTN} onClick={download} disabled={busy.export}>
                             {busy.export ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Excel
                         </button>
@@ -345,7 +349,13 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 {header}
                 <div className="space-y-3">
                     {notices}
-                    {!slot.can_collect && !collecting && (
+                    {selected && !collecting && (
+                        <div className={`${iosCard} px-6 py-12 text-center`}>
+                            <div className="text-[15px] font-semibold text-slate-800">За {pickLabel(selected.date, selected.kind)} отчёта нет</div>
+                            <div className="mt-1 text-[13px] text-slate-500">Отчёты собираются каждую ночь в 01:00 и 07:00.</div>
+                        </div>
+                    )}
+                    {!selected && !slot.can_collect && !collecting && (
                         <div className={`${iosCard} px-6 py-12 text-center`}>
                             <div className="text-[15px] font-semibold text-slate-800">Отчётов пока нет</div>
                             <div className="mt-1 text-[13px] text-slate-500">
@@ -367,16 +377,10 @@ const RentalView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 {notices}
                 <div className={`${iosCard} overflow-hidden`}>
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-                        <div className="min-w-0">
-                            {/* Отчёт один — его слот в заголовке карточки; несколько — слот уже
-                                в выборе отчёта наверху, здесь только когда собран. */}
-                            {reportOptions.length <= 1 && (
-                                <div className="text-[15px] font-semibold text-slate-900">Отчёт за {slotLabel(report.slot_at)}</div>
-                            )}
-                            <div className={reportOptions.length <= 1 ? 'text-[12.5px] text-slate-500' : 'text-[13px] text-slate-600'}>
-                                {report.collected_at ? `Собран в ${clockTime(report.collected_at)}` : 'Ещё не собран'}
-                                {rows.length ? ` · машин ${rows.length}` : ''}
-                            </div>
+                        {/* Дата и время отчёта уже в выборе наверху — здесь только когда собран. */}
+                        <div className="min-w-0 text-[13px] text-slate-600">
+                            {report.collected_at ? `Собран в ${clockTime(report.collected_at)}` : 'Ещё не собран'}
+                            {rows.length ? ` · машин ${rows.length}` : ''}
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                             {/* На телефоне четыре сегмента со счётчиками шире карточки — листаются вбок. */}

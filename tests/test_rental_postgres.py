@@ -287,6 +287,32 @@ def test_section_is_closed_to_others_and_fired(client):
     assert client.get('/api/rental', headers=_as(HEAD_OOZ)).status_code == 200
 
 
+def test_history_by_date_and_time(client, env):
+    env['collector'].result['rows'] = [_row('111AAA02')]
+    assert client.get('/api/rental', headers=_as(NIGHT_OP)).get_json()['history'] == {'first': None, 'last': None}
+    env['service'].start(rules.KIND_NIGHT, datetime(2026, 10, 27, 1))
+    env['service'].start(rules.KIND_MORNING, datetime(2026, 10, 27, 7))
+    env['service'].start(rules.KIND_NIGHT, SLOT)
+
+    latest = client.get('/api/rental', headers=_as(NIGHT_OP)).get_json()
+    assert latest['selected'] == {'date': '2026-10-28', 'kind': 'night'}
+    assert latest['history'] == {'first': '2026-10-27', 'last': '2026-10-28'}
+    assert latest['report']['slot_at'] == '2026-10-28T01:00:00'
+
+    past = client.get('/api/rental?date=2026-10-27&kind=morning', headers=_as(NIGHT_OP)).get_json()
+    assert past['report']['slot_at'] == '2026-10-27T07:00:00' and past['report']['shows_rent'] is False
+    assert [row['plate'] for row in past['rows']] == ['111AAA02']
+
+    # За выбранные дату и время отчёта нет — экран получает выбор и пустой отчёт, а не последний.
+    missing = client.get('/api/rental?date=2026-10-28&kind=morning', headers=_as(NIGHT_OP)).get_json()
+    assert missing['report'] is None and missing['rows'] == []
+    assert missing['selected'] == {'date': '2026-10-28', 'kind': 'morning'}
+
+    # Кривая дата — как без выбора: последний отчёт.
+    bad = client.get('/api/rental?date=28.10.2026&kind=night', headers=_as(NIGHT_OP)).get_json()
+    assert bad['selected'] == {'date': '2026-10-28', 'kind': 'night'}
+
+
 def test_screen_state_export_and_locked_history(client, env):
     env['collector'].result['rows'] = [_row('111AAA02', address='Абая 10', in_fleet=True),
                                        _row('222BBB02', address='Утеген Батыра ул., 15А')]

@@ -30,11 +30,12 @@ export const slotLabel = (iso) => {
     return p ? `${p.day} ${MONTHS[p.month - 1]}, ${p.hour}:${p.minute}` : '';
 };
 
-/** «28 октября» — день отчёта для группировки списка. */
-export const dayLabel = (iso) => {
-    const p = parts(iso);
-    return p ? `${p.day} ${MONTHS[p.month - 1]} ${p.year}` : '';
-};
+/** Время отчёта рядом с выбором даты: вид слота на сервере → подпись. */
+export const KIND_OPTIONS = [{ value: 'night', label: '01:00' }, { value: 'morning', label: '07:00' }];
+const KIND_CLOCK = { night: '01:00', morning: '07:00' };
+
+/** «28 октября, 01:00» — выбранные дата (ГГГГ-ММ-ДД) и время отчёта. */
+export const pickLabel = (date, kind) => slotLabel(`${date}T${KIND_CLOCK[kind] || '01:00'}:00`);
 
 /** «28.10 01:12» — время сигнала и сбора. */
 export const shortTime = (iso) => {
