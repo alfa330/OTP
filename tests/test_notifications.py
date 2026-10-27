@@ -907,6 +907,44 @@ class RealtimeTicksTest(RealtimeStateMixin, unittest.TestCase):
             poked, _ = realtime.wait_for_tick(0, user_id, 0.1)
             self.assertTrue(poked, 'после LISTEN все живые потоки сверяют сводку')
 
+    def test_ticks_tell_broadcast_from_personal(self):
+        """Новость дня широковещательна (триггер news_posts шлёт {"b":1}), адресные
+        тычки — задачи, опросы, отметки «прочитано» — её не касаются. По признаку
+        клиент решает, спрашивать ли /api/news/pending."""
+        realtime._publish(frozenset({5}))
+        self.assertEqual((True, False, 1), realtime.wait_for_ticks(0, 5, 0.1))
+        realtime._publish(None)
+        self.assertEqual((True, True, 2), realtime.wait_for_ticks(1, 5, 0.1))
+        # Широковещательный старше адресного — всё равно найден: курсор один на оба.
+        realtime._publish(frozenset({5}))
+        self.assertEqual((True, True, 3), realtime.wait_for_ticks(1, 5, 0.1))
+        self.assertEqual((True, True, 3), realtime.wait_for_ticks(1, 6, 0.1), 'чужому — только широковещательный')
+        self.assertEqual((False, False, 3), realtime.wait_for_ticks(2, 6, 0.1))
+        self.assertEqual((True, 3), realtime.wait_for_tick(2, 5, 0.1), 'прежняя форма ответа цела')
+
+    def test_buffer_gap_counts_as_broadcast(self):
+        """Вытеснённым мог быть и тычок новости — значит, спросить и её."""
+        for _ in range(realtime.TICK_BUFFER_MAXLEN + 1):
+            realtime._publish(frozenset({999}))
+        self.assertEqual((True, True, realtime.current_seq()), realtime.wait_for_ticks(0, 5, 0.1))
+
+    def test_resume_only_within_the_same_process_and_ring(self):
+        for _ in range(3):
+            realtime._publish(frozenset({5}))
+        self.assertEqual((1, True), realtime.resume_from(realtime.EPOCH, '1'))
+        self.assertEqual((3, True), realtime.resume_from(realtime.EPOCH, 3))
+        for epoch, after, label in (('другой-процесс', '1', 'рестарт сервера'),
+                                    (realtime.EPOCH, '9', 'курсор из будущего'),
+                                    (realtime.EPOCH, 'x', 'мусор'),
+                                    (realtime.EPOCH, '', 'первое подключение'),
+                                    ('', '', 'без заголовка')):
+            with self.subTest(label):
+                self.assertEqual((3, False), realtime.resume_from(epoch, after))
+        for _ in range(realtime.TICK_BUFFER_MAXLEN + 1):
+            realtime._publish(frozenset({5}))
+        self.assertEqual((realtime.current_seq(), False), realtime.resume_from(realtime.EPOCH, '1'),
+                         'курсор старше кольца — полная сверка')
+
     def test_stream_slots_are_bounded(self):
         self.assertTrue(realtime.try_acquire_stream_slot(2))
         self.assertTrue(realtime.try_acquire_stream_slot(2))
@@ -965,6 +1003,62 @@ class StreamEndpointTest(RealtimeStateMixin, unittest.TestCase):
         response.close()
         self.assertEqual(0, realtime.active_stream_count(),
                          'слот обязан вернуться при закрытии ответа')
+
+    @staticmethod
+    def _frames(response):
+        stream = response.response if hasattr(response.response, '__next__') else iter(response.response)
+        return (frame.decode('utf-8') if isinstance(frame, bytes) else frame for frame in stream)
+
+    def test_connected_names_process_cursor_and_whether_it_resumed(self):
+        client = self._client(listen_connect=lambda: None, stream_limit=2)
+        realtime._publish(frozenset({7}))
+        response = client.get('/api/notifications/stream', buffered=False)
+        parts = next(self._frames(response)).split()
+        self.assertEqual([':', 'connected'], parts[:2])
+        self.assertEqual([realtime.EPOCH, '1', '0'], parts[3:6], 'первое подключение — не продолжение')
+        response.close()
+
+    def test_resumed_stream_replays_the_missed_tick_and_marks_it_personal(self):
+        """Вкладка вернулась из фона: сервер продолжает с её места, и пропущенный
+        адресный тычок приходит первым же кадром — без перечитки всей сводки."""
+        client = self._client(listen_connect=lambda: None, stream_limit=2)
+        response = client.get('/api/notifications/stream', buffered=False)
+        cursor = next(self._frames(response)).split()[4]
+        response.close()
+        realtime._publish(frozenset({2}))   # пока вкладка была в фоне
+        response = client.get('/api/notifications/stream', buffered=False,
+                              headers={'Last-Event-ID': f'{realtime.EPOCH}:{cursor}'})
+        frames = self._frames(response)
+        self.assertTrue(next(frames).rstrip().endswith(' 1'), 'продолжен')
+        self.assertEqual('id: %d\nevent: reload\ndata: {"b":0}\n\n' % realtime.current_seq(), next(frames))
+        response.close()
+
+    def test_broadcast_reload_tells_the_client_to_ask_for_news(self):
+        client = self._client(listen_connect=lambda: None, stream_limit=2)
+        response = client.get('/api/notifications/stream', buffered=False)
+        frames = self._frames(response)
+        next(frames)
+        realtime._publish(None)
+        self.assertIn('data: {"b":1}', next(frames))
+        response.close()
+
+    def test_heartbeat_carries_the_cursor(self):
+        """Чужие тычки двигают кольцо и в тишине: без курсора в heartbeat место
+        продолжения отставало бы, и долгий фон кончался бы полной сверкой."""
+        client = self._client(listen_connect=lambda: None, stream_limit=2)
+        original_heartbeat = realtime.HEARTBEAT_SECONDS
+        realtime.HEARTBEAT_SECONDS = 0.01
+        try:
+            response = client.get('/api/notifications/stream', buffered=False)
+            frames = self._frames(response)
+            next(frames)
+            realtime._publish(frozenset({999}))   # чужой
+            beat = next(frames)
+            self.assertTrue(beat.startswith(': heartbeat '), beat)
+            self.assertEqual(str(realtime.current_seq()), beat.split()[3])
+            response.close()
+        finally:
+            realtime.HEARTBEAT_SECONDS = original_heartbeat
 
     def test_idle_stream_never_asks_the_client_to_reload(self):
         """Страж от возврата фонового опроса.

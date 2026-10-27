@@ -34,6 +34,7 @@ import logging
 import select
 import threading
 import time
+import uuid
 
 # Имя канала продублировано в database.py (BELL_EVENTS_NOTIFY_CHANNEL и литерал
 # в теле триггера): импортировать database отсюда нельзя — модуль тестируется
@@ -52,6 +53,10 @@ TICK_BUFFER_MAXLEN = 1000
 _condition = threading.Condition()
 _ticks = collections.deque(maxlen=TICK_BUFFER_MAXLEN)  # (seq, frozenset|None), None = всем
 _seq = 0
+# Номер процесса. Курсор тычков живёт в памяти и обнуляется с рестартом, поэтому
+# продолжить поток с прежнего места можно только в том же процессе: клиент
+# присылает номер обратно вместе с курсором (resume_from).
+EPOCH = uuid.uuid4().hex
 
 _listener_started = False
 _listener_lock = threading.Lock()
@@ -164,38 +169,69 @@ def current_seq():
         return _seq
 
 
-def wait_for_tick(after_seq, user_id, timeout_seconds):
-    """(есть ли тычок для user_id после after_seq, новый курсор).
+def resume_from(epoch, after):
+    """(курсор, продолжен ли) для потока, который начинается сейчас.
 
-    Чужие адресные тычки молча продвигают курсор: они уже просканированы, и
-    возвращаться к ним при следующем пробуждении незачем.
+    Вкладка, вернувшаяся из фона, присылает место, где оборвался её прошлый
+    поток. Если это тот же процесс и место ещё в кольце, поток продолжает с него:
+    пропущенные тычки уйдут первым же reload, а не случилось ничего — клиенту не
+    нужно перечитывать сводку и новость дня. Иначе — с текущего места, и клиент
+    сверяется полностью, как при первом подключении (27.10.2026: каждый возврат
+    во вкладку стоил потока, сводки и /api/news/pending)."""
+    with _condition:
+        try:
+            after = int(after)
+        except (TypeError, ValueError):
+            after = None
+        oldest_seq = _ticks[0][0] if _ticks else _seq + 1
+        if epoch == EPOCH and after is not None and oldest_seq - 1 <= after <= _seq:
+            return after, True
+        return _seq, False
+
+
+def wait_for_ticks(after_seq, user_id, timeout_seconds):
+    """(есть ли тычок для user_id после after_seq, был ли среди них
+    широковещательный, новый курсор).
+
+    Широковещательный — это «Ивенты», «4 You» и новость дня: только на него
+    клиенту есть смысл спрашивать /api/news/pending. Чужие адресные тычки молча
+    продвигают курсор: они уже просканированы, и возвращаться к ним при
+    следующем пробуждении незачем.
     """
     deadline = time.monotonic() + max(0.1, float(timeout_seconds or 0.1))
     with _condition:
         while True:
             # Если курсор старше самого раннего сохранённого элемента, часть
             # тычков уже вытеснена из deque. Нельзя заключать, что среди них не
-            # было адресной для этого пользователя: принудительная перечитка
-            # сводки дешевле и восстанавливает точное состояние.
+            # было адресной для этого пользователя (или широковещательной):
+            # принудительная перечитка дешевле и восстанавливает точное состояние.
             oldest_seq = _ticks[0][0] if _ticks else _seq + 1
             if after_seq < oldest_seq - 1:
-                return True, _seq
+                return True, True, _seq
 
-            matched = False
+            matched = broadcast = False
             for seq, targets in reversed(_ticks):
                 if seq <= after_seq:
                     break
-                if targets is None or user_id in targets:
-                    matched = True
+                if targets is None:
+                    matched = broadcast = True
                     break
+                if user_id in targets:
+                    matched = True
             cursor_seq = _seq
             if matched:
-                return True, cursor_seq
+                return True, broadcast, cursor_seq
             after_seq = cursor_seq
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return False, cursor_seq
+                return False, False, cursor_seq
             _condition.wait(timeout=remaining)
+
+
+def wait_for_tick(after_seq, user_id, timeout_seconds):
+    """(есть ли тычок для user_id после after_seq, новый курсор) — см. wait_for_ticks."""
+    poked, _broadcast, cursor_seq = wait_for_ticks(after_seq, user_id, timeout_seconds)
+    return poked, cursor_seq
 
 
 def try_acquire_stream_slot(limit):

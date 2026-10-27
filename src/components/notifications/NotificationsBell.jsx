@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
+import { bellResumeHeaders, parseBellFrame } from './bellStream.js';
 import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
 import { holdPageScroll } from '../../utils/pageScrollLock';
 import useScreenBackGesture from '../common/useScreenBackGesture';
@@ -375,6 +376,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         let pokeTimer = null;
         let watchdogTimer = null;
         let attempt = 0;
+        // Где оборвался поток: процесс сервера и курсор тычков. Вкладка,
+        // вернувшаяся из фона, продолжает с этого места (bellStream.js).
+        const resume = { epoch: null, seq: null };
+        // Был ли среди тычков, ждущих джиттера, широковещательный: адресный,
+        // пришедший первым, не должен съесть новость дня, пришедшую следом.
+        let pokeBroadcast = false;
         // Канал сейчас читается. Нужен, чтобы возврат во вкладку не рвал поток,
         // переживший сворачивание, и не занимал слот заново.
         let live = false;
@@ -429,7 +436,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             armWatchdog();
             try {
                 const response = await fetch(`${apiBaseUrl}/api/notifications/stream`, {
-                    headers: { ...getHeaders(), Accept: 'text/event-stream' },
+                    headers: { ...getHeaders(), Accept: 'text/event-stream', ...bellResumeHeaders(resume) },
                     signal: controller.signal,
                     credentials: 'include',
                 });
@@ -459,23 +466,31 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                     buffer += decoder.decode(value, { stream: true });
                     const chunks = buffer.split('\n\n');
                     buffer = chunks.pop() || '';
-                    if (!connected && chunks.some((chunk) => chunk
-                        .split('\n')
-                        .some((line) => line.startsWith(': connected')))) {
-                        connected = true;
-                        attempt = 0;
-                        /* Сервер фиксирует current_seq перед этим фреймом. Snapshot
-                           после него закрывает окно между первой загрузкой и
-                           подпиской; reload во время snapshot попадёт в очередь. */
-                        load();
-                        /* И тем, кого в сводке нет: пока канал лежал, новость
-                           могли опубликовать, а окно у этой вкладки не всплыло.
-                           Подписка закрывает то же окно, что и load() выше. */
-                        streamPokeRef.current?.();
+                    let poked = false;
+                    for (const frame of chunks.map(parseBellFrame)) {
+                        if (frame.seq !== null) resume.seq = frame.seq;
+                        if (frame.kind === 'reload') {
+                            poked = true;
+                            pokeBroadcast ||= frame.broadcast;
+                        } else if (frame.kind === 'connected') {
+                            resume.epoch = frame.epoch;
+                            if (connected) continue;
+                            connected = true;
+                            attempt = 0;
+                            /* Продолженный поток (вкладка вернулась из фона, а
+                               сервер помнит место) — сводка и окно новости уже
+                               верны: всё пропущенное придёт reload'ом. */
+                            if (frame.resumed) continue;
+                            /* Сервер фиксирует current_seq перед этим фреймом. Snapshot
+                               после него закрывает окно между первой загрузкой и
+                               подпиской; reload во время snapshot попадёт в очередь. */
+                            load();
+                            /* И тем, кого в сводке нет: пока канал лежал, новость
+                               могли опубликовать, а окно у этой вкладки не всплыло.
+                               Подписка закрывает то же окно, что и load() выше. */
+                            streamPokeRef.current?.();
+                        }
                     }
-                    const poked = chunks.some((chunk) => chunk
-                        .split('\n')
-                        .some((line) => line.startsWith('event: reload')));
                     if (poked && !pokeTimer) {
                         /* Свёрнутое окно читает СРАЗУ, без джиттера. Chrome
                            прижимает таймеры фоновой вкладки до одного
@@ -484,7 +499,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                            держали. fetch такому прижиму не подвержен. Размазывать
                            тут нечего: фоновых каналов мало, их держит лимит слотов. */
                         if (document.visibilityState === 'hidden') {
-                            if (!cancelled) { load(); streamPokeRef.current?.(); }
+                            if (!cancelled) {
+                                const news = pokeBroadcast;
+                                pokeBroadcast = false;
+                                load();
+                                if (news) streamPokeRef.current?.();
+                            }
                         } else {
                             // Джиттер размазывает перечитки после широковещательного
                             // тычка (новый пост «Ивентов» будит все вкладки разом), а
@@ -492,12 +512,16 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                             pokeTimer = setTimeout(() => {
                                 pokeTimer = null;
                                 if (cancelled || streamPaused()) return;
+                                const news = pokeBroadcast;
+                                pokeBroadcast = false;
                                 load();
                                 // Тычок наружу — под тем же джиттером и тем же
                                 // гардом: публикация новости широковещательна,
                                 // и без размазывания все открытые вкладки
                                 // компании пришли бы за ней в одну секунду.
-                                streamPokeRef.current?.();
+                                // Адресный тычок (своя задача, опрос, отметка
+                                // «прочитано») новости не касается.
+                                if (news) streamPokeRef.current?.();
                             }, Math.random() * 2000);
                         }
                     }

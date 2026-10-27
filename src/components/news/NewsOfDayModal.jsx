@@ -38,6 +38,12 @@ import './news-modal.css';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Возврат во вкладку перечитывает очередь не чаще этого — как сам колокол
+   (REFRESH_GAP_MS). Публикацию приносит его широковещательный тычок, а focus
+   срабатывает на каждый Alt-Tab из Oktell в портал: 27.10.2026 так набегало
+   больше запросов /pending, чем перечиток колокола. */
+const NEWS_WAKE_GAP_MS = 5 * 60 * 1000;
+
 /* Тест и тренажёр под текстом — общий блок NewsPasses: его же рисует лента во
  * вкладке «Новости» вики (задача #342), и считать «пройдено» двумя разными
  * способами окно и лента не должны. */
@@ -123,7 +129,11 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     // Возврат во вкладку — тот же приём, что у колокола: канал мог лежать.
     useEffect(() => {
         if (!user?.id) return undefined;
-        const onWake = () => { if (document.visibilityState === 'visible') load(); };
+        const onWake = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (performance.now() - lastLoadRef.current < NEWS_WAKE_GAP_MS) return;
+            load();
+        };
         window.addEventListener('focus', onWake);
         document.addEventListener('visibilitychange', onWake);
         return () => {

@@ -161,9 +161,16 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
             response.headers['Retry-After'] = '300'
             return response, 503
 
+        # Где оборвался прошлый поток этой вкладки: `Last-Event-ID: <процесс>:<курсор>`.
+        resume_epoch, _, resume_after = (request.headers.get('Last-Event-ID') or '').strip().rpartition(':')
+
         def generate():
-            cursor_seq = realtime.current_seq()
-            yield ": connected %d\n\n" % int(time.time())
+            cursor_seq, resumed = realtime.resume_from(resume_epoch, resume_after)
+            # Процесс, курсор и «продолжен ли» — в том же комментарии, что и
+            # раньше: прежние вкладки читают только его начало. Продолженному
+            # потоку сводку перечитывать незачем — пропущенное придёт reload'ом.
+            yield ": connected %d %s %d %d\n\n" % (int(time.time()), realtime.EPOCH, cursor_seq,
+                                                    1 if resumed else 0)
             while True:
                 # Строго событийно: reload уходит только когда на сервере
                 # ДЕЙСТВИТЕЛЬНО что-то изменилось. Периодической сверки здесь
@@ -171,15 +178,18 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
                 # которого весь механизм триггеров и делался. Изменения от хода
                 # часов (окно теста, дедлайн) клиент ждёт по next_change_at,
                 # который приезжает вместе со сводкой.
-                poked, cursor_seq = realtime.wait_for_tick(
+                poked, broadcast, cursor_seq = realtime.wait_for_ticks(
                     cursor_seq, user_id, realtime.HEARTBEAT_SECONDS)
                 if poked:
                     # Содержимого нет намеренно: клиент перечитает сводку сам.
-                    yield "event: reload\ndata: {}\n\n"
+                    # b — был ли тычок широковещательным: только на него (новость
+                    # дня, «Ивенты», «4 You») клиент спрашивает /api/news/pending.
+                    yield "id: %d\nevent: reload\ndata: {\"b\":%d}\n\n" % (cursor_seq, 1 if broadcast else 0)
                 else:
                     # Не опрос, а 20 байт комментария: без них прокси и браузер
-                    # считают молчащее соединение мёртвым.
-                    yield ": heartbeat %d\n\n" % int(time.time())
+                    # считают молчащее соединение мёртвым. Курсор — чтобы место
+                    # продолжения не отставало, пока чужие тычки двигают кольцо.
+                    yield ": heartbeat %d %d\n\n" % (int(time.time()), cursor_seq)
 
         response = Response(generate(), mimetype='text/event-stream')
         response.headers['Cache-Control'] = 'no-cache'
