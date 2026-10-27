@@ -7200,6 +7200,7 @@ class Database:
             self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
             self._init_twofa_schema_tx(cursor)
+            self._init_rental_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -65461,6 +65462,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT twofa_schema")
+
+    def _init_rental_schema_tx(self, cursor):
+        """Схема раздела «Аренда авто» (ночной отчёт #398) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете rental/schema.py, как у «Кодов 2FA»; импорт локальный, иначе
+        цикл. Не развернулась — раздел недоступен, остальное работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT rental_schema")
+        try:
+            from rental.schema import init_rental_schema
+            init_rental_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT rental_schema")
+            logging.exception(
+                "Схема раздела «Аренда авто» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT rental_schema")
 
     def update_cdr_call_end_parties(self):
         """Кто положил трубку — звонкам отдела продаж (FreePBX) в пуле и в оценках.

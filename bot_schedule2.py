@@ -1367,6 +1367,11 @@ def _get_user_payload(user):
     # (canAccessTwofaSectionForUser), границу держат роуты раздела.
     twofa_access = _twofa_section_open_for(user_id) if user_id is not None else False
 
+    # Открыт ли раздел «Аренда авто» (#398): ООЗ и супер-админ. Пункт меню экран рисует по
+    # флагу (canAccessRentalSectionForUser), границу держат роуты раздела.
+    rental_access = _rental_section_open_for(
+        user_id, role, department_code=department_code, headed_codes=headed_department_codes)
+
     return {
         "role": role,
         "id": user_id,
@@ -1380,6 +1385,7 @@ def _get_user_payload(user):
         "baiga_access": baiga_access,
         "production_access": production_access,
         "twofa_access": twofa_access,
+        "rental_access": rental_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -67822,6 +67828,54 @@ def _twofa_start_alarm():
     logging.info("⏰ Коды 2FA: будильник сроков запущен")
 
 
+# ── Раздел «Аренда авто» (ночной отчёт по арендным машинам, #398) ───────────────
+# Отчёт собирается сам в 01:00 и 07:00 (планировщик ниже) из Yume и трёх GPS-систем —
+# своей нитью сервиса, не в общем пуле: это ~10 секунд внешних запросов (rental/service.py).
+# Доступы к Yume, Wialon, ГЛОНАСС и Efir — только в окружении (rental/collect.py).
+_RENTAL = {'service': None}
+try:
+    from rental.routes import build_rental_blueprint  # noqa: E402
+    from rental.service import RentalService as _RentalService  # noqa: E402
+
+    _RENTAL['service'] = _RentalService(cursor_factory=db._get_cursor)
+    app.register_blueprint(build_rental_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        service=_RENTAL['service'],
+    ))
+    logging.info("Раздел «Аренда авто»: Blueprint подключён на /api/rental")
+except Exception:
+    logging.exception("Раздел «Аренда авто»: Blueprint НЕ подключён")
+
+
+def _rental_section_open_for(user_id, role=None, *, department_code=None, headed_codes=None):
+    """Открыт ли раздел «Аренда авто» — то же правило, что у его ручек (rental/access.py).
+
+    Ночной отчёт ведёт ООЗ (сотрудники и глава отдела) плюс супер-админ. Считается из того,
+    что профиль уже знает, без своего запроса; границу всё равно держит каждый роут.
+    """
+    if user_id is None:
+        return False
+    try:
+        from rental import access as rental_access
+        return rental_access.can_open_section({
+            'role': role, 'department_code': department_code, 'headed_codes': headed_codes or [],
+        })
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Аренде авто» пользователя %s", user_id)
+        return False
+
+
+def _rental_scheduled_report(kind):
+    service = _RENTAL.get('service')
+    if service is None:
+        logging.warning("Аренда авто: ночной отчёт не поставлен — раздел не подключён")
+        return None
+    return service.scheduled(kind)
+
+
 # ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
 # Номера, с которых сотрудники проверяют линии и чаты; их звонки и чаты не входят
 # ни в один расчёт (test_numbers/keys.py). Реестр ведут админы и главы отделов.
@@ -73212,6 +73266,29 @@ if __name__ == '__main__':
         logging.info("⏰ Обзвон фронт-офиса: отбивка в %02d:%02d", _fo_hour, _fo_minute)
     else:
         logging.warning("⏰ Обзвон фронт-офиса выключен: не задан токен CRM")
+
+    # «Аренда авто» (#398): ночной отчёт по арендным машинам в 01:00 и 07:00 по Алматы (ТЗ п. 3).
+    # Джоба только ставит сбор — он идёт своей нитью сервиса (~10 с внешних запросов), а в пуле
+    # бота занимает секунду на отметку «собирается». Пропущенный слот (перезапуск в 01:00)
+    # ночная смена соберёт кнопкой в разделе.
+    async def rental_night_report_job(kind):
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(executor_pool, _rental_scheduled_report, kind)
+        except Exception as e:
+            logging.exception(f"Error scheduling rental night report {kind}: {e}")
+
+    for _rental_kind, _rental_hour in (('night', 1), ('morning', 7)):
+        scheduler.add_job(
+            rental_night_report_job,
+            CronTrigger(hour=_rental_hour, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+            args=[_rental_kind],
+            id='rental_night_report_%s' % _rental_kind,
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+    logging.info("⏰ Аренда авто: ночной отчёт в 01:00 и 07:00")
 
     scheduler.start()
 

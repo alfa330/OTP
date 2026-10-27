@@ -285,6 +285,7 @@ const DriverMailingsView = lazyWithRetry(() => import('./components/driver_maili
 const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsView'));
 const ProductionView = lazyWithRetry(() => import('./components/production/ProductionView'));
 const TwofaView = lazyWithRetry(() => import('./components/twofa/TwofaView'));
+const RentalView = lazyWithRetry(() => import('./components/rental/RentalView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
 const OpWallboardView = lazyWithRetry(() => import('./components/monitoring/OpWallboardView'));
@@ -920,6 +921,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     payments: 'Invoice approval',
     production: 'Production',
     twofa: '2FA codes',
+    rental: 'Car rental',
     olx_leads: 'OLX leads',
     olx_ads: 'OLX adverts',
     touches: 'Sales touches',
@@ -2580,6 +2582,12 @@ const canAccessProductionForUser = (userLike) => userLike?.production_access ===
    true: профиль без поля (старый кэш) — не доступ. Набор разделов человека его не
    прячет: у раздела свой круг, как у «Оплаты счетов». */
 const canAccessTwofaSectionForUser = (userLike) => userLike?.twofa_access === true;
+
+/* «Аренда авто» (#398, ночной отчёт по арендным машинам): ООЗ — сотрудники и глава отдела —
+   и супер-админ. Круг считает сервер (bot_schedule2.py: _rental_section_open_for — то же
+   правило, что у ручек rental/access.py) и отдаёт флагом в профиле. Строго true: профиль
+   без поля (старый кэш) — не доступ. */
+const canAccessRentalSectionForUser = (userLike) => userLike?.rental_access === true;
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
@@ -43724,6 +43732,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // «Продакшн»: флаг сервера; личный набор разделов прячет его, как «Вики».
             const canAccessProductionSection = canAccessProductionForUser(user) && personalViewsAllow(user, 'production');
             const canAccessTwofaSection = canAccessTwofaSectionForUser(user);
+            const canAccessRentalSection = canAccessRentalSectionForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             // Личный набор разделов прячет его так же, как «Библиотеку».
@@ -47372,6 +47381,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
                     (requestedViewFromUrl !== 'production' || canAccessProductionSection) &&
                     (requestedViewFromUrl !== 'twofa' || canAccessTwofaSection) &&
+                    (requestedViewFromUrl !== 'rental' || canAccessRentalSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
                     (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
@@ -47395,7 +47405,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -47551,7 +47561,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessFourYouSection]);
+                // «Аренда авто» — свой круг (ООЗ и супер-админ): ссылка ?view=rental у того, кому
+                // раздел не открыт, иначе оставила бы пустой экран.
+                if (view === 'rental' && !canAccessRentalSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessRentalSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -53450,6 +53469,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Коды 2FA» — свой круг (выдачи главы маркетинга), а у «Маркетинга» есть
                 // allowlist: без этой строки проверка ниже выбросила бы сотрудника из раздела.
                 if (view === 'twofa' && canAccessTwofaSection) return;
+                // «Аренда авто» — свой круг (ООЗ), а у отдела ООЗ может быть allowlist: без этой
+                // строки проверка ниже выбросила бы ночную смену из раздела.
+                if (view === 'rental' && canAccessRentalSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -53510,7 +53532,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -54224,6 +54246,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || canAccessLibrarySection
                     || canAccessProductionSection
                     || canAccessTwofaSection
+                    || canAccessRentalSection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
                     || isAdminLikeRole
                     || isPlainTrainer
@@ -54917,6 +54940,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'twofa' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-shield-halved"></FaIcon> <span className="sidebar-text">Коды 2FA</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {/* «Аренда авто» (#398) — тоже один раз на все роли: круг — отдел ООЗ
+                                        и супер-админ, глава ООЗ по роли админ, и по ролевым ветвям пункт
+                                        легко потерять в одной из них. */}
+                                    {canAccessRentalSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'rental')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'rental' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Аренда авто</span>
                                         </button>
                                     </li>
                                     )}
@@ -58833,6 +58870,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         {view === 'twofa' && canAccessTwofaSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <TwofaView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {/* «Аренда авто» (#398) — без QR-замка: в ночном отчёте госномера, адреса и
+                            статусы машин, ни одного клиента и водителя. */}
+                        {view === 'rental' && canAccessRentalSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <RentalView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
