@@ -29,6 +29,19 @@ SETTINGS_FIELDS = (
 DEFAULT_CALL_STATES = ["fullbusy", "talk", "dial", "call", "ring"]
 DEFAULT_CALL_STATE_IDS = [5]
 
+# Как часто агент шлёт heartbeat, если в его состоянии ничего не поменялось.
+# Круг агента остаётся `heartbeat_interval_s` (минута): на нём он ставит правило
+# во вкладку Oktell, и растягивать его нельзя. Серверу же раз в минуту нужно
+# было только «жив»: 27.10.2026 пульс давал 27% всех запросов к API (1,2 млн за
+# 12 дней), три четверти — с машин без открытого Oktell. Перемену состояния
+# агент присылает сразу (с 1.0.34), а раздел краснеет «Молчит» через 15 минут.
+HEARTBEAT_REPORT_EVERY_S = 300
+# Как часто агент спрашивает обязательные объявления. Было 60 с по умолчанию
+# агента — запрос в минуту с каждой машины ради 84 показов за 12 дней. Очередь
+# из нескольких объявлений не замедляется: после «Подтвердить» агент спрашивает
+# следующее сразу.
+AGENT_NEWS_POLL_S = 300
+
 
 
 def _columns(cursor):
@@ -111,6 +124,7 @@ def agent_config_payload(settings: dict, personal: dict | None) -> dict:
         'oktell_url': settings.get('oktell_url') or '',
         'in_window_rule': rule,
         'poll_interval_s': int(settings.get('heartbeat_interval_s') or 60),
+        'news_poll_s': AGENT_NEWS_POLL_S,
         'dry_run': bool(settings.get('dry_run')),
         # keep_open НЕ навязываем: закрыл окно — значит закрыл. Возвращать его
         # силой означает спорить с человеком, а открыть заново он может ярлыком.

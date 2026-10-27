@@ -64,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.33"
+VERSION = "1.0.34"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -4770,6 +4770,65 @@ def build_heartbeat_payload(state: AgentState, cfg: dict, now_iso: str) -> dict:
     }
 
 
+# Дольше этого агент не молчит, даже если сервер попросил реже: раздел
+# показывает «Молчит» после 15 минут тишины, и до него должен оставаться запас.
+REPORT_EVERY_MAX_S = 600.0
+
+
+def heartbeat_fingerprint(payload: dict) -> str:
+    """Отпечаток того, что раздел показывает по heartbeat.
+
+    Время, секунды правила, число сокетов и адрес вкладки меняются почти каждый
+    круг. С ними «состояние изменилось» было бы всегда, и пульс снова уходил бы
+    раз в минуту — ради цифр, которых раздел не показывает.
+    """
+    browser = payload.get("browser") or {}
+    rule = payload.get("rule") or {}
+    return json.dumps({
+        "login": payload.get("operator_login"),
+        "version": payload.get("version"),
+        "dry_run": payload.get("dry_run"),
+        "window": browser.get("managed_window"),
+        "session": browser.get("session_present"),
+        "login_form": browser.get("login_form"),
+        "rule_alive": rule.get("alive"),
+        "rule_enabled": rule.get("enabled"),
+        "rule_threshold": rule.get("threshold_s"),
+        "rule_version": rule.get("version"),
+        "unmanaged": sorted(str(title) for title in payload.get("unmanaged_windows") or []),
+        "command": payload.get("last_command"),
+    }, sort_keys=True, ensure_ascii=False)
+
+
+def report_interval(data: Optional[dict], poll_s: float) -> Optional[float]:
+    """Как часто слать heartbeat при неизменном состоянии — из ответа сервера.
+
+    None — сервер не просил (до 27.10.2026 он этого поля не знал): пульс уходит
+    каждый круг, как раньше. Реже круга не бывает, чаще потолка — тоже.
+    """
+    try:
+        value = float((data or {}).get("report_every_s"))
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return max(poll_s, min(REPORT_EVERY_MAX_S, value))
+
+
+def heartbeat_due(now: float, last_sent_at: float, report_every_s: Optional[float],
+                  fingerprint: str, last_fingerprint: Optional[str]) -> bool:
+    """Слать ли heartbeat в этот круг.
+
+    Круг агента остаётся минутным: на нём он подключается к вкладке Oktell и
+    ставит туда правило, и растягивать его нельзя — свежеоткрытое окно жило бы
+    без ограничителя. Серверу же нужно знать только «жив» и «что поменялось»:
+    перемену шлём сразу, неизменное состояние — раз в `report_every_s`.
+    """
+    if not report_every_s or fingerprint != last_fingerprint:
+        return True
+    return now - last_sent_at >= report_every_s
+
+
 class ServerLink:
     def __init__(self, cfg: dict, session: Optional[dict] = None):
         self.cfg = cfg
@@ -5022,6 +5081,12 @@ def run_agent(cfg: dict) -> int:
 
     poll_s = float(cfg.get("poll_interval_s", 60))
     max_backoff = float(cfg.get("offline_max_backoff_s", 60))
+    # Круг — poll_s, а heartbeat серверу — только при перемене состояния и не
+    # реже report_every_s (heartbeat_due). Пока сервер интервал не назвал —
+    # каждый круг, как до 1.0.34.
+    report_every_s: Optional[float] = None
+    last_report_at = 0.0
+    last_report_print: Optional[str] = None
     failures = 0
     unauthorized_notified = [False]   # окно про отозванный пропуск показываем один раз
     last_command_report: Optional[dict] = None
@@ -5275,6 +5340,9 @@ def run_agent(cfg: dict) -> int:
                     next_config_refresh = time.time() + config_every_s
                     was = rule_print(cfg)
                     cfg = fetch_server_config(cfg, login_now, session=link.operator_session)
+                    # Период объявлений тоже задаёт сервер — подхватываем без
+                    # перезапуска, как и правило.
+                    news_every_s = max(30.0, float(cfg.get("news_poll_s", 60)))
                     last_config_login = login_now
                     if rule_print(cfg) != was:
                         rule_now = cfg.get("in_window_rule") or {}
@@ -5285,7 +5353,13 @@ def run_agent(cfg: dict) -> int:
                         browser.apply_new_rule()
 
                 payload = build_heartbeat_payload(state, cfg, now_iso())
-                data = link.heartbeat(payload)
+                fingerprint = heartbeat_fingerprint(payload)
+                data = None
+                if heartbeat_due(time.time(), last_report_at, report_every_s,
+                                 fingerprint, last_report_print):
+                    data = link.heartbeat(payload)
+                    last_report_at = time.time()
+                    last_report_print = fingerprint
                 failures = 0
 
                 # Нарушения, накопленные страницей, уезжают на сервер. Без этого
@@ -5359,6 +5433,7 @@ def run_agent(cfg: dict) -> int:
                     server_interval = data.get("poll_interval_s")
                     if server_interval:
                         poll_s = max(2.0, min(300.0, float(server_interval)))
+                    report_every_s = report_interval(data, poll_s)
                     for command in data.get("commands") or []:
                         command_id = str(command.get("id") or "")
                         if not command_id or ledger.seen(command_id):

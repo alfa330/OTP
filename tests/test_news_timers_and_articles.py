@@ -235,8 +235,10 @@ class TimeLimitAgentWindowTests(unittest.TestCase):
 
     def test_the_change_rides_the_unreleased_build(self):
         # 1.0.32 выпущена 25.09.2026; перенос времени между показами окна
-        # (carry_news_spent) едет следующей сборкой.
-        self.assertIn('VERSION = "1.0.33"', self.agent)
+        # (carry_news_spent) едет сборкой новее — 1.0.33 и дальше.
+        version = re.search(r'^VERSION = "(\d+)\.(\d+)\.(\d+)"', self.agent, re.M)
+        self.assertIsNotNone(version)
+        self.assertGreater(tuple(int(part) for part in version.groups()), (1, 0, 32))
 
     def test_reopened_window_continues_the_count(self):
         """Закрытое окно показывается снова из active_news — и обязано нести

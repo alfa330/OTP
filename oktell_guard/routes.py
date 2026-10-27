@@ -654,7 +654,8 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             if browser.get('managed_window') and browser.get('session_present'):
                 queries.mark_managed_day(cursor, (personal or {}).get('user_id'))
             settings = queries.get_settings(cursor)
-        return jsonify({"ok": True, "poll_interval_s": int(settings.get('heartbeat_interval_s') or 60)})
+        return jsonify({"ok": True, "poll_interval_s": int(settings.get('heartbeat_interval_s') or 60),
+                        "report_every_s": queries.HEARTBEAT_REPORT_EVERY_S})
 
     def reporter_by_header():
         """Кто прислал факт — вошедший в программе. Не вошёл — отправитель

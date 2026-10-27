@@ -268,6 +268,126 @@ def test_heartbeat_without_browser_marks_no_window():
 
 
 # --------------------------------------------------------------------------- #
+# Пульс реже круга (1.0.34): круг минутный, heartbeat — по перемене или раз в 5 мин
+# --------------------------------------------------------------------------- #
+
+def _live_payload(**browser):
+    cfg = agent.load_config(Path("нет-такого.json"))
+    base = dict(window=True, session=True, login_form=False, login="6612",
+                url="https://oktell.example.local/#/main",
+                rule={"enabled": True, "hooked": True, "sockets": 1, "seconds": 0,
+                      "thresholdS": 180, "ruleVersion": "v1"})
+    base.update(browser)
+    return agent.build_heartbeat_payload(_state(**base), cfg, "2026-10-27T19:00:00+0500")
+
+
+def test_heartbeat_fingerprint_ignores_counters_that_tick_every_round():
+    """Время, секунды правила, число сокетов и адрес вкладки меняются почти
+    каждую минуту. Попади они в отпечаток — «состояние изменилось» было бы
+    всегда, и пульс уходил бы раз в минуту, как до 1.0.34."""
+    first = _live_payload()
+    later = _live_payload(url="https://oktell.example.local/#/calls",
+                          rule={"enabled": True, "hooked": True, "sockets": 3, "seconds": 95,
+                                "thresholdS": 180, "ruleVersion": "v1"})
+    later["ts"] = "2026-10-27T19:04:00+0500"
+    assert agent.heartbeat_fingerprint(first) == agent.heartbeat_fingerprint(later)
+
+
+@pytest.mark.parametrize("change", [
+    {"window": False, "session": False},           # окно закрыли
+    {"session": False, "login_form": True},        # вышли из Oktell
+    {"login": "7049"},                             # за машину сел другой оператор
+    {"rule": {"enabled": True, "hooked": False, "sockets": 0, "thresholdS": 180,
+              "ruleVersion": "v1"}},               # правило ослепло
+    {"rule": {"enabled": True, "hooked": True, "sockets": 1, "thresholdS": 300,
+              "ruleVersion": "v2"}},               # доехал новый порог
+])
+def test_heartbeat_fingerprint_changes_with_what_the_section_shows(change):
+    """Всё, по чему раздел красит строку («Окно Oktell закрыто», «Правило не
+    считает», «Считает»), должно уходить сразу, а не через пять минут."""
+    assert agent.heartbeat_fingerprint(_live_payload()) != agent.heartbeat_fingerprint(_live_payload(**change))
+
+
+@pytest.mark.parametrize("before, after", [
+    # Окно закрыли, когда сессии в нём уже не было: меняется только «окно».
+    ({"session": False}, {"window": False, "session": False}),
+    # Правила в ответе страницы нет вовсе — сессию видно только по ней самой.
+    ({"rule": {}}, {"rule": {}, "session": False}),
+    # Тот же порог, другая сборка правила.
+    ({}, {"rule": {"enabled": True, "hooked": True, "sockets": 1, "thresholdS": 180,
+                   "ruleVersion": "v2"}}),
+])
+def test_heartbeat_fingerprint_sees_each_field_alone(before, after):
+    assert agent.heartbeat_fingerprint(_live_payload(**before)) != agent.heartbeat_fingerprint(_live_payload(**after))
+
+
+def test_heartbeat_fingerprint_sees_unmanaged_oktell():
+    """«Oktell мимо программы» — то, ради чего агент вообще писался."""
+    payload = _live_payload(window=False, session=False)
+    bypass = dict(payload, unmanaged_windows=["Oktell — Google Chrome"])
+    assert agent.heartbeat_fingerprint(payload) != agent.heartbeat_fingerprint(bypass)
+
+
+def test_heartbeat_due_without_server_interval_is_every_round():
+    """Сервер без report_every_s (до 27.10.2026) — шлём каждый круг, как раньше."""
+    assert agent.heartbeat_due(1000.0, 999.0, None, "a", "a") is True
+
+
+def test_heartbeat_due_schedule():
+    assert agent.heartbeat_due(1000.0, 0.0, 300.0, "a", None) is True, "первый круг — всегда"
+    assert agent.heartbeat_due(1000.0, 900.0, 300.0, "a", "a") is False, "ничего не поменялось"
+    assert agent.heartbeat_due(1200.0, 900.0, 300.0, "a", "a") is True, "пять минут прошли"
+    assert agent.heartbeat_due(901.0, 900.0, 300.0, "b", "a") is True, "перемена — сразу"
+
+
+@pytest.mark.parametrize("data, expected", [
+    (None, None),
+    ({}, None),
+    ({"report_every_s": "мусор"}, None),
+    ({"report_every_s": 0}, None),
+    ({"report_every_s": 300}, 300.0),
+    ({"report_every_s": 5}, 60.0),          # не чаще круга
+    ({"report_every_s": 86400}, 600.0),     # не реже потолка
+])
+def test_report_interval_bounds(data, expected):
+    assert agent.report_interval(data, 60.0) == expected
+
+
+def test_report_ceiling_stays_below_the_silence_alarm():
+    """Раздел красит агента «Молчит» после 15 минут (OktellGuardView.agentState).
+    Потолок молчания с запасом в круг ниже этого порога."""
+    view = (Path(__file__).resolve().parents[1] / "src" / "components" / "oktell_guard"
+            / "OktellGuardView.jsx").read_text(encoding="utf-8")
+    assert "minutesAgo > 15" in view
+    assert agent.REPORT_EVERY_MAX_S + agent.DEFAULT_CONFIG["poll_interval_s"] < 15 * 60
+
+
+def test_round_stays_a_minute_and_only_the_report_is_sparse():
+    """Растягивать сам круг нельзя: на нём агент подключается к вкладке и ставит
+    правило — свежеоткрытый Oktell жил бы без ограничителя. Реже уходит только
+    heartbeat; нарушения, объявления и настройки по-прежнему проверяются каждый круг."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    assert "wait_for_next_round(poll_s)" in body
+    due = body.index("if heartbeat_due(")
+    assert due < body.index("data = link.heartbeat(payload)")
+    assert body.index("state.browser = browser.probe()") < due, "правило ставится до решения о пульсе"
+    assert body.index("pending = browser.collect_violations()") > due, "нарушения уходят каждый круг"
+    assert "report_every_s = report_interval(data, poll_s)" in body
+
+
+def test_news_period_follows_server_config_without_restart():
+    """Период объявлений задаёт сервер (news_poll_s). Агент читал его один раз при
+    старте — новый период доезжал только после перезапуска."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    refresh = body[body.index("cfg = fetch_server_config(cfg, login_now"):]
+    assert refresh.index("news_every_s = max(30.0") < refresh.index("payload = build_heartbeat_payload(")
+    merged = agent.apply_server_config(agent.load_config(Path("нет-такого.json")), {"news_poll_s": 300})
+    assert merged["news_poll_s"] == 300
+
+
+# --------------------------------------------------------------------------- #
 # Обход через неуправляемый браузер
 # --------------------------------------------------------------------------- #
 
