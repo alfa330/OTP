@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Check, CircleAlert, KeyRound, Loader2, Plus, ScrollText, Send, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react';
-import { APPLE_FONT, IosSegmented, iosCard } from '../ui/ios';
+import { APPLE_FONT, IosHint, IosSegmented, IosToggle, iosCard } from '../ui/ios';
 import { subscribeNewsPoke } from '../news/newsShared';
 import { createCoalescedReload } from '../notifications/coalescedReload';
 import { AccountSheet, AddAccountSheet } from './TwofaAccountSheet';
@@ -29,10 +29,11 @@ import {
  * twofa_requests) и при возврате на вкладку; своего таймера нет.
  */
 
-const HOW_IT_WORKS = 'Сотрудник нажимает «Запросить код». Главе маркетинга приходит запрос в Telegram и в колокол '
-    + 'портала — он подтверждает или отклоняет. Код и время, до которого он действует, приходят сотруднику в Telegram '
-    + 'от бота портала; цифры стираются через минуту. Не подошёл — кнопка «Код не подошёл» в сообщении выдаёт новый '
-    + 'код без повторного подтверждения в течение 3 минут. Запрос без ответа сгорает через 10 минут.';
+const HOW_IT_WORKS = 'Сотрудник нажимает «Запросить код». Подтверждают глава маркетинга и супер-админы — здесь '
+    + 'или кнопкой в Telegram; уведомление о запросе (колокол портала и Telegram) получает тот, кто включил его '
+    + 'тумблером во вкладке «Запросы». Код и время, до которого он действует, приходят сотруднику в Telegram от бота '
+    + 'портала; цифры стираются через минуту. Не подошёл — кнопка «Код не подошёл» в сообщении выдаёт новый код без '
+    + 'повторного подтверждения в течение 3 минут. Запрос без ответа сгорает через 10 минут.';
 
 const viaLabel = (via) => (via === 'telegram' ? 'в Telegram' : via === 'portal' ? 'в портале' : '');
 
@@ -63,7 +64,7 @@ const RequestCard = ({ request, canApprove, onDecide, busy, serverTime }) => (
                 </button>
             </div>
         ) : (
-            <span className="shrink-0 text-[12.5px] text-slate-500">Подтверждает глава маркетинга</span>
+            <span className="shrink-0 text-[12.5px] text-slate-500">Подтверждают глава маркетинга и супер-админы</span>
         )}
     </div>
 );
@@ -230,6 +231,21 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
+    const toggleNotify = async () => {
+        const next = !data?.notify?.enabled;
+        setBusy((prev) => ({ ...prev, notify: true }));
+        setData((prev) => (prev ? { ...prev, notify: { ...(prev.notify || {}), enabled: next } } : prev));
+        try {
+            const { data: result } = await api.put('/notify', { enabled: next });
+            setData((prev) => (prev ? { ...prev, notify: { ...(prev.notify || {}), enabled: result.enabled } } : prev));
+        } catch (requestError) {
+            setData((prev) => (prev ? { ...prev, notify: { ...(prev.notify || {}), enabled: !next } } : prev));
+            toast(errorOf(requestError, 'Не удалось переключить уведомления'), 'error');
+        } finally {
+            setBusy((prev) => ({ ...prev, notify: false }));
+        }
+    };
+
     const shell = (children) => (
         <div className="relative mx-auto min-h-screen w-full max-w-[1400px] bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0"
              style={{ fontFamily: APPLE_FONT }}>
@@ -261,29 +277,12 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             </Notice>,
         );
     }
-    // Подсказка — тому, кто может по ней что-то сделать: главу назначает руководство, а войти
-    // в бота может только сам глава.
-    if (!data.approver) {
+    // Подтверждающих нет вовсе (ни главы, ни работающего супер-админа) — сказать сотруднику
+    // сразу, а не дать ему ждать 10 минут запроса, который некому подтвердить.
+    if (caps.can_request && !data.approvers_available) {
         notices.push(
-            <Notice key="lead" tone="amber" icon={CircleAlert} title="У отдела маркетинга нет главы">
-                {caps.can_manage
-                    ? 'Подтверждать запросы некому — назначьте главу отдела в «Отделах».'
-                    : 'Подтверждать запросы сейчас некому — обратитесь к руководству.'}
-            </Notice>,
-        );
-    } else if (caps.can_approve && !data.approver.telegram_linked) {
-        notices.push(
-            <Notice key="lead-tg" tone="amber" icon={Send} title="У вас не привязан Telegram"
-                    action={botLink && (
-                        <a href={botLink} target="_blank" rel="noopener noreferrer" className={TOOLBAR_BTN}>Открыть бота</a>
-                    )}>
-                Запросы видны только здесь и в колоколе портала. Чтобы подтверждать с телефона, войдите в бота портала своим логином и паролем.
-            </Notice>,
-        );
-    } else if (caps.can_manage && !data.approver.telegram_linked) {
-        notices.push(
-            <Notice key="lead-tg" tone="amber" icon={Send} title="У главы маркетинга не привязан Telegram">
-                Запросы он видит только в портале. Чтобы подтверждать с телефона, ему нужно войти в бота портала своим логином и паролем.
+            <Notice key="nobody" tone="amber" icon={CircleAlert} title="Подтвердить запрос сейчас некому">
+                Обратитесь к руководству отдела маркетинга.
             </Notice>,
         );
     }
@@ -302,7 +301,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         <SectionHeader
             subtitle={caps.can_manage
                 ? 'Запросы кодов, аккаунты и доступы сотрудников'
-                : 'Код приходит в Telegram после подтверждения главы маркетинга'}
+                : 'Код приходит в Telegram после подтверждения'}
             hint={HOW_IT_WORKS}
             actions={tabs.length > 1 && (
                 <IosSegmented value={activeTab} onChange={setTab} options={tabs} ariaLabel="Вкладка раздела" />
@@ -330,7 +329,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             const latest = myLatest[account.id];
                             const line = accountStateLine(latest, serverTime);
                             const pending = latest?.status === 'pending';
-                            const blocked = !data.me.telegram_linked || !data.approver || data.key_status !== 'ok';
+                            const blocked = !data.me.telegram_linked || !data.approvers_available || data.key_status !== 'ok';
                             return (
                                 <div key={account.id} className={`${iosCard} flex flex-col gap-3 px-4 py-3.5`}>
                                     <div className="flex items-start gap-3">
@@ -369,12 +368,33 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     );
 
     /* ── Запросы (глава, супер-админ) ─────────────────────────────────── */
+    const notifyRow = data.notify && (
+        <div className={`${iosCard} mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3`}>
+            <div className="min-w-0 grow basis-[240px]">
+                <div className="flex items-center gap-1.5 text-[14px] font-semibold text-slate-900">
+                    Уведомления о запросах
+                    <IosHint
+                        label="Что за уведомления"
+                        text="Когда сотрудник запрашивает код, приходит строка в колокол портала и сообщение в Telegram с кнопками «Подтвердить / Отклонить». Только вам и только пока тумблер включён; по умолчанию он выключен. Подтверждать можно и без уведомлений — здесь, во вкладке «Запросы»."
+                    />
+                </div>
+                {data.notify.enabled && !data.me.telegram_linked && (
+                    <div className="mt-0.5 text-[12.5px] text-amber-700">
+                        Telegram не привязан — уведомления придут только в колокол.
+                    </div>
+                )}
+            </div>
+            <IosToggle checked={Boolean(data.notify.enabled)} disabled={Boolean(busy.notify)} onChange={toggleNotify} />
+        </div>
+    );
+
     const requestsTab = (
         <>
+            {notifyRow}
             {(data.pending || []).length === 0 ? (
                 <div className={iosCard}>
                     <EmptyState icon={Check} title="Ждущих запросов нет">
-                        Новый запрос появится здесь, в колоколе портала и в Telegram главы маркетинга.
+                        Новый запрос появится здесь, а с включёнными уведомлениями — ещё в колоколе и в Telegram.
                     </EmptyState>
                 </div>
             ) : (

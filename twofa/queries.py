@@ -78,6 +78,41 @@ def approver(cursor):
     return {'id': int(row[0]), 'name': row[1], 'telegram_id': int(row[2]) if row[2] else None}
 
 
+_APPROVERS_SQL = """
+    SELECT u.id, u.name, u.telegram_id, (o.user_id IS NOT NULL) AS notify
+      FROM users u
+      LEFT JOIN twofa_notify_optin o ON o.user_id = u.id
+     WHERE {working}
+       AND (lower(COALESCE(u.role, '')) = 'super_admin'
+            OR u.id = (SELECT a.id FROM ({approver}) a))
+     ORDER BY u.id
+""".format(working=_WORKING, approver=_APPROVER_SQL)
+
+
+def approvers(cursor):
+    """Кто может подтверждать: глава маркетинга и работающие супер-админы — с флагом
+    «включил уведомления о запросах»."""
+    cursor.execute(_APPROVERS_SQL, {'approver_code': access.APPROVER_DEPARTMENT_CODE})
+    return [{'id': int(r[0]), 'name': r[1], 'telegram_id': int(r[2]) if r[2] else None, 'notify': bool(r[3])}
+            for r in cursor.fetchall()]
+
+
+def notify_enabled(cursor, user_id):
+    cursor.execute("SELECT 1 FROM twofa_notify_optin WHERE user_id = %s", (int(user_id),))
+    return cursor.fetchone() is not None
+
+
+def set_notify(cursor, user_id, enabled, now):
+    """Тумблер «уведомления о запросах». Выключение удаляет строку (см. schema)."""
+    if enabled:
+        cursor.execute("""
+            INSERT INTO twofa_notify_optin (user_id, enabled_at) VALUES (%s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (int(user_id), now))
+    else:
+        cursor.execute("DELETE FROM twofa_notify_optin WHERE user_id = %s", (int(user_id),))
+
+
 def user_id_by_telegram(cursor, telegram_id):
     cursor.execute("SELECT id FROM users WHERE telegram_id = %s LIMIT 1", (int(telegram_id),))
     row = cursor.fetchone()
@@ -528,13 +563,15 @@ def journal(cursor, *, before_id=None, limit=50):
 # ─── Колокол ───────────────────────────────────────────────────────────────────
 
 def bell(cursor, viewer_id, now, limit):
-    """Ждущие запросы — главе маркетинга, и только ему: подтверждает он один. И только пока ключ
-    шифрования годен: без него раздел главе закрыт (access.can_approve), и строка звала бы туда,
-    куда его не пустят. Сгорание строку гасит само: будильник закрывает запрос, триггер будит."""
+    """Ждущие запросы — тому, кто может подтверждать (глава маркетинга, супер-админ) И включил
+    уведомления о запросах в разделе (владелец: «по умолчанию тумблер выключен»). И только пока
+    ключ шифрования годен: без него раздел закрыт (access.can_approve), и строка звала бы туда,
+    куда не пустят. Сгорание строку гасит само: будильник закрывает запрос, триггер будит."""
     if crypto.key_status() != 'ok':
         return 0, []
-    lead = approver(cursor)
-    if not lead or int(lead['id']) != int(viewer_id):
+    if not notify_enabled(cursor, viewer_id):
+        return 0, []
+    if int(viewer_id) not in {a['id'] for a in approvers(cursor)}:
         return 0, []
     rows = pending_requests(cursor, now)
     return len(rows), rows[:max(0, int(limit))]

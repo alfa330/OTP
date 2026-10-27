@@ -237,10 +237,13 @@ class AccessTest(unittest.TestCase):
         self.assertTrue(access.can_approve(head) and access.can_manage(head) and access.can_open_section(head))
         self.assertFalse(access.can_request(head))
 
-    def test_super_admin_manages_but_never_approves(self):
+    def test_super_admin_manages_and_approves(self):
+        """Владелец 27.10.2026: «сделай чтобы мог глава маркетинга и суперадмины»."""
         sup = ctx(1, role='super_admin')
         self.assertTrue(access.can_manage(sup))
-        self.assertFalse(access.can_approve(sup))
+        self.assertTrue(access.can_approve(sup))
+        self.assertFalse(access.can_approve(ctx(1, role='super_admin', key='missing')))
+        self.assertFalse(access.can_approve(ctx(1, role='super_admin', status='fired')))
         self.assertTrue(access.can_open_section(ctx(1, role='super_admin', key='missing')))
 
     def test_employee_requests_only_granted_accounts(self):
@@ -288,6 +291,14 @@ class RulesTest(unittest.TestCase):
         self.assertIn('<code>%s</code>' % totp.group(issued['code']), text)
         self.assertIn('Действует до <b>13:30:30</b>', text)
         self.assertNotIn('Начнёт', text)
+
+    def test_closed_mark_names_who_decided(self):
+        text = rules.approval_closed_text(requester_name='Анна', account_title='Google', status='approved',
+                                          decided_at=1761553800, decided_by='<Супер>')
+        self.assertIn('✅ Подтверждено в 13:30 — &lt;Супер&gt;', text)
+        expired = rules.approval_closed_text(requester_name='Анна', account_title='Google', status='expired',
+                                             decided_at=1761553800, decided_by='X')
+        self.assertNotIn(' — X', expired)
 
     def test_every_status_has_a_label_and_a_closed_mark(self):
         for status in ('pending', 'approved', 'rejected', 'expired', 'cancelled'):
@@ -360,7 +371,10 @@ class WiringTest(unittest.TestCase):
         self.assertIn('OR OLD.delivery_error IS DISTINCT FROM NEW.delivery_error', self.database)
         branch = self.database.split("ELSIF TG_TABLE_NAME = 'twofa_requests' THEN", 1)[1].split('ELSIF', 1)[0]
         self.assertIn('targets := ARRAY[NEW.requester_id] || ARRAY(', branch)
-        self.assertIn("lower(d.code) = 'marketing'", branch)
+        # Будим включивших уведомления (тумблер), а не всех подтверждающих.
+        self.assertIn('SELECT o.user_id FROM twofa_notify_optin o', branch)
+        self.assertIn("('trg_bell_twofa_notify_optin', 'twofa_notify_optin', 'AFTER INSERT OR DELETE', '')",
+                      self.database)
 
     def test_trainer_with_a_grant_is_not_bounced(self):
         allowed = self.app.split('const TRAINER_ALLOWED_VIEWS = Object.freeze([', 1)[1].split(']);', 1)[0]
@@ -449,8 +463,8 @@ class RouteGatesWithoutDbTest(unittest.TestCase):
         response = getattr(self.client, method)('/api/twofa' + path, json=body)
         return response.status_code, (response.get_json() or {}).get('code')
 
-    def test_only_the_head_decides(self):
-        for user_id in (1, 20, 30):
+    def test_only_approvers_decide(self):
+        for user_id in (20, 30):
             for action in ('approve', 'reject'):
                 status, code = self.call(user_id, 'post', '/requests/5/%s' % action)
                 self.assertEqual(status, 403, (user_id, action))
@@ -542,11 +556,20 @@ class ServiceRechecksAccessWithoutDbTest(unittest.TestCase):
             self.svc.decide(_ctx(10, role='admin'), 9, 'approve', 'portal')
         self.assertEqual(len(self._codes_sent()), 1)
 
-    def test_super_admin_cannot_decide(self):
+    def test_employee_cannot_decide(self):
         self._patch(_ctx(20, granted=[5]))
-        self.assertEqual(self.svc.decide(_ctx(1, role='super_admin'), 9, 'approve', 'portal')['outcome'],
+        self.assertEqual(self.svc.decide(_ctx(20, granted=[5]), 9, 'approve', 'portal')['outcome'],
                          'forbidden')
         self.tg.send.assert_not_called()
+
+    def test_super_admin_can_decide(self):
+        self._patch(_ctx(20, granted=[5]), request={'resend_until': rules.almaty(1761553985)})
+        with mock.patch.object(self.queries, 'get_request', side_effect=[
+                dict(self.request), dict(self.request, status='approved', resend_until=rules.almaty(1761553985)),
+                dict(self.request, status='approved'), dict(self.request, status='approved')]):
+            result = self.svc.decide(_ctx(1, role='super_admin'), 9, 'approve', 'portal')
+        self.assertEqual(result['outcome'], 'approved')
+        self.assertEqual(len(self._codes_sent()), 1)
 
     def test_resend_refused_after_access_was_revoked(self):
         self._patch(_ctx(20, granted=[]), request={'status': 'approved',

@@ -119,10 +119,13 @@ def approval_text(*, requester_name, account_title, service, created_at, expires
          clock(created_at, seconds=False), clock(expires_at, seconds=False))
 
 
-def approval_closed_text(*, requester_name, account_title, status, decided_at):
+def approval_closed_text(*, requester_name, account_title, status, decided_at, decided_by=None):
+    """Отметка вместо кнопок. Кто решил — словами: сообщение получают все подтверждающие,
+    включившие уведомления, и каждому надо видеть, что запрос закрыл другой."""
+    by = ' — %s' % _esc(decided_by) if decided_by else ''
     mark = {
-        'approved': '✅ Подтверждено в %s' % clock(decided_at, seconds=False),
-        'rejected': '❌ Отклонено в %s' % clock(decided_at, seconds=False),
+        'approved': '✅ Подтверждено в %s%s' % (clock(decided_at, seconds=False), by),
+        'rejected': '❌ Отклонено в %s%s' % (clock(decided_at, seconds=False), by),
         'expired': '⏱ Сгорел в %s — ответа не было' % clock(decided_at, seconds=False),
         'cancelled': 'Отменён в %s: доступ снят или аккаунт удалён' % clock(decided_at, seconds=False),
     }.get(status, STATUS_LABELS.get(status, status))

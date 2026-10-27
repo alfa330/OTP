@@ -39,7 +39,7 @@ _ERRORS = {
     'forbidden': ('Этот аккаунт вам не выдан', 'TWOFA_REQUEST_FORBIDDEN', 403),
     'no_telegram': ('Код приходит в Telegram, а он у вас не привязан. Войдите в бота портала своим '
                     'логином и паролем, потом запросите код', 'TWOFA_NO_TELEGRAM', 409),
-    'no_approver': ('У отдела маркетинга нет главы — подтвердить запрос некому', 'TWOFA_NO_APPROVER', 409),
+    'no_approver': ('Подтвердить запрос сейчас некому — обратитесь к руководству', 'TWOFA_NO_APPROVER', 409),
     'not_found': ('Не найдено', 'TWOFA_NOT_FOUND', 404),
     'expired': ('Запрос уже сгорел: прошло 10 минут', 'TWOFA_EXPIRED', 409),
     'cancelled': ('Запрос отменён: у сотрудника больше нет доступа к аккаунту', 'TWOFA_CANCELLED', 409),
@@ -119,7 +119,8 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
                     if need == 'manage' and not access.can_manage(ctx):
                         return _bad('Аккаунты и доступы ведёт глава маркетинга', 'TWOFA_MANAGE_FORBIDDEN', 403)
                     if need == 'approve' and not access.can_approve(ctx):
-                        return _bad('Запросы подтверждает глава маркетинга', 'TWOFA_APPROVE_FORBIDDEN', 403)
+                        return _bad('Запросы подтверждают глава маркетинга и супер-админы',
+                                    'TWOFA_APPROVE_FORBIDDEN', 403)
                     return handler(*args, ctx=ctx, **kwargs)
                 except crypto.KeyMissing:
                     return _bad('Не задан ключ шифрования раздела (TWOFA_SECRET_KEY)', 'TWOFA_KEY_MISSING', 409)
@@ -145,6 +146,8 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
         now_dt = rules.almaty(service.now())
         with db._get_cursor() as cursor:
             lead = queries.approver(cursor)
+            people_who_approve = queries.approvers(cursor)
+            notify = queries.notify_enabled(cursor, ctx['user_id']) if caps['can_approve'] else False
             if caps['can_manage']:
                 accounts = queries.list_accounts(cursor)
                 grants = queries.grants_by_account(cursor)
@@ -165,6 +168,11 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'me': {'id': ctx['user_id'], 'name': ctx['name'], 'telegram_linked': bool(ctx['telegram_id'])},
             'approver': ({'id': lead['id'], 'name': lead['name'], 'telegram_linked': bool(lead['telegram_id'])}
                          if lead else None),
+            # Есть ли вообще кому подтверждать (глава или супер-админ) — без этого кнопка
+            # «Запросить код» обещала бы то, чего не будет.
+            'approvers_available': bool(people_who_approve),
+            # Тумблер «уведомления о запросах» — только тому, кто подтверждает.
+            'notify': {'enabled': notify} if caps['can_approve'] else None,
             'bot_username': bot_name.get() if caps['can_request'] or caps['can_manage'] else None,
             'limits': {
                 'request_ttl_seconds': rules.REQUEST_TTL_SECONDS,
@@ -216,6 +224,15 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
     @twofa_route('/requests/<int:request_id>/reject', methods=('POST',), need='approve')
     def twofa_request_reject(ctx, request_id):
         return _decide(ctx, request_id, 'reject')
+
+    # ─── Тумблер уведомлений ─────────────────────────────────────────────────
+
+    @twofa_route('/notify', methods=('PUT',), need='approve')
+    def twofa_notify(ctx):
+        enabled = _payload().get('enabled')
+        if not isinstance(enabled, bool):
+            return _bad('Нужно enabled: true или false', 'TWOFA_BAD_INPUT')
+        return jsonify({'enabled': service.set_notify(ctx, enabled)})
 
     # ─── Журнал ──────────────────────────────────────────────────────────────
 

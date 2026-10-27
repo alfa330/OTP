@@ -7538,13 +7538,20 @@ class Database:
                     -- процесс одному человеку, будим только его.
                     targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'twofa_requests' THEN
-                    -- «Коды 2FA» (#373): запрос ждёт главу маркетинга, решение и
-                    -- сгорание гасят строку у него. Сотрудника будим тоже: открытый у
-                    -- него раздел перечитает статус своего запроса.
+                    -- «Коды 2FA» (#373): запрос ждёт тех, кто включил уведомления о
+                    -- запросах (глава маркетинга, супер-админы — по тумблеру в разделе);
+                    -- решение и сгорание гасят строку у них. Сотрудника будим тоже:
+                    -- открытый у него раздел перечитает статус своего запроса.
                     targets := ARRAY[NEW.requester_id] || ARRAY(
-                        SELECT d.head_user_id FROM departments d
-                         WHERE lower(d.code) = 'marketing' AND d.is_active
-                           AND d.head_user_id IS NOT NULL);
+                        SELECT o.user_id FROM twofa_notify_optin o);
+                ELSIF TG_TABLE_NAME = 'twofa_notify_optin' THEN
+                    -- Тумблер включили — колокол сразу показывает ждущие запросы,
+                    -- выключили — гасит их. Строка есть только у включённого.
+                    IF TG_OP = 'DELETE' THEN
+                        targets := ARRAY[OLD.user_id];
+                    ELSE
+                        targets := ARRAY[NEW.user_id];
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -7684,6 +7691,7 @@ class Database:
             # ПОСЛЕ смены статуса, и без неё экран навсегда остался бы на «Код отправлен».
             # Отметку выдачи (last_issued_at) WHEN отсекает — экрану она ничего не говорит.
             ('trg_bell_twofa_requests_insert', 'twofa_requests', 'AFTER INSERT', ''),
+            ('trg_bell_twofa_notify_optin', 'twofa_notify_optin', 'AFTER INSERT OR DELETE', ''),
             (
                 'trg_bell_twofa_requests',
                 'twofa_requests',

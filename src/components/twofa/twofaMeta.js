@@ -54,7 +54,7 @@ export const accountStateLine = (request, serverIso) => {
     if (!request) return null;
     const at = (iso) => whenOf(iso, serverIso);
     if (request.status === 'pending') {
-        return { tone: 'amber', text: `Ждёт подтверждения главы · сгорит в ${clockOf(request.expires_at)}` };
+        return { tone: 'amber', text: `Ждёт подтверждения · сгорит в ${clockOf(request.expires_at)}` };
     }
     if (request.status === 'approved') {
         if (request.delivery_error) return { tone: 'red', text: `Код не дошёл до Telegram: ${request.delivery_error}` };

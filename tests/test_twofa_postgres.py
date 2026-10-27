@@ -29,7 +29,7 @@ PORT = os.environ.get('TWOFA_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (TWOFA_TEST_PORT)')
 
 SUPER, HEAD, ANNA, BORIS, FIRED, OTHER = 1, 10, 20, 21, 22, 30
-HEAD_TG, ANNA_TG, OTHER_TG = 9010, 9020, 9030
+SUPER_TG, HEAD_TG, ANNA_TG, OTHER_TG = 9001, 9010, 9020, 9030
 SECRET = b'12345678901234567890'
 T0 = 1761553800.0 + 5  # 13:30:05 по Алматы: до смены кода 25 секунд
 
@@ -41,7 +41,7 @@ BASE_DDL = '''
     INSERT INTO departments (id, code, name, head_user_id) VALUES
         (1, 'marketing', 'Маркетинг', 10), (2, 'szov', 'СЗоВ', NULL);
     INSERT INTO users (id, name, login, role, status, department_id, telegram_id) VALUES
-        (1, 'Супер Админов', 'super', 'super_admin', 'working', NULL, NULL),
+        (1, 'Супер Админов', 'super', 'super_admin', 'working', NULL, 9001),
         (10, 'Глава Маркетинга', 'head', 'admin', 'working', 1, 9010),
         (20, 'Анна Маркетолог', 'anna', 'marketing_manager', 'working', 1, 9020),
         (21, 'Борис Без Телеграма', 'boris', 'marketing_manager', 'working', 1, NULL),
@@ -166,6 +166,9 @@ def env(db):
     head = service.context(HEAD)
     [account_id] = service.add_accounts(head, [{'title': 'Google Ads', 'service': 'Google', 'secret': SECRET}])['created']
     assert service.set_person_grants(head, ANNA, [account_id])['outcome'] == 'ok'
+    # Уведомления по умолчанию выключены (тесты ниже — test_notifications_*); здесь глава их
+    # включил, чтобы процесс шёл через его Telegram, как в жизни.
+    assert service.set_notify(head, True) is True
     return {'db': db, 'tg': tg, 'clock': clock, 'service': service, 'account_id': account_id, 'wakes': wakes}
 
 
@@ -200,7 +203,7 @@ def test_context_knows_the_approver_and_grants(env):
     head = service.context(HEAD)
     assert access.can_approve(head) and access.can_manage(head)
     sup = service.context(SUPER)
-    assert access.can_manage(sup) and not access.can_approve(sup)
+    assert access.can_manage(sup) and access.can_approve(sup)
     assert not access.can_open_section(service.context(OTHER))
 
 
@@ -217,11 +220,16 @@ def test_fired_employee_has_no_access_even_with_a_grant(env):
     assert service.set_person_grants(service.context(HEAD), FIRED, [env['account_id']])['outcome'] == 'not_working'
 
 
-def test_fired_or_missing_head_means_nobody_can_approve(env):
+def test_without_a_head_super_admins_still_approve_and_without_anyone_nobody_can(env):
     with env['db']._get_cursor() as cur:
         cur.execute("UPDATE users SET status = 'fired' WHERE id = %s", (HEAD,))
-    assert _request(env)['outcome'] == 'no_approver'
     assert not access.can_open_section(env['service'].context(HEAD))
+    request = _request(env)['request']
+    service = env['service']
+    assert service.decide(service.context(SUPER), request['id'], 'approve', 'portal')['outcome'] == 'approved'
+    with env['db']._get_cursor() as cur:
+        cur.execute("UPDATE users SET status = 'fired' WHERE id = %s", (SUPER,))
+    assert service.request_code(service.context(ANNA), env['account_id'])['outcome'] == 'no_approver'
 
 
 def test_key_missing_closes_the_section_for_all_but_super_admin(env, monkeypatch):
@@ -322,12 +330,59 @@ def test_reject_tells_the_employee(env):
     assert '❌ Отклонено' in env['tg'].edited[0]['text']
 
 
-def test_only_the_head_can_decide(env):
+def test_employees_cannot_decide(env):
     request = _request(env)['request']
     service = env['service']
-    assert service.decide(service.context(SUPER), request['id'], 'approve', 'portal')['outcome'] == 'forbidden'
     assert service.decide(service.context(ANNA), request['id'], 'approve', 'portal')['outcome'] == 'forbidden'
+    assert service.decide(service.context(OTHER), request['id'], 'approve', 'portal')['outcome'] == 'forbidden'
     assert env['tg'].to(ANNA_TG) == []
+
+
+# ─── Тумблер уведомлений (владелец, 27.10.2026) ──────────────────────────────
+
+def test_notifications_are_off_by_default(env):
+    service = env['service']
+    service.set_notify(service.context(HEAD), False)
+    request = _request(env)['request']
+    assert env['tg'].sent == []
+    with env['db']._get_cursor() as cur:
+        assert queries.bell(cur, HEAD, rules.almaty(T0), 5) == (0, [])
+        assert queries.bell(cur, SUPER, rules.almaty(T0), 5) == (0, [])
+    # Подтверждать можно и без уведомлений — в разделе.
+    assert service.decide(service.context(HEAD), request['id'], 'approve', 'portal')['outcome'] == 'approved'
+
+
+def test_every_approver_with_the_toggle_gets_buttons_first_press_wins(env):
+    service = env['service']
+    assert service.set_notify(service.context(SUPER), True) is True
+    request = _request(env)['request']
+    assert {m['chat_id'] for m in env['tg'].sent} == {HEAD_TG, SUPER_TG}
+    text, alert = service.handle_callback(SUPER_TG, 'twofa:ok:%d' % request['id'])
+    assert text == 'Подтверждено — код отправлен' and not alert
+    closed = {m['chat_id']: m['text'] for m in env['tg'].edited}
+    assert set(closed) == {HEAD_TG, SUPER_TG}
+    assert all('✅ Подтверждено в 13:30 — Супер Админов' in t for t in closed.values())
+    text, _alert = service.handle_callback(HEAD_TG, 'twofa:no:%d' % request['id'])
+    assert text.startswith('Уже решено: подтверждён')
+    assert len([m for m in env['tg'].to(ANNA_TG) if _code_in(m['text'])]) == 1
+
+
+def test_toggle_off_stops_notifications_and_the_bell(env):
+    service = env['service']
+    service.set_notify(service.context(HEAD), False)
+    with env['db']._get_cursor() as cur:
+        assert not queries.notify_enabled(cur, HEAD)
+    _request(env)
+    assert env['tg'].to(HEAD_TG) == []
+
+
+def test_toggle_is_for_approvers_only_and_bell_needs_the_approver_role(env):
+    with env['db']._get_cursor() as cur:
+        queries.set_notify(cur, ANNA, True, rules.almaty(T0))
+    _request(env)
+    with env['db']._get_cursor() as cur:
+        assert queries.bell(cur, ANNA, rules.almaty(T0), 5) == (0, [])
+        assert queries.bell(cur, HEAD, rules.almaty(T0), 5)[0] == 1
 
 
 def test_blocked_bot_is_recorded_as_not_delivered(env):
@@ -710,12 +765,15 @@ def test_garbage_callback_is_refused(env):
 
 # ─── Колокол ─────────────────────────────────────────────────────────────────
 
-def test_bell_shows_pending_only_to_the_head(env):
+def test_bell_shows_pending_to_approvers_who_turned_it_on(env):
     _request(env)
     with env['db']._get_cursor() as cur:
         assert queries.bell(cur, HEAD, rules.almaty(T0), 5)[0] == 1
         assert queries.bell(cur, SUPER, rules.almaty(T0), 5) == (0, [])
         assert queries.bell(cur, HEAD, rules.almaty(T0 + 600), 5)[0] == 0
+    env['service'].set_notify(env['service'].context(SUPER), True)
+    with env['db']._get_cursor() as cur:
+        assert queries.bell(cur, SUPER, rules.almaty(T0), 5)[0] == 1
 
 
 # ─── Ручки ───────────────────────────────────────────────────────────────────
@@ -749,10 +807,15 @@ def test_screen_per_role(client, env):
     assert screen['capabilities'] == {'can_open': True, 'can_manage': False, 'can_approve': False, 'can_request': True}
     assert [a['title'] for a in screen['accounts']] == ['Google Ads'] and 'user_ids' not in screen['accounts'][0]
     assert screen['people'] == [] and screen['pending'] == []
+    assert screen['notify'] is None and screen['approvers_available'] is True
     assert screen['me']['telegram_linked'] is True and screen['approver']['name'] == 'Глава Маркетинга'
     client.as_user(HEAD)
     screen = client.get('/api/twofa').get_json()
     assert screen['capabilities']['can_approve'] and screen['accounts'][0]['user_ids'] == [ANNA]
+    assert screen['notify'] == {'enabled': True}
+    client.as_user(SUPER)
+    assert client.get('/api/twofa').get_json()['notify'] == {'enabled': False}
+    client.as_user(HEAD)
     assert [p['name'] for p in screen['people']] == ['Анна Маркетолог']
     client.as_user(OTHER)
     response = client.get('/api/twofa')
@@ -813,6 +876,16 @@ def test_grants_and_people_through_the_routes(client, env):
     assert response.get_json() == {'added': [env['account_id']], 'removed': []}
     assert client.put('/api/twofa/people/%d/grants' % BORIS, json={'account_ids': [999]}).status_code == 400
     assert client.put('/api/twofa/people/%d/grants' % BORIS, json={'account_ids': 'x'}).status_code == 400
+
+
+def test_toggle_route(client, env):
+    client.as_user(ANNA)
+    assert client.put('/api/twofa/notify', json={'enabled': True}).status_code == 403
+    client.as_user(SUPER)
+    assert client.put('/api/twofa/notify', json={'enabled': 'да'}).status_code == 400
+    assert client.put('/api/twofa/notify', json={'enabled': True}).get_json() == {'enabled': True}
+    assert client.get('/api/twofa').get_json()['notify'] == {'enabled': True}
+    assert client.put('/api/twofa/notify', json={'enabled': False}).get_json() == {'enabled': False}
 
 
 def test_saving_accounts_without_the_key_is_refused(client, env, monkeypatch):

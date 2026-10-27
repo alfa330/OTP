@@ -98,8 +98,8 @@ class Twofa:
             account = queries.get_account(cursor, account_id)
             if not account or not account['is_active']:
                 return {'outcome': 'not_found'}
-            lead = queries.approver(cursor)
-            if not lead:
+            people = queries.approvers(cursor)
+            if not people:
                 return {'outcome': 'no_approver'}
             existing = queries.pending_of(cursor, account_id, ctx['user_id'], now_dt)
             if existing:
@@ -112,23 +112,30 @@ class Twofa:
             queries.log_event(cursor, 'requested', now=now_dt, request_id=request_id, account_id=account['id'],
                               account_title=account['title'], actor_id=ctx['user_id'], actor_name=ctx['name'])
             request = queries.get_request(cursor, request_id)
-        self._notify_approver(request, lead)
+        # Уведомление — только включившим тумблер «уведомления о запросах» (по умолчанию он
+        # выключен) и только тем, у кого есть Telegram; колокол им покажет запрос сам.
+        self._notify_approvers(request, [p for p in people if p['notify'] and p['telegram_id']])
         self.wake()
         return {'outcome': 'created', 'request': request}
 
-    def _notify_approver(self, request, lead):
-        if not lead.get('telegram_id'):
+    def _notify_approvers(self, request, people):
+        if not people:
             return
         text = rules.approval_text(
             requester_name=request['requester_name'], account_title=request['account_title'],
             service=request['service'], created_at=rules.epoch(request['created_at']),
             expires_at=rules.epoch(request['expires_at']))
-        message_id, _error = self.tg.send(lead['telegram_id'], text, rules.approval_markup(request['id']))
-        if not message_id:
+        sent = []
+        for person in people:
+            message_id, _error = self.tg.send(person['telegram_id'], text, rules.approval_markup(request['id']))
+            if message_id:
+                sent.append((person['telegram_id'], message_id))
+        if not sent:
             return
         with self._cursor() as cursor:
-            queries.insert_message(cursor, request_id=request['id'], kind='approval', chat_id=lead['telegram_id'],
-                                   message_id=message_id, now=rules.almaty(self.now()))
+            for chat_id, message_id in sent:
+                queries.insert_message(cursor, request_id=request['id'], kind='approval', chat_id=chat_id,
+                                       message_id=message_id, now=rules.almaty(self.now()))
         # Глава мог решить в портале, пока сообщение летело. Статус читаем ПОСЛЕ фиксации
         # вставки, отдельной транзакцией: решение, зафиксированное между вставкой и её
         # фиксацией, своего сообщения ещё не видело, и кнопки у главы остались бы.
@@ -148,9 +155,10 @@ class Twofa:
         if decision not in ('approve', 'reject'):
             raise ValueError(decision)
         if not access.can_approve(ctx):
-            # Глава, у которого раздел закрыт только из-за ключа шифрования, должен узнать
-            # настоящую причину, а не «подтверждает только глава».
-            if access.is_working(ctx) and access.is_approver(ctx) and not access.key_ready(ctx):
+            # Подтверждающий, у которого раздел закрыт только из-за ключа шифрования, должен
+            # узнать настоящую причину, а не «подтверждают глава и супер-админы».
+            if (access.is_working(ctx) and (access.is_approver(ctx) or access.is_super_admin(ctx))
+                    and not access.key_ready(ctx)):
                 return {'outcome': 'key_missing'}
             return {'outcome': 'forbidden'}
         now = self.now()
@@ -230,7 +238,8 @@ class Twofa:
         decided_at = request['decided_at'] or request['expires_at']
         text = rules.approval_closed_text(
             requester_name=request['requester_name'], account_title=request['account_title'],
-            status=request['status'], decided_at=rules.epoch(decided_at))
+            status=request['status'], decided_at=rules.epoch(decided_at),
+            decided_by=request['decided_by_name'])
         for message in messages:
             self.tg.edit(message['chat_id'], message['message_id'], text)
 
@@ -420,7 +429,7 @@ class Twofa:
         'rejected': 'Отклонено',
         'expired': 'Запрос уже сгорел: прошло 10 минут',
         'cancelled': 'Запрос отменён: у сотрудника нет доступа к аккаунту',
-        'forbidden': 'Подтверждает только глава маркетинга',
+        'forbidden': 'Подтверждают глава маркетинга и супер-админы',
         'key_missing': 'Ключ шифрования раздела не задан — подтвердить нельзя',
         'not_found': 'Запрос не найден',
         'key_error': 'Ключ аккаунта не расшифровывается — код не выдан',
@@ -492,6 +501,14 @@ class Twofa:
                 return self._TOASTS['key_error'], True
             return 'Кнопка не ваша или доступ к аккаунту снят', True
         return 'Неверная кнопка', True
+
+    # ─── Тумблер уведомлений ─────────────────────────────────────────────────
+
+    def set_notify(self, ctx, enabled):
+        """Включить или выключить себе уведомления о запросах кодов (колокол и Telegram)."""
+        with self._cursor() as cursor:
+            queries.set_notify(cursor, ctx['user_id'], bool(enabled), rules.almaty(self.now()))
+            return queries.notify_enabled(cursor, ctx['user_id'])
 
     # ─── Аккаунты и доступы ──────────────────────────────────────────────────
 

@@ -28,7 +28,7 @@ test('строка состояния аккаунта у сотрудника',
     const server = '2026-10-27T13:35:00+05:00';
     assert.equal(accountStateLine(null, server), null);
     assert.deepEqual(accountStateLine({ status: 'pending', expires_at: '2026-10-27T13:40:05+05:00' }, server),
-        { tone: 'amber', text: 'Ждёт подтверждения главы · сгорит в 13:40' });
+        { tone: 'amber', text: 'Ждёт подтверждения · сгорит в 13:40' });
     assert.equal(accountStateLine({ status: 'approved', decided_at: '2026-10-27T13:31:00+05:00' }, server).tone, 'green');
     assert.equal(accountStateLine({ status: 'approved', delivery_error: 'blocked' }, server).tone, 'red');
     assert.equal(accountStateLine({ status: 'expired' }, server).tone, 'slate');
