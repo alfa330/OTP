@@ -713,7 +713,8 @@ CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-User-Id", "Authorization", "X-Refresh-Token", "X-Auth-Transport"],
+        "allow_headers": ["Content-Type", "X-User-Id", "Authorization", "X-Refresh-Token", "X-Auth-Transport",
+                          "Last-Event-ID"],
         "supports_credentials": True,
         "max_age": 86400
     }
@@ -5763,7 +5764,7 @@ def _build_cors_preflight_response():
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport, Last-Event-ID"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
@@ -5780,7 +5781,7 @@ def after_request(response):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-User-Id, Authorization, X-Refresh-Token, X-Auth-Transport, Last-Event-ID'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT, PATCH'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'

@@ -6,6 +6,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
@@ -513,6 +514,53 @@ class PilotRoutesTests(unittest.TestCase):
         self.assertEqual(self.broker.current_seq(), int(frame_id))
         response.close()
         self.assertEqual(0, self.broker.streams)
+
+    def test_reconnect_by_last_event_id_header_resumes_like_the_query(self):
+        """С 27.10.2026 точка возобновления идёт заголовком: адрес потока одинаков
+        при каждом переподключении, и браузер не повторяет OPTIONS."""
+        response = self.client.get('/api/wazzup/pilot/stream', buffered=False)
+        frames = iter(response.response)
+        _, _, connected = self.frame_parts(next(frames))
+        seen = dict(account='op', channelId=CHANNEL, chatId='77000000000', messageId='seen', status='sent')
+        self.broker.publish(seen)
+        last_id, _, _ = self.frame_parts(next(frames))
+        response.close()
+        missed = dict(seen, messageId='missed', status='pending')
+        self.broker.publish(missed)
+        response = self.client.get('/api/wazzup/pilot/stream', buffered=False,
+                                   headers={'Last-Event-ID': f'{connected["epoch"]}:{last_id}'})
+        frames = iter(response.response)
+        _, event, resumed = self.frame_parts(next(frames))
+        self.assertEqual(('connected', True, int(last_id)), (event, resumed['resumed'], resumed['seq']))
+        _, event, payload = self.frame_parts(next(frames))
+        self.assertEqual(('change', [missed]), (event, payload['changes']))
+        response.close()
+        self.assertEqual(0, self.broker.streams)
+
+    def test_resume_point_header_wins_and_bad_values_reconcile(self):
+        self.assertEqual(('e1', '7'), pilot.resume_point({'epoch': 'old', 'after': '1'}, {'Last-Event-ID': 'e1:7'}))
+        self.assertEqual(('old', '1'), pilot.resume_point({'epoch': 'old', 'after': '1'}, {}))
+        self.assertEqual((None, None), pilot.resume_point({}, {'Last-Event-ID': ':'}))
+        self.assertEqual((None, '7'), pilot.resume_point({}, {'Last-Event-ID': '7'}))
+        broker = EventBroker()
+        broker.publish({'messageId': '1'})
+        for header in ('мусор', f'{broker.epoch}:x', f'{broker.epoch}:99', 'old-process:1'):
+            with self.subTest(header):
+                self.assertEqual((broker.seq, False), broker.resume_from(*pilot.resume_point({}, {'Last-Event-ID': header})))
+
+    def test_browsers_may_send_the_resume_header_cross_origin(self):
+        """Без Last-Event-ID в списке CORS браузер отверг бы предзапрос, и поток
+        «Чатов ОП» не открылся бы вовсе. Списков три: flask-cors, ответ на OPTIONS
+        и общий after_request — расходиться им нельзя."""
+        bot = (Path(__file__).resolve().parents[1] / 'bot_schedule2.py').read_text(encoding='utf-8')
+        lines = [line for line in bot.splitlines()
+                 if 'Access-Control-Allow-Headers' in line and 'X-Auth-Transport' in line]
+        self.assertEqual(2, len(lines))
+        for line in lines:
+            self.assertIn('Last-Event-ID', line)
+        cors = bot[bot.index('CORS(app, resources={'):]
+        cors = cors[:cors.index('})')]
+        self.assertIn('"Last-Event-ID"', cors)
 
     def test_cursor_of_another_process_or_beyond_the_buffer_reconciles(self):
         broker = EventBroker(capacity=2)

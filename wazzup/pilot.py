@@ -141,6 +141,20 @@ MESSAGE_SELECT = """
 """
 
 
+def resume_point(args, headers):
+    """(epoch, after) where a reconnecting stream continues.
+
+    The client sends it as `Last-Event-ID: <epoch>:<seq>` so the stream URL stays
+    the same on every reconnect and the browser reuses its cached CORS preflight:
+    with the point in the query string each 2-minute reconnect cost an OPTIONS
+    too (27.10.2026). The query pair is still read for tabs opened before that."""
+    value = (headers.get('Last-Event-ID') or '').strip()
+    if value:
+        epoch, _, after = value.rpartition(':')
+        return epoch or None, after or None
+    return args.get('epoch'), args.get('after')
+
+
 def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                           listen_connect=None, transport=None, event_broker=None, gcs=None,
                           access=None, stream_limit=STREAM_LIMIT, driver_card_sync=None,
@@ -295,7 +309,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             raise
         # A reconnect continues after the last frame its client saw (`id:`), so
         # nothing published during the gap is lost and no reconciliation is needed.
-        epoch, after = request.args.get('epoch'), request.args.get('after')
+        epoch, after = resume_point(request.args, request.headers)
         # The portal sidebar badge (WazzupWaitingKeeper.jsx) needs the waiting
         # counter only: no messages, presence or cards. A skipped batch still
         # sends its `id:` (an empty `cursor` frame the client ignores), so a
