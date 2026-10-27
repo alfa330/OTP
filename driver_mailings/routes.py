@@ -55,6 +55,7 @@ Blueprint собирается фабрикой, зависимости прих
 """
 
 import hashlib
+import html
 import json
 import logging
 import threading
@@ -250,12 +251,151 @@ def count_key(filters):
     return json.dumps(canonical, sort_keys=True, ensure_ascii=False)
 
 
+# ── Уведомления о сбоях (владелец, 27.10.2026) ───────────────────────────────
+#
+# Сбой Яндекса 09–26.10 две недели никто не видел. Теперь фоновая проверка смотрит
+# свежие рассылки и пишет в Telegram тем, кто включил переключатель в журнале.
+
+# Как часто. О часе в очереди узнаём не позже чем через 1 ч 05 мин, а в обычный
+# день кабинет не спрашиваем вовсе: смотрим только рассылки, про которые он ещё
+# не сказал последнего слова (queries.mailings_to_watch).
+ALERT_WATCH_SECONDS = 5 * 60
+
+# Первая проверка — не сразу после старта: во время выкладки старый инстанс ещё
+# работает, и обе нити пошли бы в кабинет разом. Двойное сообщение и так
+# невозможно (queries.claim_alerts), это про нагрузку.
+ALERT_FIRST_DELAY_SECONDS = 90
+
+# «Яндекс держит рассылку в очереди дольше часа» — порог владельца. В сентябре
+# 95 тысяч водителей одной диспетчерской расходились за 8–10 минут.
+ALERT_STUCK_AFTER = timedelta(hours=1)
+
+# Насколько старые рассылки смотрим: двое суток. Потерянные 16–25.10 пропадали
+# из кабинета за дни, а то, что старше, уже разобрал журнал.
+ALERT_LOOKBACK = timedelta(days=2)
+
+# Рассылку, которая ещё отправляется, не разбираем: отказы по диспетчерским
+# пишутся по ходу, и сообщение «отказал в 30 из 89» посреди отправки соврало бы
+# числом. Отправка «всем» идёт около минуты; полчаса — значит, она оборвалась.
+ALERT_SENDING_GRACE = timedelta(minutes=30)
+
+# Порядок строк в сообщении.
+ALERT_KINDS = ('refused', 'lost', 'stuck')
+
+# Время в сообщении — по Алматы: Казахстан с 01.03.2024 живёт в UTC+5 круглый год.
+ALMATY = timezone(timedelta(hours=5))
+
+
+def alert_problems(item, now):
+    """Сбои рассылки, о которых ещё не сообщали: {вид: [цели]}.
+
+    refused — кабинет отказал при отправке или она оборвалась; lost — Яндекс
+    принял и потерял (queries.LOST_ERROR_CODE); stuck — принята, но дольше
+    ALERT_STUCK_AFTER в очереди Яндекса. item['alerted'] — уже сообщённое.
+    """
+    stamp = _parse_stamp(item.get('created_at'))
+    if item.get('status') == 'sending' and (stamp is None or now - stamp < ALERT_SENDING_GRACE):
+        return {}
+    targets = item.get('targets') or []
+    found = {
+        'refused': [t for t in targets if t.get('status') == 'failed'
+                    and t.get('error_code') != queries.LOST_ERROR_CODE],
+        'lost': [t for t in targets if t.get('error_code') == queries.LOST_ERROR_CODE],
+        'stuck': [t for t in targets if t.get('status') == 'sent' and t.get('fleet_status') == 'created'
+                  and _parse_stamp(t.get('sent_at')) is not None
+                  and now - _parse_stamp(t.get('sent_at')) >= ALERT_STUCK_AFTER],
+    }
+    alerted = item.get('alerted') or set()
+    return {kind: rows for kind, rows in found.items() if rows and kind not in alerted}
+
+
+def _parks_of(total):
+    """«из 89 диспетчерских», «из 1 диспетчерской», «из 21 диспетчерской»."""
+    total = int(total or 0)
+    word = 'диспетчерской' if total % 10 == 1 and total % 100 != 11 else 'диспетчерских'
+    return 'из {} {}'.format(total, word)
+
+
+def _park_names(targets, limit=3):
+    """Крупнейшие диспетчерские списком: по ним видно, сколько людей ждут."""
+    biggest = sorted(targets, key=lambda t: -int(t.get('recipients_estimate') or 0))
+    names = []
+    for target in biggest[:limit]:
+        name = str(target.get('park_name') or target.get('park_id') or '').strip()
+        city = str(target.get('park_city') or '').strip()
+        names.append(html.escape(name + (' ({})'.format(city) if city else '')))
+    return ', '.join(names) + ('…' if len(biggest) > limit else '')
+
+
+def alert_text(item, problems):
+    """Сообщение в Telegram (HTML) о сбоях одной рассылки."""
+    targets = item.get('targets') or []
+    total = len(targets)
+    stamp = _parse_stamp(item.get('created_at'))
+    when = stamp.astimezone(ALMATY).strftime('%d.%m %H:%M') if stamp else ''
+    head = '«{}»'.format(html.escape(str(item.get('title') or '').strip()))
+    tail = ', '.join(part for part in (when, html.escape(str(item.get('created_by_name') or '').strip()))
+                     if part)
+    lines = ['<b>Рассылки: сбой</b>', head + (' — ' + tail if tail else '')]
+    for kind in ALERT_KINDS:
+        rows = problems.get(kind)
+        if not rows:
+            continue
+        share = '{} {}'.format(len(rows), _parks_of(total))
+        if kind == 'stuck':
+            lines.append('• Яндекс больше часа держит её в очереди: не разослана в {} — {}'.format(
+                share, _park_names(rows)))
+        elif kind == 'lost':
+            lines.append('• Яндекс принял, но не разослал и удалил: {} — водители её не получили'.format(share))
+        else:
+            reasons = {}
+            for row in rows:
+                reason = str(row.get('error') or row.get('error_code') or 'ошибка').strip()
+                reasons[reason] = reasons.get(reason, 0) + 1
+            reason = max(reasons, key=reasons.get)
+            lines.append('• Не ушла в {}: {}'.format(share, html.escape(reason)))
+    lines.append('Подробности — в журнале раздела «Рассылки».')
+    return '\n'.join(lines)
+
+
+def _telegram_delivered(response):
+    """Дошло ли сообщение: ответ Bot API с ok=true. Любая другая форма — нет."""
+    try:
+        return bool(response is not None and response.status_code == 200 and response.json().get('ok'))
+    except Exception:  # noqa: BLE001 — не-JSON, обрыв: значит, не дошло
+        return False
+
+
+def start_alert_watch(run, *, interval=ALERT_WATCH_SECONDS, first_delay=ALERT_FIRST_DELAY_SECONDS):
+    """Своя нить проверки сбоев. Не в общий пул бота: проверка ходит в кабинет
+    циклом, а у общего пула четыре места на весь бот. Нить не умирает от ошибки
+    одной проверки — следующая через interval."""
+    def loop():
+        time.sleep(first_delay)
+        while True:
+            try:
+                run()
+            except Exception:  # noqa: BLE001
+                logging.exception('Рассылки: проверка сбоев не отработала')
+            time.sleep(interval)
+
+    thread = threading.Thread(target=loop, name='mailings-alerts', daemon=True)
+    thread.start()
+    return thread
+
+
 def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                                    resolve_requester, sensitive_access_granted):
+                                    resolve_requester, sensitive_access_granted, send_telegram=None):
     """sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
     QR-кодом (bot_schedule2._sensitive_access_granted_for_user). Параметр
     обязательный намеренно: со значением «по умолчанию» забытая передача молча
-    сняла бы гейт с рядового сотрудника."""
+    сняла бы гейт с рядового сотрудника.
+
+    send_telegram — (chat_id, text) -> ответ Bot API (bot_schedule2.
+    _send_telegram_text_message): им фоновая проверка пишет о сбоях. Без него
+    уведомления не уходят, раздел работает как прежде. Проверку запускает
+    владелец процесса: start_alert_watch(bp.watch_alerts) — не при импорте,
+    чтобы тесты не поднимали нить."""
     bp = Blueprint('driver_mailings', __name__, url_prefix='/api/driver_mailings')
 
     # Кэш справочников: (парк, '') → общие справочники парка, (парк, сегмент) →
@@ -928,6 +1068,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         with db._get_cursor() as cursor:
             session = session_for_view(cursor)
             template_rows = queries.templates(cursor)
+            alerts = queries.alerts_state(cursor, requester_id)
         allowed = enabled_parks(rows)
         # Пределы берём из первой разрешённой диспетчерской: они одинаковы во
         # всех (проверено), а разными быть в принципе могут — тогда честнее
@@ -954,7 +1095,19 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             'limits': limits,
             'templates': template_rows,
             'capabilities': access.capabilities(requester),
+            # Переключатель «Уведомлять о сбоях» в журнале — свой у каждого.
+            'alerts': alerts,
         })
+
+    @section_route('/alerts', methods=('PUT',))
+    def driver_mailings_alerts(requester_id, requester):
+        enabled = (request.get_json(silent=True) or {}).get('enabled')
+        if not isinstance(enabled, bool):
+            return jsonify({"error": "Нужно enabled: true или false", "code": "BAD_INPUT"}), 400
+        with db._get_cursor() as cursor:
+            queries.set_alerts(cursor, requester_id, enabled)
+            state = queries.alerts_state(cursor, requester_id)
+        return jsonify({'status': 'success', 'alerts': state})
 
     @section_route('/parks/refresh', methods=('POST',), sending=True)
     def driver_mailings_refresh_parks(requester_id, requester):
@@ -1451,4 +1604,60 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             return jsonify({"error": "Шаблон не найден"}), 404
         return jsonify({'status': 'success', 'item': item})
 
+    # ── фоновая проверка сбоев ───────────────────────────────────────────────
+
+    def watch_alerts(now=None):
+        """Одна проверка: спросить кабинет о свежих рассылках, где он ещё не
+        сказал последнего слова, и сообщить подписчикам о новых сбоях.
+
+        Кабинет спрашивает тот же attach_read_stats, что и журнал, — он же
+        запоминает «в очереди / разослана» и помечает потерянное. Нет
+        подписчиков — нет и походов в кабинет. Сеть никогда не идёт под
+        открытым курсором: столбим в базе, шлём, записываем итог.
+        """
+        now = now or datetime.now(timezone.utc)
+        since = now - ALERT_LOOKBACK
+        if send_telegram is None:
+            return {'subscribers': 0, 'alerts': 0}
+        with db._get_cursor() as cursor:
+            # Право на раздел — тем же правилом, что у ручек: отозвали допуск —
+            # уведомления прекращаются сами, без ручной чистки подписки.
+            subscribers = [person for person in queries.alert_subscribers(cursor)
+                           if person['telegram_id']
+                           and access.can_view_section(queries.access_context(cursor, person['id']))]
+        if not subscribers:
+            return {'subscribers': 0, 'alerts': 0}
+
+        with db._get_cursor() as cursor:
+            pending = queries.mailings_to_watch(cursor, since)
+        if pending:
+            attach_read_stats(pending)
+        with db._get_cursor() as cursor:
+            items = queries.mailings_for_alerts(cursor, since)
+
+        alerts = 0
+        for item in items:
+            problems = alert_problems(item, now)
+            if not problems:
+                continue
+            with db._get_cursor() as cursor:
+                claimed = queries.claim_alerts(cursor, item['id'], [k for k in ALERT_KINDS if k in problems])
+            if not claimed:
+                continue
+            text = alert_text(item, {kind: rows for kind, rows in problems.items() if kind in claimed})
+            delivered = 0
+            for person in subscribers:
+                try:
+                    if _telegram_delivered(send_telegram(person['telegram_id'], text)):
+                        delivered += 1
+                except Exception:  # noqa: BLE001 — сеть: следующему подписчику это не мешает
+                    logging.warning('Рассылки: уведомление о сбое не ушло пользователю %s', person['id'])
+            with db._get_cursor() as cursor:
+                queries.note_alert_delivered(cursor, item['id'], claimed, delivered)
+            logging.info('Рассылки: о сбое рассылки %s (%s) сообщено %s из %s',
+                         item['id'], ', '.join(sorted(claimed)), delivered, len(subscribers))
+            alerts += 1
+        return {'subscribers': len(subscribers), 'alerts': alerts}
+
+    bp.watch_alerts = watch_alerts
     return bp

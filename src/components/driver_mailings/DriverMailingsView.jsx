@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 
 import {
-    APPLE_FONT, IosBadge, IosModal, IosSegmented, iosBtnGhost, iosBtnPrimary,
+    APPLE_FONT, IosBadge, IosHint, IosModal, IosSegmented, IosToggle, iosBtnGhost, iosBtnPrimary,
     iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
 import MailingComposer from './MailingComposer';
@@ -98,6 +98,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
     const [journalMore, setJournalMore] = useState(false);
     const [journalError, setJournalError] = useState(null);
     const [revoking, setRevoking] = useState(false);
+    const [alertsBusy, setAlertsBusy] = useState(false);
 
     const [templatesOpen, setTemplatesOpen] = useState(false);
     const [templateName, setTemplateName] = useState('');
@@ -112,6 +113,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
     const session = overview?.session || {};
     const capabilities = overview?.capabilities || {};
     const templates = overview?.templates || [];
+    const alerts = overview?.alerts || null;
     const linked = Boolean(session.configured) && !session.last_error;
 
     const message = draft.bilingual
@@ -291,6 +293,25 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
             .finally(() => setSending(false));
     };
 
+    /* Переключатель «Уведомлять о сбоях»: свой у каждого, по умолчанию выключен.
+       Положение меняем сразу, а не после ответа — откатываем, если сервер отказал. */
+    const toggleAlerts = (next) => {
+        const setEnabled = (value) => setOverview((prev) => (
+            prev ? { ...prev, alerts: { ...(prev.alerts || {}), enabled: value } } : prev
+        ));
+        setAlertsBusy(true);
+        setEnabled(next);
+        axios.put(`${base}/alerts`, { enabled: next }, { headers: headers() })
+            .then((response) => setOverview((prev) => (
+                prev ? { ...prev, alerts: response.data?.alerts || prev.alerts } : prev
+            )))
+            .catch((error) => {
+                setEnabled(!next);
+                toast(error?.response?.data?.error || 'Не удалось переключить уведомления', 'error');
+            })
+            .finally(() => setAlertsBusy(false));
+    };
+
     const revoke = (item) => {
         setRevoking(true);
         axios.post(`${base}/journal/${item.id}/revoke`, {}, { headers: headers() })
@@ -467,19 +488,40 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
                     }}
                 />
             ) : (
-                <MailingJournal
-                    items={journal.items}
-                    total={journal.total}
-                    loading={journalLoading}
-                    loadingMore={journalMore}
-                    error={journalError}
-                    refs={refs}
-                    revokeWindow={limits.revoke_seconds || 300}
-                    revoking={revoking}
-                    onMore={() => loadJournal(journal.items.length)}
-                    onRevoke={revoke}
-                    onRepeat={repeat}
-                />
+                <>
+                    {alerts && (
+                        <div className={`${iosCard} mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3`}>
+                            <div className="min-w-0 grow basis-[240px]">
+                                <div className="flex items-center gap-1.5 text-[14px] font-semibold text-slate-900">
+                                    Уведомлять о сбоях
+                                    <IosHint
+                                        label="Что за уведомления"
+                                        text="Сообщение в Telegram, если Яндекс больше часа держит рассылку в очереди, принял и не разослал её или кабинет отказал в отправке. Одно сообщение на каждый сбой рассылки. Только вам и только пока переключатель включён; по умолчанию он выключен."
+                                    />
+                                </div>
+                                {alerts.enabled && !alerts.telegram_linked && (
+                                    <div className="mt-0.5 text-[12.5px] text-amber-700">
+                                        Telegram не привязан — сообщения не дойдут. Войдите в бота портала своим логином и паролем.
+                                    </div>
+                                )}
+                            </div>
+                            <IosToggle checked={Boolean(alerts.enabled)} disabled={alertsBusy} onChange={toggleAlerts} />
+                        </div>
+                    )}
+                    <MailingJournal
+                        items={journal.items}
+                        total={journal.total}
+                        loading={journalLoading}
+                        loadingMore={journalMore}
+                        error={journalError}
+                        refs={refs}
+                        revokeWindow={limits.revoke_seconds || 300}
+                        revoking={revoking}
+                        onMore={() => loadJournal(journal.items.length)}
+                        onRevoke={revoke}
+                        onRepeat={repeat}
+                    />
+                </>
             )}
 
             {/* Служебная строка: связь с кабинетом. Внизу и свёрнутой — тому, кто

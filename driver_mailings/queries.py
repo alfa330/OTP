@@ -719,6 +719,137 @@ def claimed_fleet_ids(cursor, park_id, since=None):
     return {str(row[0]) for row in cursor.fetchall() if row[0]}
 
 
+# ── Уведомления о сбоях ──────────────────────────────────────────────────────
+#
+# Переключатель в журнале (владелец, 27.10.2026): кто включил, тому о сбое
+# рассылки приходит сообщение в Telegram. См. schema.py, «УВЕДОМЛЕНИЯ О СБОЯХ».
+
+# Работающий сотрудник: уволенному уведомления не шлём, даже если строка осталась.
+_WORKING = "COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')"
+
+
+def alerts_state(cursor, user_id):
+    """{'enabled', 'telegram_linked'} — для переключателя: включено ли и дойдёт ли."""
+    cursor.execute(
+        """
+        SELECT (o.user_id IS NOT NULL), (u.telegram_id IS NOT NULL)
+          FROM users u
+          LEFT JOIN driver_mailing_alert_optin o ON o.user_id = u.id
+         WHERE u.id = %s
+        """,
+        (int(user_id),),
+    )
+    row = cursor.fetchone() or (False, False)
+    return {'enabled': bool(row[0]), 'telegram_linked': bool(row[1])}
+
+
+def set_alerts(cursor, user_id, enabled):
+    """Переключатель. Выключение удаляет строку (см. schema)."""
+    if enabled:
+        cursor.execute(
+            """
+            INSERT INTO driver_mailing_alert_optin (user_id) VALUES (%s)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            (int(user_id),),
+        )
+    else:
+        cursor.execute("DELETE FROM driver_mailing_alert_optin WHERE user_id = %s", (int(user_id),))
+
+
+def alert_subscribers(cursor):
+    """Кто включил уведомления и ещё работает: [{'id', 'name', 'telegram_id'}].
+    Есть ли у человека раздел, решает вызывающий — по тем же правилам, что ручки."""
+    cursor.execute(
+        """
+        SELECT u.id, u.name, u.telegram_id
+          FROM driver_mailing_alert_optin o
+          JOIN users u ON u.id = o.user_id
+         WHERE {working}
+         ORDER BY u.id
+        """.format(working=_WORKING)
+    )
+    return [{'id': int(row[0]), 'name': row[1], 'telegram_id': int(row[2]) if row[2] else None}
+            for row in cursor.fetchall()]
+
+
+def mailings_to_watch(cursor, since):
+    """Рассылки не старше since, про которые кабинет ещё не сказал последнего
+    слова хотя бы в одной диспетчерской: принята, а разослана ли — неизвестно
+    или «в очереди». Со всеми целями. Разосланное, потерянное и отозванное
+    больше не спрашиваем — так фоновая проверка в обычный день кабинет не трогает.
+    """
+    cursor.execute(
+        """
+        SELECT {columns}
+          FROM driver_mailings m
+         WHERE m.created_at >= %s
+           AND EXISTS (
+               SELECT 1 FROM driver_mailing_targets t
+                WHERE t.mailing_id = m.id AND t.status = 'sent'
+                  AND (t.fleet_status IS NULL OR t.fleet_status = 'created')
+           )
+         ORDER BY m.created_at DESC, m.id DESC
+        """.format(columns=', '.join('m.' + column for column in MAILING_COLUMNS)),
+        (since,),
+    )
+    return _attach_targets(cursor, _rows_to_dicts(cursor))
+
+
+def mailings_for_alerts(cursor, since):
+    """Рассылки не старше since с целями и уже отправленными уведомлениями
+    (item['alerted'] — множество видов сбоя)."""
+    cursor.execute(
+        """
+        SELECT {columns}
+          FROM driver_mailings
+         WHERE created_at >= %s
+         ORDER BY created_at DESC, id DESC
+        """.format(columns=', '.join(MAILING_COLUMNS)),
+        (since,),
+    )
+    items = _attach_targets(cursor, _rows_to_dicts(cursor))
+    if not items:
+        return items
+    cursor.execute(
+        "SELECT mailing_id, kind FROM driver_mailing_alerts WHERE mailing_id = ANY(%s)",
+        ([int(item['id']) for item in items],),
+    )
+    alerted = {}
+    for mailing_id, kind in cursor.fetchall():
+        alerted.setdefault(int(mailing_id), set()).add(kind)
+    for item in items:
+        item['alerted'] = alerted.get(int(item['id']), set())
+    return items
+
+
+def claim_alerts(cursor, mailing_id, kinds):
+    """Застолбить уведомление о видах сбоя рассылки. Возвращает те виды, которые
+    застолбил ИМЕННО этот вызов: второй инстанс во время выкладки получит пустой
+    набор и не пошлёт то же сообщение второй раз."""
+    claimed = set()
+    for kind in kinds:
+        cursor.execute(
+            """
+            INSERT INTO driver_mailing_alerts (mailing_id, kind) VALUES (%s, %s)
+            ON CONFLICT (mailing_id, kind) DO NOTHING
+            RETURNING kind
+            """,
+            (int(mailing_id), str(kind)),
+        )
+        if cursor.fetchone():
+            claimed.add(kind)
+    return claimed
+
+
+def note_alert_delivered(cursor, mailing_id, kinds, delivered):
+    """Скольким подписчикам дошло сообщение — для разбора «почему мне не пришло»."""
+    cursor.execute(
+        "UPDATE driver_mailing_alerts SET delivered = %s WHERE mailing_id = %s AND kind = ANY(%s)",
+        (int(delivered), int(mailing_id), list(kinds)),
+    )
+
+
 # ── Шаблоны ──────────────────────────────────────────────────────────────────
 
 def templates(cursor):

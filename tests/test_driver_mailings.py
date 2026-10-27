@@ -1680,6 +1680,262 @@ class JournalCabinetStateTests(_RouteHarness):
         self.assertEqual(item['targets'][0]['fleet_status'], 'sent')
 
 
+class AlertHelpersTests(unittest.TestCase):
+    """Уведомления о сбоях (27.10.2026): что считать сбоем и что написать."""
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+
+        from driver_mailings import routes
+        self.routes = routes
+        self.now = datetime(2026, 10, 27, 13, 0, tzinfo=timezone.utc)
+        self.ago = lambda **kw: self.now - timedelta(**kw)
+
+    def target(self, park, **extra):
+        row = {'park_id': park, 'park_name': park, 'park_city': 'Астана', 'status': 'sent',
+               'fleet_status': 'sent', 'sent_at': self.ago(hours=2), 'recipients_estimate': 100}
+        row.update(extra)
+        return row
+
+    def item(self, *targets, **extra):
+        row = {'id': 95, 'title': 'МАҢЫЗДЫ!', 'status': 'sent', 'created_at': self.ago(hours=2),
+               'created_by_name': 'Дана', 'targets': list(targets), 'alerted': set()}
+        row.update(extra)
+        return row
+
+    def test_queue_longer_than_an_hour_is_stuck(self):
+        item = self.item(self.target('a', fleet_status='created'),
+                         self.target('b', fleet_status='created', sent_at=self.ago(minutes=20)),
+                         self.target('c'))
+        problems = self.routes.alert_problems(item, self.now)
+        self.assertEqual(list(problems), ['stuck'])
+        self.assertEqual([t['park_id'] for t in problems['stuck']], ['a'])
+
+    def test_lost_and_refused_are_told_apart(self):
+        item = self.item(self.target('a', status='failed', error_code='lost_in_cabinet'),
+                         self.target('b', status='failed', error_code='no_permissions',
+                                     error='В этой диспетчерской рассылка не разрешена'))
+        problems = self.routes.alert_problems(item, self.now)
+        self.assertEqual(sorted(problems), ['lost', 'refused'])
+
+    def test_already_told_is_not_told_again(self):
+        item = self.item(self.target('a', fleet_status='created'), alerted={'stuck'})
+        self.assertEqual(self.routes.alert_problems(item, self.now), {})
+
+    def test_mailing_still_sending_waits(self):
+        # Отказы пишутся по ходу отправки: «30 из 89» посреди неё соврало бы числом.
+        fresh = self.item(self.target('a', status='failed', error_code='no_permissions'),
+                          status='sending', created_at=self.ago(minutes=1))
+        self.assertEqual(self.routes.alert_problems(fresh, self.now), {})
+        # А оборвавшаяся (полчаса и больше) — сбой.
+        stale = dict(fresh, created_at=self.ago(hours=1))
+        self.assertEqual(list(self.routes.alert_problems(stale, self.now)), ['refused'])
+
+    def test_delivered_and_revoked_are_not_failures(self):
+        item = self.item(self.target('a'), self.target('b', status='revoked', fleet_status='deleted_by_dispatcher'))
+        self.assertEqual(self.routes.alert_problems(item, self.now), {})
+
+    def test_text_names_the_mailing_share_and_biggest_parks(self):
+        item = self.item(self.target('Jana Taxi', fleet_status='created', recipients_estimate=95963),
+                         self.target('<Ноль>', fleet_status='created', recipients_estimate=58368),
+                         *[self.target('p{}'.format(i)) for i in range(87)])
+        text = self.routes.alert_text(item, self.routes.alert_problems(item, self.now))
+        self.assertIn('<b>Рассылки: сбой</b>', text)
+        self.assertIn('«МАҢЫЗДЫ!» — 27.10 16:00, Дана', text)     # время по Алматы
+        self.assertIn('2 из 89 диспетчерских', text)
+        self.assertIn('Jana Taxi (Астана), &lt;Ноль&gt; (Астана)', text)   # HTML экранирован
+        self.assertIn('журнале раздела «Рассылки»', text)
+
+    def test_text_says_why_it_was_refused(self):
+        item = self.item(*[self.target('p{}'.format(i), status='failed', error_code='no_permissions',
+                                       error='В этой диспетчерской рассылка не разрешена') for i in range(2)],
+                         self.target('x'))
+        text = self.routes.alert_text(item, self.routes.alert_problems(item, self.now))
+        self.assertIn('Не ушла в 2 из 3 диспетчерских: В этой диспетчерской рассылка не разрешена', text)
+
+    def test_parks_word_agrees_with_the_number(self):
+        self.assertEqual(self.routes._parks_of(1), 'из 1 диспетчерской')
+        self.assertEqual(self.routes._parks_of(21), 'из 21 диспетчерской')
+        self.assertEqual(self.routes._parks_of(11), 'из 11 диспетчерских')
+        self.assertEqual(self.routes._parks_of(89), 'из 89 диспетчерских')
+
+    def test_only_ok_from_telegram_counts_as_delivered(self):
+        class Answer:
+            def __init__(self, status, payload):
+                self.status_code, self._payload = status, payload
+
+            def json(self):
+                if isinstance(self._payload, Exception):
+                    raise self._payload
+                return self._payload
+
+        self.assertTrue(self.routes._telegram_delivered(Answer(200, {'ok': True})))
+        self.assertFalse(self.routes._telegram_delivered(Answer(200, {'ok': False})))
+        self.assertFalse(self.routes._telegram_delivered(Answer(403, {'ok': False})))
+        self.assertFalse(self.routes._telegram_delivered(Answer(200, ValueError('не JSON'))))
+        self.assertFalse(self.routes._telegram_delivered(None))
+
+    def test_schema_kinds_match_the_code(self):
+        block = DRIVER_MAILINGS_SCHEMA_SQL.split('CREATE TABLE IF NOT EXISTS driver_mailing_alerts', 1)[1]
+        block = block.split(');', 1)[0]
+        for kind in self.routes.ALERT_KINDS:
+            self.assertIn("'{}'".format(kind), block)
+        self.assertIn('PRIMARY KEY (mailing_id, kind)', block)
+
+
+class AlertRouteTests(_RouteHarness):
+    """Переключатель в журнале и фоновая проверка с отправкой в Telegram."""
+
+    def setUp(self):
+        super().setUp()
+        from datetime import datetime, timedelta, timezone
+        from unittest import mock
+
+        from driver_mailings import queries
+
+        self.now = datetime.now(timezone.utc)
+        self.ago = lambda **kw: self.now - timedelta(**kw)
+        _FakeCabinet.journal_pages = {}
+        _FakeCabinet.summaries = {}
+        self.alerts_on = {}
+        self.subscribers = []
+        self.watch_items = []
+        self.alert_items = []
+        self.claimed = []
+        self.delivered = []
+        self.sent = []
+        self.denied_ids = set()
+
+        def access_context(cursor, uid):
+            if uid in self.denied_ids:
+                return {'id': uid, 'name': 'Чужой', 'role': 'operator'}
+            return {'id': uid, 'name': 'Админ', 'role': 'super_admin'}
+
+        def claim_alerts(cursor, mailing_id, kinds):
+            fresh = {kind for kind in kinds if (mailing_id, kind) not in self.claimed}
+            self.claimed.extend((mailing_id, kind) for kind in fresh)
+            return fresh
+
+        patches = {
+            'access_context': access_context,
+            'alerts_state': lambda cursor, uid: {'enabled': self.alerts_on.get(uid, False),
+                                                 'telegram_linked': True},
+            'set_alerts': lambda cursor, uid, enabled: self.alerts_on.__setitem__(uid, enabled),
+            'alert_subscribers': lambda cursor: list(self.subscribers),
+            'mailings_to_watch': lambda cursor, since: list(self.watch_items),
+            'mailings_for_alerts': lambda cursor, since: list(self.alert_items),
+            'claim_alerts': claim_alerts,
+            'note_alert_delivered': lambda cursor, mid, kinds, n: self.delivered.append((mid, sorted(kinds), n)),
+            'templates': lambda cursor: [],
+        }
+        for name, value in patches.items():
+            patch = mock.patch.object(queries, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        class Ok:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {'ok': True}
+
+        def send_telegram(chat_id, text):
+            self.sent.append((chat_id, text))
+            return Ok()
+
+        from driver_mailings import routes
+        self.watch = routes.build_driver_mailings_blueprint(
+            db=_FakeDb(), require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (1, None, None),
+            sensitive_access_granted=lambda user_id: True,
+            send_telegram=send_telegram,
+        ).watch_alerts
+
+    def stuck_item(self, **extra):
+        item = {'id': 95, 'title': 'МАҢЫЗДЫ!', 'status': 'sent', 'created_at': self.ago(hours=2),
+                'created_by_name': 'Дана', 'alerted': set(), 'targets': [
+                    {'park_id': 'a', 'park_name': 'Jana Taxi', 'status': 'sent', 'fleet_status': 'created',
+                     'fleet_mailing_id': 'q-1', 'sent_at': self.ago(hours=2), 'recipients_estimate': 95963}]}
+        item.update(extra)
+        return item
+
+    def test_toggle_is_per_person_and_shown_in_overview(self):
+        response = self.http.put('/api/driver_mailings/alerts', json={'enabled': True})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['alerts'], {'enabled': True, 'telegram_linked': True})
+        self.assertEqual(self.alerts_on, {1: True})
+        overview = self.http.get('/api/driver_mailings/overview').get_json()
+        self.assertEqual(overview['alerts']['enabled'], True)
+        self.http.put('/api/driver_mailings/alerts', json={'enabled': False})
+        self.assertEqual(self.alerts_on, {1: False})
+
+    def test_toggle_wants_a_boolean(self):
+        response = self.http.put('/api/driver_mailings/alerts', json={'enabled': 'да'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.alerts_on, {})
+
+    def test_without_subscribers_the_cabinet_is_not_asked(self):
+        self.watch_items = [self.stuck_item()]
+        self.alert_items = [self.stuck_item()]
+        self.assertEqual(self.watch(), {'subscribers': 0, 'alerts': 0})
+        self.assertEqual(_FakeCabinet.events, [])
+        self.assertEqual(self.sent, [])
+
+    def test_stuck_mailing_is_told_once(self):
+        self.subscribers = [{'id': 476, 'name': 'Дана', 'telegram_id': 5550001},
+                            {'id': 2, 'name': 'Без Telegram', 'telegram_id': None}]
+        self.alert_items = [self.stuck_item()]
+        self.assertEqual(self.watch(), {'subscribers': 1, 'alerts': 1})
+        self.assertEqual(len(self.sent), 1)
+        chat_id, text = self.sent[0]
+        self.assertEqual(chat_id, 5550001)
+        self.assertIn('больше часа держит её в очереди', text)
+        self.assertEqual(self.delivered, [(95, ['stuck'], 1)])
+        # Вторая проверка: уже застолблено — второго сообщения нет.
+        self.assertEqual(self.watch(), {'subscribers': 1, 'alerts': 0})
+        self.assertEqual(len(self.sent), 1)
+
+    def test_person_without_the_section_gets_nothing(self):
+        self.subscribers = [{'id': 700, 'name': 'Переведён', 'telegram_id': 5550002}]
+        self.denied_ids = {700}
+        self.alert_items = [self.stuck_item()]
+        self.assertEqual(self.watch(), {'subscribers': 0, 'alerts': 0})
+        self.assertEqual(self.sent, [])
+
+    def test_watch_asks_the_cabinet_only_about_unsettled_mailings(self):
+        self.subscribers = [{'id': 476, 'name': 'Дана', 'telegram_id': 5550001}]
+        self.watch_items = [self.stuck_item()]
+        _FakeCabinet.journal_pages = {'a': [([{'id': 'q-1', 'status': 'created'}], False)]}
+        self.watch()
+        self.assertIn('list:a', _FakeCabinet.events)
+
+    def test_failed_telegram_is_counted_and_does_not_stop_the_rest(self):
+        self.subscribers = [{'id': 476, 'name': 'Дана', 'telegram_id': 5550001},
+                            {'id': 3, 'name': 'Ещё', 'telegram_id': 5550003}]
+        self.alert_items = [self.stuck_item()]
+        calls = []
+
+        def flaky(chat_id, text):
+            calls.append(chat_id)
+            if chat_id == 5550001:
+                raise OSError('сеть')
+            return type('Ok', (), {'status_code': 200, 'json': staticmethod(lambda: {'ok': True})})()
+
+        from driver_mailings import routes
+        watch = routes.build_driver_mailings_blueprint(
+            db=_FakeDb(), require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (1, None, None),
+            sensitive_access_granted=lambda user_id: True,
+            send_telegram=flaky,
+        ).watch_alerts
+        watch()
+        self.assertEqual(calls, [5550001, 5550003])
+        self.assertEqual(self.delivered, [(95, ['stuck'], 1)])
+
+
 class CountWiringTests(unittest.TestCase):
     """Форма подписывает подсчёт своим номером: без него сервер не отличит
     устаревший подсчёт от нужного, и они снова начнут копиться десятками."""
@@ -1761,8 +2017,23 @@ class FrontendWiringTests(unittest.TestCase):
         bot_path = os.path.join(os.path.dirname(APP_JSX), '..', 'bot_schedule2.py')
         with open(bot_path, encoding='utf-8') as handle:
             bot = handle.read()
-        block = bot.split('app.register_blueprint(build_driver_mailings_blueprint(', 1)[1].split('))', 1)[0]
+        block = bot.split('_driver_mailings_bp = build_driver_mailings_blueprint(', 1)[1].split('\n    )', 1)[0]
         self.assertIn('sensitive_access_granted=_sensitive_access_granted_for_user,', block)
+        self.assertIn('app.register_blueprint(_driver_mailings_bp)', bot)
+
+    def test_alert_watch_gets_telegram_and_starts_with_the_scheduler(self):
+        # Без отправки уведомления молча не уходят бы; без старта в __main__ проверка
+        # не шла бы вовсе — а при импорте нить поднимать нельзя (тесты импортируют монолит).
+        bot_path = os.path.join(os.path.dirname(APP_JSX), '..', 'bot_schedule2.py')
+        with open(bot_path, encoding='utf-8') as handle:
+            bot = handle.read()
+        block = bot.split('_driver_mailings_bp = build_driver_mailings_blueprint(', 1)[1].split('\n    )', 1)[0]
+        self.assertIn('send_telegram=_send_telegram_text_message,', block)
+        self.assertIn("_DRIVER_MAILINGS['watch'] = _driver_mailings_bp.watch_alerts", bot)
+        main = bot.split("if __name__ == '__main__':", 1)[1]
+        self.assertIn('_driver_mailings_start_alerts()', main)
+        self.assertNotIn('start_alert_watch(', bot.split("if __name__ == '__main__':", 1)[0]
+                         .split('def _driver_mailings_start_alerts', 1)[0])
 
     def test_view_opens_by_url_and_is_not_bounced(self):
         self.assertIn("(requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings)",

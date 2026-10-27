@@ -11,6 +11,17 @@ init_fleet_edm_schema и init_parcels_schema.
     driver_mailing_templates  заготовки текста и фильтров
     driver_mailing_parks      кэш «где вообще разрешена рассылка»
     driver_mailing_session    своя сессия кабинета под аккаунт с правом рассылки
+    driver_mailing_alert_optin  кто включил уведомления о сбоях (переключатель в журнале)
+    driver_mailing_alerts     о каких сбоях какой рассылки уже сообщили
+
+УВЕДОМЛЕНИЯ О СБОЯХ (владелец, 27.10.2026). Сбой Яндекса 09–26.10 две недели никто
+не видел, хотя рассылки уходили каждый день. Теперь проверка в фоне раз в пять
+минут смотрит свежие рассылки, и о сбое — Яндекс держит рассылку в очереди
+дольше часа, потерял её или кабинет отказал — пишет в Telegram тем, кто включил
+переключатель. По умолчанию он выключен. Одна рассылка — одно сообщение о
+каждом виде сбоя: driver_mailing_alerts помнит отправленное, и перезапуск или
+второй инстанс во время выкладки не повторят его (вставка с ON CONFLICT
+выигрывается один раз).
 
 ПОЧЕМУ У РАССЫЛОК СВОЯ СЕССИЯ. До 23.09.2026 куки были одни на портал и жили в
 «Провайдере ЭДО», а раздел их только читал. Но у того служебного аккаунта
@@ -143,6 +154,22 @@ CREATE TABLE IF NOT EXISTS driver_mailing_parks (
     per_day         INTEGER,
     revoke_seconds  INTEGER,
     checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Кто хочет знать о сбоях рассылок. Есть строка — включено; выключение строку
+-- удаляет: «не подписан» — одно состояние, как у twofa_notify_optin.
+CREATE TABLE IF NOT EXISTS driver_mailing_alert_optin (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    enabled_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- О каких сбоях рассылки уже сообщили: вид сбоя — один раз на рассылку.
+CREATE TABLE IF NOT EXISTS driver_mailing_alerts (
+    mailing_id  BIGINT NOT NULL REFERENCES driver_mailings(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('stuck','lost','refused')),
+    sent_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered   INTEGER,                 -- скольким подписчикам дошло сообщение
+    PRIMARY KEY (mailing_id, kind)
 );
 
 -- Куки аккаунта рассылок. Это по сути пароль от кабинета: значение наружу через

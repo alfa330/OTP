@@ -68850,10 +68850,15 @@ except Exception:
 # полсекунды. Раздел ходит в кабинет на ОБЩЕЙ сессии, которую держит «Провайдер
 # ЭДО» (таблица fleet_edm_session): учётка кабинета одна, и второе хранилище тех
 # же кук означало бы две даты обновления и молчаливые 401 в половине портала.
+#
+# Уведомления о сбоях (27.10.2026): своя нить раз в 5 минут спрашивает кабинет о
+# свежих рассылках и пишет в Telegram тем, кто включил переключатель в журнале.
+# Стартует в __main__ вместе с планировщиком, а не при импорте.
+_DRIVER_MAILINGS = {'watch': None}
 try:
     from driver_mailings.routes import build_driver_mailings_blueprint  # noqa: E402
 
-    app.register_blueprint(build_driver_mailings_blueprint(
+    _driver_mailings_bp = build_driver_mailings_blueprint(
         db=db,
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
@@ -68861,10 +68866,23 @@ try:
         # Ключ тот же, что у вики, обращений и посылок: рядовой открывает
         # раздел после QR-подтверждения сессии (владелец, 25.09.2026).
         sensitive_access_granted=_sensitive_access_granted_for_user,
-    ))
+        send_telegram=_send_telegram_text_message,
+    )
+    app.register_blueprint(_driver_mailings_bp)
+    _DRIVER_MAILINGS['watch'] = _driver_mailings_bp.watch_alerts
     logging.info("Раздел «Рассылки»: Blueprint подключён на /api/driver_mailings")
 except Exception:
     logging.exception("Раздел «Рассылки»: Blueprint НЕ подключён")
+
+
+def _driver_mailings_start_alerts():
+    watch = _DRIVER_MAILINGS.get('watch')
+    if watch is None:
+        logging.warning("Рассылки: проверка сбоев не запущена — раздел не подключён")
+        return
+    from driver_mailings.routes import start_alert_watch
+    start_alert_watch(watch)
+    logging.info("⏰ Рассылки: проверка сбоев запущена")
 
 
 # ── Раздел «Касания»: звонки отдела продаж из CDR АТС FreePBX ────────────────
@@ -73353,6 +73371,10 @@ if __name__ == '__main__':
     # «Коды 2FA»: будильник сроков (сгорание запросов, стирание кодов). Фонового опроса нет —
     # спит до ближайшего срока; при старте сразу доделывает просроченное за время выкладки.
     _twofa_start_alarm()
+
+    # «Рассылки»: фоновая проверка сбоев Яндекса (очередь дольше часа, потеря,
+    # отказ) с уведомлением подписчикам — своя нить, не общий пул.
+    _driver_mailings_start_alerts()
 
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")
