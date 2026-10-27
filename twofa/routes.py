@@ -15,9 +15,12 @@ Blueprint собирается фабрикой и получает зависи
     POST   /requests/<id>/approve|reject   решение главы маркетинга
     GET    /journal                        журнал (глава, супер-админ), порциями
     POST   /accounts/preview               разобрать QR или ключ — без записи
-    POST   /accounts                       сохранить аккаунты из того же текста
-    PATCH  /accounts/<id>                  название и сервис
+    POST   /accounts                       сохранить аккаунты из того же текста — в раздел
+    PATCH  /accounts/<id>                  название, сервис, раздел
     DELETE /accounts/<id>                  удалить аккаунт вместе с ключом
+    POST   /groups                         новый раздел (сразу с аккаунтами или пустой)
+    PATCH  /groups/<id>                    название и состав раздела
+    DELETE /groups/<id>                    удалить раздел — аккаунты остаются без раздела
     GET    /people                         кому можно выдать доступ (поиск)
     PUT    /people/<user_id>/grants        набор аккаунтов человека целиком
 """
@@ -30,7 +33,7 @@ from functools import wraps
 from flask import Blueprint, jsonify, request
 
 from . import access, crypto, otpauth, queries, rules
-from .service import public_request
+from .service import KEEP, public_request
 
 # Экспорт Google Authenticator — до 10 аккаунтов в одном QR; полсотни — заведомо не QR.
 _MAX_IMPORT = 50
@@ -150,6 +153,7 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             notify = queries.notify_enabled(cursor, ctx['user_id']) if caps['can_approve'] else False
             if caps['can_manage']:
                 accounts = queries.list_accounts(cursor)
+                groups = queries.list_groups(cursor)
                 grants = queries.grants_by_account(cursor)
                 for account in accounts:
                     account['user_ids'] = grants.get(account['id'], [])
@@ -158,6 +162,8 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 recent = queries.requests_list(cursor, limit=30)
             else:
                 accounts = queries.list_accounts(cursor, ids=access.granted_ids(ctx))
+                # Сотруднику — только разделы его аккаунтов: заголовки над карточками.
+                groups = queries.list_groups(cursor, ids=[a['group_id'] for a in accounts if a['group_id']])
                 people, pending, recent = [], [], []
             mine = queries.requests_list(cursor, requester_id=ctx['user_id'], limit=10) if caps['can_request'] else []
         for account in accounts:
@@ -180,6 +186,7 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 'code_visible_seconds': rules.CODE_VISIBLE_SECONDS,
             },
             'accounts': accounts,
+            'groups': groups,
             'people': people,
             'pending': [public_request(r) for r in pending],
             'recent': [public_request(r) for r in recent],
@@ -241,7 +248,8 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
         before = _int(request.args.get('before'))
         with db._get_cursor() as cursor:
             items, has_more = queries.journal(cursor, before_id=before, limit=50)
-        allowed_details = ('via', 'valid_until', 'error', 'from', 'to', 'service')
+        allowed_details = ('via', 'valid_until', 'error', 'from', 'to', 'service',
+                           'group', 'from_group', 'to_group', 'accounts')
         return jsonify({
             'items': [{
                 'id': item['id'],
@@ -265,6 +273,35 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return otpauth.parse(text), None
         except otpauth.ParseError as exc:
             return None, _bad(str(exc), 'TWOFA_PARSE')
+
+    def _group_choice(body):
+        """Раздел из окна: group_title — новый (или одноимённый существующий), group_id —
+        существующий, group_id: null — без раздела, ни того ни другого — KEEP. field='group' —
+        окну, к какому полю ошибка."""
+        if body.get('group_title') is not None:
+            try:
+                return {'title': rules.clean_group_title(body.get('group_title'))}, None
+            except ValueError as exc:
+                return None, _bad(str(exc), 'TWOFA_BAD_GROUP', field='group')
+        if 'group_id' in body:
+            if body['group_id'] is None:
+                return None, None
+            group_id = _int(body['group_id'])
+            if group_id is None:
+                return None, _bad('Неверный раздел', 'TWOFA_BAD_GROUP', field='group')
+            return {'id': group_id}, None
+        return KEEP, None
+
+    def _group_problem(outcome, title=None):
+        if outcome == 'group_not_found':
+            return _bad('Раздел удалён — выберите другой', 'TWOFA_GROUP_NOT_FOUND', 409, field='group')
+        if outcome == 'group_exists':
+            return _bad('Раздел «%s» уже есть' % title, 'TWOFA_GROUP_EXISTS', 409, field='title')
+        if outcome == 'unknown_account':
+            return _bad('Аккаунт удалён — обновите раздел', 'TWOFA_BAD_INPUT')
+        if outcome == 'not_found':
+            return _outcome_error('not_found')
+        return None
 
     @twofa_route('/accounts/preview', methods=('POST',), need='manage')
     def twofa_accounts_preview(ctx):
@@ -313,11 +350,17 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             except ValueError as exc:
                 return _bad(str(exc), 'TWOFA_BAD_INPUT', index=index)
             entries.append({'title': title, 'service': service_name, 'secret': entry['secret']})
-        result = service.add_accounts(ctx, entries)
+        choice, error = _group_choice(body)
+        if error:
+            return error
+        result = service.add_accounts(ctx, entries, group=None if choice is KEEP else choice)
+        problem = _group_problem(result['outcome'])
+        if problem:
+            return problem
         if result['outcome'] == 'duplicate':
             position = items[result['index']].get('index')
             return _bad('Этот ключ уже добавлен как «%s»' % result['title'], 'TWOFA_DUPLICATE', 409, index=position)
-        return jsonify({'created': result['created']}), 201
+        return jsonify({'created': result['created'], 'group_id': result['group_id']}), 201
 
     @twofa_route('/accounts/<int:account_id>', methods=('PATCH', 'DELETE'), need='manage')
     def twofa_account_edit(ctx, account_id):
@@ -331,9 +374,59 @@ def build_twofa_blueprint(*, db, require_api_key, build_cors_preflight_response,
             service_name = rules.clean_service(body.get('service'))
         except ValueError as exc:
             return _bad(str(exc), 'TWOFA_BAD_INPUT')
-        if not service.rename_account(ctx, account_id, title, service_name):
-            return _outcome_error('not_found')
-        return jsonify({'ok': True})
+        choice, error = _group_choice(body)
+        if error:
+            return error
+        result = service.update_account(ctx, account_id, title, service_name, group=choice)
+        return _group_problem(result['outcome']) or jsonify({'ok': True})
+
+    # ─── Разделы ─────────────────────────────────────────────────────────────
+
+    def _account_ids(raw):
+        """Состав раздела: None — не трогать; иначе список id без повторов."""
+        if raw is None:
+            return None, None
+        if not isinstance(raw, list):
+            return None, _bad('Нужен список аккаунтов', 'TWOFA_BAD_INPUT')
+        ids = [_int(x) for x in raw]
+        if any(x is None for x in ids) or len(set(ids)) != len(ids):
+            return None, _bad('Неверный список аккаунтов', 'TWOFA_BAD_INPUT')
+        return ids, None
+
+    def _group_title(body):
+        try:
+            return rules.clean_group_title(body.get('title')), None
+        except ValueError as exc:
+            return None, _bad(str(exc), 'TWOFA_BAD_GROUP', field='title')
+
+    @twofa_route('/groups', methods=('POST',), need='manage')
+    def twofa_group_create(ctx):
+        body = _payload()
+        title, error = _group_title(body)
+        if error:
+            return error
+        account_ids, error = _account_ids(body.get('account_ids', []))
+        if error:
+            return error
+        result = service.create_group(ctx, title, account_ids or [])
+        return _group_problem(result['outcome'], title) or (jsonify({'id': result['id']}), 201)
+
+    @twofa_route('/groups/<int:group_id>', methods=('PATCH', 'DELETE'), need='manage')
+    def twofa_group_edit(ctx, group_id):
+        if request.method == 'DELETE':
+            result = service.delete_group(ctx, group_id)
+            return _group_problem(result['outcome']) or jsonify({'ok': True, 'accounts': result['accounts']})
+        body = _payload()
+        title = None
+        if 'title' in body:
+            title, error = _group_title(body)
+            if error:
+                return error
+        account_ids, error = _account_ids(body.get('account_ids'))
+        if error:
+            return error
+        result = service.update_group(ctx, group_id, title=title, account_ids=account_ids)
+        return _group_problem(result['outcome'], title) or jsonify({'ok': True})
 
     # ─── Доступы ─────────────────────────────────────────────────────────────
 

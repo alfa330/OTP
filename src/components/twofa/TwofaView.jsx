@@ -1,16 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Check, CircleAlert, KeyRound, Loader2, Plus, ScrollText, Send, ShieldCheck, UserPlus, Users, X,
+    Check, CircleAlert, FolderPlus, KeyRound, Loader2, Pencil, Plus, ScrollText, Send, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react';
 import { APPLE_FONT, IosHint, IosSegmented, IosToggle, iosCard } from '../ui/ios';
 import { subscribeNewsPoke } from '../news/newsShared';
 import { createCoalescedReload } from '../notifications/coalescedReload';
 import { AccountSheet, AddAccountSheet } from './TwofaAccountSheet';
+import { GroupSheet } from './TwofaGroupSheet';
 import { PeoplePicker, PersonSheet } from './TwofaPeopleSheet';
 import { EmptyState, GroupLabel, Notice, Pill, SectionHeader, StateLine, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './twofaUi';
 import {
-    accountStateLine, accountsCount, clockOf, errorOf, latestByAccount, peopleCount, tabsFor, toneOfStatus, whenOf,
+    accountStateLine, accountsCount, clockOf, errorOf, groupAccounts, journalGroupNote, latestByAccount, peopleCount,
+    tabsFor, toneOfStatus, whenOf,
 } from './twofaMeta';
 
 /*
@@ -25,6 +27,10 @@ import {
  *                то же — кнопкой «Запросить код 🔐» в меню бота с выбором аккаунта;
  *   глава      — «Запросы» (подтвердить здесь или в Telegram), «Аккаунты», «Доступы»,
  *                «Журнал»; супер-админ видит и подтверждает то же самое.
+ *
+ * Аккаунты лежат по разделам (владелец 27.10.2026): во вкладке «Аккаунты» — раздел за
+ * разделом с кнопкой «Изменить» (название и состав), у сотрудника — заголовки разделов, если
+ * его аккаунты в нескольких.
  *
  * Экран перечитывается по тычку колокола (новый запрос, решение, сгорание — триггер на
  * twofa_requests) и при возврате на вкладку; своего таймера нет.
@@ -105,6 +111,22 @@ const History = ({ title, requests, serverTime, showRequester }) => (
     )
 );
 
+/* grid-cols-1 — колонка minmax(0, 1fr): без неё на телефоне колонка растягивалась под самое
+   длинное название (почта вида «marketing.team…@…») и карточка уезжала за край экрана. */
+const AccountGrid = ({ children }) => <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">{children}</div>;
+
+/* Заголовок раздела над его карточками; count — сколько в нём аккаунтов (у главы). Название
+   переносится, а не режется: на телефоне рядом с «Изменить» от него оставалась половина. */
+const SectionTitle = ({ title, count = null, action = null }) => (
+    <div className="mb-2.5 flex items-end justify-between gap-3 px-1">
+        <div className="min-w-0">
+            <h2 className="break-words text-[15px] font-semibold leading-snug text-slate-900">{title}</h2>
+            {count !== null && <p className="text-[12.5px] text-slate-500">{accountsCount(count)}</p>}
+        </div>
+        {action}
+    </div>
+);
+
 const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     // showToast из App.jsx — новая функция на каждый рендер: держим её в ref,
     // иначе загрузка перезапускалась бы после каждого тоста.
@@ -132,6 +154,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [busy, setBusy] = useState({});
     const [adding, setAdding] = useState(false);
     const [openedAccount, setOpenedAccount] = useState(null);
+    const [openedGroup, setOpenedGroup] = useState(null);
     const [picking, setPicking] = useState(false);
     const [openedPerson, setOpenedPerson] = useState(null);
     const [journal, setJournal] = useState(null);
@@ -317,6 +340,39 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         ? (data.accounts || []).filter((a) => (a.user_ids || []).includes(data.me.id))
         : (data.accounts || []);
     const myCardIds = new Set(myAccounts.map((account) => account.id));
+    // Заголовки разделов — только когда их у человека несколько: над двумя карточками одного
+    // раздела его название ничего бы не сказало.
+    const mySections = groupAccounts(myAccounts, data.groups);
+    const codeCard = (account) => {
+        const latest = myLatest[account.id];
+        const line = accountStateLine(latest, serverTime);
+        const pending = latest?.status === 'pending';
+        const blocked = !data.me.telegram_linked || !data.approvers_available || data.key_status !== 'ok';
+        return (
+            <div key={account.id} className={`${iosCard} flex flex-col gap-3 px-4 py-3.5`}>
+                <div className="flex items-start gap-3">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                        <ShieldCheck size={18} />
+                    </span>
+                    <div className="min-w-0 grow basis-0">
+                        <div className="truncate text-[14.5px] font-semibold text-slate-900">{account.title}</div>
+                        {account.service && <div className="truncate text-[12.5px] text-slate-500">{account.service}</div>}
+                    </div>
+                </div>
+                {/* На телефоне строка состояния над кнопкой: рядом с кнопкой
+                    «Код отправлен в Telegram · 11:54» обрезалось на «· 1…». */}
+                <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+                    <span className="min-w-0">{line && <StateLine tone={line.tone}>{line.text}</StateLine>}</span>
+                    <button type="button" className={`${TOOLBAR_BTN_PRIMARY} w-full sm:w-auto`}
+                            disabled={pending || blocked || Boolean(busy[`req:${account.id}`])}
+                            onClick={() => requestCode(account)}>
+                        {busy[`req:${account.id}`] ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                        {pending ? 'Запрос отправлен' : 'Запросить код'}
+                    </button>
+                </div>
+            </div>
+        );
+    };
     const codesTab = (
         <>
             {myAccounts.length === 0 ? (
@@ -325,39 +381,17 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         Доступ к аккаунтам выдаёт глава маркетинга в этом разделе.
                     </EmptyState>
                 </div>
-            ) : (
-                <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                    {myAccounts.map((account) => {
-                            const latest = myLatest[account.id];
-                            const line = accountStateLine(latest, serverTime);
-                            const pending = latest?.status === 'pending';
-                            const blocked = !data.me.telegram_linked || !data.approvers_available || data.key_status !== 'ok';
-                            return (
-                                <div key={account.id} className={`${iosCard} flex flex-col gap-3 px-4 py-3.5`}>
-                                    <div className="flex items-start gap-3">
-                                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
-                                            <ShieldCheck size={18} />
-                                        </span>
-                                        <div className="min-w-0 grow basis-0">
-                                            <div className="truncate text-[14.5px] font-semibold text-slate-900">{account.title}</div>
-                                            {account.service && <div className="truncate text-[12.5px] text-slate-500">{account.service}</div>}
-                                        </div>
-                                    </div>
-                                    {/* На телефоне строка состояния над кнопкой: рядом с кнопкой
-                                        «Код отправлен в Telegram · 11:54» обрезалось на «· 1…». */}
-                                    <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-                                        <span className="min-w-0">{line && <StateLine tone={line.tone}>{line.text}</StateLine>}</span>
-                                        <button type="button" className={`${TOOLBAR_BTN_PRIMARY} w-full sm:w-auto`}
-                                                disabled={pending || blocked || Boolean(busy[`req:${account.id}`])}
-                                                onClick={() => requestCode(account)}>
-                                            {busy[`req:${account.id}`] ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                                            {pending ? 'Запрос отправлен' : 'Запросить код'}
-                                        </button>
-                                    </div>
-                                </div>
-                            );
-                        })}
+            ) : mySections.length > 1 ? (
+                <div className="space-y-6">
+                    {mySections.map((section) => (
+                        <section key={section.id ?? 'none'}>
+                            <SectionTitle title={section.title} />
+                            <AccountGrid>{section.accounts.map(codeCard)}</AccountGrid>
+                        </section>
+                    ))}
                 </div>
+            ) : (
+                <AccountGrid>{myAccounts.map(codeCard)}</AccountGrid>
             )}
             {/* Последний запрос по аккаунту уже сказан на его карточке — в истории его нет. Но только
                 если карточка есть: по снятому или удалённому аккаунту карточки нет, и его последний
@@ -416,36 +450,65 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     );
 
     /* ── Аккаунты ─────────────────────────────────────────────────────── */
+    // Разделы — в порядке создания, пустые тоже (их наполняют кнопкой «Изменить»); «Без
+    // раздела» — в конце, если там что-то есть.
+    const accountSections = groupAccounts(data.accounts, data.groups, { withEmpty: true });
+    const accountCard = (account) => (
+        <button key={account.id} type="button" onClick={() => setOpenedAccount(account)}
+                className={`${iosCard} flex items-start gap-3 px-4 py-3.5 text-left transition hover:bg-slate-50`}>
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                <ShieldCheck size={18} />
+            </span>
+            <span className="min-w-0 grow basis-0">
+                <span className="block truncate text-[14.5px] font-semibold text-slate-900">{account.title}</span>
+                {account.service && <span className="block truncate text-[12.5px] text-slate-500">{account.service}</span>}
+                <span className="mt-1.5 block text-[12.5px] text-slate-600">
+                    {(account.user_ids || []).length ? `Доступ: ${peopleCount(account.user_ids.length)}` : 'Доступ не выдан'}
+                </span>
+            </span>
+        </button>
+    );
     const accountsTab = (
         <>
-            <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <GroupLabel>{accountsCount((data.accounts || []).length)}</GroupLabel>
-                <button type="button" className={TOOLBAR_BTN_PRIMARY} disabled={data.key_status !== 'ok'} onClick={() => setAdding(true)}>
-                    <Plus size={15} /> Добавить аккаунт
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className={TOOLBAR_BTN} onClick={() => setOpenedGroup({ id: null })}>
+                        <FolderPlus size={15} /> Новый раздел
+                    </button>
+                    <button type="button" className={TOOLBAR_BTN_PRIMARY} disabled={data.key_status !== 'ok'} onClick={() => setAdding(true)}>
+                        <Plus size={15} /> Добавить аккаунт
+                    </button>
+                </div>
             </div>
-            {(data.accounts || []).length === 0 ? (
+            {accountSections.length === 0 ? (
                 <div className={iosCard}>
                     <EmptyState icon={KeyRound} title="Аккаунтов пока нет">
                         Добавьте аккаунт по QR из настроек 2FA сервиса или экспортом из Google Authenticator на телефоне владельца.
                     </EmptyState>
                 </div>
             ) : (
-                <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                    {data.accounts.map((account) => (
-                        <button key={account.id} type="button" onClick={() => setOpenedAccount(account)}
-                                className={`${iosCard} flex items-start gap-3 px-4 py-3.5 text-left transition hover:bg-slate-50`}>
-                            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
-                                <ShieldCheck size={18} />
-                            </span>
-                            <span className="min-w-0 grow basis-0">
-                                <span className="block truncate text-[14.5px] font-semibold text-slate-900">{account.title}</span>
-                                {account.service && <span className="block truncate text-[12.5px] text-slate-500">{account.service}</span>}
-                                <span className="mt-1.5 block text-[12.5px] text-slate-600">
-                                    {(account.user_ids || []).length ? `Доступ: ${peopleCount(account.user_ids.length)}` : 'Доступ не выдан'}
-                                </span>
-                            </span>
-                        </button>
+                <div className="space-y-6">
+                    {accountSections.map((section) => (
+                        <section key={section.id ?? 'none'}>
+                            <SectionTitle
+                                title={section.title}
+                                count={section.accounts.length}
+                                action={section.id !== null && (
+                                    <button type="button" className={TOOLBAR_BTN}
+                                            onClick={() => setOpenedGroup({ id: section.id, title: section.title })}>
+                                        <Pencil size={14} /> Изменить
+                                    </button>
+                                )}
+                            />
+                            {section.accounts.length ? (
+                                <AccountGrid>{section.accounts.map(accountCard)}</AccountGrid>
+                            ) : (
+                                <div className={`${iosCard} px-4 py-3.5 text-[13px] text-slate-500`}>
+                                    В разделе пока нет аккаунтов — отметьте их кнопкой «Изменить» или добавьте новый.
+                                </div>
+                            )}
+                        </section>
                     ))}
                 </div>
             )}
@@ -512,22 +575,27 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             ) : (
                 <>
                     <ul className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {journal.items.map((item) => (
-                            <li key={item.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-4 py-2.5">
-                                <span className="w-[92px] shrink-0 text-[12.5px] tabular-nums text-slate-500">
-                                    {whenOf(item.at, serverTime)}
-                                </span>
-                                <span className="min-w-0 grow basis-0 text-[13.5px] text-slate-800">
-                                    <span className="font-semibold">{item.system ? 'Раздел' : (item.actor_name || '—')}</span>
-                                    {' — '}{item.label}
-                                    {item.account_title && <> · «{item.account_title}»</>}
-                                    {item.subject_name && item.subject_name !== item.actor_name && <> · {item.subject_name}</>}
-                                    {item.details?.valid_until && <span className="text-slate-500"> · действовал до {item.details.valid_until}</span>}
-                                    {item.details?.via && <span className="text-slate-500"> · {viaLabel(item.details.via)}</span>}
-                                    {item.details?.error && <span className="text-rose-600"> · {item.details.error}</span>}
-                                </span>
-                            </li>
-                        ))}
+                        {journal.items.map((item) => {
+                            const groupNote = journalGroupNote(item);
+                            return (
+                                <li key={item.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-4 py-2.5">
+                                    <span className="w-[92px] shrink-0 text-[12.5px] tabular-nums text-slate-500">
+                                        {whenOf(item.at, serverTime)}
+                                    </span>
+                                    <span className="min-w-0 grow basis-0 text-[13.5px] text-slate-800">
+                                        {/* «Система», а не «Раздел»: разделы теперь — группы аккаунтов. */}
+                                        <span className="font-semibold">{item.system ? 'Система' : (item.actor_name || '—')}</span>
+                                        {' — '}{item.label}
+                                        {item.account_title && <> · «{item.account_title}»</>}
+                                        {groupNote && <span className="text-slate-500"> · {groupNote}</span>}
+                                        {item.subject_name && item.subject_name !== item.actor_name && <> · {item.subject_name}</>}
+                                        {item.details?.valid_until && <span className="text-slate-500"> · действовал до {item.details.valid_until}</span>}
+                                        {item.details?.via && <span className="text-slate-500"> · {viaLabel(item.details.via)}</span>}
+                                        {item.details?.error && <span className="text-rose-600"> · {item.details.error}</span>}
+                                    </span>
+                                </li>
+                            );
+                        })}
                     </ul>
                     {journal.has_more && (
                         <div className="mt-3 flex justify-center">
@@ -561,6 +629,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 open={adding}
                 onClose={() => setAdding(false)}
                 api={api}
+                groups={data.groups || []}
                 onSaved={({ count, batch }) => {
                     const more = batch && batch.size > batch.index + 1;
                     toast(more
@@ -574,8 +643,22 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 onClose={() => setOpenedAccount(null)}
                 api={api}
                 peopleNames={peopleNames}
+                groups={data.groups || []}
                 onSaved={() => { toast('Сохранено', 'success'); reload(); }}
                 onRemoved={(account) => { toast(`Аккаунт «${account.title}» удалён вместе с ключом`, 'success'); reload(); }}
+            />
+            <GroupSheet
+                group={openedGroup}
+                accounts={data.accounts || []}
+                groups={data.groups || []}
+                onClose={() => setOpenedGroup(null)}
+                api={api}
+                onSaved={(created) => { toast(created ? 'Раздел создан' : 'Сохранено', 'success'); reload(); }}
+                onRemoved={(group, count) => {
+                    toast(count ? `Раздел «${group.title}» удалён — его аккаунты теперь без раздела`
+                        : `Раздел «${group.title}» удалён`, 'success');
+                    reload();
+                }}
             />
             <PeoplePicker
                 open={picking}
@@ -590,6 +673,7 @@ const TwofaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             <PersonSheet
                 person={openedPerson}
                 accounts={data.accounts || []}
+                groups={data.groups || []}
                 onClose={() => setOpenedPerson(null)}
                 api={api}
                 botLink={botLink}

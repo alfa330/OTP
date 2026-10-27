@@ -30,6 +30,9 @@ RESEND_GUARD_SECONDS = 3
 # Telegram не стёр или не удалил сообщение — повторить через столько секунд.
 MESSAGE_RETRY_SECONDS = 30
 
+# update_account(group=KEEP) — раздел аккаунта не трогать: правят только название.
+KEEP = object()
+
 
 def _iso(moment):
     return rules.iso(moment)
@@ -643,9 +646,11 @@ class Twofa:
                 seen[secret] = None
         return found
 
-    def add_accounts(self, ctx, entries):
-        """Сохранить аккаунты: [{'title', 'service', 'secret': bytes}]. Ключи шифруются здесь,
-        каждый — со своим id (crypto: AAD). outcome: ok (created) / duplicate (index, title)."""
+    def add_accounts(self, ctx, entries, group=None):
+        """Сохранить аккаунты: [{'title', 'service', 'secret': bytes}] — все в один раздел
+        (group: {'id'} — существующий, {'title'} — новый, None — без раздела). Ключи шифруются
+        здесь, каждый — со своим id (crypto: AAD).
+        outcome: ok (created) / duplicate (index, title) / group_not_found."""
         now_dt = rules.almaty(self.now())
         created = []
         with self._cursor() as cursor:
@@ -654,30 +659,150 @@ class Twofa:
                 index = min(clashes)
                 return {'outcome': 'duplicate', 'index': index,
                         'title': clashes[index] or entries[index]['title']}
+            target, problem = self._group_for(cursor, ctx, group, now_dt)
+            if problem:
+                return {'outcome': problem}
             for entry in entries:
                 account_id = queries.next_account_id(cursor)
                 queries.insert_account(
                     cursor, account_id=account_id, title=entry['title'], service=entry['service'],
-                    secret_enc=crypto.encrypt(entry['secret'], account_id), actor_id=ctx['user_id'], now=now_dt)
+                    secret_enc=crypto.encrypt(entry['secret'], account_id), actor_id=ctx['user_id'], now=now_dt,
+                    group_id=target['id'] if target else None)
+                details = {}
+                if entry['service']:
+                    details['service'] = entry['service']
+                if target:
+                    details['group'] = target['title']
                 queries.log_event(cursor, 'account_added', now=now_dt, account_id=account_id,
                                   account_title=entry['title'], actor_id=ctx['user_id'], actor_name=ctx['name'],
-                                  details={'service': entry['service']} if entry['service'] else None)
+                                  details=details or None)
                 created.append(account_id)
-        return {'outcome': 'ok', 'created': created}
+        return {'outcome': 'ok', 'created': created, 'group_id': target['id'] if target else None}
 
-    def rename_account(self, ctx, account_id, title, service):
+    def update_account(self, ctx, account_id, title, service, group=KEEP):
+        """Название, сервис и раздел (group — как у add_accounts; KEEP — не трогать).
+        outcome: ok / not_found / group_not_found."""
         now_dt = rules.almaty(self.now())
         with self._cursor() as cursor:
             account = queries.get_account(cursor, account_id, for_update=True)
             if not account or not account['is_active']:
-                return False
+                return {'outcome': 'not_found'}
+            target = None
+            if group is not KEEP:
+                target, problem = self._group_for(cursor, ctx, group, now_dt)
+                if problem:
+                    return {'outcome': problem}
             if not queries.rename_account(cursor, account_id, title=title, service=service, now=now_dt):
-                return False
+                return {'outcome': 'not_found'}
             if (account['title'], account['service']) != (title, service):
                 queries.log_event(cursor, 'account_renamed', now=now_dt, account_id=account_id, account_title=title,
                                   actor_id=ctx['user_id'], actor_name=ctx['name'],
                                   details={'from': account['title'], 'to': title})
+            if group is not KEEP:
+                self._move(cursor, ctx, dict(account, title=title), target, now_dt)
+        return {'outcome': 'ok'}
+
+    # ─── Разделы ─────────────────────────────────────────────────────────────
+
+    def _group_for(self, cursor, ctx, choice, now_dt):
+        """Раздел по выбору в окне: {'id'} — существующий; {'title'} — новый или уже
+        существующий с тем же названием (без дубля). (раздел или None, ошибка или None)."""
+        if not choice:
+            return None, None
+        if choice.get('id') is not None:
+            group = queries.get_group(cursor, choice['id'])
+            return (group, None) if group else (None, 'group_not_found')
+        title = choice['title']
+        group = queries.group_by_title(cursor, title)
+        if group:
+            return group, None
+        group_id = queries.insert_group(cursor, title=title, actor_id=ctx['user_id'], now=now_dt)
+        if group_id is None:  # тот же раздел мгновением раньше создали в соседней вкладке
+            return queries.group_by_title(cursor, title), None
+        queries.log_event(cursor, 'group_created', now=now_dt, actor_id=ctx['user_id'], actor_name=ctx['name'],
+                          details={'group': title})
+        return {'id': group_id, 'title': title}, None
+
+    def _move(self, cursor, ctx, account, target, now_dt, titles=None):
+        """Аккаунт — в раздел target (None — без раздела); журнал — откуда и куда."""
+        new_id = target['id'] if target else None
+        if new_id == account['group_id']:
+            return False
+        if titles is None:
+            titles = {group['id']: group['title'] for group in queries.list_groups(cursor)}
+        queries.set_account_group(cursor, account['id'], new_id, now=now_dt)
+        queries.log_event(cursor, 'account_moved', now=now_dt, account_id=account['id'],
+                          account_title=account['title'], actor_id=ctx['user_id'], actor_name=ctx['name'],
+                          details={'from_group': titles.get(account['group_id']),
+                                   'to_group': target['title'] if target else None})
         return True
+
+    def _compose(self, cursor, ctx, group, account_ids, live, now_dt):
+        """Состав раздела целиком: отмеченные — в нём (из любого раздела), убранные из него —
+        без раздела. Остальные аккаунты не трогаются."""
+        wanted = set(account_ids)
+        titles = {item['id']: item['title'] for item in queries.list_groups(cursor)}
+        for account in live.values():
+            inside = account['group_id'] == group['id']
+            if account['id'] in wanted and not inside:
+                self._move(cursor, ctx, account, group, now_dt, titles)
+            elif inside and account['id'] not in wanted:
+                self._move(cursor, ctx, account, None, now_dt, titles)
+
+    def create_group(self, ctx, title, account_ids=()):
+        """Новый раздел — пустой или сразу с аккаунтами. outcome: ok (id) / group_exists /
+        unknown_account."""
+        now_dt = rules.almaty(self.now())
+        with self._cursor() as cursor:
+            live = {account['id']: account for account in queries.list_accounts(cursor)}
+            wanted = [int(x) for x in account_ids]
+            if any(x not in live for x in wanted):
+                return {'outcome': 'unknown_account'}
+            group_id = queries.insert_group(cursor, title=title, actor_id=ctx['user_id'], now=now_dt)
+            if group_id is None:
+                return {'outcome': 'group_exists'}
+            queries.log_event(cursor, 'group_created', now=now_dt, actor_id=ctx['user_id'], actor_name=ctx['name'],
+                              details={'group': title})
+            self._compose(cursor, ctx, {'id': group_id, 'title': title}, wanted, live, now_dt)
+        return {'outcome': 'ok', 'id': group_id}
+
+    def update_group(self, ctx, group_id, title=None, account_ids=None):
+        """Название и/или состав раздела (None — не трогать). outcome: ok / not_found /
+        group_exists / unknown_account."""
+        now_dt = rules.almaty(self.now())
+        with self._cursor() as cursor:
+            group = queries.get_group(cursor, group_id, for_update=True)
+            if not group:
+                return {'outcome': 'not_found'}
+            live = None
+            if account_ids is not None:
+                live = {account['id']: account for account in queries.list_accounts(cursor)}
+                if any(int(x) not in live for x in account_ids):
+                    return {'outcome': 'unknown_account'}
+            if title is not None and title != group['title']:
+                clash = queries.group_by_title(cursor, title)
+                if clash and clash['id'] != group['id']:
+                    return {'outcome': 'group_exists'}
+                queries.rename_group(cursor, group['id'], title=title, now=now_dt)
+                queries.log_event(cursor, 'group_renamed', now=now_dt, actor_id=ctx['user_id'],
+                                  actor_name=ctx['name'], details={'from': group['title'], 'to': title})
+                group = dict(group, title=title)
+            if live is not None:
+                self._compose(cursor, ctx, group, [int(x) for x in account_ids], live, now_dt)
+        return {'outcome': 'ok'}
+
+    def delete_group(self, ctx, group_id):
+        """Раздел удаляется, его аккаунты остаются — без раздела. outcome: ok (accounts) /
+        not_found."""
+        now_dt = rules.almaty(self.now())
+        with self._cursor() as cursor:
+            group = queries.get_group(cursor, group_id, for_update=True)
+            if not group:
+                return {'outcome': 'not_found'}
+            count = queries.delete_group(cursor, group['id'])
+            queries.log_event(cursor, 'group_deleted', now=now_dt, actor_id=ctx['user_id'], actor_name=ctx['name'],
+                              details={'group': group['title'], 'accounts': count})
+        return {'outcome': 'ok', 'accounts': count}
 
     def remove_account(self, ctx, account_id):
         now_dt = rules.almaty(self.now())

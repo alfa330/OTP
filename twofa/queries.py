@@ -121,14 +121,14 @@ def user_id_by_telegram(cursor, telegram_id):
 
 # ─── Аккаунты ──────────────────────────────────────────────────────────────────
 
-_ACCOUNT_COLUMNS = "a.id, a.title, a.service, a.is_active, a.created_at"
+_ACCOUNT_COLUMNS = "a.id, a.title, a.service, a.is_active, a.created_at, a.group_id"
 
 
 def _account(row, with_secret=False):
     item = {'id': int(row[0]), 'title': row[1], 'service': row[2], 'is_active': bool(row[3]),
-            'created_at': row[4]}
+            'created_at': row[4], 'group_id': int(row[5]) if row[5] is not None else None}
     if with_secret:
-        item['secret_enc'] = row[5]
+        item['secret_enc'] = row[6]
     return item
 
 
@@ -142,7 +142,8 @@ def get_account(cursor, account_id, with_secret=False, for_update=False):
 
 
 def list_accounts(cursor, ids=None):
-    """Живые аккаунты по названию; ids — только эти (то, что выдано сотруднику)."""
+    """Живые аккаунты: по разделам в порядке их создания, внутри — по названию, без раздела —
+    в конце; ids — только эти (то, что выдано сотруднику). Тот же порядок у выбора в боте."""
     params = []
     where = "a.is_active"
     if ids is not None:
@@ -152,7 +153,8 @@ def list_accounts(cursor, ids=None):
         where += " AND a.id = ANY(%s)"
         params.append(ids)
     cursor.execute(
-        "SELECT %s FROM twofa_accounts a WHERE %s ORDER BY lower(a.title), a.id" % (_ACCOUNT_COLUMNS, where),
+        "SELECT %s FROM twofa_accounts a WHERE %s ORDER BY a.group_id NULLS LAST, lower(a.title), a.id" % (
+            _ACCOUNT_COLUMNS, where),
         params)
     return [_account(row) for row in cursor.fetchall()]
 
@@ -163,12 +165,12 @@ def next_account_id(cursor):
     return int(cursor.fetchone()[0])
 
 
-def insert_account(cursor, *, account_id, title, service, secret_enc, actor_id, now):
+def insert_account(cursor, *, account_id, title, service, secret_enc, actor_id, now, group_id=None):
     cursor.execute("""
-        INSERT INTO twofa_accounts (id, title, service, secret_enc, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO twofa_accounts (id, title, service, secret_enc, created_by, created_at, updated_at, group_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    """, (int(account_id), title, service, secret_enc, actor_id, now, now))
+    """, (int(account_id), title, service, secret_enc, actor_id, now, now, group_id))
     return int(cursor.fetchone()[0])
 
 
@@ -197,6 +199,70 @@ def remove_account(cursor, account_id, *, actor_id, now):
         return False
     cursor.execute("DELETE FROM twofa_grants WHERE account_id = %s", (int(account_id),))
     return True
+
+
+def set_account_group(cursor, account_id, group_id, *, now):
+    cursor.execute("UPDATE twofa_accounts SET group_id = %s, updated_at = %s WHERE id = %s AND is_active",
+                   (group_id, now, int(account_id)))
+    return cursor.rowcount == 1
+
+
+# ─── Разделы ───────────────────────────────────────────────────────────────────
+
+def _group(row):
+    return {'id': int(row[0]), 'title': row[1]}
+
+
+def list_groups(cursor, ids=None):
+    """Разделы в порядке создания; ids — только эти (разделы аккаунтов сотрудника)."""
+    params, where = [], 'TRUE'
+    if ids is not None:
+        ids = sorted({int(x) for x in ids})
+        if not ids:
+            return []
+        params, where = [ids], 'g.id = ANY(%s)'
+    cursor.execute("SELECT g.id, g.title FROM twofa_groups g WHERE %s ORDER BY g.id" % where, params)
+    return [_group(row) for row in cursor.fetchall()]
+
+
+def get_group(cursor, group_id, for_update=False):
+    cursor.execute("SELECT id, title FROM twofa_groups WHERE id = %%s%s" % (' FOR UPDATE' if for_update else ''),
+                   (int(group_id),))
+    row = cursor.fetchone()
+    return _group(row) if row else None
+
+
+def group_by_title(cursor, title):
+    cursor.execute("SELECT id, title FROM twofa_groups WHERE lower(title) = lower(%s)", (title,))
+    row = cursor.fetchone()
+    return _group(row) if row else None
+
+
+def insert_group(cursor, *, title, actor_id, now):
+    """id нового раздела; None — раздел с таким названием уже есть (регистр не важен)."""
+    cursor.execute("""
+        INSERT INTO twofa_groups (title, created_by, created_at, updated_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT ((lower(title))) DO NOTHING
+        RETURNING id
+    """, (title, actor_id, now, now))
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def rename_group(cursor, group_id, *, title, now):
+    cursor.execute("UPDATE twofa_groups SET title = %s, updated_at = %s WHERE id = %s",
+                   (title, now, int(group_id)))
+    return cursor.rowcount == 1
+
+
+def delete_group(cursor, group_id):
+    """Раздел уходит, его аккаунты остаются — без раздела. Сколько живых в нём было."""
+    cursor.execute("SELECT count(*) FROM twofa_accounts WHERE group_id = %s AND is_active", (int(group_id),))
+    count = int(cursor.fetchone()[0])
+    cursor.execute("UPDATE twofa_accounts SET group_id = NULL WHERE group_id = %s", (int(group_id),))
+    cursor.execute("DELETE FROM twofa_groups WHERE id = %s", (int(group_id),))
+    return count
 
 
 # ─── Доступы ───────────────────────────────────────────────────────────────────

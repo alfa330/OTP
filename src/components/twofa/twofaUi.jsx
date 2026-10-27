@@ -17,6 +17,11 @@ export const TOOLBAR_BTN =
 export const TOOLBAR_BTN_PRIMARY =
     'inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50';
 
+/* Поля окон: подпись над полем, текст того, чего не хватает, — под ним, красным. */
+export const FIELD_LABEL = 'mb-1.5 flex items-center gap-1.5 px-1 text-[12.5px] font-medium text-slate-600';
+export const FIELD_ERROR = 'mt-1.5 px-1 text-[12px] text-rose-600';
+export const INVALID_RING = 'ring-2 ring-rose-300';
+
 const PILL_TONES = {
     amber: 'bg-amber-50 text-amber-800 ring-1 ring-amber-200/80',
     green: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',

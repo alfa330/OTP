@@ -52,12 +52,18 @@ EVENT_LABELS = {
     'account_added': 'Добавил аккаунт',
     'account_renamed': 'Переименовал аккаунт',
     'account_removed': 'Удалил аккаунт и его ключ',
+    'account_moved': 'Перенёс аккаунт',
     'access_granted': 'Выдал доступ',
     'access_revoked': 'Снял доступ',
+    'group_created': 'Создал раздел',
+    'group_renamed': 'Переименовал раздел',
+    'group_deleted': 'Удалил раздел',
+    'groups_introduced': 'Аккаунты собраны в раздел',
 }
 
-# Кто действовал в событии: человек или сам раздел (срок вышел, бот отправил).
-SYSTEM_EVENTS = frozenset({'expired', 'cancelled', 'code_sent', 'code_failed'})
+# Кто действовал в событии: человек или система (срок вышел, бот отправил, обновление собрало
+# аккаунты в первый раздел — schema._GROUPS_INTRODUCED).
+SYSTEM_EVENTS = frozenset({'expired', 'cancelled', 'code_sent', 'code_failed', 'groups_introduced'})
 
 
 # ─── Время ─────────────────────────────────────────────────────────────────────
@@ -99,6 +105,15 @@ def clean_service(value):
     if len(text) > SERVICE_MAX:
         raise ValueError('Сервис — не длиннее %d символов' % SERVICE_MAX)
     return text or None
+
+
+def clean_group_title(value):
+    text = ' '.join(str(value or '').split())
+    if not text:
+        raise ValueError('Укажите название раздела')
+    if len(text) > TITLE_MAX:
+        raise ValueError('Название раздела — не длиннее %d символов' % TITLE_MAX)
+    return text
 
 
 def suggested_title(entry):

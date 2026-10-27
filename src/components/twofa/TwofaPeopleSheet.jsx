@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Loader2, Search, Send } from 'lucide-react';
 import { IosModal, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
-import { errorOf } from './twofaMeta';
+import { errorOf, groupAccounts } from './twofaMeta';
+import { GroupLabel } from './twofaUi';
 
 /*
  * Окна «Доступов» «Кодов 2FA»: найти сотрудника и выбрать, к каким аккаунтам ему можно
@@ -79,7 +80,8 @@ export const PeoplePicker = ({ open, onClose, api, onPick }) => {
     );
 };
 
-const AccountTile = ({ account, checked, onToggle }) => (
+/* Плитка-галочка аккаунта — та же в доступах сотрудника и в составе раздела. */
+export const AccountTile = ({ account, checked, onToggle }) => (
     <button type="button" onClick={onToggle} aria-pressed={checked}
             className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left ring-1 transition ${
                 checked ? 'bg-blue-50 ring-blue-200' : 'bg-white ring-slate-200/70 hover:bg-slate-50'
@@ -96,7 +98,27 @@ const AccountTile = ({ account, checked, onToggle }) => (
     </button>
 );
 
-export const PersonSheet = ({ person, accounts, onClose, api, onSaved, botLink }) => {
+/* Плитки по разделам: заголовки — когда разделов больше одного (иначе это шум) или когда
+   важно, откуда аккаунт (labelled — состав раздела: отмеченный из другого раздела переедет). */
+export const AccountTiles = ({ accounts, groups, isChecked, onToggle, labelled = false }) => {
+    const sections = groupAccounts(accounts, groups);
+    const tiles = (list) => list.map((account) => (
+        <AccountTile key={account.id} account={account} checked={isChecked(account.id)} onToggle={() => onToggle(account.id)} />
+    ));
+    if (sections.length < 2 && !labelled) return <div className="space-y-2">{tiles(accounts)}</div>;
+    return (
+        <div className="space-y-4">
+            {sections.map((section) => (
+                <div key={section.id ?? 'none'}>
+                    <GroupLabel>{section.title}</GroupLabel>
+                    <div className="space-y-2">{tiles(section.accounts)}</div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+export const PersonSheet = ({ person, accounts, groups, onClose, api, onSaved, botLink }) => {
     const initial = useMemo(() => new Set(person?.account_ids || []), [person]);
     const [picked, setPicked] = useState(initial);
     const [busy, setBusy] = useState(false);
@@ -165,12 +187,7 @@ export const PersonSheet = ({ person, accounts, onClose, api, onSaved, botLink }
                 {accounts.length === 0 ? (
                     <p className="py-6 text-center text-[13px] text-slate-500">Сначала добавьте аккаунт во вкладке «Аккаунты»</p>
                 ) : (
-                    <div className="space-y-2">
-                        {accounts.map((account) => (
-                            <AccountTile key={account.id} account={account} checked={picked.has(account.id)}
-                                         onToggle={() => toggle(account.id)} />
-                        ))}
-                    </div>
+                    <AccountTiles accounts={accounts} groups={groups} isChecked={(id) => picked.has(id)} onToggle={toggle} />
                 )}
                 {problem && <p className="px-1 text-[12.5px] text-rose-600">{problem}</p>}
             </div>

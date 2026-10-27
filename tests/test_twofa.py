@@ -304,6 +304,33 @@ class AccessTest(unittest.TestCase):
 
 
 class RulesTest(unittest.TestCase):
+    def test_section_title_is_cleaned_like_an_account_title(self):
+        self.assertEqual(rules.clean_group_title('  SMM   и  таргет '), 'SMM и таргет')
+        for bad in ('', '   ', None, 'x' * (rules.TITLE_MAX + 1)):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rules.clean_group_title(bad)
+
+    def test_section_events_are_labelled(self):
+        for kind in ('account_moved', 'group_created', 'group_renamed', 'group_deleted', 'groups_introduced'):
+            self.assertIn(kind, rules.EVENT_LABELS)
+        # Собрало аккаунты обновление, а не человек; остальное с разделами делает человек.
+        self.assertIn('groups_introduced', rules.SYSTEM_EVENTS)
+        self.assertFalse({'account_moved', 'group_created', 'group_renamed', 'group_deleted'} & rules.SYSTEM_EVENTS)
+
+    def test_sections_are_gathered_once_when_the_column_appears(self):
+        """На проде 16 аккаунтов уже есть: их раздел ставится в момент появления колонки и
+        только тогда — без Postgres (в CI Postgres-тесты пропускаются)."""
+        from twofa import schema
+
+        sql = schema._GROUPS_INTRODUCED
+        self.assertIn(sql, schema._MIGRATIONS)
+        guard = sql.index("column_name = 'group_id'")
+        self.assertLess(guard, sql.index('ADD COLUMN group_id'))
+        self.assertLess(sql.index('ADD COLUMN group_id'), sql.index('INSERT INTO twofa_groups'))
+        self.assertIn('ON DELETE SET NULL', sql)
+        self.assertEqual(schema.DEFAULT_GROUP_TITLE, 'Общий маркетинг и рекламные аккаунты')
+        self.assertIn("'groups_introduced'", sql)
+
     def test_terms_from_the_tz(self):
         self.assertEqual((rules.REQUEST_TTL_SECONDS, rules.RESEND_WINDOW_SECONDS, rules.CODE_VISIBLE_SECONDS),
                          (600, 180, 60))
@@ -499,6 +526,19 @@ class WiringTest(unittest.TestCase):
         routes = (ROOT / 'twofa' / 'routes.py').read_text(encoding='utf-8')
         self.assertNotIn("'code':", routes)
         self.assertNotIn('secret_enc', routes)
+
+    def test_sections_are_wired_into_the_screen(self):
+        """Разделы аккаунтов: окно раздела подключено, разделы доходят до всех окон, где
+        выбирают аккаунты, журнал называет систему «Системой», а не «Разделом»."""
+        view = _read(VIEW_JSX)
+        self.assertIn("import { GroupSheet } from './TwofaGroupSheet';", view)
+        self.assertIn('<GroupSheet', view)
+        self.assertEqual(view.count('groups={data.groups || []}'), 4)  # добавление, аккаунт, раздел, доступы
+        self.assertIn("item.system ? 'Система'", view)
+        self.assertNotIn("item.system ? 'Раздел'", view)
+        # Колонка minmax(0, 1fr): длинная почта в названии не выталкивает карточку за край телефона.
+        self.assertIn('className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3"', view)
+        self.assertNotIn('className="grid gap-3 md:grid-cols-2', view)
 
 
 if __name__ == '__main__':
@@ -708,8 +748,11 @@ class RouteGatesWithoutDbTest(unittest.TestCase):
     def test_employee_manages_nothing(self):
         for method, path in (('get', '/journal'), ('post', '/accounts/preview'), ('post', '/accounts'),
                              ('patch', '/accounts/5'), ('delete', '/accounts/5'), ('get', '/people'),
-                             ('put', '/people/20/grants')):
+                             ('put', '/people/20/grants'), ('post', '/groups'), ('patch', '/groups/3'),
+                             ('delete', '/groups/3')):
             self.assertEqual(self.call(20, method, path, {})[1], 'TWOFA_MANAGE_FORBIDDEN', path)
+        for name in ('create_group', 'update_group', 'delete_group', 'update_account', 'add_accounts'):
+            getattr(self.service, name).assert_not_called()
 
     def test_other_department_does_not_open_the_section(self):
         for method, path in (('get', ''), ('post', '/requests')):

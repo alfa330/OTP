@@ -94,6 +94,82 @@ export const peopleCount = (count) => `${count} ${plural(count, 'сотрудн�
 
 export const accountsCount = (count) => `${count} ${plural(count, 'аккаунт', 'аккаунта', 'аккаунтов')}`;
 
+/* ── Разделы аккаунтов (владелец 27.10.2026: «эти 16 сейчас один раздел — Общий маркетинг и
+   рекламные аккаунты», новые — при добавлении кодов, ведут глава маркетинга и супер-админы). */
+
+export const UNGROUPED_TITLE = 'Без раздела';
+export const NEW_GROUP = '__new__';
+
+/* Аккаунты по разделам — в порядке разделов с сервера (порядок создания); «Без раздела» — в
+   конце и только когда там что-то есть. withEmpty — и пустые разделы: у главы их наполняют
+   кнопкой «Изменить». Аккаунт с разделом, которого нет в списке, — тоже «Без раздела». */
+export const groupAccounts = (accounts, groups, { withEmpty = false } = {}) => {
+    const buckets = new Map((groups || []).map((group) => [group.id, []]));
+    const loose = [];
+    (accounts || []).forEach((account) => {
+        const bucket = account.group_id != null ? buckets.get(account.group_id) : null;
+        if (bucket) bucket.push(account); else loose.push(account);
+    });
+    const sections = (groups || [])
+        .map((group) => ({ id: group.id, title: group.title, accounts: buckets.get(group.id) }))
+        .filter((section) => withEmpty || section.accounts.length);
+    if (loose.length) sections.push({ id: null, title: UNGROUPED_TITLE, accounts: loose });
+    return sections;
+};
+
+/* Варианты поля «Раздел»: существующие и последним — новый. Значения — строки (CustomSelect). */
+export const groupOptions = (groups) => [
+    ...(groups || []).map((group) => ({ value: String(group.id), label: group.title })),
+    { value: NEW_GROUP, label: 'Новый раздел…' },
+];
+
+/* Раздел по умолчанию в окне добавления: единственный — он, ни одного — новый, несколько —
+   не выбран: «не выбрано» не должно молча стать первым разделом. */
+export const defaultGroupChoice = (groups) => {
+    const list = groups || [];
+    if (list.length === 1) return String(list[0].id);
+    return list.length ? '' : NEW_GROUP;
+};
+
+/* Чего не хватает в поле «Раздел» — текст у поля; null — всё есть. */
+export const groupChoiceError = (choice, newTitle) => {
+    if (!choice) return 'Выберите раздел';
+    if (choice === NEW_GROUP && !String(newTitle || '').trim()) return 'Укажите название раздела';
+    return null;
+};
+
+/* Выбор в поле «Раздел» → поля запроса: новый — названием, существующий — id. */
+export const groupPayload = (choice, newTitle) => {
+    if (choice === NEW_GROUP) return { group_title: String(newTitle || '').trim() };
+    return choice ? { group_id: Number(choice) } : {};
+};
+
+/* Хвост строки журнала о разделах: куда добавлен, откуда и куда перенесён, как переименован. */
+export const journalGroupNote = (item) => {
+    const details = item?.details || {};
+    const quoted = (title) => `«${title}»`;
+    switch (item?.kind) {
+    case 'account_added':
+        return details.group ? `в ${quoted(details.group)}` : '';
+    case 'account_moved':
+        if (details.from_group && details.to_group) return `из ${quoted(details.from_group)} в ${quoted(details.to_group)}`;
+        if (details.to_group) return `в ${quoted(details.to_group)}`;
+        return details.from_group ? `из ${quoted(details.from_group)} — без раздела` : '';
+    case 'group_created':
+        return details.group ? quoted(details.group) : '';
+    case 'group_renamed':
+        return details.from && details.to ? `${quoted(details.from)} → ${quoted(details.to)}` : '';
+    case 'group_deleted':
+        return [details.group && quoted(details.group),
+            details.accounts ? `${accountsCount(details.accounts)} — без раздела` : ''].filter(Boolean).join(' · ');
+    case 'groups_introduced':
+        return [details.group && quoted(details.group),
+            details.accounts != null ? accountsCount(details.accounts) : ''].filter(Boolean).join(' · ');
+    default:
+        return '';
+    }
+};
+
 /* Порядок проверки формы добавления: первое, чего не хватает, — туда и прокрутка. */
 export const manualErrors = ({ title, secret }) => {
     const errors = {};

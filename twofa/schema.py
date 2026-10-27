@@ -21,6 +21,11 @@
 * **Уведомления о запросах — по подписке** (`twofa_notify_optin`): подтверждать могут глава
   маркетинга и супер-админы, а колокол и Telegram получает только тот, кто включил тумблер.
 
+* **Разделы аккаунтов** (`twofa_groups`): аккаунт — в одном разделе или ни в каком («без
+  раздела»: раздел удалили или аккаунт убрали из состава). Название раздела уникально без
+  учёта регистра. Уже заведённые аккаунты собираются в первый раздел один раз — в момент
+  появления колонки (_GROUPS_INTRODUCED), а не на каждом старте.
+
 * **Журнал не правится** (ТЗ п. 7): триггер запрещает UPDATE и DELETE. Внешних ключей на
   users у журнала и запросов нет намеренно: удаление учётки (склейка дублей) не должно ни
   падать на них, ни переписывать журнал через ON DELETE SET NULL — имя лежит снимком.
@@ -41,6 +46,17 @@ _STATEMENTS = [
         removed_at    TIMESTAMP,
         removed_by    INTEGER,
         CONSTRAINT twofa_accounts_key_while_active CHECK (NOT is_active OR secret_enc IS NOT NULL)
+    )
+    """,
+
+    # Порядок разделов на экране — порядок создания (id).
+    """
+    CREATE TABLE IF NOT EXISTS twofa_groups (
+        id            SERIAL PRIMARY KEY,
+        title         VARCHAR(120) NOT NULL,
+        created_by    INTEGER,
+        created_at    TIMESTAMP NOT NULL,
+        updated_at    TIMESTAMP NOT NULL
     )
     """,
 
@@ -147,6 +163,7 @@ _STATEMENTS = [
     """,
 
     "CREATE INDEX IF NOT EXISTS idx_twofa_accounts_active ON twofa_accounts(is_active, title)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_twofa_groups_title ON twofa_groups(lower(title))",
     "CREATE INDEX IF NOT EXISTS idx_twofa_grants_user ON twofa_grants(user_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_twofa_requests_pending "
     "ON twofa_requests(account_id, requester_id) WHERE status = 'pending'",
@@ -182,6 +199,39 @@ def _add_column(table, column, ddl):
     """ % (table, column, table, column, ddl)
 
 
+DEFAULT_GROUP_TITLE = 'Общий маркетинг и рекламные аккаунты'
+
+# 27.10.2026, разделы аккаунтов (владелец: «эти 16 сейчас один раздел — Общий маркетинг и
+# рекламные аккаунты»). Колонка раздела у аккаунта — и в тот же момент, ОДИН раз, все уже
+# заведённые аккаунты собираются в этот раздел, а журнал получает строку об этом. Потом
+# аккаунт без раздела — чьё-то решение, и перезапуск сервера его не трогает. Время — Алматы,
+# как у сервиса (rules.almaty).
+_GROUPS_INTRODUCED = """
+    DO $$
+    DECLARE
+        first_group INTEGER;
+        moved INTEGER;
+        moment TIMESTAMP := (NOW() AT TIME ZONE 'UTC') + INTERVAL '5 hours';
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'twofa_accounts'
+                          AND column_name = 'group_id') THEN
+            ALTER TABLE twofa_accounts
+                ADD COLUMN group_id INTEGER REFERENCES twofa_groups(id) ON DELETE SET NULL;
+            IF EXISTS (SELECT 1 FROM twofa_accounts) THEN
+                INSERT INTO twofa_groups (title, created_at, updated_at)
+                VALUES ('%(title)s', moment, moment)
+                RETURNING id INTO first_group;
+                UPDATE twofa_accounts SET group_id = first_group;
+                SELECT count(*) INTO moved FROM twofa_accounts WHERE is_active;
+                INSERT INTO twofa_events (kind, details, created_at)
+                VALUES ('groups_introduced', jsonb_build_object('group', '%(title)s', 'accounts', moved), moment);
+            END IF;
+        END IF;
+    END
+    $$
+""" % {'title': DEFAULT_GROUP_TITLE}
+
 _MIGRATIONS = [
     # 27.10.2026, разбор после выкладки: момент последней выдачи кода — под блокировкой
     # запроса отсекает второе нажатие «Код не подошёл» (два сообщения с цифрами).
@@ -189,6 +239,7 @@ _MIGRATIONS = [
     # Сколько раз Telegram не принял «стереть цифры» / «убрать сообщение»: повторяем, но не
     # вечно (бота заблокировали — править его сообщения больше нельзя никогда).
     _add_column('twofa_messages', 'attempts', 'INTEGER NOT NULL DEFAULT 0'),
+    _GROUPS_INTRODUCED,
 ]
 
 

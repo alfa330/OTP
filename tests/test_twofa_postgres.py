@@ -1122,3 +1122,186 @@ def test_profile_flag_runs_the_real_function_from_the_bot(env):
     open_for = namespace['_twofa_section_open_for']
     assert open_for(ANNA) and open_for(HEAD) and open_for(SUPER)
     assert not open_for(OTHER) and not open_for(BORIS) and not open_for(None)
+
+
+# ─── Разделы аккаунтов ───────────────────────────────────────────────────────
+
+SECRET_3 = b'0123456789abcdefghij'
+
+
+def _groups(db):
+    return _rows(db, 'SELECT id, title FROM twofa_groups ORDER BY id')
+
+
+def _group_of(db, account_id):
+    return _rows(db, 'SELECT group_id FROM twofa_accounts WHERE id = %s', (account_id,))[0][0]
+
+
+def _events(db, kind):
+    return [row[0] for row in _rows(db, 'SELECT details FROM twofa_events WHERE kind = %s ORDER BY id', (kind,))]
+
+
+def test_accounts_added_before_sections_are_gathered_into_the_first_one_once(db):
+    """Как на проде 27.10.2026: аккаунты уже есть, а колонки раздела ещё нет."""
+    with db._get_cursor() as cur:
+        cur.execute('ALTER TABLE twofa_accounts DROP COLUMN group_id')
+        cur.execute("""
+            INSERT INTO twofa_accounts (title, secret_enc, is_active, created_at, updated_at)
+            VALUES ('Google Ads', 'x', TRUE, NOW(), NOW()), ('Meta', 'y', TRUE, NOW(), NOW()),
+                   ('Удалённый', NULL, FALSE, NOW(), NOW())
+        """)
+        schema.init_twofa_schema(cur)
+        schema.init_twofa_schema(cur)
+    [(group_id, title)] = _groups(db)
+    assert title == schema.DEFAULT_GROUP_TITLE == 'Общий маркетинг и рекламные аккаунты'
+    assert {row[0] for row in _rows(db, 'SELECT group_id FROM twofa_accounts')} == {group_id}
+    assert _events(db, 'groups_introduced') == [{'group': title, 'accounts': 2}]
+    # Дальше «без раздела» — решение человека: следующий старт сервера его не трогает.
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE twofa_accounts SET group_id = NULL WHERE title = 'Meta'")
+        schema.init_twofa_schema(cur)
+    assert _rows(db, "SELECT group_id FROM twofa_accounts WHERE title = 'Meta'") == [(None,)]
+    assert len(_groups(db)) == 1 and len(_events(db, 'groups_introduced')) == 1
+
+
+def test_fresh_install_starts_without_sections(db):
+    assert _groups(db) == [] and _events(db, 'groups_introduced') == []
+
+
+def test_accounts_go_into_the_chosen_section(env):
+    service, db = env['service'], env['db']
+    head = service.context(HEAD)
+    assert _group_of(db, env['account_id']) is None  # фикстура добавила его без раздела
+    [meta] = service.add_accounts(head, [{'title': 'Meta', 'service': None, 'secret': SECRET_2}],
+                                  group={'title': 'SMM и таргет'})['created']
+    [(smm, title)] = _groups(db)
+    assert title == 'SMM и таргет' and _group_of(db, meta) == smm
+    # То же название другим регистром — тот же раздел, а не второй.
+    [tiktok] = service.add_accounts(head, [{'title': 'TikTok', 'service': None, 'secret': SECRET_3}],
+                                    group={'title': 'smm И ТАРГЕТ'})['created']
+    assert _group_of(db, tiktok) == smm and len(_groups(db)) == 1
+    assert _events(db, 'group_created') == [{'group': 'SMM и таргет'}]
+    added = _rows(db, "SELECT account_title, details FROM twofa_events WHERE kind = 'account_added' ORDER BY id")
+    assert added[-1] == ('TikTok', {'group': 'SMM и таргет'})
+    # Раздел удалили, пока окно добавления было открыто, — аккаунт не заводится.
+    result = service.add_accounts(head, [{'title': 'X', 'service': None, 'secret': b'z' * 20}], group={'id': smm + 100})
+    assert result == {'outcome': 'group_not_found'}
+    assert _rows(db, "SELECT count(*) FROM twofa_accounts WHERE title = 'X'") == [(0,)]
+
+
+def test_section_composition_moves_accounts_both_ways(env):
+    service, db = env['service'], env['db']
+    head = service.context(HEAD)
+    google, meta = env['account_id'], _second_account(env, grant_to_anna=False)
+    general = service.create_group(head, 'Общий', [google, meta])
+    smm = service.create_group(head, 'SMM')['id']
+    assert general['outcome'] == 'ok' and _group_of(db, google) == _group_of(db, meta) == general['id']
+    # В «SMM» отметили Meta — она переезжает из «Общего».
+    assert service.update_group(head, smm, account_ids=[meta]) == {'outcome': 'ok'}
+    assert _group_of(db, meta) == smm and _group_of(db, google) == general['id']
+    # Из «Общего» убрали Google — он остаётся без раздела, а не пропадает.
+    assert service.update_group(head, general['id'], account_ids=[]) == {'outcome': 'ok'}
+    assert _group_of(db, google) is None
+    moved = _rows(db, "SELECT account_title, details FROM twofa_events WHERE kind = 'account_moved' ORDER BY id")
+    assert moved[-2:] == [('ads@company.kz', {'from_group': 'Общий', 'to_group': 'SMM'}),
+                          ('Google Ads', {'from_group': 'Общий', 'to_group': None})]
+    # Название: занятое — нельзя, своё же другим регистром — можно.
+    assert service.update_group(head, smm, title='общий') == {'outcome': 'group_exists'}
+    assert service.create_group(head, 'SMM') == {'outcome': 'group_exists'}
+    assert service.update_group(head, smm, title='smm') == {'outcome': 'ok'}
+    assert dict(_groups(db))[smm] == 'smm' and _events(db, 'group_renamed') == [{'from': 'SMM', 'to': 'smm'}]
+    # Удалённый аккаунт в составе — отказ, и ничего не тронуто.
+    service.remove_account(head, meta)
+    assert service.update_group(head, smm, account_ids=[meta, google]) == {'outcome': 'unknown_account'}
+    assert _group_of(db, google) is None
+    assert service.update_group(head, smm + general['id'] + 100, title='Нет') == {'outcome': 'not_found'}
+
+
+def test_deleting_a_section_keeps_its_accounts_and_access(env):
+    service, db = env['service'], env['db']
+    head = service.context(HEAD)
+    group_id = service.create_group(head, 'Временный', [env['account_id']])['id']
+    assert service.delete_group(head, group_id) == {'outcome': 'ok', 'accounts': 1}
+    assert _groups(db) == [] and _group_of(db, env['account_id']) is None
+    assert _events(db, 'group_deleted') == [{'group': 'Временный', 'accounts': 1}]
+    assert _request(env)['outcome'] == 'created'  # доступ и запрос кода — как были
+    assert service.delete_group(head, group_id) == {'outcome': 'not_found'}
+
+
+def test_account_sheet_moves_the_account(env):
+    service, db = env['service'], env['db']
+    head = service.context(HEAD)
+    account_id = env['account_id']
+    assert service.update_account(head, account_id, 'Google Ads', 'Google', group={'title': 'Реклама'}) == {
+        'outcome': 'ok'}
+    [(ads, _title)] = _groups(db)
+    assert _group_of(db, account_id) == ads
+    # Правка одного названия раздел не трогает.
+    assert service.update_account(head, account_id, 'Google Ads — кабинет', 'Google')['outcome'] == 'ok'
+    assert _group_of(db, account_id) == ads
+    assert service.update_account(head, account_id, 'Google Ads — кабинет', 'Google', group=None)['outcome'] == 'ok'
+    assert _group_of(db, account_id) is None
+    # Раздел исчез — ни название, ни раздел не меняются.
+    assert service.update_account(head, account_id, 'X', None, group={'id': ads + 1})['outcome'] == 'group_not_found'
+    assert _rows(db, 'SELECT title FROM twofa_accounts WHERE id = %s', (account_id,)) == [('Google Ads — кабинет',)]
+    assert _events(db, 'account_moved') == [{'from_group': None, 'to_group': 'Реклама'},
+                                            {'from_group': 'Реклама', 'to_group': None}]
+
+
+def test_bot_lists_accounts_section_by_section(env):
+    service = env['service']
+    head = service.context(HEAD)
+    meta = _second_account(env)  # «ads@company.kz» по алфавиту раньше «Google Ads»
+    service.create_group(head, 'SMM', [env['account_id']])
+    service.create_group(head, 'Медиабаинг', [meta])
+    _outcome, offer = _offer(env)
+    pressed = [row[0]['callback_data'] for row in offer['markup']['inline_keyboard'][:-1]]
+    assert pressed == ['twofa:req:%d' % env['account_id'], 'twofa:req:%d' % meta]  # «SMM» создан первым
+
+
+def test_sections_through_the_routes(client, env):
+    client.as_user(HEAD)
+    response = client.post('/api/twofa/groups', json={'title': '  Общий   маркетинг ', 'account_ids': [env['account_id']]})
+    assert response.status_code == 201
+    general = response.get_json()['id']
+    screen = client.get('/api/twofa').get_json()
+    assert screen['groups'] == [{'id': general, 'title': 'Общий маркетинг'}]
+    assert screen['accounts'][0]['group_id'] == general
+    again = client.post('/api/twofa/groups', json={'title': 'общий МАРКЕТИНГ'})
+    assert again.status_code == 409 and again.get_json()['code'] == 'TWOFA_GROUP_EXISTS'
+    assert again.get_json()['field'] == 'title'
+    empty = client.post('/api/twofa/groups', json={'title': '   '})
+    assert empty.status_code == 400 and empty.get_json()['field'] == 'title'
+    # Новый аккаунт — сразу в новый раздел; удалённый раздел — ошибка у поля «Раздел».
+    added = client.post('/api/twofa/accounts', json={
+        'text': base64.b32encode(SECRET_2).decode(), 'items': [{'index': 0, 'title': 'Meta'}], 'group_title': 'SMM'})
+    assert added.status_code == 201
+    [meta] = added.get_json()['created']
+    gone = client.post('/api/twofa/accounts', json={
+        'text': base64.b32encode(SECRET_3).decode(), 'items': [{'index': 0, 'title': 'TT'}], 'group_id': 999999})
+    assert gone.status_code == 409 and gone.get_json()['field'] == 'group'
+    groups = client.get('/api/twofa').get_json()['groups']
+    assert [g['title'] for g in groups] == ['Общий маркетинг', 'SMM']
+    smm = groups[1]['id']
+    # Карточка аккаунта: перенос по id и «без раздела» по null; без поля раздел не трогается.
+    edit = '/api/twofa/accounts/%d' % meta
+    assert client.patch(edit, json={'title': 'Meta', 'group_id': general}).status_code == 200
+    assert _group_of(env['db'], meta) == general
+    assert client.patch(edit, json={'title': 'Meta Ads'}).status_code == 200
+    assert _group_of(env['db'], meta) == general
+    assert client.patch(edit, json={'title': 'Meta Ads', 'group_id': None}).status_code == 200
+    assert _group_of(env['db'], meta) is None
+    # Сотрудник видит только разделы своих аккаунтов.
+    client.as_user(ANNA)
+    assert client.get('/api/twofa').get_json()['groups'] == [{'id': general, 'title': 'Общий маркетинг'}]
+    assert client.post('/api/twofa/groups', json={'title': 'X'}).status_code == 403
+    # Переименовать и удалить; журнал отдаёт поля разделов.
+    client.as_user(HEAD)
+    assert client.patch('/api/twofa/groups/%d' % general, json={'title': 'Общий'}).status_code == 200
+    assert client.patch('/api/twofa/groups/%d' % smm, json={'account_ids': ['x']}).status_code == 400
+    assert client.delete('/api/twofa/groups/%d' % general).get_json() == {'ok': True, 'accounts': 1}
+    items = {item['kind']: item for item in reversed(client.get('/api/twofa/journal').get_json()['items'])}
+    assert items['group_deleted']['details'] == {'group': 'Общий', 'accounts': 1}
+    assert items['group_renamed']['details'] == {'from': 'Общий маркетинг', 'to': 'Общий'}
+    assert items['account_moved']['details'] == {'from_group': 'Общий маркетинг', 'to_group': None}
+    assert not items['group_deleted']['system'] and items['group_deleted']['actor_name'] == 'Глава Маркетинга'

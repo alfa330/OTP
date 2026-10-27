@@ -1,8 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { Camera, Check, ImagePlus, KeyRound, Loader2, QrCode, Trash2 } from 'lucide-react';
+import CustomSelect from '../ui/CustomSelect';
 import { IosHint, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
-import { errorOf, manualErrors } from './twofaMeta';
+import {
+    NEW_GROUP, defaultGroupChoice, errorOf, groupChoiceError, groupOptions, groupPayload, manualErrors,
+} from './twofaMeta';
+import { FIELD_ERROR, FIELD_LABEL, INVALID_RING } from './twofaUi';
 
 /*
  * Окна аккаунтов «Кодов 2FA»: добавить (QR или ключ) и поправить существующий.
@@ -15,10 +19,64 @@ import { errorOf, manualErrors } from './twofaMeta';
  * аккаунтов → Экспорт» из Google Authenticator (несколько аккаунтов, при многих —
  * несколько QR подряд). Разбирает сервер (twofa/otpauth.py), а окно показывает список с
  * галочками: снять лишнее — например, критичный аккаунт, который в бота не кладут (ТЗ п. 8).
+ *
+ * Раздел (владелец 27.10.2026): всё, что добавлено за раз, ложится в один раздел —
+ * существующий или новый, названный тут же. Поправить раздел одного аккаунта — в его окне.
  */
 
-const FIELD_LABEL = 'mb-1.5 flex items-center gap-1.5 px-1 text-[12.5px] font-medium text-slate-600';
-const FIELD_ERROR = 'mt-1.5 px-1 text-[12px] text-rose-600';
+/* Кегль и поля списка — как у полей ввода рядом (так же сделано в «Оплате счетов»). */
+const SELECT_TEXT = '!px-3.5 !py-2.5 text-[14px] text-slate-900';
+
+/* Поле «Раздел»: существующий раздел или «Новый раздел…» — тогда под списком его название.
+   error — чего не хватает или что ответил сервер; красным обводится то из двух полей, к
+   которому он относится. */
+export const GroupField = ({ id, groups, choice, newTitle, onChoice, onNewTitle, error, boxRef, titleRef }) => {
+    const isNew = choice === NEW_GROUP;
+    return (
+        <div ref={boxRef}>
+            <label className={FIELD_LABEL} htmlFor={id}>Раздел</label>
+            <CustomSelect id={id} variant="ios" textClassName={SELECT_TEXT} value={choice} onChange={onChoice}
+                          options={groupOptions(groups)} placeholder="Выберите раздел" ariaLabel="Раздел"
+                          invalid={Boolean(error) && !isNew} />
+            {isNew && (
+                <input ref={titleRef} className={`${iosInput} mt-2 ${error ? INVALID_RING : ''}`} value={newTitle}
+                       maxLength={120} placeholder="Название нового раздела" aria-label="Название нового раздела"
+                       onChange={(event) => onNewTitle(event.target.value)} />
+            )}
+            {error && <p className={FIELD_ERROR}>{error}</p>}
+        </div>
+    );
+};
+
+/* Состояние поля «Раздел» в окне: выбор, название нового, ошибка и прокрутка к полю. */
+const useGroupField = () => {
+    const [choice, setChoice] = useState('');
+    const [newTitle, setNewTitle] = useState('');
+    const [error, setError] = useState('');
+    const boxRef = useRef(null);
+    const titleRef = useRef(null);
+    const reset = useCallback((value) => { setChoice(value); setNewTitle(''); setError(''); }, []);
+    const show = useCallback((message, isNew) => {
+        setError(message);
+        const target = isNew ? titleRef.current : boxRef.current;
+        target?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+        if (isNew) titleRef.current?.focus?.();
+    }, []);
+    return {
+        choice, newTitle, error, boxRef, titleRef, reset, show,
+        onChoice: (value) => { setChoice(value); setError(''); },
+        onNewTitle: (value) => { setNewTitle(value); setError(''); },
+        /* Не хватает — показать у поля и вернуть false; quiet — только отметить, без прокрутки:
+           первым по экрану не хватает другого поля, и фокус уже там. */
+        check: ({ quiet = false } = {}) => {
+            const message = groupChoiceError(choice, newTitle);
+            if (message && quiet) setError(message);
+            else if (message) show(message, choice === NEW_GROUP);
+            return !message;
+        },
+        payload: () => groupPayload(choice, newTitle),
+    };
+};
 
 const detectorOrNull = () => {
     if (!window.BarcodeDetector) return null;
@@ -197,7 +255,19 @@ const EntryRow = ({ entry, pick, onChange, error, inputRef }) => {
     );
 };
 
-export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
+export const AddAccountSheet = ({ open, onClose, api, onSaved, groups }) => {
+    const group = useGroupField();
+    const { reset: resetGroup } = group;
+    const groupsRef = useRef(groups);
+    groupsRef.current = groups;
+    // Экспорт на несколько QR: следующий QR по умолчанию идёт в тот же раздел, что и прошлый.
+    const lastGroupRef = useRef('');
+    useEffect(() => {
+        if (!open) return;
+        const list = groupsRef.current || [];
+        const last = lastGroupRef.current;
+        resetGroup(last && list.some((item) => String(item.id) === last) ? last : defaultGroupChoice(list));
+    }, [open, resetGroup]);
     const [mode, setMode] = useState('qr');
     const [qrText, setQrText] = useState('');
     const [preview, setPreview] = useState(null);
@@ -282,10 +352,22 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
         input?.focus?.();
     };
 
+    const saved = (data) => {
+        lastGroupRef.current = data?.group_id != null ? String(data.group_id) : '';
+    };
+
+    const groupAnswer = (requestError, message) => {
+        if (requestError?.response?.data?.field !== 'group') return false;
+        group.show(message, group.choice === NEW_GROUP);
+        return true;
+    };
+
     const saveQr = async () => {
         const missing = {};
         chosen.forEach(([index, pick]) => { if (!String(pick.title || '').trim()) missing[index] = 'Укажите название'; });
         setRowErrors(missing);
+        // Раздел стоит над списком: не хватает его — прокрутка к нему, строки уже отмечены.
+        if (!group.check()) return;
         const first = Object.keys(missing)[0];
         if (first !== undefined) {
             focusRow(first);
@@ -293,17 +375,24 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
         }
         setBusy('save');
         try {
-            await api.post('/accounts', {
+            const { data } = await api.post('/accounts', {
                 text: qrText,
                 items: chosen.map(([index, pick]) => ({ index: Number(index), title: pick.title, service: pick.service })),
+                ...group.payload(),
             });
+            saved(data);
             onSaved?.({ count: chosen.length, batch: preview?.batch || null });
             reset();
             onClose();
         } catch (requestError) {
-            // Ответ сервера про конкретную строку (дубль, неподходящий код, название) — к ней.
+            // Ответ сервера про конкретную строку (дубль, неподходящий код, название) — к ней,
+            // про раздел — к полю «Раздел».
             const index = requestError?.response?.data?.index;
             const message = errorOf(requestError, 'Аккаунты не сохранились');
+            if (groupAnswer(requestError, message)) {
+                setBusy('');
+                return;
+            }
             if (index !== undefined && index !== null && picks[index]) {
                 setRowErrors({ [index]: message });
                 focusRow(index);
@@ -317,19 +406,31 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
     const saveManual = async () => {
         const found = manualErrors(manual);
         setErrors(found);
-        if (found.title) { titleRef.current?.focus(); return; }
+        // Порядок — как поля на экране: название, раздел, ключ.
+        if (found.title) {
+            titleRef.current?.focus();
+            group.check({ quiet: true });
+            return;
+        }
+        if (!group.check()) return;
         if (found.secret) { secretRef.current?.focus(); return; }
         setBusy('save');
         try {
-            await api.post('/accounts', {
+            const { data } = await api.post('/accounts', {
                 text: manual.secret,
                 items: [{ index: 0, title: manual.title, service: manual.service }],
+                ...group.payload(),
             });
+            saved(data);
             onSaved?.({ count: 1, batch: null });
             reset();
             onClose();
         } catch (requestError) {
             const message = errorOf(requestError, 'Аккаунт не сохранился');
+            if (groupAnswer(requestError, message)) {
+                setBusy('');
+                return;
+            }
             if (['TWOFA_PARSE', 'TWOFA_UNSUPPORTED', 'TWOFA_DUPLICATE'].includes(requestError?.response?.data?.code)) {
                 setErrors({ secret: message });
                 secretRef.current?.focus();
@@ -420,6 +521,7 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
                                 Другой QR
                             </button>
                         </div>
+                        <GroupField id="twofa-add-group" groups={groups} {...group} />
                         {(preview.entries || []).map((entry) => (
                             <EntryRow key={entry.index} entry={entry} pick={picks[entry.index]}
                                       error={rowErrors[entry.index]}
@@ -448,6 +550,7 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
                                    placeholder="Google, Meta, TikTok…"
                                    onChange={(event) => setManual((prev) => ({ ...prev, service: event.target.value }))} />
                         </div>
+                        <GroupField id="twofa-manual-group" groups={groups} {...group} />
                         <div>
                             <label className={FIELD_LABEL} htmlFor="twofa-secret">
                                 Ключ
@@ -470,12 +573,15 @@ export const AddAccountSheet = ({ open, onClose, api, onSaved }) => {
     );
 };
 
-export const AccountSheet = ({ account, onClose, api, onSaved, onRemoved, peopleNames }) => {
+export const AccountSheet = ({ account, onClose, api, onSaved, onRemoved, peopleNames, groups }) => {
     const [title, setTitle] = useState('');
     const [service, setService] = useState('');
     const [busy, setBusy] = useState('');
     const [problem, setProblem] = useState('');
     const [confirmRemove, setConfirmRemove] = useState(false);
+    const group = useGroupField();
+    const { reset: resetGroup } = group;
+    const initialGroup = account?.group_id != null ? String(account.group_id) : '';
 
     useEffect(() => {
         setTitle(account?.title || '');
@@ -483,19 +589,26 @@ export const AccountSheet = ({ account, onClose, api, onSaved, onRemoved, people
         setProblem('');
         setBusy('');
         setConfirmRemove(false);
-    }, [account]);
+        resetGroup(account?.group_id != null ? String(account.group_id) : '');
+    }, [account, resetGroup]);
 
     if (!account) return <IosModal open={false} onClose={onClose} title="" />;
 
     const save = async () => {
         if (!title.trim()) { setProblem('Укажите название'); return; }
+        // Раздел уходит на сервер, только если его поменяли: иначе правка названия могла бы
+        // вернуть аккаунт в раздел, из которого его только что убрали в соседней вкладке.
+        const moved = group.choice !== initialGroup;
+        if (moved && !group.check()) return;
         setBusy('save');
         try {
-            await api.patch(`/accounts/${account.id}`, { title, service });
+            await api.patch(`/accounts/${account.id}`, { title, service, ...(moved ? group.payload() : {}) });
             onSaved?.();
             onClose();
         } catch (requestError) {
-            setProblem(errorOf(requestError, 'Не сохранилось'));
+            const message = errorOf(requestError, 'Не сохранилось');
+            if (requestError?.response?.data?.field === 'group') group.show(message, group.choice === NEW_GROUP);
+            else setProblem(message);
             setBusy('');
         }
     };
@@ -552,6 +665,7 @@ export const AccountSheet = ({ account, onClose, api, onSaved, onRemoved, people
                     <input id="twofa-edit-service" className={iosInput} value={service} maxLength={80}
                            placeholder="Google, Meta, TikTok…" onChange={(event) => setService(event.target.value)} />
                 </div>
+                <GroupField id="twofa-edit-group" groups={groups} {...group} />
                 <div className="flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2.5 text-[12.5px] text-slate-600">
                     <KeyRound size={14} className="mt-0.5 shrink-0 text-slate-400" />
                     <span>
