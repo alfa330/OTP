@@ -22,6 +22,7 @@
 """
 
 import json
+import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -152,13 +153,15 @@ class WialonSource:
     """Несколько учёток Wialon Hosting. Сбой одной не отменяет остальные (errors)."""
 
     def __init__(self, accounts, *, session_factory=requests.Session, sdk=WIALON_SDK,
-                 geocode_url=WIALON_GEOCODE, token_duration=600):
+                 geocode_url=WIALON_GEOCODE, token_duration=600, retry_pause=3.0, sleep=time.sleep):
         # accounts — [{'login', 'password'}] или [{'token'}]; пустые пропускаются.
         self.accounts = [a for a in accounts if a.get('token') or (a.get('login') and a.get('password'))]
         self.session_factory = session_factory
         self.sdk = sdk
         self.geocode_url = geocode_url
         self.token_duration = token_duration
+        self.retry_pause = retry_pause
+        self.sleep = sleep
 
     def _call(self, http, svc, params, sid=None):
         data = {'svc': svc, 'params': json.dumps(params)}
@@ -171,23 +174,35 @@ class WialonSource:
         return payload
 
     def _token(self, http, account):
-        """Токен только на просмотр, живёт token_duration секунд и истекает сам."""
-        response = http.post(self.sdk + '/oauth/authorize.html', allow_redirects=False, timeout=TIMEOUT,
-                             headers={'Origin': 'https://hosting.wialon.com',
-                                      'Referer': 'https://hosting.wialon.com/login.html'},
-                             data={'response_type': 'token', 'wialon_sdk_url': self.sdk, 'success_uri': '',
-                                   'login_uri': '', 'client_id': 'iCORE', 'redirect_uri':
-                                   'https://hosting.wialon.com/post_token.html',
-                                   'access_type': str(WIALON_ACCESS_VIEW), 'activation_time': '0',
-                                   'duration': str(self.token_duration), 'flags': '0x1', 'sign': '',
-                                   'login': account['login'], 'passw': account['password']})
-        location = urlsplit(response.headers.get('Location', ''))
-        query = parse_qs(location.query)
-        query.update(parse_qs(location.fragment))
-        token = (query.get('access_token') or [None])[0]
-        if not token:
-            raise SourceError('вход в Wialon не удался')
-        return token
+        """Токен только на просмотр, живёт token_duration секунд и истекает сам.
+
+        Вход с сервера (27.10.2026, первый сбор на проде) у двух учёток из четырёх не прошёл,
+        хотя с компьютера те же учётки входили весь день: поэтому один повтор через паузу, а в
+        причине — HTTP-статус и код Wialon (svc_error), чтобы отказ было видно в самом отчёте.
+        """
+        reason = None
+        for attempt in range(2):
+            if attempt:
+                self.sleep(self.retry_pause)
+            response = http.post(self.sdk + '/oauth/authorize.html', allow_redirects=False, timeout=TIMEOUT,
+                                 headers={'Origin': 'https://hosting.wialon.com',
+                                          'Referer': 'https://hosting.wialon.com/login.html'},
+                                 data={'response_type': 'token', 'wialon_sdk_url': self.sdk, 'success_uri': '',
+                                       'login_uri': '', 'client_id': 'iCORE', 'redirect_uri':
+                                       'https://hosting.wialon.com/post_token.html',
+                                       'access_type': str(WIALON_ACCESS_VIEW), 'activation_time': '0',
+                                       'duration': str(self.token_duration), 'flags': '0x1', 'sign': '',
+                                       'login': account['login'], 'passw': account['password']})
+            location = urlsplit(response.headers.get('Location', ''))
+            query = parse_qs(location.query)
+            query.update(parse_qs(location.fragment))
+            token = (query.get('access_token') or [None])[0]
+            if token:
+                return token
+            code = (query.get('svc_error') or [None])[0]
+            reason = 'HTTP %s%s' % (response.status_code,
+                                    ', код Wialon %s' % code if code else (', без редиректа' if not location.netloc else ''))
+        raise SourceError('вход в Wialon не удался (%s)' % reason)
 
     def geocode(self, http, uid, points):
         """Адреса точек [(lat, lon)] пачками; не ответил геокодер — None на месте адреса."""

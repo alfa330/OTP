@@ -269,15 +269,41 @@ class WialonSourceTests(unittest.TestCase):
                                      {'nm': '030XYZ08 (маяк)', 'pos': None}],
                               geocoded={(43.24, 76.85): 'Утеген Батыра ул., 15А', (43.0, 76.0): 'Efir-адрес'})
         second = self._account(token_ok=False)
+        pauses = []
         source = WialonSource([{'login': 'a', 'password': 'b'}, {'login': 'c', 'password': 'd'},
-                               {'login': '', 'password': ''}], session_factory=self._factory([first, second]))
+                               {'login': '', 'password': ''}], session_factory=self._factory([first, second]),
+                              sleep=pauses.append)
         units, extra, errors = source.fetch([(43.0, 76.0)])
         self.assertEqual([(u['name'], u['address']) for u in units],
                          [('Hongqi EQM5 020XY02', 'Утеген Батыра ул., 15А'), ('030XYZ08 (маяк)', None)])
         self.assertEqual(units[0]['plates'], {'020XY02'})
         self.assertEqual(extra, ['Efir-адрес'])
         self.assertEqual(len(errors), 1)
-        self.assertIn('учётка 2', errors[0])
+        # Причина отказа видна в отчёте: статус и то, что редиректа с токеном не было; повтор — один.
+        self.assertIn('учётка 2: вход в Wialon не удался (HTTP 301, без редиректа)', errors[0])
+        self.assertEqual(pauses, [3.0])
+
+    def test_login_is_retried_once_and_wialon_code_is_kept(self):
+        answers = iter(['https://hosting.wialon.com/post_token.html?svc_error=1003',
+                        'https://hosting.wialon.com/post_token.html?access_token=tok&svc_error=0'])
+
+        def authorize(_kwargs):
+            return FakeResponse(301, headers={'Location': next(answers)})
+
+        session = FakeSession([
+            ('POST', 'oauth/authorize.html', authorize),
+            ('POST', 'ajax.html', lambda kw: FakeResponse(payload={'eid': 'sid', 'user': {'id': 1}}
+                                                          if kw['data']['svc'] == 'token/login' else {'items': []})),
+        ])
+        source = WialonSource([{'login': 'a', 'password': 'b'}], session_factory=lambda: session, sleep=lambda _s: None)
+        _units, _extra, errors = source.fetch()
+        self.assertEqual(errors, [])
+
+        always_refused = FakeSession([('POST', 'oauth/authorize.html', lambda _kw: FakeResponse(
+            301, headers={'Location': 'https://hosting.wialon.com/post_token.html?svc_error=1003'}))])
+        source = WialonSource([{'login': 'a', 'password': 'b'}], session_factory=lambda: always_refused,
+                              sleep=lambda _s: None)
+        self.assertIn('код Wialon 1003', source.fetch()[2][0])
 
 
 class GlonassSourceTests(unittest.TestCase):
