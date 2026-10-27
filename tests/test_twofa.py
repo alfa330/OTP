@@ -17,6 +17,7 @@
 
 import ast
 import base64
+import hashlib
 import os
 import re
 import sys
@@ -108,9 +109,21 @@ class TotpTest(unittest.TestCase):
         self.assertEqual(totp.normalize_secret(b32.rstrip('=')), RFC_SECRET)
 
     def test_not_a_key_is_refused(self):
-        for text in ('', '   ', 'ключ', 'AB1!', 'AAAA', 'A' * 200):
+        for text in ('', '   ', 'ключ', 'AB1!', 'AAAA', 'A' * 1000):
             with self.assertRaises(ValueError, msg=text):
                 totp.normalize_secret(text)
+
+    def test_long_key_counts_like_google_authenticator(self):
+        """Ключ длиннее 64 байт (так у Tilda, 27.10.2026) не обрезается и не отсекается: HMAC
+        сначала сжимает его SHA1 (RFC 2104) — так же, как приложение."""
+        key = bytes(range(100))
+        self.assertEqual(totp.normalize_secret(base64.b32encode(key).decode()), key)
+        for counter in (0, 1, 37037036, 66666666):
+            self.assertEqual(totp.hotp(key, counter), totp.hotp(hashlib.sha1(key).digest(), counter))
+        longest = b'k' * totp.MAX_SECRET_BYTES
+        self.assertEqual(totp.validate_secret(longest), longest)
+        with self.assertRaises(ValueError):
+            totp.validate_secret(longest + b'k')
 
     def test_group(self):
         self.assertEqual(totp.group('123456'), '123 456')
@@ -152,6 +165,18 @@ class OtpauthTest(unittest.TestCase):
         uri = migration_uri(_otp(secret, 'plus', 'P'), encode=False)
         self.assertIn('+', uri)
         self.assertEqual(otpauth.parse(uri)['entries'][0]['secret'], secret)
+
+    def test_key_longer_than_64_bytes_is_accepted(self):
+        """Tilda в экспорте Google Authenticator (27.10.2026): прежний предел 64 байта отсекал
+        такой ключ как «вставлен лишний текст», и аккаунт было не добавить."""
+        key = bytes(range(7, 107))
+        [entry] = otpauth.parse(migration_uri(_otp(key, 'marketing@company.kz', 'Tilda')))['entries']
+        self.assertTrue(entry['supported'], entry['reason'])
+        self.assertEqual(entry['secret'], key)
+        b32 = base64.b32encode(key).decode().rstrip('=')
+        [entry] = otpauth.parse('otpauth://totp/Tilda%3Amarketing%40company.kz?secret=' + b32)['entries']
+        self.assertTrue(entry['supported'], entry['reason'])
+        self.assertEqual(entry['secret'], key)
 
     def test_unknown_fields_of_newer_app_versions_are_skipped(self):
         params = _otp(RFC_SECRET, 'n', 'I') + _field(8, 2, b'unique-id') + _field(9, 0, 5)

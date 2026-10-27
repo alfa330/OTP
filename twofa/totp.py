@@ -18,10 +18,13 @@ DIGITS = 6
 # ТЗ п. 5: «Если до смены кода осталось меньше 10 секунд, бот присылает следующий код».
 NEXT_CODE_THRESHOLD_SECONDS = 10
 
-# Ключ короче 80 бит Google Authenticator не выдаёт (16 символов base32), длиннее 512 бит —
-# не ключ, а вставленный по ошибке текст.
+# Ключ короче 80 бит Google Authenticator не выдаёт (16 символов base32). Верхний предел —
+# только от явной ошибки: обычно ключи 10–64 байта, но бывают и длиннее — у Tilda в экспорте
+# Google Authenticator ключ длиннее 64 байт (27.10.2026, прежний предел 64 его отсекал).
+# Длинный ключ HMAC сначала сжимает SHA1 (RFC 2104) — так же считает и приложение, поэтому
+# коды совпадают.
 MIN_SECRET_BYTES = 10
-MAX_SECRET_BYTES = 64
+MAX_SECRET_BYTES = 512
 
 
 def normalize_secret(text):
@@ -49,7 +52,7 @@ def validate_secret(secret):
     if len(secret) < MIN_SECRET_BYTES:
         raise ValueError('Ключ слишком короткий — проверьте, что он скопирован целиком')
     if len(secret) > MAX_SECRET_BYTES:
-        raise ValueError('Ключ слишком длинный — похоже, вставлен лишний текст')
+        raise ValueError('Ключ слишком длинный — это не похоже на ключ 2FA')
     return bytes(secret)
 
 
