@@ -38,6 +38,8 @@ def _c2d_namespace():
         "_chat_metrics_parse_number",
         "_chat_report_name_tokens",
         "_chat_report_tokens_match",
+        "_operator_info_is_chat_manager",
+        "_operator_infos_prefer_chat_manager",
         "_chat_report_resolve_operator",
         "_chat_report_parse_dt",
         "_chat2desk_sync_timezone",

@@ -49,6 +49,9 @@ def _chat_report_namespace():
         "_chat_metrics_import_parse_csv",
         "_chat_report_name_tokens",
         "_chat_report_tokens_match",
+        "_operator_info_is_chat_manager",
+        "_operator_infos_prefer_chat_manager",
+        "_chat_report_build_operator_token_index",
         "_chat_report_resolve_operator",
         "_chat_report_detect_types",
         "_chat_report_detect_type",
@@ -214,6 +217,41 @@ class ChatReportImportTests(unittest.TestCase):
                           "tokens": self.ns["_chat_report_name_tokens"](name)})
         self.assertEqual(resolve("Даулет Аргимбек", lookup, index)[0], 7)
         self.assertEqual(resolve("Арғымбек Дәулет", lookup, index)[0], 7)
+
+    def test_resolve_operator_abbreviated_name_goes_to_chat_manager(self):
+        """Сокращённое имя (отчёт Name/Requests) совпало с чат-менеджером и с его же
+        учёткой «Удаленного КЦ»: из двух берётся чат-менеджер, как в lookup Chat2Desk."""
+        resolve = self.ns["_chat_report_resolve_operator"]
+        build_index = self.ns["_chat_report_build_operator_token_index"]
+
+        def index_of(rows):
+            class FakeDb:
+                @staticmethod
+                def get_all_operators():
+                    return rows
+
+            previous_db = self.ns.get("db")
+            self.ns["db"] = FakeDb()
+            try:
+                return build_index()
+            finally:
+                self.ns["db"] = previous_db
+
+        index = index_of([
+            (7, "Тестіслам Асан Тестбекұлы", 69, None, None, None, None,
+             "Чат менеджер", "chat_manager", "working"),
+            (8, "Тестислам АСан", 95, None, None, None, None,
+             "Удаленный оператор", "operator", "working"),
+        ])
+        self.assertEqual(resolve("Асан Т", {}, index)[0], 7)
+
+        # Чат-менеджера среди совпавших нет — неоднозначно, как и было.
+        operators_only = index_of([
+            (7, "Тестіслам Асан Тестбекұлы", 10, None, None, None, None, "Основа", "operator", "working"),
+            (8, "Тестислам АСан", 95, None, None, None, None,
+             "Удаленный оператор", "operator", "working"),
+        ])
+        self.assertIsNone(resolve("Асан Т", {}, operators_only)[0])
 
     def test_tokens_match_prefix(self):
         match = self.ns["_chat_report_tokens_match"]

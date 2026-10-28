@@ -37164,8 +37164,23 @@ def _operator_info_is_chat_manager(operator_info):
     return direction_key in ('чат менеджер', 'chat manager')
 
 
+def _operator_infos_prefer_chat_manager(infos):
+    """Из нескольких учёток с одним именем оставляет единственного чат-менеджера.
+
+    У человека бывает две рабочие учётки: чат-менеджер СЗоВ и оператор «Удаленного КЦ»,
+    заведённый под тем же именем. Имя из Chat2Desk совпадает с обеими, резолвер берёт
+    совпадение только единственное — и чаты, время ответа, статусы и часы чатника молча
+    переставали писаться (октябрь 2026, двое чат-менеджеров). В Chat2Desk работают
+    чат-менеджеры, поэтому из таких кандидатов берём чат-менеджера. Два чат-менеджера
+    или ни одного — неоднозначность остаётся, как и была."""
+    if len(infos or []) < 2:
+        return infos
+    chat_managers = [info for info in infos if _operator_info_is_chat_manager(info)]
+    return chat_managers if len(chat_managers) == 1 else infos
+
+
 def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_to_ids=None,
-                                         exclude_fired=False):
+                                         exclude_fired=False, prefer_chat_managers=False):
     """Строит lookup «имя -> оператор(ы)» для матчинга строк импорта/синка.
 
     exclude_fired — выбросить уволенных. Нужен ТОЛЬКО там, где сопоставляются
@@ -37179,7 +37194,12 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_t
     Синк Oktell передаёт сюда набор операторов, у которых в периоде есть хотя бы
     один день с операторской моделью (включая тех, кто сейчас числится
     чат-менеджером, но был оператором до перехода), а дни фильтруются отдельно по
-    модели на каждый день (см. _oktell_operator_model_gate)."""
+    модели на каждый день (см. _oktell_operator_model_gate).
+
+    prefer_chat_managers — для источников Chat2Desk: имя, совпавшее с несколькими
+    учётками, достаётся единственному среди них чат-менеджеру
+    (_operator_infos_prefer_chat_manager). Телефонии этот выбор не нужен: там
+    чат-менеджеров исключают или отсекают по модели на день."""
     restrict = None
     if restrict_to_ids is not None:
         restrict = {int(v) for v in restrict_to_ids if v is not None}
@@ -37209,6 +37229,8 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_t
             lookup.setdefault(key, [])
             if not any(int(item.get('id')) == operator_id for item in lookup[key]):
                 lookup[key].append(operator_info)
+    if prefer_chat_managers:
+        lookup = {key: _operator_infos_prefer_chat_manager(infos) for key, infos in lookup.items()}
     return lookup
 
 
@@ -38183,7 +38205,10 @@ def _chat_report_name_tokens(value):
 
 
 def _chat_report_build_operator_token_index():
-    """[{id, name, tokens}] для фуззи-сопоставления (в т.ч. сокращённых имён Name/Requests)."""
+    """[{id, name, tokens, …}] для фуззи-сопоставления (в т.ч. сокращённых имён Name/Requests).
+
+    Направление и модель едут рядом, чтобы из двух учёток одного человека выбрать
+    чат-менеджера (_operator_infos_prefer_chat_manager)."""
     index = []
     for row in (db.get_all_operators() or []):
         try:
@@ -38193,7 +38218,13 @@ def _chat_report_build_operator_token_index():
         name = str(row[1] or '').strip()
         toks = _chat_report_name_tokens(name)
         if toks:
-            index.append({'id': op_id, 'name': name, 'tokens': toks})
+            index.append({
+                'id': op_id,
+                'name': name,
+                'tokens': toks,
+                'direction_name': str(row[7] or '').strip() if len(row) > 7 else '',
+                'calculation_model_code': str(row[8] or '').strip().lower() if len(row) > 8 else '',
+            })
     return index
 
 
@@ -38224,7 +38255,8 @@ def _chat_report_tokens_match(report_tokens, op_tokens):
 
 def _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index):
     """(operator_id, name) или (None, None). Сначала точный lookup (ловит перестановки ФИО),
-    затем фуззи по токенам с префиксами (сокращения). Требует РОВНО одного кандидата."""
+    затем фуззи по токенам с префиксами (сокращения). Требует РОВНО одного кандидата;
+    из учёток с одним именем фуззи, как и lookup Chat2Desk, берёт чат-менеджера."""
     name = str(raw_name or '').strip()
     if not name:
         return None, None
@@ -38237,7 +38269,8 @@ def _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_inde
     report_tokens = _chat_report_name_tokens(name)
     if not report_tokens:
         return None, None
-    hits = [op for op in operator_token_index if _chat_report_tokens_match(report_tokens, op['tokens'])]
+    hits = _operator_infos_prefer_chat_manager(
+        [op for op in operator_token_index if _chat_report_tokens_match(report_tokens, op['tokens'])])
     uniq_ids = {op['id'] for op in hits}
     if len(uniq_ids) == 1:
         return int(hits[0]['id']), hits[0]['name']
@@ -39547,7 +39580,7 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
     started = time.time()
     day_results = []
     try:
-        operator_lookup = _status_import_build_operator_lookup()
+        operator_lookup = _status_import_build_operator_lookup(prefer_chat_managers=True)
         operator_token_index = _chat_report_build_operator_token_index()
         target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
 
@@ -39654,7 +39687,7 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
     started = time.time()
     day_results = []
     try:
-        operator_lookup = _status_import_build_operator_lookup()
+        operator_lookup = _status_import_build_operator_lookup(prefer_chat_managers=True)
         target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
 
         for day_obj in target_days:
@@ -57470,7 +57503,7 @@ def import_chat_manager_metrics_csv():
                 "error": f"Файл слишком большой. Лимит: {STATUS_IMPORT_MAX_FILE_SIZE_MB} MB"
             }), 413
 
-        operator_lookup = _status_import_build_operator_lookup()
+        operator_lookup = _status_import_build_operator_lookup(prefer_chat_managers=True)
         operator_token_index = _chat_report_build_operator_token_index()
 
         # 1) Распознаём тип отчёта по колонкам (оценка / whatsapp-чаты / Name-Requests / время ответа).

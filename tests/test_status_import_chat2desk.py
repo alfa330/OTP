@@ -39,6 +39,7 @@ def _status_import_namespace():
         "_status_import_resolve_display_state",
         "_status_import_secure_filename_and_ext",
         "_operator_info_is_chat_manager",
+        "_operator_infos_prefer_chat_manager",
         "_status_import_build_operator_lookup",
         "_status_import_build_status_events",
         "_status_import_split_segment_by_day",
@@ -135,6 +136,70 @@ class StatusImportChat2DeskTests(unittest.TestCase):
         self.assertNotIn(normalize("Chat By Name"), telephony_lookup)
         self.assertIn(normalize("Chat By Model"), all_lookup)
         self.assertIn(normalize("Chat By Name"), all_lookup)
+
+    def test_chat2desk_lookup_gives_namesake_to_chat_manager(self):
+        # Чат-менеджер СЗоВ и его же учётка «Удаленного КЦ» под тем же именем: без
+        # выбора имя из Chat2Desk неоднозначно, и статусы (а с ними часы) не пишутся.
+        build_lookup = self.ns["_status_import_build_operator_lookup"]
+        build = self.ns["_chat2desk_build_status_import_from_operator_events"]
+        resolve = self.ns["_status_import_resolve_operator_matches"]
+
+        class FakeDb:
+            @staticmethod
+            def get_all_operators():
+                return [
+                    (7, "Тестіслам Асан Тестбекұлы", 69, None, None, None, None,
+                     "Чат менеджер", "chat_manager", "working"),
+                    (8, "Тестислам АСан", 95, None, None, None, None,
+                     "Удаленный оператор", "operator", "working"),
+                ]
+
+        previous_db = self.ns.get("db")
+        self.ns["db"] = FakeDb()
+        try:
+            plain_lookup = build_lookup()
+            chat2desk_lookup = build_lookup(prefer_chat_managers=True)
+            telephony_lookup = build_lookup(exclude_chat_managers=True)
+        finally:
+            self.ns["db"] = previous_db
+
+        rows = [
+            {"operator_name": "Асан Тестислам", "event": "online", "created_at": "2026-10-21 13:00:00"},
+            {"operator_name": "Асан Тестислам", "event": "break", "created_at": "2026-10-21 15:00:00"},
+        ]
+        before = build("2026-10-21", rows, plain_lookup, preview_limit=10)
+        after = build("2026-10-21", rows, chat2desk_lookup, preview_limit=10)
+
+        self.assertEqual(before["matched_events"], 0)
+        self.assertEqual(before["invalid_rows_count"], 2)
+        self.assertEqual(after["matched_events"], 2)
+        self.assertEqual(after["invalid_rows_count"], 0)
+        self.assertEqual({event["operator_id"] for event in after["events"]}, {7})
+        # Телефонии учётка удалённого КЦ остаётся своей.
+        self.assertEqual([info["id"] for info in resolve("Асан Тестислам", telephony_lookup)], [8])
+
+    def test_chat2desk_lookup_keeps_two_chat_managers_ambiguous(self):
+        build_lookup = self.ns["_status_import_build_operator_lookup"]
+        resolve = self.ns["_status_import_resolve_operator_matches"]
+
+        class FakeDb:
+            @staticmethod
+            def get_all_operators():
+                return [
+                    (7, "Тестбаев Асан", 69, None, None, None, None, "Чат менеджер", "chat_manager", "working"),
+                    (9, "Тестбаев Асан", 76, None, None, None, None, "ТП чат", "chat_manager", "fired"),
+                    (10, "Тестова Айгуль", 95, None, None, None, None, "Удаленный оператор", "operator", "working"),
+                ]
+
+        previous_db = self.ns.get("db")
+        self.ns["db"] = FakeDb()
+        try:
+            chat2desk_lookup = build_lookup(prefer_chat_managers=True)
+        finally:
+            self.ns["db"] = previous_db
+
+        self.assertEqual(sorted(info["id"] for info in resolve("Асан Тестбаев", chat2desk_lookup)), [7, 9])
+        self.assertEqual([info["id"] for info in resolve("Айгуль Тестова", chat2desk_lookup)], [10])
 
     def test_operator_name_normalization_collapses_trailing_soft_sign(self):
         normalize_name = self.ns["_status_import_normalize_operator_name"]
