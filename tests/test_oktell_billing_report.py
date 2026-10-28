@@ -1387,6 +1387,33 @@ class HourlyShiftGroupingRangeTests(unittest.TestCase):
         broken = self._db(lots, segments).get_hourly_shift_grouping("не дата")
         self.assertEqual(broken, [{"hour": hour, "planned": 0, "fact": 0} for hour in range(24)])
 
+    def test_no_phone_status_is_not_on_shift(self):
+        """Задача #380: «Без телефона» (Oktell State 7) — вошёл в Oktell, но веб-телефон не
+        подключил. Звонков такой оператор не принимает, и в факт смены он не идёт."""
+        segments = {
+            # пришёл за час до смены и подключил телефон только в 9:00
+            1: {"2026-09-15": [
+                {"stateKey": "без телефона", "start": "2026-09-15T08:00:00", "end": "2026-09-15T09:00:00"},
+                {"stateKey": "готов", "start": "2026-09-15T09:00:00", "end": "2026-09-15T10:00:00"},
+            ]},
+            # не вышел из Oktell после смены
+            2: {"2026-09-15": [{"stateKey": "без телефона", "start": "2026-09-15T08:00:00",
+                                "end": "2026-09-15T10:00:00"}]},
+        }
+        day = {row["hour"]: row for row in self._db({}, segments, users=(1, 2))
+               .get_hourly_shift_grouping_range(date(2026, 9, 15), date(2026, 9, 15))["2026-09-15"]}
+        self.assertEqual((day[8]["fact"], day[9]["fact"]), (0, 1))
+
+    def test_section_copy_of_the_rule_matches(self):
+        """«Графики работы → Группировка по операторам» считает факт на клиенте своей копией
+        правила; разойдись копии — цифры в разделе и в «Биллинге Oktell» перестанут сходиться."""
+        app = (Path(__file__).resolve().parents[1] / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        block = re.search(r"PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS = new Set\(\[(.*?)\]\);",
+                          app, flags=re.DOTALL).group(1)
+        client = set(re.findall(r"'([^']*)'", re.sub(r"//[^\n]*", "", block)))
+        self.assertEqual(client, set(self.Database._HOURLY_NOT_ON_SHIFT_STATUS_KEYS))
+        self.assertIn("без телефона", client)
+
 
 if __name__ == "__main__":
     unittest.main()

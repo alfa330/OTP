@@ -15003,7 +15003,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // iCORE Phone: «Офлайн», куда телефон сам переводит ЯР/Поток после
             // простоя в «Исходе». Человек формально в программе, но не работает —
             // для плана/факта по часам он не на смене (_HOURLY_NOT_ON_SHIFT_STATUS_KEYS).
-            'офлайн'
+            'офлайн',
+            // Oktell State 7 «Без телефона»: вошёл в Oktell, но веб-телефон не подключил
+            // (до смены или не вышел после). Звонков не принимает — не на смене (задача #380).
+            'без телефона'
             ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
