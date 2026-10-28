@@ -16,6 +16,7 @@ Fleet подставляется FakeClient, который ведёт себя 
 import sys
 import threading
 import unittest
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -24,9 +25,11 @@ from openpyxl import Workbook, load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fleet_edm import access, engine, report  # noqa: E402
-from fleet_edm.client import (MAX_BATCH, THROTTLE_RECOVERY_AFTER,  # noqa: E402
+from fleet_edm import client as client_module  # noqa: E402
+from fleet_edm.client import (CARD_RECOVERY_AFTER, MAX_BATCH,  # noqa: E402
+                               THROTTLE_RECOVERY_AFTER, THROTTLE_WAIT_MAX,
                                FleetAccessDenied, FleetClient, FleetError,
-                               FleetSessionExpired)
+                               FleetSessionExpired, FleetThrottled, Pacer)
 from fleet_edm.routes import _safe_name  # noqa: E402
 
 PARK_A = 'a' * 32
@@ -48,13 +51,16 @@ class FakeClient:
     кто лежит в архиве. Считает запросы — на них опираются проверки экономии."""
 
     def __init__(self, drivers, parks=(PARK_A, PARK_B), hidden_from_list=(),
-                 missing_everywhere=(), concurrency=4):
+                 missing_everywhere=(), concurrency=4, provider_filter_broken=False):
         # drivers: {id: {'park': ..., 'provider': 'paperdo', 'archive': bool, ...}}
         self.drivers = drivers
         self._parks = list(parks)
         self.hidden_from_list = set(hidden_from_list)
         self.missing_everywhere = set(missing_everywhere)
         self.concurrency = concurrency
+        # Кабинет 28.10.2026: фильтр по провайдеру не находит почти никого, а
+        # список без фильтра и карточка отвечают как прежде.
+        self.provider_filter_broken = provider_filter_broken
         self.requests_count = 0
         self.list_calls = []
         self.card_calls = []
@@ -92,6 +98,8 @@ class FakeClient:
                 # У сотрудника парка провайдера нет вовсе — фильтр его не находит
                 # (проверено карточками на живом кабинете 24.08.2026).
                 if kind == 'park_employee' or driver.get('provider') != edm_provider:
+                    continue
+                if self.provider_filter_broken:
                     continue
             out.append({
                 'id': cid,
@@ -1220,6 +1228,265 @@ class ThrottleTest(unittest.TestCase):
         for _ in range(1000):
             client._note_success()
         self.assertEqual(client.concurrency, 6)
+
+
+class _FakeClock:
+    """Часы для client.py: sleep двигает стрелки, а не ждёт."""
+
+    def __init__(self, now=1000.0):
+        self.now = float(now)
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += max(0.0, float(seconds))
+
+
+class RefusalPatienceTest(unittest.TestCase):
+    """429 не тратит попыток: запрос ждёт и уходит снова, предел — по часам.
+
+    До 28.10.2026 у карточки было четыре попытки, и на выгрузке №52 четыре
+    попытки регулярно приходились на четыре отказа подряд — 913 из первых 2 300
+    строк уехали в «не проверено» при живом кабинете.
+    """
+
+    class _Response:
+        def __init__(self, status):
+            self.status_code = status
+            self.content = b'{}'
+            self.headers = {'content-type': 'application/json'}
+
+        def json(self):
+            if self.status_code == 429:
+                return {'code': 'no_access', 'message': 'No access'}
+            return {'driver': {'driver_profile': {'edm_provider': 'Sapar'}}}
+
+    class _Session:
+        def __init__(self, statuses):
+            self.statuses = list(statuses)
+            self.calls = 0
+            self.cookies = type('J', (), {'update': lambda self, value: None})()
+
+        def request(self, method, url, headers=None, data=None, timeout=None):
+            self.calls += 1
+            status = self.statuses.pop(0) if self.statuses else 200
+            return RefusalPatienceTest._Response(status)
+
+    def setUp(self):
+        self.clock = _FakeClock()
+        self._real_time = client_module.time
+        client_module.time = self.clock
+
+    def tearDown(self):
+        client_module.time = self._real_time
+
+    def test_refusals_do_not_consume_attempts(self):
+        session = self._Session([429] * 6 + [200])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        profile = client.driver_card(PARK_A, _driver_id(1))   # у карточки 4 попытки
+        self.assertEqual(profile['edm_provider'], 'Sapar')
+        self.assertEqual(session.calls, 7)
+
+    def test_endless_refusals_interrupt_the_walk_not_the_row(self):
+        session = self._Session([429] * 100000)
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        with self.assertRaises(FleetThrottled):
+            client.driver_card(PARK_A, _driver_id(1))
+        self.assertGreaterEqual(self.clock.now - 1000.0, THROTTLE_WAIT_MAX)
+        # Следующий запрос не ждёт свои пятнадцать минут — выходит на первом же
+        # отказе: кабинет закрылся для всех строк сразу.
+        before = session.calls
+        with self.assertRaises(FleetThrottled):
+            client.driver_card(PARK_A, _driver_id(2))
+        self.assertEqual(session.calls, before + 1)
+
+    def test_cards_keep_the_measured_pace(self):
+        session = self._Session([])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        client.driver_card(PARK_A, _driver_id(1))
+        started = self.clock.now
+        client.driver_card(PARK_A, _driver_id(2))
+        self.assertGreaterEqual(self.clock.now - started,
+                                client_module.CARD_INTERVAL_START - 1e-6)
+        # Список шага не знает — идёт без задержки.
+        started = self.clock.now
+        client.parks()
+        self.assertEqual(self.clock.now, started)
+
+
+class PacerTest(unittest.TestCase):
+    def setUp(self):
+        self.clock = _FakeClock()
+        self._real_time = client_module.time
+        client_module.time = self.clock
+
+    def tearDown(self):
+        client_module.time = self._real_time
+
+    def test_starts_are_spaced_by_the_interval(self):
+        pacer = Pacer(interval=2.0, floor=1.0, ceiling=4.0)
+        pacer.wait()
+        first = self.clock.now
+        pacer.wait()
+        self.assertAlmostEqual(self.clock.now - first, 2.0)
+
+    def test_refusal_slows_and_a_quiet_stretch_recovers_to_the_floor(self):
+        pacer = Pacer(interval=2.0, floor=2.0, ceiling=4.0)
+        pacer.slower()
+        self.assertAlmostEqual(pacer.interval, 2.6)
+        for _ in range(CARD_RECOVERY_AFTER - 1):
+            pacer.faster()
+        self.assertAlmostEqual(pacer.interval, 2.6)        # ещё рано
+        pacer.faster()
+        self.assertLess(pacer.interval, 2.6)
+        for _ in range(CARD_RECOVERY_AFTER * 20):
+            pacer.faster()
+        self.assertAlmostEqual(pacer.interval, 2.0)        # не ниже пола
+        for _ in range(50):
+            pacer.slower()
+        self.assertAlmostEqual(pacer.interval, 4.0)        # не выше потолка
+
+
+class CardPoolTest(unittest.TestCase):
+    """Две учётки — вдвое больше карточек в минуту; помощница на подхвате."""
+
+    def _drivers(self):
+        return {_driver_id(i): {'park': PARK_A, 'provider': '2KZSP'} for i in range(1, 5)}
+
+    def test_cards_are_shared_between_accounts(self):
+        drivers = self._drivers()
+        main, helper = FakeClient(drivers), FakeClient(drivers)
+        pool = engine.CardPool([main, helper])
+        for i in range(1, 5):
+            self.assertEqual(pool.driver_card(PARK_A, _driver_id(i))['edm_provider'], 'Sapar')
+        self.assertEqual(len(main.card_calls), 2)
+        self.assertEqual(len(helper.card_calls), 2)
+        self.assertEqual(pool.requests_count, 4)
+        self.assertEqual(pool.concurrency, 8)
+
+    def test_expired_helper_retires_and_main_answers(self):
+        drivers = self._drivers()
+
+        class Dead(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                self.card_calls.append((park_id, driver_id))
+                raise FleetSessionExpired('401')
+
+        main, helper = FakeClient(drivers), Dead(drivers)
+        pool = engine.CardPool([main, helper])
+        for i in range(1, 5):
+            self.assertIsNotNone(pool.driver_card(PARK_A, _driver_id(i)))
+        self.assertEqual(len(main.card_calls), 4)
+        self.assertEqual(len(helper.card_calls), 1)        # выбыла после первого отказа
+        self.assertEqual(pool.concurrency, 4)
+
+    def test_helper_without_access_to_the_park_defers_to_main(self):
+        drivers = self._drivers()
+
+        class NoAccess(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                self.card_calls.append((park_id, driver_id))
+                raise FleetAccessDenied('403')
+
+        main, helper = FakeClient(drivers), NoAccess(drivers)
+        pool = engine.CardPool([main, helper])
+        for i in range(1, 5):
+            self.assertIsNotNone(pool.driver_card(PARK_A, _driver_id(i)))
+        self.assertEqual(len(main.card_calls), 4)
+        self.assertEqual(len(helper.card_calls), 2)        # не выбыла, просто не её парк
+
+    def test_main_expiry_is_final(self):
+        drivers = self._drivers()
+
+        class Dead(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                raise FleetSessionExpired('401')
+
+        pool = engine.CardPool([Dead(drivers), FakeClient(drivers)])
+        with self.assertRaises(FleetSessionExpired):
+            for i in range(1, 5):
+                pool.driver_card(PARK_A, _driver_id(i))
+
+
+class PriorKnownTest(unittest.TestCase):
+    """Фильтр списка сломан (28.10.2026): настоящий провайдер из прежних выгрузок
+    заменяет карточку, «бумажный» — нет (см. engine.SOURCE_PRIOR)."""
+
+    class _Cache:
+        def __init__(self, known):
+            self.known = known
+            self.put_rows = []
+
+        def get(self, contractor_ids):
+            return {}
+
+        def get_known(self, contractor_ids):
+            wanted = set(contractor_ids)
+            return {cid: dict(item) for cid, item in self.known.items() if cid in wanted}
+
+        def put(self, rows):
+            self.put_rows.extend(rows)
+
+    def _setup(self):
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': '2KZSP' if i % 2 else 'paperdo'}
+                   for i in range(1, 25)}
+        known_at = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        sapar, paper = _driver_id(1), _driver_id(2)
+        cache = self._Cache({
+            sapar: {'provider_name': 'Sapar', 'park_id': PARK_A, 'checked_at': known_at},
+            paper: {'provider_name': 'Бумажный документооборот', 'park_id': PARK_A,
+                    'checked_at': known_at},
+        })
+        client = FakeClient(drivers, provider_filter_broken=True)
+        rows = _park_rows(drivers)
+        resolution = engine.resolve(rows, client, control_sample=0, card_cache=cache)
+        return rows, client, cache, resolution, sapar, paper
+
+    def test_known_real_provider_skips_the_card(self):
+        _rows, client, cache, resolution, sapar, paper = self._setup()
+        carded = {cid for _park, cid in client.card_calls}
+        self.assertNotIn(sapar, carded)
+        self.assertIn(paper, carded)                       # «бумажный» мог смениться
+        self.assertEqual(len(carded), 23)
+        entry = resolution['results'][sapar]
+        self.assertEqual(entry['provider_name'], 'Sapar')
+        self.assertEqual(entry['source'], engine.SOURCE_PRIOR)
+        self.assertIn('25.09.2026', entry['comment'])
+        self.assertTrue(entry['full_name'])                # ФИО сегодняшнее, из списка
+        self.assertEqual(resolution['stats']['from_prior'], 1)
+        self.assertEqual(resolution['results'][paper]['source'], 'карточка')
+
+    def test_card_answers_feed_the_cache(self):
+        _rows, _client, cache, _resolution, sapar, paper = self._setup()
+        cached = {cid for cid, _park, _name in cache.put_rows}
+        self.assertIn(paper, cached)
+        self.assertNotIn(sapar, cached)                    # его не спрашивали
+        self.assertEqual(len(cached), 23)
+
+    def test_file_says_where_the_value_came_from(self):
+        rows, _client, _cache, resolution, sapar, _paper = self._setup()
+        stream = report.build_workbook(rows, resolution, source_name='вход.xlsx')
+        workbook = load_workbook(stream)
+        context = '\n'.join(str(cell.value or '') for row in workbook['Контекст'].iter_rows()
+                            for cell in row)
+        self.assertIn('Взято из прежних выгрузок', context)
+        sheet = workbook['Водители']
+        headers = [cell.value for cell in sheet[1]]
+        id_column = headers.index('ID водителя')
+        source_column = headers.index('Источник')
+        sources = {row[id_column]: row[source_column] for row in sheet.iter_rows(min_row=2, values_only=True)}
+        self.assertEqual(sources[sapar], engine.SOURCE_PRIOR)
+
+    def test_without_prior_knowledge_everything_goes_to_cards(self):
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': '2KZSP'} for i in range(1, 25)}
+        client = FakeClient(drivers, provider_filter_broken=True)
+        resolution = engine.resolve(_park_rows(drivers), client, control_sample=0,
+                                    card_cache=self._Cache({}))
+        self.assertEqual(len(client.card_calls), 24)
+        self.assertNotIn('from_prior', resolution['stats'])
+        self.assertTrue(all(entry['provider_name'] == 'Sapar'
+                            for entry in resolution['results'].values()))
 
 
 class ClientPagingTest(unittest.TestCase):

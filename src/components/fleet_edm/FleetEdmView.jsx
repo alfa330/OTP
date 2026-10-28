@@ -629,6 +629,11 @@ function JobRow({ job, busy, menuOpen, deleteAsked, blocked, onMenu, onDownload,
                         </span>
                     )}
                     {stats.from_card > 0 && <span>дособрано вручную: {num(stats.from_card)}</span>}
+                    {stats.from_prior > 0 && (
+                        <span title="Настоящий провайдер по данным кабинета не старше 35 дней. С настоящего провайдера на «Бумажный» не переходят, поэтому карточку заново не спрашивали; дата — в комментарии строки файла.">
+                            из прежних выгрузок: {num(stats.from_prior)}
+                        </span>
+                    )}
                     {stats.no_access > 0 && (
                         <span title="У учётки кабинета нет прав на эти диспетчерские — провайдера не узнать. Нужно выдать учётке доступ или убрать эти строки из файла.">
                             нет доступа к диспетчерской: {num(stats.no_access)}

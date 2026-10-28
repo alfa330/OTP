@@ -72,7 +72,7 @@ from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .client import (MAX_FILTER_IDS, FleetAccessDenied, FleetClient, FleetError,
-                     FleetSessionExpired)
+                     FleetSessionExpired, FleetThrottled)
 
 # Ниже этого числа водителей в парке дешевле спросить карточки, чем ждать раундов
 # по провайдерам. Арифметика: карточка — ровно один запрос на человека, а парк,
@@ -125,6 +125,28 @@ SOURCE_UNVERIFIED = 'не проверено'
 # при этом по-прежнему не начинаем: «нет доступа» — не «не найден» (водитель там
 # может быть) и не «не проверено» (повтор позже ничего не даст — нужен доступ).
 SOURCE_NO_ACCESS = 'нет доступа'
+
+# ЯРЛЫК СТРОКИ, ВЗЯТОЙ ИЗ ПРЕЖНИХ ВЫГРУЗОК, И СРОК, В КОТОРЫЙ ЭТО ЧЕСТНО.
+#
+# 28.10.2026 фильтр списка по провайдеру сломался на стороне кабинета: в
+# диспетчерской Jana Taxi под Sapar он показывает 63 человека, под «Бумажным» —
+# 2, тогда как в августе там было больше тысячи ИП с провайдером; то же видно и
+# в интерфейсе кабинета, не только нашим обходом. Выгрузка №52 (38 743 строки)
+# нашла фильтром 219 строк, а 30 884 ушли в карточки — по одной, при лимите
+# ~22 карточки в минуту на учётку это сутки.
+#
+# Выход — не спрашивать заново то, что и так известно. Провайдер меняется
+# только в одну сторону: с «Бумажного» на настоящего (парки переходят НА ЭДО, а
+# не с него; за всю историю раздела обратных переходов не было ни одного). Значит
+# настоящий провайдер, записанный карточкой или списком не позже чем за
+# KNOWN_PROVIDER_DAYS дней, остаётся верным ответом и сегодня, и карточку по нему
+# можно не спрашивать. «Бумажный» — нельзя: он как раз и мог смениться, ради
+# него файл и заказывают. Срок — 35 дней: выгрузка по базе заказчицы бывает раз
+# в месяц (№41 от 25.09 покрывает 18 098 строк файла №52), а дольше держать
+# снимок уже странно. В отчёте такая строка получает свой ярлык и дату в
+# комментарии — читатель видит, что значение не сегодняшнее.
+SOURCE_PRIOR = 'прежняя выгрузка'
+KNOWN_PROVIDER_DAYS = 35
 
 # ПРОВАЙДЕРЫ, ЧЬЁ ЗНАЧЕНИЕ ОБЯЗАНО ПОДТВЕРЖДАТЬСЯ КАРТОЧКОЙ.
 #
@@ -466,10 +488,126 @@ class Stopper:
             raise Cancelled('Выгрузку остановили')
 
 
+class CardPool:
+    """Несколько учёток кабинета для карточек водителей.
+
+    Лимит на карточки — на учётку (28.10.2026: ~22 ответа в минуту; чужой парк
+    и чужой адрес не помогают, а вторая учётка отвечает 200, пока первая получает
+    429). Значит каждая учётка — свои 22 карточки в минуту, и пул из двух идёт
+    вдвое быстрее. Списку это не нужно: у него лимита не видели.
+
+    Первая учётка — основная: её отказ окончателен (протухшая сессия закрывает
+    выгрузку, 403 — ответ «нет доступа»). Помощницы — на подхвате: протухла или
+    закрылась по лимиту — выбывает до конца прогона, нет доступа к парку —
+    спрашиваем основную. Кого спросить первым, решает ближайший свободный слот
+    (card_slot_at), при равенстве — по кругу.
+    """
+
+    def __init__(self, clients):
+        self._clients = [client for client in clients if client is not None]
+        if not self._clients:
+            raise ValueError('CardPool: нужна хотя бы одна учётка')
+        self._main = self._clients[0]
+        self._dead = set()
+        self._turn = 0
+        self._lock = threading.Lock()
+
+    @property
+    def concurrency(self):
+        return sum(max(1, int(getattr(client, 'concurrency', 1) or 1))
+                   for client in self._alive())
+
+    @property
+    def requests_count(self):
+        return sum(int(getattr(client, 'requests_count', 0) or 0) for client in self._clients)
+
+    def _alive(self):
+        return [client for client in self._clients if id(client) not in self._dead]
+
+    def _order(self):
+        alive = self._alive()
+        with self._lock:
+            self._turn += 1
+            turn = self._turn
+
+        def key(pair):
+            index, client = pair
+            slot = getattr(client, 'card_slot_at', None)
+            at = float(slot()) if callable(slot) else 0.0
+            return (round(at, 3), (index - turn) % len(alive))
+
+        ordered = [client for _index, client in sorted(enumerate(alive), key=key)]
+        if not ordered or ordered[0] is self._main:
+            return [self._main]
+        return [client for client in ordered if client is not self._main] + [self._main]
+
+    def _retire(self, client, reason):
+        with self._lock:
+            self._dead.add(id(client))
+        logging.warning('Провайдер ЭДО: вторая учётка кабинета выбыла до конца прогона — %s',
+                        reason)
+
+    def driver_card(self, park_id, driver_id):
+        for client in self._order():
+            try:
+                return client.driver_card(park_id, driver_id)
+            except FleetSessionExpired as error:
+                if client is self._main:
+                    raise
+                self._retire(client, 'сессия протухла ({})'.format(str(error)[:80]))
+            except FleetThrottled as error:
+                if client is self._main:
+                    raise
+                self._retire(client, 'закрылась по лимиту ({})'.format(str(error)[:80]))
+            except FleetAccessDenied:
+                if client is self._main:
+                    raise
+                logging.info('Провайдер ЭДО: у второй учётки нет доступа к диспетчерской '
+                             '%s — спрашиваем основную', str(park_id)[:8])
+        raise FleetError('Карточку водителя {}… не ответила ни одна учётка'.format(
+            str(driver_id)[:8]))
+
+
+def _pace_note(started_at, done, total):
+    """«~22/мин, осталось ~3 ч 10 мин» — чтобы на экране было видно, что добор
+    живой и сколько его ещё. Первые десять строк темп не показывают: не из чего."""
+    elapsed = time.time() - started_at
+    if done < PROGRESS_EVERY or elapsed <= 0:
+        return ''
+    per_minute = done / elapsed * 60
+    if per_minute <= 0:
+        return ''
+    left = int(round((total - done) / per_minute))
+    hours, minutes = divmod(left, 60)
+    left_text = '{} ч {} мин'.format(hours, minutes) if hours else '{} мин'.format(minutes)
+    return ', ~{:.0f}/мин, осталось ~{}'.format(per_minute, left_text)
+
+
+def _entry_prior(contractor_id, park_id, provider_name, provider_id, info, known_at):
+    """Строка, чей провайдер взят из прежней выгрузки (см. SOURCE_PRIOR). ФИО,
+    телефон и статус — сегодняшние, из разбора остатка; дата в комментарии —
+    когда провайдер был записан."""
+    stamp = known_at.strftime('%d.%m.%Y') if hasattr(known_at, 'strftime') \
+        else str(known_at or '')[:10]
+    return {
+        'contractor_id': contractor_id,
+        'park_id': park_id,
+        'provider_id': provider_id,
+        'provider_name': provider_name,
+        'full_name': str(info.get('full_name') or '').strip(),
+        'phone': str(info.get('phone') or '').strip(),
+        'work_status': str(info.get('work_status') or '').strip(),
+        'employment_type': str(info.get('employment_type') or '').strip(),
+        'source': SOURCE_PRIOR,
+        'comment': ('Провайдер по данным кабинета от {}: с настоящего провайдера на '
+                    '«Бумажный» не переходят, карточку заново не спрашивали'.format(stamp)),
+    }
+
+
 def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_SAMPLE,
             max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None,
             checkpoint=None, resume=None, should_stop=None,
-            verify_providers=VERIFY_BY_CARD, card_cache=None):
+            verify_providers=VERIFY_BY_CARD, card_cache=None, helpers=()):
     """Главная функция: заполняет провайдера по строкам. Возвращает словарь с
     результатом по каждому уникальному ID и статистикой прогона.
 
@@ -477,12 +615,18 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     найденное отдаётся наружу по ходу дела, прерванная выгрузка приходит обратно
     с уже готовыми строками, а должна ли она вообще продолжаться — спрашивается
     у вызывающего.
+
+    helpers — другие учётки того же кабинета, только для карточек (CardPool).
+    card_cache — объект с get/put (подтверждения «бумажных», неделя) и, если
+    есть, get_known (всё известное за KNOWN_PROVIDER_DAYS, с датой).
     """
     progress = Progress(progress) if not isinstance(progress, Progress) else progress
     save = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint(checkpoint)
     stop = should_stop if isinstance(should_stop, Stopper) else Stopper(should_stop)
     rng = rng or random.Random(20260820)
     resume = resume or {}
+    # Карточки — через пул учёток; список по-прежнему ходит основной.
+    cards = CardPool([client] + list(helpers or ())) if helpers else client
     stages = dict(resume.get('stages') or {})
     done_rounds = set(stages.get('rounds') or ())
 
@@ -662,6 +806,9 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     # отвечает первоисточник, а не наш вывод из типа занятости.
     unknown = [(park_id, contractor_id) for park_id, contractor_id in round_leftovers
                if not kinds.get(contractor_id)]
+    # Что список рассказал про остаток (ФИО, телефон, статус, тип занятости) —
+    # пригодится строкам, чей провайдер возьмём из прежних выгрузок.
+    classified = {}
     if _needs_classification(unknown):
         progress(percent=89, requests=client.requests_count,
                  note='Разбираем остаток: {} строк'.format(len(unknown)))
@@ -708,8 +855,39 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     # Перебор карточками — только по открытым диспетчерским: закрытая ответит 403
     # каждой строке, и строка без парка из-за неё стала бы «не проверено».
     scan_parks = [park for park in parks if _park_key(park.get('id')) not in denied]
+
+    # ── шаг 4−: что уже известно из прежних выгрузок ─────────────────────────
+    # Зачем и почему это честно — см. SOURCE_PRIOR. Берём только настоящего
+    # провайдера (тот, что «подтверждается карточкой», мог смениться — его
+    # спрашиваем) и только строки, про которые список сегодня хоть что-то
+    # рассказал: ФИО и телефон в отчёте должны быть сегодняшними, а не пустыми.
+    if to_card and card_cache is not None and hasattr(card_cache, 'get_known'):
+        known = card_cache.get_known([contractor_id for _park, contractor_id in to_card]) or {}
+        untrusted = {provider['name'] for provider in providers
+                     if provider['id'] in tuple(verify_providers or ())}
+        by_name = {provider['name']: provider['id'] for provider in providers}
+        prior_rows = []
+        for park_id, contractor_id in to_card:
+            item = known.get(contractor_id) or {}
+            provider_name = str(item.get('provider_name') or '').strip()
+            info = classified.get(contractor_id)
+            if not provider_name or provider_name in untrusted or not info:
+                continue
+            entry = _entry_prior(contractor_id, park_id or item.get('park_id') or '',
+                                 provider_name, by_name.get(provider_name, ''), info,
+                                 item.get('checked_at'))
+            results[contractor_id] = entry
+            prior_rows.append((contractor_id, entry['park_id'], entry))
+        if prior_rows:
+            save(rows=prior_rows)
+            to_card = [(park_id, contractor_id) for park_id, contractor_id in to_card
+                       if contractor_id not in results]
+            progress(percent=90, requests=cards.requests_count,
+                     note='Из прежних выгрузок взято {} строк, в карточки идёт {}'
+                          .format(len(prior_rows), len(to_card)))
+
     if to_card:
-        progress(percent=90, requests=client.requests_count,
+        progress(percent=90, requests=cards.requests_count,
                  note='Добираем из карточек: {} строк'.format(len(to_card)))
         # Карточки не зависят друг от друга — значит идут в те же потоки.
         #
@@ -735,9 +913,9 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
                 # получила 403) — спрашивать её снова незачем.
                 return _entry_no_access(task[1], park_id)
             try:
-                return _card_lookup(client, task[1], park_id, scan_parks,
+                return _card_lookup(cards, task[1], park_id, scan_parks,
                                     allow_scan=allow_scan and not park_id)
-            except FleetSessionExpired:
+            except (FleetSessionExpired, FleetThrottled):
                 raise
             except FleetAccessDenied:
                 # Единственная диспетчерская строки отказала в правах — это ответ
@@ -765,14 +943,27 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
 
         # Шаг длинный и однообразный — отмечаемся в базе по ходу, иначе сторож
         # сочтёт живую выгрузку мёртвой (так и вышло 21.08.2026 на 1068 строках).
+        # Ответы карточек заодно идут в общий кеш: следующая выгрузка по тем же
+        # людям возьмёт настоящего провайдера оттуда (см. SOURCE_PRIOR), а
+        # «бумажного» подтвердит без запроса (CARD_CACHE_DAYS).
+        card_started = time.time()
+        fresh_cards = []
+
         def card_progress(entry, done, total):
             if entry:
                 save(rows=[(entry['contractor_id'], entry.get('park_id'), entry)])
+                if entry.get('source') == 'карточка':
+                    fresh_cards.append((entry['contractor_id'], entry.get('park_id'),
+                                        entry.get('provider_name') or ''))
             if done % PROGRESS_EVERY == 0 or done == total:
-                progress(percent=90, requests=client.requests_count,
-                         note='Добираем из карточек: {} из {}'.format(done, total))
+                if card_cache is not None and fresh_cards:
+                    card_cache.put(list(fresh_cards))
+                    del fresh_cards[:]
+                progress(percent=90, requests=cards.requests_count,
+                         note='Добираем из карточек: {} из {}{}'.format(
+                             done, total, _pace_note(card_started, done, total)))
 
-        for entry in _run_parallel(client, to_card, card_task,
+        for entry in _run_parallel(cards, to_card, card_task,
                                    stop=stop, on_result=card_progress):
             if not entry:
                 stats['not_found'] += 1
@@ -782,12 +973,14 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
                 # Не «не найден»: кабинет отказался отвечать, и в отчёте это
                 # отдельная строка, а не молчаливое приписывание к пропавшим.
                 stats['unverified'] += 1
+        if card_cache is not None and fresh_cards:
+            card_cache.put(list(fresh_cards))
 
     # ── шаг 4½: подтверждение «бумажных» карточками ──────────────────────────
     # Зачем это вообще есть — см. VERIFY_BY_CARD. Коротко: фильтр списка врёт про
     # часть людей, и врёт всегда в одну сторону.
     verify = _verify_by_card(
-        client, results, providers, verify_providers, progress,
+        cards, results, providers, verify_providers, progress,
         stop=stop, save=save, cache=card_cache)
     stats['verified'] = verify['checked']
     stats['verify_fixed'] = len(verify['fixed'])
@@ -797,7 +990,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     # и съедал каждую попытку целиком (см. комментарий у orphan_sample). Здесь он
     # безопасен: главная работа уже сделана и лежит в контрольной точке.
     if orphan_sample:
-        progress(percent=94, requests=client.requests_count,
+        progress(percent=94, requests=cards.requests_count,
                  note='Проверяем строки без диспетчерской: {}'.format(len(orphan_sample)))
         # Список перебора — заново, а не тот, что снят перед карточками: шаг 4 мог
         # закрыть ещё диспетчерские, и их 403 сделал бы строку «не проверено,
@@ -807,8 +1000,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         def orphan_task(task):
             stop()
             try:
-                return _card_lookup(client, task[1], '', orphan_parks, allow_scan=True)
-            except FleetSessionExpired:
+                return _card_lookup(cards, task[1], '', orphan_parks, allow_scan=True)
+            except (FleetSessionExpired, FleetThrottled):
                 raise
             except FleetError as error:
                 logging.warning('Провайдер ЭДО: «ничья» строка %s… не проверилась (%s)',
@@ -818,10 +1011,10 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         def orphan_progress(entry, done, total):
             if entry:
                 save(rows=[(entry['contractor_id'], entry.get('park_id'), entry)])
-            progress(percent=94, requests=client.requests_count,
+            progress(percent=94, requests=cards.requests_count,
                      note='Проверяем строки без диспетчерской: {} из {}'.format(done, total))
 
-        for entry in _run_parallel(client, orphan_sample, orphan_task,
+        for entry in _run_parallel(cards, orphan_sample, orphan_task,
                                    stop=stop, on_result=orphan_progress):
             if not entry:
                 stats['not_found'] += 1
@@ -845,15 +1038,15 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         sample += rng.sample(no_provider,
                              min(CONTROL_NO_PROVIDER_SAMPLE, len(no_provider)))
     if sample:
-        progress(percent=95, requests=client.requests_count,
+        progress(percent=95, requests=cards.requests_count,
                  note='Контрольная сверка {} строк по карточкам'.format(len(sample)))
 
         def check_card(contractor_id):
             stop()
             entry = results[contractor_id]
             try:
-                profile = client.driver_card(entry.get('park_id'), contractor_id)
-            except FleetSessionExpired:
+                profile = cards.driver_card(entry.get('park_id'), contractor_id)
+            except (FleetSessionExpired, FleetThrottled):
                 raise
             except FleetError:
                 return None
@@ -862,7 +1055,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
             return (contractor_id, entry.get('provider_name') or '',
                     FleetClient.card_provider(profile))
 
-        for outcome in _run_parallel(client, sample, check_card, stop=stop):
+        for outcome in _run_parallel(cards, sample, check_card, stop=stop):
             if not outcome:
                 continue
             contractor_id, listed, card_value = outcome
@@ -886,6 +1079,9 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
                              if entry.get('source') == 'карточка')
     stats['no_provider_by_kind'] = sum(1 for entry in results.values()
                                        if entry.get('source') == SOURCE_NO_PROVIDER)
+    from_prior = sum(1 for entry in results.values() if entry.get('source') == SOURCE_PRIOR)
+    if from_prior:
+        stats['from_prior'] = from_prior
     # «Не проверено» — тоже по результату: такие строки приезжают и из контрольной
     # точки, а счётчик по ходу дела видит только эту попытку, и после подхвата
     # отчёт молча терял оговорку «НЕ СМОГЛИ ПРОВЕРИТЬ».
@@ -916,7 +1112,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         'park_names': park_names,
         'parks_total': len(parks),
         'check': check,
-        'requests': client.requests_count,
+        'requests': cards.requests_count,
         'park_probe_requests': park_probe_requests,
         'classify_requests': classify_requests,
         'skipped_orphans': skipped_orphans,
@@ -1047,7 +1243,7 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
         entry = results[contractor_id]
         try:
             profile = client.driver_card(entry.get('park_id'), contractor_id)
-        except FleetSessionExpired:
+        except (FleetSessionExpired, FleetThrottled):
             raise
         except FleetError as error:
             logging.warning('Провайдер ЭДО: карточка %s… не ответила при '
@@ -1684,7 +1880,9 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
             continue
         try:
             profile = client.driver_card(candidate, contractor_id)
-        except FleetSessionExpired:
+        except (FleetSessionExpired, FleetThrottled):
+            # Кабинет закрылся для всех строк сразу — это не «эта диспетчерская
+            # молчит», обход прерывается целиком и продолжит позже.
             raise
         except FleetAccessDenied as error:
             # Отказ в правах — тоже не «здесь такого нет», но и не молчание:

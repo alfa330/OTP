@@ -267,6 +267,14 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
     if stats.get('from_card'):
         lines.append(('Добрано из карточек', '{} строк — список кабинета их не отдал'
                                              .format(stats['from_card'])))
+    if stats.get('from_prior'):
+        from .engine import KNOWN_PROVIDER_DAYS
+        lines.append(('Взято из прежних выгрузок',
+                      '{} строк: настоящий провайдер по данным кабинета не старше {} '
+                      'дней. С настоящего провайдера на «Бумажный» не переходят, '
+                      'поэтому карточку заново не спрашивали; дата записи — в колонке '
+                      '«Комментарий». ФИО, телефон и статус у этих строк — сегодняшние'
+                      .format(stats['from_prior'], KNOWN_PROVIDER_DAYS)))
     if resolution.get('park_probe_requests'):
         lines.append(('В файле не было ID парка',
                       'Поиск по паркам стоил {} запросов из {}'.format(

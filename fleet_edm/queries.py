@@ -468,6 +468,30 @@ def load_checkpoint(cursor, job_id):
 
 # ── Подтверждённые карточкой провайдеры (общие для всех выгрузок) ────────────
 
+def load_known_providers(cursor, contractor_ids, max_age_days):
+    """Что про этих людей известно за последние max_age_days — с датой и парком.
+
+    В отличие от load_card_providers, отдаёт и дату: вызывающий сам решает, чему
+    из этого верить (настоящему провайдеру — да, «бумажному» — нет; срок и
+    правило — engine.KNOWN_PROVIDER_DAYS), а дата уходит в комментарий строки
+    отчёта. Возвращает {contractor_id: {'provider_name', 'park_id', 'checked_at'}}.
+    """
+    ids = [str(cid) for cid in (contractor_ids or []) if cid]
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT contractor_id, provider_name, park_id, checked_at
+          FROM fleet_edm_card_providers
+         WHERE contractor_id = ANY(%s)
+           AND checked_at > NOW() - (%s || ' days')::INTERVAL
+        """,
+        (ids, str(int(max_age_days))),
+    )
+    return {row[0]: {'provider_name': row[1], 'park_id': row[2], 'checked_at': row[3]}
+            for row in cursor.fetchall()}
+
+
 def load_card_providers(cursor, contractor_ids, max_age_days=CARD_CACHE_DAYS):
     """Что карточка говорила про этих людей и не протухло ли это.
 
@@ -609,6 +633,33 @@ def session_status(cursor):
     row.pop('cookies', None)
     row['configured'] = True
     return row
+
+
+def load_helper_sessions(cursor):
+    """Куки ДРУГИХ учёток того же кабинета — только для карточек водителей.
+
+    Лимит на карточки у кабинета — на учётку (измерено 28.10.2026: ~22 ответа в
+    минуту, чужой парк и чужой адрес не помогают, а вторая учётка отвечает 200,
+    пока первая получает 429). Значит вторая учётка — это вторые 22 карточки в
+    минуту. Сейчас такая одна: учётка раздела «Рассылки» (driver_mailing_session,
+    те же 89 диспетчерских). Берём её строку как есть; если таблицы нет или она
+    пуста — обходимся одной учёткой, это не ошибка.
+    """
+    cursor.execute("SELECT to_regclass('driver_mailing_session')")
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return []
+    cursor.execute(
+        "SELECT cookies, user_agent, account FROM driver_mailing_session WHERE id = 1"
+    )
+    row = _row_to_dict(cursor, cursor.fetchone())
+    if not row:
+        return []
+    try:
+        row['cookies'] = json.loads(row['cookies'] or '[]')
+    except (TypeError, ValueError):
+        return []
+    return [row] if row['cookies'] else []
 
 
 def mark_session_ok(cursor):

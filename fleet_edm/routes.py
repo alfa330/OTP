@@ -275,6 +275,17 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 logging.exception('Провайдер ЭДО: не смог прочитать кеш карточек')
                 return {}
 
+        def get_known(self, contractor_ids):
+            """Всё известное за KNOWN_PROVIDER_DAYS, с датой — чему из этого
+            верить, решает обход (см. engine.SOURCE_PRIOR)."""
+            try:
+                with db._get_cursor() as cursor:
+                    return queries.load_known_providers(
+                        cursor, contractor_ids, max_age_days=engine.KNOWN_PROVIDER_DAYS)
+            except Exception:
+                logging.exception('Провайдер ЭДО: не смог прочитать прежние ответы')
+                return {}
+
         def put(self, rows):
             try:
                 with db._get_cursor() as cursor:
@@ -318,22 +329,42 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                        .format(ready, meta['rows_total']) if ready
                        else 'Файл разобран: {} строк'.format(meta['rows_total'])))
 
+            # Вторая учётка кабинета — только для карточек: у каждой учётки свой
+            # лимит (см. queries.load_helper_sessions). Не прочитали — идём одной.
+            helper_sessions = []
+            try:
+                with db._get_cursor() as cursor:
+                    helper_sessions = queries.load_helper_sessions(cursor)
+            except Exception:
+                logging.exception('Провайдер ЭДО: вторую учётку кабинета не прочитали — '
+                                  'карточки пойдут одной')
+
             life.start()
             client = FleetClient(session['cookies'], session.get('user_agent'))
+            helpers = [FleetClient(extra['cookies'], extra.get('user_agent'))
+                       for extra in helper_sessions]
+            clients = [client] + helpers
+            if helpers:
+                logging.info('Провайдер ЭДО: задание %s — карточки спрашиваем %s учётками (%s)',
+                             job_id, len(clients),
+                             ', '.join(str(extra.get('account') or '?')
+                                       for extra in helper_sessions))
             resolution = engine.resolve(
                 rows, client, progress=emit,
                 checkpoint=make_checkpoint(
                     job_id,
-                    requests_done=lambda: requests_before + client.requests_count),
+                    requests_done=lambda: requests_before + sum(
+                        each.requests_count for each in clients)),
                 resume=state,
                 # Секунда, а не пять: обход спрашивает «нас ещё ждут?» у флажка в
                 # памяти, а не у базы, — дорогого здесь ничего нет, зато кнопка
                 # «Остановить» перестаёт стоить лишних запросов в чужой кабинет.
                 should_stop=engine.Stopper(life.should_stop, interval=1.0),
                 card_cache=CardCache(),
+                helpers=helpers,
             )
-            requests_count = requests_before + (resolution.get('requests')
-                                                or client.requests_count)
+            requests_count = requests_before + (
+                resolution.get('requests') or sum(each.requests_count for each in clients))
 
             emit(percent=98, note='Собираем файл', requests=requests_count)
             stream = report.build_workbook(
@@ -353,6 +384,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 'providers': resolution.get('provider_counts') or {},
                 'check': resolution.get('check') or {},
                 'from_card': resolution_stats.get('from_card', 0),
+                'from_prior': resolution_stats.get('from_prior', 0),
                 'not_found': resolution_stats.get('not_found', 0),
                 'no_provider_by_kind': resolution_stats.get('no_provider_by_kind', 0),
                 'unverified': resolution_stats.get('unverified', 0),

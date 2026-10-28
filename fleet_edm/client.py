@@ -85,6 +85,33 @@ DEFAULT_CONCURRENCY = 4
 # этого не страдает: изменилась только скорость возвращения, а не агрессивность.
 THROTTLE_RECOVERY_AFTER = 40
 
+# СКОЛЬКО ЖДЁМ, ПОКА КАБИНЕТ ОТКАЗЫВАЕТ. 429 — это «подожди», а не «запрос не
+# удался», и считать его попыткой нельзя. До 28.10.2026 считали: карточка имела
+# четыре попытки, и на выгрузке №52 (38 743 строки) четыре попытки регулярно
+# приходились на четыре отказа подряд — 913 из первых 2 300 строк уехали в «не
+# проверено» при живом кабинете и верной сессии. Теперь отказы не тратят попыток:
+# запрос ждёт столько, сколько просят, и уходит снова. Предел по часам всё же
+# есть — пятнадцать минут сплошных отказов означают, что кабинет закрылся, и
+# тогда обход прерывается целиком (FleetThrottled), а не хоронит строки по одной:
+# контрольная точка на месте, подхват продолжит позже.
+THROTTLE_WAIT_MAX = 900.0
+
+# РОВНЫЙ ТЕМП ДЛЯ КАРТОЧЕК. Лимит на cards/driver/details измерен лестницей
+# 28.10.2026 (учётка целиком, не парк и не адрес): интервал 3,0 с — 30 из 30
+# ответов, 2,0 с — 7 отказов из 30, 1,0 с — 13 из 30, 0,7 с — 21 из 30. То есть
+# кабинет пропускает ~22 карточки в минуту, сколько ни шли, а всё сверх этого
+# возвращается отказами и паузами. Залпы в несколько потоков с откатом давали на
+# проде те же ~20 ответов в минуту, но 77 % запросов отказами и строки «не
+# проверено». Поэтому карточки идут через общий для всех потоков шаг: между
+# стартами запросов не меньше interval. Шаг плавает: на отказ — длиннее, после
+# череды чистых ответов — короче, но не ниже измеренного пола.
+CARD_INTERVAL_START = 2.8
+CARD_INTERVAL_MIN = 2.6
+CARD_INTERVAL_MAX = 8.0
+CARD_INTERVAL_SLOWER = 1.3
+CARD_INTERVAL_FASTER = 0.92
+CARD_RECOVERY_AFTER = 20
+
 DEFAULT_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
@@ -99,6 +126,59 @@ class FleetSessionExpired(FleetError):
     """Куки протухли — нужен новый логин человеком. Отдельный класс, потому что
     это единственная ошибка, которую чинит не разработчик, а живой человек в
     браузере, и интерфейс обязан сказать об этом прямым текстом."""
+
+
+class FleetThrottled(FleetError):
+    """Кабинет отказывал (429) дольше THROTTLE_WAIT_MAX подряд.
+
+    Отдельный класс, потому что реакция другая: обычный FleetError по одной
+    строке означает «эту строку не проверили», а здесь кабинет закрылся для всех
+    строк сразу — обход обязан прерваться целиком и продолжить позже с
+    контрольной точки, а не хоронить строки по одной как «не проверено».
+    """
+
+
+class Pacer:
+    """Ровный темп для одной ручки: между СТАРТАМИ запросов не меньше interval,
+    из какого бы потока запрос ни шёл.
+
+    Слоты раздаются под замком, а ждёт каждый поток сам — так очередь не держит
+    замок на время сна. См. CARD_INTERVAL_* в шапке модуля.
+    """
+
+    def __init__(self, interval=CARD_INTERVAL_START, floor=CARD_INTERVAL_MIN,
+                 ceiling=CARD_INTERVAL_MAX):
+        self.interval = float(interval)
+        self._floor = float(floor)
+        self._ceiling = float(ceiling)
+        self._next_at = 0.0
+        self._clean = 0
+        self._lock = threading.Lock()
+
+    def next_at(self):
+        """Когда освободится ближайший слот — по нему CardPool выбирает учётку."""
+        with self._lock:
+            return max(self._next_at, time.time())
+
+    def wait(self):
+        with self._lock:
+            slot = max(time.time(), self._next_at)
+            self._next_at = slot + self.interval
+        delay = slot - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+    def slower(self):
+        with self._lock:
+            self.interval = min(self._ceiling, self.interval * CARD_INTERVAL_SLOWER)
+            self._clean = 0
+
+    def faster(self):
+        with self._lock:
+            self._clean += 1
+            if self._clean >= CARD_RECOVERY_AFTER and self.interval > self._floor:
+                self.interval = max(self._floor, self.interval * CARD_INTERVAL_FASTER)
+                self._clean = 0
 
 
 class FleetAccessDenied(FleetError):
@@ -158,6 +238,19 @@ class FleetClient:
         # поэтому и притормаживают все разом.
         self._pause_until = 0.0
         self._backoff = 0.0
+        # Шаг для карточек (см. CARD_INTERVAL_*). Списку он не нужен: у списка
+        # лимита не видели и на 400 запросах в минуту.
+        self._pacers = {PATH_CARD: Pacer()}
+        # Кабинет закрылся дольше THROTTLE_WAIT_MAX — остальные потоки не ждут
+        # свои пятнадцать минут каждый, а выходят на первом же отказе.
+        self._gave_up = False
+
+    def card_slot_at(self):
+        """Когда этот клиент сможет отправить следующую карточку (с учётом
+        общей паузы). По этому времени CardPool выбирает, кого спросить."""
+        with self._lock:
+            paused_until = self._pause_until
+        return max(self._pacers[PATH_CARD].next_at(), paused_until)
 
     # ── низкий уровень ───────────────────────────────────────────────────────
 
@@ -273,8 +366,15 @@ class FleetClient:
         """
         url = BASE + path
         last_error = None
-        for attempt in range(1, attempts + 1):
+        pacer = self._pacers.get(path)
+        # Попытки тратят только сеть и 5xx. Отказ 429 — это «подожди», у него
+        # свой счёт: по часам, не по разам (см. THROTTLE_WAIT_MAX).
+        attempt = 0
+        throttled_since = None
+        while attempt < attempts:
             self._wait_if_paused()
+            if pacer is not None:
+                pacer.wait()
             try:
                 headers = self._headers(park_id, json_body=body is not None)
                 if extra_headers:
@@ -293,6 +393,7 @@ class FleetClient:
             except requests.RequestException as error:
                 # Сеть моргнула — ждём с нарастанием. В логе только тип ошибки:
                 # тело запроса содержит ID водителей, ему в логах не место.
+                attempt += 1
                 last_error = error
                 logging.warning('%s: сеть недоступна (%s), попытка %s',
                                 self.LOG_LABEL, type(error).__name__, attempt)
@@ -301,6 +402,17 @@ class FleetClient:
 
             if response.status_code == 429:
                 backoff = self._note_throttled()
+                if pacer is not None:
+                    pacer.slower()
+                now = time.time()
+                if throttled_since is None:
+                    throttled_since = now
+                if self._gave_up or now - throttled_since >= THROTTLE_WAIT_MAX:
+                    with self._lock:
+                        self._gave_up = True
+                    raise FleetThrottled(
+                        'Кабинет отказывает (429) уже {:.0f} мин подряд — продолжим '
+                        'позже'.format(max(now - throttled_since, 0) / 60))
                 logging.warning('%s: кабинет просит помедленнее, пауза %.1f с',
                                 self.LOG_LABEL, backoff)
                 last_error = FleetError('429 Too Many Requests')
@@ -312,8 +424,11 @@ class FleetClient:
                 )
 
             self._note_success()
+            if pacer is not None:
+                pacer.faster()
 
             if response.status_code >= 500:
+                attempt += 1
                 last_error = FleetError('HTTP {}'.format(response.status_code))
                 time.sleep(min(self._max_delay, 2.0 * attempt))
                 continue
