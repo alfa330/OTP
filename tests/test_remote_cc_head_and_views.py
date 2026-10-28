@@ -1079,10 +1079,14 @@ class RemoteCcViewsMirrorTests(unittest.TestCase):
         self.assertEqual(front, {code: {role: tuple(views) for role, views in by_role.items()}
                                  for code, by_role in server.items()})
         # Ровно то, что назвал владелец: профиль, мои смены и вики. Стажёру — без
-        # вики: её запирает QR, а стажёру QR не выдают.
+        # вики: её запирает QR, а стажёру QR не выдают. Аренде авто (#391) —
+        # профиль: её раздел открывает свой флаг rental_access.
         self.assertEqual(front, {'remote_cc': {
             'operator': ('profile', 'work_schedules', 'wiki'),
             'trainee': ('profile', 'work_schedules'),
+        }, 'car_rental': {
+            'operator': ('profile',),
+            'trainee': ('profile',),
         }})
 
     def test_profile_is_the_default_section(self):

@@ -140,6 +140,13 @@ const MARKETING_EMPLOYEE_VIEWS = [
 // выданы поимённо — DEPARTMENT_PERSONAL_EXTRA_VIEWS ниже, а не здесь.
 const REQUEST_PROCESSING_EMPLOYEE_VIEWS = ['driver_mailings'];
 
+// Аренда авто (код car_rental, ТЗ #391): отдел устроен как бэк-офис — ни линии,
+// ни направлений, ни групп. Рабочий раздел у всех один — «Аренда авто», и он
+// выдаётся своим флагом (rental_access из rental/access.py), а не картой.
+// Рядовым портал показывает только «Профиль» — DEPARTMENT_ONLY_VIEWS ниже.
+// Главе — «Учет сотрудников» (заводит своих людей) и «Задачи».
+const CAR_RENTAL_HEAD_VIEWS = ['manage_operators', 'tasks'];
+
 /* Разделы СВЕРХ карты отдела — поимённо. Решение владельца 23.10.2026 про двух
    сотрудниц ООЗ: «открой доступ к разделам рассылки и к их графикам», «Мои
    смены» — только им двоим. Остальным сотрудникам ООЗ карта по-прежнему
@@ -239,6 +246,11 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         operator: REQUEST_PROCESSING_EMPLOYEE_VIEWS,
         trainee: REQUEST_PROCESSING_EMPLOYEE_VIEWS,
     },
+    // Аренда авто: здесь только глава — рядовых ограничивает набор отдела
+    // (DEPARTMENT_ONLY_VIEWS). Супервайзеров и тренеров в отделе нет.
+    car_rental: {
+        head: CAR_RENTAL_HEAD_VIEWS,
+    },
 };
 
 export const departmentCodeOf = (user) => {
@@ -312,6 +324,11 @@ const DEPARTMENT_ONLY_VIEWS = {
     remote_cc: {
         operator: ['profile', 'work_schedules', 'wiki'],
         trainee: ['profile', 'work_schedules'],
+    },
+    // Аренда авто (#391): «Профиль», а «Аренду авто» показывает её собственный флаг.
+    car_rental: {
+        operator: ['profile'],
+        trainee: ['profile'],
     },
 };
 
@@ -401,7 +418,7 @@ export const departmentHidesColleagueSchedules = (user) => {
 // называются «Сотрудники», а не «Операторы». Бэк-офис здесь по той же причине,
 // что и фронт-офисы: ни супервайзеров, ни тренеров в этих отделах нет, и оба
 // пункта выпадашки открывали бы заведомо пустые списки.
-const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr']);
+const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'car_rental']);
 
 export const departmentUsesSimpleEmployeeAccounting = (user) => {
     const code = departmentCodeOf(user);
@@ -465,9 +482,9 @@ export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCi
 // OPERATOR_FIELDS_HIDDEN_DEPARTMENTS — те же коды с другой стороны).
 // ООЗ — по просьбе владельца 25.09.2026: там у сотрудника есть группа, но
 // направлений нет, и должность («менеджер отдела обработки запросов»)
-// указывают при заведении.
+// указывают при заведении. Аренда авто (#391) — по той же причине, что бэк-офис.
 // В базе колонка называется job_title: position — ключевое слово Postgres.
-const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'request_processing_department']);
+const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);
 
 export const departmentCodeUsesEmployeeJobTitle = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -481,7 +498,7 @@ export const departmentUsesEmployeeJobTitle = (user) => departmentCodeUsesEmploy
 // бухгалтерия, HR и ООЗ на линию не выходят вовсе — обучать их работе в офисе
 // продаж незачем (ООЗ — решение владельца 25.09.2026). Скрываем только ввод —
 // уже сохранённое значение сохраняется как есть.
-const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);
+const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);
 
 export const departmentCodeHidesFrontOfficeTraining = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -502,7 +519,7 @@ export const departmentHidesFrontOfficeTraining = (user) => departmentCodeHidesF
 //
 // Уже сохранённые значения (сотрудника перевели из отдела с линией) остаются
 // как есть: поле не показываем, но и не затираем.
-const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);
+const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);
 
 export const departmentCodeHidesOperatorFields = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -526,7 +543,7 @@ export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperat
 // departmentCodeHidesOperatorFields), чтобы предикат отвечал верно сам по
 // себе: «есть ли в отделе супервайзеры» — вопрос об отделе, а не о том,
 // в каком порядке сложились гейты в карточке.
-const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing']);
+const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental']);
 
 export const departmentCodeHidesEmployeeSupervisor = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -541,7 +558,7 @@ export const departmentHidesEmployeeSupervisor = (user) => departmentCodeHidesEm
 // (задача #159). Список тот же, что у супервайзеров, но набор ОТДЕЛЬНЫЙ: это
 // два независимых свойства отдела, и телефонию фронт-офисам могут завести, не
 // заводя супервайзеров. ООЗ телефонии тоже не имеет (владелец, 25.09.2026).
-const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department']);
+const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);
 
 export const departmentCodeHidesEmployeeSip = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);

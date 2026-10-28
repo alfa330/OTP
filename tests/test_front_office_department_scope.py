@@ -98,7 +98,7 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         # ни супервайзеров, ни тренеров, см. test_back_office_department_scope.
         self.assertIn(
             "const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'car_rental']);", source
         )
         self.assertIn("export const departmentUsesSimpleEmployeeAccounting = (user) =>", source)
         self.assertIn("SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code)", source)
@@ -461,7 +461,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         # они на линию не выходят, см. test_back_office_department_scope.
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);", source
         )
         self.assertIn("export const departmentCodeHidesFrontOfficeTraining = (code) => {", source)
         self.assertIn(
@@ -572,12 +572,12 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         # НЕ сняты — иначе ушло бы и направление, которое у них есть.
         self.assertIn(
             "const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'marketing']);", views)
+            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental']);", views)
         self.assertIn(
             "const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department']);", views)
+            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);", views)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
             views)
 
         # Колонки: «Супервайзер» и «SIP» — своими гейтами, «Направление» и

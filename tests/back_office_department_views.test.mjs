@@ -192,7 +192,8 @@ test('бэк-офис не задел остальные отделы', () => {
     assert.deepEqual(
         Object.keys(DEPARTMENT_VIEW_ALLOWLIST),
         // ООЗ — задача #359, свой тест: tests/request_processing_department_views.test.mjs.
-        ['tez', 'op', 'front_office', 'accounting', 'hr', 'marketing', 'request_processing_department'],
+        // Аренда авто — #391, тоже свой: tests/car_rental_department_views.test.mjs.
+        ['tez', 'op', 'front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental'],
     );
     // Упрощённый учёт — у бэк-офиса и фронт-офисов; у ОП и ТЭЗ выпадашка
     // со «Супервайзерами» и «Тренерами» остаётся.

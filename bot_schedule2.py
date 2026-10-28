@@ -31411,8 +31411,10 @@ SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 # «Маркетинг» здесь по решению владельца (04.09.2026): его сотрудники на линии
 # не сидят, направлений и групп у отдела нет, а вместо них человека определяет
 # «Должность» — ровно как в Бухгалтерии и HR.
+# «Аренда авто» (car_rental, ТЗ #391) — тоже: её сотрудники ведут наличие машин и
+# визиты клиентов, на линии не сидят.
 # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})
+OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental'})
 
 # Отделы, где у оператора нет направления, хотя группа есть. ООЗ (отдел
 # обработки запросов, задача #359): сотрудник зачисляется в группу, но на
@@ -69152,6 +69154,11 @@ DEPARTMENT_ONLY_VIEWS = {
     'remote_cc': {
         'operator': ('profile', 'work_schedules', 'wiki'),
         'trainee': ('profile', 'work_schedules'),
+    },
+    # «Аренда авто» (#391): «Профиль»; сам раздел открывает его флаг rental_access.
+    'car_rental': {
+        'operator': ('profile',),
+        'trainee': ('profile',),
     },
 }
 

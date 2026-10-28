@@ -105,7 +105,7 @@ class BackOfficeAllowlistSourceTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'car_rental']);", source
         )
 
     def test_back_office_stays_out_of_front_office_only_sets(self):
@@ -131,7 +131,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
     def test_operator_line_fields_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
             source,
         )
         self.assertIn("export const departmentCodeHidesOperatorFields = (code) => {", source)
@@ -145,7 +145,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);", source
         )
 
     def test_modal_hides_group_direction_and_sip(self):
@@ -465,7 +465,7 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = "
-            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department']);",
+            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);",
             views,
         )
         self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
@@ -608,12 +608,12 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
     def test_helper_matches_the_frontend_set(self):
         source = _read(BOT_PATH)
         self.assertIn(
-            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})",
+            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental'})",
             source,
         )
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
             views,
         )
 
