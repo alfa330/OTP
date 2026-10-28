@@ -247,7 +247,7 @@ def test_webhook_quote_is_kept_through_edits_and_reaches_the_thread(pg):
     _, cursor, database, _ = pg
     db = database()
     def inbound(message_id, **changes):
-        return dict(message(message_id, status='inbound'), isEcho=False, **changes)
+        return dict(message(message_id, status='inbound'), isEcho=False, type='text', **changes)
 
     db.store_wazzup_messages([inbound('own', text='Тест')])
     db.store_wazzup_messages([inbound('reply', text='Тест', dateTime='2026-10-06T08:01:00Z',
@@ -262,6 +262,35 @@ def test_webhook_quote_is_kept_through_edits_and_reaches_the_thread(pg):
     item = message_item(cursor.fetchone())
     assert (item['text'], item['replyToMessageId'], item['replyText'], item['replyAuthorName'],
             item['replyIsEcho'], item['replyType']) == ('Тест!', 'own', 'Тест', None, False, 'text')
+
+
+def test_quote_snapshot_comes_from_the_archived_original_not_the_partial_webhook_copy(pg):
+    # Прод 28.10.2026: эхо ответа из iCORE пришло с цитатой входящего без текста и
+    # с пометкой исходящего. Снимок Wazzup остаётся только для оригинала вне архива.
+    _, cursor, database, _ = pg
+    db = database()
+
+    def msg(message_id, **changes):
+        return dict(message(message_id), type='text', **changes)
+
+    db.store_wazzup_messages([msg('question', isEcho=False, status='inbound', text='Когда проверка?'),
+                              msg('gone', isEcho=False, status='inbound', text='Удалённый текст', isDeleted=True)])
+    partial = {'isEcho': True, 'type': 'text'}
+    db.store_wazzup_messages([
+        msg('answer', dateTime='2026-10-06T08:01:00Z', quotedMessage=dict(partial, messageId='question')),
+        msg('to-deleted', dateTime='2026-10-06T08:02:00Z', quotedMessage=dict(partial, messageId='gone')),
+        msg('to-old', dateTime='2026-10-06T08:03:00Z', quotedMessage={
+            'messageId': 'older-than-archive', 'isEcho': False, 'type': 'text', 'text': 'Снимок Wazzup'}),
+        msg('elsewhere', dateTime='2026-10-06T08:04:00Z', chatId='70000000001',
+            quotedMessage=dict(partial, messageId='question'))])
+    cursor.execute("""SELECT message_id, quoted_message_id, quoted_is_echo, quoted_type, quoted_text
+                        FROM wazzup_messages WHERE quoted_message_id IS NOT NULL ORDER BY message_id""")
+    assert cursor.fetchall() == [
+        ('answer', 'question', False, 'text', 'Когда проверка?'),
+        ('elsewhere', 'question', True, 'text', None),      # другой чат — оригинал не наш
+        ('to-deleted', 'gone', False, 'text', None),        # текст удалённого не копируется
+        ('to-old', 'older-than-archive', False, 'text', 'Снимок Wazzup'),
+    ]
 
 
 def test_edited_is_not_a_delivery_status(pg):

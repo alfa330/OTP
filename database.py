@@ -25064,6 +25064,19 @@ class Database:
                         stored_dt = moment = placed
                 if moment is not None:
                     latest[chat_key] = max(latest.get(chat_key, moment), moment)
+                quote = quote_values(m)
+                if quote[0]:
+                    # Снимок цитаты — с оригинала, если он уже в архиве этого чата: у ответа
+                    # из iCORE вебхук прислал цитату входящего без текста и с пометкой
+                    # исходящего (28.10.2026). Снимок Wazzup — только когда оригинала нет.
+                    cursor.execute("""
+                        SELECT is_echo, type, CASE WHEN is_deleted THEN NULL ELSE text END, author_name
+                          FROM wazzup_messages
+                         WHERE message_id = %s AND account = %s AND channel_id = %s AND chat_id = %s
+                    """, (quote[0], account, chat_key[0], chat_key[1]))
+                    original = cursor.fetchone()
+                    if original:
+                        quote = (quote[0], *original)
                 cursor.execute("""
                     INSERT INTO wazzup_messages (
                         message_id, channel_id, chat_type, chat_id, dt, is_echo,
@@ -25099,7 +25112,7 @@ class Database:
                     stored_dt, is_echo, m.get('type'), m.get('text'),
                     m.get('contentUri'), m.get('authorName'), author_id,
                     contact.get('name'), contact.get('phone'), m.get('status'),
-                    m.get('sentFromApp'), *quote_values(m),
+                    m.get('sentFromApp'), *quote,
                     bool(m.get('isEdited')), bool(m.get('isDeleted')),
                     account, wazzup_dt,
                 ))
