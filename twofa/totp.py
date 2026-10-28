@@ -94,9 +94,3 @@ def issue(secret, unix_time):
         'valid_until': (counter + 1) * STEP_SECONDS,
         'is_next': is_next,
     }
-
-
-def group(code):
-    """«123456» → «123 456»: так код читают глазами и вводят без ошибок."""
-    text = str(code or '')
-    return '%s %s' % (text[:3], text[3:]) if len(text) == 6 else text

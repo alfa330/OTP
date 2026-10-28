@@ -14,8 +14,6 @@
 import html
 from datetime import datetime, timedelta, timezone
 
-from .totp import group
-
 REQUEST_TTL_SECONDS = 10 * 60
 RESEND_WINDOW_SECONDS = 3 * 60
 CODE_VISIBLE_SECONDS = 60
@@ -172,11 +170,15 @@ def resend_markup(request_id):
 
 
 def code_text(*, account_title, issued, now):
-    """Сообщение с кодом: цифры и время, после которого код недействителен (слова владельца)."""
+    """Сообщение с кодом: цифры и время, после которого код недействителен (слова владельца).
+
+    Цифры — подряд, без пробела: нажатие на код в Telegram копирует его как есть, и «123 456»
+    сервисы при вставке отвергали как неверный код (28.10.2026).
+    """
     lines = [
         '🔐 Код для «%s»' % _esc(account_title),
         '',
-        '<code>%s</code>' % _esc(group(issued['code'])),
+        '<code>%s</code>' % _esc(issued['code']),
         '',
         'Действует до <b>%s</b>' % clock(issued['valid_until']),
     ]

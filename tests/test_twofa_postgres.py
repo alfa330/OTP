@@ -198,8 +198,8 @@ def _approve(env, request_id, via='portal'):
 
 
 def _code_in(text):
-    match = re.search(r'<code>(\d{3}) (\d{3})</code>', text)
-    return match.group(1) + match.group(2) if match else None
+    match = re.search(r'<code>(\d{6})</code>', text)
+    return match.group(1) if match else None
 
 
 # ─── Права на схеме ──────────────────────────────────────────────────────────

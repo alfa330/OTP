@@ -126,9 +126,6 @@ class TotpTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             totp.validate_secret(longest + b'k')
 
-    def test_group(self):
-        self.assertEqual(totp.group('123456'), '123 456')
-
 
 class OtpauthTest(unittest.TestCase):
     b32 = base64.b32encode(RFC_SECRET).decode().rstrip('=')
@@ -352,9 +349,17 @@ class RulesTest(unittest.TestCase):
     def test_code_message_says_until_when(self):
         issued = totp.issue(RFC_SECRET, 1761553805)
         text = rules.code_text(account_title='Google Ads', issued=issued, now=1761553805)
-        self.assertIn('<code>%s</code>' % totp.group(issued['code']), text)
+        self.assertIn('<code>%s</code>' % issued['code'], text)
         self.assertIn('Действует до <b>13:30:30</b>', text)
         self.assertNotIn('Начнёт', text)
+
+    def test_code_copies_without_spaces(self):
+        # Нажатие на код в Telegram копирует его как есть: с «123 456» вставка давала «неверный код».
+        for unix_time in (1761553805, 1761553825):  # текущий код и следующий (до смены < 10 с)
+            issued = totp.issue(RFC_SECRET, unix_time)
+            text = rules.code_text(account_title='Google Ads', issued=issued, now=unix_time)
+            self.assertEqual(re.findall(r'<code>(.*?)</code>', text), [issued['code']])
+            self.assertRegex(issued['code'], r'^\d{6}$')
 
     def test_closed_mark_names_who_decided(self):
         text = rules.approval_closed_text(requester_name='Анна', account_title='Google', status='approved',
