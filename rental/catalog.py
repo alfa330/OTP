@@ -101,10 +101,16 @@ CARD_FIELDS = (
     ('insurance', 'Страховка', False),
     ('first_day', 'Первый день', False),
     ('office', 'Офис', False),
+    # Имя модели в «Классификаторе авто» — только когда по названию карточки она не находится
+    # сама (rental/tariffs.py). Тариф карточка не хранит: он приходит из классификатора.
+    ('classifier_key', 'Модель в «Классификаторе авто»', False),
 )
 CARD_LABELS = {key: label for key, label, _required in CARD_FIELDS}
 CARD_LABELS['yume_keys'] = 'Как модель записана в Yume'
 CARD_LABELS['free_count'] = 'Свободно'
+CARD_LABELS['photo_added'] = 'Фото добавлено'
+CARD_LABELS['photo_removed'] = 'Фото убрано'
+CARD_LABELS['photo_cover'] = 'Обложка'
 
 INSURANCE_DRIVER = 'от водителя'
 INSURANCE_WAYBILL = 'Путевой лист'

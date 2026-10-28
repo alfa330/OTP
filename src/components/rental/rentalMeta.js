@@ -45,6 +45,7 @@ export const CARD_FIELDS = [
     { key: 'insurance', label: 'Страховка' },
     { key: 'first_day', label: 'Первый день' },
     { key: 'office', label: 'Офис' },
+    { key: 'classifier_key', label: 'Модель в «Классификаторе авто»' },
 ];
 
 export const INSURANCE_OPTIONS = [

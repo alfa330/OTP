@@ -1,30 +1,33 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { History, Loader2, Minus, Pencil, Plus, RefreshCw, Send, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Car, History, ImagePlus, Loader2, Minus, MoreHorizontal, Pencil, Plus, RefreshCw, Send, Star, Trash2 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
-import { IosMenu, IosModal, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
+import { IosLightbox, IosMenu, IosModal, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
+import { PHOTO_ACCEPT, preparePhoto } from '../parcels/parcelPhoto';
 import { CARD_FIELDS, INSURANCE_OPTIONS, addDays, errorOf, formatPrice, freeState, shortTime } from './rentalMeta';
 import { HistoryList, ICON_BTN, Loading, Notice, Pill, TOOLBAR_BTN } from './rentalUi';
 
 /*
  * Вкладка «Наличие авто» (#391).
  *
- * Карточка — вариант модели с условиями. Свободные машины вводят сотрудники аренды (ТЗ v5, 3.1):
- * у каждой карточки своё число, и путевой лист — отдельная карточка со своим. Из Yume приходят
- * только занятые — в аренде и в брони, по модели. Свободных 0 — «Нет в наличии», не указано ни
- * разу — «Наличие не указано»; в обоих случаях направить нельзя. Направление машину не бронирует
- * (ТЗ 3.2): число свободных после него прежнее.
+ * Карточка — вариант модели с условиями, с фотографиями машины (владелец 28.10.2026: «карточку с
+ * фотографиями самих авто… возможность добавлять фото»). Первый снимок — обложка, остальные
+ * листаются точками и открываются во весь экран. Снимки грузят сотрудники аренды; кадр
+ * уменьшается в браузере, как у «Посылок» (parcelPhoto.js), и уходит по одному.
+ *
+ * Тарифы на карточке и в отборе — тарифы Яндекса из «Классификатора авто» в вики (владелец
+ * 28.10.2026), их считает сервер (rental/tariffs.py) по модели и году выпуска. На карточке —
+ * верхний тариф и «Электро»; отбор с мультивыбором смотрит на все подходящие: оператору, которому
+ * нужна машина под «Комфорт+», бизнес-машина тоже годится.
+ *
+ * Свободные машины вводят сотрудники аренды (ТЗ v5, 3.1): у каждой карточки своё число, путевой
+ * лист — отдельная карточка. Из Yume приходят только занятые. Свободных 0 — «Нет в наличии»,
+ * не указано ни разу — «Наличие не указано»; в обоих случаях направить нельзя. Направление
+ * машину не бронирует (ТЗ 3.2).
  */
 
 const FREE_TONES = { free: 'green', none: 'red', unknown: 'slate' };
-
-const Spec = ({ label, children }) => (
-    <>
-        <dt className="text-slate-500">{label}</dt>
-        <dd className="text-right font-medium text-slate-800">{children || '—'}</dd>
-    </>
-);
 
 /* Поля даты и времени — того же роста и цвета, что iosInput: окно читается одной формой
    (так же сделана форма жалоб). Свой класс триггера заменяет весь стандартный, поэтому
@@ -34,6 +37,10 @@ const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-
     + '[&>span]:flex-1 [&>span]:text-left';
 const TIME_INPUT = 'w-full rounded-xl border-0 bg-slate-100 px-6 py-2.5 text-center text-[14px] tabular-nums text-slate-900 '
     + 'placeholder-slate-400 transition hover:bg-slate-200/70 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
+
+// Кнопка поверх фотографии: матовое стекло, как у системных наложений iOS.
+const OVERLAY_BTN = 'grid h-8 w-8 place-items-center rounded-full bg-white/85 text-slate-700 shadow-sm backdrop-blur '
+    + 'transition hover:bg-white active:scale-95';
 
 /* Свободные для сотрудника аренды: −/+ и «Сохранить», когда число изменилось. Сохранение —
    явное, а не на каждый щелчок: иначе каждый промах ложился бы в историю карточки.
@@ -90,53 +97,119 @@ const FreeStepper = ({ card, onSave }) => {
     );
 };
 
-const CarCard = ({ card, caps, onSend, onFree, onEdit, onHistory, onHide }) => {
-    const state = freeState(card);
+/* Верх карточки: обложка (или заглушка), метка наличия, меню и точки — по одной на снимок. */
+const PhotoHeader = ({ card, state, canEdit, menu, onOpen, onAddPhoto }) => {
+    const photos = card.photos || [];
+    const [index, setIndex] = useState(0);
+    const current = index < photos.length ? index : 0;
+    const photo = photos[current];
     return (
-        <article className={`${iosCard} flex flex-col gap-3 p-4`}>
-            <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                    <h3 className="truncate text-[15.5px] font-semibold text-slate-900">{card.title}</h3>
-                    <div className="truncate text-[12.5px] text-slate-500">
-                        {[card.car_class, card.fuel].filter(Boolean).join(' · ')}
+        <div className="relative aspect-[16/10] w-full overflow-hidden bg-slate-100">
+            {photo ? (
+                <button type="button" className="block h-full w-full" aria-label={`Фото: ${card.title}`}
+                        onClick={() => onOpen(current)}>
+                    <img src={photo.thumb_url || photo.url} alt="" loading="lazy" className="h-full w-full object-cover" />
+                </button>
+            ) : (
+                <div className="grid h-full w-full place-items-center">
+                    <div className="flex flex-col items-center gap-2 text-slate-300">
+                        <Car size={44} strokeWidth={1.25} />
+                        {canEdit ? (
+                            <button type="button" onClick={onAddPhoto}
+                                    className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium text-slate-700 shadow-sm transition hover:bg-slate-50">
+                                <ImagePlus size={14} /> Добавить фото
+                            </button>
+                        ) : <span className="text-[12px] text-slate-400">Фото пока нет</span>}
                     </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
-                    <Pill tone={FREE_TONES[state.kind]}>{state.label}</Pill>
-                    {caps.edit_cards && (
-                        <IosMenu
-                            label={`Действия: ${card.title}`}
-                            items={[
-                                { key: 'edit', label: 'Изменить карточку', icon: Pencil, onSelect: () => onEdit(card) },
-                                { key: 'log', label: 'История правок', icon: History, onSelect: () => onHistory(card) },
-                                { key: 'hide', label: 'Скрыть карточку', icon: Trash2, danger: true, separatorBefore: true,
-                                  onSelect: () => onHide(card) },
-                            ]}
-                        />
-                    )}
-                </div>
+            )}
+            <div className="pointer-events-none absolute left-3 top-3">
+                <Pill tone={FREE_TONES[state.kind]} className="shadow-sm">{state.label}</Pill>
             </div>
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[13px]">
-                <Spec label="Стоимость">{formatPrice(card.price)}</Spec>
-                <Spec label="Год выпуска">{card.year}</Spec>
-                <Spec label="Цвет">{card.color}</Spec>
-                <Spec label="Возраст">{card.age}</Spec>
-                <Spec label="Класс страховки">{card.insurance_class}</Spec>
-                <Spec label="Страховка">{card.insurance}</Spec>
-                <Spec label="Первый день">{card.first_day}</Spec>
-            </dl>
-            <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3">
-                {caps.edit_cards && <FreeStepper card={card} onSave={onFree} />}
-                {/* Без свободных кнопка серая и не нажимается; почему — уже сказано меткой в углу карточки. */}
-                {caps.send && (
-                    <button type="button" className={`${state.kind === 'free' ? iosBtnPrimary : iosBtnSecondary} w-full`}
-                            disabled={state.kind !== 'free'} onClick={() => onSend(card)}>
-                        <Send size={15} /> Направить в офис
-                    </button>
+            {menu && <div className="absolute right-3 top-3">{menu}</div>}
+            {photos.length > 1 && (
+                <div className="absolute inset-x-0 bottom-2 flex justify-center gap-1.5">
+                    {photos.map((item, i) => (
+                        <button key={item.id} type="button" aria-label={`Фото ${i + 1} из ${photos.length}`}
+                                onClick={() => setIndex(i)}
+                                className={`h-1.5 rounded-full shadow-sm transition-all ${i === current ? 'w-4 bg-white' : 'w-1.5 bg-white/60 hover:bg-white/90'}`} />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// Разделитель приклеен к пункту: при переносе точка остаётся в конце строки, а не открывает новую.
+const Term = ({ children, last }) => (
+    <span className="whitespace-nowrap">{children}{!last && <span className="pl-1.5 text-slate-300">·</span>}</span>
+);
+
+const CarCard = ({ card, caps, onSend, onFree, onEdit, onHistory, onHide, onPhotos, onOpenPhoto }) => {
+    const state = freeState(card);
+    const shown = card.tariffs?.shown || [];
+    const specs = [card.year, card.fuel, card.color].filter(Boolean);
+    const terms = [
+        card.insurance && `Страховка ${card.insurance}`,
+        card.insurance_class && `класс ${card.insurance_class}`,
+        card.first_day && `первый день ${card.first_day}`,
+        card.age && `возраст ${card.age}`,
+    ].filter(Boolean);
+    const menu = caps.edit_cards ? (
+        <IosMenu
+            label={`Действия: ${card.title}`}
+            trigger={{ className: OVERLAY_BTN, text: <MoreHorizontal size={16} /> }}
+            items={[
+                { key: 'photos', label: 'Фотографии', icon: ImagePlus, onSelect: () => onPhotos(card) },
+                { key: 'edit', label: 'Изменить карточку', icon: Pencil, onSelect: () => onEdit(card) },
+                { key: 'log', label: 'История правок', icon: History, onSelect: () => onHistory(card) },
+                { key: 'hide', label: 'Скрыть карточку', icon: Trash2, danger: true, separatorBefore: true,
+                  onSelect: () => onHide(card) },
+            ]}
+        />
+    ) : null;
+    return (
+        <article className={`${iosCard} flex flex-col overflow-hidden`}>
+            <PhotoHeader card={card} state={state} canEdit={Boolean(caps.edit_cards)} menu={menu}
+                         onOpen={(index) => onOpenPhoto(card, index)} onAddPhoto={() => onPhotos(card)} />
+            <div className="flex grow flex-col gap-3 p-4">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <h3 className="truncate text-[16px] font-semibold leading-tight text-slate-900">{card.title}</h3>
+                        {specs.length > 0 && <div className="mt-0.5 truncate text-[12.5px] text-slate-500">{specs.join(' · ')}</div>}
+                    </div>
+                    {card.price ? (
+                        <div className="shrink-0 text-right leading-tight">
+                            <div className="text-[16px] font-semibold tabular-nums text-slate-900">{formatPrice(card.price).replace(' / сутки', '')}</div>
+                            <div className="text-[11.5px] text-slate-400">в сутки</div>
+                        </div>
+                    ) : null}
+                </div>
+                {(shown.length > 0 || card.car_class) && (
+                    <div className="flex flex-wrap gap-1.5">
+                        {shown.length > 0
+                            ? shown.map((tariff) => <Pill key={tariff.key} tone="blue">{tariff.name}</Pill>)
+                            : <Pill tone="slate">{card.car_class}</Pill>}
+                    </div>
                 )}
-                <div className="flex flex-col gap-0.5 text-[12px] text-slate-500">
-                    <span>По Yume: в аренде {card.busy.in_rent}{card.busy.booked ? `, в брони ${card.busy.booked}` : ''}</span>
-                    {card.free_at && <span>Свободные: {card.free_by || 'без имени'}, {shortTime(card.free_at)}</span>}
+                {terms.length > 0 && (
+                    <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 text-[12.5px] leading-snug text-slate-600">
+                        {terms.map((term, i) => <Term key={term} last={i === terms.length - 1}>{term}</Term>)}
+                    </div>
+                )}
+                <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3">
+                    {caps.edit_cards && <FreeStepper card={card} onSave={onFree} />}
+                    {/* Без свободных кнопка серая и не нажимается; почему — уже сказано меткой на фото. */}
+                    {caps.send && (
+                        <button type="button" className={`${state.kind === 'free' ? iosBtnPrimary : iosBtnSecondary} w-full`}
+                                disabled={state.kind !== 'free'} onClick={() => onSend(card)}>
+                            <Send size={15} /> Направить в офис
+                        </button>
+                    )}
+                    <div className="flex flex-col gap-0.5 text-[12px] text-slate-500">
+                        <span>По Yume: в аренде {card.busy.in_rent}{card.busy.booked ? `, в брони ${card.busy.booked}` : ''}</span>
+                        {card.free_at && <span>Свободные: {card.free_by || 'без имени'}, {shortTime(card.free_at)}</span>}
+                    </div>
                 </div>
             </div>
         </article>
@@ -163,6 +236,7 @@ const SendModal = ({ card, data, api, toast, onClose, onSent }) => {
             setSaving(false);
         }
     };
+    const tariffs = (card.tariffs?.shown || []).map((tariff) => tariff.name).join(', ');
     return (
         <IosModal
             open
@@ -180,7 +254,7 @@ const SendModal = ({ card, data, api, toast, onClose, onSent }) => {
         >
             <div className="space-y-3.5">
                 <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] leading-snug text-slate-600">
-                    {[card.car_class, formatPrice(card.price)].filter(Boolean).join(' · ')}
+                    {[tariffs || card.car_class, formatPrice(card.price)].filter(Boolean).join(' · ')}
                     <br />
                     Офис: {card.office || data.office?.name}
                 </div>
@@ -220,6 +294,10 @@ const SendModal = ({ card, data, api, toast, onClose, onSent }) => {
     );
 };
 
+const FIELD_HINTS = {
+    classifier_key: 'Нужно, только если тариф не определился сам: имя модели так, как в «Классификаторе авто».',
+};
+
 const CardEditModal = ({ card, api, toast, onClose, onSaved }) => {
     const [form, setForm] = useState(() => {
         const base = {};
@@ -243,12 +321,16 @@ const CardEditModal = ({ card, api, toast, onClose, onSaved }) => {
             setSaving(false);
         }
     };
+    const tariffs = card?.tariffs;
+    const tariffNote = !card ? null : tariffs?.model
+        ? `В классификаторе: ${tariffs.model} → ${(tariffs.shown || []).map((t) => t.name).join(', ') || 'тарифов по году нет'}`
+        : 'В «Классификаторе авто» модель не нашлась — впишите её имя ниже.';
     return (
         <IosModal
             open
             onClose={onClose}
             title={card ? 'Изменить карточку' : 'Новая карточка'}
-            subtitle={card ? card.title : 'Модель с условиями: класс, цена, страховка'}
+            subtitle={card ? card.title : 'Модель с условиями: цена, страховка, год'}
             maxWidth="max-w-xl"
             footer={(
                 <div className="flex justify-end gap-2">
@@ -260,16 +342,23 @@ const CardEditModal = ({ card, api, toast, onClose, onSaved }) => {
             )}
         >
             <div className="grid gap-3 sm:grid-cols-2">
+                {tariffNote && (
+                    <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] leading-snug text-slate-600 sm:col-span-2">
+                        {tariffNote}
+                    </div>
+                )}
                 {CARD_FIELDS.map(({ key, label }) => (
-                    <label key={key} className={`block space-y-1.5 ${key === 'title' || key === 'office' ? 'sm:col-span-2' : ''}`}>
+                    <label key={key} className={`block space-y-1.5 ${key === 'title' || key === 'office' || key === 'classifier_key' ? 'sm:col-span-2' : ''}`}>
                         <span className="text-[12.5px] font-medium text-slate-600">{label}</span>
                         {key === 'insurance' ? (
                             <CustomSelect variant="ios" value={form.insurance} onChange={(value) => set({ insurance: value })}
                                           options={INSURANCE_OPTIONS} ariaLabel={label} />
                         ) : (
                             <input className={iosInput} value={form[key]} inputMode={key === 'price' ? 'numeric' : undefined}
+                                   placeholder={key === 'classifier_key' ? 'Например, Kia Soluto' : undefined}
                                    onChange={(event) => set({ [key]: event.target.value })} />
                         )}
+                        {FIELD_HINTS[key] && <span className="block text-[12px] text-slate-400">{FIELD_HINTS[key]}</span>}
                     </label>
                 ))}
                 <label className="block space-y-1.5 sm:col-span-2">
@@ -283,15 +372,127 @@ const CardEditModal = ({ card, api, toast, onClose, onSaved }) => {
     );
 };
 
+/* Фотографии карточки: сетка снимков, обложка, удаление и загрузка новых по одному. */
+const PhotosModal = ({ card, max, api, toast, onClose, onChanged }) => {
+    const [step, setStep] = useState('');
+    const [busyId, setBusyId] = useState(null);
+    const inputRef = useRef(null);
+    const photos = card.photos || [];
+    const room = Math.max(0, max - photos.length);
+
+    const upload = async (files) => {
+        const list = Array.from(files || []);
+        if (!list.length) return;
+        if (!room) {
+            toast(`Больше ${max} фотографий к одной карточке не добавить`, 'error');
+            return;
+        }
+        if (list.length > room) toast(`Поместится ещё ${room} — остальные не добавлены`, 'error');
+        const queue = list.slice(0, room);
+        for (let index = 0; index < queue.length; index += 1) {
+            setStep(`Загружаю фото ${index + 1} из ${queue.length}`);
+            // eslint-disable-next-line no-await-in-loop
+            const prepared = await preparePhoto(queue[index]);
+            if (!prepared.ok) {
+                toast(prepared.issue, 'error');
+                continue;
+            }
+            const form = new FormData();
+            // Content-Type руками не ставим: его с boundary проставляет браузер.
+            form.append('file', prepared.blob, prepared.name);
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                const { data } = await api.post(`/cards/${card.id}/photos`, form);
+                onChanged(data.card);
+            } catch (requestError) {
+                toast(errorOf(requestError, 'Фото не загрузилось'), 'error');
+                break;
+            }
+        }
+        setStep('');
+    };
+
+    const act = async (photo, request, fallback) => {
+        setBusyId(photo.id);
+        try {
+            const { data } = await request();
+            onChanged(data.card);
+        } catch (requestError) {
+            toast(errorOf(requestError, fallback), 'error');
+        } finally {
+            setBusyId(null);
+        }
+    };
+
+    return (
+        <IosModal
+            open
+            onClose={onClose}
+            title="Фотографии"
+            subtitle={`${card.title} · первая — обложка карточки`}
+            maxWidth="max-w-2xl"
+            footer={(
+                <div className="flex items-center justify-between gap-3">
+                    <span className="text-[12.5px] text-slate-500">{step || `${photos.length} из ${max}`}</span>
+                    <div className="flex gap-2">
+                        <button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>
+                        <button type="button" className={iosBtnPrimary} disabled={Boolean(step) || !room}
+                                onClick={() => inputRef.current?.click()}>
+                            {step ? <Loader2 size={15} className="animate-spin" /> : <ImagePlus size={15} />} Добавить фото
+                        </button>
+                    </div>
+                </div>
+            )}
+        >
+            <input ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple className="hidden" aria-label="Выбрать фотографии"
+                   onChange={(event) => { upload(event.target.files); event.target.value = ''; }} />
+            {photos.length ? (
+                <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {photos.map((photo, index) => (
+                        <li key={photo.id} className="group relative aspect-[4/3] overflow-hidden rounded-2xl bg-slate-100">
+                            <img src={photo.thumb_url || photo.url} alt="" className="h-full w-full object-cover" />
+                            {index === 0 && (
+                                <span className="absolute left-2 top-2 rounded-full bg-white/90 px-2 py-0.5 text-[11.5px] font-medium text-slate-700 shadow-sm">
+                                    Обложка
+                                </span>
+                            )}
+                            <div className="absolute right-2 top-2 flex gap-1.5">
+                                {index > 0 && (
+                                    <button type="button" className={OVERLAY_BTN} aria-label="Сделать обложкой" disabled={busyId === photo.id}
+                                            onClick={() => act(photo, () => api.put(`/cards/${card.id}/photos/${photo.id}/cover`), 'Не получилось')}>
+                                        <Star size={15} />
+                                    </button>
+                                )}
+                                <button type="button" className={`${OVERLAY_BTN} text-rose-600`} aria-label="Удалить фото" disabled={busyId === photo.id}
+                                        onClick={() => act(photo, () => api.delete(`/cards/${card.id}/photos/${photo.id}`), 'Фото не удалилось')}>
+                                    {busyId === photo.id ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                                </button>
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <div className="grid place-items-center rounded-2xl bg-slate-50 py-12 text-center">
+                    <Car size={40} strokeWidth={1.25} className="text-slate-300" />
+                    <div className="mt-2 text-[13.5px] text-slate-600">Снимков пока нет</div>
+                    <div className="text-[12.5px] text-slate-400">JPEG, PNG или WebP — до {max} на карточку</div>
+                </div>
+            )}
+        </IosModal>
+    );
+};
+
 const FleetTab = ({ api, toast }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
-    const [carClass, setCarClass] = useState('');
+    const [tariffKeys, setTariffKeys] = useState([]);
     const [onlyFree, setOnlyFree] = useState(null);
     const [sending, setSending] = useState(null);
     const [editing, setEditing] = useState(null);
     const [history, setHistory] = useState(null);
     const [hiding, setHiding] = useState(null);
+    const [photosOf, setPhotosOf] = useState(null);
+    const [viewer, setViewer] = useState(null);
 
     const load = useCallback(async () => {
         try {
@@ -314,15 +515,22 @@ const FleetTab = ({ api, toast }) => {
     const caps = data?.capabilities || {};
     // По умолчанию оператору — только доступные, аренде — все: она ведёт и те, где свободных нет.
     const showOnlyFree = onlyFree ?? !caps.edit_cards;
-    const classes = useMemo(() => [...new Set((data?.cards || []).map((card) => card.car_class).filter(Boolean))], [data]);
+    const tariffOptions = useMemo(() => (data?.tariffs || []).map((tariff) => ({ value: tariff.key, label: tariff.name })), [data]);
     const cards = useMemo(() => (data?.cards || []).filter((card) => (
-        (!carClass || card.car_class === carClass) && (!showOnlyFree || freeState(card).kind === 'free')
-    )), [data, carClass, showOnlyFree]);
+        (!tariffKeys.length || (card.tariffs?.fits || []).some((tariff) => tariffKeys.includes(tariff.key)))
+        && (!showOnlyFree || freeState(card).kind === 'free')
+    )), [data, tariffKeys, showOnlyFree]);
+
+    // Ответ правки — карточка целиком (тарифы, фото); занятые по Yume в нём нет, берём прежние.
+    const replaceCard = useCallback((card) => {
+        if (!card) return;
+        setData((prev) => ({ ...prev, cards: prev.cards.map((item) => (item.id === card.id ? { ...item, ...card, busy: item.busy } : item)) }));
+    }, []);
 
     const saveFree = async (card, value) => {
         try {
             const { data: result } = await api.put(`/cards/${card.id}/free`, { free_count: value });
-            setData((prev) => ({ ...prev, cards: prev.cards.map((item) => (item.id === card.id ? { ...result.card, busy: item.busy } : item)) }));
+            replaceCard(result.card);
         } catch (requestError) {
             toast(errorOf(requestError, 'Не сохранилось'), 'error');
         }
@@ -363,6 +571,10 @@ const FleetTab = ({ api, toast }) => {
     if (!data) return <Loading text="Открываем наличие…" />;
 
     const sync = data.sync || {};
+    const photosCard = photosOf ? data.cards.find((card) => card.id === photosOf) : null;
+    const viewerPhotos = viewer ? (data.cards.find((card) => card.id === viewer.cardId)?.photos || []) : [];
+    const viewerPhoto = viewer ? viewerPhotos[viewer.index] : null;
+    const tariffNames = (values) => tariffOptions.filter((option) => values.includes(option.value)).map((option) => option.label).join(', ');
     return (
         <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -371,10 +583,11 @@ const FleetTab = ({ api, toast }) => {
                     {data.office?.phone && <span className="whitespace-nowrap"> · {data.office.phone}</span>}
                 </div>
                 <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-                    {classes.length > 1 && (
-                        <CustomSelect variant="ios" className="min-w-[140px] flex-1 sm:w-[190px] sm:flex-none" value={carClass} onChange={setCarClass}
-                                      options={[{ value: '', label: 'Все классы' }, ...classes.map((item) => ({ value: item, label: item }))]}
-                                      ariaLabel="Класс" />
+                    {tariffOptions.length > 0 && (
+                        <CustomSelect variant="ios" multiple bulkActions className="min-w-[160px] flex-1 sm:w-[220px] sm:flex-none"
+                                      value={tariffKeys} onChange={(values) => setTariffKeys(values || [])}
+                                      options={tariffOptions} placeholder="Все тарифы" renderValue={tariffNames}
+                                      ariaLabel="Тарифы Яндекса" />
                     )}
                     <label className="inline-flex h-9 items-center gap-2 rounded-xl bg-white px-3 text-[13px] text-slate-700 ring-1 ring-slate-200/70">
                         Только доступные
@@ -402,19 +615,21 @@ const FleetTab = ({ api, toast }) => {
                 </Notice>
             )}
             {cards.length ? (
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {cards.map((card) => (
                         <CarCard key={card.id} card={card} caps={caps} onSend={setSending} onFree={saveFree}
-                                 onEdit={(item) => setEditing({ card: item })} onHistory={openHistory} onHide={setHiding} />
+                                 onEdit={(item) => setEditing({ card: item })} onHistory={openHistory} onHide={setHiding}
+                                 onPhotos={(item) => setPhotosOf(item.id)}
+                                 onOpenPhoto={(item, index) => setViewer({ cardId: item.id, index })} />
                     ))}
                 </div>
             ) : (
                 <div className={`${iosCard} px-6 py-12 text-center`}>
                     <div className="text-[15px] font-semibold text-slate-800">
-                        {showOnlyFree ? 'Свободных машин сейчас нет' : 'Карточек нет'}
+                        {showOnlyFree ? 'Свободных машин по этому отбору нет' : 'Карточек по этому отбору нет'}
                     </div>
                     <div className="mt-1 text-[13px] text-slate-500">
-                        {showOnlyFree ? 'Свободные машины указывают сотрудники аренды.' : 'Сбросьте отбор по классу.'}
+                        {tariffKeys.length ? 'Снимите отбор по тарифам.' : 'Свободные машины указывают сотрудники аренды.'}
                     </div>
                 </div>
             )}
@@ -426,6 +641,20 @@ const FleetTab = ({ api, toast }) => {
             {editing && (
                 <CardEditModal card={editing.card} api={api} toast={toast} onClose={() => setEditing(null)}
                                onSaved={() => { setEditing(null); load(); }} />
+            )}
+            {photosCard && (
+                <PhotosModal card={photosCard} max={data.photos_max || 6} api={api} toast={toast}
+                             onClose={() => setPhotosOf(null)} onChanged={replaceCard} />
+            )}
+            {viewerPhoto && (
+                <IosLightbox
+                    url={viewerPhoto.url}
+                    alt="Фотография машины"
+                    counter={viewerPhotos.length > 1 ? `${viewer.index + 1} / ${viewerPhotos.length}` : ''}
+                    onClose={() => setViewer(null)}
+                    onPrev={viewer.index > 0 ? () => setViewer({ ...viewer, index: viewer.index - 1 }) : undefined}
+                    onNext={viewer.index < viewerPhotos.length - 1 ? () => setViewer({ ...viewer, index: viewer.index + 1 }) : undefined}
+                />
             )}
             {history && (
                 <IosModal open onClose={() => setHistory(null)} title="История правок" subtitle={history.card.title}>

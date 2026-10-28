@@ -60706,6 +60706,17 @@ def _parcels_bucket_name():
     )
 
 
+def _rental_bucket_name():
+    """Бакет раздела «Аренда авто» (фотографии машин в «Наличии авто»). Каскад env тот же,
+    что у посылок: свой -> общий tasks -> общий; пока своя переменная не задана, снимки
+    лежат в общем бакете под префиксом rental/cars/."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_RENTAL') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
 def _news_bucket_name():
     """Бакет раздела «Новости» (фотографии объявления). Каскад env тот же, что у
     вики и посылок: свой -> общий tasks -> общий. Своя переменная нужна на
@@ -67885,6 +67896,8 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         service=_RENTAL['service'],
+        # Фотографии машин — подписанными ссылками прямо из GCS, как у «Посылок».
+        gcs={'bucket_name': _rental_bucket_name, 'client': get_gcs_client},
     ))
     logging.info("Раздел «Аренда авто»: Blueprint подключён на /api/rental")
 except Exception:

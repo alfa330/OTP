@@ -19,6 +19,7 @@ tests/test_rental.py. Здесь — процесс на схеме раздел
 """
 
 import contextlib
+import io
 import os
 import uuid
 from datetime import datetime
@@ -269,8 +270,32 @@ def client(env, monkeypatch):
         build_cors_preflight_response=lambda: jsonify({}),
         resolve_requester=lambda: (int(request.headers['X-User-Id']), {}, None),
         service=env['service'],
+        gcs={'bucket_name': lambda: 'test-bucket', 'client': _FakeGcsClient},
     ))
     return app.test_client()
+
+
+# Бакет понарошку для фотографий: блобы в памяти, «подписанная ссылка» — signed://путь.
+STORE = {}
+
+
+class _FakeBlob:
+    def __init__(self, path):
+        self.path, self.cache_control = path, None
+
+    def upload_from_string(self, data, content_type=None):
+        STORE[self.path] = (data, content_type)
+
+    def generate_signed_url(self, **_kw):
+        return 'signed://' + self.path
+
+    def delete(self):
+        STORE.pop(self.path, None)
+
+
+class _FakeGcsClient:
+    def bucket(self, _name):
+        return type('Bucket', (), {'blob': staticmethod(_FakeBlob)})()
 
 
 def _as(user_id):
@@ -318,3 +343,63 @@ def test_routes_by_role(client, env):
     conditions = client.get('/api/rental/conditions', headers=_as(SALES_OP)).get_json()
     assert conditions['can_edit'] is False and len(conditions['current']['blocks']) == 5
     assert client.post('/api/rental/conditions', json={'blocks': []}, headers=_as(RENTAL)).status_code == 400
+
+
+def _jpeg(color):
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new('RGB', (640, 400), color).save(out, format='JPEG', quality=85)
+    return out.getvalue()
+
+
+def test_photos_cover_delete_limit_and_tariffs(client, env):
+    """Фото машины: грузит аренда, обложка — первая, удаление чистит бакет, предел — 6;
+    тарифы карточки и отбора — из «Классификатора авто»."""
+    pytest.importorskip('PIL')
+    STORE.clear()
+    card = _eqm5(env['db'])[0]
+    url = '/api/rental/cards/%d/photos' % card['id']
+
+    def upload(who, name='car.jpg'):
+        return client.post(url, data={'file': (io.BytesIO(_jpeg((40, 60, 120))), name)},
+                           content_type='multipart/form-data', headers=_as(who))
+
+    assert upload(SALES_OP).status_code == 403
+    first = upload(RENTAL)
+    assert first.status_code == 201
+    photos = first.get_json()['card']['photos']
+    assert len(photos) == 1 and photos[0]['url'].startswith('signed://rental/cars/')
+    assert len(STORE) == 2                                   # кадр и миниатюра
+    second = upload(RENTAL, 'side.jpg').get_json()['card']['photos']
+    assert [p['id'] for p in second][0] == photos[0]['id']
+    # Обложка — второй снимок: встаёт первым и в ответе, и в наличии.
+    cover = client.put('%s/%s/cover' % (url, second[1]['id']), headers=_as(RENTAL)).get_json()['card']['photos']
+    assert [p['id'] for p in cover] == [second[1]['id'], second[0]['id']]
+    fleet = client.get('/api/rental/fleet', headers=_as(SALES_OP)).get_json()
+    shown = next(c for c in fleet['cards'] if c['id'] == card['id'])
+    assert [p['id'] for p in shown['photos']] == [second[1]['id'], second[0]['id']]
+    assert 'bucket' not in shown['photos'][0] and 'blob_path' not in shown['photos'][0]
+    # Тарифы — из классификатора: E-QM5 2025 — «Бизнес» и «Электро»; отбор знает тарифы Алматы.
+    assert [t['key'] for t in shown['tariffs']['shown']] == ['business', 'electro']
+    assert [t['key'] for t in fleet['tariffs']] == ['econom', 'intercity', 'comfort', 'comfort_plus',
+                                                    'business', 'electro', 'ultima']
+    assert 'classifier_key' not in shown and fleet['photos_max'] == 6
+    # Удаление снимает строку и оба блоба; история карточки пополнилась.
+    gone = client.delete('%s/%s' % (url, second[0]['id']), headers=_as(RENTAL)).get_json()['card']['photos']
+    assert [p['id'] for p in gone] == [second[1]['id']] and len(STORE) == 2
+    log = client.get('/api/rental/cards/%d/log' % card['id'], headers=_as(RENTAL)).get_json()['items']
+    assert [e['label'] for e in log[:4]] == ['Фото убрано', 'Обложка', 'Фото добавлено', 'Фото добавлено']
+    for _ in range(5):
+        assert upload(RENTAL).status_code == 201
+    assert upload(RENTAL).status_code == 409
+    assert client.delete('%s/999999' % url, headers=_as(RENTAL)).status_code == 404
+
+    # Модель, которой классификатор не знает, получает имя через карточку.
+    soluto = next(c for c in _cards(env['db']) if c['title'] == 'Kia Soluto')
+    payload = {key: soluto[key] for key in ('title', 'car_class', 'price', 'year', 'fuel', 'color', 'age',
+                                             'insurance_class', 'insurance', 'first_day', 'office')}
+    saved = client.put('/api/rental/cards/%d' % soluto['id'], headers=_as(RENTAL),
+                       json=dict(payload, classifier_key='Kia Rio', yume_keys=', '.join(soluto['yume_keys'])))
+    assert saved.status_code == 200
+    assert saved.get_json()['card']['classifier_key'] == 'Kia Rio'
+    assert saved.get_json()['card']['tariffs']['model'] == 'Kia Rio'

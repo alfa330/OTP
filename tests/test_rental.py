@@ -531,5 +531,115 @@ class WiringTests(unittest.TestCase):
         self.assertIn("{view === 'rental' && canAccessRentalSection && (", self.app)
 
 
+class TariffTests(unittest.TestCase):
+    """Тарифы Яндекса у карточек — из книги «Классификатора авто» (rental/tariffs.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from wiki import classifier
+        cls.book = classifier.build_book({
+            'tariffs': [{'key': 'econom', 'name': 'Эконом'}, {'key': 'intercity', 'name': 'Межгород'},
+                        {'key': 'comfort', 'name': 'Комфорт'}, {'key': 'comfort_plus', 'name': 'Комфорт+'},
+                        {'key': 'business', 'name': 'Бизнес'}, {'key': 'electro', 'name': 'Электро'},
+                        {'key': 'ultima', 'name': 'Ultima (Premier)'}],
+            'cities': [{'id': 'almaty', 'name': 'Алматы', 'offset': 0,
+                        'tariffs': ['econom', 'intercity', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima']},
+                       {'id': 'astana', 'name': 'Астана', 'offset': 2, 'tariffs': ['econom', 'comfort', 'business']}],
+            'cars': [
+                {'brand': 'Toyota', 'model': 'Camry',
+                 'years': {'econom': 1985, 'comfort': 2014, 'comfort_plus': 2021, 'business': 2023}},
+                {'brand': 'Hongqi', 'model': 'E-QM5',
+                 'years': {'comfort': 2021, 'comfort_plus': 2021, 'electro': 2021, 'business': 2021}},
+                {'brand': 'Hongqi', 'model': 'H5', 'years': {'comfort': 2017, 'business': 2023, 'ultima': 2023}},
+                {'brand': 'BYD', 'model': 'Qin', 'years': {'comfort': 2018, 'comfort_plus': 2024}},
+                {'brand': 'BYD', 'model': 'Qin Plus', 'years': {'comfort': 2018, 'electro': 2022}},
+            ],
+        })
+
+    def test_city_tariffs_in_classifier_order(self):
+        from rental import tariffs
+        self.assertEqual([t['key'] for t in tariffs.city_tariffs(self.book)],
+                         ['econom', 'intercity', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima'])
+        self.assertEqual(tariffs.city_tariffs(None), [])
+
+    def test_model_found_by_title_prefix_and_without_first_word(self):
+        from rental import tariffs
+        self.assertEqual(tariffs.find_car(self.book, 'Toyota Camry 70')['name'], 'Toyota Camry')
+        self.assertEqual(tariffs.find_car(self.book, 'FAW HONGQI H5')['name'], 'Hongqi H5')
+        self.assertEqual(tariffs.find_car(self.book, 'HongQi E-QM5')['name'], 'Hongqi E-QM5')
+        # Самое длинное имя: «BYD Qin Plus» не путается с «BYD Qin», а «Qin L» находит «Qin».
+        self.assertEqual(tariffs.find_car(self.book, 'BYD Qin Plus')['name'], 'BYD Qin Plus')
+        self.assertEqual(tariffs.find_car(self.book, 'BYD Qin L')['name'], 'BYD Qin')
+        self.assertIsNone(tariffs.find_car(self.book, 'Kia Soluto'))
+        # Явное имя из классификатора сильнее названия карточки.
+        self.assertEqual(tariffs.find_car(self.book, 'Kia Soluto', 'toyota camry')['name'], 'Toyota Camry')
+        self.assertIsNone(tariffs.find_car(None, 'Toyota Camry'))
+
+    def test_fits_by_year_and_city_and_shown_is_top_of_ladder(self):
+        from rental import tariffs
+        camry_2020 = tariffs.card_tariffs(self.book, {'title': 'Toyota Camry 70', 'year': '2020 г.'})
+        self.assertEqual([t['key'] for t in camry_2020['fits']], ['econom', 'comfort'])
+        self.assertEqual([t['name'] for t in camry_2020['shown']], ['Комфорт'])
+        self.assertEqual(camry_2020['model'], 'Toyota Camry')
+        eqm5 = tariffs.card_tariffs(self.book, {'title': 'HongQi E-QM5', 'year': '2025'})
+        self.assertEqual([t['key'] for t in eqm5['fits']], ['comfort', 'comfort_plus', 'business', 'electro'])
+        self.assertEqual([t['key'] for t in eqm5['shown']], ['business', 'electro'])
+        self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, {'title': 'FAW HONGQI H5', 'year': 2024})['shown']],
+                         ['ultima'])
+        # Поправка города: в Астане (+2) Camry 2023 до «Бизнеса» не дотягивает.
+        camry_2023 = {'title': 'Toyota Camry', 'year': '2023'}
+        self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, camry_2023)['shown']], ['business'])
+        self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, camry_2023, 'astana')['shown']], ['comfort'])
+        # Без года и без книги — пусто, а не ошибка.
+        self.assertEqual(tariffs.card_tariffs(self.book, {'title': 'Toyota Camry', 'year': ''})['fits'], [])
+        self.assertEqual(tariffs.card_tariffs(None, camry_2023), {'fits': [], 'shown': [], 'model': None})
+
+    def test_real_file_knows_the_mockup_cards(self):
+        """Файл классификатора из репозитория знает все карточки макета, кроме Kia Soluto —
+        ей сотрудник аренды впишет имя модели в карточку."""
+        from rental import catalog, tariffs
+        from wiki import classifier
+        book = classifier.build_book(classifier.read_data())
+        missing = [card['title'] for card in catalog.seed_cards() if not tariffs.find_car(book, card['title'])]
+        self.assertEqual(missing, ['Kia Soluto'])
+
+
+class PhotoTests(unittest.TestCase):
+    """Фото машины: свой префикс в бакете, кадр и миниатюра, отказ без хранилища."""
+
+    def test_blob_path_has_own_prefix_and_safe_name(self):
+        from rental import photos
+        path = photos.blob_path_for('Фото машины.jpg')
+        self.assertTrue(path.startswith('rental/cars/'))
+        self.assertTrue(path.endswith('.jpg'))
+        self.assertNotIn(' ', path)
+        self.assertIn('_thumb_', photos.blob_path_for('a.webp', thumb=True))
+        self.assertEqual(photos.MAX_PER_CARD, 6)
+
+    def test_upload_puts_frame_and_thumb_with_cache_control(self):
+        from rental import photos
+        store = {}
+
+        class Blob:
+            def __init__(self, path):
+                self.path, self.cache_control = path, None
+
+            def upload_from_string(self, data, content_type=None):
+                store[self.path] = (data, content_type, self.cache_control)
+
+        class Client:
+            def bucket(self, _name):
+                return type('Bucket', (), {'blob': staticmethod(Blob)})()
+
+        gcs = {'bucket_name': lambda: 'b', 'client': lambda: Client()}
+        bucket, path, thumb = photos.upload(gcs, {'original_name': 'x.webp', 'data': b'1',
+                                                  'content_type': 'image/webp', 'thumb': b'2'})
+        self.assertEqual((bucket, len(store)), ('b', 2))
+        self.assertEqual(store[path], (b'1', 'image/webp', 'private, max-age=3600'))
+        self.assertTrue(thumb and '_thumb_' in thumb)
+        with self.assertRaises(photos.PhotoError):
+            photos.upload({}, {'original_name': 'x', 'data': b'', 'content_type': 'image/webp'})
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -233,9 +233,9 @@ def user_names(cursor, ids):
 
 _CARD_COLUMNS = ('id', 'title', 'car_class', 'price', 'year', 'fuel', 'color', 'age', 'insurance_class',
                  'insurance', 'first_day', 'office', 'yume_keys', 'position', 'is_active',
-                 'free_count', 'free_by_name', 'free_at')
+                 'free_count', 'free_by_name', 'free_at', 'classifier_key')
 _CARD_EDITABLE = ('title', 'car_class', 'price', 'year', 'fuel', 'color', 'age', 'insurance_class',
-                  'insurance', 'first_day', 'office', 'yume_keys')
+                  'insurance', 'first_day', 'office', 'yume_keys', 'classifier_key')
 
 
 def _card(row):
@@ -277,9 +277,11 @@ def create_card(cursor, card, ctx, now):
     position = cursor.fetchone()[0]
     cursor.execute("""
         INSERT INTO rental_cards (title, car_class, price, year, fuel, color, age, insurance_class, insurance,
-                                  first_day, office, yume_keys, position, created_by, created_at, updated_at)
+                                  first_day, office, yume_keys, classifier_key, position, created_by, created_at,
+                                  updated_at)
         VALUES (%(title)s, %(car_class)s, %(price)s, %(year)s, %(fuel)s, %(color)s, %(age)s, %(insurance_class)s,
-                %(insurance)s, %(first_day)s, %(office)s, %(yume_keys)s, %(position)s, %(by)s, %(now)s, %(now)s)
+                %(insurance)s, %(first_day)s, %(office)s, %(yume_keys)s, %(classifier_key)s, %(position)s, %(by)s,
+                %(now)s, %(now)s)
         RETURNING id
     """, dict(card, position=position, by=ctx['user_id'], now=now))
     card_id = cursor.fetchone()[0]
@@ -321,6 +323,81 @@ def card_log(cursor, card_id, limit=200):
          WHERE card_id = %s ORDER BY id DESC LIMIT %s
     """, (int(card_id), int(limit)))
     return [dict(zip(('field', 'old', 'new', 'by', 'at'), row)) for row in cursor.fetchall()]
+
+
+# ─── Фотографии карточки ────────────────────────────────────────────────────────
+
+_PHOTO_COLUMNS = ('id', 'card_id', 'bucket', 'blob_path', 'thumb_blob_path', 'content_type', 'original_name',
+                  'file_size', 'width', 'height', 'thumb_width', 'thumb_height', 'sort_order',
+                  'created_by_name', 'created_at')
+
+
+def _photo(row):
+    return dict(zip(_PHOTO_COLUMNS, row))
+
+
+def card_photos(cursor, card_ids):
+    """{card_id: [снимки по порядку]} — обложка первой."""
+    ids = [int(value) for value in card_ids]
+    if not ids:
+        return {}
+    cursor.execute("SELECT " + ', '.join(_PHOTO_COLUMNS) + " FROM rental_card_photos WHERE card_id = ANY(%s)"
+                   " ORDER BY card_id, sort_order, id", (ids,))
+    out = {}
+    for row in cursor.fetchall():
+        photo = _photo(row)
+        out.setdefault(photo['card_id'], []).append(photo)
+    return out
+
+
+def photo_count(cursor, card_id):
+    """(сколько снимков, последний sort_order) — карточку вызывающий уже держит FOR UPDATE."""
+    cursor.execute("SELECT COUNT(*), COALESCE(MAX(sort_order), -1) FROM rental_card_photos WHERE card_id = %s",
+                   (int(card_id),))
+    count, last = cursor.fetchone()
+    return int(count), int(last)
+
+
+def insert_photo(cursor, card_id, prepared, *, bucket, blob_path, thumb_path, sort_order, ctx, now):
+    cursor.execute("""
+        INSERT INTO rental_card_photos (card_id, bucket, blob_path, thumb_blob_path, content_type, original_name,
+                                        file_size, width, height, thumb_width, thumb_height, sort_order,
+                                        created_by, created_by_name, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (int(card_id), bucket, blob_path, thumb_path, prepared['content_type'], prepared['original_name'],
+          prepared['file_size'], prepared.get('width'), prepared.get('height'), prepared.get('thumb_width'),
+          prepared.get('thumb_height'), int(sort_order), ctx['user_id'], ctx.get('name') or '', now))
+    photo_id = cursor.fetchone()[0]
+    _log_card(cursor, card_id, 'photo_added', None, prepared['original_name'], ctx, now)
+    return photo_id
+
+
+def get_photo(cursor, card_id, photo_id):
+    cursor.execute("SELECT " + ', '.join(_PHOTO_COLUMNS) + " FROM rental_card_photos WHERE id = %s AND card_id = %s",
+                   (int(photo_id), int(card_id)))
+    row = cursor.fetchone()
+    return _photo(row) if row else None
+
+
+def delete_photo(cursor, photo, ctx, now):
+    """Снимает строку. Возвращает [(bucket, path)] — блобы удаляет вызывающий ПОСЛЕ фиксации:
+    удалить файл раньше, чем база подтвердила удаление строки, значило бы оставить запись в пустоту."""
+    cursor.execute("DELETE FROM rental_card_photos WHERE id = %s", (photo['id'],))
+    _log_card(cursor, photo['card_id'], 'photo_removed', photo.get('original_name'), None, ctx, now)
+    refs = [(photo['bucket'], photo['blob_path'])]
+    if photo.get('thumb_blob_path'):
+        refs.append((photo['bucket'], photo['thumb_blob_path']))
+    return refs
+
+
+def make_cover(cursor, photo, ctx, now):
+    """Снимок — первым; остальные сдвигаются, порядок между ними прежний."""
+    cursor.execute("SELECT id FROM rental_card_photos WHERE card_id = %s ORDER BY sort_order, id", (photo['card_id'],))
+    ordered = [photo['id']] + [row[0] for row in cursor.fetchall() if row[0] != photo['id']]
+    for position, photo_id in enumerate(ordered):
+        cursor.execute("UPDATE rental_card_photos SET sort_order = %s WHERE id = %s", (position, photo_id))
+    _log_card(cursor, photo['card_id'], 'photo_cover', None, photo.get('original_name'), ctx, now)
 
 
 # ─── Снимок парка Yume ──────────────────────────────────────────────────────────

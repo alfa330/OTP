@@ -18,7 +18,7 @@ import logging
 import threading
 from datetime import timedelta
 
-from . import access, catalog, collect, queries, rules
+from . import access, catalog, collect, photos, queries, rules
 from .sources import SourceError, YumeSource
 
 GPS_SOURCES = ('wialon', 'glonass', 'efir')
@@ -263,6 +263,46 @@ class RentalService:
         return 'ok'
 
     # ─── Направления ────────────────────────────────────────────────────────
+
+    # ─── Фотографии карточки ─────────────────────────────────────────────────
+
+    def attach_photo(self, ctx, card_id, prepared, *, bucket, blob_path, thumb_path):
+        """Строка снимка после загрузки в бакет. ('ok', id) / ('forbidden'|'not_found'|'photo_limit', None).
+        Блобы при отказе убирает вызывающий — он их и клал."""
+        if not access.can_edit_cards(ctx):
+            return 'forbidden', None
+        now = self._now()
+        with self._cursor() as cursor:
+            current = queries.get_card(cursor, card_id, for_update=True)
+            if not current or not current['is_active']:
+                return 'not_found', None
+            count, last = queries.photo_count(cursor, card_id)
+            if count >= photos.MAX_PER_CARD:
+                return 'photo_limit', None
+            return 'ok', queries.insert_photo(cursor, card_id, prepared, bucket=bucket, blob_path=blob_path,
+                                              thumb_path=thumb_path, sort_order=last + 1, ctx=ctx, now=now)
+
+    def drop_photo(self, ctx, card_id, photo_id):
+        """('ok', [(bucket, path)…] для удаления из бакета после фиксации) / ('forbidden'|'not_found', [])."""
+        if not access.can_edit_cards(ctx):
+            return 'forbidden', []
+        with self._cursor() as cursor:
+            photo = queries.get_photo(cursor, card_id, photo_id)
+            if not photo:
+                return 'not_found', []
+            return 'ok', queries.delete_photo(cursor, photo, ctx, self._now())
+
+    def cover_photo(self, ctx, card_id, photo_id):
+        if not access.can_edit_cards(ctx):
+            return 'forbidden'
+        with self._cursor() as cursor:
+            photo = queries.get_photo(cursor, card_id, photo_id)
+            if not photo:
+                return 'not_found'
+            queries.make_cover(cursor, photo, ctx, self._now())
+        return 'ok'
+
+    # ─── Направления ─────────────────────────────────────────────────────────
 
     def create_direction(self, ctx, payload):
         """«Направить в офис» (ТЗ 3.2). ('ok', направление) / ('forbidden'|'no_card'|'no_free', None) /

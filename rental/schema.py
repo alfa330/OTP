@@ -202,6 +202,34 @@ _STATEMENTS = [
     )
     """,
 
+    # Фотографии машины (владелец 28.10.2026): файл в бакете, строка здесь; первая по sort_order —
+    # обложка. Пути в бакете наружу не отдаются — фронт получает подписанный адрес (rental/photos.py).
+    """
+    CREATE TABLE IF NOT EXISTS rental_card_photos (
+        id               SERIAL PRIMARY KEY,
+        card_id          INTEGER NOT NULL REFERENCES rental_cards(id) ON DELETE CASCADE,
+        bucket           VARCHAR(255) NOT NULL,
+        blob_path        TEXT NOT NULL,
+        thumb_blob_path  TEXT,
+        content_type     VARCHAR(100) NOT NULL DEFAULT 'image/webp',
+        original_name    VARCHAR(255),
+        file_size        BIGINT NOT NULL DEFAULT 0,
+        width            INTEGER,
+        height           INTEGER,
+        thumb_width      INTEGER,
+        thumb_height     INTEGER,
+        sort_order       INTEGER NOT NULL DEFAULT 0,
+        created_by       INTEGER,
+        created_by_name  VARCHAR(200),
+        created_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_rental_card_photos_card ON rental_card_photos (card_id, sort_order, id)",
+
+    # Имя модели в «Классификаторе авто», когда по названию карточки она не находится сама
+    # (rental/tariffs.py). Колонка появилась после выкладки карточек — отсюда ALTER.
+    "ALTER TABLE rental_cards ADD COLUMN IF NOT EXISTS classifier_key VARCHAR(120)",
+
     # История не правится и не удаляется (ТЗ 10.3: «Удаление пользователем истории недоступно»).
     """
     CREATE OR REPLACE FUNCTION rental_history_append_only() RETURNS trigger AS $$

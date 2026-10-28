@@ -40,7 +40,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, catalog, queries, report as report_xlsx, rules
+from . import access, catalog, photos, queries, report as report_xlsx, rules, tariffs
 from .service import Busy
 
 
@@ -86,8 +86,12 @@ def public_row(row, names):
     }
 
 
-def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service):
+def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service,
+                           gcs=None):
+    """gcs — {'bucket_name': () -> str, 'client': () -> Client} для фотографий машин (как у «Посылок»);
+    без него снимки не грузятся, а раздел работает."""
     bp = Blueprint('rental', __name__, url_prefix='/api/rental')
+    gcs = gcs or {}
 
     def rental_route(rule, methods=('GET',)):
         all_methods = tuple(methods) + ('OPTIONS',)
@@ -268,6 +272,8 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         'not_found': ('Не найдено — обновите страницу', 'RENTAL_NOT_FOUND', 404),
         'no_card': ('Такой карточки машины уже нет — обновите наличие', 'RENTAL_NO_CARD', 404),
         'no_free': ('Свободных машин нет — направить нельзя', 'RENTAL_NO_FREE', 409),
+        'photo_limit': ('Больше %d фотографий к одной карточке не добавить' % photos.MAX_PER_CARD,
+                        'RENTAL_PHOTO_LIMIT', 409),
     }
 
     def _outcome(outcome, message=None):
@@ -279,7 +285,7 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
     def _need(allowed):
         return None if allowed else _bad('Это действие вам не открыто', 'RENTAL_FORBIDDEN', 403)
 
-    def public_card(card, busy, with_keys):
+    def public_card(card, busy, with_keys, book=None, photo_rows=None):
         payload = {key: card.get(key) for key in ('id', 'title', 'car_class', 'price', 'year', 'fuel', 'color',
                                                   'age', 'insurance_class', 'insurance', 'first_day', 'office')}
         # Свободные — только ручные (ТЗ 3.1); ни разу не указаны — None, а не 0.
@@ -287,9 +293,20 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         payload['free_by'] = card.get('free_by_name') if card.get('free_at') else None
         payload['free_at'] = _iso(card.get('free_at'))
         payload['busy'] = busy.get(card['id'], {'in_rent': 0, 'booked': 0})
+        # Тарифы Яндекса — из «Классификатора авто» (rental/tariffs.py); фото — подписанными адресами.
+        payload['tariffs'] = tariffs.card_tariffs(book, card)
+        payload['photos'] = photos.sign_urls(gcs, photo_rows or [])
         if with_keys:
             payload['yume_keys'] = card.get('yume_keys') or []
+            payload['classifier_key'] = card.get('classifier_key')
         return payload
+
+    def _card_payload(card_id, ctx):
+        """Карточка целиком — с тарифами и фото: ответ правки заменяет карточку на экране без потерь."""
+        with db._get_cursor() as cursor:
+            card = queries.get_card(cursor, card_id)
+            rows = queries.card_photos(cursor, [card_id]).get(card['id'], []) if card else []
+        return public_card(card, {}, access.can_edit_cards(ctx), tariffs.book(), rows) if card else None
 
     def public_direction(item):
         return {
@@ -322,18 +339,23 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         except Exception:  # noqa: BLE001 — экран показывает прежний снимок, а не 500
             logging.exception('rental: не поставилось обновление снимка Yume')
         caps = access.capabilities(ctx)
+        book = tariffs.book()
         with db._get_cursor() as cursor:
             cards = queries.cards(cursor)
             sync = queries.fleet_sync(cursor)
             parks = queries.sales_parks(cursor) if caps['send'] else []
+            photo_rows = queries.card_photos(cursor, [card['id'] for card in cards])
         busy = catalog.count_busy(sync['cars'], cards)
         return jsonify({
             'capabilities': caps,
-            'cards': [public_card(card, busy, caps['edit_cards']) for card in cards],
+            'cards': [public_card(card, busy, caps['edit_cards'], book, photo_rows.get(card['id'])) for card in cards],
+            # Отбор по тарифам — тарифы города из классификатора (владелец 28.10.2026); пусто — отбора нет.
+            'tariffs': tariffs.city_tariffs(book),
             'sync': {'synced_at': _iso(sync['synced_at']), 'error': sync['error'],
                      'refreshing': service.fleet_refreshing()},
             'parks': parks,
             'office': {'name': catalog.OFFICE, 'phone': catalog.OFFICE_PHONE},
+            'photos_max': photos.MAX_PER_CARD,
             'server_time': _iso(queries.now_almaty()),
         })
 
@@ -351,7 +373,7 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         outcome, result = service.save_card(ctx, _payload())
         if outcome != 'ok':
             return _outcome(outcome, result)
-        return jsonify({'card': public_card(result, {}, True)}), 201
+        return jsonify({'card': _card_payload(result['id'], ctx)}), 201
 
     @rental_route('/cards/<int:card_id>', methods=('PUT', 'DELETE'))
     def rental_card_update(card_id, ctx):
@@ -361,14 +383,14 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         outcome, result = service.save_card(ctx, _payload(), card_id)
         if outcome != 'ok':
             return _outcome(outcome, result)
-        return jsonify({'card': public_card(result, {}, True)})
+        return jsonify({'card': _card_payload(card_id, ctx)})
 
     @rental_route('/cards/<int:card_id>/free', methods=('PUT',))
     def rental_card_free(card_id, ctx):
         outcome, result = service.set_free_count(ctx, card_id, _payload().get('free_count'))
         if outcome != 'ok':
             return _outcome(outcome, result)
-        return jsonify({'card': public_card(result, {}, access.can_edit_cards(ctx))})
+        return jsonify({'card': _card_payload(card_id, ctx)})
 
     @rental_route('/cards/<int:card_id>/log')
     def rental_card_log(card_id, ctx):
@@ -379,6 +401,68 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
             entries = queries.card_log(cursor, card_id)
         return jsonify({'items': public_log(entries, dict(catalog.CARD_LABELS, created='Карточка заведена',
                                                           hidden='Карточка скрыта'))})
+
+    # ─── Фотографии карточки ─────────────────────────────────────────────────
+    # Как у «Посылок»: один файл на запрос (очередь грузится по одному, осечка на третьем не уносит
+    # два уехавших), кадр переводится в WebP, адреса — подписанные ссылки GCS.
+
+    def _uploaded_file():
+        """Файл из multipart: (файл, размер) либо (None, None). На multipart get_json() пуст."""
+        item = request.files.get('file')
+        if item is None:
+            return None, None
+        item.stream.seek(0, 2)
+        size = item.stream.tell()
+        item.stream.seek(0)
+        return item, size
+
+    @rental_route('/cards/<int:card_id>/photos', methods=('POST',))
+    def rental_card_photo_add(card_id, ctx):
+        denied = _need(access.can_edit_cards(ctx))
+        if denied:
+            return denied
+        if (request.content_length or 0) > photos.MAX_BYTES:
+            return _bad('Файл больше %d МБ' % (photos.MAX_BYTES // (1024 * 1024)), 'RENTAL_PHOTO_TOO_LARGE', 413)
+        item, size = _uploaded_file()
+        if item is None:
+            return _bad('Файл не выбран', 'RENTAL_PHOTO_REJECTED')
+        issue = photos.photo_issue(filename=item.filename, content_type=item.mimetype, size=size or 0)
+        if issue:
+            return _bad(issue, 'RENTAL_PHOTO_REJECTED')
+        try:
+            prepared = photos.prepare(item.read(), filename=item.filename, content_type=item.mimetype)
+            bucket, blob_path, thumb_path = photos.upload(gcs, prepared)
+        except photos.PhotoError as refusal:
+            return _bad(refusal.message, refusal.code, refusal.status)
+        except Exception:  # noqa: BLE001 — бакет не ответил: человеку — причина, в лог — трейсбек
+            logging.exception('rental: фотография не уехала в бакет')
+            return _bad('Не удалось сохранить фотографию', 'RENTAL_PHOTO_UPLOAD_FAILED', 502)
+        refs = [(bucket, blob_path)] + ([(bucket, thumb_path)] if thumb_path else [])
+        try:
+            outcome, _photo_id = service.attach_photo(ctx, card_id, prepared, bucket=bucket, blob_path=blob_path,
+                                                      thumb_path=thumb_path)
+        except Exception:
+            photos.drop_blobs(gcs, refs)
+            raise
+        if outcome != 'ok':
+            photos.drop_blobs(gcs, refs)
+            return _outcome(outcome)
+        return jsonify({'card': _card_payload(card_id, ctx)}), 201
+
+    @rental_route('/cards/<int:card_id>/photos/<int:photo_id>', methods=('DELETE',))
+    def rental_card_photo_drop(card_id, photo_id, ctx):
+        outcome, refs = service.drop_photo(ctx, card_id, photo_id)
+        if outcome != 'ok':
+            return _outcome(outcome)
+        photos.drop_blobs(gcs, refs)
+        return jsonify({'card': _card_payload(card_id, ctx)})
+
+    @rental_route('/cards/<int:card_id>/photos/<int:photo_id>/cover', methods=('PUT',))
+    def rental_card_photo_cover(card_id, photo_id, ctx):
+        outcome = service.cover_photo(ctx, card_id, photo_id)
+        if outcome != 'ok':
+            return _outcome(outcome)
+        return jsonify({'card': _card_payload(card_id, ctx)})
 
     # ─── Направления ─────────────────────────────────────────────────────────
 
