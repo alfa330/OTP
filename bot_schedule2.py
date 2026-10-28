@@ -19016,9 +19016,8 @@ def change_password():
 
         # Authorization checks. A formally assigned department head may manage
         # any non-admin employee in that department regardless of the head's
-        # base role; regular admins/SVs retain their previous permissions.
+        # base role; a regular SV — operators of their own department.
         requester_role = _normalize_user_role(requester[3])
-        target_role = _normalize_user_role(target_user[3])
         if requester_id != user_id:
             headed_dept_id = _headed_department_id(requester_id)
             # Кадровик меняет учётные данные кому угодно, включая админов:
@@ -19039,8 +19038,17 @@ def change_password():
             elif requester_role == 'operator':
                 return jsonify({"error": "Operators can only change their own password"}), 403
             elif requester_role == 'sv':
-                if target_role != 'operator' or target_user[6] != requester_id:
-                    return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
+                # Задача #380: СВ меняет пароль любому оператору своего отдела, а не только
+                # тем, у кого он записан руководителем. Граница — та же, что у остальных
+                # правок СВ в карточке сотрудника.
+                if not _requester_can_access_target_user(
+                    requester,
+                    requester_id,
+                    target_user,
+                    allow_self=False,
+                    supervisor_target_roles=('operator',)
+                ):
+                    return jsonify({"error": "Супервайзер меняет пароль только операторам своего отдела"}), 403
             elif not _is_admin_role(requester_role):
                 return jsonify({"error": "Unauthorized to change this user's password"}), 403
 
@@ -20098,9 +20106,8 @@ def change_login():
 
         # Authorization checks. A formally assigned department head may manage
         # any non-admin employee in that department regardless of the head's
-        # base role; regular admins/SVs retain their previous permissions.
+        # base role; a regular SV — operators of their own department.
         requester_role = _normalize_user_role(requester[3])
-        target_role = _normalize_user_role(target_user[3])
         if requester_id != user_id:
             headed_dept_id = _headed_department_id(requester_id)
             # Кадровик меняет учётные данные кому угодно, включая админов:
@@ -20121,8 +20128,15 @@ def change_login():
             elif requester_role == 'operator':
                 return jsonify({"error": "Operators can only change their own login"}), 403
             elif requester_role == 'sv':
-                if target_role != 'operator' or target_user[6] != requester_id:
-                    return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
+                # Задача #380: как и пароль — любому оператору своего отдела.
+                if not _requester_can_access_target_user(
+                    requester,
+                    requester_id,
+                    target_user,
+                    allow_self=False,
+                    supervisor_target_roles=('operator',)
+                ):
+                    return jsonify({"error": "Супервайзер меняет логин только операторам своего отдела"}), 403
             elif not _is_admin_role(requester_role):
                 return jsonify({"error": "Unauthorized to change this user's login"}), 403
 
