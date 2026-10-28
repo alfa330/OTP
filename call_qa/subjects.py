@@ -239,12 +239,31 @@ def journal_same_scale_sql(journal: str, imported: str) -> str:
     критерии без единой ошибки, а согласие ИИ и человека стало бы мусором. Семья —
     сама шкала и её архивные версии (canonical_id): после правки критериев оценки
     журнала перевешиваются на архивную строку. У звонка без пометки условие
-    пропускает всё — как и было."""
+    пропускает всё — как и было.
+
+    Семья нужна сохранению «Моей оценки»: новая оценка в журнал ложится переоценкой
+    прежней строки, а не второй строкой того же звонка. Показывать вердикты рядом с
+    оценкой ИИ можно только при тех же критериях — это same_criteria_sql."""
     return (f"({imported}.qa_direction_id IS NULL OR EXISTS ("
             f"SELECT 1 FROM directions jd"
             f" JOIN directions qd ON qd.id = {imported}.qa_direction_id"
             f" WHERE jd.id = {journal}.direction_id"
             f" AND COALESCE(jd.canonical_id, jd.id) = COALESCE(qd.canonical_id, qd.id)))")
+
+
+def same_criteria_sql(direction: str, criteria: str) -> str:
+    """SQL-условие: оценка человека, поставленная по шкале `direction` (directions.id),
+    сопоставима с оценкой ИИ, у которой критерии `criteria` (jsonb-массив карточки,
+    ai_review_cache.payload->'criteria'): те же критерии в том же порядке.
+
+    Вердикты человека лежат позиционно (scores[idx]). Правка критериев уводит его
+    оценку на архивную строку шкалы (save_directions перевешивает журнал и «Мою
+    оценку»), а после «Переоценить» ИИ оценивает уже по новой шкале — без сверки старые
+    вердикты легли бы на чужие критерии (обзвон АВР 28.10.2026: было 11 критериев,
+    стало 13). Сверяются имена по порядку: правка описания или веса оценку не прячет."""
+    return (f"EXISTS (SELECT 1 FROM directions hd WHERE hd.id = {direction}"
+            f" AND jsonb_path_query_array(hd.criteria, '$[*].name')"
+            f" = jsonb_path_query_array({criteria}, '$[*].name'))")
 
 
 # ── загрузка субъекта ────────────────────────────────────────────────────────
@@ -381,11 +400,15 @@ def _load_imported_call(imported_call_id: int) -> dict:
                  -- запасным — на случай оператора без направления.
                  LEFT JOIN departments dep
                         ON dep.id = COALESCE(d.department_id, u.department_id)
+                 -- Балл человека — только по той шкале, по которой звонок оценит ИИ:
+                 -- он застывает в карточке прогона рядом с баллом ИИ.
                  LEFT JOIN LATERAL (
                      SELECT c.score FROM calls c
                       WHERE c.imported_call_id = ic.id
                         AND COALESCE(c.is_draft, FALSE) = FALSE
                         AND """ + journal_same_scale_sql("c", "ic") + """
+                        AND """ + same_criteria_sql("c.direction_id",
+                                                    "COALESCE(dq.criteria, d.criteria)") + """
                       ORDER BY c.created_at DESC LIMIT 1
                  ) hc ON TRUE
                 WHERE ic.id = %s""", (imported_call_id,))

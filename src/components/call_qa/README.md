@@ -463,13 +463,24 @@ immutable-прогон не трогается. `_ai_score` и причины о
 - `POST /api/ai-qa/human-review` ← `{ call_id, subject_kind, direction_id, evaluation_run_id,
   criteria_names[], scores[], criterion_comments[], comment, comment_visible_to_operator,
   question_resolved, resolved_first_contact, count_in_quality }` →
-  `{ journal_call_id, human_score, has_human_review, human_review, my_review, criteria:[{idx, human, human_comment}] }`.
+  `{ journal_call_id, human_score, has_human_review, human_review, previous_scale_review, my_review,
+  criteria:[{idx, human, human_comment}] }`.
   `400` — неполная/невалидная оценка (текст объясняет, чего не хватает), `409 scale_changed` —
   шкала карточки не совпала с действующей, `403 journal_locked` — переоценка чужой строки без прав.
 - Карточка (`GET /api/ai-qa/call/:id`) дополнительно несёт `human_review: { call_id, evaluator,
   evaluator_id, datetime, score, is_mine }`, `my_review` (форма `human_review.serialise`),
   `ai_review: { outcome, reviewed_at, reviewer } | null` (разобран ли прогон — `_attach_ai_review`),
-  `criteria[].weight/description` из живой шкалы, `scale_size`, `scale_changed`.
+  `criteria[].weight/description` из живой шкалы, `scale_size`, `scale_changed`,
+  `previous_scale_review: { call_id, score, evaluator, datetime } | null` — строка журнала по
+  прежней версии шкалы (см. ниже).
+- Оценка человека ложится на оценку ИИ, только если поставлена по тем же критериям в том же
+  порядке (`subjects.same_criteria_sql` в списках, согласии и сводке, `_human_scale_check` в
+  карточке): правка критериев перевешивает журнал и «Мою оценку» на архивную строку шкалы
+  (`save_directions`), и после «Переоценить» их вердикты легли бы на чужие критерии. Такая
+  строка журнала в карточке — только серым баллом «Человек · прежняя шкала»
+  (`previous_scale_review`); «Моя оценка» по ней панель не заполняет, а сохранение «в
+  качество» ложится переоценкой этой строки. Звонка журнала (`call`) сверка не касается — его
+  оценка человека и есть сама строка.
 - Звонок из АТС, у которого запись ещё не доехала в облако (мост CDR у ОП, ссылка Binotel у
   Тез КЦ), отвечает `202 { status:'audio_pending', stage:'downloading'|'error'|'missing',
   source:'cdr'|'binotel'|'oktell', job, job_error, retry_after }` вместо `404 «нет записи»`.

@@ -29377,8 +29377,9 @@ class Database:
         - имя / файл / модель расчёта меняются НА МЕСТЕ;
         - изменение критериев уводит старую шкалу в архивную строку
           (is_active=FALSE, canonical_id -> живая строка) и перевешивает на неё
-          исторические оценки (calls, калибровки) — старые оценки продолжают
-          отображаться по той шкале, по которой ставились (баллы позиционные);
+          исторические оценки (calls, калибровки, «Моя оценка» ИИ-оценки) —
+          старые оценки продолжают отображаться по той шкале, по которой
+          ставились (баллы позиционные);
         - запись без id (legacy-клиент) матчится по имени среди активных
           направлений скоупа, иначе создаётся новое направление (version=1);
         - активные направления скоупа, отсутствующие в списке, деактивируются,
@@ -29493,6 +29494,15 @@ class Database:
                 for frozen_table in ("calls", "calibration_rooms", "calibration_room_calls"):
                     cursor.execute(
                         f"UPDATE {frozen_table} SET direction_id = %s WHERE direction_id = %s",
+                        (archive_id, existing["id"]))
+                # «Моя оценка» карточки ИИ-оценки тоже позиционная, а версии шкалы у неё,
+                # кроме direction_id, нет: без перевеса после «Переоценить» её вердикты
+                # легли бы на новые критерии. Таблица — схемы call_qa, на голой базе её
+                # может не быть.
+                cursor.execute("SELECT to_regclass('public.ai_human_reviews') IS NOT NULL")
+                if cursor.fetchone()[0]:
+                    cursor.execute(
+                        "UPDATE ai_human_reviews SET direction_id = %s WHERE direction_id = %s",
                         (archive_id, existing["id"]))
                 cursor.execute("""
                     UPDATE directions

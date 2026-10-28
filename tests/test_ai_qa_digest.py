@@ -406,15 +406,24 @@ class HumanReviewSourceTests(unittest.TestCase):
     оценка» — и та только по той же шкале."""
 
     class _Cursor:
-        def __init__(self, journal, reviews):
+        def __init__(self, journal, reviews, scales=None):
             self.journal, self.reviews, self.rows, self.sql = journal, reviews, [], []
+            self.scales = scales or {}
 
         def execute(self, sql, params=None):
             self.sql.append(sql)
-            self.rows = self.reviews if "ai_human_reviews" in sql else self.journal
+            if sql.startswith("SELECT id, criteria FROM directions"):
+                # Имена критериев шкал (живой и архивной строки) — для сверки с оценкой ИИ.
+                self.rows = [(direction_id, [{"name": name} for name in names])
+                             for direction_id, names in self.scales.items() if direction_id in params[0]]
+            else:
+                self.rows = self.reviews if "ai_human_reviews" in sql else self.journal
 
         def fetchall(self):
             return self.rows
+
+    # Имена критериев шкалы по idx — те же, что у оценки ИИ из _criteria().
+    NAMES = ["Имя", "Итог", "Грубость"]
 
     def _criteria(self):
         # idx — позиция критерия в шкале; в карточке их порядок может не совпадать.
@@ -425,10 +434,10 @@ class HumanReviewSourceTests(unittest.TestCase):
     def test_journal_row_wins_and_is_read_by_criterion_idx(self):
         talk = _talk(1, kind="imported_call", subject_id=55, criteria=self._criteria())
         journal = [(55, ["Correct", "Error", "Correct"], 92, "снял грубость",
-                    ["", "", "ругался водитель, не оператор"])]
+                    ["", "", "ругался водитель, не оператор"], 73)]
         # «Моя оценка» другого содержания — журнал важнее.
         reviews = [(55, ["Incorrect", "Incorrect", "Incorrect"], [], 10, "", 73)]
-        data.attach_human_reviews(self._Cursor(journal, reviews), [talk])
+        data.attach_human_reviews(self._Cursor(journal, reviews, {73: self.NAMES}), [talk])
         human = talk["human"]
         self.assertEqual(human["source"], "journal")
         self.assertEqual(human["score"], 92.0)
@@ -452,18 +461,43 @@ class HumanReviewSourceTests(unittest.TestCase):
 
     def test_my_review_counts_only_on_the_same_scale(self):
         talk = _talk(2, kind="wz_episode", subject_id=77, criteria=self._criteria(), direction=73)
+        scales = {73: self.NAMES, 74: ["Имя", "Итог", "Вежливость"]}
         same = [(77, ["Correct", "Correct", "Incorrect"], ["", "", ""], 80, "", 73)]
-        data.attach_human_reviews(self._Cursor([], same), [talk])
+        data.attach_human_reviews(self._Cursor([], same, scales), [talk])
         self.assertEqual(talk["human"]["source"], "review")
         self.assertEqual([c["position"] for c in talk["human"]["changes"]], [0])
-        # Шкалу правили: позиций стало больше — вердикты легли бы на чужие критерии.
+        # Шкалу правили: позиций стало больше — вердикты легли бы на чужие критерии,
+        # поэтому такая оценка — не проверка человека вовсе (и балл её не в счёт).
         shifted = [(77, ["Correct", "Correct", "Incorrect", "Correct"], [], 80, "", 73)]
-        data.attach_human_reviews(self._Cursor([], shifted), [talk])
-        self.assertEqual(talk["human"]["changes"], [])
+        data.attach_human_reviews(self._Cursor([], shifted, scales), [talk])
+        self.assertIsNone(talk["human"])
         other_scale = [(77, ["Correct", "Correct", "Incorrect"], [], 80, "", 74)]
-        data.attach_human_reviews(self._Cursor([], other_scale), [talk])
-        self.assertEqual(talk["human"]["changes"], [])
+        data.attach_human_reviews(self._Cursor([], other_scale, scales), [talk])
+        self.assertIsNone(talk["human"])
         self.assertTrue(data.is_critical_failure(talk))
+
+    def test_journal_by_a_previous_scale_version_is_not_trusted(self):
+        # 28.10.2026, обзвон АВР: шкалу сменили, строка журнала модератора перевешена
+        # на архив (97), а ИИ уже переоценил звонок по новой (96) — её вердикты по
+        # позициям легли бы на другие критерии.
+        talk = _talk(4, kind="imported_call", subject_id=88, criteria=self._criteria(), direction=96)
+        journal = [(88, ["Incorrect", "Correct", "Correct"], 61, "", [], 97)]
+        scales = {96: self.NAMES, 97: ["Предложение подписать", "Помощь", "Проверка"]}
+        data.attach_human_reviews(self._Cursor(journal, [], scales), [talk])
+        self.assertIsNone(talk["human"])
+        # Новая «Моя оценка» по новой шкале — уже проверка человека.
+        reviews = [(88, ["Correct", "Correct", "Correct"], [], 100, "", 96)]
+        data.attach_human_reviews(self._Cursor(journal, reviews, scales), [talk])
+        self.assertEqual(talk["human"]["source"], "review")
+
+    def test_journal_call_is_its_own_human_review(self):
+        # У звонка журнала оценка человека — сама строка: переименование критериев
+        # шкалы (ОП, «Идентификация клиента» → «водителя») её не прячет.
+        talk = _talk(5, kind="call", subject_id=91, criteria=self._criteria(), direction=73)
+        journal = [(91, ["Correct", "Correct", "Correct"], 100, "", [], 70)]
+        scales = {70: ["Имя клиента", "Итог", "Грубость"]}
+        data.attach_human_reviews(self._Cursor(journal, [], scales), [talk])
+        self.assertEqual(talk["human"]["source"], "journal")
 
     def test_journal_queries_cover_every_subject_kind(self):
         self.assertEqual(set(data._JOURNAL_BATCH_SQL), set(api_human_review_kinds()))

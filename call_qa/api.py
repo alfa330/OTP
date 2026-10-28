@@ -304,16 +304,25 @@ _SUBJECT_OPERATOR = ("COALESCE(uc.name, ue.name, COALESCE(ui.name, ic.operator_n
 # уже умеет показывать (так ведут себя эпизоды Верификаторов с самого начала).
 # У звонка из АТС со своей шкалой в расчёт идёт только строка журнала той же
 # шкалы (subjects.journal_same_scale_sql): балл по «Основе» рядом с баллом ИИ по
-# шкале обзвона сравнивал бы несравнимое.
+# шкале обзвона сравнивал бы несравнимое. И у любого субъекта, кроме звонка
+# журнала, — только оценка по тем же критериям, что у оценки ИИ рядом
+# (subjects.same_criteria_sql): после правки шкалы и «Переоценить» прежняя оценка
+# человека относится к другой версии шкалы.
+def _human_same_criteria(direction: str) -> str:
+    return subjects_mod.same_criteria_sql(direction, "rc.payload->'criteria'")
+
+
 _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                  (SELECT hc.score FROM calls hc
                    WHERE rc.subject_kind = 'imported_call' AND hc.imported_call_id = ic.id
                      AND COALESCE(hc.is_draft, FALSE) = FALSE
                      AND """ + subjects_mod.journal_same_scale_sql("hc", "ic") + """
+                     AND """ + _human_same_criteria("hc.direction_id") + """
                    ORDER BY hc.created_at DESC LIMIT 1),
                  (SELECT hc.score FROM calls hc
                    WHERE rc.subject_kind = 'c2d_snapshot' AND hc.c2d_snapshot_id = cs.id
                      AND COALESCE(hc.is_draft, FALSE) = FALSE
+                     AND """ + _human_same_criteria("hc.direction_id") + """
                    ORDER BY hc.created_at DESC LIMIT 1),
                  (SELECT hc.score FROM c2d_chat_snapshots s
                    JOIN calls hc ON hc.c2d_snapshot_id = s.id
@@ -321,6 +330,7 @@ _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                     AND s.wz_channel_id = e.channel_id AND s.wz_chat_id = e.chat_id
                     AND s.episode_start = e.started_at
                     AND COALESCE(hc.is_draft, FALSE) = FALSE
+                    AND """ + _human_same_criteria("hc.direction_id") + """
                   ORDER BY hc.created_at DESC LIMIT 1),
                  (SELECT hc.score FROM c2d_chat_snapshots s
                    JOIN calls hc ON hc.c2d_snapshot_id = s.id
@@ -328,10 +338,12 @@ _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                     AND s.wz_channel_id = ce.license_id::text || ':' || ce.messenger_type
                     AND s.wz_chat_id = ce.chat_id AND s.episode_start = ce.started_at
                     AND COALESCE(hc.is_draft, FALSE) = FALSE
+                    AND """ + _human_same_criteria("hc.direction_id") + """
                   ORDER BY hc.created_at DESC LIMIT 1),
                  (SELECT hr.score FROM ai_human_reviews hr
                    WHERE hr.subject_kind = rc.subject_kind AND hr.call_id = rc.call_id
                      AND hr.score IS NOT NULL
+                     AND """ + _human_same_criteria("hr.direction_id") + """
                    ORDER BY hr.updated_at DESC LIMIT 1))"""
 # Последняя ветка COALESCE — «Моя оценка» из карточки (ai_human_reviews), полная,
 # но не отправленная в журнал: человек оценил разговор целиком, и в списках это
@@ -1818,15 +1830,51 @@ def _attach_scale(payload: dict) -> None:
                                    if isinstance(meta.get("deficiency"), dict) else None)
 
 
-def _my_review(subject_kind: str, call_id: int, reviewer_id: int, journal: dict | None):
+def _criteria_names_by_direction(direction_ids) -> dict:
+    """Имена критериев шкал по id строки directions — живой и архивной — одним запросом."""
+    ids = sorted({int(d) for d in direction_ids if d is not None})
+    if not ids:
+        return {}
+    conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, criteria FROM directions WHERE id = ANY(%s)", (ids,))
+            return {int(direction_id): [c.get("name") for c in (criteria or []) if isinstance(c, dict)]
+                    for direction_id, criteria in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _human_scale_check(payload: dict, criteria: list, subject_kind: str, *direction_ids):
+    """Проверка «оценка человека по шкале direction_id сопоставима с этой карточкой»:
+    те же критерии в том же порядке — как subjects.same_criteria_sql в списках.
+
+    Вердикты человека лежат позиционно, а после правки шкалы и «Переоценить» карточка
+    уже по новым критериям: прежняя оценка (её строка перевешена на архив шкалы) легла
+    бы на чужие критерии. У звонка журнала оценка человека — сама строка, её не
+    сверяем. Карточке без имён (human_review_state) имена даёт живая шкала."""
+    if subject_kind == config.SUBJECT_CALL:
+        return lambda direction_id: True
+    by_idx = {c.get("idx"): c.get("name") for c in criteria if isinstance(c.get("idx"), int)}
+    card = [by_idx.get(i) for i in range(len(by_idx))]
+    live = None if card and all(name is not None for name in card) else payload.get("direction_id")
+    try:
+        names = _criteria_names_by_direction([*direction_ids, live])
+    except Exception:
+        logging.exception("ai-qa: не удалось сверить шкалу оценки человека %s %s",
+                          subject_kind, payload.get("id"))
+        return lambda direction_id: True
+    if live is not None:
+        card = names.get(int(live))
+    if not card:
+        return lambda direction_id: True
+    return lambda direction_id: direction_id is None or names.get(int(direction_id)) == card
+
+
+def _my_review(row: dict | None, journal: dict | None, reviewer_id: int):
     """«Моя оценка» этого проверяющего: своя строка ai_human_reviews, а без неё —
     строка журнала, если её сделал он же (тогда карточка показывает её как свою и
     правит переоценкой)."""
-    try:
-        row = human_review_mod.get_review(subject_kind, call_id, reviewer_id)
-    except Exception:
-        logging.exception("ai-qa: не удалось прочитать «Мою оценку» %s %s", subject_kind, call_id)
-        row = None
     if row:
         return human_review_mod.serialise(row)
     if journal and journal.get("evaluator_id") is not None \
@@ -1872,6 +1920,24 @@ def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
         logging.exception("ai-qa: не удалось загрузить оценку супервайзера для %s %s",
                           subject_kind, call_id)
         return payload
+    own = None
+    if reviewer_id is not None:
+        try:
+            own = human_review_mod.get_review(subject_kind, int(call_id), int(reviewer_id))
+        except Exception:
+            logging.exception("ai-qa: не удалось прочитать «Мою оценку» %s %s", subject_kind, call_id)
+    comparable = _human_scale_check(payload, criteria, subject_kind,
+                                    (journal or {}).get("direction_id"), (own or {}).get("direction_id"))
+    # Оценка по прежней версии шкалы — только числом и подписью: её вердикты к этим
+    # критериям не приложить, но проверяющий должен знать, что в журнале она есть
+    # (сохранение «в качество» ляжет её переоценкой).
+    previous = None
+    if journal and not comparable(journal.get("direction_id")):
+        previous = {"call_id": journal.get("id"), "score": journal.get("score"),
+                    "evaluator": journal.get("evaluator") or "—", "datetime": journal.get("datetime")}
+        journal = None
+    if own and not comparable(own.get("direction_id")):
+        own = None
     scores = journal.get("scores") if journal else None
     comments = journal.get("criterion_comments") if journal else None
     for c in criteria:
@@ -1880,7 +1946,9 @@ def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
         comment = comments[idx] if comments is not None and isinstance(idx, int) and 0 <= idx < len(comments) else None
         c["human"] = _human_display_verdict(raw)
         c["human_comment"] = (str(comment).strip() or None) if comment is not None else None
-    payload["human_score"] = journal["score"] if journal else payload.get("human_score")
+    payload["human_score"] = (journal["score"] if journal
+                              else None if previous else payload.get("human_score"))
+    payload["previous_scale_review"] = previous
     payload["has_human_review"] = scores is not None
     payload["human_review"] = ({
         "call_id": journal.get("id"), "evaluator_id": journal.get("evaluator_id"),
@@ -1891,7 +1959,7 @@ def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
     } if journal else None)
     _attach_scale(payload)
     if reviewer_id is not None:
-        payload["my_review"] = _my_review(subject_kind, int(call_id), int(reviewer_id), journal)
+        payload["my_review"] = _my_review(own, journal, int(reviewer_id))
     return payload
 
 
@@ -1969,6 +2037,7 @@ def human_review_state(subject_kind: str, call_id: int, direction_id: int,
         "human_score": payload.get("human_score"),
         "has_human_review": payload.get("has_human_review", False),
         "human_review": payload.get("human_review"),
+        "previous_scale_review": payload.get("previous_scale_review"),
         "my_review": payload.get("my_review"),
         "criteria": [{"idx": c["idx"], "human": c.get("human"),
                       "human_comment": c.get("human_comment")} for c in payload["criteria"]],
@@ -6900,7 +6969,8 @@ def _rag_observability(cur) -> dict:
 # ИИ↔человек — молча, без ошибки. Так и было со звонками из АТС и
 # перепиской СЗоВ/ТЭЗ: оценка человека появлялась позже, но в метрику
 # не входила никогда. Сверка позиционная (scores[idx]), поэтому у звонка из
-# АТС со своей шкалой берётся только строка журнала той же шкалы.
+# АТС со своей шкалой берётся только строка журнала той же шкалы, а у всех,
+# кроме звонка журнала, — только оценка по тем же критериям, что у прогона.
 _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
                                            hc2d.scores, hca.scores, hrv.scores), t.direction
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
@@ -6931,6 +7001,7 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                         AND s.wz_channel_id = e.channel_id AND s.wz_chat_id = e.chat_id
                         AND s.episode_start = e.started_at
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                        AND """ + subjects_mod.same_criteria_sql("hcalls.direction_id", "t.criteria") + """
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) hwz ON true
                  LEFT JOIN LATERAL (
@@ -6938,12 +7009,14 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                       WHERE ic.id IS NOT NULL AND hcalls.imported_call_id = ic.id
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
                         AND """ + subjects_mod.journal_same_scale_sql("hcalls", "ic") + """
+                        AND """ + subjects_mod.same_criteria_sql("hcalls.direction_id", "t.criteria") + """
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) himp ON true
                  LEFT JOIN LATERAL (
                      SELECT hcalls.scores FROM calls hcalls
                       WHERE cs.id IS NOT NULL AND hcalls.c2d_snapshot_id = cs.id
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                        AND """ + subjects_mod.same_criteria_sql("hcalls.direction_id", "t.criteria") + """
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) hc2d ON true
                  LEFT JOIN LATERAL (
@@ -6954,6 +7027,7 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                         AND s.wz_channel_id = ce.license_id::text || ':' || ce.messenger_type
                         AND s.wz_chat_id = ce.chat_id AND s.episode_start = ce.started_at
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                        AND """ + subjects_mod.same_criteria_sql("hcalls.direction_id", "t.criteria") + """
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) hca ON true
                  -- «Моя оценка» из карточки (ai_human_reviews): полная оценка
@@ -6963,6 +7037,7 @@ _RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.s
                      SELECT hr.scores FROM ai_human_reviews hr
                       WHERE hr.subject_kind = t.subject_kind AND hr.call_id = t.call_id
                         AND hr.score IS NOT NULL
+                        AND """ + subjects_mod.same_criteria_sql("hr.direction_id", "t.criteria") + """
                       ORDER BY hr.updated_at DESC LIMIT 1
                  ) hrv ON true
                 WHERE COALESCE(c.scores, hwz.scores, himp.scores,

@@ -838,6 +838,7 @@ export default function CallQaView(props) {
                     human_score: state.human_score ?? null,
                     has_human_review: Boolean(state.has_human_review),
                     human_review: state.human_review || null,
+                    previous_scale_review: state.previous_scale_review || null,
                     my_review: state.my_review || null,
                     criteria: (current.criteria || []).map((c) => {
                         const h = humanByIdx.get(c.idx);

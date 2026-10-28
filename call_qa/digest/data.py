@@ -299,6 +299,8 @@ def attach_details(cur, talks, *, with_transcripts=True, with_notes=False) -> No
 # звонка журнала — хвост цепочки переоценок, у звонка из АТС — строка с его
 # imported_call_id (у звонка со своей шкалой — только строка той же шкалы: вердикты
 # сверяются по позиции критерия), у переписки — строка, привязанная к снапшоту.
+# direction_id — шкала строки: те ли у неё критерии, что у оценки ИИ, сверяет
+# attach_human_reviews.
 _JOURNAL_BATCH_SQL = {
     config.SUBJECT_CALL: """
         WITH RECURSIVE chain AS (
@@ -307,24 +309,28 @@ _JOURNAL_BATCH_SQL = {
             SELECT chain.root, n.id, chain.depth + 1
               FROM calls n JOIN chain ON n.previous_version_id = chain.id
              WHERE chain.depth < 32)
-        SELECT DISTINCT ON (chain.root) chain.root, c.scores, c.score, c.comment, c.criterion_comments
+        SELECT DISTINCT ON (chain.root) chain.root, c.scores, c.score, c.comment, c.criterion_comments,
+               c.direction_id
           FROM chain JOIN calls c ON c.id = chain.id
          WHERE COALESCE(c.is_draft, FALSE) = FALSE
          ORDER BY chain.root, c.created_at DESC, c.id DESC""",
     config.SUBJECT_IMPORTED_CALL: """
-        SELECT DISTINCT ON (c.imported_call_id) c.imported_call_id, c.scores, c.score, c.comment, c.criterion_comments
+        SELECT DISTINCT ON (c.imported_call_id) c.imported_call_id, c.scores, c.score, c.comment, c.criterion_comments,
+               c.direction_id
           FROM calls c
           JOIN imported_calls ic ON ic.id = c.imported_call_id
          WHERE c.imported_call_id = ANY(%s) AND COALESCE(c.is_draft, FALSE) = FALSE
            AND """ + journal_same_scale_sql("c", "ic") + """
          ORDER BY c.imported_call_id, c.created_at DESC""",
     config.SUBJECT_C2D_SNAPSHOT: """
-        SELECT DISTINCT ON (c.c2d_snapshot_id) c.c2d_snapshot_id, c.scores, c.score, c.comment, c.criterion_comments
+        SELECT DISTINCT ON (c.c2d_snapshot_id) c.c2d_snapshot_id, c.scores, c.score, c.comment, c.criterion_comments,
+               c.direction_id
           FROM calls c
          WHERE c.c2d_snapshot_id = ANY(%s) AND COALESCE(c.is_draft, FALSE) = FALSE
          ORDER BY c.c2d_snapshot_id, c.created_at DESC""",
     config.SUBJECT_WZ_EPISODE: """
-        SELECT DISTINCT ON (e.id) e.id, c.scores, c.score, c.comment, c.criterion_comments
+        SELECT DISTINCT ON (e.id) e.id, c.scores, c.score, c.comment, c.criterion_comments,
+               c.direction_id
           FROM wazzup_episodes e
           JOIN c2d_chat_snapshots s
             ON s.source = 'wazzup' AND s.wz_channel_id = e.channel_id
@@ -333,7 +339,8 @@ _JOURNAL_BATCH_SQL = {
          WHERE e.id = ANY(%s) AND COALESCE(c.is_draft, FALSE) = FALSE
          ORDER BY e.id, c.created_at DESC""",
     config.SUBJECT_CA_EPISODE: """
-        SELECT DISTINCT ON (e.id) e.id, c.scores, c.score, c.comment, c.criterion_comments
+        SELECT DISTINCT ON (e.id) e.id, c.scores, c.score, c.comment, c.criterion_comments,
+               c.direction_id
           FROM chatapp_episodes e
           JOIN c2d_chat_snapshots s
             ON s.source = 'chatapp'
@@ -358,6 +365,23 @@ def _same_verdict(human, ai) -> bool:
     return human == ai or (human in FAIL and ai in FAIL)
 
 
+def _scale_names(cur, direction_ids) -> dict:
+    """Имена критериев шкал (живой и архивной строки directions) по id."""
+    ids = sorted({int(d) for d in direction_ids if d is not None})
+    if not ids:
+        return {}
+    cur.execute("SELECT id, criteria FROM directions WHERE id = ANY(%s)", (ids,))
+    return {int(direction_id): [c.get("name") for c in (criteria or []) if isinstance(c, dict)]
+            for direction_id, criteria in cur.fetchall()}
+
+
+def _card_names(criteria) -> list | None:
+    """Имена критериев оценки ИИ по idx; None — сверить не с чем."""
+    by_idx = {c.get("idx"): c.get("name") for c in criteria if isinstance(c.get("idx"), int)}
+    card = [by_idx.get(i) for i in range(len(by_idx))]
+    return card if card and all(name is not None for name in card) else None
+
+
 def attach_human_reviews(cur, talks) -> None:
     """Где человек уже проверил разговор — его вердикты по критериям.
 
@@ -366,9 +390,11 @@ def attach_human_reviews(cur, talks) -> None:
     том же порядке, что у балла человека (api._SUBJECT_HUMAN_SCORE) и у карточки
     (api._attach_human_review): сперва строка журнала — она и есть качество
     сотрудника, её вердикты лежат по idx критерия; нет её — «Моя оценка» из
-    карточки (ai_human_reviews), список 1:1 с критериями карточки. «Моей оценке»
-    верим, только если она сделана по той же шкале и той же длины: после правки
-    шкалы позиции съезжают, и вердикт человека лёг бы на чужой критерий."""
+    карточки (ai_human_reviews), список 1:1 с критериями карточки. Обеим верим,
+    только если они поставлены по тем же критериям, что у оценки ИИ (как
+    subjects.same_criteria_sql у балла человека): после правки шкалы и
+    «Переоценить» прежняя оценка лежит на архиве шкалы, и её вердикт лёг бы на
+    чужой критерий. У звонка журнала оценка человека — сама строка, её не сверяем."""
     by_kind = defaultdict(list)
     for talk in talks:
         by_kind[talk["kind"]].append(talk["id"])
@@ -378,8 +404,8 @@ def attach_human_reviews(cur, talks) -> None:
         sql = _JOURNAL_BATCH_SQL.get(kind)
         if sql:
             cur.execute(sql, (ids,))
-            for subject_id, scores, score, comment, comments in cur.fetchall():
-                journal[(kind, int(subject_id))] = (scores, score, comment, comments)
+            for subject_id, scores, score, comment, comments, direction_id in cur.fetchall():
+                journal[(kind, int(subject_id))] = (scores, score, comment, comments, direction_id)
         cur.execute(
             """SELECT DISTINCT ON (call_id) call_id, scores, criterion_comments, score, comment,
                       direction_id
@@ -389,6 +415,7 @@ def attach_human_reviews(cur, talks) -> None:
             (kind, ids))
         for subject_id, scores, comments, score, comment, direction_id in cur.fetchall():
             mine[(kind, int(subject_id))] = (scores, comments, score, comment, direction_id)
+    names = _scale_names(cur, [row[4] for row in journal.values()] + [row[4] for row in mine.values()])
     for talk in talks:
         key = (talk["kind"], talk["id"])
         criteria = talk.get("criteria") or []
@@ -396,8 +423,16 @@ def attach_human_reviews(cur, talks) -> None:
         notes: list = [""] * len(criteria)
         score = comment = None
         source = None
-        if key in journal:
-            scores, score, comment, comments = journal[key]
+        card = _card_names(criteria)
+
+        def comparable(direction_id):
+            return direction_id is None or card is None or names.get(int(direction_id)) == card
+
+        own = mine.get(key)
+        own_ok = (own is not None and isinstance(own[0], list) and len(own[0]) == len(criteria)
+                  and comparable(own[4]))
+        if key in journal and (talk["kind"] == config.SUBJECT_CALL or comparable(journal[key][4])):
+            scores, score, comment, comments, _direction = journal[key]
             scores = scores if isinstance(scores, list) else []
             comments = comments if isinstance(comments, list) else []
             for position, criterion in enumerate(criteria):
@@ -407,18 +442,13 @@ def attach_human_reviews(cur, talks) -> None:
                 if isinstance(idx, int) and 0 <= idx < len(comments):
                     notes[position] = str(comments[idx] or "").strip()[:300]
             source = "journal"
-        elif key in mine:
-            scores, comments, score, comment, direction_id = mine[key]
-            scores = scores if isinstance(scores, list) else []
+        elif own_ok:
+            scores, comments, score, comment, _direction = own
             comments = comments if isinstance(comments, list) else []
-            same_scale = (len(scores) == len(criteria) and
-                          (direction_id is None or talk.get("scale_direction") is None
-                           or int(direction_id) == int(talk["scale_direction"])))
-            if same_scale:
-                for position in range(len(criteria)):
-                    verdicts[position] = _human_verdict(scores[position])
-                    if position < len(comments):
-                        notes[position] = str(comments[position] or "").strip()[:300]
+            for position in range(len(criteria)):
+                verdicts[position] = _human_verdict(scores[position])
+                if position < len(comments):
+                    notes[position] = str(comments[position] or "").strip()[:300]
             source = "review"
         if source is None:
             talk["human"] = None

@@ -135,12 +135,14 @@ const SCORE_TEXT = { green: 'text-emerald-600', amber: 'text-amber-600', red: 't
 
 /* Балл в шапке карточки — как колонки списка разговоров: подпись, крупное число в
  * цвет балла, под ним пояснение. Три пилюли столбиком читались как три кнопки. */
-function ScoreStat({ label, value, sub = null, title }) {
+/* muted — балл не этой оценки (прежняя версия шкалы): серым, без цвета «хорошо/плохо». */
+function ScoreStat({ label, value, sub = null, title, muted = false }) {
     return (
         <div className="min-w-[3.5rem] text-right" title={title}>
             <div className="text-[11px] font-medium text-slate-500">{label}</div>
             <div className={`text-[22px] font-semibold leading-tight tabular-nums ${
-                value == null ? 'text-slate-300' : SCORE_TEXT[scoreTone(value)] || 'text-slate-900'}`}>
+                value == null ? 'text-slate-300' : muted ? 'text-slate-400'
+                    : SCORE_TEXT[scoreTone(value)] || 'text-slate-900'}`}>
                 {value ?? '—'}
             </div>
             {sub && <div className="whitespace-nowrap text-[11px] text-slate-400">{sub}</div>}
@@ -476,6 +478,14 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimil
                                 {call.human_score != null && (
                                     <ScoreStat label="Человек" value={Math.round(call.human_score)}
                                                title={journal ? `Оценка в журнале: ${journal.evaluator || '—'}${journal.datetime ? `, ${journal.datetime}` : ''}` : 'Оценка человека в журнале'} />
+                                )}
+                                {/* Оценка в журнале по прежней версии шкалы: критерии
+                                    с тех пор сменились, поэтому её вердиктов в панели
+                                    нет — только балл, чтобы о ней знали. */}
+                                {call.human_score == null && call.previous_scale_review?.score != null && (
+                                    <ScoreStat label="Человек" value={Math.round(call.previous_scale_review.score)}
+                                               sub="прежняя шкала" muted
+                                               title={`Оценка в журнале по прежней версии шкалы: ${call.previous_scale_review.evaluator || '—'}${call.previous_scale_review.datetime ? `, ${call.previous_scale_review.datetime}` : ''}. Критерии с тех пор сменились — оцените звонок заново; «Учитывать в качестве» переоценит эту строку журнала.`} />
                                 )}
                                 {showMyBadge && (
                                     <ScoreStat label="Моя" value={Math.round(myReview.score)}

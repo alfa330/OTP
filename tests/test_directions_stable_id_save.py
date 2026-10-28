@@ -140,7 +140,7 @@ class CriteriaChangeArchivesOldScaleTests(unittest.TestCase):
             [ROW_OSNOVA],
             [{"id": 73, "name": "Основа", "hasFileUpload": True,
               "criteria": CRITERIA_B, "calculationModelCode": "operator"}],
-            returning_ids=[99],
+            returning_ids=[99, True],  # id архивной строки; таблица «Моей оценки» есть
         )
         joined = [q for q, _ in cursor.executions]
         archive_inserts = [(q, p) for q, p in cursor.executions
@@ -149,7 +149,8 @@ class CriteriaChangeArchivesOldScaleTests(unittest.TestCase):
         self.assertEqual(archive_inserts[0][1], (73,))
         self.assertIn("SELECT name, has_file_upload, criteria, calculation_model_code, version, previous_version_id, department_id, FALSE, id FROM directions WHERE id = %s RETURNING id",
                       archive_inserts[0][0])
-        for frozen_table in ("calls", "calibration_rooms", "calibration_room_calls"):
+        # «Моя оценка» ИИ-оценки позиционная, как журнал: на новые критерии её не класть.
+        for frozen_table in ("calls", "calibration_rooms", "calibration_room_calls", "ai_human_reviews"):
             remaps = [(q, p) for q, p in cursor.executions
                       if q == f"UPDATE {frozen_table} SET direction_id = %s WHERE direction_id = %s"]
             self.assertEqual(len(remaps), 1, frozen_table)
@@ -158,6 +159,20 @@ class CriteriaChangeArchivesOldScaleTests(unittest.TestCase):
         self.assertEqual(len(bumps), 1)
         self.assertEqual(bumps[0][1][-2:], (99, 73))  # previous_version_id=архив, id живой строки
         self.assertNotIn("UPDATE users", " | ".join(joined))
+
+
+    def test_database_without_ai_qa_schema_still_saves(self):
+        # ai_human_reviews — таблица схемы call_qa; на голой базе её нет, и сохранение
+        # шкалы из-за неё падать не должно.
+        cursor = _run(
+            [ROW_OSNOVA],
+            [{"id": 73, "name": "Основа", "hasFileUpload": True,
+              "criteria": CRITERIA_B, "calculationModelCode": "operator"}],
+            returning_ids=[99, False],
+        )
+        joined = " | ".join(q for q, _ in cursor.executions)
+        self.assertNotIn("UPDATE ai_human_reviews", joined)
+        self.assertIn("version = version + 1", joined)
 
 
 class DeletionTests(unittest.TestCase):
