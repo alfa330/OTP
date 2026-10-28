@@ -13,7 +13,7 @@
  *
  * Запуск: node --test tests/payments_own_requests.test.mjs
  */
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -157,8 +157,12 @@ const ownRows = (html) => [...html.matchAll(/<button[^>]*data-own-request="(\d+)
     .map((match) => ({ id: Number(match[1]), html: match[2], text: textOf(match[2]).trim() }));
 const layoutOf = (html) => (html.match(/data-desk="([\w-]+)"/) || [])[1];
 
-test('повторный вход: «Мои заявки» стоят сразу — над задачами, этап и у кого, из памяти страницы', async () => {
+test('повторный вход: «Мои заявки» стоят сразу — над задачами, этап и у кого, из памяти страницы', async (t) => {
     const { PaymentsView, memory } = await section();
+    // Срок №40 в образце — 30.10, а метка срока считает дни от сегодня: по настоящим часам
+    // с 28.10 она жёлтая («подходит»), и проверка цвета строки ниже краснела бы по календарю.
+    mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-22T07:00:00Z') });
+    t.after(() => mock.timers.reset());
     memory.forgetEntryMemory();
     memory.remember(7, 'ping', PING);
     memory.remember(7, 'desk', deskAnswer(SAMPLE));
