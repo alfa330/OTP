@@ -16,17 +16,21 @@ export function shouldShowMessageAuthor(message, previous) {
     return authorNameKey(message.authorName) !== authorNameKey(previous.authorName);
 }
 
+// Без оригинала на загруженной странице подпись цитаты берётся из ответа
+// сервера: replyIsEcho/replyType — оригинал из архива или снимок цитаты Wazzup.
 export function messageQuote(message, messagesById) {
     const messageId = message?.replyToMessageId;
     if (!messageId || messageId === message.messageId) return null;
     const original = messagesById.get(messageId);
+    const isEcho = original ? Boolean(original.isEcho) : message.replyIsEcho;
     const text = original?.isDeleted ? 'Сообщение удалено'
-        : original?.text || message.replyText || ATTACHMENTS[original?.type] || 'Исходное сообщение';
+        : original?.text || message.replyText || ATTACHMENTS[original?.type || message.replyType]
+            || 'Исходное сообщение';
     return {
         messageId,
         text,
         author: original?.authorName || message.replyAuthorName
-            || (original ? (original.isEcho ? 'Оператор' : 'Клиент') : 'Ответ на сообщение'),
+            || (isEcho === true ? 'Оператор' : isEcho === false ? 'Клиент' : 'Ответ на сообщение'),
     };
 }
 

@@ -43,6 +43,23 @@ test('quote remains readable when original is outside loaded history', () => {
         'Исходное сообщение');
 });
 
+test('driver reply to their own message is quoted as the client, loaded or not', () => {
+    // Тест-чат владельца: водитель ответил «Тест» на своё же «Тест».
+    const own = { messageId: 'own', text: 'Тест', isEcho: false, authorName: null };
+    const reply = { messageId: 'reply', isEcho: false, replyToMessageId: 'own', replyText: 'Тест',
+        replyAuthorName: null, replyIsEcho: false, replyType: 'text' };
+    assert.deepEqual(messageQuote(reply, new Map([['own', own]])), { messageId: 'own', text: 'Тест', author: 'Клиент' });
+    assert.deepEqual(messageQuote(reply, new Map()), { messageId: 'own', text: 'Тест', author: 'Клиент' });
+});
+
+test('quote outside the loaded page is labelled by the server: operator, client, attachment', () => {
+    const outside = (fields) => messageQuote({ messageId: 'reply', replyToMessageId: 'old', ...fields }, new Map());
+    assert.equal(outside({ replyIsEcho: true, replyText: 'лсмитлсмотилом' }).author, 'Оператор');
+    assert.equal(outside({ replyIsEcho: true, replyAuthorName: 'Phone' }).author, 'Phone');
+    assert.deepEqual(outside({ replyIsEcho: false, replyType: 'image' }), { messageId: 'old', text: 'Фото', author: 'Клиент' });
+    assert.equal(outside({}).author, 'Ответ на сообщение', 'a reply without the server fields keeps the neutral label');
+});
+
 test('quote labels attachment-only messages and does not quote the message itself', () => {
     const original = { messageId: 'photo', type: 'image', text: '', isEcho: false };
     assert.deepEqual(messageQuote({ messageId: 'reply', replyToMessageId: 'photo' }, new Map([['photo', original]])), {

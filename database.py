@@ -3101,6 +3101,16 @@ class Database:
                 ALTER TABLE wazzup_messages
                     ADD COLUMN IF NOT EXISTS wazzup_dt TIMESTAMPTZ;
             """)
+            # Цитата ответа, сделанного не из iCORE (wazzup/quotes.py): id
+            # цитируемого и снимок на случай, когда оригинала в архиве нет.
+            cursor.execute("""
+                ALTER TABLE wazzup_messages
+                    ADD COLUMN IF NOT EXISTS quoted_message_id TEXT,
+                    ADD COLUMN IF NOT EXISTS quoted_is_echo BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS quoted_type TEXT,
+                    ADD COLUMN IF NOT EXISTS quoted_text TEXT,
+                    ADD COLUMN IF NOT EXISTS quoted_author_name TEXT;
+            """)
             cursor.execute("""
                 ALTER TABLE wazzup_chats
                     ADD COLUMN IF NOT EXISTS account TEXT NOT NULL DEFAULT 'op';
@@ -25002,6 +25012,7 @@ class Database:
                                      is_in_time, is_late_inbound, parse_wazzup_dt,
                                      reply_pending)
         from wazzup.names import author_key
+        from wazzup.quotes import quote_values
         if not isinstance(messages, list) or not messages:
             return 0
         processed = 0
@@ -25058,8 +25069,11 @@ class Database:
                         message_id, channel_id, chat_type, chat_id, dt, is_echo,
                         type, text, content_uri, author_name, author_id,
                         contact_name, contact_phone, status, sent_from_app,
+                        quoted_message_id, quoted_is_echo, quoted_type, quoted_text,
+                        quoted_author_name,
                         is_edited, is_deleted, account, wazzup_dt)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (message_id) DO UPDATE SET
                         -- событие удаления приходит без текста: сохраняем последний
                         -- известный текст, факт удаления фиксирует is_deleted
@@ -25068,6 +25082,15 @@ class Database:
                         status = wazzup_merge_delivery(wazzup_messages.status, EXCLUDED.status),
                         author_name = COALESCE(EXCLUDED.author_name, wazzup_messages.author_name),
                         author_id = COALESCE(EXCLUDED.author_id, wazzup_messages.author_id),
+                        -- правка и удаление могут прийти без цитаты, а наша копия
+                        -- отправки из iCORE пишется без неё до эха Wazzup
+                        quoted_message_id = COALESCE(EXCLUDED.quoted_message_id,
+                                                     wazzup_messages.quoted_message_id),
+                        quoted_is_echo = COALESCE(EXCLUDED.quoted_is_echo, wazzup_messages.quoted_is_echo),
+                        quoted_type = COALESCE(EXCLUDED.quoted_type, wazzup_messages.quoted_type),
+                        quoted_text = COALESCE(EXCLUDED.quoted_text, wazzup_messages.quoted_text),
+                        quoted_author_name = COALESCE(EXCLUDED.quoted_author_name,
+                                                      wazzup_messages.quoted_author_name),
                         is_edited = EXCLUDED.is_edited,
                         is_deleted = EXCLUDED.is_deleted
                     WHERE wazzup_messages.account = EXCLUDED.account
@@ -25076,7 +25099,8 @@ class Database:
                     stored_dt, is_echo, m.get('type'), m.get('text'),
                     m.get('contentUri'), m.get('authorName'), author_id,
                     contact.get('name'), contact.get('phone'), m.get('status'),
-                    m.get('sentFromApp'), bool(m.get('isEdited')), bool(m.get('isDeleted')),
+                    m.get('sentFromApp'), *quote_values(m),
+                    bool(m.get('isEdited')), bool(m.get('isDeleted')),
                     account, wazzup_dt,
                 ))
                 if cursor.rowcount == 0:

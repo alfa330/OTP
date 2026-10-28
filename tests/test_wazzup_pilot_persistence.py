@@ -64,6 +64,8 @@ def pg():
             contact_name TEXT, contact_phone TEXT, status TEXT, sent_from_app TEXT,
             is_edited BOOLEAN NOT NULL DEFAULT FALSE, is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
             account TEXT NOT NULL DEFAULT 'op', wazzup_dt TIMESTAMPTZ,
+            quoted_message_id TEXT, quoted_is_echo BOOLEAN, quoted_type TEXT, quoted_text TEXT,
+            quoted_author_name TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         CREATE TABLE wazzup_chats (
@@ -237,6 +239,29 @@ def test_duplicate_and_out_of_order_statuses_are_monotonic(pg, events, expected)
     for event in events:
         db.update_wazzup_statuses([{'messageId': 'm1', 'status': event}])
     assert status(cursor) == expected
+
+
+def test_webhook_quote_is_kept_through_edits_and_reaches_the_thread(pg):
+    # Тест-чат владельца: водитель отвечает «Тест» на своё же «Тест».
+    from wazzup.pilot import MESSAGE_SELECT, message_item
+    _, cursor, database, _ = pg
+    db = database()
+    def inbound(message_id, **changes):
+        return dict(message(message_id, status='inbound'), isEcho=False, **changes)
+
+    db.store_wazzup_messages([inbound('own', text='Тест')])
+    db.store_wazzup_messages([inbound('reply', text='Тест', dateTime='2026-10-06T08:01:00Z',
+                                      quotedMessage={'messageId': 'own', 'isEcho': False, 'type': 'text',
+                                                     'text': 'Тест', 'status': 'inbound'})])
+    # An edit arrives without the quote; the reply still quotes its original.
+    db.store_wazzup_messages([inbound('reply', text='Тест!', dateTime='2026-10-06T08:01:00Z', isEdited=True)])
+    cursor.execute('SELECT quoted_message_id, quoted_is_echo, quoted_type, quoted_text, quoted_author_name '
+                   "FROM wazzup_messages WHERE message_id='reply'")
+    assert cursor.fetchone() == ('own', False, 'text', 'Тест', None)
+    cursor.execute(MESSAGE_SELECT + " WHERE m.account='op' AND m.message_id='reply'")
+    item = message_item(cursor.fetchone())
+    assert (item['text'], item['replyToMessageId'], item['replyText'], item['replyAuthorName'],
+            item['replyIsEcho'], item['replyType']) == ('Тест!', 'own', 'Тест', None, False, 'text')
 
 
 def test_edited_is_not_a_delivery_status(pg):

@@ -86,6 +86,8 @@ def pg():
             contact_name TEXT, contact_phone TEXT, status TEXT, sent_from_app TEXT,
             is_edited BOOLEAN NOT NULL DEFAULT FALSE, is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
             account TEXT NOT NULL DEFAULT 'op', wazzup_dt TIMESTAMPTZ,
+            quoted_message_id TEXT, quoted_is_echo BOOLEAN, quoted_type TEXT, quoted_text TEXT,
+            quoted_author_name TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         CREATE TABLE wazzup_chats (

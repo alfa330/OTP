@@ -12,7 +12,9 @@
   status 99 — входящее, 1/2/3 — sent/delivered/read, errorCode → error;
   contentSha + filename → https://store.wazzup24.com/<sha>/?filename=… —
   та же форма, что contentUri вебхука (проверено HEAD → 200);
-  authorName — имя менеджера (в окне подписано «API • Имя»), id автора нет.
+  authorName — имя менеджера (в окне подписано «API • Имя»), id автора нет;
+  quotedMessage — цитата ответа: id, status, type, text, authorName (снято с
+  тест-чата аккаунта «op» 28.10.2026).
 """
 import logging
 import threading
@@ -126,6 +128,23 @@ def to_webhook_message(m, chat):
         'sentFromApp': None,
         'isEdited': bool(m.get('messageEditingByUser')),
         'isDeleted': bool(m.get('messageDeleteByUser')),
+        'quotedMessage': to_webhook_quote(m.get('quotedMessage')),
+    }
+
+
+def to_webhook_quote(quoted):
+    """quotedMessage окна (ответ «Ответить» в WhatsApp, wazzup/quotes.py) → форма
+    вебхука. У цитаты нет incoming — входящее отмечено статусом 99; тип — по тем
+    же правилам, что у сообщения; у входящего authorName — телефон клиента."""
+    if not isinstance(quoted, dict) or not quoted.get('id'):
+        return None
+    incoming = quoted.get('status') == 99
+    return {
+        'messageId': quoted['id'],
+        'isEcho': not incoming,
+        'type': message_type(quoted),
+        'text': quoted.get('text'),
+        'authorName': None if incoming else (quoted.get('authorName') or None),
     }
 
 

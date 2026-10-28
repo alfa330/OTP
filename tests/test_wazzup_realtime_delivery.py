@@ -16,7 +16,9 @@ class Archive:
             CREATE TABLE wazzup_messages (
                 account TEXT, channel_id TEXT, chat_id TEXT, message_id TEXT, dt TEXT,
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
-                author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
+                author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT,
+                quoted_message_id TEXT, quoted_is_echo BOOLEAN, quoted_type TEXT, quoted_text TEXT,
+                quoted_author_name TEXT
             );
             CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT, request_id TEXT);
             CREATE TABLE wazzup_chats (
@@ -29,10 +31,10 @@ class Archive:
 
     def add(self, message_id, *, account='op', status='read', text='Complete message', author=None,
             channel='channel', chat='chat', deleted=False, reply_to=None,
-            provider_author='Provider author', request_id=None):
-        self.connection.execute('INSERT INTO wazzup_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (account, channel, chat, message_id, '2026-10-06T10:00:00+00:00', True, 'text', text,
-             None, provider_author, None, status, False, deleted, None))
+            provider_author='Provider author', request_id=None, is_echo=True, quoted=(None,) * 5):
+        self.connection.execute('INSERT INTO wazzup_messages VALUES (' + ','.join('?' * 20) + ')',
+            (account, channel, chat, message_id, '2026-10-06T10:00:00+00:00', is_echo, 'text', text,
+             None, provider_author, None, status, False, deleted, None, *quoted))
         if author or reply_to or request_id:
             self.connection.execute('''INSERT INTO wazzup_pilot_outbox
                 (account,message_id,author_name,reply_to_message_id,request_id) VALUES (?,?,?,?,?)''',
@@ -165,6 +167,25 @@ class RealtimeDeliveryTests(unittest.TestCase):
         self.assertIsNone(message['replyText'])
         self.assertEqual('Visible reply', message['text'])
         self.assertNotIn('Deleted confidential text', json.dumps(message))
+
+    def test_webhook_quote_of_a_reply_made_outside_iCORE_reaches_live_and_history(self):
+        # Водитель ответил на своё же сообщение: цели в outbox нет, цитата — из вебхука.
+        self.archive.add('own', text='Тест', is_echo=False, provider_author=None)
+        self.archive.add('reply', text='Тест ещё раз', is_echo=False, provider_author=None,
+                         quoted=('own', False, 'text', 'Тест', None))
+        # The original left the archive: the webhook's snapshot stands in.
+        self.archive.add('late', text='Ок', is_echo=False, provider_author=None,
+                         quoted=('expired', True, 'image', None, 'Phone'))
+        self.archive.summary()
+
+        message, chat = self.quote_from_delivery_and_history('reply')
+        fallback, _ = self.quote_from_delivery_and_history('late')
+
+        self.assertEqual(('own', 'Тест', None, False, 'text'), tuple(message[key] for key in (
+            'replyToMessageId', 'replyText', 'replyAuthorName', 'replyIsEcho', 'replyType')))
+        self.assertEqual(('expired', None, 'Phone', True, 'image'), tuple(fallback[key] for key in (
+            'replyToMessageId', 'replyText', 'replyAuthorName', 'replyIsEcho', 'replyType')))
+        self.assertEqual('Test name', chat['contactName'], 'chat summary offset follows the new fields')
 
     def test_six_readers_share_one_query_and_local_author_and_chat_summary(self):
         self.archive.add('message', author='Local operator')

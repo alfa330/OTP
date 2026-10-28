@@ -116,7 +116,10 @@ MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
                   'wazzupDt', 'replyToMessageId', 'replyText', 'replyAuthorName',
                   # The sending browser's id of an iCORE send: lets the sender's own
                   # optimistic bubble meet the archive row before the POST returns.
-                  'clientMessageId')
+                  'clientMessageId',
+                  # Whose and what the quoted message is: the quote's label when the
+                  # original is not on the loaded page.
+                  'replyIsEcho', 'replyType')
 
 
 def json_value(value):
@@ -129,15 +132,20 @@ def message_item(row):
     return dict(zip(MESSAGE_FIELDS, [json_value(v) for v in row]))
 
 
+# The quote: an iCORE send's target from the outbox, any other reply's from the
+# webhook (wazzup/quotes.py). The original is read from the same chat only; when
+# it is not in the archive, the webhook's snapshot stands in for it.
 MESSAGE_SELECT = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
-           m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
-           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,o.request_id
+           m.is_edited,m.is_deleted,m.wazzup_dt,COALESCE(o.reply_to_message_id,m.quoted_message_id),
+           CASE WHEN r.is_deleted THEN NULL ELSE COALESCE(r.text,m.quoted_text) END,
+           COALESCE(r.author_name,m.quoted_author_name),o.request_id,
+           COALESCE(r.is_echo,m.quoted_is_echo),COALESCE(r.type,m.quoted_type)
       FROM wazzup_messages m
       LEFT JOIN wazzup_pilot_outbox o ON o.message_id=m.message_id AND o.account=m.account
-      LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
-          AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
+      LEFT JOIN wazzup_messages r ON r.message_id=COALESCE(o.reply_to_message_id,m.quoted_message_id)
+          AND r.account=m.account AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
 """
 
 

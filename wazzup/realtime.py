@@ -24,7 +24,8 @@ _DELIVERY_RANK = {'pending': 0, 'sent': 1, 'error': 2, 'delivered': 3, 'read': 4
 # The same fields, in the same order, as the history endpoints (pilot.MESSAGE_FIELDS).
 _MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
                    'authorName', 'authorId', 'status', 'isEdited', 'isDeleted', 'wazzupDt',
-                   'replyToMessageId', 'replyText', 'replyAuthorName', 'clientMessageId')
+                   'replyToMessageId', 'replyText', 'replyAuthorName', 'clientMessageId',
+                   'replyIsEcho', 'replyType')
 _CHAT_OFFSET = len(_MESSAGE_FIELDS)
 _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone',
                 'lastMessageAt', 'lastMessageText', 'lastMessageIsEcho',
@@ -34,8 +35,10 @@ _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone'
 _HYDRATE_SQL = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
-           m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
-           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,o.request_id,
+           m.is_edited,m.is_deleted,m.wazzup_dt,COALESCE(o.reply_to_message_id,m.quoted_message_id),
+           CASE WHEN r.is_deleted THEN NULL ELSE COALESCE(r.text,m.quoted_text) END,
+           COALESCE(r.author_name,m.quoted_author_name),o.request_id,
+           COALESCE(r.is_echo,m.quoted_is_echo),COALESCE(r.type,m.quoted_type),
            c.channel_id,c.chat_id,c.chat_type,c.contact_name,c.contact_phone,
            c.last_message_at,c.last_message_text,c.last_message_is_echo,
            c.messages_count,c.inbound_count,c.outbound_count,
@@ -45,8 +48,8 @@ _HYDRATE_SQL = """
         ON o.message_id=m.message_id AND o.account=m.account
       LEFT JOIN wazzup_chats c
         ON c.account=m.account AND c.channel_id=m.channel_id AND c.chat_id=m.chat_id
-      LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
-        AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
+      LEFT JOIN wazzup_messages r ON r.message_id=COALESCE(o.reply_to_message_id,m.quoted_message_id)
+        AND r.account=m.account AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
      WHERE m.account='op' AND m.message_id=ANY(%s)
 """.replace('{last_message}', last_message_columns('m'))
 

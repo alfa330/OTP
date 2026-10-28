@@ -109,7 +109,9 @@ class RefreshDatabase:
             CREATE TABLE wazzup_messages (
                 account TEXT, channel_id TEXT, chat_id TEXT, message_id TEXT, dt TEXT,
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
-                author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
+                author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT,
+                quoted_message_id TEXT, quoted_is_echo BOOLEAN, quoted_type TEXT, quoted_text TEXT,
+                quoted_author_name TEXT
             );
             CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT, request_id TEXT);
         ''')
@@ -125,8 +127,8 @@ class RefreshDatabase:
                    author_name=None, author_id=None, status='sent', is_edited=False,
                    is_deleted=False, wazzup_dt=None)
         row.update(updates)
-        self.connection.execute('INSERT INTO wazzup_messages VALUES (' + ','.join('?' * 15) + ')',
-                                tuple(row.values()))
+        self.connection.execute('INSERT INTO wazzup_messages (' + ','.join(row) + ') VALUES ('
+                                + ','.join('?' * len(row)) + ')', tuple(row.values()))
 
     @contextmanager
     def _get_cursor(self):
@@ -714,9 +716,10 @@ class KeepAliveTransportTests(unittest.TestCase):
 class MessageItemTests(unittest.TestCase):
     def test_client_message_id_is_serialised_for_json(self):
         request_id = uuid.uuid4()
-        item = pilot.message_item(['m'] + [None] * 14 + [request_id])
+        item = pilot.message_item(['m'] + [None] * 14 + [request_id, False, 'text'])
         self.assertEqual(str(request_id), item['clientMessageId'])
-        self.assertEqual(len(pilot.MESSAGE_FIELDS), len(pilot.message_item([None] * 16)))
+        self.assertEqual((False, 'text'), (item['replyIsEcho'], item['replyType']))
+        self.assertEqual(len(pilot.MESSAGE_FIELDS), len(pilot.message_item([None] * 18)))
 
 
 class EventBrokerTests(unittest.TestCase):
@@ -821,6 +824,32 @@ class RefreshTests(unittest.TestCase):
         items = self.client.post('/api/wazzup/pilot/refresh', json=self.body).get_json()['items']
         self.assertEqual({'m-10': 'client-id-10', 'm-11': None},
                          {item['messageId']: item['clientMessageId'] for item in items})
+
+    def test_webhook_quotes_reach_the_thread_for_replies_made_outside_iCORE(self):
+        # Тест-чат владельца: водитель отвечает на своё сообщение и на сообщение
+        # оператора; цели в outbox нет — цитата пришла вебхуком.
+        self.db.add(10, is_echo=False, text='Тест')
+        self.db.add(11, is_echo=True, text='лсмитлсмотилом', author_name='Phone')
+        self.db.add(12, is_echo=False, text='Тест', quoted_message_id='m-10', quoted_is_echo=False,
+                    quoted_type='text', quoted_text='Тест')
+        self.db.add(13, is_echo=False, text='Ааа ок', quoted_message_id='m-11', quoted_is_echo=True,
+                    quoted_type='text', quoted_text='лсмитлсмотилом', quoted_author_name='Phone')
+        # The original is older than the archive: the webhook's snapshot stands in.
+        self.db.add(14, is_echo=False, text='Это фото', quoted_message_id='expired', quoted_is_echo=False,
+                    quoted_type='image')
+        # Another chat's message with the same id is never read as the original.
+        self.db.add(15, chat='other-chat', text='Чужой текст')
+        self.db.add(16, is_echo=False, text='Ответ', quoted_message_id='m-15', quoted_is_echo=False,
+                    quoted_type='text', quoted_text='Снимок своего чата')
+        items = {item['messageId']: item for item in self.client.post(
+            '/api/wazzup/pilot/refresh', json=self.body).get_json()['items']}
+        quote = lambda message_id: tuple(items[message_id][key] for key in (  # noqa: E731
+            'replyToMessageId', 'replyText', 'replyAuthorName', 'replyIsEcho', 'replyType'))
+        self.assertEqual(('m-10', 'Тест', None, False, 'text'), quote('m-12'))
+        self.assertEqual(('m-11', 'лсмитлсмотилом', 'Phone', True, 'text'), quote('m-13'))
+        self.assertEqual(('expired', None, None, False, 'image'), quote('m-14'))
+        self.assertEqual(('m-15', 'Снимок своего чата', None, False, 'text'), quote('m-16'))
+        self.assertEqual((None,) * 5, quote('m-10'))
 
 
 if __name__ == '__main__':
