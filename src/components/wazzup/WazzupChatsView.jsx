@@ -40,6 +40,8 @@ import { latestInboundTime } from './useWabaWindowExpired';
 import ChatMessageImage from './ChatMessageImage';
 import ChatMessageVideo from './ChatMessageVideo';
 import ChatAudioPlayer from './ChatAudioPlayer';
+import ChatVoiceTranscript from './ChatVoiceTranscript';
+import useVoiceTranscripts from './useVoiceTranscripts';
 import MessageDeliveryStatus from './MessageDeliveryStatus';
 import useInternalNotes from './useInternalNotes';
 import useThreadEnd, { centerMessageRow, messageRow } from './useThreadEnd';
@@ -217,9 +219,10 @@ const Avatar = ({ name, size = 'h-9 w-9', muted = false, icon: Icon = null }) =>
     </div>
 );
 
-/* Медиа-содержимое пузыря: фото с лайтбоксом, аудио/видео плееры,
- * для остального — аккуратный чип со ссылкой. Битая ссылка → чип. */
-function MediaContent({ msg, light, onAttachment }) {
+/* Медиа-содержимое пузыря: фото с лайтбоксом, аудио/видео плееры (под голосовым —
+ * его текст, useVoiceTranscripts), для остального — аккуратный чип со ссылкой.
+ * Битая ссылка → чип. */
+function MediaContent({ msg, light, onAttachment, transcript, onTranscriptRetry }) {
     const [zoom, setZoom] = useState(false);
     const uri = msg.contentUri;
     const previewKind = onAttachment ? attachmentPreviewKind(msg) : null;
@@ -260,7 +263,11 @@ function MediaContent({ msg, light, onAttachment }) {
         );
     }
     if (uri && msg.type === 'audio') {
-        return <ChatAudioPlayer src={uri} />;
+        return <>
+            <ChatAudioPlayer src={uri} />
+            <ChatVoiceTranscript state={transcript}
+                onRetry={onTranscriptRetry ? () => onTranscriptRetry(msg.messageId) : undefined} />
+        </>;
     }
     const label = MEDIA_LABELS[msg.type] || msg.type || 'Вложение';
     const Icon = MEDIA_ICONS[msg.type] || FileText;
@@ -277,7 +284,7 @@ function MediaContent({ msg, light, onAttachment }) {
  * Своё ещё не подтверждённое сообщение (msg.local, sendQueue.js) рисуется тем
  * же пузырём; сбой отправки — строкой под ним с действиями. */
 const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment, onRetry, onDiscard,
-    onEdit, showAuthor = true }) {
+    onEdit, showAuthor = true, transcript, onTranscriptRetry }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
@@ -303,7 +310,8 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     <span className="block truncate font-semibold">{quote.author}</span>
                     <span className="line-clamp-2 whitespace-pre-wrap break-words"><ChatMessageText text={quote.text} links={false} /></span>
                 </button>}
-                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment} /></div>}
+                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={false} onAttachment={onAttachment}
+                    transcript={transcript} onTranscriptRetry={onTranscriptRetry} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words"><ChatMessageText text={msg.text} /></div>}
                 {!msg.text && !hasMedia && (
                     <div className="italic text-slate-500">
@@ -1496,6 +1504,9 @@ function ChatsWorkspace(props) {
     const notesEnabled = pilot.enabled && mainTab === 'chats' && Boolean(selected) && !selected.isNew
         && !pilot.capability?.excludedChannelIds?.includes(selected?.channelId);
     const notes = useInternalNotes({ enabled: notesEnabled, chat: selected, apiBaseUrl, headers });
+    // Текст голосовых открытого чата — всем, кто читает переписку (wazzup/voice.py).
+    const voice = useVoiceTranscripts({ account, chat: mainTab === 'chats' ? selected : null, thread,
+        apiBaseUrl, headers });
     /* Карточка водителя (ChatDriverCard.jsx) — у каждого чата Верификаторов,
        кроме Global: его чаты обрабатываются отдельно. Видят её все, кому открыта
        переписка; заполнять может тот, кто обрабатывает (решает сервер, canEdit). */
@@ -2363,6 +2374,7 @@ function ChatsWorkspace(props) {
                                             showAuthor={shouldShowMessageAuthor(m, threadWithDays[index - 1])}
                                             onReply={pilotCanSend && !m.local ? chooseReply : undefined} onQuote={jumpToQuote}
                                             onRetry={retryOutboxMessage} onDiscard={discardMessage} onEdit={editFailed}
+                                            transcript={voice.byId[m.messageId]} onTranscriptRetry={voice.retry}
                                             onAttachment={m.local ? undefined : pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
                                                 ? openAttachment : attachmentPreviewKind(m) === 'video' ? (message) => openAttachment(message, true) : undefined} />
                                         {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&

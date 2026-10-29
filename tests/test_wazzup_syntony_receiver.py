@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 from flask import Flask, jsonify, request
 
+from wazzup import voice
+
 
 @pytest.fixture
 def receiver():
@@ -35,6 +37,8 @@ def receiver():
         datetime=datetime, timezone=timezone,
         db=SimpleNamespace(store_wazzup_messages=store, update_wazzup_statuses=statuses),
         wazzup_syntony=SimpleNamespace(enqueue=enqueue),
+        wazzup_voice=SimpleNamespace(payload_has_audio=voice.payload_has_audio,
+                                     wake=lambda: calls.append(('voice-wake',))),
         wazzup_accounts=SimpleNamespace(account_by_webhook_token=lambda token:
             {'valid-op': 'op', 'valid-potok': 'potok'}.get(token)))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), 'exec'), namespace)
@@ -76,3 +80,18 @@ def test_potok_cannot_be_misclassified_as_op(receiver):
     client, calls, _ = receiver
     assert client.post('/hook/valid-potok', json={'statuses': []}).status_code == 200
     assert calls[-1][2]['account'] == 'potok'
+
+
+def test_a_voice_message_wakes_the_transcriber_after_it_is_stored(receiver):
+    client, calls, failures = receiver
+    voice_message = {'messageId': 'voice', 'type': 'audio', 'contentUri': 'https://store.wazzup24.com/v'}
+    assert client.post('/hook/valid-op', json={'messages': [voice_message]}).status_code == 200
+    assert [call[0] for call in calls] == ['store', 'statuses', 'enqueue', 'voice-wake']
+    calls.clear()
+    assert client.post('/hook/valid-op', json={'messages': [{'messageId': 't', 'type': 'text'}]}).status_code == 200
+    assert 'voice-wake' not in [call[0] for call in calls]
+    # Not stored — not woken: Wazzup delivers it again and the next webhook wakes it.
+    calls.clear()
+    failures.add('enqueue')
+    assert client.post('/hook/valid-op', json={'messages': [voice_message]}).status_code == 500
+    assert 'voice-wake' not in [call[0] for call in calls]

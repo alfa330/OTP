@@ -9613,6 +9613,9 @@ def wazzup_webhook(token):
         # Driver exceptions can include failed SQL rows; never log message bodies.
         logging.error("wazzup webhook: ошибка записи (%s)", type(error).__name__)
         return jsonify({"error": "internal"}), 500
+    if wazzup_voice.payload_has_audio(payload):
+        # Голосовое — фоновой расшифровке (wazzup/voice.py); вебхук её не ждёт.
+        wazzup_voice.wake()
     return jsonify({"ok": True, "messages": stored, "statuses": updated}), 200
 
 
@@ -9844,6 +9847,7 @@ from wazzup import chat_list as wazzup_chat_list  # noqa: E402
 from wazzup import chat_search as wazzup_chat_search  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 from wazzup import syntony as wazzup_syntony  # noqa: E402
+from wazzup import voice as wazzup_voice  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
 from wazzup import embed_auth as wazzup_embed_auth  # noqa: E402
 
@@ -9862,6 +9866,16 @@ app.register_blueprint(build_pilot_blueprint(
     stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+
+# Голосовые «Чатов ОП» текстом (wazzup/voice.py): Gemini расшифровывает их фоном,
+# своим потоком, не трогая общий пул бота. Текст своих голосовых лента берёт той же
+# аудиторией, что читает переписку; аккаунт читается при запросе (лямбда — функция
+# объявлена ниже по файлу).
+app.register_blueprint(wazzup_voice.build_voice_blueprint(
+    db=db, require_api_key=require_api_key, guard=_wazzup_chat_reader_guard,
+    preflight=_build_cors_preflight_response, account_arg=lambda: _wazzup_account_arg(),
+    channel_scope=_wazzup_channel_scope))
+wazzup_voice.start_worker(db)
 
 # Кастомизация «Чатов ОП»: свои обои на фоне переписки (wazzup/appearance.py).
 # Свои — каждому, кому раздел открыт; у кого какие стоят — видят админы.
