@@ -89,6 +89,9 @@ class CabinetClient(MailingsClient):
     сразу, а не через нарастающие повторы. Ширина не растёт выше CONCURRENCY."""
 
     LOG_LABEL = 'Карточка водителя'
+    # Отказ 429 — попытка: обход «Провайдера ЭДО» ждёт кабинет до пятнадцати минут,
+    # а здесь разовый отказ повторяет _call — один раз, через RETRY_DELAY.
+    THROTTLE_SPENDS_ATTEMPT = True
 
     def __init__(self, cookies, user_agent=None):
         super().__init__(cookies, user_agent, concurrency=CONCURRENCY, max_delay=0, timeout=REQUEST_TIMEOUT)

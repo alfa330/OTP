@@ -216,6 +216,11 @@ class FleetClient:
     # «Провайдер ЭДО», и разбор начался не с того раздела.
     LOG_LABEL = 'Провайдер ЭДО'
 
+    # Отказ 429 не тратит попыток (см. THROTTLE_WAIT_MAX) — так нужно обходу
+    # выгрузки. Клиент, ответа которого ждёт человек, ставит True: тогда 429 —
+    # попытка, как до 28.10.2026, и запрос не висит пятнадцать минут.
+    THROTTLE_SPENDS_ATTEMPT = False
+
     def __init__(self, cookies, user_agent=None, *, concurrency=DEFAULT_CONCURRENCY,
                  max_delay=10.0, timeout=60, session=None):
         self._cookies = self._normalize_cookies(cookies)
@@ -368,7 +373,8 @@ class FleetClient:
         last_error = None
         pacer = self._pacers.get(path)
         # Попытки тратят только сеть и 5xx. Отказ 429 — это «подожди», у него
-        # свой счёт: по часам, не по разам (см. THROTTLE_WAIT_MAX).
+        # свой счёт: по часам, не по разам (см. THROTTLE_WAIT_MAX), — кроме
+        # клиентов с THROTTLE_SPENDS_ATTEMPT.
         attempt = 0
         throttled_since = None
         while attempt < attempts:
@@ -407,7 +413,9 @@ class FleetClient:
                 now = time.time()
                 if throttled_since is None:
                     throttled_since = now
-                if self._gave_up or now - throttled_since >= THROTTLE_WAIT_MAX:
+                if self.THROTTLE_SPENDS_ATTEMPT:
+                    attempt += 1
+                elif self._gave_up or now - throttled_since >= THROTTLE_WAIT_MAX:
                     with self._lock:
                         self._gave_up = True
                     raise FleetThrottled(
