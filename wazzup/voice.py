@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from uuid import uuid4
 
 from flask import Blueprint, jsonify, request
@@ -41,6 +41,8 @@ LEASE_SECONDS = 900
 MAX_ATTEMPTS = 4
 RETRY_DELAYS = (20, 120, 600)
 IDLE_SECONDS = 60
+# One drain of the queue before the worker looks for new arrivals again.
+DRAIN_SECONDS = 120
 DISCOVER_HOURS = 24
 MAX_IDS = 200
 # A person opening chats queues at most this many old voice messages an hour;
@@ -215,29 +217,47 @@ def process(item, *, download=None, transcribe=None):
         return 'retry', voice_asr.VoiceError(f'внутренняя ошибка ({type(error).__name__})')
 
 
-def process_batch(db, pool, limit=WORKERS):
-    """Claim and transcribe up to `limit` messages in parallel. False — nothing to do."""
-    items = _claim(db, limit)
-    if not items:
-        return False
-    for item, (kind, outcome) in zip(items, pool.map(process, items)):
-        try:
-            if kind == 'final':
-                try:
-                    _finish(db, item, outcome)
-                except Exception as error:
-                    # The answer itself does not fit the row: count it as a failed
-                    # attempt (with its cost), so the attempts run out instead of
-                    # the lease expiring into the same paid request again.
-                    logger.warning('Wazzup voice: could not store a transcript (%s)', type(error).__name__)
-                    _retry(db, item, f'не удалось сохранить расшифровку ({type(error).__name__})',
-                           dict(outcome, text=None))
+def _store_outcome(db, item, kind, outcome):
+    try:
+        if kind == 'final':
+            try:
+                _finish(db, item, outcome)
+            except Exception as error:
+                # The answer itself does not fit the row: count it as a failed
+                # attempt (with its cost), so the attempts run out instead of
+                # the lease expiring into the same paid request again.
+                logger.warning('Wazzup voice: could not store a transcript (%s)', type(error).__name__)
+                _retry(db, item, f'не удалось сохранить расшифровку ({type(error).__name__})',
+                       dict(outcome, text=None))
+        else:
+            _retry(db, item, outcome, getattr(outcome, 'result', None))
+    except Exception as error:
+        # Never the traceback: driver errors carry the SQL parameters, the text among them.
+        logger.warning('Wazzup voice: could not store a transcript outcome (%s)', type(error).__name__)
+
+
+def drain(db, pool, seconds=DRAIN_SECONDS):
+    """Transcribe due messages, up to WORKERS at a time, for about `seconds`.
+
+    A conveyor, not batches: a freed place takes the next message at once, so one
+    request hanging on Vertex (seconds to tens of seconds) never holds the others.
+    True — time ran out with the queue still being worked (go on after a yield)."""
+    in_flight, started, more = {}, time.monotonic(), False
+    while True:
+        room = WORKERS - len(in_flight)
+        if room:
+            if time.monotonic() - started >= seconds:
+                more = True
             else:
-                _retry(db, item, outcome, getattr(outcome, 'result', None))
-        except Exception as error:
-            # Never the traceback: driver errors carry the SQL parameters, the text among them.
-            logger.warning('Wazzup voice: could not store a transcript outcome (%s)', type(error).__name__)
-    return True
+                budget = _budget_left(db)
+                for item in (_claim(db, min(room, budget)) if budget else []):
+                    in_flight[pool.submit(process, item)] = item
+        if not in_flight:
+            return more
+        done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+        for future in done:
+            item = in_flight.pop(future)
+            _store_outcome(db, item, *future.result())
 
 
 def _maintenance(db):
@@ -299,12 +319,7 @@ def _run(db):
                 if woken or time.monotonic() - discovered_at >= IDLE_SECONDS:
                     discovered_at = time.monotonic()
                     discover(db)
-                started = time.monotonic()
-                while time.monotonic() - started < 120:
-                    budget = _budget_left(db)
-                    if not budget or not process_batch(db, pool, min(WORKERS, budget)):
-                        break
-                else:
+                if drain(db, pool):
                     _wake_event.set()   # a long backlog: yield, then go on
         except Exception as error:
             logger.warning('Wazzup voice: worker iteration failed (%s)', type(error).__name__)

@@ -257,7 +257,7 @@ def test_an_answer_that_cannot_be_stored_still_runs_out_of_attempts(db, monkeypa
     with ThreadPoolExecutor(1) as pool:
         for _ in range(voice.MAX_ATTEMPTS + 3):
             db.one("UPDATE wazzup_voice_transcripts SET next_attempt_at = now() RETURNING 1")
-            voice.process_batch(db, pool, 1)
+            voice.drain(db, pool)
     saved = row(db, 'nul-voice')
     assert saved['status'] == 'failed' and saved['attempts'] == voice.MAX_ATTEMPTS
     assert 'не удалось сохранить' in saved['error']
@@ -302,3 +302,28 @@ def test_a_row_created_by_someone_else_meanwhile_is_reported_not_dropped(db, mon
     monkeypatch.setattr(voice, '_allow_queue', allow_and_race)
     client, _ = app_for(db)
     assert post(client, ['raced']).get_json()['items'] == [{'messageId': 'raced', 'status': 'pending', 'text': None}]
+
+
+def test_a_hanging_message_does_not_hold_the_others(db, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    for name in ('slow', 'b', 'c', 'd', 'e'):
+        message(db, name)
+    voice.discover(db)
+    db.one("UPDATE wazzup_voice_transcripts SET next_attempt_at = now() - interval '1 minute' "
+           "WHERE message_id = 'slow' RETURNING 1")    # claimed first
+    order, others_done = [], threading.Event()
+
+    def process(item):
+        if item['message_id'] == 'slow':
+            # Vertex hangs on this one until the others are through (or 5 s).
+            others_done.wait(5)
+        order.append(item['message_id'])
+        if len(order) == 4 and 'slow' not in order:
+            others_done.set()
+        return 'final', dict(PAID)
+    monkeypatch.setattr(voice, 'process', process)
+    with ThreadPoolExecutor(voice.WORKERS) as pool:
+        assert voice.drain(db, pool) is False
+    assert order[-1] == 'slow' and sorted(order) == ['b', 'c', 'd', 'e', 'slow']
+    assert all(row(db, name)['status'] == 'ready' for name in ('slow', 'b', 'c', 'd', 'e'))
