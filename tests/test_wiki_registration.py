@@ -512,6 +512,54 @@ class QuestionTest(unittest.TestCase):
                                       'регистрировать в городе Костанай')
             self.assertNotIn(', парк ', rows[0]['text'], question)
 
+    def test_owner_followup_with_layout_dot(self):
+        """Владелец 29.10.2026, дословно: после вопроса про Jana из Рудного — «а
+        если он с кентауЮ». Город не нашёлся («Ю» — точка на русской
+        раскладке), фрагмента не было, и помощник назвал Туркестан, где Jana нет."""
+        first = ('водитель обращается с жана такси а водитель сам в рудном и ничего '
+                 'сделать не может, в какой из диспетчерских зарегать его')
+        history = [{'role': 'user', 'text': first}, {'role': 'assistant', 'text': 'Актобе'}]
+        question = 'а если он с кентауЮ'
+        rows = self.assertAnswers(question, 'Кентау › Регистрация водителей', 'парк Jana такси',
+                                  'в городе Тараз', '«Jana Taxi»',
+                                  search_query=ai_answer.enrich_query(question, history))
+        self.assertNotIn('регистрировать в городе Туркестан', rows[0]['text'])
+
+    def test_followups_for_every_city(self):
+        """Продолжение разговора по каждому городу: «а если он с …» с точкой и
+        запятой раскладки, «а из …?», опечатка в длинном названии; смена парка
+        «а если ай партнер?» после вопроса про город."""
+        names = sorted(CITY_CASES)
+        for index, name in enumerate(names):
+            gen, _loc = CITY_CASES[name]
+            other = CITY_CASES[names[(index + 7) % len(names)]][0]
+            first = 'куда зарегать водителя жана такси из %s' % other
+            history = [{'role': 'user', 'text': first}, {'role': 'assistant', 'text': '…'}]
+            follows = ['а если он с %sЮ' % gen.lower(), 'а из %s?' % gen.lower(),
+                       'а если он с %sб' % gen.lower()]
+            word = name.lower()
+            if len(word) >= 7 and '-' not in word:
+                follows.append('а если он с %s' % (word[:len(word) // 2] + word[len(word) // 2 + 1:]))
+            for question in follows:
+                analysis = registration.analyze(question, ai_answer.enrich_query(question, history))
+                self.assertEqual([(d['city']['name'], d['brand']['key'])
+                                  for d in registration.plan(analysis, CATALOG)],
+                                 [(name, 'p:%d' % PARK['Jana такси'])], question)
+            history = [{'role': 'user', 'text': 'куда регистрировать водителя из %s' % gen},
+                       {'role': 'assistant', 'text': '…'}]
+            for question in ('а если ай партнер?', 'а еки донгелек'):
+                analysis = registration.analyze(question, ai_answer.enrich_query(question, history))
+                park = 'iPartner' if 'партнер' in question else '2dongelek'
+                self.assertEqual([(d['city']['name'], d['brand']['key'])
+                                  for d in registration.plan(analysis, CATALOG)],
+                                 [(name, 'p:%d' % PARK[park])], question)
+
+    def test_city_typo_in_a_registration_question(self):
+        self.assertAnswers('куда регать водителя айтакси с кокшеау', 'Кокшетау › Регистрация водителей',
+                           'парк iTaxi', 'регистрировать в городе Кокшетау')
+        self.assertAnswers('водитель jana с павладар куда регистрировать',
+                           'Павлодар › Регистрация водителей', 'парк Jana такси')
+
     def test_kazakh_name_of_karaganda(self):
         self.assertAnswers('Қарағандыдан келген жүргізушіні iTaxi-ге қай қалада тіркеу керек?',
                            'Караганда › Регистрация водителей', 'парк iTaxi',
@@ -693,6 +741,18 @@ class PromptTest(unittest.TestCase):
         self.assertIn('Другие парки и их диспетчерские НЕ', rule)
         self.assertIn('это ответ, а не отказ', rule)
         self.assertIn('БЛИЖАЙШУЮ диспетчерскую парка', rule)
+
+    def test_base_prompt_forbids_guessing_the_city_without_the_record(self):
+        """Без записи «Регистрация водителей» помощник вывел Туркестан из статьи
+        о сайтах парков и своего прошлого ответа (владелец 29.10.2026). Правило —
+        в общем промпте: правило 13 приходит только вместе с такой записью."""
+        prompt = ' '.join(ai_answer.SYSTEM_PROMPT.split())
+        self.assertIn('Город и диспетчерскую, куда регистрировать водителя, бери только из записи', prompt)
+        self.assertIn('не переноси из прошлого ответа про другой город', prompt)
+        self.assertFalse(ai_answer.is_refusal(
+            'По городу Кентаую в справочнике записи не нашлось — напишите город водителя полностью.'))
+        self.assertFalse(ai_answer.admits_missing(
+            'По городу Кентаую в справочнике записи не нашлось — напишите город водителя полностью.'))
 
     def test_directory_label_and_pipeline_gates(self):
         rows = _rows('куда зарегать водителя айтакси с рудного')

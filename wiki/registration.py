@@ -229,10 +229,19 @@ def _unexplained(variants, catalog, entries):
         for pattern in patterns:
             text = pattern.sub(' ', text)
         rest = []
-        for word in text.split():
+        words = text.split()
+        for index, word in enumerate(words):
             if len(word) < 4 or word.isdigit() or word.startswith(_EXPLAINED):
                 continue
             if directory._park_word_forms(word) & brand_forms:
+                continue
+            # «ай партнер» — это iPartner слитно: слово объяснено вместе с соседом.
+            joined = []
+            if index:
+                joined.append(words[index - 1] + word)
+            if index + 1 < len(words):
+                joined.append(word + words[index + 1])
+            if any(directory._park_word_forms(pair) & brand_forms for pair in joined):
                 continue
             rest.append(word)
         if best is None or len(rest) < len(best):
@@ -550,6 +559,10 @@ def plan(analysis, catalog):
     # «а жана такси?» осталось бы необъяснённым словом (_unexplained).
     own_variants = directory._park_variants(list(own_variants) + kazakh_own)
     all_variants = directory._park_variants(list(analysis['variants']) + kazakh_all)
+    # Опечатка в названии города («с кокшеау») — тем же написанием, что верное:
+    # иначе город не «из» и слово не объяснено, и продолжение разговора молчит.
+    own_variants += directory.city_typos(own_variants, catalog.city_names)
+    all_variants += directory.city_typos(all_variants, catalog.city_names)
     own_cities = directory.find_cities({'variants': own_variants}, catalog.city_names)
     own_brands, own_entries = catalog.named_brands(own_variants)
     if analysis.get('registration_own'):

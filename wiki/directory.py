@@ -259,7 +259,10 @@ def _city_pattern(folded_name):
     else:
         tail = re.escape(last) + '(?:а|е|у|ом|ы)?'
     body = r'\s+'.join([re.escape(word) for word in head] + [tail])
-    return re.compile(r'(?<![%s])%s(?![%s])' % (_LETTERS, body, _LETTERS))
+    # «кентауЮ», «рудныйб» — точка и запятая, набранные на русской раскладке
+    # (владелец 29.10.2026: «а если он с кентауЮ» — город не нашёлся, и помощник
+    # без справочника назвал Туркестан). Слов «город + ю/б» в языке нет.
+    return re.compile(r'(?<![%s])%s(?:[юб])?(?![%s])' % (_LETTERS, body, _LETTERS))
 
 
 def city_patterns(names):
@@ -347,6 +350,45 @@ def analyze(query):
     }
 
 
+def _one_letter_apart(word, name):
+    """Слова расходятся ровно одной буквой: пропущенной, лишней или другой."""
+    if word == name or abs(len(word) - len(name)) > 1:
+        return False
+    if len(word) == len(name):
+        return sum(1 for a, b in zip(word, name) if a != b) == 1
+    short, long_ = sorted((word, name), key=len)
+    return any(long_[:index] + long_[index + 1:] == short for index in range(len(long_)))
+
+
+def city_typos(variants, names):
+    """Написания запроса с исправленной опечаткой в длинном названии города:
+    «кокшеау» → «кокшетау», «туркемтан» → «туркестан», «кызылорд» →
+    «кызылорда» (журнал помощника, 29.10.2026). Одна буква и только у названий
+    от семи букв: у коротких на букву расходятся обычные слова («семьей» —
+    «Семей»). Слово, в котором город и так узнан («кызылорде»), не трогается."""
+    forms = set()
+    for name in names:
+        folded = normalize(name)
+        if folded and ' ' not in folded:
+            forms.add(folded)
+    forms |= {alias for alias, target in CITY_ALIASES.items() if target in forms and ' ' not in alias}
+    forms = sorted(form for form in forms if len(form) >= 7)
+    patterns = [pattern for pattern, _name in city_patterns(names)]
+    found = []
+    for value in variants or ():
+        words = value.split()
+        for index, word in enumerate(words):
+            if len(word) < 6 or any(pattern.search(word) for pattern in patterns):
+                continue
+            match = next((form for form in forms if _one_letter_apart(word, form)), None)
+            if match:
+                words[index] = match
+        text = ' '.join(words)
+        if text != value and text not in found and text not in variants:
+            found.append(text)
+    return found
+
+
 def find_cities(analysis, names):
     """Названные в запросе города — в том написании, как в справочнике.
 
@@ -381,6 +423,12 @@ def find_cities(analysis, names):
             continue
         taken.append((position, folded))
         result.append(by_folded[folded])
+    if not result:
+        # Опечатка в длинном названии («кокшеау») — только когда города не нашлось
+        # вовсе: исправление не спорит с названным верно.
+        fixed = city_typos(analysis['variants'], names)
+        if fixed:
+            return find_cities({'variants': fixed}, names)
     return result
 
 

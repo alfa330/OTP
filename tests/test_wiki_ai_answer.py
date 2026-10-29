@@ -184,6 +184,17 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual('Сыйлық жоқ.', body)
         self.assertEqual([1, 2], cited)
 
+    def test_translated_marker_is_stripped(self):
+        """Замер 29.10.2026 на Vertex: казахский ответ кончился «ІСТІКШЕЛЕР: [1]» —
+        модель перевела маркер, и строка уехала оператору в текст."""
+        for reply, expected in (('Алматы қаласына тіркеу қажет. ІСТІКШЕЛЕР: [1]',
+                                 ('Алматы қаласына тіркеу қажет.', [1])),
+                                ('Сыйлық жоқ.\n\nДЕРЕККӨЗДЕР: [1] [2]', ('Сыйлық жоқ.', [1, 2]))):
+            self.assertEqual(ai_answer.split_sources(reply), expected, reply)
+        # Обычный текст со ссылкой — не маркер.
+        for reply in ('Пример: [1] — первый пункт списка.', 'Позвоните: 7700 [1]'):
+            self.assertEqual(ai_answer.split_sources(reply), (reply, []), reply)
+
     def test_excerpt_comes_from_chunk_not_from_model(self):
         text = ('Город: Астана; Адрес: Проспект Сарыарка, 31\n'
                 'Город: Алматы; Адрес: Жамбыла, 172')

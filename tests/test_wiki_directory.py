@@ -169,6 +169,32 @@ class CityRecognitionTest(unittest.TestCase):
         analysis = directory.analyze('офис нур-султан')
         self.assertEqual(directory.find_cities(analysis, ['Алматы']), [])
 
+    def test_layout_dot_and_comma_glued_to_the_city(self):
+        """«кентауЮ» — точка на русской раскладке (владелец 29.10.2026: город не
+        нашёлся, и помощник без справочника назвал Туркестан)."""
+        names = ['Кентау', 'Шымкент', 'Актау', 'Рудный']
+        for query, expected in (('а если он с кентауЮ', ['Кентау']), ('адрес в шымкентеЮ', ['Шымкент']),
+                                ('с рудногоб', ['Рудный']), ('актаую офис', ['Актау'])):
+            self.assertEqual(directory.find_cities(directory.analyze(query), names), expected, query)
+        # Дальше буквы — уже другое слово.
+        self.assertEqual(directory.find_cities(directory.analyze('кентаюбу'), names), [])
+
+    def test_one_letter_typo_in_a_long_city_name(self):
+        """Журнал помощника 29.10.2026: «депортамент кокшеау», «недельные цели в
+        кызылорд», «туркемтан акция». Только длинные названия и только когда
+        город не нашёлся верно: у коротких на букву расходятся обычные слова."""
+        names = ['Кокшетау', 'Кызылорда', 'Туркестан', 'Актау', 'Павлодар']
+        for query, expected in (('в депортамент кокшеау', ['Кокшетау']),
+                                ('недельные цели в кызылорд', ['Кызылорда']),
+                                ('туркемтан акция', ['Туркестан']), ('офис в павладаре', []),
+                                ('водитель с павладар', ['Павлодар']),
+                                ('аккаунт водителя', []), ('офис в кызылорде', ['Кызылорда'])):
+            self.assertEqual(directory.find_cities(directory.analyze(query), names), expected, query)
+        # Город назван верно — опечатку рядом не ищем.
+        self.assertEqual(directory.find_cities(directory.analyze('актау кокшеау'), names), ['Актау'])
+        # «семьей» на букву от «Семей» — потому короткие названия и не правятся.
+        self.assertEqual(directory.find_cities(directory.analyze('переехал с семьей'), ['Семей']), [])
+
 
 class IntentTest(unittest.TestCase):
     def test_office_and_commission_intents(self):
