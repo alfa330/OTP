@@ -91,17 +91,28 @@ const RESIZE_HANDLES = [
 /* Разделы, где шарика нет.
  *
  * call_evaluation и lms — оболочка есть, а содержимое рисует не она: «Журнал
- * оценок» это iframe со своей сборкой, LMS — свой полноэкранный каркас.
+ * оценок» это iframe со своей сборкой, LMS — свой полноэкранный каркас. */
+const SUPPRESSED_VIEWS = new Set(['call_evaluation', 'lms']);
+
+/* В «Вики» шарик гаснет ТОЛЬКО на вкладке «Помощник» (решение владельца
+ * 29.10.2026). Там помощник и так во весь экран, и шарик поверх него — второй
+ * вход в тот же чат: человек начинает выбирать, в какой из двух писать, вместо
+ * того чтобы спросить. На остальных вкладках он нужен ровно как в других
+ * разделах: человек читает статью, листает «Офисы» или «Города» — и спрашивает,
+ * не уходя со страницы.
  *
- * wiki — по другой причине, и она главная. В самом разделе помощник УЖЕ есть:
- * вкладка «Помощник» и строка «Спросить Помощника» под выдачей поиска. Шарик
- * поверх них — второй вход в то же самое, и человек, у которого на экране два
- * помощника, начинает выбирать между ними вместо того, чтобы спросить. Заодно
- * это снимает три технические беды одним решением: оверлеи тренажёров,
- * полноэкранное чтение статьи и `zoom` на .wiki-scope, из-за которого
- * getBoundingClientRect внутри вики возвращает координаты, умноженные на
- * масштаб (см. wiki-scale.css) — а шарик считает позицию именно ими. */
-const SUPPRESSED_VIEWS = new Set(['wiki', 'call_evaluation', 'lms']);
+ * Раньше шарик гас во всей вики, и среди причин числились оверлеи тренажёров,
+ * полноэкранное чтение статьи и `zoom` на .wiki-scope. Ни одна больше не мешает:
+ * zoom из вики убран, шарик стоит СИБЛИНГОМ main-content (App.jsx), тренажёры
+ * (95) и окна (90 и выше) лежат выше его слоя 84 и перекрывают его сами, а над
+ * статьёй «Во весь экран» (слой 40) он висит в углу, как над любым разделом.
+ *
+ * Вкладку сообщает сама вики (WikiView: onTabShown), и сообщает её заранее,
+ * если вот-вот откроет «Помощник» по ссылке или из колокола: иначе шарик
+ * показался бы на кадр перед вкладкой, где его быть не должно. */
+const WIKI_ASSISTANT_TAB = 'assistant';
+const isSuppressed = (view, wikiTab) => SUPPRESSED_VIEWS.has(view)
+    || (view === 'wiki' && wikiTab === WIKI_ASSISTANT_TAB);
 
 const storageKey = (userId) => `${STORAGE_PREFIX}${userId}`;
 
@@ -137,7 +148,7 @@ export default function AssistantOrb({
     user, view, apiBaseUrl, withAccessTokenHeader, showToast,
     wikiEnabled = true, locked = false, lockChecking = false,
     onCheckAccess, onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
-    onOpenWikiTarget = null,
+    onOpenWikiTarget = null, wikiTab = '', wikiSpaceId = null,
 }) {
     const userId = user?.id;
     const [appearance, setAppearance] = useAssistantAppearance(userId);
@@ -189,21 +200,30 @@ export default function AssistantOrb({
        «Таксопарков» без признака, что база знаний другая. */
     const [probe, setProbe] = useState(null);
 
-    const rememberedSpace = () => {
+    /* С какого пространства спрашивать. Вне вики — последнее выбранное в ней:
+       при загрузке портала это память браузера (wiki:space), после захода в
+       раздел — то, что вики сообщила сама (wikiSpaceId). Внутри вики это и
+       есть ОТКРЫТАЯ вика: шарик висит над её статьями, и переключатель в шапке
+       обязан переключать и его — иначе рядом со статьями «Тез КЦ» он отвечал
+       бы из «Таксопарков». Память читаем один раз, а значение примитивное:
+       проба ниже повторяется, только когда пространство правда сменилось, и
+       заход в ту же вику, что была, второго запроса не шлёт. */
+    const [startSpace] = useState(() => {
         try {
             const value = Number(window.localStorage.getItem('wiki:space'));
             return Number.isFinite(value) && value > 0 ? value : undefined;
         } catch (error) {
             return undefined;
         }
-    };
+    });
+    const askSpace = wikiSpaceId || startSpace;
 
     useEffect(() => {
         // У запертого QR-ом пробы нет: она вернула бы 403, а решение показать
         // ему шарик с замком принято и без сервера.
         if (!userId || !wikiEnabled || locked) return undefined;
         let alive = true;
-        axios.get(`${base}/ai/status`, { headers, params: { space_id: rememberedSpace() } })
+        axios.get(`${base}/ai/status`, { headers, params: { space_id: askSpace } })
             .then((r) => {
                 if (!alive) return;
                 const data = r.data || {};
@@ -219,14 +239,18 @@ export default function AssistantOrb({
                 // локально «доступ есть», а сервер отвечает 403. Шарик оставляем
                 // — панель откроется замком.
                 const code = error?.response?.data?.code;
-                setProbe({
+                /* Сбой — не ответ: сервер не ответил или упал (5xx). Повторная
+                   проба при смене вики, не дойдя, погасила бы шарик, который
+                   только что работал, — прежний ответ остаётся в силе. */
+                const failed = !error?.response || error.response.status >= 500;
+                setProbe((prev) => (failed && prev?.ok ? prev : {
                     ok: code === 'SENSITIVE_ACCESS_REQUIRED',
                     spaceId: null,
                     serverLocked: code === 'SENSITIVE_ACCESS_REQUIRED',
-                });
+                }));
             });
         return () => { alive = false; };
-    }, [userId, wikiEnabled, locked, base, headers]);
+    }, [userId, wikiEnabled, locked, base, headers, askSpace]);
 
     const spaceId = probe?.spaceId ?? null;
     const detached = !!pipContainer;
@@ -676,11 +700,19 @@ export default function AssistantOrb({
         onOpenWikiArticle?.(slug, quote);
     }, [onOpenWikiArticle, onOpenWikiTarget, raisePortal]);
 
+    /* «Открыть в разделе «Вики»» — вкладка «Помощник» на ТОМ ЖЕ разговоре.
+       Раньше кнопка просто уводила в раздел, на главную: пока шарик гас во
+       всей вики, человек хотя бы видел вкладку рядом. Теперь шарик на главной
+       остаётся, и такой переход читался бы как «панель закрылась, ничего не
+       произошло», а изнутри вики кнопка не делала бы вовсе ничего. Разговор
+       передаём номером: вкладка откроет его тем же путём, что и колокол
+       «Супервайзер ответил». Нового разговора ещё нет (activeId пуст) —
+       открывается просто вкладка. */
     const openFull = useCallback(() => {
         setOpen(false);
         raisePortal();
-        onOpenWikiAssistant?.();
-    }, [onOpenWikiAssistant, raisePortal]);
+        onOpenWikiAssistant?.(chat.activeId || null);
+    }, [onOpenWikiAssistant, raisePortal, chat.activeId]);
 
     /* Кому шарика не видно вовсе. Замок QR сюда НЕ входит: владелец решил, что
        неподтверждённый оператор обязан видеть помощника и понимать, как его
@@ -690,16 +722,16 @@ export default function AssistantOrb({
        сервер подтвердил, что помощнику есть на чём отвечать. */
     const orbVisible = !!userId
         && wikiEnabled
-        && !SUPPRESSED_VIEWS.has(view)
+        && !isSuppressed(view, wikiTab)
         && (locked || !!probe?.ok)
         && !!position;
 
     /* Откреплённое окно переживает всё перечисленное, и это не недосмотр.
-       Уйдя в «Вики», человек теряет шарик — но окно, которое он сам вынес
-       поверх Fleet и в котором лежит его разговор, закрываться от смены
-       раздела в чужой вкладке не должно. Закрывают его крестиком, Escape,
-       кнопкой «вернуть в портал» и выходом из аккаунта — то есть решением
-       человека, а не переходом по меню. */
+       Открыв вкладку «Помощник» в вике, человек теряет шарик — но окно,
+       которое он сам вынес поверх Fleet и в котором лежит его разговор,
+       закрываться от перехода в чужой вкладке не должно. Закрывают его
+       крестиком, Escape, кнопкой «вернуть в портал» и выходом из аккаунта —
+       то есть решением человека, а не переходом по меню. */
     if (!orbVisible && !detached) return null;
 
     const docked = !!position?.dock;

@@ -1,5 +1,6 @@
 /*
- * Стенд для тестов входа в «Вики» (wiki_entry_first_frame, wiki_entry_after_answer).
+ * Стенд для тестов входа в «Вики» (wiki_entry_first_frame, wiki_entry_after_answer)
+ * и шарика помощника над ней (assistant_orb_wiki_tab).
  *
  * Не тест: имя без `.test.`, под шаблон `tests/*.test.mjs` файл не попадает.
  *
@@ -127,10 +128,13 @@ const REACT_SHIM = `
 `;
 
 /* Раздел и его память входа — ОДНОЙ сборкой: у памяти состояние на уровне
-   модуля, и тест обязан писать в тот же экземпляр, из которого читает раздел. */
+   модуля, и тест обязан писать в тот же экземпляр, из которого читает раздел.
+   Шарик помощника — туда же: он висит над разделом и гаснет по вкладке,
+   которую раздел сообщает (WikiView: onTabShown). */
 const ENTRY = `
   export { default as WikiView } from ${JSON.stringify(path('src/components/wiki/WikiView.jsx'))};
   export { default as WikiLibrary } from ${JSON.stringify(path('src/components/wiki/WikiLibrary.jsx'))};
+  export { default as AssistantOrb } from ${JSON.stringify(path('src/components/assistant/AssistantOrb.jsx'))};
   export * as memory from ${JSON.stringify(path('src/components/wiki/entryMemory.js'))};
 `;
 
@@ -344,6 +348,12 @@ export function mount(Component, props) {
         holds: (value) => lab.slots.some((slot) => slot.kind === 'state' && slot.value === value),
         settle,
         update: (next) => { current = { ...current, ...next }; frame(); return settle(); },
+        // Ушли из раздела: снимаются все эффекты корня, как при размонтировании.
+        unmount: () => {
+            for (const slot of lab.slots) {
+                if (slot.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();
+            }
+        },
     };
 }
 

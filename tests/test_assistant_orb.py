@@ -148,11 +148,49 @@ class MountTests(unittest.TestCase):
         suppressed = re.search(r'SUPPRESSED_VIEWS = new Set\(\[([^\]]*)\]\)', self.orb)
         self.assertIsNotNone(suppressed, 'список погашенных разделов исчез')
         views = suppressed.group(1)
-        # Вики: там уже есть вкладка «Помощник» и строка «Спросить Помощника».
-        self.assertIn("'wiki'", views)
         # Журнал оценок — iframe со своей сборкой; LMS — свой каркас.
         self.assertIn("'call_evaluation'", views)
         self.assertIn("'lms'", views)
+        # Вики целиком — нет (решение владельца 29.10.2026): шарик гаснет только
+        # на вкладке «Помощник», где тот же чат и так во весь экран. Как это
+        # работает на деле — tests/assistant_orb_wiki_tab.test.mjs.
+        self.assertNotIn("'wiki'", views)
+        self.assertIn("|| (view === 'wiki' && wikiTab === WIKI_ASSISTANT_TAB)", self.orb)
+        self.assertIn("const WIKI_ASSISTANT_TAB = 'assistant';", self.orb)
+        self.assertIn('&& !isSuppressed(view, wikiTab)', self.orb)
+
+    def test_вкладку_и_пространство_вики_шарику_сообщает_раздел(self):
+        """Вкладку и выбранную вику знает только раздел — портал их передаёт.
+
+        Не передай он вкладку — шарик висел бы и над «Помощником»; не передай
+        пространство — отвечал бы над статьями одной вики из другой. Вкладка при
+        перезагрузке берётся из адреса сразу: раздел грузится лениво, и шарик
+        успевал бы показаться над «Помощником» до него.
+        """
+        wiki = self.app[self.app.index('<WikiView'):]
+        wiki = wiki[:wiki.index('/>')]
+        self.assertIn('onTabShown={setWikiTabShown}', wiki)
+        self.assertIn('onSpaceShown={setWikiSpaceShown}', wiki)
+        orb = self.app[self.app.index('<AssistantOrb'):]
+        orb = orb[:orb.index('/>\n')]
+        self.assertIn('wikiTab={wikiTabShown}', orb)
+        self.assertIn('wikiSpaceId={wikiSpaceShown}', orb)
+        seed = self.app[self.app.index('const [wikiTabShown, setWikiTabShown] = useState('):]
+        seed = seed[:seed.index('});')]
+        self.assertLess(seed.index('readArticleSlugFromSearch(search)'),
+                        seed.index('readWikiTabFromSearch(search)'),
+                        'ссылка на статью обязана быть сильнее ссылки на вкладку')
+
+    def test_открыть_в_вики_ведёт_на_помощника_с_тем_же_разговором(self):
+        """Раньше кнопка уводила на главную вики. Теперь шарик там остаётся, и
+        такой переход выглядел бы как «панель закрылась, ничего не случилось»,
+        а изнутри вики кнопка не делала бы вовсе ничего."""
+        self.assertIn('onOpenWikiAssistant?.(chat.activeId || null);', self.orb)
+        door = self.app[self.app.index('onOpenWikiAssistant={(chatId) => {'):]
+        door = door[:door.index("navigateToView('wiki');")]
+        self.assertIn("kind: 'assistant'", door)
+        self.assertIn('id: chatId || null', door)
+        self.assertIn('setWikiBellFocus((prev) => ({', door)
 
     def test_слой_ниже_полноэкранных_режимов(self):
         """84 держит шарик под всем, что занимает экран целиком.
@@ -360,10 +398,11 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertRegex(self.orb, r'lazyWithRetry\(\(\) => import\(.\./AssistantPanel')
 
     def test_окно_переживает_смену_раздела(self):
-        """Уйдя в «Вики», человек теряет шарик — так и задумано (там свой
-        помощник). Но окно, которое он вынес поверх Fleet и в котором лежит его
-        разговор, от перехода по меню в чужой вкладке закрываться не должно:
-        ранние return, гасившие весь виджет, обязаны пропускать откреплённое.
+        """Открыв вкладку «Помощник» в вике, человек теряет шарик — так и
+        задумано (там тот же чат во весь экран). Но окно, которое он вынес
+        поверх Fleet и в котором лежит его разговор, от перехода по меню в чужой
+        вкладке закрываться не должно: ранние return, гасившие весь виджет,
+        обязаны пропускать откреплённое.
         """
         self.assertIn('if (!orbVisible && !detached) return null;', self.orb)
         self.assertIn('createPortal(panel, pipContainer)', self.orb)

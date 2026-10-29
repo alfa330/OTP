@@ -146,7 +146,7 @@ import { startFileDownload } from './utils/fileDownload';
 import { hoursScreenModelCode } from './utils/hoursScreenModel';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 import {
-    WIKI_SPACE_QUERY_PARAM, WIKI_TAB_QUERY_PARAM,
+    WIKI_SPACE_QUERY_PARAM, WIKI_TAB_QUERY_PARAM, readWikiTabFromSearch,
 } from './components/wiki/tabLink';
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
    импорт компонента ради двух функций утащил бы его в основной бандл. */
@@ -43921,7 +43921,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
             /* Переход из колокола по «Вопросам операторов» ведёт не в статью, а во
                вкладку вики: супервайзеру — карточка вопроса, оператору — разговор
-               с ответом. nonce — чтобы повторный клик по тому же уведомлению
+               с ответом. Той же дверью шарик открывает «Помощник» на разговоре
+               из мини-чата. nonce — чтобы повторный клик по тому же уведомлению
                сработал снова. */
             const [wikiBellFocus, setWikiBellFocus] = useState(null);
             const clearWikiBellFocus = useCallback(() => setWikiBellFocus(null), []);
@@ -43931,6 +43932,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                повторный щелчок по тому же чипу сработал снова. */
             const [wikiDirectoryFocus, setWikiDirectoryFocus] = useState(null);
             const clearWikiDirectoryFocus = useCallback(() => setWikiDirectoryFocus(null), []);
+            /* Что открыто в «Вики» — для шарика помощника: на вкладке «Помощник»
+               он гаснет, а отвечает по той вике, что выбрана в разделе
+               (AssistantOrb: isSuppressed, askSpace). Обе величины сообщает сам
+               раздел. Вкладку при перезагрузке берём из адреса сразу: раздел
+               грузится лениво, и шарик успел бы показаться над «Помощником»
+               раньше, чем тот встанет. Ссылка на статью сильнее ссылки на
+               вкладку — то же правило, что у раздела (WikiView: requestedTab). */
+            const [wikiTabShown, setWikiTabShown] = useState(() => {
+                if (typeof window === 'undefined') return '';
+                const search = window.location.search;
+                return readArticleSlugFromSearch(search) ? '' : readWikiTabFromSearch(search);
+            });
+            const [wikiSpaceShown, setWikiSpaceShown] = useState(null);
             /* Источник «Списки Байги» под ответом помощника (baiga/assistant.py):
                раздел открывается на неделе и водителе из ответа. Одноразово, как
                справочник выше, и в памяти, а не в адресе: номер ВУ — персональные
@@ -57355,6 +57369,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     directoryFocus={wikiDirectoryFocus}
                                     onDirectoryFocusConsumed={clearWikiDirectoryFocus}
                                     onOpenBaiga={openBaigaSource}
+                                    onTabShown={setWikiTabShown}
+                                    onSpaceShown={setWikiSpaceShown}
                                 />
                             </Suspense>
                         ))}
@@ -63903,6 +63919,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     <AssistantOrb
                         user={user}
                         view={view}
+                        wikiTab={wikiTabShown}
+                        wikiSpaceId={wikiSpaceShown}
                         mobileNav={mobileNavGeometry}
                         apiBaseUrl={API_BASE_URL}
                         withAccessTokenHeader={withAccessTokenHeader}
@@ -63926,7 +63944,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             setWikiDirectoryFocus({ ...target, nonce: Date.now() });
                             navigateToView('wiki');
                         }}
-                        onOpenWikiAssistant={() => navigateToView('wiki')}
+                        onOpenWikiAssistant={(chatId) => {
+                            // Дверь колокола «Супервайзер ответил»: вкладка
+                            // «Помощник» на разговоре из мини-чата, а без
+                            // разговора — просто вкладка.
+                            setWikiBellFocus((prev) => ({
+                                kind: 'assistant',
+                                id: chatId || null,
+                                nonce: Number(prev?.nonce || 0) + 1,
+                            }));
+                            navigateToView('wiki');
+                        }}
                     />
                     )}
                     {/* Предложение установить портал на телефон. Стоит здесь по

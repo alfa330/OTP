@@ -173,10 +173,15 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
     </div>
 );
 
-/** Вкладка, на которую ведёт переход из колокола; '' — просьбы нет. */
+/** Вкладка, на которую ведёт переход из колокола; '' — просьбы нет.
+ *
+ * Той же дверью приходит «Открыть в разделе «Вики»» из мини-чата шарика
+ * (App: onOpenWikiAssistant), и у него разговора может ещё не быть — тогда
+ * номера нет, а вкладка «Помощник» всё равно открывается. Вопросу без номера
+ * открывать нечего. */
 const bellTabOf = (focus) => {
-    if (!focus?.id) return '';
-    return focus.kind === 'assistant' ? 'assistant' : 'questions';
+    if (focus?.kind === 'assistant') return 'assistant';
+    return focus?.id ? 'questions' : '';
 };
 
 /* Место ряда вкладок на время первого ответа /ping — та же подложка, пустая.
@@ -207,7 +212,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                    initialArticleSlug, onInitialArticleConsumed,
                                    bellFocus = null, onBellFocusConsumed,
                                    directoryFocus = null, onDirectoryFocusConsumed,
-                                   onOpenBaiga = null }) {
+                                   onOpenBaiga = null,
+                                   onTabShown = null, onSpaceShown = null }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -443,10 +449,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        каждом рендере считается заново. Запись сюда ломала создание — только
        что заведённое пространство ещё не приехало в ping, подстановка честно
        давала первое из старого списка, и она же затирала выбор новым. Человек
-       нажимал «Создать» и оставался в прежней вике. */
+       нажимал «Создать» и оставался в прежней вике.
+       Порталу сообщаем то же значение: по нему отвечает шарик помощника,
+       который висит над разделом (AssistantOrb: askSpace). */
+    const reportSpace = useStableCallback(onSpaceShown);
     useEffect(() => {
-        if (activeSpace) localStorage.setItem('wiki:space', String(activeSpace.id));
-    }, [activeSpace]);
+        if (!activeSpace) return;
+        localStorage.setItem('wiki:space', String(activeSpace.id));
+        reportSpace(activeSpace.id);
+    }, [activeSpace, reportSpace]);
 
     const loadPing = useCallback(() => {
         setLoading(true);
@@ -775,8 +786,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         }
         setBellDone(bellFocus);
         setTab(target);
-        if (target === 'assistant') setAssistantChat({ chatId: bellFocus.id, nonce: bellFocus.nonce });
-        else setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
+        if (target !== 'assistant') setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
+        // Шарик без разговора просит только вкладку — открывать в ней нечего.
+        else if (bellFocus.id) setAssistantChat({ chatId: bellFocus.id, nonce: bellFocus.nonce });
         onBellFocusConsumed?.();
     }, [bellFocus, tabs, ready, loading, onBellFocusConsumed]);
 
@@ -831,9 +843,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        Классификатор из шарика — тоже уход: статья откроется на месте главной,
        и рисовать главную на кадр перед ней незачем. */
     const bellTab = bellTabOf(bellFocus);
-    const leavingLibrary = !!requestedTab
+    const bellPending = !!bellTab && bellDone !== bellFocus
         // До ответа набора ещё нет: уйдут ли — неизвестно, и за данными не спешим.
-        || (!!bellTab && bellDone !== bellFocus && (!ready || tabs.some((t) => t.key === bellTab)))
+        && (!ready || tabs.some((t) => t.key === bellTab));
+    const leavingLibrary = !!requestedTab
+        || bellPending
         || (!!directoryFocus?.tab && directoryDone !== directoryFocus);
 
     /* «Опубликовать как новость» из «Вопросов» живёт, пока открыта вкладка
@@ -959,6 +973,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        Главная в это правило не входит намеренно: в ней живут открытая статья
        и редактор с несохранённым текстом, а пустой она становится сама. */
     const bodyTab = ready ? tab : '';
+
+    /* ВКЛАДКА — ПОРТАЛУ. На «Помощнике» шарик помощника гаснет, на остальных
+       висит (AssistantOrb: isSuppressed). Сообщаем ту вкладку, что на экране,
+       а если её вот-вот сменит просьба — вкладка из адреса или переход из
+       колокола и шарика, — то ту, что встанет. Иначе при входе прямо в
+       «Помощник» (перезагрузка на нём, «Открыть в разделе «Вики»» из
+       мини-чата) шарик успевал бы показаться до ответа /ping и исчезнуть с
+       ним. Не исполнится просьба — встанет главная, и шарик просто появится.
+       useLayoutEffect: шарик гаснет тем же кадром, каким встаёт вкладка. Уйдя
+       из раздела, сообщаем, что вкладки больше нет. */
+    const shownTab = requestedTab || (bellPending ? bellTab : '') || bodyTab;
+    const reportTab = useStableCallback(onTabShown);
+    useLayoutEffect(() => { reportTab(shownTab); }, [shownTab, reportTab]);
+    useLayoutEffect(() => () => reportTab(''), [reportTab]);
 
     return (
         <div
