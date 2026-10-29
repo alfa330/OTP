@@ -35,6 +35,7 @@ from . import directory as wiki_directory
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import questions as wiki_questions
+from . import registration as wiki_registration
 from . import schema
 from . import structure
 from .ai import answer as ai_answer
@@ -100,12 +101,34 @@ def assistant_spaces(cursor, ctx):
     ]
 
 
+def registration_rows(cursor, ctx, question, space_id, search_query=None):
+    """«Куда регистрировать водителя» — город и диспетчерская (wiki/registration.py).
+
+    Своим савпоинтом, а не общим со справочником: сбой одного не должен
+    отнимать у оператора адрес офиса или комиссию из другого.
+    """
+    cursor.execute('SAVEPOINT wiki_ai_registration')
+    try:
+        rows = wiki_registration.ai_rows(cursor, ctx, question, space_id=space_id,
+                                         search_query=search_query)
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_registration')
+        logging.exception('Помощник: справочник регистрации не ответил')
+        return []
+    cursor.execute('RELEASE SAVEPOINT wiki_ai_registration')
+    return rows
+
+
 def directory_rows(cursor, ctx, question, space_id, search_query=None):
     """Записи «Офисов» и «Городов» к вопросу (wiki/directory.py) — или [].
+
+    Регистрация водителей — первой: на «куда зарегистрировать» отвечает она, а
+    офис и комиссия того же города — соседние сведения.
 
     Под савпоинтом: справочник — приставка к ответу, и его сбой не должен
     отнимать у оператора ответ по статьям.
     """
+    registration = registration_rows(cursor, ctx, question, space_id, search_query)
     cursor.execute('SAVEPOINT wiki_ai_directory')
     try:
         rows = wiki_directory.ai_rows(cursor, ctx, question, space_id=space_id,
@@ -113,9 +136,9 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None):
     except Exception:                                    # noqa: BLE001
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_directory')
         logging.exception('Помощник: справочник не ответил')
-        return []
+        return registration
     cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
-    return rows
+    return registration + rows
 
 
 def classifier_rows(cursor, question, article_ids, search_query=None, *, history=None):
@@ -530,8 +553,11 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
         # савпоинтом: передача — продолжение ответа, а не его условие, и
         # сломавшаяся очередь не должна отнимать у оператора сам ответ.
         escalation = None
+        # Ответ справочника регистрации («у парка диспетчерской для Рудного нет»)
+        # — сведение, а не пробел в базе знаний: супервайзеру его не передаём.
         if (not gated_by
                 and wiki_questions.should_escalate(ctx['otp_role'], result['kind'], result['text'])
+                and not ai_answer.registration_answer(result)
                 and wiki_questions.table_ready(cursor)):
             cursor.execute('SAVEPOINT wiki_question_escalate')
             try:

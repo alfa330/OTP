@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Loader2, Map as MapIcon, Plus, Search } from 'lucide-react';
+import { ListTree, Loader2, Map as MapIcon, Plus, Search } from 'lucide-react';
 import {
     iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal,
 } from '../ui/ios';
@@ -9,13 +9,15 @@ import useStableCallback from './useStableCallback';
 import CityMap from './CityMap';
 import CityCard from './CityCard';
 import CityEditor, { draftFromCity, payloadFromDraft } from './CityEditor';
+import CityDispatchers from './CityDispatchers';
 import OfficeInfoModal from './OfficeInfoModal';
 import { officeTodayISO } from './officeSchedule';
 import { cityMatches, cityZone, zoneHubs, zonePalette } from './cityRules';
 
 /* Вкладка «Города» (задача #322): тарифы Яндекс Go по городу и то, чего на
- * странице Яндекса нет, — комиссии, требования к авто, услуги парка и куда
- * направлять водителя.
+ * странице Яндекса нет, — комиссии, требования к авто, услуги парка, куда
+ * регистрировать водителя (диспетчерские кабинета Fleet, 29.10.2026) и куда
+ * его направлять.
  *
  * Раскладка — по двум макетам постановки: сверху схема страны с зонами
  * офисов, под ней список городов с поиском и карточка выбранного. Список
@@ -64,6 +66,7 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
     const [draft, setDraft] = useState(null);
     const [busy, setBusy] = useState(false);
     const [officeTarget, setOfficeTarget] = useState(null);
+    const [dispatchersOpen, setDispatchersOpen] = useState(false);
     const [tick, setTick] = useState(0);
     const inflight = useRef(new Set());
 
@@ -153,6 +156,11 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
     // Карточка — сводка, поверх которой лежит догруженная подробность: пока
     // подробность едет, шапка и комиссии уже на месте.
     const current = summary ? { ...summary, ...(details[summary.id] || {}) } : null;
+    /* Кабинет Fleet есть не у каждого пространства (у Тез его нет): без единой
+       диспетчерской кнопка «Диспетчерские» и выбор «Куда регистрировать» —
+       пустые экраны. Карточка с блоком регистрации — тоже признак: сразу после
+       выкладки снимок снимается первым открытием карточки, раньше сводки. */
+    const hasFleet = cities.some((city) => (city.dispatcher_count || 0) > 0) || !!current?.registration;
 
     /* Ответ сервера после записи несёт карточку целиком — кладём её и в
        сводку, и в подробности, без второго запроса за тем же. */
@@ -186,6 +194,7 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
 
     const save = () => {
         const payload = payloadFromDraft(draft);
+        const before = (draft.id && (details[draft.id] || cities.find((item) => item.id === draft.id))) || null;
         setBusy(true);
         const request = draft.id
             ? axios.patch(`${base}/cities/${draft.id}`, payload, req)
@@ -193,6 +202,13 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
         request
             .then((r) => {
                 const city = r.data?.city;
+                /* «Куда регистрировать» у Рудного меняет и чужие карточки: у
+                   Костаная — «Сюда же регистрируют водителей из Рудного».
+                   Подробности остальных городов сбрасываем, их догрузят заново. */
+                const regBefore = JSON.stringify(before?.registration_city_ids || []);
+                if (city && JSON.stringify(city.registration_city_ids || []) !== regBefore) {
+                    setDetails({});
+                }
                 absorb(city);
                 if (city && !draft.id) select(city);
                 setDraft(null);
@@ -220,11 +236,30 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
             .then(() => {
                 toast('Город убран в архив', 'success');
                 setPhoneOpen(false);
+                // Архивный город уходит и из чужих «куда регистрировать».
+                setDetails({});
                 load();
             })
             .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
             .finally(() => setBusy(false));
     };
+
+    /* Привязку диспетчерских поправили — у карточек сменился ответ «куда
+       регистрировать». Запомненные подробности сбрасываем все: правка одной
+       диспетчерской меняет и её город, и город, откуда туда регистрируют. */
+    const closeDispatchers = (changed) => {
+        setDispatchersOpen(false);
+        if (!changed) return;
+        /* Открытая карточка остаётся на месте, пока не придёт свежая: со
+           сброшенной подробностью она складывалась в «Загружаем тарифы…» и
+           раскрывалась снова прямо под уходящим окном (разбор 29.10.2026). */
+        setDetails((currentDetails) => (effectiveId && currentDetails[effectiveId]
+            ? { [effectiveId]: currentDetails[effectiveId] } : {}));
+        if (effectiveId) fetchDetail(effectiveId, { force: true });
+        load();
+    };
+
+    const openDispatchers = () => { setPhoneOpen(false); setDispatchersOpen(true); };
 
     const copyAddress = (office) => {
         const text = [office.city, office.address].filter(Boolean).join(', ');
@@ -252,6 +287,9 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
             onSync={sync}
             onArchive={archive}
             onOpenOffice={(office) => { setPhoneOpen(false); setOfficeTarget(office); }}
+            /* На компьютере в то же окно ведёт кнопка в шапке вкладки — вторая
+               дверь на одном экране была бы дублем. На телефоне шапки рядом нет. */
+            onOpenDispatchers={isPhone ? openDispatchers : null}
         />
     );
 
@@ -300,10 +338,15 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
                         Города
                     </h2>
                     <p className="mt-0.5 text-[12.5px] text-slate-500">
-                        Тарифы Яндекс Go, комиссии и куда направлять водителя
+                        Тарифы Яндекс Go, комиссии, куда регистрировать и куда направлять водителя
                     </p>
                 </div>
-                <div className="flex shrink-0 items-center gap-3">
+                <div className="flex shrink-0 items-center gap-2">
+                    {hasFleet && (
+                        <button type="button" className={iosBtnSecondary} onClick={openDispatchers}>
+                            <ListTree size={15} /> Диспетчерские
+                        </button>
+                    )}
                     {canManage && (
                         <button type="button" className={iosBtnPrimary} onClick={() => openEditor(null)}>
                             <Plus size={15} /> Город
@@ -405,10 +448,19 @@ export default function WikiCities({ base, headers, showToast, spaceId = null,
                         draft={draft}
                         setDraft={setDraft}
                         offices={offices}
+                        cities={hasFleet ? cities : []}
                         takenNames={cities.filter((city) => city.id !== draft.id).map((city) => city.name)}
                     />
                 )}
             </IosModal>
+
+            <CityDispatchers
+                open={dispatchersOpen}
+                onClose={closeDispatchers}
+                base={base}
+                req={req}
+                toast={toast}
+            />
 
             {officeTarget && (
                 <OfficeInfoModal

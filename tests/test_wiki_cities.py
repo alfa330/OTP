@@ -256,11 +256,22 @@ class CityFieldTest(unittest.TestCase):
     def test_options_are_read_as_a_list_even_before_they_are_filled(self):
         row = [None] * len(wiki_cities._SUMMARY_KEYS)
         row[0], row[1] = 4, 'Алматы'
-        self.assertEqual(wiki_cities._city_row(tuple(row))['option_commissions'], [])
-        # В конце сводки: поля до неё берутся по номеру (row[13] — статус).
-        self.assertEqual(wiki_cities._SUMMARY_KEYS[-1], 'option_commissions')
+        city = wiki_cities._city_row(tuple(row))
+        self.assertEqual(city['option_commissions'], [])
+        self.assertEqual(city['registration_city_ids'], [])
+        self.assertEqual(city['dispatcher_count'], 0)
+        # Новые поля — в конце сводки: поля до них берутся по номеру (row[13] —
+        # статус). Опции (#368), за ними «куда регистрировать» и число
+        # диспетчерских города (29.10.2026).
+        self.assertEqual(wiki_cities._SUMMARY_KEYS[-3:],
+                         ('option_commissions', 'registration_city_ids', 'dispatcher_count'))
         self.assertEqual(wiki_cities._SUMMARY_KEYS[13], 'status')
-        self.assertTrue(wiki_cities._SUMMARY_COLUMNS.rstrip().endswith('c.option_commissions'))
+        columns = ' '.join(wiki_cities._SUMMARY_COLUMNS.split())
+        self.assertTrue(columns.endswith("AND dd.status = 'active')"))
+        self.assertLess(columns.index('c.option_commissions'),
+                        columns.index('FROM wiki_city_registration r'))
+        self.assertLess(columns.index('FROM wiki_city_registration r'),
+                        columns.index('FROM wiki_dispatchers dd'))
 
 
 # ── Граница пространства ─────────────────────────────────────────────────────
@@ -448,11 +459,13 @@ class CitySyncTest(unittest.TestCase):
             @contextmanager
             def _get_cursor(self):
                 state['open'] += 1
-                cursor = _RecordingCursor(rows=[] if cursors else [
+                # Первый такт — снимок диспетчерских (wiki/dispatchers.py): в
+                # пустой базе пространства по умолчанию нет, и он молчит.
+                cursor = _RecordingCursor(rows=[] if len(cursors) != 1 else [
                     (1, SPACE, 'https://taxi.yandex.ru/aktau/tariff'),
                     (2, 12, 'https://taxi.yandex.ru/almaty/tariff'),
                 ])
-                if len(cursors) >= 1:
+                if len(cursors) >= 2:
                     cursor.rows = [(None,)]   # прежнего отпечатка нет
                 cursors.append(cursor)
                 try:
@@ -467,12 +480,37 @@ class CitySyncTest(unittest.TestCase):
             return _page()
 
         summary = wiki_cities.sync_due(DB(), fetch=fetch, pause=0, sleep=lambda _s: None)
-        self.assertEqual(summary, {'cities': 2, 'checked': 2, 'changed': 1, 'errors': 1})
+        self.assertEqual(summary, {'cities': 2, 'checked': 2, 'changed': 1, 'errors': 1,
+                                   'dispatchers': 'no_source'})
         # Сеть — только при закрытом соединении.
         self.assertEqual(state['fetched_open'], [0, 0])
+        # Снимок диспетчерских — своим коротким тактом, до обхода тарифов.
+        self.assertIn('FROM wiki_spaces', cursors[0].calls[0][0])
         # Результат пишется через пространство каждого города, а не одно на всех.
-        self.assertTrue(cursors[1].asked_space(SPACE))
-        self.assertTrue(cursors[2].asked_space(12))
+        self.assertTrue(cursors[2].asked_space(SPACE))
+        self.assertTrue(cursors[3].asked_space(12))
+
+    def test_failed_dispatcher_snapshot_does_not_stop_the_tariffs(self):
+        """Снимок диспетчерских — приставка к обходу: его сбой оставляет
+        города с тарифами, а не без них."""
+        cursors = []
+
+        class Broken(_RecordingCursor):
+            def execute(self, sql, params=None):
+                raise RuntimeError('кэш «Рассылок» недоступен')
+
+        class DB:
+            @contextmanager
+            def _get_cursor(self):
+                cursor = Broken() if not cursors else _RecordingCursor(rows=[])
+                cursors.append(cursor)
+                yield cursor
+
+        summary = wiki_cities.sync_due(DB(), fetch=lambda _url: _page(), pause=0,
+                                       sleep=lambda _s: None)
+        self.assertEqual(summary['dispatchers'], 'error')
+        self.assertEqual(summary['cities'], 0)
+        self.assertTrue(any('FROM wiki_cities' in sql for sql, _ in cursors[1].calls))
 
 
 # ── Роуты ────────────────────────────────────────────────────────────────────

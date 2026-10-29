@@ -4,6 +4,7 @@ import { iosBtnGhost, iosGroupLabel, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
 import { Field } from './formField';
+import { dispatcherWord } from './registrationRules';
 
 /* Редактор города — всё, чего нет на странице Яндекса.
  *
@@ -39,6 +40,8 @@ const chip = 'inline-flex items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1
     + 'font-medium text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]';
 
 const EMPTY_EXTRA = { name: '', commission: '', requirement: '', price: '' };
+// Двойник cities.MAX_REGISTRATION_CITIES: больше сервер не примет.
+const MAX_REGISTRATION_CITIES = 5;
 const EMPTY_OPTION = { name: '', commission: '' };
 const EMPTY_SERVICE = { title: '', note: '' };
 
@@ -69,6 +72,7 @@ export const draftFromCity = (city) => {
         yandex_url: city?.yandex_url || '',
         serving_office_id: city?.serving_office_id || '',
         driver_office_ids: [...(city?.driver_office_ids || [])],
+        registration_city_ids: [...(city?.registration_city_ids || [])],
         park_commission: city?.park_commission ?? '',
         tariff_meta: meta,
         extra_tariffs: (city?.extra_tariffs || []).map((item) => ({
@@ -99,6 +103,7 @@ export const payloadFromDraft = (draft) => ({
     yandex_url: draft.yandex_url.trim() || null,
     serving_office_id: draft.serving_office_id || null,
     driver_office_ids: draft.driver_office_ids || [],
+    registration_city_ids: draft.registration_city_ids || [],
     park_commission: String(draft.park_commission ?? '').trim() || null,
     tariff_meta: Object.fromEntries(
         Object.entries(draft.tariff_meta || {}).map(([code, entry]) => [code, {
@@ -258,7 +263,114 @@ const DriverOffices = ({ offices, cityName, value, onChange }) => {
     );
 };
 
-export default function CityEditor({ draft, setDraft, offices = [], takenNames = [] }) {
+/* «Куда регистрировать водителей», если у их парка в этом городе своей
+ * диспетчерской нет (просьба владельца 29.10.2026: «водитель iTaxi из Рудного
+ * — в Костанай»). Города по порядку: оператор и помощник называют первый, где
+ * у парка диспетчерская есть, — у Кентау это Туркестан для iTaxi и Шымкент для
+ * остальных. Своя диспетчерская парка в городе всегда первая, её тут не
+ * выбирают. Города без диспетчерских — внизу: регистрировать там некуда. */
+const RegistrationCities = ({ cities, cityId, value, onChange }) => {
+    const [query, setQuery] = useState('');
+    const chosen = useMemo(() => new Set(value), [value]);
+    const initiallyChosen = useRef(new Set(value)).current;
+
+    const rows = useMemo(() => {
+        const collator = new Intl.Collator('ru');
+        const needle = fold(query);
+        return (cities || [])
+            .filter((city) => city.id !== cityId && (!needle || fold(city.name).includes(needle)))
+            .sort((a, b) => (initiallyChosen.has(b.id) - initiallyChosen.has(a.id))
+                || ((b.dispatcher_count > 0) - (a.dispatcher_count > 0))
+                || collator.compare(a.name, b.name));
+    }, [cities, cityId, query, initiallyChosen]);
+
+    /* Поле поиска — по числу городов БЕЗ фильтра, как у DriverOffices: по
+       отфильтрованному оно пропадало, пока его вводят, и запрос было уже не
+       сбросить (разбор 29.10.2026). */
+    const total = (cities || []).filter((city) => city.id !== cityId).length;
+    /* Предел сервера (cities.MAX_REGISTRATION_CITIES) — видно у самого списка,
+       а не тостом после «Сохранить». */
+    const full = value.length >= MAX_REGISTRATION_CITIES;
+    const toggle = (id) => {
+        if (chosen.has(id)) onChange(value.filter((item) => item !== id));
+        else if (!full) onChange([...value, id]);
+    };
+
+    return (
+        <Group
+            title="Куда регистрировать водителей"
+            right={value.length > 0 ? (
+                <button type="button" className={`${iosBtnGhost} !py-1`} onClick={() => onChange([])}>
+                    Сбросить · {value.length}
+                </button>
+            ) : null}
+            hint={full
+                ? `Отмечено ${MAX_REGISTRATION_CITIES} — больше не нужно: дальше уже соседняя область. Снимите отметку, чтобы выбрать другой город.`
+                : value.length
+                    ? 'Если у парка нет своей диспетчерской в этом городе, оператор и помощник назовут первый отмеченный город, где она у парка есть.'
+                    : 'Своя диспетчерская парка в городе — всегда ответ. Здесь — куда регистрировать, если её нет: например, для Рудного — Костанай.'}
+        >
+            <div className="overflow-hidden rounded-2xl bg-slate-50 ring-1 ring-slate-200/70">
+                {total > 6 && (
+                    <div className="relative border-b border-slate-200/70 bg-white/70 p-2">
+                        <Search size={14} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                            className="w-full rounded-lg bg-slate-100 py-1.5 pl-8 pr-2.5 text-[13px] text-slate-900 placeholder-slate-400 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Поиск города"
+                            aria-label="Поиск города регистрации"
+                        />
+                    </div>
+                )}
+                <div className="max-h-64 overflow-y-auto overscroll-contain thin-scroll">
+                    {rows.length === 0 && (
+                        <div className="px-4 py-3 text-[13px] text-slate-500">Ничего не найдено</div>
+                    )}
+                    {rows.map((city) => {
+                        const checked = chosen.has(city.id);
+                        const order = value.indexOf(city.id) + 1;
+                        const count = city.dispatcher_count || 0;
+                        const blocked = full && !checked;
+                        return (
+                            <button
+                                key={city.id}
+                                type="button"
+                                role="checkbox"
+                                aria-checked={checked}
+                                aria-disabled={blocked || undefined}
+                                onClick={() => toggle(city.id)}
+                                className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition ${
+                                    blocked ? 'cursor-default opacity-45' : 'hover:bg-slate-100/80 active:bg-slate-100'
+                                }`}
+                            >
+                                <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full transition ${
+                                    checked ? 'bg-blue-600 text-white' : 'bg-white ring-[1.5px] ring-inset ring-slate-300'
+                                }`}
+                                >
+                                    {checked && <Check size={12} strokeWidth={3} />}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-slate-900">
+                                    {city.name}
+                                </span>
+                                <span className={`shrink-0 text-[11.5px] tabular-nums ${count ? 'text-slate-400' : 'text-amber-600'}`}>
+                                    {count ? `${count} ${dispatcherWord(count)}` : 'нет диспетчерских'}
+                                </span>
+                                {checked && value.length > 1 && (
+                                    <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-blue-50 px-1.5 text-[11px] font-semibold tabular-nums text-blue-700">
+                                        {order}
+                                    </span>
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </Group>
+    );
+};
+
+export default function CityEditor({ draft, setDraft, offices = [], takenNames = [], cities = [] }) {
     const patch = (fields) => setDraft((current) => ({ ...current, ...fields }));
 
     /* Город — из общего справочника с областями (тот же, что в карточке
@@ -629,6 +741,15 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
                         </button>
                     )}
                 </div>
+            )}
+
+            {cities.length > 1 && (
+                <RegistrationCities
+                    cities={cities}
+                    cityId={draft.id}
+                    value={draft.registration_city_ids || []}
+                    onChange={(ids) => patch({ registration_city_ids: ids })}
+                />
             )}
 
             <DriverOffices

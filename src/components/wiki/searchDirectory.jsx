@@ -1,8 +1,9 @@
 import React from 'react';
-import { CornerDownLeft, MapPin, Percent } from 'lucide-react';
+import { CornerDownLeft, MapPin, Percent, UserPlus } from 'lucide-react';
 import { OfficeStatusBadge } from './officeBadges';
 import { officeDayStatus } from './officeDayStatus';
 import { officeTodayISO } from './officeSchedule';
+import { registrationSearchText } from './registrationRules';
 
 /* Справочник в выдаче поиска: офисы и комиссии Яндекса.
  *
@@ -19,8 +20,12 @@ import { officeTodayISO } from './officeSchedule';
  */
 
 /* Вид строки → вкладка, которую она открывает. Строка без открытой вкладки
-   не рисуется: щелчок по ней вёл бы в раздел, которого у человека нет. */
-const TAB_OF = { office: 'offices', offices_tab: 'offices', city: 'cities', cities_tab: 'cities' };
+   не рисуется: щелчок по ней вёл бы в раздел, которого у человека нет.
+   «Регистрация» (wiki/registration.py) открывает карточку города водителя. */
+const TAB_OF = {
+    office: 'offices', offices_tab: 'offices', city: 'cities', cities_tab: 'cities',
+    registration: 'cities',
+};
 
 export const directoryTab = (entry) => TAB_OF[entry?.kind] || null;
 
@@ -41,9 +46,10 @@ const plural = (count, one, few, many) => {
 
 /** Ключ строки. Сервер одну точку на два города не повторяет, но for_city в
  *  ключе — страховка: два одинаковых ключа React сливает, и в списке
- *  оставалась бы строка от прошлого запроса. */
+ *  оставалась бы строка от прошлого запроса. Парк — у «Регистрации»: на
+ *  «рудный регистрация itaxi аманат» это две строки одного города. */
 export const directoryKey = (entry) => (
-    `${entry?.kind}-${entry?.id ?? entry?.city ?? 'all'}-${entry?.for_city || ''}`
+    `${entry?.kind}-${entry?.id ?? entry?.city ?? 'all'}-${entry?.for_city || ''}-${entry?.park || ''}`
 );
 
 /* Номер парка — с подписью, как в карточке офиса: без неё WhatsApp iTaxi
@@ -95,12 +101,16 @@ export function directoryText(entry) {
             subtitle: summary.join(' · ') || 'Тарифы и комиссии каждого города',
         };
     }
+    case 'registration':
+        return registrationSearchText(entry);
     default:
         return { title: '', subtitle: '' };
     }
 }
 
-const ICONS = { office: MapPin, offices_tab: MapPin, city: Percent, cities_tab: Percent };
+const ICONS = {
+    office: MapPin, offices_tab: MapPin, city: Percent, cities_tab: Percent, registration: UserPlus,
+};
 
 /** Строка справочника. Выделение и Enter — как у статьи: она в общем списке строк. */
 export function DirectoryRow({ entry, dataRow, selected, onPick, onHover }) {

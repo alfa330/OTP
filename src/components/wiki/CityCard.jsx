@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, IosMenu } from '../ui/ios';
 import { regionOfCity } from '../../utils/kazakhstanCities';
+import CityRegistration from './CityRegistration';
 import { OfficeStatusBadge } from './officeBadges';
 import { officeDayStatus } from './officeDayStatus';
 import { officeTodayISO, scheduleLines } from './officeSchedule';
@@ -18,8 +19,9 @@ import {
 
 /* Карточка города: всё, что оператору нужно знать о заказах в городе.
  *
- * Порядок — по частоте вопроса: сколько берут (комиссии), какие тарифы и по
- * чём, что ещё умеет Яндекс, что даёт наш парк, куда отправить водителя.
+ * Порядок — по частоте вопроса: сколько берут (комиссии), куда регистрировать
+ * водителя, какие тарифы и по чём, что ещё умеет Яндекс, что даёт наш парк,
+ * куда отправить водителя.
  * Пустые блоки не рисуются вовсе: заголовок над пустотой — тот же шум, что
  * прочерк в каждой строке.
  *
@@ -240,7 +242,7 @@ const OfficeRow = ({ office, onOpen, tick }) => {
 
 export default function CityCard({
     city, loading = false, offices = [], canManage = false, busy = false, tick = 0,
-    zoneColor = null, onEdit, onSync, onArchive, onOpenOffice,
+    zoneColor = null, onEdit, onSync, onArchive, onOpenOffice, onOpenDispatchers = null,
     embedded = false,
 }) {
     const [openKey, setOpenKey] = useState('');
@@ -341,6 +343,20 @@ export default function CityCard({
                         </div>
                     )}
                 </div>
+            )}
+
+            {/* Куда регистрировать водителя — сразу под комиссиями: у города
+                без своей диспетчерской это главный ответ карточки («Рудный →
+                Костанай»). Приходит подробностью, поэтому ждёт её загрузки;
+                key — чтобы раскрытый список не переезжал в соседний город. */}
+            {!loading && (
+                <CityRegistration
+                    key={city.id}
+                    city={city}
+                    canManage={canManage}
+                    onEdit={onEdit}
+                    onOpenDispatchers={onOpenDispatchers}
+                />
             )}
 
             {!loading && (

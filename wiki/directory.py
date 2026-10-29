@@ -243,7 +243,12 @@ def _city_pattern(folded_name):
     if not words:
         return None
     *head, last = words
-    if last.endswith('й'):
+    if len(last) >= 5 and last[-2:] in ('ый', 'ий', 'ой'):
+        # Название-прилагательное: «с Рудного», «в Рудном», «к Рудному».
+        # Без этой ветки «Рудный» склонялся как «Аксай» (е/я/ю/ем), и вопрос
+        # владельца «если он обращается с рудного» города не находил.
+        tail = re.escape(last[:-2]) + '(?:ый|ий|ой|ого|его|ому|ему|ым|им|ом|ем)'
+    elif last.endswith('й'):
         tail = re.escape(last[:-1]) + '(?:й|е|я|ю|ем)'
     elif last[-1] in 'ая' and len(last) >= 6:
         tail = re.escape(last[:-1]) + '(?:а|я|ы|и|е|у|ю|ой|ей)'

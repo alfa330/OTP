@@ -22,6 +22,7 @@ from . import migration as wiki_migration
 from . import parks as wiki_parks
 from . import perimeter as wiki_perimeter
 from . import queries
+from . import registration as wiki_registration
 from . import schema as wiki_schema
 from . import search as wiki_search
 from . import structure
@@ -289,17 +290,31 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # как журнал ниже.
         directory = []
         if not (article_types or author_ids or section_id or scope != wiki_search.MATCH_ALL):
+            requested = _int_or_none(request.args.get('space_id'))
+            # «Рудный регистрация» — сначала город, куда регистрировать
+            # (wiki/registration.py), потом офисы и комиссии города. Своим
+            # савпоинтом: сбой регистрации не должен отнимать адрес офиса.
+            registration = []
+            cursor.execute('SAVEPOINT wiki_search_registration')
+            try:
+                registration = wiki_registration.search(cursor, ctx, query,
+                                                        requested_space=requested)
+            except Exception:
+                cursor.execute('ROLLBACK TO SAVEPOINT wiki_search_registration')
+                logger.exception('wiki: регистрация в поиске не ответила')
+                registration = []
+            else:
+                cursor.execute('RELEASE SAVEPOINT wiki_search_registration')
             cursor.execute('SAVEPOINT wiki_search_directory')
             try:
-                directory = wiki_directory.search(
-                    cursor, ctx, query,
-                    requested_space=_int_or_none(request.args.get('space_id')))
+                directory = wiki_directory.search(cursor, ctx, query, requested_space=requested)
             except Exception:
                 cursor.execute('ROLLBACK TO SAVEPOINT wiki_search_directory')
                 logger.exception('wiki: справочник в поиске не ответил')
                 directory = []
             else:
                 cursor.execute('RELEASE SAVEPOINT wiki_search_directory')
+            directory = registration + directory
 
         # Запрос — в журнал. Под савпоинтом: поиск и запись идут в ОДНОЙ
         # транзакции, и падение INSERT'а иначе превратило бы рабочую выдачу в

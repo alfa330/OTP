@@ -115,6 +115,8 @@ export const ACTION_META = {
     'city.archive': { label: 'Город в архиве', tone: REMOVED, icon: Archive },
     'city.restore': { label: 'Город возвращён из архива', tone: CREATED, icon: MapPin },
     'city.sync': { label: 'Тарифы города сверены с Яндексом', tone: CHANGED, icon: RefreshCw },
+    'dispatcher.update': { label: 'Изменена привязка диспетчерской', tone: CHANGED, icon: MapPin },
+    'dispatcher.sync': { label: 'Диспетчерские обновлены из кабинета Fleet', tone: CHANGED, icon: RefreshCw },
 
     // ── Ознакомление ────────────────────────────────────────────────────
     'ack.assign': { label: 'Назначено ознакомление', tone: GRANTED, icon: UserCheck },
@@ -199,6 +201,10 @@ const FIELD_TITLE = {
     city: 'город', address: 'адрес', address_note: 'как найти', phone: 'телефон',
     website: 'сайт', commission: 'комиссия', map_url: 'карта', lat: 'широта',
     lon: 'долгота', kind: 'тип', head_office_id: 'главный офис',
+    driver_office_ids: 'куда направлять водителя',
+    registration_city_ids: 'куда регистрировать водителей',
+    park_id: 'парк', city_id: 'город', total: 'диспетчерских', linked: 'с парком',
+    added: 'новых', gone: 'ушли из кабинета', dispatcher: 'диспетчерская', park: 'парк',
     /* Подробности переноса и сверки с Яндекс Про. Без перевода строка читалась
        «source: wikijs · source_id: №84 · dedup: new» — подпись уже русская, а
        под ней снова английский. */

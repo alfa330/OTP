@@ -737,6 +737,7 @@ AUDIT_SPACE_SQL = """
                 WHEN 'office'    THEN (SELECT x.space_id FROM wiki_offices    x WHERE x.id = %(eid)s)
                 WHEN 'promotion' THEN (SELECT x.space_id FROM wiki_promotions x WHERE x.id = %(eid)s)
                 WHEN 'city'      THEN (SELECT x.space_id FROM wiki_cities     x WHERE x.id = %(eid)s)
+                WHEN 'dispatcher' THEN (SELECT x.space_id FROM wiki_dispatchers x WHERE x.id = %(eid)s)
                 WHEN 'article'   THEN (SELECT sec.space_id
                                          FROM wiki_article_sections link
                                          JOIN wiki_sections sec ON sec.id = link.section_id
@@ -753,7 +754,7 @@ AUDIT_SPACE_SQL = """
 # сверить его с типами, которые пишут роуты: забытый тип не ломается, он молча
 # кладёт запись в журнал ВСЕХ пространств — тише, чем ошибка, и хуже.
 AUDIT_SPACE_ENTITIES = ('space', 'section', 'park', 'office', 'promotion', 'city',
-                        'article')
+                        'dispatcher', 'article')
 
 
 def audit_space_sql(entity_type, entity_id, details):
@@ -1201,6 +1202,114 @@ _CITY_STATEMENTS = [
     "ALTER TABLE wiki_cities ADD COLUMN IF NOT EXISTS option_commissions "
     "JSONB NOT NULL DEFAULT '[]'::jsonb;",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Регистрация водителей (просьба владельца 29.10.2026)
+#
+# «Куда зарегистрировать водителя iTaxi, если он звонит из Рудного?» Ответ —
+# город и диспетчерская кабинета Fleet: в Рудном своих диспетчерских нет, и
+# водителей регистрируют в Костанае. Знают это две таблицы.
+#
+# wiki_dispatchers — диспетчерские кабинета, СНИМОК кэша раздела «Рассылки»
+# (driver_mailing_parks: его раз в сутки пересканирует служебный аккаунт с
+# доступом ко всем 89 паркам). Свой снимок, а не чтение чужой таблицы: при
+# смене аккаунта «Рассылки» кэш очищают целиком, и вкладка «Города» на это
+# время осталась бы без диспетчерских. Ушедшая из кабинета диспетчерская не
+# удаляется, а получает status = 'gone': ручная привязка к парку переживёт её
+# возвращение. park_id / city_id подставляет сверка (wiki/registration.py:
+# auto_park, auto_city); флаги *_manual — «правили руками», и тогда сверка
+# поле не трогает.
+#
+# wiki_city_registration — куда регистрировать водителей города, если у их
+# парка в самом городе диспетчерской нет: города по порядку («Кентау:
+# Туркестан, затем Шымкент»). Связь с ключами на оба конца, как у «Куда
+# направлять водителя»: удалённый город уходит из списка сам.
+#
+# wiki_seeds — какие разовые заливки уже сделаны. Сид городов узнаёт «один
+# раз» по пустому списку, но список регистрации человек вправе очистить сам,
+# и сид по пустоте вернул бы ему стёртое при следующем деплое.
+# ─────────────────────────────────────────────────────────────────────────────
+_REGISTRATION_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_dispatchers (
+        id               SERIAL PRIMARY KEY,
+        space_id         INTEGER NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
+        fleet_park_id    VARCHAR(64) NOT NULL,
+        name             VARCHAR(255) NOT NULL,
+        fleet_city       VARCHAR(120),
+        park_id          INTEGER REFERENCES wiki_taxi_parks(id) ON DELETE SET NULL,
+        park_manual      BOOLEAN NOT NULL DEFAULT FALSE,
+        city_id          INTEGER REFERENCES wiki_cities(id) ON DELETE SET NULL,
+        city_manual      BOOLEAN NOT NULL DEFAULT FALSE,
+        status           VARCHAR(16) NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('active', 'gone')),
+        fleet_checked_at TIMESTAMP,
+        seen_at          TIMESTAMP,
+        created_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        UNIQUE (space_id, fleet_park_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_dispatchers_space "
+    "ON wiki_dispatchers(space_id, status, city_id);",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_city_registration (
+        city_id   INTEGER NOT NULL REFERENCES wiki_cities(id) ON DELETE CASCADE,
+        target_id INTEGER NOT NULL REFERENCES wiki_cities(id) ON DELETE CASCADE,
+        position  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (city_id, target_id),
+        CHECK (city_id <> target_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_city_registration_target "
+    "ON wiki_city_registration(target_id);",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_seeds (
+        code       VARCHAR(64) PRIMARY KEY,
+        applied_at TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+]
+
+# Метка разовой заливки городов регистрации (cities.DEFAULT_REGISTRATION).
+REGISTRATION_SEED = 'city_registration_2026_10_29'
+
+
+def _seed_city_registration(cursor):
+    """Куда регистрировать водителей городов без своих диспетчерских — один раз.
+
+    Решение владельца 29.10.2026 — «по области» (список в
+    cities.DEFAULT_REGISTRATION). Только в пространство по умолчанию: у Тез
+    кабинета Fleet нет. Метка ставится, когда нашлось пространство, а не до:
+    иначе пустая база (стенд, тесты) навсегда закрыла бы заливку для прода.
+    Город, у которого список уже кто-то заполнил, сид не трогает.
+    """
+    from .cities import DEFAULT_REGISTRATION
+    cursor.execute('SELECT id FROM wiki_spaces WHERE code = %s', (DEFAULT_SPACE_CODE,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    space_id = row[0]
+    cursor.execute('INSERT INTO wiki_seeds (code) VALUES (%s) '
+                   'ON CONFLICT DO NOTHING RETURNING code', (REGISTRATION_SEED,))
+    if not cursor.fetchone():
+        return
+    for name, targets in DEFAULT_REGISTRATION:
+        cursor.execute(
+            """
+            INSERT INTO wiki_city_registration (city_id, target_id, position)
+            SELECT c.id, t.id, x.ord
+              FROM wiki_cities c
+              JOIN unnest(%s::text[]) WITH ORDINALITY AS x(name, ord) ON TRUE
+              JOIN wiki_cities t ON t.space_id = c.space_id AND lower(t.name) = lower(x.name)
+                                AND t.status = 'active' AND t.id <> c.id
+             WHERE c.space_id = %s AND lower(c.name) = lower(%s) AND c.status = 'active'
+               AND NOT EXISTS (SELECT 1 FROM wiki_city_registration r WHERE r.city_id = c.id)
+            ON CONFLICT DO NOTHING
+            """,
+            (list(targets), space_id, name),
+        )
 
 
 def _seed_cities(cursor):
@@ -2786,6 +2895,12 @@ def init_wiki_schema(cursor):
     for statement in _CITY_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
     _seed_cities(cursor)
+
+    # Регистрация водителей — после городов и парков (ключи на обе таблицы) и
+    # тоже до журнала: формула пространства журнала читает wiki_dispatchers.
+    for statement in _REGISTRATION_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
+    _seed_city_registration(cursor)
 
     # Граница пространства у журнала — здесь же и по той же причине: функция
     # разбирает историю по разделам, паркам и офисам, а значит все три таблицы

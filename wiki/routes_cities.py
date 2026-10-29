@@ -13,7 +13,10 @@ from flask import jsonify, request
 
 from . import access as wiki_access
 from . import cities as wiki_cities
+from . import dispatchers as wiki_dispatchers
+from . import parks as wiki_parks
 from . import queries
+from . import registration as wiki_registration
 from . import yandex_tariffs
 from .routes_structure import _clean, _int_or_none, request_space
 
@@ -23,6 +26,40 @@ _BAD_URL = ('Нужна ссылка на страницу тарифов Янд
 
 def _body():
     return request.get_json(silent=True) or {}
+
+
+def registration_block(cursor, city, *, space_id):
+    """Блок «Регистрация водителей» карточки — тем же правилом, что у помощника.
+
+    Первое открытие после выкладки снимает диспетчерские сразу (до ночной
+    сверки карточка была бы пустой). Архивному городу блок не нужен.
+    """
+    wiki_dispatchers.ensure_synced(cursor, space_id=space_id)
+    catalog = wiki_registration.load(cursor, space_id=space_id)
+    own = next((item for item in catalog.cities if item['id'] == city['id']), None)
+    block = catalog.block(own) if own else None
+    if block is not None:
+        block['source'] = wiki_dispatchers.sync_state(cursor, space_id=space_id)
+    return block
+
+
+def city_card(cursor, city_id, *, space_id):
+    """Карточка города для ответа роута: сводка, слепок и регистрация водителей."""
+    city = wiki_cities.get_city(cursor, city_id, space_id=space_id)
+    if city:
+        city['registration'] = registration_block(cursor, city, space_id=space_id)
+    return city
+
+
+def _choice(value, label):
+    """Выбор в форме диспетчерской: 'auto' — как подставит сверка, None —
+    «без привязки», число — id. Остальное — отказ, а не молчаливое «нет»."""
+    if value == 'auto' or value is None:
+        return value
+    number = _int_or_none(value)
+    if number is None or number <= 0:
+        raise wiki_cities.CityFieldError('%s пришёл в неверном виде' % label)
+    return number
 
 
 def _fields(cursor, data, *, partial, space_id):
@@ -137,6 +174,7 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": "Укажите город"}), 400
         try:
             office_ids = wiki_cities.clean_office_ids(data.get('driver_office_ids'))
+            registration_ids = wiki_cities.clean_city_ids(data.get('registration_city_ids'))
         except wiki_cities.CityFieldError as field_error:
             return _bad(field_error)
         found = wiki_cities.find_by_name(cursor, fields['name'], space_id=space_id)
@@ -158,13 +196,16 @@ def register(bp, wiki_route, db, log_ip):
                 "id": city_id,
                 "restored": True,
                 "sync": None,
-                "city": wiki_cities.get_city(cursor, city_id, space_id=space_id),
+                "city": city_card(cursor, city_id, space_id=space_id),
             })
 
         city_id = wiki_cities.create_city(cursor, fields=fields,
                                           created_by=ctx['user_id'], space_id=space_id)
         if office_ids:
             wiki_cities.set_city_offices(cursor, city_id, office_ids, space_id=space_id)
+        if registration_ids:
+            wiki_cities.set_registration_cities(cursor, city_id, registration_ids,
+                                                space_id=space_id)
         queries.log_action(cursor, actor_id=ctx['user_id'], action='city.create',
                            entity_type='city', entity_id=city_id,
                            details={'name': fields['name'], 'space_id': space_id},
@@ -173,7 +214,7 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({
             "id": city_id,
             "sync": sync,
-            "city": wiki_cities.get_city(cursor, city_id, space_id=space_id),
+            "city": city_card(cursor, city_id, space_id=space_id),
         }), 201
 
     @wiki_route('/cities/<int:city_id>', methods=('GET', 'PATCH', 'DELETE'))
@@ -188,6 +229,7 @@ def register(bp, wiki_route, db, log_ip):
             # Архивный город читателю «не найден» — так же, как в списке его нет.
             if not city or (city['status'] != 'active' and not can_manage):
                 return _not_found()
+            city['registration'] = registration_block(cursor, city, space_id=space_id)
             return jsonify({'city': city, 'can_manage': can_manage})
 
         if not can_manage:
@@ -211,6 +253,9 @@ def register(bp, wiki_route, db, log_ip):
             # только если их прислали, и тогда заменяют список целиком.
             office_ids = (wiki_cities.clean_office_ids(data.get('driver_office_ids'))
                           if 'driver_office_ids' in data else None)
+            # «Куда регистрировать водителей» — тоже связью и тоже целиком.
+            registration_ids = (wiki_cities.clean_city_ids(data.get('registration_city_ids'))
+                                if 'registration_city_ids' in data else None)
         except wiki_cities.CityFieldError as field_error:
             return _bad(field_error)
         if 'name' in fields:
@@ -220,7 +265,7 @@ def register(bp, wiki_route, db, log_ip):
                                              space_id=space_id)
             if found:
                 return _taken(found[1])
-        if not fields and office_ids is None:
+        if not fields and office_ids is None and registration_ids is None:
             return jsonify({"error": "Нечего обновлять"}), 400
 
         if fields:
@@ -229,11 +274,15 @@ def register(bp, wiki_route, db, log_ip):
         changed = sorted(fields.keys())
         if office_ids is not None:
             wiki_cities.set_city_offices(cursor, city_id, office_ids, space_id=space_id)
-            if not fields:
-                # Дата «Обновлено» обязана сдвинуться и от правки одного списка.
-                wiki_cities.touch_city(cursor, city_id, space_id=space_id,
-                                       updated_by=ctx['user_id'])
             changed.append('driver_office_ids')
+        if registration_ids is not None:
+            wiki_cities.set_registration_cities(cursor, city_id, registration_ids,
+                                                space_id=space_id)
+            changed.append('registration_city_ids')
+        if not fields:
+            # Дата «Обновлено» обязана сдвинуться и от правки одних списков.
+            wiki_cities.touch_city(cursor, city_id, space_id=space_id,
+                                   updated_by=ctx['user_id'])
         queries.log_action(cursor, actor_id=ctx['user_id'], action='city.update',
                            entity_type='city', entity_id=city_id,
                            details={'fields': changed}, ip_address=log_ip())
@@ -245,7 +294,7 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({
             "status": "ok",
             "sync": sync,
-            "city": wiki_cities.get_city(cursor, city_id, space_id=space_id),
+            "city": city_card(cursor, city_id, space_id=space_id),
         })
 
     @wiki_route('/cities/<int:city_id>/sync', methods=('POST',))
@@ -261,5 +310,95 @@ def register(bp, wiki_route, db, log_ip):
             return _not_found()
         return jsonify({
             "sync": result,
-            "city": wiki_cities.get_city(cursor, city_id, space_id=space_id),
+            "city": city_card(cursor, city_id, space_id=space_id),
         })
+
+    # ── Диспетчерские кабинета Fleet ─────────────────────────────────────────
+    #
+    # Список читают все, у кого есть вкладка: это тот же справочник, что в
+    # карточке города, только целиком. Привязку к парку и городу правит тот
+    # же круг, что и сам справочник (_may_edit).
+
+    def _dispatchers_payload(cursor, space_id):
+        wiki_dispatchers.ensure_synced(cursor, space_id=space_id)
+        return {
+            'items': wiki_dispatchers.list_dispatchers(cursor, space_id=space_id),
+            'source': wiki_dispatchers.sync_state(cursor, space_id=space_id),
+            'has_source': space_id == wiki_dispatchers.fleet_space_id(cursor),
+            # Варианты выбора — тем же ответом: окну привязки не нужно ходить
+            # за парками и городами отдельно.
+            'parks': [{'id': park['id'], 'name': park['name']}
+                      for park in wiki_parks.list_parks(cursor, space_id=space_id)],
+            'cities': [{'id': city['id'], 'name': city['name']}
+                       for city in wiki_cities.registration_cities(cursor, space_id=space_id)],
+        }
+
+    @wiki_route('/dispatchers', methods=('GET',))
+    def wiki_dispatchers_list(cursor, ctx):
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+        payload = _dispatchers_payload(cursor, space_id)
+        payload['can_manage'] = _may_edit(ctx)
+        return jsonify(payload)
+
+    @wiki_route('/dispatchers/sync', methods=('POST',))
+    def wiki_dispatchers_sync(cursor, ctx):
+        """«Обновить из кабинета» — снять кэш «Рассылок» сейчас, не дожидаясь ночи."""
+        if not _may_edit(ctx):
+            return _forbidden()
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+        result = wiki_dispatchers.sync_from_fleet(cursor, space_id=space_id)
+        if result.get('status') == 'ok':
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='dispatcher.sync',
+                               entity_type='space', entity_id=space_id,
+                               details={key: result.get(key) for key in
+                                        ('total', 'linked', 'added', 'gone')},
+                               ip_address=log_ip())
+        payload = _dispatchers_payload(cursor, space_id)
+        payload.update(sync=result, can_manage=True)
+        return jsonify(payload)
+
+    @wiki_route('/dispatchers/<int:dispatcher_id>', methods=('PATCH',))
+    def wiki_dispatcher_item(cursor, ctx, dispatcher_id):
+        """Привязка диспетчерской: {park_id, city_id} — id, null («нет») или 'auto'."""
+        if not _may_edit(ctx):
+            return _forbidden()
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+        dispatcher = wiki_dispatchers.get_dispatcher(cursor, dispatcher_id, space_id=space_id)
+        if not dispatcher:
+            return jsonify({"error": "Диспетчерская не найдена"}), 404
+        data = _body()
+        try:
+            park = _choice(data['park_id'], 'Парк') if 'park_id' in data else False
+            city = _choice(data['city_id'], 'Город') if 'city_id' in data else False
+        except wiki_cities.CityFieldError as field_error:
+            return _bad(field_error)
+        if park is False and city is False:
+            return jsonify({"error": "Нечего обновлять"}), 400
+        auto_park, auto_city = (wiki_dispatchers.auto_values(cursor, dispatcher, space_id=space_id)
+                                if 'auto' in (park, city) else (None, None))
+        wiki_dispatchers.update_dispatcher(
+            cursor, dispatcher_id, space_id=space_id,
+            park=None if park is False else ((auto_park, False) if park == 'auto' else (park, True)),
+            city=None if city is False else ((auto_city, False) if city == 'auto' else (city, True)))
+        updated = wiki_dispatchers.get_dispatcher(cursor, dispatcher_id, space_id=space_id)
+        # Журнал читают люди: названия словами, «как в кабинете» вместо auto, и
+        # только то поле, которое правили (разбор 29.10.2026: было «парк: auto»,
+        # «парк: №3» и ни слова о том, какая диспетчерская).
+        details = {'dispatcher': '%s (%s)' % (dispatcher['name'],
+                                              dispatcher['fleet_city'] or 'город не указан')}
+        if park is not False:
+            details['park'] = ((updated or {}).get('park_name') or 'без парка') + (
+                ' — как в кабинете' if park == 'auto' else '')
+        if city is not False:
+            details['city'] = ((updated or {}).get('city_name') or 'не выбран') + (
+                ' — как в кабинете' if city == 'auto' else '')
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='dispatcher.update',
+                           entity_type='dispatcher', entity_id=dispatcher_id,
+                           details=details, ip_address=log_ip())
+        return jsonify({'dispatcher': updated})

@@ -66,6 +66,21 @@ DEFAULT_CITIES = (
     ('Экибастуз', 'https://taxi.yandex.ru/ekibastuz/tariff'),
 )
 
+# Куда регистрировать водителей городов, где своих диспетчерских нет, —
+# решение владельца 29.10.2026: «по области». Города по порядку: у Кентау
+# сначала Туркестан (там только iTaxi), остальным паркам — Шымкент.
+# Заливается один раз (schema._seed_city_registration), дальше правится в
+# редакторе города.
+DEFAULT_REGISTRATION = (
+    ('Рудный', ('Костанай',)),
+    ('Темиртау', ('Караганда',)),
+    ('Экибастуз', ('Павлодар',)),
+    ('Жанаозен', ('Актау',)),
+    ('Аксай', ('Уральск',)),
+    ('Кентау', ('Туркестан', 'Шымкент')),
+    ('Жезказган', ('Караганда',)),
+)
+
 # Пределы ручных списков. Не про базу, а про карточку: двадцать услуг парка —
 # это уже не карточка города, а каталог, и такой список надо вести не здесь.
 MAX_EXTRA_TARIFFS = 20
@@ -224,6 +239,17 @@ def clean_services(value):
 
 # ── Чтение ───────────────────────────────────────────────────────────────────
 
+# «Куда регистрировать водителей», если у их парка в городе диспетчерской нет:
+# города по порядку. Только живые города своего пространства — условие в JOIN,
+# а не доверие к записи: id приходят из формы.
+_REGISTRATION_IDS_SQL = """
+    ARRAY(SELECT r.target_id FROM wiki_city_registration r
+            JOIN wiki_cities rt ON rt.id = r.target_id
+             AND rt.space_id = c.space_id AND rt.status = 'active'
+           WHERE r.city_id = c.id
+           ORDER BY r.position, r.target_id)
+"""
+
 # Колонки сводки. Слепка тарифов в сводке нет: на 24 города это ~140 КБ JSON
 # (ответы портала не сжимаются), а для списка и карты нужны только число
 # тарифов и номер заказа. Сам слепок приезжает карточкой — get_city.
@@ -245,7 +271,10 @@ _SUMMARY_COLUMNS = """
              WHERE o.space_id = c.space_id AND o.status = 'active'
                AND NOT o.no_office AND o.kind = 'park'
                AND lower(o.city) = lower(c.name)),
-    c.option_commissions
+    c.option_commissions,
+    """ + _REGISTRATION_IDS_SQL + """,
+    (SELECT count(*) FROM wiki_dispatchers dd
+      WHERE dd.space_id = c.space_id AND dd.city_id = c.id AND dd.status = 'active')
 """
 
 _SUMMARY_KEYS = (
@@ -261,6 +290,10 @@ _SUMMARY_KEYS = (
     # В конце, а не рядом с tariff_meta: выборки и тесты берут поля сводки по
     # номеру, вставка в середину сдвинула бы их.
     'option_commissions',
+    'registration_city_ids',
+    # Диспетчерских, которые работают на город, — редактору «куда регистрировать»:
+    # город без своей диспетчерской целью регистрации служить не может.
+    'dispatcher_count',
 )
 
 # Обслуживающий офис — только своего пространства. Условие в самом JOIN, а не
@@ -289,6 +322,8 @@ def _city_row(row):
     city['option_commissions'] = city['option_commissions'] or []
     city['services'] = city['services'] or []
     city['driver_office_ids'] = list(city['driver_office_ids'] or [])
+    city['registration_city_ids'] = list(city['registration_city_ids'] or [])
+    city['dispatcher_count'] = int(city['dispatcher_count'] or 0)
     if not city['serving_office_name']:
         # Офис ушёл в архив или оказался чужим — «обслуживает» его нет вовсе.
         city['serving_office_id'] = None
@@ -334,7 +369,8 @@ def directory_cities(cursor, *, space_id):
                            FROM jsonb_array_elements(
                                     COALESCE(c.yandex_data->'tariffs', '[]'::jsonb))
                                 WITH ORDINALITY AS x(t, ord)), '[]'::jsonb),
-               GREATEST(c.updated_at, c.yandex_changed_at)
+               GREATEST(c.updated_at, c.yandex_changed_at),
+        """ + _REGISTRATION_IDS_SQL + """
           FROM wiki_cities c
          WHERE c.space_id = %(space)s AND c.status = 'active'
          ORDER BY c.position, c.name
@@ -344,7 +380,7 @@ def directory_cities(cursor, *, space_id):
     result = []
     for row in cursor.fetchall():
         (city_id, name, tariff_meta, extra_tariffs, option_commissions, park_commission,
-         serving_office_id, driver_office_ids, tariffs, updated_at) = row
+         serving_office_id, driver_office_ids, tariffs, updated_at, registration_ids) = row
         result.append({
             'id': city_id,
             'name': name,
@@ -356,8 +392,25 @@ def directory_cities(cursor, *, space_id):
             'driver_office_ids': list(driver_office_ids or []),
             'tariffs': list(tariffs or []),
             'updated_at': _iso(updated_at),
+            'registration_city_ids': list(registration_ids or []),
         })
     return result
+
+
+def registration_cities(cursor, *, space_id):
+    """Живые города пространства с их «куда регистрировать» — для правила
+    регистрации (wiki/registration.py). Без тарифов: правилу нужны только
+    название и список, а карточка и помощник зовут его на каждый вопрос."""
+    cursor.execute(
+        'SELECT c.id, c.name, ' + _REGISTRATION_IDS_SQL + """
+          FROM wiki_cities c
+         WHERE c.space_id = %s AND c.status = 'active'
+         ORDER BY c.position, c.name
+        """,
+        (space_id,),
+    )
+    return [{'id': row[0], 'name': row[1], 'registration_city_ids': list(row[2] or [])}
+            for row in cursor.fetchall()]
 
 
 def get_city(cursor, city_id, *, space_id):
@@ -461,6 +514,60 @@ def set_city_offices(cursor, city_id, office_ids, *, space_id):
         ON CONFLICT DO NOTHING
         """,
         (list(office_ids), city_id, space_id),
+    )
+    return cursor.rowcount
+
+
+# Городов «куда регистрировать» больше трёх-четырёх не бывает: дальше —
+# соседняя область, и такой список уже не ответ оператору, а перебор.
+MAX_REGISTRATION_CITIES = 5
+
+
+def clean_city_ids(value):
+    """Города «куда регистрировать» из формы: целые, без повторов, по порядку."""
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise CityFieldError('Города регистрации пришли в неверном виде')
+    result = []
+    for raw in value:
+        try:
+            city_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if city_id > 0 and city_id not in result:
+            result.append(city_id)
+    if len(result) > MAX_REGISTRATION_CITIES:
+        raise CityFieldError('Городов регистрации — не больше %d' % MAX_REGISTRATION_CITIES)
+    return result
+
+
+def set_registration_cities(cursor, city_id, target_ids, *, space_id):
+    """«Куда регистрировать водителей»: заменить список городов целиком.
+
+    Граница пространства — в самих запросах, как у set_city_offices: удаляем
+    список только у города этого пространства, вставляем только живые города
+    того же пространства и не сам город. Чужой id молча не попадает в список.
+    Возвращает число записанных городов.
+    """
+    cursor.execute(
+        'DELETE FROM wiki_city_registration r USING wiki_cities c '
+        ' WHERE r.city_id = c.id AND c.id = %s AND c.space_id = %s',
+        (city_id, space_id),
+    )
+    if not target_ids:
+        return 0
+    cursor.execute(
+        """
+        INSERT INTO wiki_city_registration (city_id, target_id, position)
+        SELECT c.id, t.id, x.ord
+          FROM unnest(%s::int[]) WITH ORDINALITY AS x(target_id, ord)
+          JOIN wiki_cities t ON t.id = x.target_id
+          JOIN wiki_cities c ON c.id = %s AND c.space_id = t.space_id
+         WHERE t.space_id = %s AND t.status = 'active' AND t.id <> c.id
+        ON CONFLICT DO NOTHING
+        """,
+        (list(target_ids), city_id, space_id),
     )
     return cursor.rowcount
 
@@ -642,11 +749,28 @@ def sync_due(db, *, fetch=None, max_age_hours=SYNC_MAX_AGE_HOURS,
     db — объект с _get_cursor() (тот же, что у Blueprint вики). Страницы
     качаются БЕЗ открытого соединения: 24 запроса с паузой — это полминуты, и
     держать всё это время место в пуле вики нельзя.
+
+    Тем же обходом снимаются диспетчерские кабинета Fleet (wiki/dispatchers.py):
+    это копия кэша «Рассылок» внутри той же базы, сети в ней нет, а время то
+    же — ночью и после каждого деплоя. Своим тактом и своим отказом: сбой
+    снимка не должен оставлять города без тарифов.
     """
+    from . import dispatchers as wiki_dispatchers
+    try:
+        with db._get_cursor() as cursor:
+            fleet = wiki_dispatchers.sync_from_fleet(
+                cursor, space_id=wiki_dispatchers.fleet_space_id(cursor))
+        if fleet.get('added') or fleet.get('gone'):
+            logger.info('Диспетчерские Fleet: %s', fleet)
+    except Exception:                                        # noqa: BLE001
+        logger.exception('Диспетчерские Fleet: снимок не снялся')
+        fleet = {'status': 'error'}
+
     with db._get_cursor() as cursor:
         targets = due_cities(cursor, max_age_hours=max_age_hours)
 
-    summary = {'cities': len(targets), 'checked': 0, 'changed': 0, 'errors': 0}
+    summary = {'cities': len(targets), 'checked': 0, 'changed': 0, 'errors': 0,
+               'dispatchers': fleet.get('status')}
     for index, target in enumerate(targets):
         if index and pause:
             sleep(pause)
