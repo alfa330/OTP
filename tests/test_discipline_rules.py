@@ -334,7 +334,7 @@ class SuperAdminRolloutTests(unittest.TestCase):
     def test_named_operator_enters_by_the_usual_rules(self):
         """Владелец, 23.10.2026: «открой данный раздел для … как оператору» — 56.
         Список снимает только флаг выкладки: дальше обычные правила ТЗ."""
-        self.assertEqual(access.ROLLOUT_USER_IDS, frozenset({56}))
+        self.assertEqual(access.ROLLOUT_USER_IDS, frozenset({56, 202}))
         with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True):
             operator = ctx('operator', user_id=56)
             self.assertTrue(access.can_open_section(operator))
@@ -344,6 +344,80 @@ class SuperAdminRolloutTests(unittest.TestCase):
             for who in (ctx('operator', user_id=57), ctx('operator', user_id=56, department_id=4),
                         ctx('admin', user_id=56)):
                 self.assertFalse(access.can_open_section(who), who)
+
+
+class ManagerGrantTests(unittest.TestCase):
+    """Владелец, 29.10.2026: «дай ей полный доступ только для отдела СзоВ» —
+    202, СВ СЗоВ (access.MANAGER_GRANTS): весь отдел, как у главы, а не своя группа."""
+
+    def test_grant_in_code(self):
+        self.assertEqual(access.MANAGER_GRANTS, {202: ('szov',)})
+        for user_id, codes in access.MANAGER_GRANTS.items():
+            self.assertTrue(set(codes) <= set(catalog.SECTION_DEPARTMENT_CODES), user_id)
+            # Пока стоит флаг, без списка выкладки допуск в раздел не пустит.
+            if ROLLOUT_IN_CODE:
+                self.assertIn(user_id, access.ROLLOUT_USER_IDS)
+
+    def test_named_supervisor_runs_the_whole_szov(self):
+        named = ctx('sv', user_id=202, groups=[5])
+        self.assertEqual(access.managed_department_ids(named), {1})
+        self.assertEqual(access.scope(named), access.SCOPE_MANAGER)
+        self.assertFalse(access.is_supervisor(named))
+        caps = access.capabilities(named)
+        for key in ('can_create', 'can_manage', 'can_controls', 'can_settings', 'can_reports', 'can_audit'):
+            self.assertTrue(caps[key], key)
+        self.assertFalse(caps['is_operator'])
+        # Человек чужой группы, запись завёл другой СВ — всё, что может глава.
+        stranger = {'id': 1, 'role': 'operator', 'department_id': 1, 'group_ids': [6]}
+        record = {'operator_id': 1, 'department_id': 1, 'created_by': 99, 'operator_department_id': 1,
+                  'operator_group_ids': [6]}
+        self.assertTrue(access.operator_in_scope(named, stranger))
+        for check in (access.can_view_record, access.can_edit_record, access.can_cancel_record,
+                      access.can_work_record, access.can_upload_explanation, access.can_approve_measure):
+            self.assertTrue(check(named, record), check.__name__)
+        self.assertTrue(access.can_close_record(named, record, under_control=True))
+        self.assertTrue(access.can_propose_measure(named, dict(record, measure_state='approved',
+                                                               measure_approved_by=100)))
+        self.assertTrue(access.can_manage_department(named, 1))
+
+    def test_only_szov(self):
+        named = ctx('sv', user_id=202, groups=[5])
+        for department in (2, 3):
+            self.assertFalse(access.can_manage_department(named, department))
+            self.assertFalse(access.operator_in_scope(named, {'id': 1, 'role': 'operator', 'department_id': department,
+                                                              'group_ids': [5]}))
+            elsewhere = {'operator_id': 1, 'department_id': department, 'operator_department_id': department,
+                         'operator_group_ids': [5], 'created_by': 202}
+            for check in (access.can_view_record, access.can_edit_record, access.can_cancel_record,
+                          access.can_approve_measure):
+                self.assertFalse(check(named, elsewhere), (department, check.__name__))
+        # СЗоВ нет среди действующих отделов раздела — допуск ничего не даёт.
+        closed = dict(named, section_departments={'op': 2, 'tez': 3})
+        self.assertEqual(access.managed_department_ids(closed), set())
+        self.assertFalse(access.can_open_section(closed))
+
+    def test_others_keep_their_circles(self):
+        self.assertEqual(access.scope(ctx('sv', user_id=203, groups=[5])), access.SCOPE_GROUPS)
+        self.assertEqual(access.managed_department_ids(ctx('admin', user_id=203, headed=[2])), {2})
+        # Глава ОП с допуском на СЗоВ — оба отдела.
+        with mock.patch.object(access, 'MANAGER_GRANTS', {203: ('szov',)}):
+            self.assertEqual(access.managed_department_ids(ctx('sv', user_id=203, headed=[2])), {1, 2})
+
+    def test_grant_holders_by_department(self):
+        sections = {'szov': 1, 'op': 2, 'tez': 3}
+        self.assertEqual(access.granted_manager_ids(sections, [1]), {202})
+        self.assertEqual(access.granted_manager_ids(sections, [2, 3]), set())
+        self.assertEqual(access.granted_manager_ids({'op': 2}, [1]), set())
+        with mock.patch.object(access, 'MANAGER_GRANTS', {7: ('op', 'TEZ'), 8: ('szov',)}):
+            self.assertEqual(access.granted_manager_ids(sections, [3]), {7})
+            self.assertEqual(access.granted_manager_ids(sections, [1, 2]), {7, 8})
+
+    def test_rollout_flag_still_closes_the_section(self):
+        with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True), \
+                mock.patch.object(access, 'ROLLOUT_USER_IDS', frozenset()):
+            self.assertFalse(access.can_open_section(ctx('sv', user_id=202, groups=[5])))
+        with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True):
+            self.assertTrue(access.can_open_section(ctx('sv', user_id=202, groups=[5])))
 
 
 class LadderLibraryTests(unittest.TestCase):

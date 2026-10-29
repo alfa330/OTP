@@ -5,7 +5,8 @@
 
     супер-админ          все три отдела: «админ и выше» — выше админа только он;
     руководитель         глава СЗоВ, ОП или Теза (departments.head_user_id) —
-                         свои отделы. Это «старший супервайзер / руководитель
+                         свои отделы; поимённо (MANAGER_GRANTS) — названные
+                         отделы. Это «старший супервайзер / руководитель
                          отдела» из ТЗ: утверждает акты и меры, ставит и снимает
                          особый контроль, отменяет записи, настраивает
                          справочники и лестницу, выгружает отчёты;
@@ -62,10 +63,19 @@ SUPER_ADMIN_ONLY = True
 # (оператор — только свои записи и своя объяснительная), и колокол им приходит
 # (notify.push). Остальным раздел по-прежнему
 # закрыт, их СВ и главе ничего не уходит. Владелец, 23.10.2026: «открой данный
-# раздел для … как оператору» — 56, оператор СЗоВ. Зеркало —
+# раздел для … как оператору» — 56, оператор СЗоВ; 29.10.2026 — 202, СВ СЗоВ,
+# руководитель отдела поимённо (MANAGER_GRANTS). Зеркало —
 # DISCIPLINE_ROLLOUT_USER_IDS в src/App.jsx (пункт меню), списки сверяет тест.
 # Новый id — только по слову владельца; ФИО в код не пишем (репозиторий публичный).
-ROLLOUT_USER_IDS = frozenset({56})
+ROLLOUT_USER_IDS = frozenset({56, 202})
+
+# Руководитель раздела поимённо: права главы, но только в названных отделах
+# (коды catalog.SECTION_DEPARTMENT_CODES), id → коды. Владелец, 29.10.2026:
+# «дай ей полный доступ только для отдела СзоВ» — 202, СВ СЗоВ: весь отдел, а
+# не только своя группа, и уведомления «руководителю» по нему — вместе с главой
+# (queries.department_managers). Пока стоит флаг выкладки, id нужен и в
+# ROLLOUT_USER_IDS — тест сверяет. Новый id — только по слову владельца.
+MANAGER_GRANTS = {202: ('szov',)}
 
 
 def normalize_role(role):
@@ -100,11 +110,28 @@ def is_super_admin(ctx):
     return normalize_role(ctx.get('role')) == 'super_admin'
 
 
+def _granted(codes, section_departments):
+    return _ids((section_departments or {}).get(code) for code in _codes(codes))
+
+
+def granted_department_ids(ctx):
+    """Отделы раздела, где пользователь — руководитель поимённо (MANAGER_GRANTS)."""
+    return _granted(MANAGER_GRANTS.get(_me(ctx)), ctx.get('section_departments'))
+
+
+def granted_manager_ids(section_departments, department_ids):
+    """Поимённые руководители хотя бы одного из этих отделов — адресаты
+    уведомлений «руководителю» вместе с главой. section_departments — {код: id}."""
+    wanted = _ids(department_ids)
+    return {int(user_id) for user_id, codes in MANAGER_GRANTS.items()
+            if _granted(codes, section_departments) & wanted}
+
+
 def managed_department_ids(ctx):
-    """Отделы, где пользователь — руководитель раздела."""
+    """Отделы, где пользователь — руководитель раздела: глава или поимённо."""
     if is_super_admin(ctx):
         return section_department_ids(ctx)
-    return _ids(ctx.get('headed_department_ids')) & section_department_ids(ctx)
+    return (_ids(ctx.get('headed_department_ids')) | granted_department_ids(ctx)) & section_department_ids(ctx)
 
 
 def is_manager(ctx):

@@ -739,8 +739,8 @@ def _ladder_snapshot(cursor, operator_id):
 def _push_act_basis(cursor, outbox, act, body, settings_for, base_url):
     """«Проверить основание акта» — одна непрочитанная на акт: прежняя гаснет."""
     queries.clear_kind(cursor, record_id=act['trigger_record_id'], kinds=['act_basis'])
-    heads = list(queries.department_heads(cursor, [act.get('department_id')]).values())
-    notify.push(cursor, outbox, event='act_basis', user_ids=heads, settings=settings_for(act.get('department_id')),
+    managers = queries.department_managers(cursor, [act.get('department_id')])
+    notify.push(cursor, outbox, event='act_basis', user_ids=managers, settings=settings_for(act.get('department_id')),
                 title='Проверить основание акта %s' % act['number'], body=body,
                 record_id=act['trigger_record_id'], tone='warning', base_url=base_url)
 
@@ -772,7 +772,7 @@ def settle_ladder(cursor, ctx, operator_id, before, *, since, now, today, base_u
         record = history[record_id]
         settings = settings_for(record.get('department_id'))
         info = after['steps'].get(record_id) or {}
-        heads = list(queries.department_heads(cursor, [record.get('department_id')]).values())
+        managers = queries.department_managers(cursor, [record.get('department_id')])
         control = queries.active_controls(cursor, [operator_id]).get(int(operator_id))
         attached = []
         if control and not control.get('act_id'):
@@ -783,12 +783,12 @@ def settle_ladder(cursor, ctx, operator_id, before, *, since, now, today, base_u
             _control_id, attached = _auto_control(cursor, ctx, record, info, act_id, settings, now=now, today=today)
         for other_id in attached:
             other = history.get(other_id) or {}
-            notify.push(cursor, outbox, event='under_control', user_ids=heads, settings=settings,
+            notify.push(cursor, outbox, event='under_control', user_ids=managers, settings=settings,
                         title='%s: нарушение на особом контроле' % name,
                         body='%s. Акт составлен по более раннему нарушению — нужна мера' % notify.describe(other),
                         record_id=other_id, tone='warning', base_url=base_url, exclude=[me])
         if record_id != new_record_id:
-            notify.push(cursor, outbox, event='act', user_ids=heads, settings=settings,
+            notify.push(cursor, outbox, event='act', user_ids=managers, settings=settings,
                         title='%s: %s — нужен акт' % (name, notify.ordinal_text(info).lower()),
                         body='%s. Ступень сдвинулась после записи задним числом или правки'
                              % notify.describe(record),
@@ -848,18 +848,18 @@ def _notify_new_record(cursor, ctx, record, info, profile, settings, control, *,
         notify.push(cursor, outbox, event='recorded', user_ids=[record['operator_id']], settings=settings,
                     title='Зафиксировано нарушение', body=line, record_id=record_id, base_url=base_url,
                     exclude=[me])
-    heads = list(queries.department_heads(cursor, [record['department_id']]).values())
+    managers = queries.department_managers(cursor, [record['department_id']])
     ladder = settings.get('ladder') or []
     act_index = catalog.act_step(ladder)
     if control:
         body = ('%s. Мера применена (%s) — закройте запись' % (line, record.get('measure_title') or '')
                 if record.get('measure_state') == 'approved'
                 else '%s. Мера ждёт утверждения' % line)
-        notify.push(cursor, outbox, event='under_control', user_ids=heads, settings=settings,
+        notify.push(cursor, outbox, event='under_control', user_ids=managers, settings=settings,
                     title='%s: нарушение на особом контроле' % name, body=body, record_id=record_id,
                     tone='warning', base_url=base_url, exclude=[me])
     if action == catalog.STEP_ACT:
-        notify.push(cursor, outbox, event='act', user_ids=heads, settings=settings,
+        notify.push(cursor, outbox, event='act', user_ids=managers, settings=settings,
                     title='%s: %s — нужен акт' % (name, notify.ordinal_text(info).lower()),
                     body=line, record_id=record_id, tone='warning', base_url=base_url, exclude=[me])
     elif act_index and info.get('weighted') == act_index - 1:
@@ -1039,8 +1039,8 @@ def record_refusal(cursor, ctx, record, upload, witness_ids, *, now, base_url=No
                   department_id=record['department_id'], record_id=record['id'],
                   changes={'file_id': file_id, 'witnesses': [names[w] for w in witnesses]})
     settings = queries.get_settings(cursor, record['department_id'])
-    heads = list(queries.department_heads(cursor, [record['department_id']]).values())
-    notify.push(cursor, outbox, event='refusal', user_ids=heads, settings=settings,
+    managers = queries.department_managers(cursor, [record['department_id']])
+    notify.push(cursor, outbox, event='refusal', user_ids=managers, settings=settings,
                 title='%s: отказ от объяснения' % record.get('operator_name', 'Сотрудник'),
                 body=notify.describe(record), record_id=record['id'], tone='warning', base_url=base_url,
                 exclude=[ctx['user_id']])
@@ -1189,8 +1189,8 @@ def _notify_finance(cursor, ctx, record, measure, changes, *, base_url, outbox):
     value = money_text(changes.get('measure_amount'), changes.get('measure_percent'))
     value = (' · ' + value) if value else ''
     settings = queries.get_settings(cursor, record['department_id'])
-    heads = list(queries.department_heads(cursor, [record['department_id']]).values())
-    notify.push(cursor, outbox, event='measure_finance', user_ids=heads, settings=settings,
+    managers = queries.department_managers(cursor, [record['department_id']])
+    notify.push(cursor, outbox, event='measure_finance', user_ids=managers, settings=settings,
                 title='Мера с финансовым эффектом: %s%s' % (measure.get('title') or '', value),
                 body='%s — попадёт в выгрузку на удержания' % record.get('operator_name', ''),
                 record_id=record['id'], base_url=base_url, exclude=[ctx['user_id']])
@@ -1490,13 +1490,14 @@ def run_reminders(cursor, *, now, today, base_url=None, outbox=None):
     руководителю), 3 дня до конца контроля и «нужно решение» по его окончании.
     Идемпотентно: dedupe_key — одно напоминание на срок."""
     system = {'user_id': None, 'name': 'Система'}
-    section = set(queries.section_departments(cursor).values())
+    sections = queries.section_departments(cursor)
+    section = set(sections.values())
 
-    def heads_of(*department_ids):
+    def managers_of(*department_ids):
         # Глава отдела вне раздела (человека перевели в Удалённый КЦ) раздела не
         # видит — напоминание ему ни к чему.
-        return list(queries.department_heads(
-            cursor, [d for d in department_ids if d is not None and int(d) in section]).values())
+        return queries.department_managers(
+            cursor, [d for d in department_ids if d is not None and int(d) in section], sections=sections)
 
     cursor.execute(
         """
@@ -1526,7 +1527,7 @@ def run_reminders(cursor, *, now, today, base_url=None, outbox=None):
                 # Кто ведёт человека сегодня: главы отдела записи и нынешнего
                 # отдела человека, СВ его нынешних групп. Завёдший запись СВ, от
                 # которого человека перевели, напоминаний больше не получает.
-                targets = heads_of(item['department_id'], item.get('operator_department_id'))
+                targets = managers_of(item['department_id'], item.get('operator_department_id'))
                 targets += queries.group_supervisors(cursor, item.get('operator_group_ids') or [], today)
                 sent += len(notify.push(
                     cursor, outbox, event='explanation_overdue', user_ids=targets, settings=settings,
@@ -1542,7 +1543,7 @@ def run_reminders(cursor, *, now, today, base_url=None, outbox=None):
         # Решение принимает нынешний глава отдела, а не тот, кто был главой при
         # постановке. Отдел без главы — супер-админам: решение без человека не
         # принимается (п. 10.5), и напоминание не должно уйти в пустоту.
-        targets = heads_of(department, control.get('operator_department_id')) or queries.super_admins(cursor)
+        targets = managers_of(department, control.get('operator_department_id')) or queries.super_admins(cursor)
         if not targets:
             continue
         name = control.get('operator_name') or 'Сотрудник'

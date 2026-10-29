@@ -110,6 +110,26 @@ def department_heads(cursor, department_ids):
     return {int(row[0]): int(row[1]) for row in cursor.fetchall()}
 
 
+def department_managers(cursor, department_ids, sections=None):
+    """Кому уведомления «руководителю» по отделам: глава каждого и поимённые
+    руководители раздела (access.MANAGER_GRANTS), кто ещё работает.
+    sections — section_departments(), если он уже под рукой."""
+    ids = _int_list(department_ids)
+    if not ids:
+        return []
+    managers = list(dict.fromkeys(department_heads(cursor, ids).values()))
+    if not access.MANAGER_GRANTS:
+        return managers
+    granted = access.granted_manager_ids(section_departments(cursor) if sections is None else sections, ids)
+    granted -= set(managers)
+    if granted:
+        cursor.execute(
+            "SELECT id FROM users WHERE id = ANY(%s) AND COALESCE(status, 'working') NOT IN ('fired', 'dismissal')"
+            " ORDER BY id", (sorted(granted),))
+        managers += [int(row[0]) for row in cursor.fetchall()]
+    return managers
+
+
 def group_supervisors(cursor, group_ids, today):
     ids = _int_list(group_ids)
     if not ids:

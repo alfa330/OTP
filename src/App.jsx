@@ -2729,9 +2729,11 @@ const DISCIPLINE_DEPARTMENT_CODES = ['szov', 'op', 'tez'];
    по правилам выше — false здесь и там. */
 const DISCIPLINE_SUPER_ADMIN_ONLY = true;
 /* Поимённо, пока стоит флаг: раздел по обычным правилам ТЗ (оператор — свои
-   записи). Владелец, 23.10.2026: 56 — «как оператору». Зеркало ROLLOUT_USER_IDS
-   в discipline/access.py, списки сверяет тест. */
-const DISCIPLINE_ROLLOUT_USER_IDS = new Set([56]);
+   записи). Владелец, 23.10.2026: 56 — «как оператору»; 29.10.2026: 202 — СВ
+   СЗоВ, руководитель отдела поимённо (MANAGER_GRANTS в access.py: что ей видно
+   и доступно, решает сервер). Зеркало ROLLOUT_USER_IDS в discipline/access.py,
+   списки сверяет тест. */
+const DISCIPLINE_ROLLOUT_USER_IDS = new Set([56, 202]);
 
 const canAccessDisciplineSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);

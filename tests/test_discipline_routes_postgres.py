@@ -17,7 +17,7 @@ import pytest
 
 from discipline import catalog, report
 from tests.test_discipline_postgres import (  # noqa: F401 — фикстура db
-    ADMIN, HEAD_SZOV, OP_A, OP_B, SUPER, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, section_open_for_all,
+    ADMIN, HEAD_SZOV, OP, OP_A, OP_B, OP_OP, SUPER, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, section_open_for_all,
     use_sample_ladder)
 
 flask = pytest.importorskip('flask')
@@ -817,6 +817,64 @@ def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):
     assert client.get('/api/discipline/records/%d' % other.get_json()['id'], headers=h(OP_A)).status_code == 403
     blank = client.get('/api/discipline/records/%d/explanation.docx' % mine.get_json()['id'], headers=h(OP_A))
     assert blank.status_code == 200
+
+
+def test_named_manager_while_the_section_rolls_out(client, db, monkeypatch):
+    """Владелец, 29.10.2026: СВ СЗоВ — «полный доступ только для отдела СзоВ», пока
+    раздел закрыт остальным (как 202 на проде: ROLLOUT_USER_IDS + MANAGER_GRANTS).
+    Ручки руководителя по СЗоВ открыты, по ОП — нет; уведомления «руководителю»
+    приходят ей, а главе, которого нет в списке выкладки, — по-прежнему нет."""
+    from discipline import access
+
+    monkeypatch.setattr(access, 'SUPER_ADMIN_ONLY', True)
+    monkeypatch.setattr(access, 'ROLLOUT_USER_IDS', frozenset({SV_B}))
+    monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',)})
+    ping = client.get('/api/discipline/ping', headers=h(SV_B)).get_json()
+    caps = ping['capabilities']
+    assert caps['scope'] == 'manager' and not caps['is_operator']
+    assert all(caps[key] for key in ('can_create', 'can_manage', 'can_controls', 'can_settings', 'can_reports',
+                                     'can_audit'))
+    assert [d['id'] for d in ping['departments']] == [SZOV]
+    # Человек чужой группы (OP_A — группа СВ Альфа): записи заводит супер-админ.
+    now = datetime.now().replace(second=0, microsecond=0)
+    created = [_create(client, SUPER, OP_A, now - timedelta(days=days)) for days in (3, 2, 1)]
+    assert all(r.status_code == 201 for r in created), [r.get_json() for r in created]
+    ids = [r.get_json()['id'] for r in created]
+    items = client.get('/api/discipline/records', headers=h(SV_B)).get_json()['items']
+    assert sorted(item['id'] for item in items) == sorted(ids)
+    with db.cursor() as cur:
+        cur.execute("SELECT DISTINCT user_id FROM discipline_notifications WHERE title LIKE %s", ('%нужен акт%',))
+        assert {row[0] for row in cur.fetchall()} == {SV_B}
+    found = client.get('/api/discipline/operators/search?q=опер', headers=h(SV_B)).get_json()
+    assert {row['id'] for row in found['items']} == {OP_A, OP_B}
+    # Ручки руководителя: настройки, справочник, отчёт, журнал, контроль, отмена.
+    settings = client.get('/api/discipline/settings?department_id=%d' % SZOV, headers=h(SV_B))
+    assert settings.status_code == 200
+    saved = client.put('/api/discipline/settings', headers=h(SV_B),
+                       json={'department_id': SZOV, 'settings': {'period_days': 45}})
+    assert saved.status_code == 200 and saved.get_json()['settings']['period_days'] == 45
+    assert client.post('/api/discipline/types', headers=h(SV_B), json={
+        'department_id': SZOV, 'title': 'Курение в неположенном месте', 'severity': 'light',
+        'weight': 1}).status_code == 200
+    assert client.get('/api/discipline/reports/operators', headers=h(SV_B)).status_code == 200
+    assert client.get('/api/discipline/audit', headers=h(SV_B)).status_code == 200
+    assert client.get('/api/discipline/controls', headers=h(SV_B)).status_code == 200
+    cancel = client.post('/api/discipline/records/%d/cancel' % ids[0], headers=h(SV_B),
+                         json={'reason': 'Ошибочно зафиксировано'})
+    assert cancel.status_code == 200, cancel.get_json()
+    # ОП — закрыт: настройки, справочник и чужая запись.
+    for refused in (client.get('/api/discipline/settings?department_id=%d' % OP, headers=h(SV_B)),
+                    client.put('/api/discipline/settings', headers=h(SV_B),
+                               json={'department_id': OP, 'settings': {'period_days': 45}}),
+                    client.post('/api/discipline/types', headers=h(SV_B), json={
+                        'department_id': OP, 'title': 'Курение', 'severity': 'light', 'weight': 1})):
+        assert refused.status_code == 403, refused.get_json()
+    op_record = _create(client, SUPER, OP_OP, now - timedelta(hours=1))
+    assert op_record.status_code == 201, op_record.get_json()
+    assert client.get('/api/discipline/records/%d' % op_record.get_json()['id'], headers=h(SV_B)).status_code == 403
+    # Остальные СВ раздел по-прежнему не открывают.
+    refused = client.get('/api/discipline/ping', headers=h(SV_A))
+    assert (refused.status_code, refused.get_json()['code']) == (403, 'DISCIPLINE_SECTION_CLOSED')
 
 
 def test_audit_pages_by_the_requested_size(client, db):

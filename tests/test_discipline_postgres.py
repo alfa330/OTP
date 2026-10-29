@@ -243,6 +243,104 @@ def test_head_cannot_touch_other_department(db):
         assert service.load_record(cur, ctx_of(cur, SUPER), record_id, TODAY)['id'] == record_id
 
 
+def test_named_manager_runs_the_whole_department(db, monkeypatch):
+    """Владелец, 29.10.2026: СВ СЗоВ — «полный доступ только для отдела СзоВ»
+    (access.MANAGER_GRANTS). Здесь поимённый — СВ Бета (группа 11): ведёт весь
+    СЗоВ, как глава, и уведомления «руководителю» получает вместе с главой; ОП — нет."""
+    monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',)})
+    with db.cursor() as cur:
+        named = ctx_of(cur, SV_B)
+        assert access.managed_department_ids(named) == {SZOV} and access.scope(named) == access.SCOPE_MANAGER
+        # Ищет по всему отделу, а не по своей группе; оператора ОП — нет.
+        assert {row['id'] for row in queries.search_operators(cur, named, TODAY, 'опер')} == {OP_A, OP_B}
+        # Человек группы СВ Альфа, записи завёл он: третья — ступень «акт».
+        ids = [create(cur, SV_A, OP_A, NOW - timedelta(days=days)) for days in (12, 10, 8)]
+        for user in (HEAD_SZOV, SV_B):
+            assert any('нужен акт' in title for title in bell_titles(cur, user)), user
+        assert enriched(cur, SV_B, ids[2])['permissions']['can_manage'] is True
+        total, rows = queries.bell(cur, ctx_of(cur, SV_B), 10, TODAY)
+        assert total >= 1 and any('нужен акт' in row['title'] for row in rows)
+        # Отменяет чужую запись (только руководитель) — «Проверить основание акта» обоим.
+        record = service.load_record(cur, named, ids[1], TODAY, for_update=True)
+        service.cancel_record(cur, named, record, 'Ошибочно зафиксировано', now=NOW)
+        for user in (HEAD_SZOV, SV_B):
+            assert any(t.startswith('Проверить основание акта') for t in bell_titles(cur, user)), user
+        # Особый контроль от акта — в её списке; ответственный, как и раньше, глава.
+        controls = service.visible_controls(cur, named, TODAY)
+        assert [c['operator_id'] for c in controls] == [OP_A] and controls[0]['responsible_id'] == HEAD_SZOV
+        # ОП: ни чужой записи, ни фиксации.
+        op_record = create(cur, HEAD_OP, OP_OP, NOW - timedelta(hours=1), department=OP)
+        with pytest.raises(service.DisciplineError):
+            service.load_record(cur, named, op_record, TODAY)
+        with pytest.raises(service.DisciplineError) as error:
+            create(cur, SV_B, OP_OP, NOW - timedelta(hours=1), department=OP)
+        assert error.value.status == 403
+        assert not any('нужен акт' in t for t in bell_titles(cur, SV_A))
+
+
+def test_named_manager_gets_reminders_with_the_head(db, monkeypatch):
+    monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',), FIRED: ('szov',)})
+    with db.cursor() as cur:
+        create(cur, SV_A, OP_A, NOW - timedelta(days=10))
+        late = create(cur, SV_A, OP_A, NOW - timedelta(days=9))
+        cur.execute('UPDATE discipline_records SET created_at = %s WHERE id = %s', (NOW - timedelta(days=9), late))
+        service.run_reminders(cur, now=NOW, today=TODAY)
+        overdue = 'Оператор Анна: объяснительная не предоставлена в срок'
+        for user in (HEAD_SZOV, SV_A, SV_B):
+            assert overdue in bell_titles(cur, user), user
+        # Уволенному из списка допуска — ничего.
+        assert bell_titles(cur, FIRED) == []
+
+
+def test_named_manager_gets_everything_the_head_gets(db, monkeypatch):
+    """Каждое место, где уведомление идёт «руководителю», шлёт его и поимённому:
+    акт (и после записи задним числом), особый контроль, мера с удержанием, отказ,
+    основание акта, просрочка объяснительной, конец контроля. Действуют только СВ
+    Альфа и супер-админ, а СВ Бета ведёт другую группу — своих уведомлений СВ о
+    человеке у него нет, и всё, что пришло главе, должно прийти и ему."""
+    monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',)})
+    with db.cursor() as cur:
+        super_ctx = ctx_of(cur, SUPER)
+        first = create(cur, SV_A, OP_A, NOW - timedelta(days=6))
+        create(cur, SV_A, OP_A, NOW - timedelta(days=4))
+        # Задним числом: вторая запись сдвигается на ступень «акт».
+        create(cur, SV_A, OP_A, NOW - timedelta(days=8))
+        fine = measure_id(cur, SZOV, 'Лишение переменной части (фиксированная сумма)')
+        under = create(cur, SV_A, OP_A, NOW - timedelta(hours=2), measure_id=fine, measure_amount='15000')
+        service.approve_measure(cur, super_ctx, service.load_record(cur, super_ctx, under, TODAY, for_update=True),
+                                now=NOW)
+        service.record_refusal(cur, ctx_of(cur, SV_A), service.load_record(cur, ctx_of(cur, SV_A), under, TODAY,
+                                                                           for_update=True),
+                               upload(), [500, 501], now=NOW)
+        service.cancel_record(cur, super_ctx, service.load_record(cur, super_ctx, first, TODAY, for_update=True),
+                              'Ошибочно зафиксировано', now=NOW)
+        for days in (24, 27):
+            service.run_reminders(cur, now=NOW + timedelta(days=days), today=TODAY + timedelta(days=days))
+        cur.execute('SELECT user_id, kind, title FROM discipline_notifications WHERE user_id = ANY(%s) '
+                    'ORDER BY kind, title', ([HEAD_SZOV, SV_B],))
+        rows = cur.fetchall()
+        head = [(kind, title) for user, kind, title in rows if user == HEAD_SZOV]
+        named = [(kind, title) for user, kind, title in rows if user == SV_B]
+        assert {kind for kind, _ in head} == {'act', 'under_control', 'measure_finance', 'refusal', 'act_basis',
+                                              'explanation_overdue', 'control_ending', 'control_due'}
+        assert named == head
+
+
+def test_department_managers_are_head_and_named(db, monkeypatch):
+    with db.cursor() as cur:
+        # Допуск в коде — 202, его в этой базе нет: глава отдела, как и раньше.
+        assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV]
+        assert queries.department_managers(cur, []) == []
+        monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',), FIRED: ('szov',),
+                                                       HEAD_SZOV: ('szov', 'op'), SV_A: ('op',)})
+        # Глава с допуском на свой же отдел — один раз; уволенный — нет.
+        assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV, SV_B]
+        assert queries.department_managers(cur, [OP]) == [HEAD_OP, HEAD_SZOV, SV_A]
+        # У Теза главы нет и допуска нет — никого.
+        assert queries.department_managers(cur, [TEZ]) == []
+        assert queries.department_managers(cur, [SZOV], sections={'op': OP}) == [HEAD_SZOV]
+
+
 # ── Лестница по умолчанию — как в ТЗ: критерии приёмки 2–4 ─────────────────
 
 def test_default_ladder_passes_acceptance_2_3_4(db):

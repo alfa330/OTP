@@ -61,6 +61,9 @@ const PEOPLE = [
     // [кто, пользователь, виден ли пункт при флаге, видна ли при снятом флаге, вид оператора]
     ['поимённо: 56, оператор СЗоВ', { id: 56, role: 'operator', ...SZOV }, true, true, true],
     ['поимённо, id строкой', { id: '56', role: 'operator', ...SZOV }, true, true, true],
+    // 29.10.2026: 202 — СВ СЗоВ, руководитель отдела поимённо; что ей видно, решает сервер.
+    ['поимённо: 202, СВ СЗоВ', { id: 202, role: 'sv', ...SZOV }, true, true, false],
+    ['202 в отделе вне раздела', { id: 202, role: 'sv', department_id: 4, department_code: 'remote_cc' }, false, false, false],
     ['другой оператор СЗоВ', { id: 57, role: 'operator', ...SZOV }, false, true, true],
     ['56 в отделе вне раздела', { id: 56, role: 'operator', department_id: 4, department_code: 'remote_cc' }, false, false, false],
     ['56 с ролью админа', { id: 56, role: 'admin', ...SZOV }, false, false, false],
@@ -102,6 +105,8 @@ test('пункт меню: поимённому — сразу, остальны
     assert.equal(flagOn(named, null), true);
     assert.equal(flagOn(other, 5), false);
     assert.equal(flagOn({ id: 1, role: 'super_admin' }, null), true);
+    assert.equal(flagOn({ id: 202, role: 'sv', ...SZOV }, null), true);
+    assert.equal(flagOn({ id: 301, role: 'sv', ...SZOV }, null), false);
     assert.equal(flagOn({ id: 56, role: 'operator', department_id: 4, department_code: 'remote_cc' }, 0), false);
     // Раздел открыт всем — поимённые как все операторы: пункт при записях.
     const flagOff = build(false).isDisciplineMenuVisibleFor;
