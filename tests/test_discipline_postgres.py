@@ -331,14 +331,22 @@ def test_department_managers_are_head_and_named(db, monkeypatch):
         # Допуск в коде — 202, его в этой базе нет: глава отдела, как и раньше.
         assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV]
         assert queries.department_managers(cur, []) == []
-        monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',), FIRED: ('szov',),
-                                                       HEAD_SZOV: ('szov', 'op'), SV_A: ('op',)})
-        # Глава с допуском на свой же отдел — один раз; уволенный — нет.
+        monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',), FIRED: ('szov',), HEAD_SZOV: ('szov',),
+                                                       SV_A: ('op',), HEAD_OP: ('op',)})
+        # Глава с допуском на свой же отдел — один раз; уволенный — нет; СВ СЗоВ с
+        # допуском на ОП — нет: допуск действует, пока человек — СВ названного отдела.
         assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV, SV_B]
-        assert queries.department_managers(cur, [OP]) == [HEAD_OP, HEAD_SZOV, SV_A]
+        assert queries.department_managers(cur, [OP]) == [HEAD_OP]
         # У Теза главы нет и допуска нет — никого.
         assert queries.department_managers(cur, [TEZ]) == []
         assert queries.department_managers(cur, [SZOV], sections={'op': OP}) == [HEAD_SZOV]
+        # Перевели в Удалённый КЦ или сменили роль — допуск молчит, как и вход в раздел.
+        cur.execute('UPDATE users SET department_id = %s WHERE id = %s', (REMOTE, SV_B))
+        assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV]
+        assert not access.can_open_section(ctx_of(cur, SV_B))
+        cur.execute("UPDATE users SET department_id = %s, role = 'admin' WHERE id = %s", (SZOV, SV_B))
+        assert queries.department_managers(cur, [SZOV]) == [HEAD_SZOV]
+        assert access.managed_department_ids(ctx_of(cur, SV_B)) == set()
 
 
 # ── Лестница по умолчанию — как в ТЗ: критерии приёмки 2–4 ─────────────────

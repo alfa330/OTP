@@ -877,6 +877,29 @@ def test_named_manager_while_the_section_rolls_out(client, db, monkeypatch):
     assert (refused.status_code, refused.get_json()['code']) == (403, 'DISCIPLINE_SECTION_CLOSED')
 
 
+def test_act_draft_keeps_the_head_when_the_named_manager_approves(client, monkeypatch):
+    """Разбор 29.10.2026: акт утверждает поимённый руководитель (СВ СЗоВ), а в
+    строке «С актом ознакомлен руководитель СЗоВ» — глава отдела, не она; и когда
+    составитель — она сама, строка не пустеет."""
+    from discipline import access
+
+    monkeypatch.setattr(access, 'MANAGER_GRANTS', {SV_B: ('szov',)})
+    now = datetime.now().replace(second=0, microsecond=0)
+    # Вход заводит справочники отдела (ensure_department_defaults) — в нём и «Выговор».
+    assert client.get('/api/discipline/ping', headers=h(SV_B)).status_code == 200
+    measures = client.get('/api/discipline/controls', headers=h(SV_B)).get_json()['measures']
+    reprimand = next(m['id'] for m in measures if m['title'] == 'Выговор')
+    for author, operator, name in ((SV_A, OP_A, 'Супервайзер Альфа'), (SV_B, OP_B, 'Супервайзер Бета')):
+        ids = [_create(client, author, operator, now - timedelta(days=days)).get_json()['id'] for days in (3, 2, 1)]
+        act = client.get('/api/discipline/records/%d' % ids[2], headers=h(SV_B)).get_json()['act_full']
+        assert client.patch('/api/discipline/acts/%d' % act['id'], headers=h(SV_B), json={
+            'composed_on': now.strftime('%Y-%m-%d'), 'decision_measure_id': reprimand,
+            'approve': True}).status_code == 200
+        text = _docx_text(client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(SV_B)).data)
+        assert 'Мною, супервайзером СЗоВ %s, составлен настоящий акт о нижеследующем:' % name in text
+        assert 'С актом ознакомлен руководитель СЗоВ\nПодпись: _______\nФИО: Глава Сзовова' in text, name
+
+
 def test_audit_pages_by_the_requested_size(client, db):
     """«Отчёты» листают журнал действий по 10 строк (владелец, 23.10.2026: «чтобы
     не уходило вниз»): сервер отдаёт страницу заданного размера в границах, без

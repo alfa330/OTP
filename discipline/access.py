@@ -73,8 +73,11 @@ ROLLOUT_USER_IDS = frozenset({56, 202})
 # (коды catalog.SECTION_DEPARTMENT_CODES), id → коды. Владелец, 29.10.2026:
 # «дай ей полный доступ только для отдела СзоВ» — 202, СВ СЗоВ: весь отдел, а
 # не только своя группа, и уведомления «руководителю» по нему — вместе с главой
-# (queries.department_managers). Пока стоит флаг выкладки, id нужен и в
-# ROLLOUT_USER_IDS — тест сверяет. Новый id — только по слову владельца.
+# (queries.department_managers). Допуск действует, пока человек — СВ одного из
+# названных отделов (granted_department_ids): перевели или сменили роль — он
+# молчит, и сервер не расходится с меню (App.jsx пускает СВ только своего отдела).
+# Пока стоит флаг выкладки, id нужен и в ROLLOUT_USER_IDS — тест сверяет.
+# Новый id — только по слову владельца.
 MANAGER_GRANTS = {202: ('szov',)}
 
 
@@ -115,13 +118,20 @@ def _granted(codes, section_departments):
 
 
 def granted_department_ids(ctx):
-    """Отделы раздела, где пользователь — руководитель поимённо (MANAGER_GRANTS)."""
-    return _granted(MANAGER_GRANTS.get(_me(ctx)), ctx.get('section_departments'))
+    """Отделы раздела, где пользователь — руководитель поимённо (MANAGER_GRANTS):
+    пока он СВ одного из них. ctx — контекст доступа или строка users с теми же
+    полями (user_id, role, department_id, section_departments)."""
+    granted = _granted(MANAGER_GRANTS.get(_me(ctx)), ctx.get('section_departments'))
+    department_id = ctx.get('department_id')
+    if normalize_role(ctx.get('role')) != 'sv' or department_id is None or int(department_id) not in granted:
+        return set()
+    return granted
 
 
 def granted_manager_ids(section_departments, department_ids):
-    """Поимённые руководители хотя бы одного из этих отделов — адресаты
-    уведомлений «руководителю» вместе с главой. section_departments — {код: id}."""
+    """Кому из MANAGER_GRANTS допуск называет хотя бы один из этих отделов — по
+    одному списку, без роли и отдела человека: их сверяет granted_department_ids
+    по строке users (queries.department_managers). section_departments — {код: id}."""
     wanted = _ids(department_ids)
     return {int(user_id) for user_id, codes in MANAGER_GRANTS.items()
             if _granted(codes, section_departments) & wanted}

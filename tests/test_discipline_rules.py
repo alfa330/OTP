@@ -5,11 +5,13 @@
 tests/test_discipline_postgres.py (запускается с DISCIPLINE_TEST_PORT).
 """
 
+import ast
+import pathlib
 import unittest
 from unittest import mock
 from datetime import date, datetime, timedelta
 
-from discipline import access, catalog, files, service
+from discipline import access, catalog, files, queries, service
 
 AT = datetime(2026, 10, 20, 12, 0)
 
@@ -418,6 +420,99 @@ class ManagerGrantTests(unittest.TestCase):
             self.assertFalse(access.can_open_section(ctx('sv', user_id=202, groups=[5])))
         with mock.patch.object(access, 'SUPER_ADMIN_ONLY', True):
             self.assertTrue(access.can_open_section(ctx('sv', user_id=202, groups=[5])))
+
+    def test_grant_holds_while_she_is_a_szov_supervisor(self):
+        """Допуск — «супервайзеру СзоВ»: перевели в другой отдел или сменили роль —
+        он молчит, и сервер отвечает так же, как меню (canAccessDisciplineSectionForUser)."""
+        for who in (ctx('sv', user_id=202, department_id=4), ctx('admin', user_id=202),
+                    ctx('trainer', user_id=202)):
+            self.assertEqual(access.managed_department_ids(who), set(), who)
+            self.assertFalse(access.can_open_section(who), who)
+        # СВ ОП — обычный СВ своих групп; оператор СЗоВ — только свои записи.
+        moved = ctx('sv', user_id=202, department_id=2, groups=[7])
+        self.assertEqual(access.managed_department_ids(moved), set())
+        self.assertEqual(access.scope(moved), access.SCOPE_GROUPS)
+        self.assertEqual(access.scope(ctx('operator', user_id=202)), access.SCOPE_OWN)
+        # Строка users с ролью «supervisor» — тот же СВ.
+        row = {'user_id': 202, 'role': 'supervisor', 'department_id': 1, 'section_departments': {'szov': 1}}
+        self.assertEqual(access.granted_department_ids(row), {1})
+
+    def test_department_managers_without_a_database(self):
+        """queries.department_managers там, где нет Postgres (CI): глава, затем
+        поимённые — один раз, только работающие и только с действующим допуском."""
+        sections = {'szov': 1, 'op': 2, 'tez': 3}
+        cur = _Cursor([(202, 'sv', 1), (203, 'sv', 4), (204, 'admin', 1)])
+        grants = {202: ('szov',), 203: ('szov',), 204: ('szov',), 1: ('szov',), 205: ('op',)}
+        with mock.patch.object(queries, 'department_heads', return_value={1: 1}), \
+                mock.patch.object(access, 'MANAGER_GRANTS', grants):
+            self.assertEqual(queries.department_managers(cur, [1], sections=sections), [1, 202])
+        sql, params = cur.queries[-1]
+        self.assertIn("NOT IN ('fired', 'dismissal')", sql)
+        # Главу второй раз не спрашиваем, допуск на ОП к СЗоВ не относится.
+        self.assertEqual(params, ([202, 203, 204],))
+        cur = _Cursor()
+        with mock.patch.object(queries, 'department_heads', return_value={3: 300}), \
+                mock.patch.object(access, 'MANAGER_GRANTS', {202: ('szov',)}):
+            self.assertEqual(queries.department_managers(cur, [3], sections=sections), [300])
+        self.assertEqual(cur.queries, [])
+
+    def test_every_manager_notice_goes_through_department_managers(self):
+        """Все места рассылки «руководителю» в service.py — через department_managers;
+        голый department_heads — только «ответственный» за автоконтроль и строка
+        руководителя в акте. Postgres-тесты рассылки в CI пропускаются, этот — нет."""
+        tree = ast.parse(pathlib.Path(service.__file__).read_text(encoding='utf-8'))
+        callers = {'department_heads': set(), 'department_managers': set()}
+        for top in tree.body:
+            if isinstance(top, ast.FunctionDef):
+                for node in ast.walk(top):
+                    if isinstance(node, ast.Attribute) and node.attr in callers:
+                        callers[node.attr].add(top.name)
+        self.assertEqual(callers['department_heads'], {'_auto_control', 'act_draft_context'})
+        self.assertEqual(callers['department_managers'], {'_push_act_basis', 'settle_ladder', '_notify_new_record',
+                                                          'record_refusal', '_notify_finance', 'run_reminders'})
+
+    def test_act_leader_is_the_head_when_she_approves(self):
+        """Разбор 29.10.2026: акт утверждает и поимённый руководитель, но строка
+        «С актом ознакомлен руководитель отдела» — главы, а не СВ с допуском."""
+        self.assertEqual(service.act_leader_id(202, 1), 1)
+        self.assertIsNone(service.act_leader_id(202, None))
+        # Как раньше: утвердил глава или супер-админ — он; не утверждён — глава.
+        self.assertEqual(service.act_leader_id(1, 1), 1)
+        self.assertEqual(service.act_leader_id(7, 1), 7)
+        self.assertEqual(service.act_leader_id(None, 1), 1)
+        with mock.patch.object(access, 'MANAGER_GRANTS', {1: ('szov',)}):
+            self.assertEqual(service.act_leader_id(1, 1), 1)
+
+    def test_act_draft_names_the_head_when_she_composes_and_approves(self):
+        """Черновик акта без базы: составила и утвердила 202 — «Мною, супервайзером …»
+        она, а «ознакомлен руководитель» — глава отдела, строка не пустеет."""
+        people = {1: {'name': 'Глава Отдела', 'role': 'admin'}, 202: {'name': 'Поимённая', 'role': 'sv'},
+                  50: {'name': 'Оператор', 'role': 'operator', 'gender': 'female'}}
+        with mock.patch.object(queries, 'department_names', return_value={1: {'id': 1, 'name': 'СЗоВ'}}), \
+                mock.patch.object(queries, 'department_heads', return_value={1: 1}), \
+                mock.patch.object(queries, 'people', side_effect=lambda _cur, ids: {
+                    i: people[i] for i in ids if i in people}), \
+                mock.patch.object(queries, 'control_of_act', return_value=None):
+            context = service.act_draft_context(
+                None, {'user_id': 202, 'name': 'Поимённая'},
+                {'id': 9, 'department_id': 1, 'approved_by': 202, 'operator_id': 50},
+                {'created_by': 202, 'created_at': AT, 'occurred_at': AT},
+                settings_for=lambda *_args: catalog.normalize_settings({}))
+        self.assertEqual((context['composer_name'], context['composer_role'], context['head_name']),
+                         ('Поимённая', 'supervisor', 'Глава Отдела'))
+
+
+class _Cursor:
+    """Курсор без базы: запоминает запросы и отдаёт заготовленные строки."""
+
+    def __init__(self, rows=()):
+        self.rows, self.queries = list(rows), []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params))
+
+    def fetchall(self):
+        return self.rows
 
 
 class LadderLibraryTests(unittest.TestCase):

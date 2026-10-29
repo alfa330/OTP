@@ -112,7 +112,8 @@ def department_heads(cursor, department_ids):
 
 def department_managers(cursor, department_ids, sections=None):
     """Кому уведомления «руководителю» по отделам: глава каждого и поимённые
-    руководители раздела (access.MANAGER_GRANTS), кто ещё работает.
+    руководители раздела (access.MANAGER_GRANTS) — кто работает и чей допуск в
+    силе по тому же правилу, что и вход в раздел (access.granted_department_ids).
     sections — section_departments(), если он уже под рукой."""
     ids = _int_list(department_ids)
     if not ids:
@@ -120,13 +121,15 @@ def department_managers(cursor, department_ids, sections=None):
     managers = list(dict.fromkeys(department_heads(cursor, ids).values()))
     if not access.MANAGER_GRANTS:
         return managers
-    granted = access.granted_manager_ids(section_departments(cursor) if sections is None else sections, ids)
-    granted -= set(managers)
-    if granted:
+    sections = section_departments(cursor) if sections is None else sections
+    candidates = access.granted_manager_ids(sections, ids) - set(managers)
+    if candidates:
         cursor.execute(
-            "SELECT id FROM users WHERE id = ANY(%s) AND COALESCE(status, 'working') NOT IN ('fired', 'dismissal')"
-            " ORDER BY id", (sorted(granted),))
-        managers += [int(row[0]) for row in cursor.fetchall()]
+            "SELECT id, role, department_id FROM users WHERE id = ANY(%s)"
+            " AND COALESCE(status, 'working') NOT IN ('fired', 'dismissal') ORDER BY id", (sorted(candidates),))
+        managers += [int(user_id) for user_id, role, department_id in cursor.fetchall()
+                     if access.granted_department_ids({'user_id': user_id, 'role': role, 'department_id': department_id,
+                                                       'section_departments': sections}) & set(ids)]
     return managers
 
 

@@ -1208,6 +1208,16 @@ def load_act(cursor, ctx, act_id, today):
     return act, record
 
 
+def act_leader_id(approved_by, head_id):
+    """Чья строка «С актом ознакомлен руководитель отдела»: утвердившего акт,
+    иначе главы отдела акта. Поимённый руководитель раздела (access.MANAGER_GRANTS)
+    акт утверждает, но главой отдела в документе организации не становится —
+    в строке тогда глава."""
+    if approved_by is not None and int(approved_by) in access.MANAGER_GRANTS and int(approved_by) != head_id:
+        return head_id
+    return approved_by or head_id
+
+
 def act_draft_context(cursor, ctx, act, trigger, *, settings_for):
     """Чего нет в самом акте и его записях, а стандартному акту нужно
     (act_docx.standard_act): отдел акта, кто его составил и на каком он месте
@@ -1220,15 +1230,15 @@ def act_draft_context(cursor, ctx, act, trigger, *, settings_for):
     скачивающий (руководитель). Отметка «составил» в самом акте (composed_by)
     в документ не идёт: её ставит руководитель вместе с датой, и тогда он
     оказывался бы в акте и составителем, и ознакомленным руководителем.
-    Руководитель — утвердивший акт, иначе глава отдела акта; если это и есть
-    составитель, его строка остаётся линией для подписи."""
+    Руководитель — act_leader_id; если это и есть составитель, его строка
+    остаётся линией для подписи."""
     department_id = act.get('department_id')
     department = (queries.department_names(cursor, [department_id]).get(int(department_id)) or {}
                   if department_id is not None else {})
     head_id = queries.department_heads(cursor, [department_id]).get(int(department_id)) \
         if department_id is not None else None
     candidates = [int(uid) for uid in (trigger.get('created_by'), ctx['user_id']) if uid is not None]
-    leader_id = act.get('approved_by') or head_id
+    leader_id = act_leader_id(act.get('approved_by'), head_id)
     people = queries.people(cursor, candidates + [leader_id, act['operator_id']])
 
     def supervisor(user_id):
