@@ -232,7 +232,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
-const KnowledgeKeysPanel = lazyWithRetry(() => import('./components/knowledge/KnowledgeKeysPanel'));
+const PartnerKeysPanel = lazyWithRetry(() => import('./components/partner_keys/PartnerKeysPanel'));
 const RegContestCeremony = lazyWithRetry(() => import('./components/contests/RegContestCeremony'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
 const EmployeeCardPage = lazyWithRetry(() => import('./components/employees/EmployeeCardPage'));
@@ -42643,10 +42643,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         // людей вместо таблицы. Состояние остаётся здесь и общее с компьютером.
         const isMobileShell = useIsMobileShell();
 
-        // Вкладка «Ключи» — ключи партнёрских ИИ (knowledge_api) и журнал их
-        // вызовов. Только супер-админу: ключ открывает базу знаний стороннему
-        // сервису. Переключатель один на телефон и компьютер, содержимое — свой
-        // компонент; раздел «Сессии» остальным админам виден как раньше.
+        // Вкладка «Ключи» — ключи партнёрских сервисов (partner_keys): кому
+        // выдан, к чему открыт доступ, журнал вызовов. Только супер-админу: ключ
+        // открывает ручки портала стороннему сервису. Переключатель один на
+        // телефон и компьютер, содержимое — свой компонент; раздел «Сессии»
+        // остальным админам виден как раньше.
         const [panelTab, setPanelTab] = React.useState('sessions');
         const showKeys = Boolean(canManageKeys) && panelTab === 'keys';
         const tabsBar = canManageKeys ? (
@@ -43034,7 +43035,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 <div className={isMobileShell ? 'space-y-4 px-4 pb-6 pt-3' : 'space-y-4'}>
                     {tabsBar}
                     <Suspense fallback={null}>
-                        <KnowledgeKeysPanel base={API_BASE_URL} headers={apiHeaders || {}} formatDate={formatDate} />
+                        <PartnerKeysPanel base={API_BASE_URL} headers={apiHeaders || {}} formatDate={formatDate} />
                     </Suspense>
                 </div>
             );

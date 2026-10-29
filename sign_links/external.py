@@ -50,6 +50,10 @@ import time
 
 from flask import Blueprint, jsonify, request
 
+from partner_keys import auth as partner_auth
+from partner_keys import journal as partner_journal
+from partner_keys import scopes as partner_scopes
+
 from . import api_key, batch, iin as iin_rules, queries, sapar_link, schema
 
 # Пределы подняты 13.10.2026 по слову владельца («нормально так увеличим») —
@@ -239,43 +243,72 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
             return _refuse(500, 'SIGN_LINKS_API_FAILED',
                            'Внутренняя ошибка — повторите запрос позже')
 
+    def _note(partner, *, outcome, status, summary, details=None, started=None):
+        """Строка журнала ключа партнёра (partner_keys). Ключ из окружения
+        журнала ключей не имеет — у него только журнал раздела."""
+        if partner:
+            partner_journal.record(
+                db, partner, scope=partner_scopes.SIGN_LINKS, endpoint=request.path,
+                outcome=outcome, http_status=status, summary=summary, details=details,
+                latency_ms=int((time.monotonic() - started) * 1000) if started else None,
+                ip=_ip(), user_agent=_ua())
+
     def _links():
         # ── Ключ. До него не читается даже тело запроса. ─────────────────────
+        # Два источника: ключи из окружения (как раньше) и ключи партнёров из
+        # «Сессии → Ключи» с областью «Ссылки на подписание» (partner_keys).
+        # Окружение сверяется первым — это переход, а не второй вход: партнёр
+        # переходит на ключ из «Ключей», и переменную можно убрать.
         keys, _config_error = api_key.configured(environ)
-        if not keys:
-            # Не задан и задан с ошибкой — снаружи одно и то же; причина в логе.
-            return _refuse(503, 'SIGN_LINKS_API_NOT_CONFIGURED',
-                           'Доступ по ключу на сервере не настроен')
-        mark = api_key.match(request.headers.get(api_key.HEADER), keys)
+        presented = request.headers.get(api_key.HEADER)
+        mark = api_key.match(presented, keys)
+        partner = None
         if not mark:
-            # Нет заголовка и неверный ключ — один ответ: чужому незачем знать,
-            # на чём он споткнулся.
-            return _refuse(401, 'SIGN_LINKS_API_UNAUTHORIZED', 'Ключ не принят')
+            status, partner = partner_auth.lookup(db, presented, scope=partner_scopes.SIGN_LINKS)
+            if status == partner_auth.OK:
+                mark = partner['mark']
+            elif status == partner_auth.NO_SCOPE:
+                # Ключ настоящий, но эта дверь ему не выдана: сказать об этом безопасно.
+                return _refuse(403, 'SIGN_LINKS_API_FORBIDDEN',
+                               'Ключу не открыты ссылки на подписание')
+            elif not keys and status in (partner_auth.NOT_READY, partner_auth.ERROR):
+                # Ни переменной, ни таблицы ключей — закрыто, а не «пускаем всех».
+                return _refuse(503, 'SIGN_LINKS_API_NOT_CONFIGURED',
+                               'Доступ по ключу на сервере не настроен')
+            else:
+                # Нет заголовка и неверный ключ — один ответ: чужому незачем знать,
+                # на чём он споткнулся.
+                return _refuse(401, 'SIGN_LINKS_API_UNAUTHORIZED', 'Ключ не принят')
 
         # ── Тело ─────────────────────────────────────────────────────────────
         body = _read_body()
         if body is None:
+            _note(partner, outcome='bad_request', status=413, summary='Запрос слишком большой')
             return _refuse(413, 'SIGN_LINKS_API_TOO_LARGE', 'Запрос слишком большой',
                            max_iins=max_iins)
         items, problem = _parse_items(body)
         if problem:
+            _note(partner, outcome='bad_request', status=400, summary=problem)
             return _refuse(400, 'SIGN_LINKS_API_BAD_REQUEST', problem)
         if len(items) > max_iins:
+            _note(partner, outcome='bad_request', status=413,
+                  summary='ИИН в запросе: %d, предел %d' % (len(items), max_iins))
             return _refuse(413, 'SIGN_LINKS_API_TOO_MANY',
                            'В одном запросе не больше %d ИИН' % max_iins, max_iins=max_iins)
         entries = [_entry(item) for item in items]
 
         # ── Место. Без ожидания: ждущий запрос держал бы нить так же, как идущий. ──
         if not slots.acquire(blocking=False):
+            _note(partner, outcome='limit', status=429, summary='Слишком много одновременных запросов')
             return _refuse(429, 'SIGN_LINKS_API_BUSY',
                            'Слишком много одновременных запросов — повторите через '
                            'пару секунд', headers={'Retry-After': str(RETRY_AFTER_SEC)})
         try:
-            return _process(mark, entries)
+            return _process(mark, entries, partner)
         finally:
             slots.release()
 
-    def _process(mark, entries):
+    def _process(mark, entries, partner=None):
         started = time.monotonic()
         # Повтор в списке спрашивается и пишется в журнал один раз, а ответ
         # получает каждая его строка.
@@ -302,6 +335,9 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
                 logging.warning('sign_links: внешний вход (ключ %s) упёрся в дневной предел: '
                                 'принято %d из %d, в запросе ещё %d', mark, used, daily_limit,
                                 planned)
+                _note(partner, outcome='limit', status=429, started=started,
+                      summary='Дневной предел: принято %d из %d, в запросе ещё %d'
+                              % (used, daily_limit, planned))
                 return _refuse(429, 'SIGN_LINKS_API_DAILY_LIMIT',
                                'Дневной предел: в запросе ИИН больше, чем осталось на сегодня',
                                limits=_limits(used))
@@ -352,6 +388,13 @@ def build_sign_links_external_blueprint(*, db, client_ip=None, generate=None, ex
                      summary[NOT_FOUND], summary[INVALID], summary[ERROR],
                      int((time.monotonic() - started) * 1000),
                      ', остановлена: %s' % stopped if stopped else '')
+        _note(partner, outcome='ok', status=200, started=started,
+              summary='ИИН: %d — ссылок %d, без документов %d, не ИИН %d, без ответа %d'
+                      % (len(results), summary[LINK], summary[NOT_FOUND], summary[INVALID],
+                         summary[ERROR]),
+              details={'iins': len(results), 'links': summary[LINK], 'not_found': summary[NOT_FOUND],
+                       'invalid': summary[INVALID], 'errors': summary[ERROR],
+                       'stopped': stopped or None})
         return jsonify({
             "results": results,
             "summary": dict(summary, total=len(results)),

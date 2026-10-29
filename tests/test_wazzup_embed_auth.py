@@ -120,6 +120,40 @@ def test_window_session_reaches_only_chats_and_signing_in_and_out():
     assert embed_auth.scope_refusal(None, '/api/admin/users') is None, 'обычной сессии ограничения нет'
 
 
+def test_a_partner_key_opens_the_launch_and_is_journaled(monkeypatch):
+    """Второй источник ключа — «Сессии → Ключи» с областью «Окно „Чатов ОП“ в CRM»
+    (partner_keys): ключ из окружения не обязателен, вызов ложится в журнал ключа."""
+    from partner_keys import auth as partner_auth, journal as partner_journal
+
+    monkeypatch.delenv(embed_auth.KEY_ENV, raising=False)
+    partner = {'id': 7, 'name': 'CRM', 'mark': 'abcd1234', 'scopes': ['crm_embed']}
+    recorded = []
+
+    def lookup(db, presented, *, scope):
+        assert scope == 'crm_embed'
+        if presented == 'otpk_partner':
+            return partner_auth.OK, partner
+        if presented == 'otpk_other-door':
+            return partner_auth.NO_SCOPE, partner
+        return partner_auth.UNKNOWN, None
+
+    monkeypatch.setattr(partner_auth, 'lookup', lookup)
+    monkeypatch.setattr(partner_journal, 'record', lambda db, key, **fields: recorded.append((key, fields)))
+    db = FakeDb(binding=10, users=[{'id': 10, 'name': 'Иван'}])
+    client = app_for(db, users={10: (10, 'ivan', 'Иван', 'operator')})
+    response = launch(client, {'crmUserId': '352', 'crmUserName': 'Иван'}, key='otpk_partner')
+    assert response.status_code == 200
+    assert response.get_json()['linked'] is True
+    key, fields = recorded[0]
+    assert key is partner
+    assert (fields['scope'], fields['outcome'], fields['details']['crm_user_id'],
+            fields['details']['icore_user_id']) == ('crm_embed', 'ok', '352', 10)
+    assert launch(client, {'crmUserId': '352'}, key='otpk_other-door').status_code == 403
+    assert launch(client, {'crmUserId': '352'}, key='otpk_stranger').status_code == 401
+    assert client.post('/api/wazzup/embed/launch', json={'crmUserId': '352'},
+                       headers={'X-Api-Key': 'otpk_partner'}).status_code == 200
+
+
 def test_key_is_bearer_and_compared_whole():
     assert embed_auth.key_matches(f'Bearer {KEY}', KEY)
     assert embed_auth.key_matches(f'bearer {KEY}', KEY)

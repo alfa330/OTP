@@ -6,22 +6,24 @@
     POST /api/knowledge/search        {"park_id": 5, "question": "…", "limit": 8}
 
 Сотрудником партнёрский сервис не является: нет ни учётки, ни сессии, ни QR —
-вместо них ключ в заголовке X-Api-Key (keys.py), выпущенный супер-админом во
-вкладке «Ключи» раздела «Сессии». Что здесь сторожится и почему:
+вместо них ключ партнёра в заголовке X-Api-Key (partner_keys) с областью
+«Ручка знаний», выпущенный супер-админом во вкладке «Ключи» раздела «Сессии».
+Что здесь сторожится и почему:
 
 * **До ключа не делается ничего.** Ни разбор тела, ни поиск. Неверный ключ,
   отозванный ключ и ключ, которого нет, — один ответ 401: чужому незачем
-  знать, на чём он споткнулся. Схема не развёрнута — 503, а не «пускаем всех».
+  знать, на чём он споткнулся. Ключ настоящий, но без области — 403. Схема
+  ключей не развёрнута — 503, а не «пускаем всех».
 
 * **Пределы.** Вызовов в минуту на ключ (KNOWLEDGE_API_PER_MINUTE, 60) и
   одновременных поисков на всех (KNOWLEDGE_API_LANES, 4): поиск считает вектор
   у провайдера и ходит в базу, и очередь из ждущих запросов держала бы нити
   портала. Сверх предела — 429 с Retry-After, без ожидания.
 
-* **Журнал — строкой на вызов**, включая отказы (нет данных, плохой запрос,
-  предел). Пишется отдельной транзакцией ПОСЛЕ поиска: падение поиска не
-  должно унести запись о том, что спрашивали; сама запись не держит
-  соединение на время поиска.
+* **Журнал — строкой на вызов** (partner_keys.journal), включая отказы (нет
+  данных, плохой запрос, предел). Пишется отдельной транзакцией ПОСЛЕ поиска:
+  падение поиска не должно унести запись о том, что спрашивали; сама запись не
+  держит соединение на время поиска.
 
 * **«Данных нет» уходит супервайзерам.** Вопрос без ответа ложится в «Вопросы
   операторов» отдела ключа (wiki/questions.py: escalate_external) — как отказ
@@ -38,9 +40,12 @@ from collections import deque
 
 from flask import Blueprint, jsonify, request
 
+from partner_keys import auth as partner_auth
+from partner_keys import journal as partner_journal
+from partner_keys import scopes as partner_scopes
 from wiki import questions as wiki_questions
 
-from . import keys, queries, schema
+from . import perimeter
 from . import search as knowledge_search
 
 DEFAULT_PER_MINUTE = 60
@@ -87,7 +92,7 @@ def build_knowledge_blueprint(*, db, client_ip=None, search=None, environ=None,
                               per_minute=None, lanes=None, escalate=None):
     """Фабрика: зависимости аргументами, bot_schedule2 не импортируется.
 
-    search(cursor, key=, park=, question=, limit=) — подменяется в тестах;
+    search(cursor, key=, question=, park_id=, park=, limit=) — подменяется в тестах;
     escalate(cursor, **fields) — запись «Вопроса операторов», по умолчанию
     wiki.questions.escalate_external.
     """
@@ -121,17 +126,20 @@ def build_knowledge_blueprint(*, db, client_ip=None, search=None, environ=None,
 
     # ── Ключ ─────────────────────────────────────────────────────────────────
     def _authenticate():
-        """(ключ, отказ). До базы — только если значение похоже на ключ."""
-        presented = keys.presented(request.headers.get(keys.HEADER))
-        with db._get_cursor() as cursor:
-            if not schema.schema_is_ready(cursor):
-                logging.error('knowledge_api: таблиц ключей нет — вход закрыт; схема не встала')
-                return None, _refuse(503, 'KNOWLEDGE_API_NOT_CONFIGURED',
-                                     'Доступ по ключу на сервере не настроен')
-            key = queries.find_key(cursor, keys.digest(presented)) if presented else None
-        if key is None or key.get('revoked_at'):
-            logging.warning('knowledge_api: ключ не принят (отпечаток %s, ip %s)',
-                            keys.mark(presented) if presented else '-', _ip() or '-')
+        """(ключ, отказ). Проверка — partner_keys.auth с областью «Ручка знаний»."""
+        status, key = partner_auth.lookup(
+            db, partner_auth.presented_from(request.headers), scope=partner_scopes.KNOWLEDGE)
+        if status == partner_auth.NOT_READY:
+            logging.error('knowledge_api: таблиц ключей нет — вход закрыт; схема не встала')
+            return None, _refuse(503, 'KNOWLEDGE_API_NOT_CONFIGURED',
+                                 'Доступ по ключу на сервере не настроен')
+        if status == partner_auth.NO_SCOPE:
+            logging.warning('knowledge_api: ключу «%s» (%s) не открыта ручка знаний, ip %s',
+                            key['name'], key['mark'], _ip() or '-')
+            return None, _refuse(403, 'KNOWLEDGE_API_FORBIDDEN',
+                                 'Ключу не открыта ручка знаний')
+        if status != partner_auth.OK:
+            logging.warning('knowledge_api: ключ не принят (%s, ip %s)', status, _ip() or '-')
             return None, _refuse(401, 'KNOWLEDGE_API_UNAUTHORIZED', 'Ключ не принят')
         return key, None
 
@@ -156,7 +164,6 @@ def build_knowledge_blueprint(*, db, client_ip=None, search=None, environ=None,
             return refusal
         try:
             with db._get_cursor() as cursor:
-                from . import perimeter
                 ctx = perimeter.service_context(cursor, otp_role=key['otp_role'],
                                                 department_id=key['department_id'])
                 spaces = perimeter.spaces(cursor, ctx)
@@ -219,15 +226,21 @@ def build_knowledge_blueprint(*, db, client_ip=None, search=None, environ=None,
                         cursor.execute('ROLLBACK TO SAVEPOINT knowledge_escalate')
                         logging.exception('knowledge_api: вопрос не ушёл в «Вопросы операторов»')
                         question_id = None
-                queries.insert_call(
-                    cursor, key_id=key['id'], request_id=request_id, ip_address=_ip(),
-                    user_agent=request.headers.get('User-Agent'),
-                    park_id=park['id'] if park else None, park_name=park['name'] if park else None,
-                    question=question, outcome=outcome, http_status=http_status,
-                    fragments=knowledge_search.journal_fragments(fragments),
-                    question_id=question_id, latency_ms=latency_ms, degraded=degraded,
-                    error_text=error_text)
-                queries.touch_key(cursor, key['id'])
+                details = {
+                    'park_id': park['id'] if park else None,
+                    'park_name': park['name'] if park else None,
+                    'fragments': knowledge_search.journal_fragments(fragments),
+                    'fragments_count': len(fragments or ()),
+                    'question_id': question_id,
+                    'degraded': bool(degraded) or None,
+                    'error_text': error_text,
+                }
+                partner_journal.insert(
+                    cursor, key, scope=partner_scopes.KNOWLEDGE, endpoint=request.path,
+                    outcome=outcome, http_status=http_status, latency_ms=latency_ms,
+                    summary=question or None,
+                    details={name: value for name, value in details.items() if value is not None},
+                    ip=_ip(), user_agent=request.headers.get('User-Agent'), request_id=request_id)
         except Exception:                                # noqa: BLE001
             logging.exception('knowledge_api: вызов ключа %s не записан в журнал', key.get('mark'))
         return question_id

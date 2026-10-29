@@ -7188,7 +7188,7 @@ class Database:
             self._init_parcels_schema_tx(cursor)
             self._init_driver_chats_schema_tx(cursor)
             self._init_sign_links_schema_tx(cursor)
-            self._init_knowledge_api_schema_tx(cursor)
+            self._init_partner_keys_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_driver_mailings_schema_tx(cursor)
@@ -8487,30 +8487,32 @@ class Database:
         else:
             cursor.execute("RELEASE SAVEPOINT sign_links_schema")
 
-    def _init_knowledge_api_schema_tx(self, cursor):
-        """Схема ручки знаний для партнёрского ИИ (knowledge_api/schema.py):
-        ключи партнёров и журнал вызовов.
+    def _init_partner_keys_schema_tx(self, cursor):
+        """Схема ключей партнёров (partner_keys/schema.py): ключи с областями
+        доступа и журнал вызовов; ими открыты ручка знаний, внешний вход
+        «Ссылок на подписание» и окно «Чатов ОП» для CRM.
 
         Внешние ключи — только на users и departments, поэтому место в
         порядке безразлично. Под своим савпоинтом, как «Ссылка на подписание»:
-        при отказе внешний вход отвечает 503, остальное приложение стартует.
+        при отказе внешние входы по ключу отвечают 503, остальное приложение
+        стартует.
         """
         import logging
 
-        cursor.execute("SAVEPOINT knowledge_api_schema")
+        cursor.execute("SAVEPOINT partner_keys_schema")
         try:
-            from knowledge_api.schema import init_knowledge_api_schema
-            init_knowledge_api_schema(cursor)
+            from partner_keys.schema import init_partner_keys_schema
+            init_partner_keys_schema(cursor)
         except Exception as exc:
             if _is_schema_lock_conflict(exc):
                 raise
-            cursor.execute("ROLLBACK TO SAVEPOINT knowledge_api_schema")
+            cursor.execute("ROLLBACK TO SAVEPOINT partner_keys_schema")
             logging.exception(
-                "Схема ручки знаний не применилась — вход по ключу будет "
-                "недоступен, остальное приложение работает штатно"
+                "Схема ключей партнёров не применилась — входы по ключу будут "
+                "недоступны, остальное приложение работает штатно"
             )
         else:
-            cursor.execute("RELEASE SAVEPOINT knowledge_api_schema")
+            cursor.execute("RELEASE SAVEPOINT partner_keys_schema")
 
     def cleanup_driver_chats_data(self, events_days=None, cache_days=None):
         """Ретеншн раздела «Чаты водителей»: журнал и кеш переписки.

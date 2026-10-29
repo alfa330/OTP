@@ -35,6 +35,10 @@ from urllib.parse import urlencode
 
 from flask import Blueprint, jsonify, request
 
+from partner_keys import auth as partner_auth
+from partner_keys import journal as partner_journal
+from partner_keys import scopes as partner_scopes
+
 from . import crm_identity
 from .names import normalize_name
 
@@ -265,15 +269,42 @@ def build_embed_blueprint(*, db, preflight, portal_base_url, load_user, issue_se
     def embed_launch():
         if request.method == 'OPTIONS':
             return preflight()
+        # Два источника ключа: переменная окружения (как раньше — ключ, которым
+        # CRM и пересылка в неё ходят друг к другу) и ключ партнёра из «Сессии →
+        # Ключи» с областью «Окно „Чатов ОП“ в CRM» (partner_keys). Подпись
+        # пользователя CRM в адресе окна по-прежнему делается ключом из
+        # окружения — это наш секрет, а не вход; без переменной подписи нет и
+        # пара учёток из окна не запоминается.
         expected = launch_key()
-        if not expected:
-            return jsonify(error='Вход из CRM не настроен', code='EMBED_DISABLED'), 503
+        partner = None
         if not key_matches(request.headers.get('Authorization'), expected):
-            return jsonify(error='unauthorized'), 401
+            status, partner = partner_auth.lookup(
+                db, partner_auth.presented_from(request.headers, bearer=True),
+                scope=partner_scopes.CRM_EMBED)
+            if status == partner_auth.NO_SCOPE:
+                return jsonify(error='Ключу не открыто окно чатов', code='KEY_FORBIDDEN'), 403
+            if status != partner_auth.OK:
+                if not expected and status in (partner_auth.NOT_READY, partner_auth.ERROR):
+                    return jsonify(error='Вход из CRM не настроен', code='EMBED_DISABLED'), 503
+                return jsonify(error='unauthorized'), 401
         identity = crm_identity.clean_identity(request.get_json(silent=True))
         if identity is None:
             return jsonify(error='Нужен crmUserId — id пользователя CRM', code='BAD_IDENTITY'), 400
         crm_user_id, crm_user_name = identity
+
+        def _note(linked, how, user_id=None):
+            if not partner:
+                return
+            partner_journal.record(
+                db, partner, scope=partner_scopes.CRM_EMBED, endpoint=request.path,
+                outcome='ok' if linked else 'no_link', http_status=200,
+                summary='CRM %s%s — %s' % (
+                    crm_user_id, ' (%s)' % crm_user_name if crm_user_name else '',
+                    'учётка %s, %s' % (user_id, how) if linked else how),
+                details={'crm_user_id': crm_user_id, 'crm_user_name': crm_user_name,
+                         'linked': bool(linked), 'matched_by': how, 'icore_user_id': user_id},
+                ip=client_ip(), user_agent=request.headers.get('User-Agent'))
+
         if not overall.allow('all') or not per_crm_user.allow(crm_user_id):
             return jsonify(error='Слишком часто', code='RATE_LIMITED'), 429, {'Retry-After': '60'}
         with db._get_cursor() as cursor:
@@ -282,12 +313,14 @@ def build_embed_blueprint(*, db, preflight, portal_base_url, load_user, issue_se
                 url = launch_url(portal_base_url, crm_user_id=crm_user_id, crm_user_name=crm_user_name,
                                  key=expected)
                 log.info('Чаты ОП: вход из CRM без учётки (%s)', how)
+                _note(False, how)
                 return jsonify(status='success', linked=False, reason=how, url=url)
             if how == 'name':
                 crm_identity.bind(cursor, user_id, crm_user_id, crm_user_name)
             code = create_launch(cursor, user_id, crm_user_id)
         user = load_user(user_id)
         log.info('Чаты ОП: вход из CRM — учётка %s (%s)', user_id, how)
+        _note(True, how, user_id)
         return jsonify(status='success', linked=True, matchedBy=how,
                        url=launch_url(portal_base_url, crm_user_id=crm_user_id, crm_user_name=crm_user_name,
                                       code=code, user_id=user_id, key=expected),

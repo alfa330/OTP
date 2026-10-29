@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     Flask = None
 
 from common import log_secrets  # noqa: E402
+from partner_keys import keys as partner_keys  # noqa: E402
 from sign_links import api_key, batch, external, iin, queries, sapar_link  # noqa: E402
 from sign_links.external import build_sign_links_external_blueprint  # noqa: E402
 
@@ -55,6 +56,11 @@ GENERATOR_HOST = 'silt.kz'
 # Ключи выдуманы; настоящий живёт только в окружении сервера.
 KEY = 'FAKE-key-for-tests-0123456789-abcdefghij'
 OTHER_KEY = 'FAKE-second-key-for-tests-9876543210-zyx'
+# Ключ партнёра из «Сессии → Ключи» (partner_keys) — второй источник входа.
+PARTNER_KEY = 'otpk_FAKE-partner-key-for-tests-0123456789-abc'
+PARTNER_ROW = (7, 'CRM «Потока»', partner_keys.mark(PARTNER_KEY), ['sign_links'], 'operator', 1,
+               'СЗоВ', 'szov', 3, 'Админ', None, None, 0, None, None, None)
+PARTNER_OTHER_DOOR = PARTNER_ROW[:3] + (['knowledge'],) + PARTNER_ROW[4:]
 
 
 def synthetic_iins(count, prefix='9001013'):
@@ -363,11 +369,15 @@ class _Cursor:
     usage_ready — есть ли таблица счёта суток.
     """
 
-    def __init__(self, used=0, fail_insert=False, usage_ready=True):
+    def __init__(self, used=0, fail_insert=False, usage_ready=True, partner_ready=False,
+                 partner_row=None):
         self.calls = []
         self.used = used
         self.fail_insert = fail_insert
         self.usage_ready = usage_ready
+        # Таблицы ключей партнёров (partner_keys) и строка ключа, если он выдан.
+        self.partner_ready = partner_ready
+        self.partner_row = partner_row
         self._last = None
 
     def execute(self, sql, params=None):
@@ -378,7 +388,12 @@ class _Cursor:
         if text.startswith('INSERT INTO sign_link_api_usage') and self.fail_insert in (True, 'usage'):
             raise RuntimeError('база недоступна')
         if 'to_regclass' in text:
-            self._last = (self.usage_ready,)
+            self._last = (self.partner_ready,) if 'partner_keys' in text else (self.usage_ready,)
+        elif 'FROM partner_keys k' in text and 'WHERE k.key_hash' in text:
+            self._last = (self.partner_row if self.partner_row
+                          and params and params[0] == partner_keys.digest(PARTNER_KEY) else None)
+        elif text.startswith('INSERT INTO partner_key_calls'):
+            self._last = (1,)
         elif text.startswith('SELECT COALESCE(sum(u.iins)'):
             self._last = (self.used,)
         else:
@@ -396,11 +411,17 @@ class _Cursor:
         return [params for text, params in self.calls
                 if text.startswith('INSERT INTO sign_link_api_usage')]
 
+    def partner_journal(self):
+        """Строки журнала ключа партнёра (partner_key_calls)."""
+        return [params for text, params in self.calls
+                if text.startswith('INSERT INTO partner_key_calls')]
+
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
 class Harness(unittest.TestCase):
     def build(self, *, plan=None, used=0, fail_insert=False, environ=None,
-              max_iins=None, daily_limit=None, generate='fake', usage_ready=True, workers=4):
+              max_iins=None, daily_limit=None, generate='fake', usage_ready=True, workers=4,
+              partner_ready=False, partner_row=None):
         """Клиент ручки. plan — {ИИН: исход | функция}; чего в нём нет — ссылка."""
         self.plan = plan or {}
         self.asked = []
@@ -414,7 +435,8 @@ class Harness(unittest.TestCase):
                 return answer(value)
             return dict(answer) if answer else link_for(value)
 
-        self.cursor = _Cursor(used=used, fail_insert=fail_insert, usage_ready=usage_ready)
+        self.cursor = _Cursor(used=used, fail_insert=fail_insert, usage_ready=usage_ready,
+                              partner_ready=partner_ready, partner_row=partner_row)
         # По списку на каждое открытие курсора (транзакцию): в какие таблицы писали.
         self.transactions = []
         db = MagicMock()
@@ -447,9 +469,54 @@ class Harness(unittest.TestCase):
         return client.post(URL, json={'iins': iins}, headers=headers)
 
     def assert_untouched(self):
-        """Ни генератора, ни базы: запрос остановлен на входе."""
+        """Ни генератора, ни записи в базу: запрос остановлен на входе. Чтение
+        ключа партнёра (partner_keys) — не запись: SELECT ради «а не выдан ли ключ
+        в „Сессиях“» входом не считается."""
         self.assertEqual(self.asked, [])
-        self.assertEqual(self.cursor.calls, [])
+        self.assertEqual([text for text, _params in self.cursor.calls
+                          if not text.startswith('SELECT')], [])
+
+
+class PartnerKeyTests(Harness):
+    """Второй источник ключа — «Сессии → Ключи» с областью «Ссылки на подписание»."""
+
+    def test_a_partner_key_with_this_door_opens_it_and_is_journaled(self):
+        client = self.build(environ={}, partner_ready=True, partner_row=PARTNER_ROW)
+        response = self.post(client, [A], key=PARTNER_KEY)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.asked, [A])
+        # Журнал раздела подписан отпечатком ключа партнёра, журнал ключа — строкой на вызов.
+        self.assertIn(partner_keys.mark(PARTNER_KEY), self.cursor.inserted()[0]['user_name'])
+        entry = self.cursor.partner_journal()[0]
+        self.assertEqual((entry['key'], entry['scope'], entry['endpoint'], entry['outcome'],
+                          entry['status']),
+                         (7, 'sign_links', URL, 'ok', 200))
+        self.assertIn('ссылок 1', entry['summary'])
+        self.assertEqual(json.loads(entry['details'])['links'], 1)
+
+    def test_a_partner_key_without_this_door_is_403(self):
+        client = self.build(environ={}, partner_ready=True, partner_row=PARTNER_OTHER_DOOR)
+        response = self.post(client, [A], key=PARTNER_KEY)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'SIGN_LINKS_API_FORBIDDEN')
+        self.assert_untouched()
+
+    def test_with_the_keys_table_in_place_an_unknown_key_is_401_not_503(self):
+        client = self.build(environ={}, partner_ready=True)
+        response = self.post(client, [A], key=OTHER_KEY)
+        self.assertEqual(response.status_code, 401)
+        self.assert_untouched()
+
+    def test_the_environment_key_still_works_without_a_partner_journal(self):
+        client = self.build(partner_ready=True, partner_row=PARTNER_ROW)
+        self.assertEqual(self.post(client, [A], key=KEY).status_code, 200)
+        self.assertEqual(self.cursor.partner_journal(), [])
+
+    def test_refusals_of_a_partner_are_journaled_too(self):
+        client = self.build(environ={}, partner_ready=True, partner_row=PARTNER_ROW, max_iins=2)
+        response = self.post(client, synthetic_iins(3), key=PARTNER_KEY)
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(self.cursor.partner_journal()[0]['outcome'], 'bad_request')
 
 
 class DoorTests(Harness):

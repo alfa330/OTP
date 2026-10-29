@@ -4,16 +4,16 @@
 Что здесь сторожится и почему:
 
 * **До ключа не делается ничего.** Нет ключа, неверный, отозванный — один ответ
-  401 и ни одного обращения к поиску; схема не развёрнута — 503.
+  401 и ни одного обращения к поиску; ключ без области «Ручка знаний» — 403;
+  схема ключей не развёрнута — 503.
 * **Один парк на вызов.** Фрагменты про чужой парк не отдаются; общие и «все
   парки, кроме…» — отдаются (решения владельца 29.10.2026).
 * **«Данных нет» — тоже ответ**: status no_data, вопрос уходит в «Вопросы
   операторов», в журнале — строка с question_id.
-* **Журнал — строкой на вызов**, включая плохой запрос и предел; ключ в базе
-  только хешем, в ответе на выпуск — один раз.
+* **Журнал — строкой на вызов** (partner_keys), включая плохой запрос и предел.
 
-Сети и базы нет: поиск подменяется, курсор — двойник. Правила, живущие в SQL и
-JSX, проверяются чтением исходника — приём разделов «Новости» и «Вики».
+Сети и базы нет: поиск подменяется, курсор — двойник. Ключи, их выпуск и
+админка проверяются в tests/test_partner_keys.py.
 """
 
 import json
@@ -32,10 +32,10 @@ try:
 except ImportError:  # pragma: no cover
     Flask = None
 
-from knowledge_api import keys, parks as park_match, queries, routes, schema  # noqa: E402
+from knowledge_api import parks as park_match, routes  # noqa: E402
 from knowledge_api import search as knowledge_search  # noqa: E402
-from knowledge_api.admin_routes import build_knowledge_admin_blueprint  # noqa: E402
 from knowledge_api.routes import build_knowledge_blueprint  # noqa: E402
+from partner_keys import keys  # noqa: E402
 
 BOT = ROOT / 'bot_schedule2.py'
 README = ROOT / 'README.md'
@@ -44,9 +44,10 @@ DOC = ROOT / 'docs' / 'SYNTONY_KNOWLEDGE_API.md'
 SEARCH_URL = '/api/knowledge/search'
 # Ключ выдуман; настоящий живёт только в журнале выпуска.
 KEY = 'otpk_FAKE-key-for-tests-0123456789-abcdefghijk'
-KEY_ROW = (7, 'Syntony', keys.mark(KEY), 'operator', 1, 'СЗоВ — Служба заботы о водителях',
-           'szov', 3, 'Админ', None, None, 5, None, None, None)
-REVOKED_ROW = KEY_ROW[:12] + ('2026-10-29T10:00:00', 3, 'Админ')
+KEY_ROW = (7, 'Syntony', keys.mark(KEY), ['knowledge'], 'operator', 1,
+           'СЗоВ — Служба заботы о водителях', 'szov', 3, 'Админ', None, None, 5, None, None, None)
+REVOKED_ROW = KEY_ROW[:13] + ('2026-10-29T10:00:00', 3, 'Админ')
+OTHER_DOOR_ROW = KEY_ROW[:3] + (['sign_links'],) + KEY_ROW[4:]
 PARK_ROW = (5, 'global', 'Global', None, 'active', 11)
 
 PARKS = [
@@ -82,27 +83,6 @@ def result(status='ok', fragments=None):
         'notes': [], 'degraded': False, 'vector_error': None, 'branches': {},
         'perimeter': {'articles': 50, 'hash': 'x', 'space_id': 11} if status in ('ok', 'no_data') else None,
     }
-
-
-# ── Ключ ────────────────────────────────────────────────────────────────────────
-
-class KeyTests(unittest.TestCase):
-    def test_generated_key_has_prefix_and_is_long_random_ascii(self):
-        first, second = keys.generate(), keys.generate()
-        self.assertTrue(first.startswith(keys.PREFIX))
-        self.assertNotEqual(first, second)
-        self.assertGreaterEqual(len(first), keys.MIN_LENGTH)
-        self.assertTrue(first.isascii())
-        self.assertIsNotNone(keys.presented(first))
-
-    def test_mark_is_the_start_of_the_hash_and_never_the_key(self):
-        self.assertEqual(keys.mark(KEY), keys.digest(KEY)[:keys.MARK_LENGTH])
-        self.assertNotIn(keys.mark(KEY), KEY)
-
-    def test_values_that_are_not_keys_do_not_reach_the_database(self):
-        for value in ('', None, 'short', 'ключ-кириллицей-' * 4, 'with space ' * 5,
-                      'x' * (keys.MAX_LENGTH + 1)):
-            self.assertIsNone(keys.presented(value), repr(value))
 
 
 # ── Парк во фрагменте ───────────────────────────────────────────────────────────
@@ -251,26 +231,14 @@ class _Cursor:
         self._one, self._all = None, []
         if 'to_regclass' in text:
             self._one = (self.ready,)
-        elif 'FROM knowledge_api_keys k' in text and 'WHERE k.key_hash' in text:
+        elif 'FROM partner_keys k' in text and 'WHERE k.key_hash' in text:
             self._one = self.key_row if params and params[0] == keys.digest(KEY) else None
-        elif 'FROM knowledge_api_keys k' in text and 'WHERE k.id' in text:
-            self._one = self.key_row
-        elif 'FROM knowledge_api_keys k' in text:
-            self._all = [self.key_row] if self.key_row else []
-        elif 'FROM wiki_taxi_parks' in text and 'WHERE id = %s' in text:
-            self._one = self.park_row if params and params[0] == 5 else None
+        elif 'FROM wiki_taxi_parks' in text and 'WHERE id = %(id)s' in text:
+            self._one = self.park_row if params and params['id'] == 5 else None
         elif 'FROM wiki_taxi_parks' in text and 'lower(slug)' in text:
             self._one = self.park_row if params and params['value'].lower() == 'global' else None
-        elif text.startswith('INSERT INTO knowledge_api_calls'):
+        elif text.startswith('INSERT INTO partner_key_calls'):
             self._one = (101,)
-        elif text.startswith('INSERT INTO knowledge_api_keys'):
-            self._one = (8,)
-        elif text.startswith('UPDATE knowledge_api_keys') and 'revoked_at' in text:
-            self._one = (7,)
-        elif text.startswith('SELECT id, name FROM departments'):
-            self._one = (1, 'СЗоВ')
-        elif 'count(*) FROM knowledge_api_calls' in text:
-            self._one = (0,)
 
     def fetchone(self):
         return self._one
@@ -283,11 +251,11 @@ class _Cursor:
         return 1
 
     def journal(self):
-        return [params for text, params in self.calls if text.startswith('INSERT INTO knowledge_api_calls')]
+        return [params for text, params in self.calls if text.startswith('INSERT INTO partner_key_calls')]
 
     def touched(self):
         return [params for text, params in self.calls
-                if text.startswith('UPDATE knowledge_api_keys') and 'calls_count' in text]
+                if text.startswith('UPDATE partner_keys') and 'calls_count' in text]
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
@@ -349,6 +317,14 @@ class DoorTests(Harness):
             self.assertEqual(self.searches, [])
             self.assertEqual(self.cursor.journal(), [])
 
+    def test_a_key_without_this_door_is_403(self):
+        client = self.build(key_row=OTHER_DOOR_ROW)
+        response = self.post(client, {'park_id': 5, 'question': 'акции'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'KNOWLEDGE_API_FORBIDDEN')
+        self.assertEqual(self.searches, [])
+        self.assertEqual(client.get('/api/knowledge/ping', headers={keys.HEADER: KEY}).status_code, 403)
+
     def test_response_is_never_cached(self):
         client = self.build()
         response = self.post(client, {'park_id': 5, 'question': 'акции'})
@@ -383,8 +359,8 @@ class RequestShapeTests(Harness):
         self.assertEqual(response.get_json()['code'], 'KNOWLEDGE_API_PARK_NOT_FOUND')
         self.assertEqual(self.searches[0]['park_id'], 99)
         entry = self.cursor.journal()[0]
-        self.assertEqual((entry['outcome'], entry['status'], entry['error'], entry['park']),
-                         ('bad_request', 404, 'park_not_found', None))
+        self.assertEqual((entry['outcome'], entry['status']), ('bad_request', 404))
+        self.assertEqual(json.loads(entry['details'])['error_text'], 'park_not_found')
 
     def test_park_can_be_named_by_slug(self):
         client = self.build()
@@ -407,10 +383,14 @@ class AnswerTests(Harness):
         self.assertEqual(self.searches, [{'key': 7, 'park_id': 5, 'park': None,
                                           'question': 'Какие акции?', 'limit': 3}])
         entry = self.cursor.journal()[0]
-        self.assertEqual((entry['outcome'], entry['status'], entry['count'], entry['park'], entry['ip']),
-                         ('ok', 200, 1, 5, '203.0.113.7'))
-        self.assertEqual(json.loads(entry['fragments'])[0]['article_id'], 33)
-        self.assertNotIn('text', json.loads(entry['fragments'])[0])
+        self.assertEqual((entry['key'], entry['scope'], entry['endpoint'], entry['outcome'],
+                          entry['status'], entry['summary'], entry['ip']),
+                         (7, 'knowledge', SEARCH_URL, 'ok', 200, 'Какие акции?', '203.0.113.7'))
+        details = json.loads(entry['details'])
+        self.assertEqual((details['park_id'], details['park_name'], details['fragments_count']),
+                         (5, 'Global', 1))
+        self.assertEqual(details['fragments'][0]['article_id'], 33)
+        self.assertNotIn('text', details['fragments'][0])
         self.assertEqual(self.cursor.touched(), [(7,)])
         self.assertEqual(self.escalations, [])
 
@@ -427,7 +407,8 @@ class AnswerTests(Harness):
             'key_id': 7, 'key_name': 'Syntony', 'department_id': 1, 'space_id': 11,
             'park_id': 5, 'park_name': 'Global', 'question': 'Есть ли парковка у офиса?'}])
         entry = self.cursor.journal()[0]
-        self.assertEqual((entry['outcome'], entry['question_id']), ('no_data', 55))
+        self.assertEqual(entry['outcome'], 'no_data')
+        self.assertEqual(json.loads(entry['details'])['question_id'], 55)
 
     def test_an_archived_park_is_403(self):
         client = self.build(result_=result('park_unavailable'))
@@ -443,7 +424,8 @@ class AnswerTests(Harness):
         self.assertEqual(response.get_json()['code'], 'KNOWLEDGE_API_FAILED')
         self.assertNotIn('провайдер', response.get_data(as_text=True))
         entry = self.cursor.journal()[0]
-        self.assertEqual((entry['outcome'], entry['error']), ('error', 'RuntimeError'))
+        self.assertEqual(entry['outcome'], 'error')
+        self.assertEqual(json.loads(entry['details'])['error_text'], 'RuntimeError')
 
 
 class LimitTests(Harness):
@@ -473,76 +455,6 @@ class PingTests(Harness):
         self.assertEqual(client.get('/api/knowledge/ping').status_code, 401)
 
 
-# ── Ключи для супер-админа ──────────────────────────────────────────────────────
-
-@unittest.skipIf(Flask is None, 'flask не установлен')
-class AdminTests(unittest.TestCase):
-    def build(self, role='super_admin'):
-        self.cursor = _Cursor()
-        db = MagicMock()
-
-        @contextmanager
-        def _get_cursor():
-            yield self.cursor
-
-        db._get_cursor = _get_cursor
-
-        def passthrough(handler):
-            return handler
-
-        app = Flask(__name__)
-        app.config['TESTING'] = True
-        app.register_blueprint(build_knowledge_admin_blueprint(
-            db=db, require_api_key=passthrough, build_cors_preflight_response=lambda: ('', 204),
-            resolve_requester=lambda: (3, (3, 'admin', 'Админ', role), None),
-            normalize_role=lambda value: str(value or '').strip().lower()))
-        return app.test_client()
-
-    def test_only_the_super_admin_issues_keys(self):
-        client = self.build(role='admin')
-        self.assertEqual(client.get('/api/admin/knowledge-keys').status_code, 403)
-        self.assertEqual(client.post('/api/admin/knowledge-keys', json={'name': 'X'}).status_code, 403)
-        self.assertEqual(self.cursor.calls, [])
-
-    def test_the_list_describes_whose_rights_the_key_has(self):
-        client = self.build()
-        response = client.get('/api/admin/knowledge-keys')
-        self.assertEqual(response.status_code, 200)
-        item = response.get_json()['keys'][0]
-        self.assertEqual(item['name'], 'Syntony')
-        self.assertEqual(item['acts_as']['department_code'], 'szov')
-        self.assertTrue(item['active'])
-        self.assertNotIn('key_hash', item)
-
-    def test_issue_shows_the_secret_once_and_stores_only_its_hash(self):
-        client = self.build()
-        self.assertEqual(client.post('/api/admin/knowledge-keys', json={'name': '  '}).status_code, 400)
-        response = client.post('/api/admin/knowledge-keys', json={'name': ' Syntony '})
-        self.assertEqual(response.status_code, 201)
-        payload = response.get_json()
-        secret = payload['secret']
-        self.assertTrue(secret.startswith(keys.PREFIX))
-        self.assertEqual(payload['header'], keys.HEADER)
-        inserted = [params for text, params in self.cursor.calls
-                    if text.startswith('INSERT INTO knowledge_api_keys')][0]
-        self.assertEqual(inserted['hash'], keys.digest(secret))
-        self.assertEqual(inserted['mark'], keys.mark(secret))
-        self.assertEqual((inserted['name'], inserted['role'], inserted['department'], inserted['by']),
-                         ('Syntony', 'operator', 1, 3))
-        self.assertNotIn(secret, json.dumps(inserted))
-
-    def test_wider_rights_than_an_operator_are_refused(self):
-        client = self.build()
-        response = client.post('/api/admin/knowledge-keys', json={'name': 'X', 'otp_role': 'admin'})
-        self.assertEqual(response.status_code, 400)
-
-    def test_revoke_answers_with_the_key(self):
-        client = self.build()
-        response = client.post('/api/admin/knowledge-keys/7/revoke')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()['key']['id'], 7)
-
-
 # ── Проводка ────────────────────────────────────────────────────────────────────
 
 class WiringTests(unittest.TestCase):
@@ -557,27 +469,6 @@ class WiringTests(unittest.TestCase):
         self.assertIn('client_ip=_client_ip', call)
         self.assertNotIn('require_api_key', call)
 
-    def test_the_admin_entry_needs_the_session(self):
-        start = self.bot.index('build_knowledge_admin_blueprint(\n')
-        call = self.bot[start:self.bot.index('))', start)]
-        for token in ('require_api_key=require_api_key', 'resolve_requester=_resolve_requester',
-                      'normalize_role=_normalize_user_role'):
-            self.assertIn(token, call)
-
-    def test_browsers_cannot_send_the_key_cross_origin(self):
-        for line in self.bot.splitlines():
-            if 'allow_headers' in line or 'Access-Control-Allow-Headers' in line:
-                self.assertNotIn(keys.HEADER.lower(), line.lower())
-
-    def test_the_journal_is_cleaned_daily(self):
-        self.assertIn("id='knowledge_api_calls_retention_daily'", self.bot)
-        self.assertIn('knowledge_queries.cleanup_calls(cursor, days)', self.bot)
-
-    def test_the_schema_is_deployed_under_its_own_savepoint(self):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
-        self.assertIn('self._init_knowledge_api_schema_tx(cursor)', database)
-        self.assertIn('SAVEPOINT knowledge_api_schema', database)
-
     def test_the_partner_document_and_the_readme_name_the_contract(self):
         doc = DOC.read_text(encoding='utf-8')
         readme = README.read_text(encoding='utf-8')
@@ -586,16 +477,12 @@ class WiringTests(unittest.TestCase):
                       'KNOWLEDGE_API_PARK_NOT_FOUND', 'KNOWLEDGE_API_LIMIT', 'Retry-After'):
             self.assertIn(token, doc, token)
         for token in (SEARCH_URL, keys.HEADER, 'KNOWLEDGE_API_PER_MINUTE', 'KNOWLEDGE_API_LANES',
-                      'KNOWLEDGE_API_CALLS_DAYS', 'docs/SYNTONY_KNOWLEDGE_API.md'):
+                      'docs/SYNTONY_KNOWLEDGE_API.md'):
             self.assertIn(token, readme, token)
         for kind in ('article', 'park', 'office', 'offices', 'city', 'cities', 'classifier'):
             self.assertIn('`%s`' % kind, doc, kind)
         for name in knowledge_search.FOUND_BY.values():
             self.assertIn('`%s`' % name, doc, name)
-
-    def test_outcomes_are_the_contract(self):
-        self.assertEqual(schema.OUTCOMES,
-                         ('ok', 'no_data', 'park_unavailable', 'bad_request', 'limit', 'error'))
 
     def test_partner_questions_have_a_source_and_a_park_in_the_queue(self):
         from wiki import questions as wiki_questions
@@ -613,7 +500,6 @@ class WiringTests(unittest.TestCase):
 
     def test_the_sessions_section_shows_the_keys_tab_to_the_super_admin_only(self):
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
-        self.assertIn("import('./components/knowledge/KnowledgeKeysPanel')", app)
         self.assertIn('canManageKeys={isSuperAdmin}', app)
         self.assertIn("{ value: 'keys', label: 'Ключи' }", app)
 

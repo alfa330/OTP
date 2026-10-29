@@ -68442,9 +68442,9 @@ except Exception:
 
 # ── Ручка знаний для партнёрского ИИ (Syntony, 29.10.2026) ───────────────────
 # Партнёр присылает таксопарк и вопрос, получает фрагменты вики в правах
-# оператора СЗоВ (knowledge_api/). Сотрудником он не является: вход по ключу в
-# заголовке X-Api-Key, require_api_key сюда не передаётся. Ключи выпускает
-# супер-админ во вкладке «Ключи» раздела «Сессии» — вторым Blueprint'ом ниже.
+# оператора СЗоВ (knowledge_api/). Сотрудником он не является: вход по ключу
+# партнёра в заголовке X-Api-Key (partner_keys, область «Ручка знаний»),
+# require_api_key сюда не передаётся.
 try:
     from knowledge_api.routes import build_knowledge_blueprint  # noqa: E402
 
@@ -68453,19 +68453,23 @@ try:
 except Exception:
     logging.exception("Ручка знаний: внешний вход НЕ подключён")
 
+# ── Ключи партнёров (partner_keys, 29.10.2026) ──────────────────────────────
+# Один способ пускать сторонние сервисы: ключ с областями доступа (ручка
+# знаний, внешний вход «Ссылок на подписание», окно «Чатов ОП» для CRM) и журнал
+# вызовов. Выпускает и отзывает супер-админ во вкладке «Ключи» раздела «Сессии».
 try:
-    from knowledge_api.admin_routes import build_knowledge_admin_blueprint  # noqa: E402
+    from partner_keys.admin_routes import build_partner_keys_admin_blueprint  # noqa: E402
 
-    app.register_blueprint(build_knowledge_admin_blueprint(
+    app.register_blueprint(build_partner_keys_admin_blueprint(
         db=db,
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         normalize_role=_normalize_user_role,
     ))
-    logging.info("Ручка знаний: ключи подключены на /api/admin/knowledge-keys")
+    logging.info("Ключи партнёров: подключены на /api/admin/partner-keys")
 except Exception:
-    logging.exception("Ручка знаний: ключи НЕ подключены")
+    logging.exception("Ключи партнёров: НЕ подключены")
 
 
 # ── «Мои данные» в «Профиле» оператора (задача #357) ─────────────────────────
@@ -71421,25 +71425,26 @@ async def run_user_sessions_retention_async():
         logging.exception("user sessions retention failed")
 
 
-def _knowledge_api_retention():
-    """Журнал вызовов партнёрского ИИ (knowledge_api) живёт KNOWLEDGE_API_CALLS_DAYS
-    дней (90): вопросы водителей — материал для базы знаний, а не вечный архив."""
-    from knowledge_api import queries as knowledge_queries
+def _partner_keys_retention():
+    """Журнал вызовов ключей партнёров (partner_keys) живёт PARTNER_KEYS_CALLS_DAYS
+    дней (90): вопросы водителей и вызовы CRM — материал для разбора, а не вечный
+    архив. Старое имя переменной (KNOWLEDGE_API_CALLS_DAYS) принимается тоже."""
+    from partner_keys import queries as partner_queries
 
-    raw_days = (os.getenv('KNOWLEDGE_API_CALLS_DAYS') or '').strip()
+    raw_days = (os.getenv('PARTNER_KEYS_CALLS_DAYS') or os.getenv('KNOWLEDGE_API_CALLS_DAYS') or '').strip()
     days = int(raw_days) if raw_days.isdigit() and int(raw_days) > 0 else 90
     with db._get_cursor() as cursor:
-        deleted = knowledge_queries.cleanup_calls(cursor, days)
-    logging.info("knowledge_api: из журнала вызовов удалено строк старше %d дней: %d", days, deleted)
+        deleted = partner_queries.cleanup_calls(cursor, days)
+    logging.info("partner_keys: из журнала вызовов удалено строк старше %d дней: %d", days, deleted)
     return deleted
 
 
-async def run_knowledge_api_retention_async():
+async def run_partner_keys_retention_async():
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(executor_pool, _knowledge_api_retention)
+        return await loop.run_in_executor(executor_pool, _partner_keys_retention)
     except Exception:
-        logging.exception("knowledge api retention failed")
+        logging.exception("partner keys retention failed")
 
 
 def oktell_guard_patrol_job(hours_back: int = 2):
@@ -72729,12 +72734,12 @@ if __name__ == '__main__':
         coalesce=True
     )
 
-    # Журнал вызовов партнёрского ИИ (knowledge_api): строки старше срока — в 03:25,
+    # Журнал вызовов ключей партнёров (partner_keys): строки старше срока — в 03:25,
     # следом за сессиями; задача на один DELETE по индексу.
     scheduler.add_job(
-        run_knowledge_api_retention_async,
+        run_partner_keys_retention_async,
         CronTrigger(hour=3, minute=25, timezone=ZoneInfo('Asia/Almaty')),
-        id='knowledge_api_calls_retention_daily',
+        id='partner_keys_calls_retention_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
