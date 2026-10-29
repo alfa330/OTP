@@ -38,7 +38,7 @@ from datetime import datetime, time as day_time, timedelta
 # оплатить, приложить чек), только из процесса закупа.
 #
 # «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
-SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'wiki_questions', 'checkpoints', 'shift_requests',
+SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'hiring', 'wiki_questions', 'checkpoints', 'shift_requests',
            'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events', 'four_you',
            'birthdays')
 
@@ -54,6 +54,7 @@ SOURCE_VIEWS = {
     'wiki_ack': ('wiki',),
     'tasks': ('tasks',),
     'payments': ('payments',),
+    'hiring': ('hiring',),
     'wiki_questions': ('wiki',),
     'checkpoints': ('evaluation', 'call_evaluation'),
     'shift_requests': ('work_schedules',),
@@ -73,7 +74,7 @@ SOURCE_VIEWS = {
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
 # «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
 # набор, а _notifications_viewer_context: тому, кто в раздел не входит.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa'})
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'hiring'})
 
 
 def sources_outside_views(allowed_views):
@@ -668,6 +669,28 @@ def payments(cursor, viewer, limit):
     } for row in rows]
 
 
+def hiring(cursor, viewer, limit):
+    """«Воронка найма» (#404): адресные строки процесса (ТЗ 8.3) — новый и повторный
+    отклик, наступившая дата контакта, возврат карточки в пул, выход на линию, мотивация.
+
+    Строки пишет сам процесс (hiring/notices.py) одному человеку, правил и границ доступа
+    здесь нет. Гаснут, когда человек открыл карточку (или все разом кнопкой в разделе).
+    """
+    from hiring import queries as hiring_queries
+
+    total, rows = hiring_queries.bell(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'hiring',
+        'id': row['id'],
+        'title': row['title'],
+        'body': row['body'] or '',
+        'at': _iso(row['created_at']),
+        'view': 'hiring',
+        'target': row['card_id'],
+        'tone': 'warning' if row['tone'] == 'warning' else 'default',
+    } for row in rows]
+
+
 def twofa(cursor, viewer, limit):
     """«Коды 2FA» (#373): запросы кода, которые ждут подтверждения.
 
@@ -1129,6 +1152,7 @@ _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
     'payments': payments,
+    'hiring': hiring,
     'wiki_questions': wiki_questions,
     'checkpoints': checkpoints,
     'shift_requests': shift_requests,

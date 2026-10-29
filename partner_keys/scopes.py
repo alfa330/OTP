@@ -14,6 +14,7 @@ KNOWLEDGE = 'knowledge'
 SIGN_LINKS = 'sign_links'
 CRM_EMBED = 'crm_embed'
 OLX_CHATS = 'olx_chats'
+HIRING_LEADS = 'hiring_leads'
 
 SCOPES = (
     Scope(KNOWLEDGE, 'Ручка знаний',
@@ -38,6 +39,12 @@ SCOPES = (
           ('GET /api/olx/cabinets', 'GET /api/olx/threads', 'GET /api/olx/threads/{cabinet}/{thread}',
            'POST /api/olx/threads/{cabinet}/{thread}/messages', 'GET /api/olx/journal',
            'GET|PUT|DELETE /api/olx/webhook'),
+          'X-Api-Key'),
+    Scope(HIRING_LEADS, 'Отклики в воронку найма',
+          'Площадки и лид-формы (Kaspi, таргет, свой сайт) присылают отклики кандидатов — '
+          'ФИО, телефон, город, вакансия, кампания; отклик попадает в колонку «Отклики» '
+          'раздела «Воронка найма», дубли по телефону склеиваются.',
+          ('POST /api/hiring/external/responses',),
           'X-Api-Key'),
 )
 BY_CODE = {scope.code: scope for scope in SCOPES}

@@ -1373,6 +1373,11 @@ def _get_user_payload(user):
     rental_access = _rental_section_open_for(
         user_id, role, department_code=department_code, headed_codes=headed_department_codes)
 
+    # Открыт ли раздел «Воронка найма» (#404): руководитель рекрутинга / HR, рекрутеры по
+    # выдаче, тренер с группой на обучение, глава отдела, куда ведётся найм. Пункт меню
+    # экран рисует по флагу (canAccessHiringSectionForUser), границу держат роуты раздела.
+    hiring_access = _hiring_section_open_for(user_id)
+
     return {
         "role": role,
         "id": user_id,
@@ -1387,6 +1392,7 @@ def _get_user_payload(user):
         "production_access": production_access,
         "twofa_access": twofa_access,
         "rental_access": rental_access,
+        "hiring_access": hiring_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -67969,6 +67975,88 @@ except Exception:
     logging.exception("Раздел «Аренда авто»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Воронка найма» (рабочий стол рекрутера и канбан-воронка, #404) ──────
+# Отклики OLX подтягиваются из журнала робота (olx_amo) раз в 5 минут, HeadHunter — раз в
+# 15 минут при заданном токене (hiring/hh.py), площадки без API шлют отклики вебхуком по
+# ключу партнёра (область «Отклики в воронку найма»). Планировщик ниже: дата следующего
+# контакта (колокол), возврат в пул без касаний месяц и утренняя сводка просрочек в Telegram.
+_HIRING = {'service': None}
+try:
+    from hiring.routes import build_hiring_blueprint, build_hiring_external_blueprint  # noqa: E402
+    from hiring.service import HiringService as _HiringService  # noqa: E402
+    from partner_keys import auth as _hiring_partner_auth  # noqa: E402
+    from partner_keys import journal as _hiring_partner_journal  # noqa: E402
+    from partner_keys import scopes as _hiring_partner_scopes  # noqa: E402
+    from partner_keys.limits import RateLimiter as _HiringRateLimiter  # noqa: E402
+
+    _HIRING['service'] = _HiringService(
+        cursor_factory=db._get_cursor,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+    )
+    app.register_blueprint(build_hiring_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        service=_HIRING['service'],
+    ))
+    app.register_blueprint(build_hiring_external_blueprint(
+        db=db,
+        service=_HIRING['service'],
+        partner_auth=_hiring_partner_auth,
+        partner_scopes=_hiring_partner_scopes,
+        partner_journal=_hiring_partner_journal,
+        rate_limiter=_HiringRateLimiter(60),
+    ))
+    logging.info("Раздел «Воронка найма»: Blueprint подключён на /api/hiring")
+except Exception:
+    logging.exception("Раздел «Воронка найма»: Blueprint НЕ подключён")
+
+
+def _hiring_section_open_for(user_id):
+    """Открыт ли раздел «Воронка найма» — то же правило, что у его ручек (hiring/access.py).
+
+    Руководитель рекрутинга / HR, рекрутеры по выдаче в разделе, тренер с группой на обучение,
+    глава отдела, в который есть вакансия. Один запрос профиля; границу всё равно держит
+    каждый роут.
+    """
+    if user_id is None:
+        return False
+    service = _HIRING.get('service')
+    if service is None:
+        return False
+    try:
+        from hiring import access as hiring_access
+        ctx = service.context(user_id)
+        return bool(ctx) and hiring_access.can_open_section(ctx)
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Воронке найма» пользователя %s", user_id)
+        return False
+
+
+def _hiring_job(name):
+    """Задача планировщика раздела «Воронка найма» по имени: olx, hh, next_contacts, auto_return, overdue."""
+    service = _HIRING.get('service')
+    if service is None:
+        logging.warning("Воронка найма: задача %s пропущена — раздел не подключён", name)
+        return None
+    try:
+        if name == 'olx':
+            return service.pull_olx()
+        if name == 'hh':
+            return service.pull_hh()
+        if name == 'next_contacts':
+            return service.notify_next_contacts()
+        if name == 'auto_return':
+            return service.auto_return()
+        if name == 'overdue':
+            return service.overdue_digest()
+    except Exception:
+        logging.exception("Воронка найма: задача %s упала", name)
+    return None
+
+
 def _rental_section_open_for(user_id, role=None, *, department_code=None, headed_codes=None):
     """Открыт ли раздел «Аренда авто» — то же правило, что у его ручек (rental/access.py).
 
@@ -73510,6 +73598,34 @@ if __name__ == '__main__':
             coalesce=True
         )
     logging.info("⏰ Аренда авто: ночной отчёт в 01:00 и 07:00")
+
+    # «Воронка найма» (#404): отклики OLX из журнала робота раз в 5 минут, HeadHunter раз в
+    # 15 минут (ТЗ 5.2), дата следующего контакта — колокол раз в 10 минут (ТЗ 8.3), возврат
+    # в пул без касаний месяц — ночью (ТЗ 7.1), сводка просрочек в Telegram — утром.
+    async def hiring_job(name):
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(executor_pool, _hiring_job, name)
+        except Exception as e:
+            logging.exception(f"Error running hiring job {name}: {e}")
+
+    for _hiring_name, _hiring_trigger in (
+        ('olx', CronTrigger(minute='2,7,12,17,22,27,32,37,42,47,52,57', timezone=ZoneInfo('Asia/Almaty'))),
+        ('hh', CronTrigger(minute='4,19,34,49', timezone=ZoneInfo('Asia/Almaty'))),
+        ('next_contacts', CronTrigger(minute='1,11,21,31,41,51', timezone=ZoneInfo('Asia/Almaty'))),
+        ('auto_return', CronTrigger(hour=3, minute=20, timezone=ZoneInfo('Asia/Almaty'))),
+        ('overdue', CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty'))),
+    ):
+        scheduler.add_job(
+            hiring_job,
+            _hiring_trigger,
+            args=[_hiring_name],
+            id='hiring_%s' % _hiring_name,
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+    logging.info("⏰ Воронка найма: OLX, HeadHunter, контакты, возврат в пул и сводка просрочек поставлены")
 
     scheduler.start()
 

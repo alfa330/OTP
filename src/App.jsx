@@ -287,6 +287,7 @@ const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsV
 const ProductionView = lazyWithRetry(() => import('./components/production/ProductionView'));
 const TwofaView = lazyWithRetry(() => import('./components/twofa/TwofaView'));
 const RentalView = lazyWithRetry(() => import('./components/rental/RentalView'));
+const HiringView = lazyWithRetry(() => import('./components/hiring/HiringView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
 const OpWallboardView = lazyWithRetry(() => import('./components/monitoring/OpWallboardView'));
@@ -870,6 +871,9 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     // тренер под выдачу попадает. Без выдачи раздел закрыт своим предикатом
     // (canAccessTwofaSectionForUser) и своей веткой перебросов.
     'twofa',
+    // «Воронка найма» (#404): тренер группы на обучение отмечает выход на обучение и отсев —
+    // раздел ему открывает сервер флагом (canAccessHiringSectionForUser) по его группам.
+    'hiring',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
@@ -923,6 +927,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     production: 'Production',
     twofa: '2FA codes',
     rental: 'Car rental',
+    hiring: 'Hiring funnel',
     olx_leads: 'OLX leads',
     olx_ads: 'OLX adverts',
     touches: 'Sales touches',
@@ -2591,6 +2596,12 @@ const canAccessTwofaSectionForUser = (userLike) => userLike?.twofa_access === tr
    кэш) — не доступ. */
 const canAccessRentalSectionForUser = (userLike) => userLike?.rental_access === true;
 
+/* «Воронка найма» (#404): руководитель рекрутинга / HR, рекрутеры по выдаче в разделе, тренер
+   с группой на обучение, глава отдела, куда ведётся найм. Круг считает сервер
+   (bot_schedule2.py: _hiring_section_open_for — то же правило, что у ручек hiring/access.py)
+   и отдаёт флагом в профиле. Строго true: профиль без поля (старый кэш) — не доступ. */
+const canAccessHiringSectionForUser = (userLike) => userLike?.hiring_access === true;
+
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
 /* Раздел «Обращения» на время выката открыт не всем: отдел СЗоВ (глава и
@@ -3317,6 +3328,8 @@ const buildAppViewUrl = (nextView) => {
         if (nextView !== 'ai_qa') stripAiQaParams(url);
         /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
         if (nextView !== 'discipline') url.searchParams.delete('record');
+        /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
+        if (nextView !== 'hiring') url.searchParams.delete('card');
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3380,6 +3393,8 @@ const syncAppViewWithUrl = (nextView) => {
         if (nextView !== 'ai_qa') stripAiQaParams(url);
         /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
         if (nextView !== 'discipline') url.searchParams.delete('record');
+        /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
+        if (nextView !== 'hiring') url.searchParams.delete('card');
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {
@@ -43797,6 +43812,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canAccessProductionSection = canAccessProductionForUser(user) && personalViewsAllow(user, 'production');
             const canAccessTwofaSection = canAccessTwofaSectionForUser(user);
             const canAccessRentalSection = canAccessRentalSectionForUser(user);
+            const canAccessHiringSection = canAccessHiringSectionForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             // Личный набор разделов прячет его так же, как «Библиотеку».
@@ -43865,6 +43881,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
             // Клик по уведомлению «Оплаты счетов»: раздел открывает заявку из уведомления.
             const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
+            // «Воронка найма»: карточка по номеру из колокола (target — id карточки).
+            const [hiringFocusRequest, setHiringFocusRequest] = useState(null);
             // «Дисциплина»: переход из колокола — запись или особый контроль.
             const [disciplineFocusRequest, setDisciplineFocusRequest] = useState(null);
             // «Продакшн»: какую карточку открыть при входе (переход из «Задач»).
@@ -47490,6 +47508,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'production' || canAccessProductionSection) &&
                     (requestedViewFromUrl !== 'twofa' || canAccessTwofaSection) &&
                     (requestedViewFromUrl !== 'rental' || canAccessRentalSection) &&
+                    // «Воронка найма»: ссылка из колокола и Telegram ведёт на ?view=hiring&card=<id>.
+                    (requestedViewFromUrl !== 'hiring' || canAccessHiringSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
                     (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
@@ -47513,7 +47533,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -47678,7 +47698,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessRentalSection, canAccessFourYouSection]);
+                // «Воронка найма» — свой круг (руководитель рекрутинга, рекрутеры, тренеры групп, главы
+                // отделов найма): ссылка ?view=hiring у того, кому раздел не открыт, оставила бы пустой экран.
+                if (view === 'hiring' && !canAccessHiringSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -53586,6 +53615,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Аренда авто» — свой круг (ООЗ, продажи, аренда), а у ООЗ и продаж есть allowlist:
                 // без этой строки проверка ниже выбросила бы ночную смену и операторов ОП из раздела.
                 if (view === 'rental' && canAccessRentalSection) return;
+                // «Воронка найма» — свой круг (рекрутеры по выдаче, HR, тренеры, главы отделов найма), у
+                // многих есть allowlist: без этой строки проверка ниже выбросила бы их из раздела.
+                if (view === 'hiring' && canAccessHiringSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -53646,7 +53678,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -53865,6 +53897,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             useEffect(() => {
                 if (view !== 'tasks') setTaskFocusRequest(null);
                 if (view !== 'payments') setPaymentsFocusRequest(null);
+                if (view !== 'hiring') setHiringFocusRequest(null);
                 if (view !== 'production') setProductionFocusRequest(null);
                 if (view !== 'discipline') setDisciplineFocusRequest(null);
             }, [view]);
@@ -54124,6 +54157,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }
+                // «Воронка найма»: target — номер карточки (notifications/sources.py: hiring).
+                if (nextView === 'hiring' && Number(target)) {
+                    setHiringFocusRequest((prev) => ({
+                        cardId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
                 // «Дисциплина»: target — «record:<id>» или «control:<id>»
                 // (notifications/sources.py: discipline).
                 if (nextView === 'discipline') setDisciplinePingNonce((n) => n + 1);
@@ -54376,6 +54416,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || canAccessProductionSection
                     || canAccessTwofaSection
                     || canAccessRentalSection
+                    || canAccessHiringSection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
                     || isAdminLikeRole
                     || isPlainTrainer
@@ -55083,6 +55124,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'rental' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Аренда авто</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {/* «Воронка найма» (#404) — тоже один раз на все роли: круг — рекрутеры по выдаче,
+                                        HR, тренеры групп и главы отделов найма, то есть любая роль портала. */}
+                                    {canAccessHiringSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'hiring')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hiring' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-user-plus"></FaIcon> <span className="sidebar-text">Воронка найма</span>
                                         </button>
                                     </li>
                                     )}
@@ -59019,6 +59073,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {/* «Воронка найма» (#404) — без QR-замка: телефоны кандидатов удалённому рекрутеру
+                            сервер отдаёт только в его карточках (hiring/access.py). */}
+                        {view === 'hiring' && canAccessHiringSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <HiringView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    focusRequest={hiringFocusRequest}
                                 />
                             </Suspense>
                         )}

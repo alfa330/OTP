@@ -7212,6 +7212,7 @@ class Database:
             self._init_baiga_schema_tx(cursor)
             self._init_twofa_schema_tx(cursor)
             self._init_rental_schema_tx(cursor)
+            self._init_hiring_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -7549,6 +7550,10 @@ class Database:
                     -- «Дисциплина» (#254): так же адресно — строку пишет сам
                     -- процесс одному человеку, будим только его.
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'hiring_notifications' THEN
+                    -- «Воронка найма» (#404): адресно, как у «Оплаты счетов» —
+                    -- появление строки и её гашение (карточку открыли).
+                    targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'twofa_requests' THEN
                     -- «Коды 2FA» (#373): запрос ждёт тех, кто включил уведомления о
                     -- запросах (глава маркетинга, супер-админы — по тумблеру в разделе);
@@ -7686,6 +7691,14 @@ class Database:
             (
                 'trg_bell_payment_notifications',
                 'payment_notifications',
+                'AFTER UPDATE OF read_at',
+                'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
+            ),
+            # «Воронка найма» (#404): появление уведомления и его погашение (карточку открыли).
+            ('trg_bell_hiring_notifications_insert', 'hiring_notifications', 'AFTER INSERT', ''),
+            (
+                'trg_bell_hiring_notifications',
+                'hiring_notifications',
                 'AFTER UPDATE OF read_at',
                 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
             ),
@@ -65564,6 +65577,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT rental_schema")
+
+    def _init_hiring_schema_tx(self, cursor):
+        """Схема раздела «Воронка найма» (#404) — своим SAVEPOINT'ом, как у «Аренды авто».
+
+        DDL живёт в пакете hiring/schema.py; импорт локальный, иначе цикл. Не развернулась —
+        раздел недоступен, остальное приложение работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT hiring_schema")
+        try:
+            from hiring.schema import init_hiring_schema
+            init_hiring_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT hiring_schema")
+            logging.exception(
+                "Схема раздела «Воронка найма» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT hiring_schema")
 
     def update_cdr_call_end_parties(self):
         """Кто положил трубку — звонкам отдела продаж (FreePBX) в пуле и в оценках.
