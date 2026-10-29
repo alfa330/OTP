@@ -5152,11 +5152,14 @@ class AnnouncementTests(unittest.TestCase):
     def test_counters_never_take_it_for_an_answer(self):
         svc = dial_service.DialListService
         talk = dial_service.ATTEMPT_TALK_SQL
-        # «Мой прогресс»: дозвоны и секунды разговора — только по разговорам.
+        # «Мой прогресс»: дозвоны и секунды разговора — только по разговорам; дозвон удалённого КЦ —
+        # разговор от 10 с (владелец, 29.10.2026), у автообзвона Тез (any_talk) — любой.
         progress = ' '.join(svc._PROGRESS_SQL.split())
         self.assertIn(f"({talk}) AS talk FROM dial_list_attempts t", progress)
-        self.assertIn("WHERE state = 'finished' AND disp IN %(answered)s AND talk) AS answered,", progress)
-        self.assertIn("AND talk AND day = %(today)s) AS answered_today,", progress)
+        self.assertIn("WHERE state = 'finished' AND disp IN %(answered)s AND talk "
+                      "AND (%(any_talk)s OR billsec >= %(min_sec)s)) AS answered,", progress)
+        self.assertIn("AND talk AND (%(any_talk)s OR billsec >= %(min_sec)s) AND day = %(today)s) AS answered_today,",
+                      progress)
         self.assertIn("FROM att WHERE state = 'finished' AND talk) AS talk_sec,", progress)
         self.assertIn("FROM att WHERE state = 'finished' AND talk AND day = %(today)s) AS talk_sec_today,", progress)
         # Попыткой сообщение сети остаётся: оператор звонил.
@@ -5165,9 +5168,13 @@ class AnnouncementTests(unittest.TestCase):
         self.assertIn("AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s",
                       ' '.join(svc._PROGRESS_CONVERSION_SQL.split()))
         overview = ' '.join(inspect.getsource(svc.overview).split())
-        self.assertIn("IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS') AND {ATTEMPT_TALK_SQL}) AS answered", overview)
+        self.assertIn("answered_sql = ATTEMPT_TALK_SQL if tez else ATTEMPT_DIAL_COUNTED_SQL", overview)
+        self.assertIn("IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS') AND {answered_sql}) AS answered", overview)
         self.assertIn("FILTER (WHERE t.state = 'finished' AND {ATTEMPT_TALK_SQL}), 0) AS talk_sec", overview)
-        self.assertNotIn('%', talk)                       # вставляется в запросы с параметрами как есть
+        self.assertEqual(dial_service.ATTEMPT_DIAL_COUNTED_SQL, talk + " AND t.billsec >= 10")
+        # Вставляются в запросы с параметрами как есть.
+        self.assertNotIn('%', talk)
+        self.assertNotIn('%', dial_service.ATTEMPT_DIAL_COUNTED_SQL)
 
 
 class LastCommentTests(unittest.TestCase):

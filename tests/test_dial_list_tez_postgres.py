@@ -481,6 +481,20 @@ def test_wrapup_expired_is_recorded_and_counted(env, settle_now):
     assert 'wrapup_expired' not in plain[0] and 'live_status' not in plain[0]
 
 
+def test_tez_still_counts_any_talk_as_a_dial(env, settle_now):
+    """Порог 10 с у дозвона (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки меньше
+    10 секунд») — только у удалённого КЦ: у автообзвона Тез «Дозвонились» — любой разговор, как было."""
+    env.enroll()
+    env.leads(1)
+    nxt = env.svc.auto_next(OPERATOR, status='active', phone_version=GUARDED)["next"]
+    attempt = env.svc.start_call(OPERATOR, nxt["assignment_id"], auto=True, operator_status='active')
+    env.finish(attempt, 'ANSWER', 5)
+    rows = env.svc.overview([TEZ], datetime.now(dial_service.PERIOD_TZ).date(), tez=True)
+    assert [(r["attempts"], r["answered"], r["talk_sec"]) for r in rows if r["operator_id"] == OPERATOR] == [(1, 1, 5)]
+    progress = env.svc.operator_progress(OPERATOR)
+    assert (progress["month"]["answered"], progress["today_stats"]["answered"]) == (1, 1)
+
+
 # ── WhatsApp ─────────────────────────────────────────────────────────────────
 
 def test_whatsapp_template_goes_to_own_driver_once_a_day(env):

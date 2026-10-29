@@ -385,6 +385,26 @@ def test_network_announcement_is_a_no_answer_whatever_binotel_says(env):
         talk["attempt_id"]
 
 
+def test_talk_shorter_than_ten_seconds_is_not_a_counted_dial(env):
+    """Владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки меньше 10 секунд». Короткий
+    разговор — в минутах, но не в «Дозвонились» вкладки «Операторы» и «Моего прогресса»; граница — та же,
+    что у диалога в оплате (SUCCESS_MIN_BILLSEC): ровно 10 с — дозвон."""
+    for name, phone, billsec in (('Иванов Иван', '77010000001', 5), ('Петров Пётр', '77010000002', 30),
+                                 ('Сидоров Сидор', '77010000003', 10)):
+        _lead, asg = env.lead(name, phone)
+        attempt = env.call(asg)
+        env.ended(attempt, phone_version=None, by_operator=False, leg_sec=billsec + 5)
+        env.final(attempt, 'ANSWER', billsec)
+        assert env.save(attempt) == 'Отказ'
+    progress = env.svc.operator_progress(OPERATOR)
+    for part in (progress["month"], progress["today_stats"]):
+        assert (part["attempts"], part["answered"], part["talk_sec"]) == (3, 2, 45)
+    # Диалоги оплаты — как были: водители с разговором от 10 с.
+    assert progress["conversion"]["leads_talked"] == 2
+    (row,) = env.svc.overview([RCC], datetime.now(dial_service.PERIOD_TZ).date())
+    assert (row["attempts"], row["answered"], row["talk_sec"]) == (3, 2, 45)
+
+
 def test_announcement_after_an_early_answer_takes_the_answer_back(env):
     # Вебхук ANSWER (автоответчик) обогнал событие телефона: дозвон уже засчитан —
     # событие с сообщением сети снимает его в той же транзакции.

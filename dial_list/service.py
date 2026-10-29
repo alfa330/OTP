@@ -295,6 +295,11 @@ AUTO_HANGUPS = (AUTO_HANGUP_RING_TIMEOUT, AUTO_HANGUP_ANNOUNCEMENT)
 # меняется. Двойник в Python — attempt_talked; то же условие в SQL аналитики
 # (analytics._LEADS_CTE) и успешек (sign_check._RESOLVE_SQL) — правятся вместе.
 ATTEMPT_TALK_SQL = "t.auto_hangup <> 'announcement' AND (t.talk_detected IS NOT FALSE OR t.billsec >= 1)"
+# Засчитанный дозвон удалённого КЦ (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки
+# меньше 10 секунд»): разговор не короче signing.SUCCESS_MIN_BILLSEC — та же граница, что у диалога в
+# оплате и у успешки. «Дозвонились» вкладки «Операторы», «Моего прогресса» и «Детализации» (двойник —
+# calls_export.counted_dial). У автообзвона Тез дозвон — по-прежнему любой разговор (ATTEMPT_TALK_SQL).
+ATTEMPT_DIAL_COUNTED_SQL = ATTEMPT_TALK_SQL + " AND t.billsec >= " + str(signing.SUCCESS_MIN_BILLSEC)
 # Подписание — до выдачи (владелец, 11.10.2026: «подписавших не выдавать»). Перед «Ещё»
 # сервер спрашивает Sapar о тех, кто попадёт в порцию (с запасом), если их проверка
 # старше SIGN_PRECHECK_FRESH_MINUTES или кончилась ошибкой; подписавшие и «на проверке
@@ -4799,7 +4804,9 @@ class DialListService:
     # попытки не входят (они не в счёт). Только числа: ни ФИО, ни номеров. Работа по
     # лиду с номером «Реестра тестовых номеров» — проверка обзвона, не показатель.
     # talk — разговор ли попытка при ответе Binotel (ATTEMPT_TALK_SQL): сообщение сети,
-    # которое положил телефон, ни в «дозвонились», ни в минуты разговора не идёт.
+    # которое положил телефон, ни в «дозвонились», ни в минуты разговора не идёт. Дозвон
+    # оператора удалённого КЦ — разговор не короче %(min_sec)s (ATTEMPT_DIAL_COUNTED_SQL);
+    # %(any_talk)s — автообзвон Тез, у него дозвон — любой разговор.
     _PROGRESS_SQL = """
         WITH att AS (
             SELECT t.state, UPPER(t.disposition) AS disp, t.billsec, t.cancelled,
@@ -4825,9 +4832,11 @@ class DialListService:
             (SELECT COUNT(*) FROM att WHERE NOT cancelled)                                AS attempts,
             (SELECT COUNT(*) FROM att WHERE NOT cancelled AND day = %(today)s)            AS attempts_today,
             (SELECT COUNT(*) FROM att WHERE state = 'finished' AND disp IN %(answered)s
-                                        AND talk)                                         AS answered,
+                                        AND talk AND (%(any_talk)s OR billsec >= %(min_sec)s))
+                                                                                          AS answered,
             (SELECT COUNT(*) FROM att WHERE state = 'finished' AND disp IN %(answered)s
-                                        AND talk AND day = %(today)s)                     AS answered_today,
+                                        AND talk AND (%(any_talk)s OR billsec >= %(min_sec)s)
+                                        AND day = %(today)s)                              AS answered_today,
             (SELECT COALESCE(SUM(billsec), 0) FROM att WHERE state = 'finished' AND talk) AS talk_sec,
             (SELECT COALESCE(SUM(billsec), 0) FROM att WHERE state = 'finished' AND talk
                                                           AND day = %(today)s)            AS talk_sec_today,
@@ -5023,7 +5032,8 @@ class DialListService:
         ctx = self.operator_context(user_id)
         month = current_period()
         today = datetime.now(PERIOD_TZ).date()
-        params = {"operator_id": ctx["user_id"], "month": month, "today": today, "answered": ANSWERED_SQL}
+        params = {"operator_id": ctx["user_id"], "month": month, "today": today, "answered": ANSWERED_SQL,
+                  "any_talk": is_tez(ctx.get("settings")), "min_sec": signing.SUCCESS_MIN_BILLSEC}
         with self.db._get_cursor() as cur:
             cur.execute(self._PROGRESS_SQL, params)
             r = cur.fetchone() or (0,) * 10
@@ -7480,7 +7490,10 @@ class DialListService:
         # линии. Отбор по users.department_id такого оператора из сводки терял.
         # Лид с номером «Реестра тестовых номеров» — проверка обзвона: ни попыток, ни
         # выдачи, ни успешки по нему в сводке нет. Сообщение сети, которое положил телефон
-        # (ATTEMPT_TALK_SQL), — попытка, но не дозвон и не минуты разговора.
+        # (ATTEMPT_TALK_SQL), — попытка, но не дозвон и не минуты разговора. Дозвон удалённого
+        # КЦ — разговор не короче 10 с (ATTEMPT_DIAL_COUNTED_SQL); короткий — в минутах, но не
+        # в дозвонах.
+        answered_sql = ATTEMPT_TALK_SQL if tez else ATTEMPT_DIAL_COUNTED_SQL
         lead_filter = "AND " + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL
         if department_ids is not None:
             lead_filter += " AND l.department_id = ANY(%(departments)s)"
@@ -7495,7 +7508,7 @@ class DialListService:
                            COUNT(*) AS attempts,
                            COUNT(*) FILTER (WHERE t.state = 'finished'
                                             AND UPPER(t.disposition) IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS')
-                                            AND {ATTEMPT_TALK_SQL}) AS answered,
+                                            AND {answered_sql}) AS answered,
                            COALESCE(SUM(t.billsec) FILTER (WHERE t.state = 'finished'
                                                            AND {ATTEMPT_TALK_SQL}), 0) AS talk_sec,
                            COUNT(*) FILTER (WHERE t.state = 'failed') AS failed,

@@ -14,7 +14,10 @@
 Исход и его подписи — те же, что в журнале и карточке (service.attempt_outcome; RESULT_LABELS —
 двойник RESULT_LABEL в DialListJournal.jsx, приписки — attemptHints.js): файл и экран не должны
 называть один звонок по-разному. Итоги на листе «Операторы» считаются по тем же строкам, что
-на листе «Звонки», — фильтр по оператору в Excel даёт ровно их.
+на листе «Звонки», — фильтр по оператору в Excel даёт ровно их. Дозвон засчитывается от
+DIAL_MIN_SEC секунд разговора (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки
+меньше 10 секунд»): короткий разговор остаётся «Дозвонились» по Binotel, как в журнале, но в
+«Подробностях» помечен, а в «Дозвонились» листа «Операторы» не входит.
 
 Номер водителя — только маской (service.mask_phone), как в журнале: полный номер из раздела не
 выходит ни в одну ручку, а файл — тоже ручка. ИИН и ID водителя — полностью (владелец, 29.10.2026:
@@ -45,7 +48,7 @@ from openpyxl.utils import get_column_letter
 
 from test_numbers import keys as test_keys
 
-from . import driver_ids, service
+from . import driver_ids, service, signing
 
 # Сколько дней за раз. Месяц — естественная единица отчёта (зарплата, итоги месяца), и в 31 день
 # помещается любой календарный месяц. Двойник — EXPORT_MAX_DAYS в callsExport.js.
@@ -67,6 +70,10 @@ RESULT_LABELS = {
 RING_TIMEOUT_NOTE = "сброшен автоматически: водитель не взял трубку"
 ANNOUNCEMENT_NOTE = "сброшен автоматически: сообщение сети «абонент недоступен»"
 CANCELLED_NOTE = "попытка не засчитана"
+# Дозвон засчитывается от этой длительности разговора (владелец, 29.10.2026: «с засчитанного кол-во
+# дозвонов убрать звонки меньше 10 секунд»; service.ATTEMPT_DIAL_COUNTED_SQL — двойник в SQL).
+DIAL_MIN_SEC = signing.SUCCESS_MIN_BILLSEC
+SHORT_TALK_NOTE = f"разговор короче {DIAL_MIN_SEC} с — в дозвоны не засчитан"
 
 # Почему звонок не начался (service.call_error_kind). Сам текст Binotel в файл не идёт: он
 # английский, а у попыток до 13.10.2026 в нём бывает номер водителя.
@@ -108,7 +115,7 @@ TEXT_COLUMNS = ("line", "driver_ids", "iin")
 OPERATOR_COLUMNS = (
     ("Оператор", 30),
     ("Звонков", 10),
-    ("Дозвонились", 13),
+    (f"Дозвонились (от {DIAL_MIN_SEC} с)", 13),
     ("Дозвон", 9),
     ("Разговор", 12),
     ("Средний разговор", 12),
@@ -231,15 +238,23 @@ def failure_note(api_error):
     return f"{note} (код {code})" if code is not None and kind in FAILURE_CODE_KINDS else note
 
 
-def call_note(result, auto_hangup="", ring_timeout_at=None, api_error=""):
+def counted_dial(result, billsec):
+    """Засчитанный дозвон: разговор не короче DIAL_MIN_SEC (двойник service.ATTEMPT_DIAL_COUNTED_SQL)."""
+    return result == "answered" and int(billsec or 0) >= DIAL_MIN_SEC
+
+
+def call_note(result, auto_hangup="", ring_timeout_at=None, api_error="", billsec=None):
     """«Подробности» звонка — то, что карточка водителя пишет под попыткой; '' — нечего добавить.
     Приписку автосброса получает только недозвон: у разговора и у отмены она была бы неправдой
-    (как autoHangupHint в attemptHints.js); сообщение сети сильнее гудков."""
+    (как autoHangupHint в attemptHints.js); сообщение сети сильнее гудков. Разговор короче
+    DIAL_MIN_SEC (billsec передан) — пометка, что в дозвоны он не засчитан."""
     if result == "failed":
         return failure_note(api_error)
     if result == "cancelled":
         return CANCELLED_NOTE
-    if result in ("answered", ""):
+    if result == "answered":
+        return SHORT_TALK_NOTE if billsec is not None and not counted_dial(result, billsec) else ""
+    if result == "":
         return ""
     if auto_hangup == service.AUTO_HANGUP_ANNOUNCEMENT:
         return ANNOUNCEMENT_NOTE
@@ -265,6 +280,7 @@ def call_from_row(r):
     auto_hangup = auto_hangup or ""
     result = service.attempt_outcome(state or "", disposition or "", billsec, auto_hangup, talk_detected,
                                      cancelled=bool(cancelled))
+    talk_sec = int(billsec or 0) if result == "answered" else 0
     return {
         "at": _local(requested_at),
         "operator_id": operator_id,
@@ -276,12 +292,14 @@ def call_from_row(r):
         "phone": service.mask_phone(phone_norm),
         "result": result,
         # Разговор — только у дозвона: у сообщения сети Binotel пишет длительность автоответчика.
-        "talk_sec": int(billsec or 0) if result == "answered" else 0,
+        "talk_sec": talk_sec,
+        # В «Дозвонились» листа «Операторы» — только разговор не короче DIAL_MIN_SEC.
+        "counted": counted_dial(result, talk_sec),
         # Итог с типом — одной строкой, как бейдж в журнале: «Отказ · Дорого».
         "outcome": " · ".join(part for part in (outcome_name, subtype_name) if part),
         "comment": comment or "",
         "success": bool(is_success),
-        "note": call_note(result, auto_hangup, ring_timeout_at, api_error),
+        "note": call_note(result, auto_hangup, ring_timeout_at, api_error, billsec=talk_sec),
     }
 
 
@@ -382,7 +400,9 @@ def _call_cells(sheet, call):
     ]
 
 
-TOTAL_KEYS = ("calls", "answered", "talk_sec", "successes", "cancelled", "failed")
+# answered — засчитанные дозвоны (counted), counted_talk_sec — их разговор: из него средний разговор.
+# talk_sec — весь разговор, и короткий тоже: это время, которое оператор говорил.
+TOTAL_KEYS = ("calls", "answered", "talk_sec", "counted_talk_sec", "successes", "cancelled", "failed")
 
 
 def _empty_totals(name):
@@ -391,8 +411,9 @@ def _empty_totals(name):
 
 def _count(totals, call):
     totals["calls"] += 1
-    totals["answered"] += int(call["result"] == "answered")
+    totals["answered"] += int(call["counted"])
     totals["talk_sec"] += call["talk_sec"]
+    totals["counted_talk_sec"] += call["talk_sec"] if call["counted"] else 0
     totals["successes"] += int(call["success"])
     totals["cancelled"] += int(call["result"] == "cancelled")
     totals["failed"] += int(call["result"] == "failed")
@@ -412,6 +433,7 @@ def _operator_cells(sheet, totals, total_row=False):
     name = plain(_clean(totals["name"]) or "—")
     name.data_type = "s"
     calls, answered, talk = totals["calls"], totals["answered"], totals["talk_sec"]
+    counted_talk = totals["counted_talk_sec"]
     return [
         name,
         plain(calls),
@@ -419,7 +441,8 @@ def _operator_cells(sheet, totals, total_row=False):
         # Доля — от всех звонков, как «Дозвонились · N %» на вкладке «Операторы».
         plain(answered / calls if calls else None, PERCENT_FORMAT),
         _duration(sheet, talk, TALK_TOTAL_FORMAT, style),
-        _duration(sheet, round(talk / answered) if answered else 0, TALK_FORMAT, style),
+        # Средний — по засчитанным дозвонам: короткий разговор не в счёт и здесь.
+        _duration(sheet, round(counted_talk / answered) if answered else 0, TALK_FORMAT, style),
         plain(totals["successes"]),
         plain(totals["cancelled"]),
         plain(totals["failed"]),
@@ -444,7 +467,8 @@ def _fill_context(sheet, *, department, day_from, day_to, generated_at, generate
         ("Как читать", None),
         ("Дата и время", "Когда оператор нажал «Позвонить». Время — Алматы."),
         ("Результат", "Чем кончился звонок по данным Binotel. «Дозвонились» — водитель ответил и был "
-                      "разговор; сообщение сети «абонент недоступен» и ответ без единой реплики — недозвон."),
+                      "разговор; сообщение сети «абонент недоступен» и ответ без единой реплики — недозвон. "
+                      f"Разговор короче {DIAL_MIN_SEC} с в дозвоны не засчитывается — так и помечен в «Подробностях»."),
         ("Отменён до ответа", "Оператор сам завершил звонок до ответа водителя — попытка не засчитана."),
         ("Ошибка АТС", "Звонок не начался; почему — в «Подробностях»."),
         ("Успешка", "Водитель подписал документы после этого разговора — успешка засчитана оператору."),
@@ -452,8 +476,9 @@ def _fill_context(sheet, *, department, day_from, day_to, generated_at, generate
                         "несколько — все, через запятую. Пусто — Sapar водителя не знает."),
         ("ИИН", "Полностью, из базы водителей раздела."),
         ("Номер", "Только последние четыре цифры, как в журнале раздела."),
-        ("Операторы", "Итоги по тем же звонкам, что на листе «Звонки»; «Дозвон» — доля дозвонов "
-                      "от всех звонков, как на вкладке «Операторы»."),
+        ("Операторы", f"Итоги по тем же звонкам, что на листе «Звонки». «Дозвонились» — разговоры от {DIAL_MIN_SEC} с, "
+                      "«Дозвон» — их доля от всех звонков, как на вкладке «Операторы»; «Средний разговор» — по "
+                      "ним же, «Разговор» — весь, и короткий тоже."),
         ("Тестовые номера", "Звонки на номера из «Реестра тестовых номеров» в файл не входят."),
     ]
     for index, (label, value) in enumerate(lines, start=1):

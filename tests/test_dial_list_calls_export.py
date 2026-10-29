@@ -162,6 +162,26 @@ class CallRowTests(unittest.TestCase):
         self.assertEqual(call(**no)['note'], '')
         self.assertEqual(call(state='ended', disposition='')['note'], '')
 
+    def test_short_talk_is_answered_but_not_a_counted_dial(self):
+        """Владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки меньше 10 секунд». Результат —
+        как у Binotel и в журнале («Дозвонились»), а в «Подробностях» — что в дозвоны он не засчитан."""
+        short, edge, long_ = call(billsec=9), call(billsec=10), call()
+        self.assertEqual((short['result'], short['counted'], short['note']),
+                         ('answered', False, 'разговор короче 10 с — в дозвоны не засчитан'))
+        self.assertEqual((edge['counted'], edge['note']), (True, ''))
+        self.assertEqual((long_['counted'], long_['note']), (True, ''))
+        # Недозвон, отмена и сбой — не дозвоны, и пометки о длительности у них нет.
+        for over in (dict(disposition='NOANSWER', billsec=0), dict(disposition='CANCEL', billsec=0, cancelled=True),
+                     dict(state='failed', disposition='', billsec=0), dict(auto_hangup='announcement', billsec=40)):
+            with self.subTest(over=over):
+                c = call(**over)
+                self.assertFalse(c['counted'])
+                self.assertNotIn('10 с', c['note'])
+        # Порог — тот же, что у диалога в оплате и у успешки.
+        self.assertEqual(calls_export.DIAL_MIN_SEC, dial_service.signing.SUCCESS_MIN_BILLSEC)
+        self.assertIn(f't.billsec >= {calls_export.DIAL_MIN_SEC}', dial_service.ATTEMPT_DIAL_COUNTED_SQL)
+        self.assertIn(dial_service.ATTEMPT_TALK_SQL, dial_service.ATTEMPT_DIAL_COUNTED_SQL)
+
     def test_twins_on_the_site(self):
         """Подписи исхода и приписки — те же слова, что в журнале и карточке водителя."""
         journal = (ROOT / 'src/components/dial_list/DialListJournal.jsx').read_text(encoding='utf-8')
@@ -240,6 +260,7 @@ class WorkbookTests(unittest.TestCase):
             call(),                                                                    # Своев: разговор 2:05
             call(billsec=55, success=True),                                            # Своев: 0:55, успешка
             call(disposition='NOANSWER', billsec=0),                                   # Своев: недозвон
+            call(billsec=7),                                                           # Своев: 0:07 — не дозвон
             call(operator_id=701, operator='Гостев Глеб', disposition='CANCEL', billsec=0, cancelled=True),
             call(operator_id=701, operator='Гостев Глеб', state='failed', disposition='', billsec=0),
             call(operator_id=701, operator='Гостев Глеб', billsec=30),
@@ -248,24 +269,27 @@ class WorkbookTests(unittest.TestCase):
         wb, written, _ = book(calls)
         ws = wb['Операторы']
         self.assertEqual([c.value for c in ws[1]], [title for title, _w in calls_export.OPERATOR_COLUMNS])
+        self.assertEqual(ws['C1'].value, 'Дозвонились (от 10 с)')
         rows = values(ws)[1:]
-        # Больше звонков — выше.
+        # Больше звонков — выше; поровну — по имени.
         self.assertEqual([r[0] for r in rows], ['Гостев Глеб', 'Своев Сава', 'Итого'])
         gostev, svoev, total = rows
         self.assertEqual(gostev[1:4], [4, 1, 0.25])
         self.assertEqual((gostev[4], gostev[5]), (timedelta(seconds=30), timedelta(seconds=30)))
         self.assertEqual(gostev[6:], [0, 1, 1])
-        self.assertEqual(svoev[1:3], [3, 2])
-        self.assertAlmostEqual(svoev[3], 2 / 3)
-        self.assertEqual((svoev[4], svoev[5]), (timedelta(seconds=180), timedelta(seconds=90)))
+        # Разговор 0:07 — в минутах оператора, но не в дозвонах и не в среднем разговоре
+        # (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки меньше 10 секунд»).
+        self.assertEqual(svoev[1:4], [4, 2, 0.5])
+        self.assertEqual((svoev[4], svoev[5]), (timedelta(seconds=187), timedelta(seconds=90)))
         self.assertEqual(svoev[6:], [1, 0, 0])
-        self.assertEqual(total[1:3], [7, 3])
-        self.assertEqual(total[4], timedelta(seconds=210))
+        self.assertEqual(total[1:3], [8, 3])
+        self.assertEqual(total[4], timedelta(seconds=217))
+        self.assertEqual(total[5], timedelta(seconds=70))       # (125 + 55 + 30) / 3
         self.assertEqual(total[6:], [1, 1, 1])
         # Сумма «Разговор» на листе «Звонки» равна итогу — это одни и те же строки.
         talk_column = [title for _k, title, _w in calls_export.COLUMNS].index('Разговор')
         talk = sum((r[talk_column] for r in values(wb['Звонки'])[1:] if r[talk_column]), timedelta())
-        self.assertEqual(talk, timedelta(seconds=210))
+        self.assertEqual(talk, timedelta(seconds=217))
         self.assertEqual(wb['Операторы']['D2'].number_format, '0%')
         self.assertEqual(wb['Операторы']['E2'].number_format, '[h]:mm:ss')
         self.assertTrue(wb['Операторы']['A4'].font.bold)

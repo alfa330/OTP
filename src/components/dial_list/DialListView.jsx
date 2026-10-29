@@ -125,7 +125,8 @@ const OperatorRow = ({ row, showDepartment }) => {
             </div>
             <div className="hidden shrink-0 items-center gap-1.5 sm:flex">
                 <IosBadge tone="blue" title="Попыток">{row.attempts} звон.</IosBadge>
-                <IosBadge tone={answered == null ? 'slate' : answered >= 50 ? 'green' : 'amber'} title="Дозвонились">
+                {/* Дозвон — разговор от 10 с (владелец, 29.10.2026); короткий — в минутах, но не здесь. */}
+                <IosBadge tone={answered == null ? 'slate' : answered >= 50 ? 'green' : 'amber'} title="Дозвонились: разговор от 10 секунд">
                     {row.answered}{answered != null ? ` · ${answered}%` : ''}
                 </IosBadge>
                 <IosBadge tone="slate" title="Разговоры">{fmtTalk(row.talk_sec)}</IosBadge>
