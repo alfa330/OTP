@@ -130,11 +130,14 @@ const REACT_SHIM = `
 /* Раздел и его память входа — ОДНОЙ сборкой: у памяти состояние на уровне
    модуля, и тест обязан писать в тот же экземпляр, из которого читает раздел.
    Шарик помощника — туда же: он висит над разделом и гаснет по вкладке,
-   которую раздел сообщает (WikiView: onTabShown). */
+   которую раздел сообщает (WikiView: onTabShown). Его панель шарик грузит
+   лениво, и в его кадрах её нет — она отдельным корнем. */
 const ENTRY = `
   export { default as WikiView } from ${JSON.stringify(path('src/components/wiki/WikiView.jsx'))};
   export { default as WikiLibrary } from ${JSON.stringify(path('src/components/wiki/WikiLibrary.jsx'))};
   export { default as AssistantOrb } from ${JSON.stringify(path('src/components/assistant/AssistantOrb.jsx'))};
+  export { default as AssistantPanel } from ${JSON.stringify(path('src/components/assistant/AssistantPanel.jsx'))};
+  export { default as useAssistantChat } from ${JSON.stringify(path('src/components/assistant/useAssistantChat.js'))};
   export * as memory from ${JSON.stringify(path('src/components/wiki/entryMemory.js'))};
 `;
 

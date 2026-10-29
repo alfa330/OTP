@@ -437,7 +437,7 @@ test('связки, которые видны только в браузере',
     /* «С витрины уходят»: исполненное помнит сам раздел, и неснятая снаружи
        просьба не оставляет витрину пустой навсегда. */
     const leaving = view.slice(view.indexOf('const bellPending ='), view.indexOf('const bodyTab'));
-    assert.match(leaving, /const bellPending = !!bellTab && bellDone !== bellFocus\s*(?:\/\/[^\n]*\s*)?&& \(!ready \|\| tabs\.some\(\(t\) => t\.key === bellTab\)\);/);
+    assert.match(leaving, /const bellPending = !!bellTab && bellDone !== bellFocus\s*(?:\/\/[^\n]*\s*)*&& \(!ready \|\| !!bellSpace \|\| tabs\.some\(\(t\) => t\.key === bellTab\)\);/);
     assert.match(leaving, /const leavingLibrary = !!requestedTab\s*\|\| bellPending\s*\|\|/);
     assert.match(leaving, /directoryDone !== directoryFocus/);
     // Кнопка «Обновить»: знак работы есть и у тех, кому движение уменьшено.

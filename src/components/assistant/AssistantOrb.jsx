@@ -15,6 +15,7 @@ import {
     canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
 } from '../../utils/pipWindow';
 import { CLASSIFIER_TAB } from './sourceTarget';
+import { answeringSpaceName } from './answeringSpace';
 import './assistant-orb.css';
 
 const AssistantPanel = lazyWithRetry(() => import('./AssistantPanel.jsx'));
@@ -111,8 +112,9 @@ const SUPPRESSED_VIEWS = new Set(['call_evaluation', 'lms']);
  * если вот-вот откроет «Помощник» по ссылке или из колокола: иначе шарик
  * показался бы на кадр перед вкладкой, где его быть не должно. */
 const WIKI_ASSISTANT_TAB = 'assistant';
+const onWikiAssistantTab = (view, wikiTab) => view === 'wiki' && wikiTab === WIKI_ASSISTANT_TAB;
 const isSuppressed = (view, wikiTab) => SUPPRESSED_VIEWS.has(view)
-    || (view === 'wiki' && wikiTab === WIKI_ASSISTANT_TAB);
+    || onWikiAssistantTab(view, wikiTab);
 
 const storageKey = (userId) => `${STORAGE_PREFIX}${userId}`;
 
@@ -241,9 +243,12 @@ export default function AssistantOrb({
                 const code = error?.response?.data?.code;
                 /* Сбой — не ответ: сервер не ответил или упал (5xx). Повторная
                    проба при смене вики, не дойдя, погасила бы шарик, который
-                   только что работал, — прежний ответ остаётся в силе. */
+                   только что работал, — прежний ответ остаётся в силе. Но
+                   вика — уже новая: со старой шарик отвечал бы над чужими
+                   статьями до перезагрузки, а проверить её сервер не забудет —
+                   каждый запрос чата проходит через effective_space. */
                 const failed = !error?.response || error.response.status >= 500;
-                setProbe((prev) => (failed && prev?.ok ? prev : {
+                setProbe((prev) => (failed && prev?.ok ? { ...prev, spaceId: askSpace ?? prev.spaceId } : {
                     ok: code === 'SENSITIVE_ACCESS_REQUIRED',
                     spaceId: null,
                     serverLocked: code === 'SENSITIVE_ACCESS_REQUIRED',
@@ -707,12 +712,35 @@ export default function AssistantOrb({
        произошло», а изнутри вики кнопка не делала бы вовсе ничего. Разговор
        передаём номером: вкладка откроет его тем же путём, что и колокол
        «Супервайзер ответил». Нового разговора ещё нет (activeId пуст) —
-       открывается просто вкладка. */
+       открывается просто вкладка. Вместе с номером едет вика, по которой
+       шарик отвечал: в вике без «Помощника» сервер подставил другую, и
+       вкладку надо открывать там.
+
+       Пока ответ пишется, двери нет: вопрос с ответом сервер сохраняет одним
+       махом в конце, и вкладка открыла бы разговор без них — а ответ пришёл
+       бы в погашенный шарик. Кнопка в панели на это время выключена
+       (AssistantPanel), здесь — страховка. Откреплённое окно уступает место
+       вкладке: две ленты одного разговора на экране — выбор «в какую писать»
+       вместо вопроса (см. toggleOpen). */
     const openFull = useCallback(() => {
+        if (chat.busy) return;
+        if (pipWindow) closePip();
         setOpen(false);
         raisePortal();
-        onOpenWikiAssistant?.(chat.activeId || null);
-    }, [onOpenWikiAssistant, raisePortal, chat.activeId]);
+        onOpenWikiAssistant?.(chat.activeId || null, spaceId);
+    }, [onOpenWikiAssistant, raisePortal, chat.activeId, chat.busy, pipWindow, closePip, spaceId]);
+
+    /* Вкладка «Помощник» — тот же чат во весь экран: мини-чат ею заменён, а
+       не отложен. Вернувшись на главную, человек не ждёт, что панель сама
+       раскроется поверх статей, — так же её закрывает и openFull. */
+    const onAssistantTab = onWikiAssistantTab(view, wikiTab);
+    useEffect(() => {
+        if (onAssistantTab) setOpen(false);
+    }, [onAssistantTab]);
+
+    // Из какой вики ответ — в подписи панели, когда это не очевидно.
+    const spaceName = useMemo(
+        () => answeringSpaceName(chat.status, askSpace), [chat.status, askSpace]);
 
     /* Кому шарика не видно вовсе. Замок QR сюда НЕ входит: владелец решил, что
        неподтверждённый оператор обязан видеть помощника и понимать, как его
@@ -746,6 +774,7 @@ export default function AssistantOrb({
                 appearance={appearance}
                 onAppearanceChange={setAppearance}
                 chat={chat}
+                spaceName={spaceName}
                 locked={locked}
                 lockChecking={lockChecking}
                 detached={detached}

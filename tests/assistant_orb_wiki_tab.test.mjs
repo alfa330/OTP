@@ -14,13 +14,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    API, BASE, HR_SPACE, activeTab, calls, loadSection, mount, pending, pingAnswer,
-    read, sectionProps, sent, storage, withAccessTokenHeader, withAddress,
+    API, BASE, HEADERS, HR_SPACE, React, activeTab, calls, firstFrame, loadSection, mount, pending,
+    pingAnswer, read, sectionProps, sent, storage, withAccessTokenHeader, withAddress,
 } from './wiki_entry_lab.mjs';
+import { answeringSpaceName } from '../src/components/assistant/answeringSpace.js';
 
-const { WikiView, AssistantOrb, memory } = await loadSection({ lab: true });
+const {
+    WikiView, AssistantOrb, AssistantPanel, useAssistantChat, memory,
+} = await loadSection({ lab: true });
 
 const pingKey = (user) => memory.memoryKey(BASE, user.id, 'ping');
+
+/* Лежит ли в состоянии корня, прожившего последний кадр, объект ровно такого
+   вида — те же ключи и значения. Что именно раздел передал дальше (карточку
+   вопроса или разговор, пространство пробы), разметка не показывает: вкладки
+   ленивые, а панель шарика в его кадрах не рисуется. */
+const holdsLike = (shape) => globalThis.__wikiEntryLab.slots
+    .filter((slot) => slot.kind === 'state').map((slot) => slot.value)
+    .some((value) => value && typeof value === 'object'
+        && Object.keys(value).length === Object.keys(shape).length
+        && Object.entries(shape).every(([key, want]) => Object.is(value[key], want)));
 
 /* Вкладки, которые раздел сообщил порталу, по порядку. Без повторов подряд:
    важна смена, а не то, сколько раз раздел перерисовался. */
@@ -151,6 +164,135 @@ test('уход из раздела: вкладки больше нет — ша�
     assert.deepEqual(tabs.seen, ['assistant', '']);
 });
 
+test('отказ или сбой /ping при просьбе «Помощник»: над карточкой ошибки шарик виден', async () => {
+    /* Просьба ждёт «Попробовать снова», но на экране карточка «Раздел
+       недоступен», а не чат: гасить шарик здесь — гасить его не на «Помощнике». */
+    const doors = [
+        ['адрес', '?view=wiki&tab=assistant', {}],
+        ['мини-чат', '', { bellFocus: { kind: 'assistant', id: 41, nonce: 1 } }],
+    ];
+    const answers = [['сбой', (call) => call.fail()], ['отказ', (call) => call.refuse(403)]];
+    let id = 2110;
+    for (const [door, address, over] of doors) {
+        for (const [what, answer] of answers) {
+            const tabs = tabReports();
+            const mark = calls.length;
+            id += 1;
+            await withAddress(address, async () => {
+                const section = mount(WikiView, sectionProps({ id }, { ...over, onTabShown: tabs.onTabShown }));
+                await section.settle();
+                answer(pending('/ping', mark));
+                await section.settle();
+                assert.match(section.html, /Раздел недоступен/);
+            });
+            assert.deepEqual(tabs.seen, ['assistant', ''], `${door}, ${what}: шарик погашен над карточкой ошибки`);
+        }
+    }
+});
+
+test('мини-чат в вике без «Помощника»: дверь ведёт в вику, по которой он отвечал', async () => {
+    /* В «Кадрах» помощник выключен, и сервер отвечал шарику из «Таксопарков».
+       Без переключения просьба погасла бы по набору вкладок «Кадров», и кнопка
+       просто закрыла бы панель. */
+    const user = { id: 2120 };
+    const TAXI = pingAnswer().spaces[0];
+    memory.remember(pingKey(user), pingAnswer({ spaces: [TAXI, HR_SPACE] }));
+    storage.set('wiki:space', String(HR_SPACE.id));
+    try {
+        let consumed = 0;
+        const tabs = tabReports();
+        const spaces = [];
+        const section = mount(WikiView, sectionProps(user, {
+            bellFocus: { kind: 'assistant', id: 41, space_id: TAXI.id, nonce: 1 },
+            onBellFocusConsumed: () => { consumed += 1; },
+            onTabShown: tabs.onTabShown,
+            onSpaceShown: (space) => spaces.push(space),
+        }));
+        await section.settle();
+        assert.equal(consumed, 1);
+        assert.equal(activeTab(section.html), 'Помощник');
+        assert.equal(spaces.at(-1), TAXI.id, 'вика не переключилась');
+        assert.deepEqual(tabs.seen, ['assistant'], 'шарик на кадр вставал над главной «Кадров»');
+        assert.ok(holdsLike({ chatId: 41, nonce: 1 }), 'разговор из мини-чата не открылся');
+    } finally {
+        storage.delete('wiki:space');
+    }
+});
+
+test('мини-чат: вика, которой у человека нет, никуда не уводит', async () => {
+    const user = { id: 2121 };
+    memory.remember(pingKey(user), pingAnswer());
+    const spaces = [];
+    const section = mount(WikiView, sectionProps(user, {
+        bellFocus: { kind: 'assistant', id: 41, space_id: 99, nonce: 1 },
+        onSpaceShown: (space) => spaces.push(space),
+    }));
+    await section.settle();
+    assert.equal(activeTab(section.html), 'Помощник');
+    assert.deepEqual(spaces, [1]);
+});
+
+test('мини-чат в вике без «Помощника», пока /ping обновляется: шарик над главной не гаснет', async () => {
+    /* Запомненный набор вкладок «Помощника» не знает, свежий ответ ещё в пути.
+       Просьба ждёт его, а на экране главная — шарик на ней обязан остаться. */
+    const user = { id: 2122 };
+    memory.remember(pingKey(user), pingAnswer({ spaces: [HR_SPACE] }));
+    let consumed = 0;
+    const tabs = tabReports();
+    const mark = calls.length;
+    const section = mount(WikiView, sectionProps(user, {
+        bellFocus: { kind: 'assistant', id: 41, nonce: 1 },
+        onBellFocusConsumed: () => { consumed += 1; },
+        onTabShown: tabs.onTabShown,
+    }));
+    await section.settle();
+    assert.equal(activeTab(section.html), 'Главная');
+    assert.deepEqual(tabs.seen, ['library'], 'шарик погас над главной ради вкладки, которой нет');
+    pending('/ping', mark).answer(pingAnswer({ spaces: [HR_SPACE] }));
+    await section.settle();
+    assert.equal(consumed, 1);
+    assert.deepEqual(tabs.seen, ['library']);
+});
+
+test('колокол: вопрос открывается карточкой, разговор — разговором', async () => {
+    /* Ветки перестроены под дверь шарика без номера: перепутай их — и
+       супервайзер получил бы чат вместо карточки, оператор — карточку вместо
+       ответа. Вкладка при этом встаёт верная, поэтому смотрим, что передано. */
+    const user = { id: 2123 };
+    memory.remember(pingKey(user), pingAnswer());
+    const question = mount(WikiView, sectionProps(user, { bellFocus: { kind: 'questions', id: 5, nonce: 3 } }));
+    await question.settle();
+    assert.equal(activeTab(question.html), 'Вопросы');
+    assert.ok(holdsLike({ id: 5, nonce: 3 }), 'вопрос из колокола открылся без карточки');
+    assert.ok(!holdsLike({ chatId: 5, nonce: 3 }), 'вопрос ушёл разговором помощника');
+    const answer = mount(WikiView, sectionProps(user, { bellFocus: { kind: 'assistant', id: 7, nonce: 4 } }));
+    await answer.settle();
+    assert.equal(activeTab(answer.html), 'Помощник');
+    assert.ok(holdsLike({ chatId: 7, nonce: 4 }), 'разговор из колокола не открылся');
+    assert.ok(!holdsLike({ id: 7, nonce: 4 }), 'разговор ушёл карточкой вопроса');
+});
+
+test('исполненная просьба колокола и шарика не повторяется', () => {
+    /* Стенду не сменить вику в шапке (нажатия ему недоступны), поэтому
+       сторож — текстом: без него смена вики возвращала бы человека в ту,
+       куда его однажды позвал шарик. */
+    const view = read('src/components/wiki/WikiView.jsx');
+    assert.match(view, /const target = bellTabOf\(bellFocus\);\s*if \(!target \|\| bellDone === bellFocus\) return;\s*if \(bellSpace\) \{\s*setSpaceId\(bellSpace\);\s*return;\s*\}/);
+});
+
+test('до ответа /ping раздел не сообщает «вики нет»', async () => {
+    /* Иначе на каждом первом входе шарик откатывался бы к вике из памяти
+       браузера и спрашивал сервер лишний раз. */
+    const spaces = [];
+    const mark = calls.length;
+    const section = mount(WikiView, sectionProps({ id: 2124 }, { onSpaceShown: (space) => spaces.push(space) }));
+    await section.settle();
+    assert.deepEqual(spaces, []);
+    pending('/ping', mark).answer(pingAnswer());
+    await section.settle();
+    assert.deepEqual(spaces, [1]);
+});
+
 test('вкладка уходит порталу до отрисовки кадра, а не после', () => {
     /* Стенд выполняет useEffect и useLayoutEffect одинаково, поэтому вид хука
        держим текстом. Обычный эффект сработал бы ПОСЛЕ отрисовки: кадр со
@@ -265,7 +407,7 @@ test('шарик: сбой повторной пробы его не гасит,
     await orb.settle();
     assert.match(orb.html, ORB, 'сеть моргнула при смене вики — и шарик пропал до перезагрузки');
     await orb.update({ wikiSpaceId: 8 });
-    pending('/ai/status', mark).refuse(503);
+    pending('/ai/status', mark).refuse(500);
     await orb.settle();
     assert.match(orb.html, ORB, '5xx — сбой, а не ответ «помощника нет»');
     await orb.update({ wikiSpaceId: 9 });
@@ -285,3 +427,128 @@ test('шарик: первая проба, не дойдя, его не пока
     await orb.settle();
     assert.equal(orb.html, '');
 }));
+
+test('шарик: проба не дошла — он остаётся, но спрашивает уже открытую вику', () => withBrowser(async () => {
+    /* С прежней шарик отвечал бы над статьями новой до перезагрузки: пробу
+       повторяет только следующая смена вики. Пространство сервер проверит и
+       так — каждый запрос чата идёт через effective_space. */
+    const { orb, mark } = await readyOrb({ user: { id: 2201 } });
+    await orb.update({ wikiSpaceId: 7 });
+    pending('/ai/status', mark).fail();
+    await orb.settle();
+    assert.match(orb.html, ORB);
+    assert.ok(holdsLike({ ok: true, spaceId: 7 }), 'мини-чат остался на прежней вике');
+}));
+
+const ORB_EMPTY = { perimeter: { articles_for_ai: 0 }, index: { chunks: 0 }, space_id: 7 };
+
+test('шарик: поздний ответ по вике, из которой ушли, не перетирает ответ по открытой', () => withBrowser(async () => {
+    /* Проба теперь уходит на каждую смену вики, и при быстром переключении
+       ответы приходят не по порядку. */
+    for (const [what, late] of [['пустой периметр', (call) => call.answer(ORB_EMPTY)],
+                                ['отказ', (call) => call.refuse(403)]]) {
+        const { orb, mark } = await readyOrb({ user: { id: what === 'отказ' ? 2203 : 2202 } });
+        await orb.update({ wikiSpaceId: 7 });
+        const stale = pending('/ai/status', mark);
+        await orb.update({ wikiSpaceId: 8 });
+        const fresh = pending('/ai/status', mark);
+        assert.notEqual(stale, fresh);
+        fresh.answer({ ...ORB_READY, space_id: 8 });
+        await orb.settle();
+        late(stale);
+        await orb.settle();
+        assert.match(orb.html, ORB, `${what} по прежней вике погасил шарик над открытой`);
+        assert.ok(holdsLike({ ok: true, spaceId: 8 }), `${what} по прежней вике подменил пространство`);
+    }
+}));
+
+test('шарик: без сообщённой вкладки он в вике виден', () => withBrowser(async () => {
+    /* Вторая точка монтирования без пропса не должна возвращать «шарика нет
+       во всей вике». */
+    const props = orbProps({ user: { id: 2204 } });
+    delete props.wikiTab;
+    const mark = calls.length;
+    const orb = mount(AssistantOrb, props);
+    await orb.settle();
+    pending('/ai/status', mark).answer(ORB_READY);
+    await orb.settle();
+    assert.match(orb.html, ORB);
+}));
+
+/* ── Мини-чат: подпись и дверь в раздел ──────────────────────────────────── */
+
+test('подпись мини-чата: имя вики — когда вик несколько или сервер подставил другую', () => {
+    const TAXI = { id: 1, name: 'Таксопарки' };
+    const TEZ = { id: 9, name: 'Тез КЦ' };
+    // Одна вика с помощником, спрашивали её же — имя было бы лишним словом.
+    assert.equal(answeringSpaceName({ space_id: 1, spaces: [TAXI] }, 1), null);
+    assert.equal(answeringSpaceName({ space_id: 1, spaces: [TAXI] }, undefined), null);
+    // Открыта вика без помощника, сервер ответил из другой — без имени никак.
+    assert.equal(answeringSpaceName({ space_id: 1, spaces: [TAXI] }, 12), 'Таксопарки');
+    // Вик с помощником несколько — имя всегда.
+    assert.equal(answeringSpaceName({ space_id: 9, spaces: [TAXI, TEZ] }, 9), 'Тез КЦ');
+    // Статуса ещё нет, помощника нет нигде.
+    assert.equal(answeringSpaceName(null, 1), null);
+    assert.equal(answeringSpaceName({ space_id: null, spaces: [] }, 1), null);
+});
+
+const panelChat = (over = {}) => ({
+    status: { space_id: 1 }, statusError: null, perimeter: { articles_for_ai: 49 },
+    indexReady: true, noAccess: false, canAsk: true, suggestions: [],
+    chats: [], chatsLoading: false, activeId: null, messages: [], draft: '', busy: false, error: '',
+    escalating: null, canEscalate: false,
+    setDraft() {}, ask() {}, startNewChat() {}, openChat() {}, sendFeedback() {},
+    removeChat() {}, escalate() {}, loadStatus() {}, loadChats() {},
+    ...over,
+});
+const panelHtml = (over = {}) => firstFrame(AssistantPanel, {
+    appearance: 'aurora', onAppearanceChange() {}, onOpenArticle() {}, onOpenFullAssistant() {},
+    onClose() {}, showToast() {}, ...over,
+});
+const doorButton = (html) => html.match(/<button[^>]*aria-label="Открыть помощника в разделе «Вики»"[^>]*>/)?.[0] || '';
+
+test('мини-чат: пока ответ пишется, дверь в раздел закрыта и объясняет почему', () => {
+    /* Вопрос с ответом сервер сохраняет одним махом в конце. Открой вкладку
+       раньше — она покажет разговор без них, а ответ придёт в погашенный шарик. */
+    const waiting = doorButton(panelHtml({ chat: panelChat({ busy: true, activeId: 41 }) }));
+    assert.match(waiting, /\sdisabled=""/);
+    assert.match(waiting, /title="Дождитесь ответа — разговор откроется вместе с ним"/);
+    const idle = doorButton(panelHtml({ chat: panelChat({ activeId: 41 }) }));
+    assert.ok(idle, 'двери в раздел нет');
+    assert.doesNotMatch(idle, /\sdisabled=""/);
+});
+
+test('мини-чат: подпись называет вику, из которой ответ', () => {
+    assert.match(panelHtml({ chat: panelChat(), spaceName: 'Таксопарки' }), /Таксопарки · доступно статей: 49/);
+    assert.match(panelHtml({ chat: panelChat() }), />доступно статей: 49</);
+});
+
+test('мини-чат: статус прежней вики, опоздав, не ложится поверх нынешнего', async () => {
+    /* Шарик идёт за викой из шапки раздела, и при быстрой смене ответы
+       приходят не по порядку: подпись назвала бы не ту вику, подсказки и
+       периметр были бы от неё же, а вопросы уходили бы уже в нынешнюю. */
+    const ChatStatus = (props) => {
+        const chat = useAssistantChat(props);
+        return React.createElement('i', null, String(chat.status?.space_id ?? ''));
+    };
+    const mark = calls.length;
+    const chat = mount(ChatStatus, { base: BASE, headers: HEADERS, spaceId: 7, enabled: true, withSuggestions: true });
+    await chat.settle();
+    await chat.update({ spaceId: 9 });
+    const statuses = calls.slice(mark).filter((call) => call.url === `${BASE}/ai/status`);
+    assert.deepEqual(statuses.map((call) => call.params.space_id), [7, 9]);
+    statuses[1].answer({ space_id: 9, spaces: [], perimeter: { articles_for_ai: 3 } });
+    await chat.settle();
+    statuses[0].answer({ space_id: 7, spaces: [], perimeter: { articles_for_ai: 5 } });
+    await chat.settle();
+    assert.equal(chat.html, '<i>9</i>', 'статус вики, из которой ушли, перетёр нынешний');
+    // И отказ по прежней вике нынешний статус не стирает.
+    await chat.update({ spaceId: 11 });
+    await chat.update({ spaceId: 12 });
+    const more = calls.slice(mark).filter((call) => call.url === `${BASE}/ai/status`).slice(2);
+    more[1].answer({ space_id: 12, spaces: [], perimeter: { articles_for_ai: 1 } });
+    await chat.settle();
+    more[0].refuse(403);
+    await chat.settle();
+    assert.equal(chat.html, '<i>12</i>');
+});

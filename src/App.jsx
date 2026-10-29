@@ -53803,7 +53803,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                следующий обычный заход в раздел открыл бы чужую статью вместо
                списка, и человек не понял бы, откуда она взялась. */
             useEffect(() => {
-                if (view !== 'wiki') setWikiInitialSlug(null);
+                if (view !== 'wiki') {
+                    setWikiInitialSlug(null);
+                    /* То же с переходом во вкладку (колокол, «Открыть в разделе
+                       «Вики»» из мини-чата): неисполненный, он открыл бы
+                       «Помощник» при следующем обычном заходе. И вкладка,
+                       поставленная шарику заранее: ушли раньше, чем раздел её
+                       подтвердил, — при следующем заходе шарик погас бы над
+                       заглушкой загрузки. */
+                    setWikiBellFocus(null);
+                    setWikiTabShown('');
+                }
             }, [view]);
 
             /* Чатам Верификаторов — тот же сброс, по той же причине: иначе
@@ -54030,6 +54040,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             id: Number(focus[2]),
                             nonce: Number(prev?.nonce || 0) + 1,
                         }));
+                        // Шарик над заглушкой загрузки раздела не нужен —
+                        // как у двери мини-чата (onOpenWikiAssistant).
+                        if (focus[1] === 'assistant' && viewRef.current !== 'wiki') {
+                            setWikiTabShown('assistant');
+                        }
                     } else {
                         setWikiInitialSlug(String(target));
                     }
@@ -63921,7 +63936,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     <AssistantOrb
                         user={user}
                         view={view}
-                        wikiTab={wikiTabShown}
+                        // Под QR-замком вместо вкладок вики — заглушка, и
+                        // «Помощника» на экране нет, что бы ни просил адрес.
+                        wikiTab={sensitiveSectionsLocked ? '' : wikiTabShown}
                         wikiSpaceId={wikiSpaceShown}
                         mobileNav={mobileNavGeometry}
                         apiBaseUrl={API_BASE_URL}
@@ -63946,15 +63963,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             setWikiDirectoryFocus({ ...target, nonce: Date.now() });
                             navigateToView('wiki');
                         }}
-                        onOpenWikiAssistant={(chatId) => {
+                        onOpenWikiAssistant={(chatId, spaceId) => {
                             // Дверь колокола «Супервайзер ответил»: вкладка
                             // «Помощник» на разговоре из мини-чата, а без
-                            // разговора — просто вкладка.
+                            // разговора — просто вкладка; в той вике, по
+                            // которой шарик отвечал.
                             setWikiBellFocus((prev) => ({
                                 kind: 'assistant',
                                 id: chatId || null,
+                                space_id: spaceId || null,
                                 nonce: Number(prev?.nonce || 0) + 1,
                             }));
+                            // Раздел не открыт — его код может ещё грузиться, и
+                            // шарик висел бы над заглушкой загрузки; открытый
+                            // раздел сообщит вкладку сам (onTabShown).
+                            if (view !== 'wiki') setWikiTabShown('assistant');
                             navigateToView('wiki');
                         }}
                     />

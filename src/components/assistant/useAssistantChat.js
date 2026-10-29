@@ -40,6 +40,10 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
     const [escalating, setEscalating] = useState(null);   // id реплики, которую передаём
 
     const threadRequest = useRef(0);
+    /* Та же гонка у статуса: шарик идёт за викой, открытой в разделе, и при
+       быстрой смене вики ответ по прежней, опоздав, лёг бы поверх нынешнего —
+       с её подсказками, периметром и именем в подписи панели. */
+    const statusRequest = useRef(0);
     // Для перечитки по тычку: пока вопрос в полёте, лента держит локальный
     // пузырь, и перечитка стёрла бы его до ответа сервера.
     const busyRef = useRef(false);
@@ -47,6 +51,7 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
 
     const loadStatus = useCallback(() => {
         if (!enabled) return Promise.resolve();
+        const request = ++statusRequest.current;
         return axios.get(`${base}/ai/status`, {
             headers,
             // suggest=1 просим только когда есть кому показать подсказки: этот
@@ -54,11 +59,16 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
             // «показываться ли», и лишний запрос к базе там ни к чему.
             params: { space_id: spaceId, suggest: withSuggestions ? 1 : undefined },
         })
-            .then((r) => { setStatus(r.data); setStatusError(null); })
+            .then((r) => {
+                if (request !== statusRequest.current) return;
+                setStatus(r.data);
+                setStatusError(null);
+            })
             // Ошибку статуса сохраняем, а не гасим в null: по её коду вызывающий
             // отличает «отдел без вики» и «нужен QR» от «сервер прилёг», и
             // рисует замок, а не пустой чат.
             .catch((e) => {
+                if (request !== statusRequest.current) return;
                 setStatus(null);
                 setStatusError({
                     code: e?.response?.data?.code || null,

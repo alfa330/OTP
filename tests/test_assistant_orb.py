@@ -155,7 +155,9 @@ class MountTests(unittest.TestCase):
         # на вкладке «Помощник», где тот же чат и так во весь экран. Как это
         # работает на деле — tests/assistant_orb_wiki_tab.test.mjs.
         self.assertNotIn("'wiki'", views)
-        self.assertIn("|| (view === 'wiki' && wikiTab === WIKI_ASSISTANT_TAB)", self.orb)
+        self.assertIn("const onWikiAssistantTab = (view, wikiTab) => view === 'wiki'"
+                      " && wikiTab === WIKI_ASSISTANT_TAB;", self.orb)
+        self.assertIn('|| onWikiAssistantTab(view, wikiTab);', self.orb)
         self.assertIn("const WIKI_ASSISTANT_TAB = 'assistant';", self.orb)
         self.assertIn('&& !isSuppressed(view, wikiTab)', self.orb)
 
@@ -173,10 +175,13 @@ class MountTests(unittest.TestCase):
         self.assertIn('onSpaceShown={setWikiSpaceShown}', wiki)
         orb = self.app[self.app.index('<AssistantOrb'):]
         orb = orb[:orb.index('/>\n')]
-        self.assertIn('wikiTab={wikiTabShown}', orb)
+        # Под QR-замком вместо вкладок заглушка: «Помощника» на экране нет,
+        # что бы ни просил адрес, — шарик с замком обязан остаться.
+        self.assertIn("wikiTab={sensitiveSectionsLocked ? '' : wikiTabShown}", orb)
         self.assertIn('wikiSpaceId={wikiSpaceShown}', orb)
         seed = self.app[self.app.index('const [wikiTabShown, setWikiTabShown] = useState('):]
         seed = seed[:seed.index('});')]
+        self.assertIn('const search = window.location.search;', seed)
         self.assertLess(seed.index('readArticleSlugFromSearch(search)'),
                         seed.index('readWikiTabFromSearch(search)'),
                         'ссылка на статью обязана быть сильнее ссылки на вкладку')
@@ -185,12 +190,55 @@ class MountTests(unittest.TestCase):
         """Раньше кнопка уводила на главную вики. Теперь шарик там остаётся, и
         такой переход выглядел бы как «панель закрылась, ничего не случилось»,
         а изнутри вики кнопка не делала бы вовсе ничего."""
-        self.assertIn('onOpenWikiAssistant?.(chat.activeId || null);', self.orb)
-        door = self.app[self.app.index('onOpenWikiAssistant={(chatId) => {'):]
+        full = self.orb[self.orb.index('const openFull = useCallback('):]
+        full = full[:full.index(']);') + 3]
+        call = full.index('onOpenWikiAssistant?.(chat.activeId || null, spaceId);')
+        # Номер разговора — ТЕКУЩИЙ: без него в зависимостях кнопка замкнула бы
+        # первый, пустой, и открывала бы «Помощник» без разговора.
+        deps = re.search(r'\}, \[([^\]]*)\]\);$', full)
+        self.assertIsNotNone(deps)
+        self.assertIn('chat.activeId', [dep.strip() for dep in deps.group(1).split(',')])
+        # Пока ответ пишется — двери нет; откреплённое окно уступает место вкладке.
+        self.assertLess(full.index('if (chat.busy) return;'), call)
+        self.assertLess(full.index('if (pipWindow) closePip();'), call)
+        door = self.app[self.app.index('onOpenWikiAssistant={(chatId, spaceId) => {'):]
         door = door[:door.index("navigateToView('wiki');")]
         self.assertIn("kind: 'assistant'", door)
         self.assertIn('id: chatId || null', door)
+        self.assertIn('space_id: spaceId || null', door)
         self.assertIn('setWikiBellFocus((prev) => ({', door)
+        # Раздел ещё не открыт — его код может грузиться: вкладку шарику
+        # сообщает сам портал, иначе шарик висел бы над заглушкой загрузки.
+        self.assertIn("if (view !== 'wiki') setWikiTabShown('assistant');", door)
+
+    def test_колокол_и_уход_из_вики_не_оставляют_шарик_погашенным(self):
+        """Колокол «Супервайзер ответил» открывает «Помощник» той же дверью —
+        и так же заранее сообщает вкладку. Неисполненная просьба и вкладка,
+        поставленная заранее, снимаются при уходе из вики: иначе следующий
+        обычный заход открыл бы «Помощник» или погасил бы шарик над заглушкой."""
+        bell = self.app[self.app.index('const focus = /^(questions|assistant):(\\d+)$/'
+                                       '.exec(String(target));'):]
+        bell = bell[:bell.index('} else {')]
+        self.assertIn("if (focus[1] === 'assistant' && viewRef.current !== 'wiki') {", bell)
+        self.assertIn("setWikiTabShown('assistant');", bell)
+        reset = re.search(r"if \(view !== 'wiki'\) \{\s*setWikiInitialSlug\(null\);(.*?)\}\s*\}, \[view\]\);",
+                          self.app, re.S)
+        self.assertIsNotNone(reset, 'сброс при уходе из вики исчез')
+        self.assertIn('setWikiBellFocus(null);', reset.group(1))
+        self.assertIn("setWikiTabShown('');", reset.group(1))
+
+    def test_вкладка_помощник_закрывает_мини_чат(self):
+        """Вкладка — тот же чат во весь экран: мини-чат ею заменён, а не отложен,
+        и при возврате на главную не раскрывается сам поверх статей."""
+        self.assertIn('const onAssistantTab = onWikiAssistantTab(view, wikiTab);', self.orb)
+        self.assertRegex(self.orb, r'useEffect\(\(\) => \{\s*if \(onAssistantTab\) setOpen\(false\);'
+                                   r'\s*\}, \[onAssistantTab\]\);')
+
+    def test_подпись_мини_чата_называет_вику_ответа(self):
+        """Как имя считается — tests/assistant_orb_wiki_tab.test.mjs; здесь —
+        что шарик его считает по пробе и отдаёт панели."""
+        self.assertIn('answeringSpaceName(chat.status, askSpace), [chat.status, askSpace]', self.orb)
+        self.assertIn('spaceName={spaceName}', self.orb)
 
     def test_слой_ниже_полноэкранных_режимов(self):
         """84 держит шарик под всем, что занимает экран целиком.

@@ -184,6 +184,15 @@ const bellTabOf = (focus) => {
     return focus?.id ? 'questions' : '';
 };
 
+/** Вика, в которую просьба шарика зовёт ПРЕЖДЕ вкладки; null — остаёмся в
+ *  открытой. Чужую или исчезнувшую вику не открываем: просьба сработает в
+ *  той, что есть, или погаснет по её набору вкладок. */
+const bellSpaceOf = (focus, spaces, activeSpace) => {
+    const wanted = Number(focus?.space_id) || null;
+    if (!wanted || wanted === activeSpace?.id) return null;
+    return spaces.some((sp) => sp.id === wanted) ? wanted : null;
+};
+
 /* Место ряда вкладок на время первого ответа /ping — та же подложка, пустая.
  *
  * Разметка НАСТОЯЩЕГО ряда: те же классы у подложки и та же кнопка внутри,
@@ -772,10 +781,22 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     /* Пришли из колокола по «Вопросам операторов». Вкладку открываем, только
        когда она уже есть в наборе: права приезжают с ping ПОЗЖЕ первого
        рендера, и раньше времени эффект выше вернул бы человека на главную.
-       До этого просьба просто ждёт, а гасится — когда выполнена. */
+       До этого просьба просто ждёт, а гасится — когда выполнена.
+
+       Шарик приходит той же дверью и называет вику, по которой отвечал. Она
+       бывает не той, что открыта: в открытой «Помощник» выключен, и сервер
+       подставил первую доступную. Тогда сначала в неё — как источник-справочник
+       из соседнего пространства (openDirectory), — а вкладку откроет следующий
+       проход, уже по её набору. Исполненная просьба не повторяется: иначе
+       смена вики в шапке возвращала бы человека туда, откуда он ушёл. */
+    const bellSpace = bellSpaceOf(bellFocus, spaces, activeSpace);
     useLayoutEffect(() => {
         const target = bellTabOf(bellFocus);
-        if (!target) return;
+        if (!target || bellDone === bellFocus) return;
+        if (bellSpace) {
+            setSpaceId(bellSpace);
+            return;
+        }
         if (!tabs.some((t) => t.key === target)) {
             /* Набор окончательный (свежий ответ получен), а вкладки в нём нет:
                просьбу гасим, как и вкладку из адреса. Непогашенная, она
@@ -790,7 +811,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // Шарик без разговора просит только вкладку — открывать в ней нечего.
         else if (bellFocus.id) setAssistantChat({ chatId: bellFocus.id, nonce: bellFocus.nonce });
         onBellFocusConsumed?.();
-    }, [bellFocus, tabs, ready, loading, onBellFocusConsumed]);
+    }, [bellFocus, bellDone, bellSpace, tabs, ready, loading, onBellFocusConsumed]);
 
     /* Источник-справочник из шарика помощника (App.onOpenWikiTarget): вкладка
        «Офисы»/«Города» на записи. Ждём ОТВЕТА /ping — свежего или запомненного
@@ -845,7 +866,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const bellTab = bellTabOf(bellFocus);
     const bellPending = !!bellTab && bellDone !== bellFocus
         // До ответа набора ещё нет: уйдут ли — неизвестно, и за данными не спешим.
-        && (!ready || tabs.some((t) => t.key === bellTab));
+        // Зовут в другую вику — уйдут тоже: вкладку откроют уже там.
+        && (!ready || !!bellSpace || tabs.some((t) => t.key === bellTab));
     const leavingLibrary = !!requestedTab
         || bellPending
         || (!!directoryFocus?.tab && directoryDone !== directoryFocus);
@@ -981,9 +1003,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        «Помощник» (перезагрузка на нём, «Открыть в разделе «Вики»» из
        мини-чата) шарик успевал бы показаться до ответа /ping и исчезнуть с
        ним. Не исполнится просьба — встанет главная, и шарик просто появится.
+       Просьба, которой не дал исполниться отказ или сбой /ping, «Помощником»
+       не считается: на экране карточка ошибки, а не чат.
        useLayoutEffect: шарик гаснет тем же кадром, каким встаёт вкладка. Уйдя
        из раздела, сообщаем, что вкладки больше нет. */
-    const shownTab = requestedTab || (bellPending ? bellTab : '') || bodyTab;
+    const pendingTab = error ? '' : (requestedTab || (bellPending ? bellTab : ''));
+    const shownTab = pendingTab || bodyTab;
     const reportTab = useStableCallback(onTabShown);
     useLayoutEffect(() => { reportTab(shownTab); }, [shownTab, reportTab]);
     useLayoutEffect(() => () => reportTab(''), [reportTab]);

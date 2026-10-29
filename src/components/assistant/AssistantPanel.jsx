@@ -233,12 +233,18 @@ export default function AssistantPanel({
                         >
                             <History size={15} />
                         </button>
+                        {/* Пока ответ пишется, кнопка молчит: вопрос с ответом
+                            сервер сохраняет одним махом в конце, и вкладка
+                            открыла бы разговор без них (AssistantOrb: openFull). */}
                         <button
                             type="button"
                             onClick={onOpenFullAssistant}
-                            className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                            disabled={chat.busy}
+                            className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400"
                             aria-label="Открыть помощника в разделе «Вики»"
-                            title="Открыть в разделе «Вики»"
+                            title={chat.busy
+                                ? 'Дождитесь ответа — разговор откроется вместе с ним'
+                                : 'Открыть в разделе «Вики»'}
                         >
                             <ArrowUpRight size={15} />
                         </button>
