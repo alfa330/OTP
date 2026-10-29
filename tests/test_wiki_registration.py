@@ -92,6 +92,23 @@ CITY_NAMES = ('Аксай', 'Актау', 'Актобе', 'Алматы', 'Ас�
               'Рудный', 'Семей', 'Талдыкорган', 'Тараз', 'Темиртау', 'Туркестан', 'Уральск',
               'Усть-Каменогорск', 'Шымкент', 'Экибастуз', 'Кокшетау')
 
+# Как операторы пишут город: «из Рудного», «в Рудном».
+CITY_CASES = {
+    'Аксай': ('Аксая', 'Аксае'), 'Актау': ('Актау', 'Актау'), 'Актобе': ('Актобе', 'Актобе'),
+    'Алматы': ('Алматы', 'Алматы'), 'Астана': ('Астаны', 'Астане'), 'Атырау': ('Атырау', 'Атырау'),
+    'Жанаозен': ('Жанаозена', 'Жанаозене'), 'Жезказган': ('Жезказгана', 'Жезказгане'),
+    'Караганда': ('Караганды', 'Караганде'), 'Кентау': ('Кентау', 'Кентау'),
+    'Костанай': ('Костаная', 'Костанае'), 'Кызылорда': ('Кызылорды', 'Кызылорде'),
+    'Павлодар': ('Павлодара', 'Павлодаре'), 'Петропавловск': ('Петропавловска', 'Петропавловске'),
+    'Рудный': ('Рудного', 'Рудном'), 'Семей': ('Семея', 'Семее'),
+    'Талдыкорган': ('Талдыкоргана', 'Талдыкоргане'), 'Тараз': ('Тараза', 'Таразе'),
+    'Темиртау': ('Темиртау', 'Темиртау'), 'Туркестан': ('Туркестана', 'Туркестане'),
+    'Уральск': ('Уральска', 'Уральске'),
+    'Усть-Каменогорск': ('Усть-Каменогорска', 'Усть-Каменогорске'),
+    'Шымкент': ('Шымкента', 'Шымкенте'), 'Экибастуз': ('Экибастуза', 'Экибастузе'),
+    'Кокшетау': ('Кокшетау', 'Кокшетау'),
+}
+
 
 def _cities(registration_rules=wiki_cities.DEFAULT_REGISTRATION):
     cities = [{'id': index + 1, 'name': name, 'registration_city_ids': []}
@@ -287,6 +304,37 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(CATALOG.block(_city('Темиртау'))['state'], 'mixed')
         self.assertEqual(registration.other_cities(CATALOG.block(_city('Темиртау'))), ['Караганда'])
 
+    def test_every_city_and_every_park_follow_the_rule(self):
+        """Все 25 городов × все бренды (владелец 29.10.2026: «проверил не только
+        на жана и на других городах?»): только диспетчерские названного парка;
+        своя — первой, затем города списка по порядку, затем ближайшая."""
+        for city in CATALOG.cities:
+            targets = [target['id'] for target in CATALOG.targets(city)]
+            for key, brand in CATALOG.brands.items():
+                label = '%s × %s' % (city['name'], brand['name'])
+                pool = CATALOG.by_brand.get(key) or []
+                found = CATALOG.resolve(city, key)
+                if not pool:
+                    self.assertIsNone(found, label)
+                    continue
+                self.assertTrue(found['dispatchers'], label)
+                for dispatcher in found['dispatchers']:
+                    self.assertIn(dispatcher, pool, label)
+                    self.assertEqual(dispatcher['city_id'], found['city']['id'], label)
+                served = {d['city_id'] for d in pool if d.get('city_id')}
+                expected = city['id'] if city['id'] in served else next(
+                    (target for target in targets if target in served), None)
+                if expected is not None:
+                    self.assertEqual((found['city']['id'], bool(found.get('nearest'))),
+                                     (expected, False), label)
+                    continue
+                self.assertTrue(found['nearest'], label)
+                km = [registration.distance_km(city['name'], CATALOG.cities_by_id[other]['name'])
+                      for other in served]
+                self.assertAlmostEqual(
+                    registration.distance_km(city['name'], found['city']['name']), min(km),
+                    msg=label)
+
     def test_block_of_a_hub_names_who_registers_here(self):
         block = CATALOG.block(_city('Караганда'))
         self.assertEqual(block['state'], 'own')
@@ -424,6 +472,50 @@ class QuestionTest(unittest.TestCase):
         follow = 'куда зарегать водителя айтакси с рудного а жана такси?'
         rows = _rows('а жана такси?', search_query=follow)
         self.assertIn('парк Jana такси', rows[0]['text'])
+
+    def test_every_city_with_every_park_spelling(self):
+        """Все города в падежах × написания парков из журнала операторов:
+        город и парк узнаются. Не узнанный парк — это ответ «город без парка»,
+        как с «жана такси»: Костанай вместо диспетчерской парка."""
+        spellings = (
+            ('iTaxi', 'айтакси'), ('Taxi24', 'такси 24'), ('Департамент', 'департамент такси'),
+            ('Честный', 'адал'), ('Global', 'глобал'), ('iPartner', 'ай партнер'),
+            ('Бизнес Партнер', 'бизнес партнер'), ('Халык', 'халык'), ('Qazaq', 'казак такси'),
+            ('Аманат', 'аманат'), ('Стабильный', 'стабильный'), ('Jana такси', 'жана такси'),
+            ('2dongelek', 'еки донгелек'), ('2dongelek', 'екі дөңгелек'),
+            ('Тенге Такси', 'тенге такси'), ('Salam такси', 'салам такси'),
+            ('Ноль такси', '0 такси'), ('Ноль такси', 'нольтакси'), ('iTaxi VIP', 'айтакси вип'),
+            ('Hokage (Wolt)', 'wolt'))
+        templates = ('куда зарегать водителя {park} из {gen}',
+                     'водитель обращается с {park}, а сам в {loc}, куда его регистрировать')
+        for index, (name, (gen, loc)) in enumerate(sorted(CITY_CASES.items())):
+            for park, spelling in spellings:
+                question = templates[index % 2].format(park=spelling, gen=gen, loc=loc)
+                decisions = registration.plan(registration.analyze(question), CATALOG)
+                self.assertEqual([(d['city']['name'], d['brand'] and d['brand']['key'])
+                                  for d in decisions], [(name, 'p:%d' % PARK[park])], question)
+
+    def test_greetings_money_and_language_are_not_parks(self):
+        """Журнал помощника 29.10.2026: «Саламатсыз ба» читалось Salam такси,
+        «2000 тенге» — Тенге Такси, «қазақша» — Qazaq. С «ближайшей» такой
+        парк отправлял водителя из Рудного в Алматы за 1490 км."""
+        for question in ('Саламатсыз ба, водитель из рудного куда регистрировать?',
+                         'Салам! куда зарегать водителя с рудного',
+                         'водитель из рудного, на балансе 2000 тенге, куда регистрировать?',
+                         'қазақша жауап беріңізші, водитель с рудного куда регать',
+                         'Қазақстан бойынша Рудныйдан келген жүргізушіні қайда тіркеу керек',
+                         'комиссия ноль процентов, водитель из рудного куда регистрировать',
+                         'глобальный сбой, куда регистрировать водителя из рудного',
+                         'водитель из рудного, карта халык банк, куда регистрировать',
+                         'цепочка заказов, водитель из рудного куда регистрировать'):
+            rows = self.assertAnswers(question, 'Рудный › Регистрация водителей',
+                                      'регистрировать в городе Костанай')
+            self.assertNotIn(', парк ', rows[0]['text'], question)
+
+    def test_kazakh_name_of_karaganda(self):
+        self.assertAnswers('Қарағандыдан келген жүргізушіні iTaxi-ге қай қалада тіркеу керек?',
+                           'Караганда › Регистрация водителей', 'парк iTaxi',
+                           'регистрировать в городе Караганда')
 
     def test_named_park_spelled_by_its_dispatcher(self):
         """«Адал» и «EKI DONGELEK» — так их называют операторы, и так названы

@@ -227,6 +227,8 @@ CITY_ALIASES = {
     'джезказган': 'жезказган',
     'талдыкурган': 'талдыкорган',
     'кзыл орда': 'кызылорда', 'кызыл орда': 'кызылорда',
+    # Казахское «Қарағанды»: без него «Қарағандыдан» (из Караганды) не находилось.
+    'караганды': 'караганда',
 }
 
 _VOWELS = 'аеиоуыэюя'
@@ -404,7 +406,25 @@ def _park_word_forms(word):
     # начале бренда читается «ай».
     if len(word) > 2 and word[0] == 'i' and re.match(r'[a-z]', word[1]):
         forms.add('ай' + _cyrillic(word[1:]))
+    # Общий транслит читает «ng» казахской «ң» («dongelek» → «донелек»), а
+    # операторы пишут «донгелек»: «еки донгелек» не находило 2dongelek.
+    if 'ng' in word:
+        forms.add(normalize('нг'.join(_cyrillic(part) for part in word.split('ng'))))
     return {form.replace(' ', '') for form in forms if form}
+
+
+# Названия-обычные слова (журнал помощника, 29.10.2026): «2000 тенге» — деньги,
+# «Саламатсыз ба» — приветствие, «қазақша» — «по-казахски», «комиссия ноль» —
+# число. Кириллицей такое слово — парк, только когда рядом «такси»/«таксопарк»/
+# «парк» («тенге такси», «в парке казак»), перед ним «водитель» или в запросе
+# больше ничего нет. Так операторы и пишут: в журнале все упоминания этих парков
+# — с таким словом. Латиницей («Salam», «Tenge», «Qazaq») пишут бренд — она
+# парк и сама по себе.
+_COMMON_PARK_FORMS = frozenset(('тенге', 'салам', 'казак', 'ноль'))
+_PARK_NEIGHBOUR = re.compile(r'(?:такси|taxi|park|парк\w{0,3}|такс[ао]п\w*|такоспарк\w*)')
+_DRIVER_WORD = re.compile(r'водител\w*')
+# «Халык банк» — банк, а не парк Халык.
+_BANK = re.compile(r'(?:банк|bank)\w*')
 
 
 def _park_alternatives(name):
@@ -435,14 +455,23 @@ def park_word_forms(word):
     return _park_word_forms(word)
 
 
-# Как парк называют кириллицей, если транслит его не находит. «Jana» по-английски
-# читается «джана», а операторы пишут «жана такси» (журнал помощника, 29.10.2026:
-# из 8 вопросов с отдельным «жана» 6 — про парк, и во всех шести дальше идёт
-# «такси»/«таксапарк»). Только вместе с этим словом: голое «жана» — это казахское
-# «жаңа», «новый» («жаңа жүргізуші», «жаңа жасай алмадым»).
+# Как парк пишут в вопросах, если транслит его не находит (журнал помощника,
+# 29.10.2026). Порядок важен: сначала слитное «жанатакси» делится на два слова.
 PARK_PHRASE_ALIASES = (
+    # «нольтакси», «жанатакси» — как раздельно.
+    (re.compile(r'(?<![%s])([а-я]{2,}?)(?=такси(?![%s]))' % (_LETTERS, _LETTERS)), r'\1 '),
+    # «Jana» по-английски читается «джана», а операторы пишут «жана такси»: из
+    # 8 вопросов с отдельным «жана» 6 — про парк, и во всех шести дальше идёт
+    # «такси»/«таксапарк». Только вместе с этим словом: голое «жана» — это
+    # казахское «жаңа», «новый» («жаңа жүргізуші», «жаңа жасай алмадым»).
     (re.compile(r'(?<![%s])жана\s+(?=(?:такси|таксопарк|таксапарк|taxi)(?![%s]))'
                 % (_LETTERS, _LETTERS)), 'jana '),
+    # «0 такси» — Ноль такси.
+    (re.compile(r'(?<![%s])0\s*(?=(?:такси|taxi)(?![%s]))' % (_LETTERS, _LETTERS)), 'ноль '),
+    # «Екі дөңгелек» — «два колеса», парк 2dongelek; с русской раскладки «екі»
+    # пишут «еки» и «екы».
+    (re.compile(r'(?<![%s])(?:ек[иы]|eki)\s*(?=(?:донгелек|dongelek)(?![%s]))'
+                % (_LETTERS, _LETTERS)), '2'),
 )
 
 
@@ -458,27 +487,67 @@ def _park_variants(variants):
     return found
 
 
+def _glued(form, words):
+    """form в слитном написании («ай такси» — «айтакси», «департамента»): с
+    начала слова и с хвостом не длиннее окончания. Иначе «цепочка заказов»
+    содержала «казак», а «глобальный» — «глобал»."""
+    blob = ''.join(words)
+    starts, ends, position = set(), [], 0
+    for word in words:
+        starts.add(position)
+        position += len(word)
+        ends.append(position)
+    start = blob.find(form)
+    while start != -1:
+        stop = start + len(form)
+        if start in starts and next(end for end in ends if end >= stop) - stop <= 3:
+            return True
+        start = blob.find(form, start + 1)
+    return False
+
+
+def _beside_park_word(forms, sequences):
+    """Обычное слово названо как парк: рядом «такси»/«парк», перед ним
+    «водитель» или оно одно."""
+    for words in sequences:
+        if len(words) == 1 and words[0] in forms:
+            return True
+        for index, word in enumerate(words):
+            if word not in forms:
+                continue
+            before = words[index - 1] if index else ''
+            after = words[index + 1] if index + 1 < len(words) else ''
+            if (_PARK_NEIGHBOUR.fullmatch(before) or _PARK_NEIGHBOUR.fullmatch(after)
+                    or _DRIVER_WORD.fullmatch(before)):
+                return True
+    return False
+
+
+def _word_named(word, sequences, tokens):
+    forms = _park_word_forms(word)
+    plain = forms - _COMMON_PARK_FORMS
+    if plain & tokens:
+        return True
+    if len(word) >= 4 and any(_glued(form, words) for form in plain if len(form) >= 5
+                              for words in sequences):
+        return True
+    return _beside_park_word(forms & _COMMON_PARK_FORMS, sequences)
+
+
 def match_parks(analysis, parks):
     """Парки, названные в запросе: все значимые слова названия на месте."""
-    tokens = set()
-    compact = []
+    sequences = []
     for value in _park_variants(analysis['variants']):
-        tokens.update(value.split())
-        compact.append(value.replace(' ', ''))
+        words = value.split()
+        sequences.append([word for index, word in enumerate(words)
+                          if not (index + 1 < len(words) and _BANK.fullmatch(words[index + 1]))])
+    tokens = {word for words in sequences for word in words}
     found = []
     for park in parks:
         for words in _park_alternatives(park.get('name')):
-            ok = True
-            for word in words:
-                forms = _park_word_forms(word)
-                if forms & tokens:
-                    continue
-                if len(word) >= 4 and any(form in blob for form in forms if len(form) >= 5
-                                          for blob in compact):
-                    continue
-                ok = False
-                break
-            if ok:
+            # Слитно («бизнеспартнер») — как раздельно.
+            if all(_word_named(word, sequences, tokens) for word in words) or (
+                    len(words) > 1 and _word_named(''.join(words), sequences, tokens)):
                 found.append(park)
                 break
     # «iTaxi VIP» и «iTaxi» оба подходят под «itaxi vip» — остаётся тот, чьё

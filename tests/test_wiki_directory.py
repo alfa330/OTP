@@ -281,6 +281,55 @@ class ParkTest(unittest.TestCase):
         self.assertEqual(self.names('itaxi vip офис'), ['iTaxi VIP'])
         # «бизнес» — тариф, а не «Бизнес Партнер»: нужны все слова названия.
         self.assertEqual(self.names('бизнес офис'), [])
+        self.assertEqual(self.names('бизнеспартнер адрес'), ['Бизнес Партнер'])
+
+    def test_operator_spellings_from_the_log(self):
+        """Журнал помощника 29.10.2026: так операторы пишут парки, а транслит
+        их не находил («dongelek» читался «донелек», «0» — числом)."""
+        parks = [{'id': 1, 'name': '2dongelek'}, {'id': 2, 'name': 'Ноль такси'},
+                 {'id': 3, 'name': 'Jana такси'}]
+
+        def names(query):
+            return [park['name'] for park in directory.match_parks(directory.analyze(query), parks)]
+        for query in ('почему у еки донгелек так много комисии ?', 'екы донгелек коммисяи?',
+                      'екі дөңгелек', 'коммисия Eki Dongelek', '2 донгелек'):
+            self.assertEqual(names(query), ['2dongelek'], query)
+        for query in ('На чем зарабатывает таксопарк Нольтакси',
+                      'какая комиссия при выводе средств в тасопарке 0 такси', 'ноль такси акции'):
+            self.assertEqual(names(query), ['Ноль такси'], query)
+        self.assertEqual(names('жанатакси акции'), ['Jana такси'])
+        # «Дөңгелек» без «екі» — просто «колесо».
+        self.assertEqual(names('дөңгелек ауыстыру'), [])
+
+    def test_common_words_are_parks_only_beside_a_park_word(self):
+        """«2000 тенге», «Саламатсыз ба», «қазақша», «комиссия ноль» — не парки
+        (журнал помощника 29.10.2026). Рядом «такси»/«парк», после «водитель»
+        или одним словом — парки; латиница — бренд и сама по себе."""
+        parks = [{'id': 1, 'name': 'Тенге Такси'}, {'id': 2, 'name': 'Salam такси'},
+                 {'id': 3, 'name': 'Qazaq'}, {'id': 4, 'name': 'Ноль такси'},
+                 {'id': 5, 'name': 'Халык'}, {'id': 6, 'name': 'Global'},
+                 {'id': 7, 'name': 'iTaxi'}]
+
+        def names(query):
+            return [park['name'] for park in directory.match_parks(directory.analyze(query), parks)]
+        for query in ('по акции забирай 2000 тенге', 'комиссия тенге',
+                      'Саламатсыз ба! комент не виден', 'Саламалейкум', 'Салам, как дела',
+                      'қазақша жауап беріңізші', 'Қазақстан бойынша', 'цепочка заказов',
+                      'комиссия ноль процентов', 'вывод на халык банк', 'глобальный сбой',
+                      'Как сменить авто в приложении ТаксиПро'):
+            self.assertEqual(names(query), [], query)
+        for query, park in (('тенге такси акции', 'Тенге Такси'),
+                            ('акции для tenge taxi', 'Тенге Такси'),
+                            ('инфо про тенге таксопарк', 'Тенге Такси'),
+                            ('тенге', 'Тенге Такси'),
+                            ('Какой процент комиссии в парке Салам Такси?', 'Salam такси'),
+                            ('salam адрес', 'Salam такси'),
+                            ('Какие акции есть в парке казак?', 'Qazaq'),
+                            ('в таксопар Qazaq действует акция', 'Qazaq'),
+                            ('водитель ноль из рудного', 'Ноль такси'),
+                            ('комиссия халык', 'Халык'), ('global адрес', 'Global'),
+                            ('itaxi адрес', 'iTaxi')):
+            self.assertEqual(names(query), [park], query)
 
 
 class PlanTest(unittest.TestCase):
