@@ -17,8 +17,11 @@
 на листе «Звонки», — фильтр по оператору в Excel даёт ровно их.
 
 Номер водителя — только маской (service.mask_phone), как в журнале: полный номер из раздела не
-выходит ни в одну ручку, а файл — тоже ручка. ИИН в файл не идёт. Звонки на номера «Реестра
-тестовых номеров» не попадают — как и в сводку «Операторы».
+выходит ни в одну ручку, а файл — тоже ручка. ИИН и ID водителя — полностью (владелец, 29.10.2026:
+«в детализацию и в отчеты добавить id и иин водителя»): по ним водителя находят в Sapar, в Fleet и в
+выгрузках iTaxi. ID — Yandex Driver Id из Sapar (driver_ids.py); аккаунтов несколько — все, через
+запятую; Sapar водителя не знает — пусто. Звонки на номера «Реестра тестовых номеров» не попадают —
+как и в сводку «Операторы».
 
 Отчёт главы по своей группе (владелец, 15.10.2026: «глава Регионов мог выгружать отчеты только по
 своей группе»; service.DIAL_LIST_GROUP_REPORT_HEAD_CODES) — тот же файл, но только звонки тех, кто в
@@ -42,7 +45,7 @@ from openpyxl.utils import get_column_letter
 
 from test_numbers import keys as test_keys
 
-from . import service
+from . import driver_ids, service
 
 # Сколько дней за раз. Месяц — естественная единица отчёта (зарплата, итоги месяца), и в 31 день
 # помещается любой календарный месяц. Двойник — EXPORT_MAX_DAYS в callsExport.js.
@@ -88,6 +91,8 @@ COLUMNS = (
     ("operator", "Оператор", 28),
     ("line", "Линия", 9),
     ("driver", "Водитель", 30),
+    ("driver_ids", "ID водителя", 38),
+    ("iin", "ИИН", 15),
     ("phone", "Номер", 17),
     ("result", "Результат", 19),
     ("talk_sec", "Разговор", 10),
@@ -96,8 +101,9 @@ COLUMNS = (
     ("success", "Успешка", 10),
     ("note", "Подробности", 46),
 )
-# Линия — цифрами, но текстом: так она и хранится, и так её показывает раздел.
-TEXT_COLUMNS = ("line",)
+# Цифрами, но текстом: линия так хранится и так её показывает раздел, у ИИН числом пропал бы ведущий
+# ноль, ID — код, а не число.
+TEXT_COLUMNS = ("line", "driver_ids", "iin")
 
 OPERATOR_COLUMNS = (
     ("Оператор", 30),
@@ -119,6 +125,7 @@ SECTION_FONT = Font(bold=True, size=11)
 TOTAL_FILL = PatternFill("solid", fgColor="F1F5F9")
 TOTAL_FONT = Font(bold=True)
 WRAP_TOP = Alignment(wrap_text=True, vertical="top")
+WRAP = Alignment(wrap_text=True)
 
 DATETIME_FORMAT = "DD.MM.YYYY HH:MM:SS"
 # Разговор — долей суток с форматом длительности: Excel показывает «3:25» и честно складывает.
@@ -132,7 +139,7 @@ _CALLS_SELECT = """
     SELECT t.requested_at, t.operator_id, COALESCE(u.name, ''), t.internal_number, t.state,
            t.disposition, t.billsec, t.cancelled, t.auto_hangup, t.talk_detected, t.ring_timeout_at,
            t.api_error, l.full_name, l.phone_norm, o.name, os.name, COALESCE(t.operator_comment, ''),
-           COALESCE(l.success_attempt_id = t.id, FALSE)
+           COALESCE(l.success_attempt_id = t.id, FALSE), l.iin, COALESCE(l.yandex_driver_ids, '')
     FROM dial_list_attempts t
     JOIN dial_list_assignments a ON a.id = t.assignment_id
     JOIN dial_list_leads l ON l.id = a.lead_id
@@ -254,7 +261,7 @@ def call_from_row(r):
     """Строка CALLS_SQL → звонок словарём (одно место, где колонки запроса знают по номерам)."""
     (requested_at, operator_id, operator_name, internal_number, state, disposition, billsec,
      cancelled, auto_hangup, talk_detected, ring_timeout_at, api_error, full_name, phone_norm,
-     outcome_name, subtype_name, comment, is_success) = r
+     outcome_name, subtype_name, comment, is_success, iin, yandex_ids) = r
     auto_hangup = auto_hangup or ""
     result = service.attempt_outcome(state or "", disposition or "", billsec, auto_hangup, talk_detected,
                                      cancelled=bool(cancelled))
@@ -264,6 +271,8 @@ def call_from_row(r):
         "operator": operator_name or "",
         "line": internal_number or "",
         "driver": full_name or "",
+        "driver_ids": yandex_ids or "",
+        "iin": iin or "",
         "phone": service.mask_phone(phone_norm),
         "result": result,
         # Разговор — только у дозвона: у сообщения сети Binotel пишет длительность автоответчика.
@@ -344,6 +353,15 @@ def _header(sheet, titles, widths):
     sheet.append(row)
 
 
+def _ids_cell(sheet, value):
+    """ID водителя. Аккаунтов несколько — перенос у запятой: каждый ID своей строкой в ячейке, второй
+    не прячется за краем колонки."""
+    cell = _text(sheet, value, keep_format=True)
+    if cell is not None and driver_ids.SEPARATOR in value:
+        cell.alignment = WRAP
+    return cell
+
+
 def _call_cells(sheet, call):
     at = WriteOnlyCell(sheet, value=call["at"])
     at.number_format = DATETIME_FORMAT
@@ -352,6 +370,8 @@ def _call_cells(sheet, call):
         _text(sheet, call["operator"]),
         _text(sheet, call["line"], keep_format=True),
         _text(sheet, call["driver"]),
+        _ids_cell(sheet, call["driver_ids"]),
+        _text(sheet, call["iin"], keep_format=True),
         _text(sheet, call["phone"]),
         _text(sheet, RESULT_LABELS.get(call["result"], call["result"])),
         _duration(sheet, call["talk_sec"]),
@@ -428,6 +448,9 @@ def _fill_context(sheet, *, department, day_from, day_to, generated_at, generate
         ("Отменён до ответа", "Оператор сам завершил звонок до ответа водителя — попытка не засчитана."),
         ("Ошибка АТС", "Звонок не начался; почему — в «Подробностях»."),
         ("Успешка", "Водитель подписал документы после этого разговора — успешка засчитана оператору."),
+        ("ID водителя", "Yandex Driver Id из Sapar — тот же, что в выгрузке услуг iTaxi. Аккаунтов у водителя "
+                        "несколько — все, через запятую. Пусто — Sapar водителя не знает."),
+        ("ИИН", "Полностью, из базы водителей раздела."),
         ("Номер", "Только последние четыре цифры, как в журнале раздела."),
         ("Операторы", "Итоги по тем же звонкам, что на листе «Звонки»; «Дозвон» — доля дозвонов "
                       "от всех звонков, как на вкладке «Операторы»."),

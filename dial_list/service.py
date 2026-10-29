@@ -2552,7 +2552,8 @@ class DialListService:
 
     # ------------------------------------------------------------ лиды отдела
     # Повторная загрузка того же номера с ДРУГИМ ИИН переписывает ИИН (и сбрасывает
-    # проверку), пока водитель не подписал: подписавший остаётся как был.
+    # проверку и ID водителя — его заново спросит driver_ids.py), пока водитель не
+    # подписал: подписавший остаётся как был.
     # Город (19.10.2026) — из колонки «город», если она есть; пустой не затирает прежний.
     _IMPORT_SQL = """
         INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id,
@@ -2573,7 +2574,9 @@ class DialListService:
             sign_error = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
                               THEN '' ELSE dial_list_leads.sign_error END,
             sign_checked_at = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
-                                   THEN NULL ELSE dial_list_leads.sign_checked_at END
+                                   THEN NULL ELSE dial_list_leads.sign_checked_at END,
+            yandex_driver_ids = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
+                                     THEN NULL ELSE dial_list_leads.yandex_driver_ids END
         RETURNING (xmax = 0) AS inserted
     """
 

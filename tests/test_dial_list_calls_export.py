@@ -3,7 +3,8 @@
 
 Что защищаем:
   * звонок называется в файле так же, как в журнале и карточке водителя (исход, приписки);
-  * номер водителя — только маской, ИИН и текст ошибки АТС (в нём бывает номер) — нигде;
+  * номер водителя — только маской, текст ошибки АТС (в нём бывает номер) — нигде; ИИН и ID
+    водителя — полностью и текстом (владелец, 29.10.2026);
   * итоги операторов считаются по тем же строкам, что на листе «Звонки»;
   * период: потолок, будущее, перепутанные границы — словами для руководителя;
   * ручка только для руководителя своего отдела, пустой период — 404 с кодом, а не пустой файл;
@@ -33,6 +34,9 @@ ROOT = Path(__file__).resolve().parents[1]
 UTC = timezone.utc
 TODAY = date(2026, 10, 15)
 PHONE = '77011234567'
+# Выдуманные: ИИН с ведущим нулём (родился в 2005-м) — числом Excel его бы потерял.
+IIN = '050312500017'
+YANDEX_ID = '0f' * 16
 
 
 def row(**over):
@@ -41,12 +45,13 @@ def row(**over):
         requested_at=datetime(2026, 10, 14, 4, 5, 6, tzinfo=UTC), operator_id=520, operator='Своев Сава',
         line='902', state='finished', disposition='ANSWER', billsec=125, cancelled=False, auto_hangup='',
         talk_detected=None, ring_timeout_at=None, api_error='', driver='Иванов Иван', phone=PHONE,
-        outcome='Отказ', subtype='Дорого', comment='перезвонить после 18', success=False)
+        outcome='Отказ', subtype='Дорого', comment='перезвонить после 18', success=False, iin=IIN,
+        driver_ids=YANDEX_ID)
     base.update(over)
     return tuple(base[key] for key in (
         'requested_at', 'operator_id', 'operator', 'line', 'state', 'disposition', 'billsec', 'cancelled',
         'auto_hangup', 'talk_detected', 'ring_timeout_at', 'api_error', 'driver', 'phone', 'outcome',
-        'subtype', 'comment', 'success'))
+        'subtype', 'comment', 'success', 'iin', 'driver_ids'))
 
 
 def call(**over):
@@ -110,6 +115,9 @@ class CallRowTests(unittest.TestCase):
         self.assertEqual(c['at'], datetime(2026, 10, 14, 9, 5, 6))  # Алматы, без пояса
         self.assertEqual((c['result'], c['talk_sec'], c['outcome']), ('answered', 125, 'Отказ · Дорого'))
         self.assertEqual((c['phone'], c['line'], c['note']), ('+7 ••• ••• 45 67', '902', ''))
+        self.assertEqual((c['iin'], c['driver_ids']), (IIN, YANDEX_ID))
+        # Sapar ещё не спрашивали (запрос отдаёт '') или водителя он не знает — пусто, а не «None».
+        self.assertEqual(call(driver_ids='')['driver_ids'], '')
         self.assertEqual(call(subtype=None)['outcome'], 'Отказ')
         self.assertEqual(call(outcome=None, subtype=None)['outcome'], '')
 
@@ -192,8 +200,13 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(wb.sheetnames, ['Звонки', 'Операторы', 'Контекст'])
         ws = wb['Звонки']
         self.assertEqual([c.value for c in ws[1]], [title for _k, title, _w in calls_export.COLUMNS])
-        self.assertEqual((ws.freeze_panes, ws.auto_filter.ref), ('A2', 'A1:K3'))
+        self.assertEqual([c.value for c in ws[1]][3:7], ['Водитель', 'ID водителя', 'ИИН', 'Номер'])
+        self.assertEqual((ws.freeze_panes, ws.auto_filter.ref), ('A2', 'A1:M3'))
         first = {title: cell for (_k, title, _w), cell in zip(calls_export.COLUMNS, ws[2])}
+        # ИИН и ID — текстом: у ИИН числом пропал бы ведущий ноль.
+        for title, expected in (('ИИН', IIN), ('ID водителя', YANDEX_ID)):
+            self.assertEqual((first[title].value, first[title].data_type, first[title].number_format),
+                             (expected, 's', '@'), title)
         self.assertEqual(first['Дата и время'].value, datetime(2026, 10, 14, 9, 5, 6))
         self.assertEqual(first['Дата и время'].number_format, 'DD.MM.YYYY HH:MM:SS')
         # Разговор — длительность: «2:05» на экране и 125 секунд в сумме.
@@ -209,6 +222,18 @@ class WorkbookTests(unittest.TestCase):
         # Пусто там, где нечего сказать: ни «0:00» разговора, ни «нет» успешки.
         self.assertEqual((second['Результат'], second['Разговор'], second['Итог оператора'], second['Успешка']),
                          ('Не поднял трубку', None, None, None))
+
+    def test_several_ids_wrap_and_unknown_is_empty(self):
+        """Аккаунтов несколько — все, каждый своей строкой в ячейке; Sapar водителя не знает — пусто."""
+        several_ids = f'{"a" * 32}, {"b" * 32}'
+        wb, _, _ = book([call(driver_ids=several_ids), call(driver_ids=''), call()])
+        column = [title for _k, title, _w in calls_export.COLUMNS].index('ID водителя')
+        several, unknown, single = (wb['Звонки'][index][column] for index in (2, 3, 4))
+        self.assertEqual((several.value, several.alignment.wrap_text), (several_ids, True))
+        self.assertIsNone(unknown.value)
+        # Один ID — без переноса: строка не растёт зря.
+        self.assertEqual(single.value, YANDEX_ID)
+        self.assertFalse(single.alignment.wrap_text)
 
     def test_operators_are_counted_from_the_same_rows(self):
         calls = [
@@ -238,7 +263,8 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(total[4], timedelta(seconds=210))
         self.assertEqual(total[6:], [1, 1, 1])
         # Сумма «Разговор» на листе «Звонки» равна итогу — это одни и те же строки.
-        talk = sum((r[6] for r in values(wb['Звонки'])[1:] if r[6]), timedelta())
+        talk_column = [title for _k, title, _w in calls_export.COLUMNS].index('Разговор')
+        talk = sum((r[talk_column] for r in values(wb['Звонки'])[1:] if r[talk_column]), timedelta())
         self.assertEqual(talk, timedelta(seconds=210))
         self.assertEqual(wb['Операторы']['D2'].number_format, '0%')
         self.assertEqual(wb['Операторы']['E2'].number_format, '[h]:mm:ss')
@@ -256,11 +282,14 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(context['Собрано'], '15.10.2026 09:30 (Алматы)')
         self.assertEqual(context['Собрал'], 'Руководителева Раиса')
         self.assertEqual(context['Звонков'], 1)
-        for label in ('Результат', 'Отменён до ответа', 'Ошибка АТС', 'Успешка', 'Номер', 'Тестовые номера'):
+        for label in ('Результат', 'Отменён до ответа', 'Ошибка АТС', 'Успешка', 'ID водителя', 'ИИН', 'Номер',
+                      'Тестовые номера'):
             self.assertTrue(context.get(label), label)
+        self.assertIn('Sapar', context['ID водителя'])
 
-    def test_no_full_phone_iin_or_binotel_text_anywhere(self):
-        """Файл — тоже ручка раздела: полный номер, ИИН и текст АТС не выходят ни на один лист."""
+    def test_no_full_phone_or_binotel_text_anywhere_iin_and_id_in_full(self):
+        """Файл — тоже ручка раздела: полный номер и текст АТС не выходят ни на один лист. ИИН и ID
+        водителя — полностью (владелец, 29.10.2026: «в детализацию и в отчеты добавить id и иин»)."""
         calls = [call(), call(state='failed', disposition='', billsec=0,
                               api_error="status='error' code=104: bad number 77011234567")]
         _, _, stream = book(calls)
@@ -270,12 +299,14 @@ class WorkbookTests(unittest.TestCase):
                           if name.endswith('.xml'))
         for forbidden in ('1234567', '77011234567', "status='error'", 'bad number'):
             self.assertNotIn(forbidden, xml, forbidden)
-        self.assertIn('45 67', xml)
+        for present in ('45 67', IIN, YANDEX_ID):
+            self.assertIn(present, xml, present)
 
-    def test_route_does_not_read_phone_or_iin_outside_the_mask(self):
+    def test_route_does_not_read_phone_outside_the_mask(self):
         src = (ROOT / 'dial_list/calls_export.py').read_text(encoding='utf-8')
         sql = calls_export.CALLS_SQL
-        self.assertNotIn('iin', sql.replace(dial_service.test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, ''))
+        # ИИН и ID — из строки водителя; ещё не спрошенный у Sapar ID приходит пустым, а не NULL.
+        self.assertIn("l.iin, COALESCE(l.yandex_driver_ids, '')", sql)
         # Номер читается ровно один раз — чтобы тут же стать маской.
         self.assertEqual(src.count('phone_norm'), 3)  # SQL, распаковка строки, mask_phone(phone_norm)
         self.assertIn('"phone": service.mask_phone(phone_norm)', src)
@@ -292,12 +323,12 @@ class TextWarningTests(unittest.TestCase):
             return stream
         return recorded, patch
 
-    def test_line_column_on_the_calls_sheet(self):
+    def test_text_columns_on_the_calls_sheet(self):
         recorded, patch = self.calls()
         book([call(), call()], text_warning_patch=patch)
-        self.assertEqual(recorded, [{'sqref': 'C2:C3', 'sheet_path': 'xl/worksheets/sheet1.xml'}])
+        self.assertEqual(recorded, [{'sqref': 'C2:C3 E2:E3 F2:F3', 'sheet_path': 'xl/worksheets/sheet1.xml'}])
         titles = [title for _k, title, _w in calls_export.COLUMNS]
-        self.assertEqual(titles[2], 'Линия')
+        self.assertEqual((titles[2], titles[4], titles[5]), ('Линия', 'ID водителя', 'ИИН'))
 
     def test_real_patch_lands_and_book_opens(self):
         from tests import source_cache
@@ -309,7 +340,7 @@ class TextWarningTests(unittest.TestCase):
         _, _, stream = book([call()], text_warning_patch=namespace['_excel_suppress_number_as_text_warning'])
         stream.seek(0)
         xml = ZipFile(stream).read('xl/worksheets/sheet1.xml').decode('utf-8')
-        self.assertIn('<ignoredError sqref="C2:C2" numberStoredAsText="1"/>', xml)
+        self.assertIn('<ignoredError sqref="C2:C2 E2:E2 F2:F2" numberStoredAsText="1"/>', xml)
         self.assertLess(xml.index('<pageMargins'), xml.index('<ignoredErrors'))
         stream.seek(0)
         self.assertEqual(load_workbook(stream).sheetnames[0], 'Звонки')

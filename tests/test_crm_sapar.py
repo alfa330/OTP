@@ -309,6 +309,59 @@ class ClientTest(SaparClientCase):
         self.assertEqual(self.calls, [])
 
 
+class DriverIdsTest(SaparClientCase):
+    """ID водителя — массовой ручкой статусов подписания (формат снят с живого API 29.10.2026):
+    точечная by-iin его не отдаёт. Нужен «Детализации» и выгрузкам «Удаленного КЦ»."""
+
+    ID_A, ID_B, ID_C = 'a' * 32, 'b' * 32, 'c' * 32
+    LIST = {'Response': {'DriverStatusModels': [
+        {'Iin': '880317351347', 'YandexDriverIds': [ID_B, ID_A], 'ArrivalStatus': 'Arrived',
+         'SignStatus': 'Signed'},
+        {'Iin': '640516301600', 'YandexDriverIds': [ID_C], 'ArrivalStatus': 'NotArrived',
+         'SignStatus': 'NotSigned'},
+        {'Iin': '050312500017', 'YandexDriverIds': None, 'ArrivalStatus': 'NotArrived',
+         'SignStatus': 'NotSigned'},
+        {'Iin': None, 'YandexDriverIds': [ID_A]},
+    ]}, 'Code': 200, 'Message': 'Ok'}
+
+    def test_ids_by_iin_from_the_mass_list(self):
+        self.answer(self.LIST)
+        result = sapar.driver_yandex_ids(9, 2026)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['listed'], 4)
+        # Несколько аккаунтов — все; порядок — как у Sapar (сортирует тот, кто пишет в базу).
+        self.assertEqual(result['ids'], {'880317351347': [self.ID_B, self.ID_A], '640516301600': [self.ID_C]})
+        self.assertEqual(self.calls[0]['json'], {'Month': 9, 'Year': 2026})
+        self.assertIn('get-driver-sign-statuses', self.calls[0]['url'])
+        # Список парка большой: свой таймаут, а не восьмисекундный точечной ручки.
+        self.assertEqual(self.calls[0]['timeout'], sapar.MASS_TIMEOUT)
+
+    def test_only_wanted_iins_are_kept(self):
+        self.answer(self.LIST)
+        result = sapar.driver_yandex_ids(9, 2026, wanted={'640516301600', '111111111111'})
+        self.assertEqual((result['ids'], result['listed']), ({'640516301600': [self.ID_C]}, 4))
+
+    def test_empty_list_and_refusal_are_failures_not_nobody_known(self):
+        """Пустой ответ записал бы «Sapar водителя не знает» всем, кого спрашивали."""
+        for payload in ({'Response': {'DriverStatusModels': []}, 'Code': 200},
+                        {'Response': None, 'Code': 200},
+                        {'Response': None, 'Code': 403, 'Message': 'Forbidden'}):
+            with self.subTest(payload=payload):
+                self.answer(payload)
+                result = sapar.driver_yandex_ids(9, 2026)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['ids'], {})
+                self.assertTrue(result['error'])
+
+    def test_network_failure_is_systemic_and_never_raises(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError('таймаут')
+        sapar.requests.request = boom
+        result = sapar.driver_yandex_ids(9, 2026)
+        self.assertEqual((result['ok'], result['systemic']), (False, True))
+        self.assertIn('таймаут', result['error'])
+
+
 class ClosedPeriodTest(SaparClientCase):
     """Флаг `are-docs-ready-to-sign` — про ОТКРЫТОЕ подписание, а не про выгрузку.
 

@@ -185,27 +185,31 @@ def test_period_department_tests_and_columns(db):
     seed.call(petrov, GUEST, _at(16, 0, 0, 0), line='903', billsec=40)       # уже после периода
     seed.call(tester, OWN, _at(14, 12, 0), billsec=60)
     seed.call(stranger, TEZ_OP, _at(14, 12, 0), line='913', billsec=60)
-    # Успешка засчитана первому разговору с Ивановым.
+    # Успешка засчитана первому разговору с Ивановым. ID водителя — у Иванова два аккаунта; Петрова Sapar
+    # ещё не спрашивали (NULL) — в файле пусто.
+    ivan_ids = 'a' * 32 + ', ' + 'b' * 32
     with db._get_cursor() as cur:
-        cur.execute("UPDATE dial_list_leads SET signed_at = %s, success_attempt_id = %s, success_operator_id = %s "
-                    "WHERE id = %s", (_at(14, 10, 0), first, OWN, ivanov))
+        cur.execute("UPDATE dial_list_leads SET signed_at = %s, success_attempt_id = %s, success_operator_id = %s, "
+                    "yandex_driver_ids = %s WHERE id = %s", (_at(14, 10, 0), first, OWN, ivan_ids, ivanov))
 
     stream, written = svc.calls_export(RCC, date(2026, 10, 14), date(2026, 10, 15), generated_by='Руководителева Раиса')
     assert written == 3
     book = _rows(stream)
     calls = book['Звонки']
-    assert calls[0][:6] == ['Дата и время', 'Оператор', 'Линия', 'Водитель', 'Номер', 'Результат']
+    assert calls[0][:8] == ['Дата и время', 'Оператор', 'Линия', 'Водитель', 'ID водителя', 'ИИН', 'Номер',
+                            'Результат']
     assert [r[0] for r in calls[1:]] == [datetime(2026, 10, 14, 0, 0, 0), datetime(2026, 10, 14, 9, 30),
                                          datetime(2026, 10, 15, 23, 59, 59)]
     ivan, petr_no, petr_fail = calls[1:]
-    assert ivan[1:7] == ['Своев Сава', '902', 'Иванов Иван', '+7 ••• ••• 45 67', 'Дозвонились', timedelta(seconds=125)]
-    assert ivan[7:11] == ['Отказ · Дорого', 'дорого, подумает', 'да', None]
+    assert ivan[1:9] == ['Своев Сава', '902', 'Иванов Иван', ivan_ids, iin('77011234567'), '+7 ••• ••• 45 67',
+                         'Дозвонились', timedelta(seconds=125)]
+    assert ivan[9:13] == ['Отказ · Дорого', 'дорого, подумает', 'да', None]
     # Гость с линии удалённого КЦ (сотрудник СЗоВ) — в детализации отдела базы.
-    assert petr_no[1:6] == ['Гостев Глеб', '903', 'Петров Пётр', '+7 ••• ••• 43 21', 'Не поднял трубку']
-    assert petr_fail[5] == 'Ошибка АТС' and petr_fail[10] == 'АТС отказала (код 104)'
+    assert petr_no[1:8] == ['Гостев Глеб', '903', 'Петров Пётр', None, iin('77017654321'), '+7 ••• ••• 43 21',
+                            'Не поднял трубку']
+    assert petr_fail[7] == 'Ошибка АТС' and petr_fail[12] == 'АТС отказала (код 104)'
     flat = repr(book)
-    for forbidden in ('77011234567', '7654321', iin('77011234567'), iin('77017654321'), 'Тестовый номер',
-                      'Чужой водитель', 'Тезов'):
+    for forbidden in ('77011234567', '7654321', 'Тестовый номер', 'Чужой водитель', 'Тезов'):
         assert forbidden not in flat, forbidden
 
     operators = book['Операторы']

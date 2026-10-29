@@ -2,7 +2,9 @@
 """Выгрузка рассылки автоинформатора в xlsx: водители, все звонки, контекст.
 
 Номер — маской, как в журнале раздела: полный номер из раздела не выходит ни в одну ручку,
-а файл — тоже ручка. Время — по Алматы настоящей датой, секунды — числом (складываются)."""
+а файл — тоже ручка. ИИН и ID водителя — полностью, из базы «Удаленного КЦ» по номеру (владелец,
+29.10.2026: «в детализацию и в отчеты добавить id и иин водителя»), как в «Детализации»
+(dial_list/calls_export.py). Время — по Алматы настоящей датой, секунды — числом (складываются)."""
 from datetime import datetime, timezone
 from io import BytesIO
 
@@ -11,12 +13,18 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from dial_list.driver_ids import SEPARATOR as IDS_SEPARATOR
+
 from . import rules
 
 HEADER_FONT = Font(bold=True, color='FFFFFF')
 HEADER_FILL = PatternFill('solid', fgColor='1F4E79')
 WRAP = Alignment(wrap_text=True, vertical='top')
+IDS_WRAP = Alignment(wrap_text=True)
 DATETIME_FORMAT = 'DD.MM.YYYY HH:MM:SS'
+# ID водителя и ИИН — третья и четвёртая колонки обоих листов: ИИН цифрами, но текстом (числом пропал бы
+# ведущий ноль), зелёный уголок «Число сохранено как текст» у них гасит функция монолита.
+TEXT_COLUMNS = ('C', 'D')
 
 STATE_LABELS = {
     rules.STATE_DONE: 'Дозвонились',
@@ -67,30 +75,47 @@ def _datetime_cell(ws, value):
     return cell
 
 
-def build(detail, targets, calls):
+def _identity_cells(ws, row):
+    """ID водителя и ИИН — строкой, с форматом «текст». Аккаунтов несколько — каждый ID своей строкой
+    в ячейке (перенос у запятой)."""
+    cells = []
+    for value in (row.get("driver_ids") or '', row.get("iin") or ''):
+        cell = WriteOnlyCell(ws, value=_text(value) or None)
+        if value:
+            cell.data_type, cell.number_format = 's', '@'
+        if IDS_SEPARATOR in value:
+            cell.alignment = IDS_WRAP
+        cells.append(cell)
+    return cells
+
+
+def build(detail, targets, calls, text_warning_patch=None):
+    """text_warning_patch — функция монолита (_excel_suppress_number_as_text_warning), гасит зелёный
+    уголок у ИИН; нет её — файл тот же, только с уголком."""
     wb = Workbook(write_only=True)
     parts = detail.get("parts") or []
 
-    ws = _sheet(wb, 'Водители', ['Строка файла', 'ФИО', 'Номер', 'Итог', 'Попыток', 'Последний звонок',
-                                  'Слушал, с', 'Где положил трубку', 'Подписал (Sapar)', 'Подпись после звонка'],
-                [12, 32, 18, 26, 10, 20, 11, 30, 20, 20])
+    ws = _sheet(wb, 'Водители', ['Строка файла', 'ФИО', 'ID водителя', 'ИИН', 'Номер', 'Итог', 'Попыток',
+                                  'Последний звонок', 'Слушал, с', 'Где положил трубку', 'Подписал (Sapar)',
+                                  'Подпись после звонка'],
+                [12, 32, 38, 15, 18, 26, 10, 20, 11, 30, 20, 20])
     for t in targets:
         signed_at = t.get("signed_at")
-        ws.append([t["row_number"], _text(t["full_name"]), t["phone"], STATE_LABELS.get(t["state"], t["state"]),
-                   t["attempts"], _datetime_cell(ws, t["last_call_at"]),
+        ws.append([t["row_number"], _text(t["full_name"]), *_identity_cells(ws, t), t["phone"],
+                   STATE_LABELS.get(t["state"], t["state"]), t["attempts"], _datetime_cell(ws, t["last_call_at"]),
                    _seconds(t["listened_ms"]) if t["state"] == rules.STATE_DONE else None,
                    rules.stage_label(t["stage"]) if t["state"] == rules.STATE_DONE else '',
                    _datetime_cell(ws, signed_at) if signed_at else None,
                    ('да' if t.get("signed_after_call") else 'подписал до звонка') if signed_at else ''])
 
-    ws = _sheet(wb, 'Звонки', ['Время звонка', 'ФИО', 'Номер', 'Попытка', 'Линия', 'Итог',
+    ws = _sheet(wb, 'Звонки', ['Время звонка', 'ФИО', 'ID водителя', 'ИИН', 'Номер', 'Попытка', 'Линия', 'Итог',
                                 'Звонило до ответа, с', 'Слушал, с', 'Где положил трубку', 'Кто положил',
                                 'Нажатия'],
-                [20, 32, 18, 9, 8, 18, 14, 11, 30, 24, 10])
+                [20, 32, 38, 15, 18, 9, 8, 18, 14, 11, 30, 24, 10])
     for c in calls:
         answered = c["result"] == rules.RESULT_ANSWERED
-        ws.append([_datetime_cell(ws, c["issued_at"]), _text(c["full_name"]), c["phone"], c["attempt_no"],
-                   c["line"], rules.RESULT_LABELS.get(c["result"], c["result"]), _seconds(c["ring_ms"]),
+        ws.append([_datetime_cell(ws, c["issued_at"]), _text(c["full_name"]), *_identity_cells(ws, c), c["phone"],
+                   c["attempt_no"], c["line"], rules.RESULT_LABELS.get(c["result"], c["result"]), _seconds(c["ring_ms"]),
                    _seconds(c["listened_ms"]) if answered else None,
                    rules.stage_label(c["stage"]) if answered else '',
                    HANGUP_LABELS.get(c["hangup_by"], c["hangup_by"]), c["dtmf"]])
@@ -131,7 +156,9 @@ def build(detail, targets, calls):
                        '«Где положил трубку» — часть записи, которая звучала в момент отбоя. '
                        '«Линия занята» — Binotel не дал линию (у линии два звонка одновременно); '
                        '«Сеть не пропустила» — вызов не дошёл до водителя (сеть или оператор связи); '
-                       'попыткой водителя ни то, ни другое не считается. Номер — маской.'),
+                       'попыткой водителя ни то, ни другое не считается. Номер — маской. ИИН и ID водителя — '
+                       'из базы «Удаленного КЦ» по номеру; ID — Yandex Driver Id из Sapar, аккаунтов несколько — '
+                       'через запятую; пусто — водителя нет в базе или Sapar его не знает.'),
     ]
     for key, value in rows:
         ws.append([key, _text(value)])
@@ -139,4 +166,15 @@ def build(detail, targets, calls):
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
+    if callable(text_warning_patch):
+        # «Водители» — sheet1.xml, «Звонки» — sheet2.xml (порядок создания листов).
+        for sheet_path, written in (('xl/worksheets/sheet1.xml', len(targets)),
+                                    ('xl/worksheets/sheet2.xml', len(calls))):
+            if not written:
+                continue
+            sqref = ' '.join(f'{column}2:{column}{written + 1}' for column in TEXT_COLUMNS)
+            try:
+                stream = text_warning_patch(stream, sqref, sheet_path=sheet_path)
+            except Exception:  # noqa: BLE001 — значок в углу ячейки не повод не отдать файл
+                stream.seek(0)
     return stream

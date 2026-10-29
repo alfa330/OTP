@@ -19,6 +19,9 @@
      ещё не набранная, снимается с его списка так же, как при «Исключить»:
      звонить подписавшему незачем.
 
+Перед проверкой — ID водителей из Sapar (driver_ids.py), если в базах есть
+водители, о которых его ещё не спрашивали: свежая база получает ID сразу.
+
 Где крутится. Свой поток на ОДНО место: прогон — сотни запросов подряд, в общем
 пуле бота из четырёх мест он держал бы четверть приложения (см. заметку про
 executor_pool). Запросы на проверку склеиваются: пока идёт прогон, следующий
@@ -43,7 +46,7 @@ from psycopg2.extras import execute_values
 
 from crm import sapar
 from test_numbers import keys as test_keys
-from . import signing
+from . import driver_ids, signing
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +73,9 @@ NOW_BACKOFF_SEC = 30
 # столько потоков, у каждого та же пауза между запросами. Проверка «сейчас» держит к Sapar 4.
 REFRESH_LANES = 3
 REFRESH_MAX_LEADS = 60000
+# ID водителя (driver_ids.py): Sapar не отдал список — следующая попытка не раньше: пока массовая ручка
+# лежит, каждый прогон ждал бы её таймаута.
+IDS_RETRY_SEC = 2 * 3600
 
 ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 IN_FLIGHT_STATES = ("requested", "leg_ringing", "leg_answered", "ended")
@@ -104,13 +110,19 @@ def _package_verdict(documents, now):
 class SignChecker:
     """Проверка подписания для всего раздела. `fetch(iin, month, year, session,
     timeout=…)` — подменяется в тестах; по умолчанию crm.sapar.driver_documents
-    (прогон таймаут не передаёт — у него свой, REQUEST_TIMEOUT_SEC)."""
+    (прогон таймаут не передаёт — у него свой, REQUEST_TIMEOUT_SEC). `fetch_ids(month,
+    year, wanted=…)` — список ID водителей (driver_ids.py), по умолчанию
+    crm.sapar.driver_yandex_ids."""
 
-    def __init__(self, db, fetch=None, configured=None, sleep=time.sleep):
+    def __init__(self, db, fetch=None, configured=None, sleep=time.sleep, fetch_ids=None):
         self.db = db
         self._fetch = fetch or _default_fetch
+        self._fetch_ids = fetch_ids or sapar.driver_yandex_ids
         self._configured = configured or sapar.configured
         self._sleep = sleep
+        self.last_ids_sync = None
+        # До какого момента (time.monotonic) сверку ID не пробуем: Sapar не отдал список.
+        self._ids_retry_at = 0.0
         self._executor = None
         self._lock = threading.Lock()
         self._running = False
@@ -199,6 +211,9 @@ class SignChecker:
             self.last_run = summary
             return summary
         now = now or _utcnow()
+        if lead_ids is None:
+            # ID водителя — до проверки подписания: свежая база получает их сразу, а не после прогона по ней.
+            self.sync_driver_ids(now)
         from_period, to_period = signing.check_window(now.astimezone(signing.PERIOD_TZ).date())
         params = {"from_period": from_period, "to_period": to_period, "limit": RUN_MAX_LEADS,
                   "due_before": now - timedelta(hours=signing.RECHECK_HOURS)
@@ -271,6 +286,25 @@ class SignChecker:
                      f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
         if lead_ids is None:
             self.last_run = summary
+        return summary
+
+    # ------------------------------------------------------------ ID водителя
+    def sync_driver_ids(self, now=None, force=False):
+        """ID водителей баз из Sapar (driver_ids.py), если есть кого спросить. Падение сверки прогон
+        подписания не останавливает. → сводка driver_ids.sync или None (спрашивать некого / ждём)."""
+        if not force and time.monotonic() < self._ids_retry_at:
+            return None
+        now = now or _utcnow()
+        try:
+            summary = driver_ids.sync(self.db, self._fetch_ids, now.astimezone(signing.PERIOD_TZ).date(),
+                                      force=force)
+        except Exception as exc:
+            log.exception("dial_list: сверка ID водителей с Sapar упала")
+            summary = {"ok": False, "error": str(exc)[:300]}
+        if summary is not None:
+            self.last_ids_sync = summary
+            if not summary.get("ok"):
+                self._ids_retry_at = time.monotonic() + IDS_RETRY_SEC
         return summary
 
     # ------------------------------------------------------------ перепроверка перед отчётом

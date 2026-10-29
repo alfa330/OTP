@@ -267,8 +267,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period) -> dict —
     тот же файл базы автообзвона Тез ещё и в «Базу лидов ОП TEZ» (владелец, 15.10.2026: одна
     загрузка на обе); не передан — только в раздел;
-    excel_text_warning(stream, sqref, sheet_path) — гасит в детализации звонков зелёный уголок
-    «Число сохранено как текст» (функция монолита; не передана — файл с уголком);
+    excel_text_warning(stream, sqref, sheet_path) — гасит в детализации звонков и выгрузке
+    автоинформатора зелёный уголок «Число сохранено как текст» (функция монолита; не передана —
+    файл с уголком);
     informer_service — informer.service.InformerService: вкладка «Автоинформатор» (не передан —
     её ручки отвечают 503)."""
     bp = Blueprint('dial_list', __name__)
@@ -1063,8 +1064,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def calls_export(department_id):
         """Детализация звонков отдела за дни ?date_from=&date_to= (YYYY-MM-DD, по Алматы) — xlsx
-        (dial_list/calls_export.py). Номер водителя — маской, как в журнале; ИИН нет. Звонков за
-        период нет — 404 с кодом: сайт скажет это словами, а не отдаст пустой файл.
+        (dial_list/calls_export.py). Номер водителя — маской, как в журнале; ИИН и ID водителя —
+        полностью (владелец, 29.10.2026). Звонков за период нет — 404 с кодом: сайт скажет это
+        словами, а не отдаст пустой файл.
 
         Глава «Регионов» (DIAL_LIST_GROUP_REPORT_HEAD_CODES) — только звонки людей своих групп, и
         только в отделах раздела."""
@@ -1312,7 +1314,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         inf = _informer(department_id)
         from informer import export as informer_export
         detail, targets, calls = _informer_do(lambda: inf.export_rows(department_id, campaign_id))
-        stream = informer_export.build(detail, targets, calls)
+        stream = informer_export.build(detail, targets, calls, text_warning_patch=excel_text_warning)
         return send_file(stream, mimetype=XLSX_MIME, as_attachment=True,
                          download_name=f'informer_{campaign_id}.xlsx')
 

@@ -408,6 +408,26 @@ class InformerService:
             "before_call": int(before_call or 0), "checked_at": checked_at.isoformat() if checked_at else None,
         }, signed_map
 
+    def _identities(self, cur, campaign_id, department_id):
+        """{id цели: (ИИН, ID водителя)} для выгрузки (владелец, 29.10.2026: «в детализацию и в отчеты
+        добавить id и иин водителя») — из базы «Удаленного КЦ» того же отдела по номеру, база самого
+        свежего месяца. Водителя в базе нет — нет и здесь; базы нет (другой стенд) — пусто."""
+        cur.execute("SAVEPOINT informer_identities")
+        try:
+            cur.execute("""
+                SELECT DISTINCT ON (t.id) t.id, l.iin, COALESCE(l.yandex_driver_ids, '')
+                FROM informer_targets t
+                JOIN dial_list_leads l ON l.phone_norm = t.phone AND l.department_id = %s
+                WHERE t.campaign_id = %s
+                ORDER BY t.id, l.period DESC
+            """, (int(department_id), int(campaign_id)))
+            rows = cur.fetchall()
+        except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn):
+            cur.execute("ROLLBACK TO SAVEPOINT informer_identities")
+            return {}
+        cur.execute("RELEASE SAVEPOINT informer_identities")
+        return {tid: (iin or '', ids or '') for tid, iin, ids in rows}
+
     def campaign_audio(self, department_id, campaign_id):
         """Запись для руководителя: оригинал, а у рассылок прежней страницы — телефонная версия."""
         self.ready()
@@ -421,7 +441,8 @@ class InformerService:
         return bytes(row[0])
 
     def export_rows(self, department_id, campaign_id):
-        """Всё для выгрузки: рассылка, водители и все звонки (номер — маской)."""
+        """Всё для выгрузки: рассылка, водители и все звонки (номер — маской; ИИН и ID водителя — из
+        базы «Удаленного КЦ», полностью)."""
         detail = self.campaign_detail(department_id, campaign_id, targets_limit=0)
         parts = detail["parts"]
         with self.db._get_cursor() as cur:
@@ -433,14 +454,16 @@ class InformerService:
             targets = cur.fetchall()
             cur.execute("""
                 SELECT c.issued_at, c.answered_at, c.ended_at, t.full_name, t.phone, c.attempt_no, c.line,
-                       c.result, c.ring_ms, c.listened_ms, c.played_to_end, c.hangup_by, c.dtmf
+                       c.result, c.ring_ms, c.listened_ms, c.played_to_end, c.hangup_by, c.dtmf, c.target_id
                 FROM informer_calls c JOIN informer_targets t ON t.id = c.target_id
                 WHERE c.campaign_id = %s ORDER BY c.issued_at, c.id
             """, (int(campaign_id),))
             calls = cur.fetchall()
             _signing, signed_map = self._signing(cur, campaign_id, department_id)
+            identities = self._identities(cur, campaign_id, department_id)
         target_rows = [{
             "row_number": t[1], "full_name": t[2], "phone": mask_phone(t[3]), "state": t[4],
+            "iin": identities.get(t[0], ('', ''))[0], "driver_ids": identities.get(t[0], ('', ''))[1],
             "attempts": int(t[5] or 0), "last_result": t[6] or '', "last_call_at": t[7],
             "listened_ms": t[8],
             "stage": (rules.listen_stage(t[8], parts, bool(t[9])) if t[4] == rules.STATE_DONE
@@ -450,6 +473,7 @@ class InformerService:
         } for t in targets]
         call_rows = [{
             "issued_at": c[0], "answered_at": c[1], "ended_at": c[2], "full_name": c[3],
+            "iin": identities.get(c[13], ('', ''))[0], "driver_ids": identities.get(c[13], ('', ''))[1],
             "phone": mask_phone(c[4]), "attempt_no": c[5], "line": c[6], "result": c[7],
             "ring_ms": c[8], "listened_ms": c[9],
             "stage": (rules.listen_stage(c[9], parts, bool(c[10])) if c[7] == rules.RESULT_ANSWERED

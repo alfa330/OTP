@@ -41,9 +41,12 @@ BASE_DDL = '''
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL);
     INSERT INTO departments VALUES (1954, 'Удаленный КЦ'), (560, 'Тез КЦ');
     INSERT INTO users VALUES (2, 'Владелец');
-    -- База «Обзвона» того же отдела: по ней считается «подписал после звонка» (колонки — как в dial_list).
+    -- База «Обзвона» того же отдела: по ней считается «подписал после звонка» и берутся ИИН и ID водителя
+    -- для выгрузки (колонки — как в dial_list).
     CREATE TABLE dial_list_leads (id serial PRIMARY KEY, department_id integer NOT NULL, phone_norm text NOT NULL,
-                                  signed_at timestamptz, success_attempt_id integer, sign_checked_at timestamptz);
+                                  signed_at timestamptz, success_attempt_id integer, sign_checked_at timestamptz,
+                                  iin text NOT NULL DEFAULT '', period date NOT NULL DEFAULT '2026-10-01',
+                                  yandex_driver_ids text);
 '''
 
 
@@ -488,10 +491,57 @@ def test_export_workbook(env):
     wb = load_workbook(io.BytesIO(informer_export.build(detail, targets, call_rows).getvalue()))
     assert wb.sheetnames == ['Водители', 'Звонки', 'Контекст']
     drivers = list(wb['Водители'].iter_rows(min_row=2, values_only=True))
-    assert len(drivers) == 2 and all('•••' in row[2] for row in drivers)
+    assert len(drivers) == 2 and all('•••' in row[4] for row in drivers)
     assert all('7701' not in str(cell) for row in drivers for cell in row)        # полного номера нет
     call_sheet = list(wb['Звонки'].iter_rows(min_row=2, values_only=True))
-    assert {row[5] for row in call_sheet} == {'Дозвонились', 'Недоступен'}
+    assert {row[7] for row in call_sheet} == {'Дозвонились', 'Недоступен'}
+
+
+def test_export_has_iin_and_driver_id_from_the_base(env):
+    """Владелец, 29.10.2026: «в детализацию и в отчеты добавить id и иин водителя». ИИН и ID — из базы
+    «Удаленного КЦ» того же отдела по номеру, база самого свежего месяца; водителя нет в базе — пусто."""
+    svc, _clock, db = env
+    known, fresh, unknown = phones(3)
+    campaign = make_campaign(svc, [known, fresh, unknown])
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    for call in poll(svc, {'939': {'capacity': 3, 'active': 0}})['calls']:
+        fail(svc, call, rules.RESULT_NO_ANSWER)
+    two_ids = 'a' * 32 + ', ' + 'b' * 32
+    with db._get_cursor() as cur:
+        cur.execute("""INSERT INTO dial_list_leads (department_id, phone_norm, iin, period, yandex_driver_ids) VALUES
+                         (1954, %s, '050312500017', '2026-10-01', %s),
+                         (1954, %s, '880317350001', '2026-09-01', 'c'),         -- прошлый месяц: не он
+                         (1954, %s, '880317350002', '2026-10-01', NULL),        -- ID у Sapar ещё не спрашивали
+                         (560, %s, '990101300003', '2026-10-01', 'd')           -- другой отдел — не наш""",
+                    (known, two_ids, fresh, fresh, unknown))
+    detail, targets, call_rows = svc.export_rows(DEPT, campaign['id'])
+    recorded = []
+
+    def patch(stream, sqref, sheet_path=None):
+        recorded.append((sheet_path, sqref))
+        return stream
+
+    wb = load_workbook(io.BytesIO(informer_export.build(detail, targets, call_rows, text_warning_patch=patch)
+                                  .getvalue()))
+    drivers = list(wb['Водители'].iter_rows(values_only=True))
+    assert drivers[0][1:5] == ('ФИО', 'ID водителя', 'ИИН', 'Номер')
+    by_phone_tail = {row[4][-5:]: row[2:4] for row in drivers[1:]}
+    assert by_phone_tail == {_masked_tail(known): (two_ids, '050312500017'),
+                             _masked_tail(fresh): (None, '880317350002'),
+                             _masked_tail(unknown): (None, None)}
+    iin_cell = next(row for row in wb['Водители'].iter_rows(min_row=2) if row[3].value == '050312500017')[3]
+    assert (iin_cell.data_type, iin_cell.number_format) == ('s', '@')
+    calls_sheet = list(wb['Звонки'].iter_rows(values_only=True))
+    assert calls_sheet[0][1:5] == ('ФИО', 'ID водителя', 'ИИН', 'Номер')
+    assert sorted((row[2] or '', row[3] or '') for row in calls_sheet[1:]) == sorted(
+        [(two_ids, '050312500017'), ('', '880317350002'), ('', '')])
+    # Зелёный уголок у ID и ИИН гасится на обоих листах — по числу строк каждого.
+    assert recorded == [('xl/worksheets/sheet1.xml', 'C2:C4 D2:D4'), ('xl/worksheets/sheet2.xml', 'C2:C4 D2:D4')]
+
+
+def _masked_tail(phone):
+    """Хвост маски номера, как его пишет выгрузка: «+7 ••• ••• 00 01» → «00 01»."""
+    return f'{phone[-4:-2]} {phone[-2:]}'
 
 
 def test_signed_after_robot_call(env):
@@ -530,8 +580,8 @@ def test_signed_after_robot_call(env):
     assert sorted(t['signed_after_call'] for t in targets) == [False, False, True, True]
     wb = load_workbook(io.BytesIO(informer_export.build(detail, targets, []).getvalue()))
     drivers = list(wb['Водители'].iter_rows(min_row=1, values_only=True))
-    assert drivers[0][8:10] == ('Подписал (Sapar)', 'Подпись после звонка')
-    assert sorted(row[9] for row in drivers[1:]) == ['да', 'да', 'подписал до звонка', 'подписал до звонка']
+    assert drivers[0][10:12] == ('Подписал (Sapar)', 'Подпись после звонка')
+    assert sorted(row[11] for row in drivers[1:]) == ['да', 'да', 'подписал до звонка', 'подписал до звонка']
     context = {row[0]: row[1] for row in wb['Контекст'].iter_rows(min_row=2, values_only=True)}
     assert context['Подписали после звонка робота'] == '2' and context['…из них без разговора с оператором'] == '1'
     # Базы «Обзвона» нет (другой стенд) — сводки нет, остальное работает.
@@ -540,6 +590,9 @@ def test_signed_after_robot_call(env):
     detail = svc.campaign_detail(DEPT, campaign['id'])
     assert detail['analytics']['signing'] is None and detail['analytics']['answered'] == 3
     assert all(t['signed_at'] is None for t in detail['targets'])
+    # И выгрузка — без ИИН и ID, но собирается.
+    _, targets, _ = svc.export_rows(DEPT, campaign['id'])
+    assert {(t['iin'], t['driver_ids']) for t in targets} == {('', '')}
 
 
 def test_robot_status(env):

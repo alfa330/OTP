@@ -152,6 +152,41 @@ def driver_documents(iin, month, year, *, session=None, timeout=None):
             'park': list(payload.get('TaxiParkDocuments') or []), 'error': None, 'systemic': False}
 
 
+# Весь список парка одним ответом: замер 29.10.2026 — 62 884 водителя, ~8 МБ, от 2 до 21 с.
+MASS_TIMEOUT = 90
+
+
+def driver_yandex_ids(month, year, *, wanted=None, timeout=None):
+    """Yandex Driver Id водителей парка по ИИН — массовая ручка get-driver-sign-statuses
+    (DriverStatusModels: Iin, YandexDriverIds, ArrivalStatus, SignStatus). Точечная by-iin
+    (driver_documents) ID не отдаёт.
+
+    Замер 29.10.2026: список один и тот же за любой месяц; у каждого водителя хотя бы один ID
+    (32 символа — тот же «Yandex Driver Id», что в выгрузке услуг iTaxi), у 6 % несколько
+    (аккаунты в разных парках, до 8). wanted — множество ИИН: остальных не держим в памяти.
+
+    Возвращает {'ok', 'ids': {ИИН: [ID, …]}, 'listed', 'error', 'systemic'}; listed — водителей
+    в ответе. Пустой список — отказ, а не «Sapar никого не знает»: иначе всем, кого спрашивали,
+    записалось бы «ID нет»."""
+    payload, error, systemic = _request(
+        '/taxipark-api/get-driver-sign-statuses', body={'Month': int(month), 'Year': int(year)},
+        timeout=timeout or MASS_TIMEOUT)
+    rows = payload.get('DriverStatusModels') if isinstance(payload, dict) else None
+    if not error and not (isinstance(rows, list) and rows):
+        error, systemic = 'Sapar отдал пустой список водителей', False
+    if error:
+        return {'ok': False, 'ids': {}, 'listed': 0, 'error': error, 'systemic': systemic}
+    ids = {}
+    for row in rows:
+        iin = str(row.get('Iin') or '').strip() if isinstance(row, dict) else ''
+        if not iin or (wanted is not None and iin not in wanted):
+            continue
+        found = [str(x).strip() for x in (row.get('YandexDriverIds') or ()) if str(x or '').strip()]
+        if found:
+            ids[iin] = found
+    return {'ok': True, 'ids': ids, 'listed': len(rows), 'error': None, 'systemic': False}
+
+
 def signing_period_open(month, year):
     """Идёт ли СЕЙЧАС подписание за этот месяц. None — не знаем.
 
