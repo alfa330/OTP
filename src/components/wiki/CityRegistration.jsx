@@ -3,7 +3,8 @@ import { AlertTriangle, ArrowRight, Check, ChevronDown, ListTree, Pencil } from 
 import { iosBtnGhost, iosGroupLabel } from '../ui/ios';
 import { formatDate, formatTime } from './cityRules';
 import {
-    absentText, dispatcherNote, feedersText, parksPreview, registrationHeadline,
+    absentText, dispatcherNote, feedersText, nearestLabel, parksPreview, registrationHeadline,
+    splitNearest,
 } from './registrationRules';
 
 /* «Регистрация водителей» в карточке города (просьба владельца 29.10.2026):
@@ -43,8 +44,13 @@ const ParkRow = ({ entry }) => (
         </div>
         <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5">
             {!entry.own && (
-                <span className="inline-flex items-center gap-1 text-[12.5px] font-medium text-blue-700">
+                <span className={`inline-flex items-center gap-1 text-[12.5px] font-medium ${
+                    entry.nearest ? 'text-slate-600' : 'text-blue-700'}`}
+                >
                     <ArrowRight size={12} /> {entry.city.name}
+                    {entry.nearest && entry.km ? (
+                        <span className="font-normal tabular-nums text-slate-400">· ~{entry.km} км</span>
+                    ) : null}
                 </span>
             )}
             {entry.dispatchers.map((dispatcher) => (
@@ -57,12 +63,14 @@ const ParkRow = ({ entry }) => (
 export default function CityRegistration({ city, canManage = false, onEdit = null, onOpenDispatchers = null }) {
     const [expanded, setExpanded] = useState(false);
     const [absentOpen, setAbsentOpen] = useState(false);
+    const [nearestOpen, setNearestOpen] = useState(false);
     const block = city?.registration;
     if (!block) return null;
 
     const head = registrationHeadline(city.name, block);
     const { Icon, box } = TONES[head.tone] || TONES.unset;
-    const { shown, hidden } = parksPreview(block.parks, expanded);
+    const { main, nearest } = splitNearest(block.parks);
+    const { shown, hidden } = parksPreview(main, expanded);
     const absent = block.absent || [];
     const feeders = feedersText(block.feeders);
     const source = block.source || {};
@@ -111,6 +119,29 @@ export default function CityRegistration({ city, canManage = false, onEdit = nul
                     >
                         Ещё {hidden} <ChevronDown size={13} />
                     </button>
+                )}
+
+                {/* Ни в городе, ни по списку — ближайшая диспетчерская ЭТОГО
+                    парка (просьба владельца 29.10.2026: «предлагать ближайшую
+                    диспу жана такси»). Отдельно и свёрнуто: это запасной путь,
+                    а не ответ города, и в Рудном таких парков четырнадцать. */}
+                {nearest.length > 0 && (
+                    <div className="border-t border-slate-100">
+                        <button
+                            type="button"
+                            onClick={() => setNearestOpen((open) => !open)}
+                            aria-expanded={nearestOpen}
+                            className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[12.5px] font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800"
+                        >
+                            <span className="min-w-0 flex-1">{nearestLabel(nearest.length, main.length === 0)}</span>
+                            <ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${nearestOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                        {nearestOpen && (
+                            <div className="divide-y divide-slate-100 bg-slate-50/40">
+                                {nearest.map((entry) => <ParkRow key={entry.key} entry={entry} />)}
+                            </div>
+                        )}
+                    </div>
                 )}
 
                 {(absent.length > 0 || feeders || checked) && (

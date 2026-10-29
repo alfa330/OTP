@@ -55,10 +55,16 @@ const SATELLITE = {
   parks: [
     { key: 'p:1', name: 'iTaxi', park_id: 1, own: false, city: { id: 11, name: 'Костанай' },
       dispatchers: [{ id: 5, name: 'iTaxi', fleet_city: 'Костанай', fleet_city_other: null }] },
+    { key: 'p:12', name: 'Jana такси', park_id: 12, own: false, nearest: true, km: 510,
+      city: { id: 2, name: 'Актобе' },
+      dispatchers: [{ id: 8, name: 'Jana Taxi', fleet_city: 'Актобе', fleet_city_other: null }] },
     { key: 'p:10', name: 'Аманат', park_id: 10, own: false, city: { id: 11, name: 'Костанай' },
       dispatchers: [{ id: 6, name: 'Аманат', fleet_city: 'Костанай', fleet_city_other: null }] },
+    { key: 'p:7', name: 'Taxi24', park_id: 7, own: false, nearest: true, km: 600,
+      city: { id: 3, name: 'Астана' },
+      dispatchers: [{ id: 9, name: 'Taxi24', fleet_city: 'Астана', fleet_city_other: null }] },
   ],
-  absent: ['Jana такси', 'Global', 'Qazaq', 'Taxi24', 'Честный', 'Халык'],
+  absent: [],
   feeders: [],
   source: { count: 89, synced_at: '2026-10-29T05:20:00', fleet_checked_at: '2026-10-28T19:47:17' },
 };
@@ -123,8 +129,9 @@ test('подписи: город кабинета, кто регистрируе
   assert.equal(rules.feedersText([{ name: 'Темиртау' }, { name: 'Жезказган' }]),
     'Сюда же регистрируют водителей из Темиртау и Жезказгана');
   assert.equal(rules.feedersText([]), '');
-  assert.equal(rules.absentText('Рудный', SATELLITE.absent),
+  assert.equal(rules.absentText('Рудный', ['Jana такси', 'Global', 'Qazaq', 'Taxi24', 'Честный', 'Халык']),
     'Нет диспетчерской для Рудного: Jana такси, Global, Qazaq, Taxi24 и ещё 2');
+  assert.equal(rules.absentText('Рудный', []), '');
 });
 
 test('семнадцать парков сворачиваются, один лишний — нет', () => {
@@ -148,7 +155,12 @@ test('блок карточки: ответ, парки, кого нет и от
   assert.match(html, /Своих диспетчерских в Рудном нет/);
   assert.match(html, />iTaxi</);
   assert.match(html, />Аманат</);
-  assert.match(html, /Нет диспетчерской для Рудного: Jana такси/);
+  // Ближайшие диспетчерские остальных парков — свёрнутой строкой, не ответом
+  // города: Актобе в карточке Рудного сразу не виден.
+  assert.match(html, /Остальные 2 парка — ближайшая диспетчерская/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /Актобе|Jana Taxi/);
+  assert.doesNotMatch(html, /Нет диспетчерской для/);
   // Дата и время — одним неразрывным куском: на телефоне «в / 11:49» рвалось.
   assert.match(html, /из кабинета Fleet <span class="whitespace-nowrap">на 28 октября в 19:47<\/span>/);
   // Другой город строки виден у каждого парка — «Рудный → Костанай».
@@ -181,6 +193,24 @@ test('город кабинета у диспетчерской — когда �
   assert.match(html, /в кабинете — Караганда/);
 });
 
+test('ближайшая диспетчерская парка — запасной путь, а не ответ города', () => {
+  const { main, nearest } = rules.splitNearest(SATELLITE.parks);
+  assert.deepEqual(main.map((entry) => entry.name), ['iTaxi', 'Аманат']);
+  assert.deepEqual(nearest.map((entry) => entry.name), ['Jana такси', 'Taxi24']);
+  // «Регистрируем в …» берёт только свои и по списку: Актобе и Астана — нет.
+  assert.deepEqual(rules.otherCities(SATELLITE), ['Костанай']);
+  assert.equal(rules.nearestLabel(14), 'Остальные 14 парков — ближайшая диспетчерская');
+  assert.equal(rules.nearestLabel(1), 'Ещё 1 парк — ближайшая диспетчерская');
+  assert.equal(rules.nearestLabel(17, true), '17 парков — ближайшая диспетчерская');
+  // В городе без своих и без правила «остальные» не к чему.
+  const unset = { state: 'unset', own_count: 0, targets: [], feeders: [], absent: [],
+    parks: SATELLITE.parks.filter((entry) => entry.nearest) };
+  const html = renderToStaticMarkup(React.createElement(CityRegistration, {
+    city: { id: 1, name: 'Аркалык', registration: unset } }));
+  assert.match(html, /2 парка — ближайшая диспетчерская/);
+  assert.doesNotMatch(html, /Остальные/);
+});
+
 /* ------------------------------------------------------------- поиск */
 
 test('строка поиска «Регистрация»: парк, город и диспетчерская', () => {
@@ -204,6 +234,11 @@ test('строка поиска «Регистрация»: парк, город
     others: ['Караганда'], dispatchers: [] }), {
     title: 'Регистрация водителей · Рудный',
     subtitle: 'Зависит от парка: здесь или в Караганде',
+  });
+  assert.deepEqual(directoryText({ ...entry, park: 'Jana такси', target: 'Актобе', nearest: true,
+    km: 510, dispatchers: [{ name: 'Jana Taxi' }] }), {
+    title: 'Регистрация Jana такси · Рудный',
+    subtitle: 'Ближайшая — в Актобе · ~510 км · «Jana Taxi»',
   });
   // Две строки одного города с разными парками — два ключа, а не один.
   assert.notEqual(directoryKey(entry), directoryKey({ ...entry, park: 'Аманат' }));

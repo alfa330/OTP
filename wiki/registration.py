@@ -18,6 +18,7 @@
 выдачи поиска и фрагментов помощника.
 """
 
+import math
 import re
 from collections import defaultdict
 
@@ -285,8 +286,47 @@ def _dispatcher_order(brand_name):
     return key
 
 
+# Центры городов — двойник CITY_COORDS схемы «Городов»
+# (src/components/wiki/kazakhstanMap.js; расхождение стережёт тест). Нужны для
+# «ближайшей диспетчерской парка»: город без координат в расчёт не входит.
+CITY_COORDS = {
+    'Аксай': (51.171, 53.003), 'Актау': (43.651, 51.160), 'Актобе': (50.283, 57.167),
+    'Алматы': (43.238, 76.946), 'Астана': (51.169, 71.449), 'Атырау': (47.094, 51.924),
+    'Аксу': (52.041, 76.927), 'Аркалык': (50.248, 66.912), 'Балхаш': (46.848, 74.995),
+    'Жанаозен': (43.341, 52.862), 'Жаркент': (44.163, 80.001), 'Жезказган': (47.783, 67.714),
+    'Житикара': (52.190, 61.201), 'Караганда': (49.806, 73.085), 'Кандыагаш': (49.476, 57.422),
+    'Кентау': (43.517, 68.504), 'Кокшетау': (53.283, 69.383), 'Конаев': (43.867, 77.063),
+    'Костанай': (53.214, 63.625), 'Кульсары': (46.953, 54.019), 'Кызылорда': (44.849, 65.482),
+    'Лисаковск': (52.537, 62.494), 'Павлодар': (52.287, 76.967),
+    'Петропавловск': (54.875, 69.163), 'Риддер': (50.344, 83.513), 'Рудный': (52.973, 63.117),
+    'Сарыагаш': (41.460, 69.170), 'Сатпаев': (47.900, 67.533), 'Семей': (50.411, 80.227),
+    'Степногорск': (52.350, 71.883), 'Талдыкорган': (45.016, 78.374), 'Тараз': (42.900, 71.367),
+    'Темиртау': (50.055, 72.965), 'Туркестан': (43.297, 68.252), 'Уральск': (51.233, 51.367),
+    'Усть-Каменогорск': (49.948, 82.628), 'Шымкент': (42.342, 69.590),
+    'Щучинск': (52.936, 70.189), 'Экибастуз': (51.724, 75.323),
+}
+
+
+def distance_km(first, second):
+    """Расстояние между городами по прямой, км, или None без координат."""
+    a, b = CITY_COORDS.get(first), CITY_COORDS.get(second)
+    if not a or not b:
+        return None
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+
 def resolve(city, key, *, by_brand, cities_by_id):
-    """Куда регистрировать водителя города city в бренд key — или None."""
+    """Куда регистрировать водителя города city в бренд key — или None.
+
+    Третий шаг — просьба владельца 29.10.2026: «водитель Jana из Рудного, в
+    Костанае Jana нет — предлагать ближайшую диспу Jana». Если ни в городе, ни
+    в городах списка у парка диспетчерской нет, берётся ближайший по прямой
+    город, где она у этого парка есть (nearest=True, km). Другой парк взамен
+    по-прежнему не предлагается.
+    """
     pool = by_brand.get(key) or []
     own = [d for d in pool if d.get('city_id') == city['id']]
     if own:
@@ -298,6 +338,16 @@ def resolve(city, key, *, by_brand, cities_by_id):
         found = [d for d in pool if d.get('city_id') == target_id]
         if found:
             return {'city': target, 'dispatchers': found, 'own': False}
+    best = None
+    for city_id in sorted({d.get('city_id') for d in pool if d.get('city_id') is not None}):
+        target = cities_by_id.get(city_id)
+        km = distance_km(city['name'], target['name']) if target else None
+        if km is not None and (best is None or km < best[0]):
+            best = (km, target)
+    if best:
+        km, target = best
+        return {'city': target, 'dispatchers': [d for d in pool if d.get('city_id') == target['id']],
+                'own': False, 'nearest': True, 'km': max(10, int(round(km / 10.0)) * 10)}
     return None
 
 
@@ -355,27 +405,37 @@ class Catalog:
             if not self.by_brand.get(brand['key']):
                 continue          # парк без диспетчерских — карточке города сказать нечего
             found = self.resolve(city, brand['key'])
+            if found and found.get('nearest') and brand['park_id'] is None:
+                # Бренды без парка вики — только свои и по списку: «ближайший
+                # Каспий» в карточке Алматы — шум, а не сведение.
+                continue
             if found:
                 served = found['city']['name']
                 entries.append({
                     'key': brand['key'], 'name': brand['name'], 'park_id': brand['park_id'],
                     'city': {'id': found['city']['id'], 'name': served},
                     'own': found['own'],
+                    # Ни в городе, ни по списку — ближайшая диспетчерская парка
+                    # (просьба владельца 29.10.2026); карточка показывает такие
+                    # строки отдельно, свёрнутыми.
+                    'nearest': bool(found.get('nearest')),
+                    'km': found.get('km'),
                     'dispatchers': [_dispatcher_view(d, served) for d in found['dispatchers']],
                 })
             elif brand['park_id'] is not None:
-                # Парк вики, у которого диспетчерские есть, но не для этого
-                # города. Бренды без парка сюда не идут: «Каспий» из Актау в
-                # карточке Алматы — шум, а не сведение.
+                # Парк вики, которому не нашлось и ближайшей диспетчерской (у
+                # города нет координат).
                 absent.append(brand['name'])
         own_count = sum(1 for d in self.dispatchers if d.get('city_id') == city['id'])
         targets = [{'id': target['id'], 'name': target['name']} for target in self.targets(city)]
         # «Смешанный» город: своя диспетчерская есть не у всех парков. В
         # Темиртау она одна — «Честный Темиртау», а iTaxi и Аманат регистрируют
         # в Караганде, и заголовок «регистрируем в Темиртау» был бы неправдой
-        # для двух парков из трёх.
+        # для двух парков из трёх. Ближайшие диспетчерские в расчёт не идут:
+        # Jana в Актобе не делает Костанай «смешанным».
+        configured = [entry for entry in entries if not entry['nearest']]
         if own_count:
-            state = 'mixed' if any(not entry['own'] for entry in entries) else 'own'
+            state = 'mixed' if any(not entry['own'] for entry in configured) else 'own'
         else:
             state = 'elsewhere' if targets else 'unset'
         feeders = [{'id': other['id'], 'name': other['name']} for other in self.cities
@@ -486,8 +546,10 @@ def plan(analysis, catalog):
     own_variants = analysis.get('own_variants') or analysis['variants']
     kazakh_own, origin_own = _kazakh_cases(own_variants, catalog.city_names)
     kazakh_all, origin_all = _kazakh_cases(analysis['variants'], catalog.city_names)
-    own_variants = list(own_variants) + kazakh_own
-    all_variants = list(analysis['variants']) + kazakh_all
+    # С синонимами парков («жана такси» → Jana): иначе «жана» в продолжении
+    # «а жана такси?» осталось бы необъяснённым словом (_unexplained).
+    own_variants = directory._park_variants(list(own_variants) + kazakh_own)
+    all_variants = directory._park_variants(list(analysis['variants']) + kazakh_all)
     own_cities = directory.find_cities({'variants': own_variants}, catalog.city_names)
     own_brands, own_entries = catalog.named_brands(own_variants)
     if analysis.get('registration_own'):
@@ -575,13 +637,30 @@ def brand_text(decision, catalog):
         # «Хочет в Адал» — GLM переспрашивал, парк это или диспетчерская, когда
         # во фрагменте стоял только «парк Честный» (замер 29.10.2026).
         head += ' (он же %s)' % ', '.join('«%s»' % name for name in aliases)
+    targets = [target['name'] for target in catalog.targets(city)]
+    if found and found.get('nearest'):
+        # Ни в городе, ни в городах списка — ближайшая диспетчерская ЭТОГО
+        # парка (просьба владельца 29.10.2026: «предлагать ближайшую диспу
+        # жана такси»). Расстояние по прямой — чтобы оператор понимал, далеко
+        # ли, а не принимал Актобе за соседний город.
+        places = [city['name']] + targets
+        missing = ('В городе %s диспетчерской %s нет.' % (places[0], brand['name'])
+                   if len(places) == 1 else
+                   'Диспетчерской %s нет ни в городе %s.' % (brand['name'],
+                                                            ', ни в городе '.join(places)))
+        return ('%s: ближайшая диспетчерская %s — в городе %s, около %d км по прямой: '
+                'регистрировать там — %s. %s'
+                % (head, brand['name'], found['city']['name'], found['km'], _labels(found),
+                   missing))
     if found:
         text = '%s: регистрировать в городе %s — %s.' % (head, found['city']['name'],
                                                           _labels(found))
         if not found['own']:
             text += ' Своей диспетчерской %s в городе %s нет.' % (brand['name'], city['name'])
         return text
-    targets = [target['name'] for target in catalog.targets(city)]
+    if not catalog.by_brand.get(brand['key']):
+        return ('%s: у парка %s нет ни одной диспетчерской в кабинете Fleet.'
+                % (head, brand['name']))
     if targets:
         return ('%s: диспетчерской %s для водителей из города %s нет — ни в городе %s, ни в '
                 'городе %s.' % (head, brand['name'], city['name'], city['name'],
@@ -594,7 +673,7 @@ def other_cities(block):
     """Города, куда регистрируют парки без своей диспетчерской в городе, — по порядку."""
     found = []
     for entry in block.get('parks') or []:
-        if not entry['own'] and entry['city']['name'] not in found:
+        if not entry['own'] and not entry.get('nearest') and entry['city']['name'] not in found:
             found.append(entry['city']['name'])
     return found
 
@@ -683,20 +762,25 @@ def search_items(analysis, catalog, *, space_id):
         city = decision['city']
         item = {'kind': 'registration', 'space_id': space_id, 'id': city['id'],
                 'ref_id': city['id'], 'name': city['name'], 'park': None, 'target': None,
-                'own': False, 'dispatchers': [], 'state': None, 'targets': [], 'others': []}
+                'own': False, 'dispatchers': [], 'state': None, 'targets': [], 'others': [],
+                'nearest': False, 'km': None}
         if decision['brand']:
             found = decision['found']
             item['park'] = decision['brand']['name']
             if found:
                 served = found['city']['name']
                 item.update(target=served, own=found['own'], dispatchers=[
-                    _dispatcher_view(d, served) for d in found['dispatchers']])
+                    _dispatcher_view(d, served) for d in found['dispatchers']],
+                    nearest=bool(found.get('nearest')), km=found.get('km'))
         else:
             block = decision['block'] or {}
             item.update(state=block.get('state'), own=block.get('state') == 'own',
                         targets=[target['name'] for target in block.get('targets') or []],
                         others=other_cities(block),
-                        dispatchers=[{'name': entry['name']} for entry in block.get('parks') or []])
+                        # Ближайшие диспетчерские — не ответ города: «Регистрируем
+                        # здесь · 3 парка», а не «· 17».
+                        dispatchers=[{'name': entry['name']} for entry in block.get('parks') or []
+                                     if not entry.get('nearest')])
         items.append(item)
     return items
 

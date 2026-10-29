@@ -435,11 +435,34 @@ def park_word_forms(word):
     return _park_word_forms(word)
 
 
+# Как парк называют кириллицей, если транслит его не находит. «Jana» по-английски
+# читается «джана», а операторы пишут «жана такси» (журнал помощника, 29.10.2026:
+# из 8 вопросов с отдельным «жана» 6 — про парк, и во всех шести дальше идёт
+# «такси»/«таксапарк»). Только вместе с этим словом: голое «жана» — это казахское
+# «жаңа», «новый» («жаңа жүргізуші», «жаңа жасай алмадым»).
+PARK_PHRASE_ALIASES = (
+    (re.compile(r'(?<![%s])жана\s+(?=(?:такси|таксопарк|таксапарк|taxi)(?![%s]))'
+                % (_LETTERS, _LETTERS)), 'jana '),
+)
+
+
+def _park_variants(variants):
+    """Написания запроса для поиска парка: как есть и с PARK_PHRASE_ALIASES."""
+    found = list(variants)
+    for value in variants:
+        aliased = value
+        for pattern, target in PARK_PHRASE_ALIASES:
+            aliased = pattern.sub(target, aliased)
+        if aliased != value and aliased not in found:
+            found.append(aliased)
+    return found
+
+
 def match_parks(analysis, parks):
     """Парки, названные в запросе: все значимые слова названия на месте."""
     tokens = set()
     compact = []
-    for value in analysis['variants']:
+    for value in _park_variants(analysis['variants']):
         tokens.update(value.split())
         compact.append(value.replace(' ', ''))
     found = []
@@ -597,7 +620,7 @@ def _leftover(analysis, city_names, *, hits=(), parks=(), strip_tariffs=True):
             for word in words:
                 park_forms |= _park_word_forms(word)
     best = None
-    for value in analysis.get('own_variants') or analysis['variants']:
+    for value in _park_variants(analysis.get('own_variants') or analysis['variants']):
         text = value
         for pattern in patterns:
             if pattern is not None:

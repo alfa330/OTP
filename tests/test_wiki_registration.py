@@ -229,9 +229,34 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(_answer('Кентау', 'iTaxi'), ('Туркестан', ['iTaxi']))
         self.assertEqual(_answer('Кентау', 'Честный'), ('Шымкент', ['Адал']))
 
-    def test_no_dispatcher_is_an_answer_not_another_park(self):
-        self.assertIsNone(_answer('Рудный', 'Jana такси'))
-        self.assertIsNone(_answer('Кентау', 'Аманат'))
+    def test_nearest_dispatcher_of_the_same_park(self):
+        """Владелец 29.10.2026: «водитель Jana из Рудного, в Костанае Jana нет —
+        предлагать ближайшую диспу жана такси». Ни в городе, ни по списку —
+        ближайший по прямой город, где у ЭТОГО парка диспетчерская есть."""
+        self.assertEqual(_answer('Рудный', 'Jana такси'), ('Актобе', ['Jana Taxi']))
+        self.assertEqual(_answer('Кентау', 'Аманат'), ('Тараз', ['Аманат']))
+        found = CATALOG.resolve(_city('Рудный'), 'p:%d' % PARK['Jana такси'])
+        self.assertTrue(found['nearest'])
+        self.assertEqual(found['km'], 510)
+        # Настроенный список сильнее расстояния: Жезказгану ближе Кызылорда,
+        # но владелец решил «Караганда».
+        self.assertEqual(_answer('Жезказган', 'iTaxi'), ('Караганда', ['iTaxi']))
+        # Парка без единой диспетчерской «ближайшая» не спасает.
+        self.assertIsNone(_answer('Рудный', 'Hokage (Wolt)'))
+
+    def test_distance_twin_matches_the_map(self):
+        """Координаты — двойник CITY_COORDS схемы «Городов»: разойдутся — и
+        «ближайшая» в помощнике перестанет совпадать с точками на карте."""
+        source = (ROOT / 'src/components/wiki/kazakhstanMap.js').read_text(encoding='utf-8')
+        block = source[source.index('export const CITY_COORDS = {'):]
+        block = block[:block.index('};')]
+        coords = {name: (float(lat), float(lon)) for name, lat, lon in
+                  re.findall(r"'([^']+)':\s*\[([\d.]+),\s*([\d.]+)\]", block)}
+        self.assertEqual(coords, registration.CITY_COORDS)
+        self.assertAlmostEqual(registration.distance_km('Рудный', 'Костанай'), 43, delta=3)
+        self.assertIsNone(registration.distance_km('Рудный', 'Нет такого'))
+        for name in CITY_NAMES:
+            self.assertIn(name, registration.CITY_COORDS, name)
 
     def test_main_dispatcher_first_parentheses_last(self):
         self.assertEqual(_answer('Алматы', 'iTaxi')[1],
@@ -242,14 +267,25 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(block['state'], 'elsewhere')
         self.assertEqual([target['name'] for target in block['targets']], ['Костанай'])
         self.assertEqual([(entry['name'], entry['city']['name'], entry['own'])
-                          for entry in block['parks']],
+                          for entry in block['parks'] if not entry['nearest']],
                          [('iTaxi', 'Костанай', False), ('Департамент', 'Костанай', False),
                           ('Аманат', 'Костанай', False)])
-        # Парки вики без диспетчерской для города — названы, бренды без парка —
-        # нет: «Каспий» в карточке Рудного был бы шумом.
-        self.assertIn('Jana такси', block['absent'])
-        self.assertNotIn('Каспий', block['absent'])
-        self.assertNotIn('Hokage (Wolt)', block['absent'])   # диспетчерских нет вовсе
+        # Остальные парки вики — ближайшей диспетчерской, отдельно от ответа
+        # города; бренды без парка («Каспий») в ближайшие не идут — шум.
+        nearest = {entry['name']: (entry['city']['name'], entry['km'])
+                   for entry in block['parks'] if entry['nearest']}
+        self.assertEqual(nearest['Jana такси'], ('Актобе', 510))
+        self.assertNotIn('Каспий', nearest)
+        self.assertNotIn('Hokage (Wolt)', nearest)           # диспетчерских нет вовсе
+        self.assertEqual(block['absent'], [])
+        self.assertEqual(registration.other_cities(block), ['Костанай'])
+
+    def test_nearest_does_not_change_the_answer_of_the_city(self):
+        """Jana в Актобе — запасной путь, а не ответ Костаная: город со своими
+        диспетчерскими остаётся «своим», смешанный — смешанным."""
+        self.assertEqual(CATALOG.block(_city('Костанай'))['state'], 'own')
+        self.assertEqual(CATALOG.block(_city('Темиртау'))['state'], 'mixed')
+        self.assertEqual(registration.other_cities(CATALOG.block(_city('Темиртау'))), ['Караганда'])
 
     def test_block_of_a_hub_names_who_registers_here(self):
         block = CATALOG.block(_city('Караганда'))
@@ -291,7 +327,10 @@ class ResolveTest(unittest.TestCase):
         catalog = _catalog(registration_rules=())
         block = catalog.block(catalog.city('Рудный'))
         self.assertEqual(block['state'], 'unset')
-        self.assertEqual(block['parks'], [])
+        # Правила нет — у каждого парка остаётся только ближайшая диспетчерская.
+        self.assertEqual([entry for entry in block['parks'] if not entry['nearest']], [])
+        itaxi = next(entry for entry in block['parks'] if entry['name'] == 'iTaxi')
+        self.assertEqual((itaxi['city']['name'], itaxi['km']), ('Костанай', 40))
 
     def test_block_shows_the_cabinet_city_when_it_differs(self):
         entry = next(entry for entry in CATALOG.block(_city('Темиртау'))['parks']
@@ -350,13 +389,41 @@ class QuestionTest(unittest.TestCase):
                            'в городе Туркестан; если у парка нет диспетчерской в городе '
                            'Туркестан — в городе Шымкент')
 
-    def test_missing_dispatcher_is_said_plainly(self):
+    def test_nearest_dispatcher_is_offered_for_the_same_park(self):
         rows = self.assertAnswers('Jana из рудного куда регистрировать',
                                   'Рудный › Регистрация водителей',
-                                  'диспетчерской Jana такси для водителей из города Рудный нет')
+                                  'ближайшая диспетчерская Jana такси — в городе Актобе, около 510 км '
+                                  'по прямой: регистрировать там — диспетчерская «Jana Taxi»',
+                                  'Диспетчерской Jana такси нет ни в городе Рудный, ни в городе Костанай')
         self.assertNotIn('доступн', rows[0]['text'])
+        self.assertNotIn('iTaxi', rows[0]['text'])           # другой парк не предлагается
         self.assertAnswers('регистрация hokage рудный', 'Рудный › Регистрация водителей',
-                           'диспетчерской Hokage (Wolt)')
+                           'у парка Hokage (Wolt) нет ни одной диспетчерской в кабинете Fleet')
+
+    def test_owner_question_about_jana_verbatim(self):
+        """Вопрос владельца 29.10.2026 дословно: помощник ответил «Костанай»,
+        потому что «жана такси» не узнавался как Jana, и вопрос шёл без парка."""
+        rows = self.assertAnswers(
+            'водитель обращается с жана такси а водитель сам в рудном и ничего сделать не может, '
+            'в какой из диспетчерских зарегать его',
+            'Рудный › Регистрация водителей', 'парк Jana такси', 'в городе Актобе', '«Jana Taxi»')
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn('регистрировать в городе Костанай', rows[0]['text'])
+
+    def test_jana_spelled_in_cyrillic(self):
+        """«Жана такси» — Jana, и в регистрации, и в справочнике офисов. Голое
+        «жана» — казахское «жаңа» («новый»), парком не считается."""
+        jana = {'id': 12, 'name': 'Jana такси'}
+        for text in ('жана такси', 'адрес жана такси шымкент', 'жана таксапарк алматы',
+                     'жана taxi'):
+            self.assertEqual(directory.match_parks({'variants': directory._variants(text)}, [jana]),
+                             [jana], text)
+        for text in ('жана жургизуши', 'жаңа жүргізуші тіркеу', 'жана'):
+            self.assertEqual(directory.match_parks({'variants': directory._variants(text)}, [jana]),
+                             [], text)
+        follow = 'куда зарегать водителя айтакси с рудного а жана такси?'
+        rows = _rows('а жана такси?', search_query=follow)
+        self.assertIn('парк Jana такси', rows[0]['text'])
 
     def test_named_park_spelled_by_its_dispatcher(self):
         """«Адал» и «EKI DONGELEK» — так их называют операторы, и так названы
@@ -530,9 +597,10 @@ class PromptTest(unittest.TestCase):
         self.assertLess(prompt.index('13. РЕГИСТРАЦИЯ'), prompt.index('ФОРМАТ ОТВЕТА'))
 
     def test_rule_says_what_the_owner_asked(self):
-        rule = ai_answer.REGISTRATION_RULE
+        rule = ' '.join(ai_answer.REGISTRATION_RULE.split())
         self.assertIn('Другие парки и их диспетчерские НЕ', rule)
         self.assertIn('это ответ, а не отказ', rule)
+        self.assertIn('БЛИЖАЙШУЮ диспетчерскую парка', rule)
 
     def test_directory_label_and_pipeline_gates(self):
         rows = _rows('куда зарегать водителя айтакси с рудного')
@@ -586,6 +654,17 @@ class SearchItemsTest(unittest.TestCase):
         item = registration.search_items(registration.analyze('регистрация рудный'), CATALOG,
                                          space_id=SPACE)[0]
         self.assertEqual((item['state'], item['targets']), ('elsewhere', ['Костанай']))
+        # Подпись «Регистрируем здесь · N парков» — без ближайших чужих городов.
+        item = registration.search_items(registration.analyze('регистрация костанай'), CATALOG,
+                                         space_id=SPACE)[0]
+        self.assertEqual(item['state'], 'own')
+        self.assertNotIn('Jana такси', [d['name'] for d in item['dispatchers']])
+
+    def test_park_item_names_the_nearest_city(self):
+        item = registration.search_items(registration.analyze('регистрация jana рудный'), CATALOG,
+                                         space_id=SPACE)[0]
+        self.assertEqual((item['park'], item['target'], item['nearest'], item['km']),
+                         ('Jana такси', 'Актобе', True, 510))
 
     def test_registration_failure_does_not_take_offices_down(self):
         """Разбор 29.10.2026: регистрация и справочник офисов шли под одним

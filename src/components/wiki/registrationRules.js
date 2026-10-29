@@ -47,7 +47,10 @@ const listLocative = (names) => {
 export const otherCities = (block) => {
     const found = [];
     (block?.parks || []).forEach((entry) => {
-        if (!entry.own && entry.city?.name && !found.includes(entry.city.name)) found.push(entry.city.name);
+        // Ближайшие диспетчерские — не «куда регистрируют» город, а запасной путь.
+        if (!entry.own && !entry.nearest && entry.city?.name && !found.includes(entry.city.name)) {
+            found.push(entry.city.name);
+        }
     });
     return found;
 };
@@ -100,6 +103,22 @@ export const dispatcherNote = (dispatcher) => (
     dispatcher?.fleet_city_other ? `в кабинете — ${dispatcher.fleet_city_other}` : ''
 );
 
+/** Строки парков: свои и по списку «куда регистрировать» — ответ города,
+ *  ближайшие диспетчерские остальных парков — запасной путь, отдельно. */
+export const splitNearest = (parks) => ({
+    main: (parks || []).filter((entry) => !entry.nearest),
+    nearest: (parks || []).filter((entry) => entry.nearest),
+});
+
+/** «Остальные 14 парков — ближайшая диспетчерская»; один — «Ещё 1 парк»
+ *  («остальные 1 парк» не по-русски). В городе без своих и без правила других
+ *  строк нет, и «остальные» было бы не к чему. */
+export const nearestLabel = (count, alone = false) => {
+    const parks = `${count} ${plural(count, 'парк', 'парка', 'парков')}`;
+    const head = alone ? parks : `${count === 1 ? 'Ещё' : 'Остальные'} ${parks}`;
+    return `${head} — ближайшая диспетчерская`;
+};
+
 /** Сколько строк парков показать сразу. В Алматы их семнадцать — карточка
  *  превратилась бы в список, а смотрят обычно один-два первых. */
 export const PARKS_PREVIEW = 6;
@@ -134,6 +153,13 @@ export const registrationSearchText = (entry) => {
     if (entry?.park) {
         const title = `Регистрация ${entry.park} · ${entry.name}`;
         if (!entry.target) return { title, subtitle: `Диспетчерской ${entry.park} для этого города нет` };
+        if (entry.nearest) {
+            return {
+                title,
+                subtitle: [`Ближайшая — в ${cityLocative(entry.target)}`, entry.km ? `~${entry.km} км` : '',
+                    dispatchers].filter(Boolean).join(' · '),
+            };
+        }
         const where = entry.own ? 'Здесь' : `В ${cityLocative(entry.target)}`;
         return { title, subtitle: [where, dispatchers].filter(Boolean).join(' · ') };
     }
