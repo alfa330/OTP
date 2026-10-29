@@ -36,7 +36,7 @@ import os
 import threading
 from datetime import datetime, timedelta
 
-from . import cabinets, phones, queries
+from . import cabinets, partner_events, phones, queries
 from .amo_writer import AmoWriteError, AmoWriter
 from .olx_client import (MAX_MESSAGE_LENGTH, OlxAuthError, OlxClient, OlxError,
                          OlxRateLimited, message_is_incoming, message_phone,
@@ -249,7 +249,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                         cursor, cabinet.code, 'needs_human', thread_id=thread_id,
                         message_id=message_id, message_at=sent_at,
                         message_excerpt=excerpt, tag=tag_name)
-            return
+            return 'needs_human'
         # Отметку ставим ДО отправки и отдельной транзакцией.
         #
         # Порядок здесь важнее, чем кажется. Отметь мы чат после отправки и в
@@ -275,7 +275,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                     cursor, cabinet.code, 'error', thread_id=thread_id,
                     message_id=message_id, message_at=sent_at, message_excerpt=excerpt,
                     error_text='не удалось отправить заготовленный ответ: %s' % (exc,))
-            return
+            return 'error'
 
         counters.replies_sent += 1
         with db._get_cursor() as cursor:
@@ -290,7 +290,10 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                 cursor, cabinet.code, 'canned_reply', thread_id=thread_id,
                 message_id=message_id, message_at=sent_at, message_excerpt=excerpt,
                 tag=tag_name)
-        return
+        # Партнёрам с областью «Чаты OLX» (partner_keys): из кабинета ушёл автоответ.
+        partner_events.message_sent(db, cabinet, thread_id, cabinet.canned_reply, kind='canned',
+                                    author='Робот', source='robot', sent_at=queries.now_almaty())
+        return 'canned_reply'
 
     needs_manual = phone is None
     # Кривой номер в название сделки не поставить: ТЗ отдельным пунктом
@@ -310,7 +313,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                     message_id=message_id, message_at=sent_at, phone_raw=raw,
                     phone_normalized=phone, tag=tag_name, message_excerpt=excerpt,
                     amo_lead_id=already.get('amo_lead_id'))
-            return
+            return 'duplicate'
 
     # ── создание сделки (СЕТЬ, вне транзакции) ────────────────────────────
     try:
@@ -324,7 +327,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                 message_id=message_id, message_at=sent_at, phone_raw=raw,
                 phone_normalized=phone, tag=tag_name, message_excerpt=excerpt,
                 error_text=str(exc))
-        return
+        return 'error'
 
     created_at = queries.now_almaty()
     latency = None
@@ -352,7 +355,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                 error_text='гонка дедупликации: сделка создана повторно')
             log.warning('OLX %s: гонка дедупликации, сделка %s создана повторно',
                         cabinet.code, lead_id)
-            return
+            return 'duplicate'
 
         queries.upsert_thread(cursor, cabinet.code, thread_id,
                               amo_lead_id=lead_id, phone_normalized=phone)
@@ -361,6 +364,7 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
     if latency is not None and latency > SLA_MS:
         log.warning('OLX %s: обращение доехало за %.1f с — вне SLA',
                     cabinet.code, latency / 1000.0)
+    return 'manual_review' if needs_manual else 'lead_created'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,7 +536,13 @@ def _poll_thread(db, writers, cabinet, thread, result):
     result.messages_seen += len(incoming)
 
     for message in incoming:
-        _handle_message(db, writers, cabinet, thread, message, result)
+        outcome = _handle_message(db, writers, cabinet, thread, message, result)
+        # Партнёрам с областью «Чаты OLX» (partner_keys): кандидат написал и что
+        # робот с этим сделал. Приставка к делу робота — исключений не выпускает.
+        phone, raw, _found = extract_phone(message)
+        partner_events.message_received(db, cabinet, thread, state, message, outcome,
+                                        phone=phone, phone_raw=raw,
+                                        message_at=message_time(message))
 
     # Закладку двигаем ПОСЛЕ разбора: упади обработка на середине — чат
     # разберётся заново на следующем опросе, а дубли отсечёт индекс. Обратный
@@ -1205,6 +1215,12 @@ def reply_from_portal(db, cabinet, thread_id, text, actor):
 
     log.info('Лиды OLX: %s ответил кандидату в чате %s/%s',
              (actor or {}).get('name') or 'сотрудник', cabinet.code, thread_id)
+    # Партнёрам с областью «Чаты OLX» (partner_keys): из кабинета ушёл ответ — и
+    # когда отвечал сотрудник из раздела, и когда сам партнёр через API.
+    partner_events.message_sent(db, cabinet, thread_id, body, kind='portal',
+                                author=(actor or {}).get('name'),
+                                source=(actor or {}).get('source') or 'portal',
+                                sent_at=queries.now_almaty())
     return claim
 
 

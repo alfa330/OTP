@@ -13,6 +13,7 @@ Scope = namedtuple('Scope', 'code title hint endpoints header')
 KNOWLEDGE = 'knowledge'
 SIGN_LINKS = 'sign_links'
 CRM_EMBED = 'crm_embed'
+OLX_CHATS = 'olx_chats'
 
 SCOPES = (
     Scope(KNOWLEDGE, 'Ручка знаний',
@@ -30,6 +31,14 @@ SCOPES = (
           'пароля iCORE.',
           ('POST /api/wazzup/embed/launch',),
           'Authorization: Bearer или X-Api-Key'),
+    Scope(OLX_CHATS, 'Чаты OLX',
+          'Чаты девяти кабинетов OLX: список чатов и журнал откликов, переписка с '
+          'кандидатом, ответ ему от имени кабинета и подписка на события вебхуком '
+          '(новое сообщение, наш ответ).',
+          ('GET /api/olx/cabinets', 'GET /api/olx/threads', 'GET /api/olx/threads/{cabinet}/{thread}',
+           'POST /api/olx/threads/{cabinet}/{thread}/messages', 'GET /api/olx/journal',
+           'GET|PUT|DELETE /api/olx/webhook'),
+          'X-Api-Key'),
 )
 BY_CODE = {scope.code: scope for scope in SCOPES}
 ORDER = {scope.code: index for index, scope in enumerate(SCOPES)}

@@ -9866,6 +9866,10 @@ app.register_blueprint(build_pilot_blueprint(
     stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
 ))
 wazzup_syntony.start_worker(db)
+# Доставка событий партнёрам по их подпискам (partner_keys/webhooks.py): свой
+# демон на процесс, строки очереди арендуются в базе.
+from partner_keys import webhooks as partner_webhooks  # noqa: E402
+partner_webhooks.start_worker(db)
 
 # Голосовые «Чатов ОП» текстом (wazzup/voice.py): Gemini расшифровывает их фоном,
 # своим потоком, не трогая общий пул бота. Текст своих голосовых лента берёт той же
@@ -68532,6 +68536,19 @@ try:
     logging.info("Раздел «Лиды OLX»: Blueprint подключён на /api/olx_amo")
 except Exception:
     logging.exception("Раздел «Лиды OLX»: Blueprint НЕ подключён")
+
+# ── Чаты OLX для партнёров (partner_keys, область «Чаты OLX») ────────────────
+# Сторонний сервис по ключу партнёра читает чаты кабинетов, отвечает кандидату
+# и подписывается на события (olx_amo/partner_routes.py); сами события шлёт
+# опрос робота через partner_keys/webhooks.py. Сотрудником сервис не является:
+# ключ в заголовке X-Api-Key, require_api_key сюда не передаётся.
+try:
+    from olx_amo.partner_routes import build_olx_partner_blueprint  # noqa: E402
+
+    app.register_blueprint(build_olx_partner_blueprint(db=db, client_ip=_client_ip))
+    logging.info("Чаты OLX для партнёров: вход подключён на /api/olx")
+except Exception:
+    logging.exception("Чаты OLX для партнёров: вход НЕ подключён")
 
 
 # ── Раздел «Объявления OLX» (тексты объявлений девяти кабинетов) ─────────────

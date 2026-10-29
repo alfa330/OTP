@@ -23,7 +23,7 @@ from functools import wraps
 
 from flask import Blueprint, jsonify, request
 
-from . import keys, queries, schema, scopes
+from . import keys, queries, schema, scopes, webhooks
 
 DEFAULT_DEPARTMENT_CODE = 'szov'
 DEFAULT_ROLE = 'operator'
@@ -58,7 +58,7 @@ def build_partner_keys_admin_blueprint(*, db, require_api_key, build_cors_prefli
                 return jsonify({'error': 'Внутренняя ошибка раздела ключей'}), 500
         return wrapper
 
-    def _public(key, last_day=None):
+    def _public(key, last_day=None, hooks=None):
         item = {field: key[field] for field in (
             'id', 'name', 'mark', 'scopes', 'created_at', 'created_by_name', 'last_used_at',
             'calls_count', 'revoked_at', 'revoked_by_name', 'active')}
@@ -67,6 +67,11 @@ def build_partner_keys_admin_blueprint(*, db, require_api_key, build_cors_prefli
                            'department': key['department_name'],
                            'department_code': key['department_code']}
         item['calls_last_day'] = int((last_day or {}).get(key['id'], 0))
+        # Подписки ключа на события (без секрета): по ним видно, куда партнёр
+        # получает вебхуки и не спотыкается ли доставка.
+        item['webhooks'] = [dict(hook, scope_title=scopes.titles([hook['scope']])[0]
+                                 if hook['scope'] in scopes.BY_CODE else hook['scope'])
+                            for hook in (hooks or {}).get(key['id'], [])]
         return item
 
     def _scopes_from(body):
@@ -84,7 +89,8 @@ def build_partner_keys_admin_blueprint(*, db, require_api_key, build_cors_prefli
     @guarded
     def partner_keys_list(cursor, requester_id):
         last_day = queries.calls_last_day(cursor)
-        return jsonify({'keys': [_public(key, last_day) for key in queries.list_keys(cursor)],
+        hooks = webhooks.subscriptions_by_key(cursor)
+        return jsonify({'keys': [_public(key, last_day, hooks) for key in queries.list_keys(cursor)],
                         'scopes': scopes.catalog(), 'header': keys.HEADER})
 
     @bp.route('', methods=['POST', 'OPTIONS'])

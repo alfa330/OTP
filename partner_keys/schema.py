@@ -121,6 +121,57 @@ _STATEMENTS = [
     # Чистка по сроку.
     "CREATE INDEX IF NOT EXISTS idx_partner_key_calls_created "
     "ON partner_key_calls (created_at);",
+    # ── Подписки на события и их доставка (partner_keys/webhooks.py) ─────────
+    # Подписка — одна на ключ и область: адрес партнёра, его секрет для подписи
+    # HMAC и список событий (пусто — все события области). Секрет лежит открыто:
+    # им подписывается каждая доставка, и хеш здесь не помог бы.
+    """
+    CREATE TABLE IF NOT EXISTS partner_webhooks (
+        id                 SERIAL PRIMARY KEY,
+        key_id             INTEGER NOT NULL REFERENCES partner_keys(id) ON DELETE CASCADE,
+        scope              VARCHAR(32) NOT NULL,
+        url                TEXT NOT NULL,
+        secret             TEXT NOT NULL,
+        events             TEXT[] NOT NULL DEFAULT '{}',
+        enabled            BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at         TIMESTAMP NOT NULL DEFAULT """ + _NOW + """,
+        updated_at         TIMESTAMP NOT NULL DEFAULT """ + _NOW + """,
+        last_delivered_at  TIMESTAMP,
+        last_error         TEXT,
+        last_error_at      TIMESTAMP,
+        failures_in_row    INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (key_id, scope)
+    );
+    """,
+    # Очередь доставки: строка на событие и подписку, доставка «как минимум один
+    # раз» с арендой строки (lease) — несколько экземпляров портала не дерутся за
+    # одно событие. Тот же приём, что у пересылки Wazzup (wazzup/syntony_schema.py).
+    """
+    CREATE TABLE IF NOT EXISTS partner_webhook_outbox (
+        id               BIGSERIAL PRIMARY KEY,
+        webhook_id       INTEGER NOT NULL REFERENCES partner_webhooks(id) ON DELETE CASCADE,
+        event            VARCHAR(64) NOT NULL,
+        event_id         UUID NOT NULL,
+        payload          JSONB NOT NULL,
+        state            VARCHAR(12) NOT NULL DEFAULT 'ready'
+                         CHECK (state IN ('ready', 'done', 'failed')),
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        lease_token      UUID,
+        lease_until      TIMESTAMPTZ,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        delivered_at     TIMESTAMPTZ,
+        completed_at     TIMESTAMPTZ,
+        last_status      SMALLINT,
+        last_error       TEXT
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_partner_webhook_outbox_due "
+    "ON partner_webhook_outbox (next_attempt_at, id) WHERE state = 'ready';",
+    "CREATE INDEX IF NOT EXISTS idx_partner_webhook_outbox_webhook "
+    "ON partner_webhook_outbox (webhook_id, created_at DESC, id DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_partner_webhook_outbox_completed "
+    "ON partner_webhook_outbox (completed_at) WHERE completed_at IS NOT NULL;",
 ]
 
 

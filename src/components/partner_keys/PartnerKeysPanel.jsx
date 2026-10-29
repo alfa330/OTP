@@ -62,6 +62,14 @@ const plural = (n, one, few, many) => {
 
 const callWord = (n) => plural(n, 'вызов', 'вызова', 'вызовов');
 
+const hostOf = (url) => {
+    try {
+        return new URL(url).host;
+    } catch {
+        return String(url || '');
+    }
+};
+
 const detailValue = (value) => {
     if (value === true) return 'да';
     if (value === false) return 'нет';
@@ -129,6 +137,17 @@ function KeyCard({ item, formatDate, onCalls, onScopes, onRevoke }) {
                     <p className="mt-1.5 text-[12.5px] text-slate-500">
                         Отпечаток <span className="font-mono">{item.mark}</span>
                     </p>
+                    {/* Подписки на события: куда партнёр получает вебхуки. Красным — только
+                        сбои подряд: исправная доставка внимания не просит. */}
+                    {Array.isArray(item.webhooks) && item.webhooks.map((hook) => (
+                        <p key={hook.scope} className="mt-0.5 text-[12.5px] text-slate-500">
+                            Вебхук · {hook.scope_title || hook.scope}: <span className="font-mono">{hostOf(hook.url)}</span>
+                            {!hook.enabled && ' · выключен'}
+                            {hook.failures_in_row > 0 && (
+                                <span className="text-rose-600"> · сбоев подряд {hook.failures_in_row}</span>
+                            )}
+                        </p>
+                    ))}
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                     {item.active && (

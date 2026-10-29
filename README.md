@@ -388,6 +388,7 @@ SIGN_LINKS_API_LANES=4              # одновременных обращен�
 | Ручка знаний | фрагменты базы знаний в правах оператора СЗоВ: парк + вопрос → куски статей, карточка парка, офисы, комиссии; для ИИ Syntony (`knowledge_api/`, инструкция партнёру — `docs/SYNTONY_KNOWLEDGE_API.md`) | `POST /api/knowledge/search`, `GET /api/knowledge/parks`, `GET /api/knowledge/ping` |
 | Ссылки на подписание | внешний вход раздела «Ссылка на подписание»: ссылки eGov по списку ИИН | `POST /api/sign_links/external/links` |
 | Окно «Чатов ОП» в CRM | сервер CRM получает ссылку на окно чатов для своего пользователя (принимается и `Authorization: Bearer`) | `POST /api/wazzup/embed/launch` |
+| Чаты OLX | чаты девяти кабинетов OLX: кабинеты, список чатов, переписка живьём, ответ кандидату, журнал откликов робота и подписка на события вебхуком (`olx_amo/partner_routes.py`, инструкция партнёру — `docs/OLX_PARTNER_API.md`) | `GET /api/olx/cabinets`, `GET /api/olx/threads…`, `POST /api/olx/threads/{cabinet}/{thread}/messages`, `GET /api/olx/journal`, `GET|PUT|DELETE /api/olx/webhook` |
 
 Ключ без нужной области получает `403`, неизвестный или отозванный — `401`.
 Ключи из окружения (`SIGN_LINKS_API_KEY`, `POTOK_CRM_WEBHOOK_API_KEY`) пока
@@ -400,9 +401,20 @@ SIGN_LINKS_API_LANES=4              # одновременных обращен�
 фрагментов нет, партнёр получает `status: no_data`, а вопрос ложится в «Вопросы
 операторов» отдела ключа — супервайзеры допишут статью.
 
+**События партнёрам.** У OLX вебхуков нет — новое в чатах узнаёт наш опрос раз в
+30 секунд, и события партнёру шлём мы сами (`partner_keys/webhooks.py`): партнёр
+через `PUT /api/olx/webhook` задаёт адрес (только https), секрет и список
+событий; каждая доставка подписана `X-Partner-Signature: sha256=hmac(secret,
+timestamp + "." + body)`, несёт `Idempotency-Key` и повторяется при сбоях с
+задержкой 5 с → удвоение до часа, до 30 попыток. Очередь — `partner_webhook_outbox`
+со строкой на событие и подписку, подписки — `partner_webhooks`; доставленное
+хранится 7 дней, недоставленное — 30. Доставку выключает
+`PARTNER_WEBHOOKS_DISABLED=1`.
+
 ```env
 KNOWLEDGE_API_PER_MINUTE=60     # вызовов ручки знаний в минуту на ключ, не больше 600
 KNOWLEDGE_API_LANES=4           # одновременных поисков на всех, до 16
+OLX_API_PER_MINUTE=120          # вызовов ручек «Чатов OLX» в минуту на ключ, не больше 600
 PARTNER_KEYS_CALLS_DAYS=90      # сколько дней хранится журнал вызовов ключей
 ```
 

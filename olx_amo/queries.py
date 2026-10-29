@@ -404,6 +404,42 @@ def awaiting_human(cursor, limit=200):
     return _all(cursor)
 
 
+def partner_threads(cursor, cabinet_code=None, awaiting_only=False, since=None, limit=50, offset=0):
+    """Чаты для партнёрской ручки (partner_routes.py): страница по свежести с фильтром
+    по кабинету, «ждут человека» и «обновлены после». Возвращает (строки, всего).
+
+    `since` — по updated_at, а не по last_message_at: партнёру нужно «что
+    изменилось с прошлого раза», а меняется у чата не только последнее
+    сообщение — метка ожидания, сделка, номер."""
+    where = ["1 = 1"]
+    params = {'limit': max(1, min(int(limit or 50), 200)), 'offset': max(0, int(offset or 0))}
+    if cabinet_code:
+        where.append("cabinet_code = %(cabinet_code)s")
+        params['cabinet_code'] = cabinet_code
+    if awaiting_only:
+        where.append("awaiting_human_since IS NOT NULL")
+    if since is not None:
+        where.append("updated_at >= %(since)s")
+        params['since'] = since
+    clause = " AND ".join(where)
+    cursor.execute("SELECT COUNT(*) AS total FROM olx_threads WHERE " + clause, params)
+    total = _scalar(cursor) or 0
+    cursor.execute(
+        """
+        SELECT cabinet_code, thread_id, advert_id, advert_title, interlocutor_id,
+               interlocutor_name, last_message_id, last_message_at, messages_seen,
+               awaiting_human_since, canned_reply_sent_at, phone_normalized, amo_lead_id,
+               first_seen_at, updated_at
+          FROM olx_threads
+         WHERE """ + clause + """
+         ORDER BY last_message_at DESC NULLS LAST, id DESC
+         LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    return _all(cursor), int(total)
+
+
 def threads_state(cursor, cabinet_code, thread_ids):
     """Состояние сразу по списку чатов. Один запрос вместо пятидесяти.
 
