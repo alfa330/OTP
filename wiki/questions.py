@@ -171,6 +171,64 @@ def escalate(cursor, *, asker_id, department_id, space_id, chat_id,
     return {'id': int(cursor.fetchone()[0]), 'status': 'open'}
 
 
+# Вопрос партнёрского ИИ (knowledge_api, решение владельца 29.10.2026): «данных
+# нет» уходит в ту же очередь, что и отказ помощника, — супервайзеры СЗоВ допишут
+# статью, и в следующий раз фрагменты найдутся. Спрашивает не сотрудник, а ключ:
+# asker_id пуст, вместо него подпись источника («ИИ Syntony») и парк, про который
+# спрашивал водитель.
+EXTERNAL_SOURCE = 'api'
+# Один и тот же вопрос партнёр присылает много раз (водители спрашивают одно и
+# то же). Пока строка открыта и моложе этого срока, повтор не плодит строк, а
+# считается в asked_count — супервайзер видит, насколько вопрос частый.
+EXTERNAL_REPEAT_DAYS = 30
+
+
+def escalate_external(cursor, *, key_id, key_name, department_id, space_id, park_id,
+                      park_name, question):
+    """Вопрос партнёрского ИИ без ответа — в очередь отдела. Возвращает id строки."""
+    text = ' '.join(str(question or '').split())
+    if not text:
+        return None
+    label = ('ИИ %s' % str(key_name).strip()) if str(key_name or '').strip() else 'Внешний ИИ'
+    params = {
+        'source': EXTERNAL_SOURCE, 'label': label[:120], 'department': department_id,
+        'space': space_id, 'park': park_id, 'park_name': (str(park_name)[:255] if park_name else None),
+        'question': text, 'days': EXTERNAL_REPEAT_DAYS,
+    }
+    cursor.execute(
+        """
+        UPDATE wiki_operator_questions
+           SET asked_count = asked_count + 1, updated_at = {now}
+         WHERE id = (SELECT id
+                       FROM wiki_operator_questions
+                      WHERE source = %(source)s AND status = 'open'
+                        AND department_id IS NOT DISTINCT FROM %(department)s
+                        AND park_id IS NOT DISTINCT FROM %(park)s
+                        AND lower(question) = lower(%(question)s)
+                        AND created_at >= {now} - (%(days)s * INTERVAL '1 day')
+                      ORDER BY created_at DESC
+                      LIMIT 1)
+        RETURNING id
+        """.format(now=_NOW),
+        params,
+    )
+    row = cursor.fetchone()
+    if row:
+        return int(row[0])
+    cursor.execute(
+        """
+        INSERT INTO wiki_operator_questions
+               (asker_id, department_id, space_id, question, source, source_label,
+                park_id, park_name)
+        VALUES (NULL, %(department)s, %(space)s, %(question)s, %(source)s, %(label)s,
+                %(park)s, %(park_name)s)
+        RETURNING id
+        """,
+        params,
+    )
+    return int(cursor.fetchone()[0])
+
+
 # Что оператор вправе передать сам: ответ, уточняющий вопрос и отказ, если тот
 # почему-то не ушёл автоматически. Ответ супервайзера — нет: с ним возвращаются к
 # самому супервайзеру, а не заводят второй вопрос. Копия — во фронте
@@ -307,7 +365,8 @@ SELECT q.id, q.question, q.status, q.created_at, q.space_id, q.chat_id,
        q.asker_id, asker.name, q.department_id, d.name,
        q.answer, q.resolved_at, q.resolved_by, resolver.name,
        q.kb_status, q.kb_at, q.kb_article_id, a.title, a.slug, q.kb_news_id,
-       q.answer_message_id, sp.name, q.requested_by_asker, reply.text
+       q.answer_message_id, sp.name, q.requested_by_asker, reply.text,
+       q.source, q.source_label, q.park_name, q.asked_count
   FROM wiki_operator_questions q
   LEFT JOIN users asker ON asker.id = q.asker_id
   LEFT JOIN users resolver ON resolver.id = q.resolved_by
@@ -322,7 +381,8 @@ _ROW_KEYS = ('id', 'question', 'status', 'created_at', 'space_id', 'chat_id',
              'answer', 'resolved_at', 'resolved_by', 'resolved_by_name',
              'kb_status', 'kb_at', 'kb_article_id', 'kb_article_title',
              'kb_article_slug', 'kb_news_id', 'answer_message_id', 'space_name',
-             'requested_by_asker', 'assistant_text')
+             'requested_by_asker', 'assistant_text', 'source', 'source_label',
+             'park_name', 'asked_count')
 
 
 def _row(row):

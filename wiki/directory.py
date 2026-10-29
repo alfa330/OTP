@@ -421,6 +421,20 @@ def _park_alternatives(name):
     return result
 
 
+def park_name_words(name):
+    """Значимые слова названия парка, по варианту на скобки — для соседних пакетов.
+
+    Ручка знаний для партнёрского ИИ (knowledge_api/parks.py) ищет парки в
+    тексте фрагментов тем же разбором, что и справочник в вопросе: второй
+    список форм названия разошёлся бы с этим при первом же новом парке."""
+    return _park_alternatives(name)
+
+
+def park_word_forms(word):
+    """Написания одного слова названия: латиница, кириллица, «ай такси»."""
+    return _park_word_forms(word)
+
+
 def match_parks(analysis, parks):
     """Парки, названные в запросе: все значимые слова названия на месте."""
     tokens = set()
@@ -930,13 +944,18 @@ def _serves(office, parks):
     return any(park['id'] in ids for park in parks)
 
 
-def plan(analysis, *, offices, cities, parks=(), features=None, limit=SEARCH_OFFICES):
+def plan(analysis, *, offices, cities, parks=(), features=None, limit=SEARCH_OFFICES,
+         named_parks=None):
     """Что из справочников показать на этот запрос.
 
     Возвращает {'offices': [{'office', 'for_city'}], 'offices_more':
     {'city', 'count'} | None, 'cities': [{'city', 'tariffs', 'narrowed'}],
     'offices_tab': bool, 'cities_tab': {'tariffs'} | None}. Пусто — значит
     справочнику сказать нечего, и выдача остаётся выдачей статей.
+
+    named_parks — парки, известные ЗАРАНЕЕ (партнёрский ИИ присылает парк
+    вместе с вопросом, knowledge_api): тогда парк из текста не угадывается, и
+    офисы сужаются до него. None — как раньше, парк ищется в словах запроса.
     """
     features = features or {'offices': True, 'cities': True}
     offices = offices if features.get('offices') else []
@@ -952,7 +971,10 @@ def plan(analysis, *, offices, cities, parks=(), features=None, limit=SEARCH_OFF
         named = find_cities({'variants': analysis['own_variants']}, names) or named
     tariffs = set(analysis['tariffs'])
     hits = office_hits(analysis, offices, names) if offices else []
-    named_parks = match_parks(analysis, parks) if parks else []
+    if named_parks is None:
+        named_parks = match_parks(analysis, parks) if parks else []
+    else:
+        named_parks = list(named_parks)
     short = len(analysis['words']) <= MAX_CITY_ONLY_WORDS
     # Слабые признаки — только когда остальные слова объяснены: «адрес в
     # Актобе» — да, «автомойка адреса по Атырау» и «работает ли фин отдел» — нет.
@@ -1410,7 +1432,7 @@ def asks_directory(analysis):
                 or analysis.get('percent_hint'))
 
 
-def ai_rows(cursor, ctx, question, *, space_id, search_query=None):
+def ai_rows(cursor, ctx, question, *, space_id, search_query=None, park=None):
     """Фрагменты справочников к вопросу помощника — живые, на сейчас.
 
     space_id — то, что помощник уже выбрал (routes_ai.effective_space). Его
@@ -1418,6 +1440,9 @@ def ai_rows(cursor, ctx, question, *, space_id, search_query=None):
     поэтому пространство проверяется здесь ещё раз (directory_space).
     search_query — вопрос, дополненный прошлыми репликами («а в Шымкенте?»):
     город и намерение часто только в них.
+    park — {'id', 'name'} парка, известного заранее (ручка знаний для
+    партнёрского ИИ): офисы и телефоны сужаются до него, парк из слов вопроса
+    не угадывается.
     """
     space = directory_space(cursor, ctx, space_id)
     if space is None:
@@ -1431,19 +1456,24 @@ def ai_rows(cursor, ctx, question, *, space_id, search_query=None):
     day = now.date()
     offices, cities, parks = load(cursor, space=space, day=day)
     return build_ai_rows(analysis, space=space, offices=offices, cities=cities,
-                         parks=parks, day=day, now=now)
+                         parks=parks, day=day, now=now,
+                         named_parks=[park] if park else None)
 
 
-def build_ai_rows(analysis, *, space, offices, cities, parks, day, now=None):
+def build_ai_rows(analysis, *, space, offices, cities, parks, day, now=None, named_parks=None):
     """Фрагменты помощника из уже прочитанного справочника. Без базы — для тестов.
 
     now — текущее время офисов: с ним статус офиса живой («сейчас 20:30 —
-    закрыт до завтра 09:00»), без него — за день."""
+    закрыт до завтра 09:00»), без него — за день.
+    named_parks — парки, известные заранее (см. plan); None — из слов вопроса."""
     if not asks_directory(analysis):
         return []
     decision = plan(analysis, offices=offices, cities=cities, parks=parks, features=space,
-                    limit=AI_OFFICES)
-    named_parks = match_parks(analysis, parks) if parks else []
+                    limit=AI_OFFICES, named_parks=named_parks)
+    if named_parks is None:
+        named_parks = match_parks(analysis, parks) if parks else []
+    else:
+        named_parks = list(named_parks)
     rows = []
     for entry in decision['offices']:
         office = entry['office']

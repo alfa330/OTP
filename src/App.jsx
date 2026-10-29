@@ -232,6 +232,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
+const KnowledgeKeysPanel = lazyWithRetry(() => import('./components/knowledge/KnowledgeKeysPanel'));
 const RegContestCeremony = lazyWithRetry(() => import('./components/contests/RegContestCeremony'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
 const EmployeeCardPage = lazyWithRetry(() => import('./components/employees/EmployeeCardPage'));
@@ -42625,6 +42626,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         handleRevokeAdminSessionUser,
         handleBulkRevokeAdminSessionUsers,
         formatDate,
+        canManageKeys = false,
+        apiHeaders = null,
         }) => {
         const view = sessionsView || ADMIN_SESSIONS_DEFAULT_VIEW;
         const roleFilter = view.role || 'all';
@@ -42639,6 +42642,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         // На телефоне раздел рисует своя раскладка (SessionsMobileView) — список
         // людей вместо таблицы. Состояние остаётся здесь и общее с компьютером.
         const isMobileShell = useIsMobileShell();
+
+        // Вкладка «Ключи» — ключи партнёрских ИИ (knowledge_api) и журнал их
+        // вызовов. Только супер-админу: ключ открывает базу знаний стороннему
+        // сервису. Переключатель один на телефон и компьютер, содержимое — свой
+        // компонент; раздел «Сессии» остальным админам виден как раньше.
+        const [panelTab, setPanelTab] = React.useState('sessions');
+        const showKeys = Boolean(canManageKeys) && panelTab === 'keys';
+        const tabsBar = canManageKeys ? (
+            <IosSegmented
+                ariaLabel="Раздел"
+                value={panelTab}
+                onChange={setPanelTab}
+                options={[{ value: 'sessions', label: 'Сессии' }, { value: 'keys', label: 'Ключи' }]}
+            />
+        ) : null;
 
         // ── Карточка сотрудника ──────────────────────────────────────────────────
         const [detailPerson, setDetailPerson] = React.useState(null);
@@ -43011,9 +43029,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </Suspense>
         );
 
+        if (showKeys) {
+            return (
+                <div className={isMobileShell ? 'space-y-4 px-4 pb-6 pt-3' : 'space-y-4'}>
+                    {tabsBar}
+                    <Suspense fallback={null}>
+                        <KnowledgeKeysPanel base={API_BASE_URL} headers={apiHeaders || {}} formatDate={formatDate} />
+                    </Suspense>
+                </div>
+            );
+        }
+
         if (isMobileShell) {
             return (
                 <div>
+                    {tabsBar && <div className="px-4 pt-3">{tabsBar}</div>}
                     {detailScreen}
                     <Suspense fallback={null}>
                         <SessionsMobileView
@@ -43066,6 +43096,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         return (
             <div className="space-y-4">
 
+            {tabsBar}
             {detailScreen}
 
             {/* ── Confirmation modal ── */}
@@ -57701,6 +57732,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     handleRevokeAdminSessionUser={handleRevokeAdminSessionUser}
                                     handleBulkRevokeAdminSessionUsers={handleBulkRevokeAdminSessionUsers}
                                     formatDate={formatDate}
+                                    canManageKeys={isSuperAdmin}
+                                    apiHeaders={{ 'X-User-Id': user?.id }}
                                 />
                                 )}
 

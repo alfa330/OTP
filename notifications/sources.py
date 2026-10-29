@@ -1075,7 +1075,8 @@ def wiki_questions(cursor, viewer, limit):
     """
     cursor.execute(
         """
-        SELECT q.id, q.question, q.created_at, asker.name, 'open', NULL::bigint
+        SELECT q.id, q.question, q.created_at, COALESCE(asker.name, q.source_label), 'open',
+               NULL::bigint
           FROM wiki_operator_questions q
           JOIN users me ON me.id = %(user_id)s
           LEFT JOIN users asker ON asker.id = q.asker_id

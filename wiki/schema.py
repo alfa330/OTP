@@ -1826,6 +1826,31 @@ _QUESTION_STATEMENTS = [
     # помощник вроде бы ответил, выглядел бы ошибкой передачи.
     "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS "
     "requested_by_asker BOOLEAN NOT NULL DEFAULT FALSE;",
+    # Вопрос партнёрского ИИ (knowledge_api, 29.10.2026): спрашивает не сотрудник,
+    # а ключ — asker_id пуст, рядом источник ('assistant' | 'api') и подпись
+    # («ИИ Syntony»); парк — снимок того, про что спрашивал водитель; asked_count —
+    # сколько раз тот же вопрос пришёл, пока строка открыта. NOT NULL с asker_id
+    # снимается один раз: ALTER берёт эксклюзивную блокировку, и на каждом старте
+    # ей не место.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'wiki_operator_questions'
+               AND column_name = 'asker_id' AND is_nullable = 'NO'
+        ) THEN
+            ALTER TABLE wiki_operator_questions ALTER COLUMN asker_id DROP NOT NULL;
+        END IF;
+    END $$;
+    """,
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS "
+    "source VARCHAR(16) NOT NULL DEFAULT 'assistant';",
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS source_label VARCHAR(120);",
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS park_id INTEGER;",
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS park_name VARCHAR(255);",
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS "
+    "asked_count INTEGER NOT NULL DEFAULT 1;",
 ]
 
 # ── Векторы кусков ───────────────────────────────────────────────────────────

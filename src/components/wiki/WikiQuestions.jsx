@@ -58,6 +58,12 @@ const EMPTY_TEXT = {
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Кто спросил. Оператор — по имени; партнёрский ИИ (ручка знаний, knowledge_api)
+   учётки не имеет — подписью источника («ИИ Syntony»), а парк, про который
+   спрашивал водитель, идёт отдельной меткой рядом. */
+const askerLabel = (item) => item.asker_name
+    || (item.source === 'api' ? (item.source_label || 'Внешний ИИ') : 'Оператор');
+
 export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
                                         spaceId = null, spaces = [], onSpaceChange,
                                         canComposeNews = false, onComposeNews,
@@ -261,7 +267,7 @@ function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) 
         >
             <div className="flex items-baseline justify-between gap-2">
                 <span className="truncate text-[13px] font-semibold text-slate-900">
-                    {item.asker_name || 'Оператор'}
+                    {askerLabel(item)}
                 </span>
                 <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">
                     {publishedLabel(item.created_at)}
@@ -270,9 +276,11 @@ function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) 
             <p className="mt-0.5 line-clamp-2 break-words text-[13px] leading-snug text-slate-600">
                 {item.question}
             </p>
-            {(mark || department || space) && (
+            {(mark || department || space || item.park_name || item.asked_count > 1) && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                     {mark && <IosBadge tone="slate">{mark}</IosBadge>}
+                    {item.asked_count > 1 && <IosBadge tone="slate">×{item.asked_count}</IosBadge>}
+                    {item.park_name && <span className="truncate text-[11.5px] text-slate-400">парк {item.park_name}</span>}
                     {department && <span className="truncate text-[11.5px] text-slate-400">{department}</span>}
                     {space && <span className="truncate text-[11.5px] text-slate-400">пространство «{space}»</span>}
                 </div>
@@ -283,7 +291,9 @@ function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) 
 
 function QuestionCard({ item, base, headers, toast, showDepartment, canComposeNews, onComposeNews,
                         onBack, onChanged, onOpenArticle }) {
-    const meta = [item.asker_name, showDepartment ? item.department_name : null,
+    const meta = [askerLabel(item), item.park_name ? `парк ${item.park_name}` : null,
+                  item.asked_count > 1 ? `×${item.asked_count}` : null,
+                  showDepartment ? item.department_name : null,
                   publishedLabel(item.created_at)].filter(Boolean).join(' · ');
     return (
         <div className={`${iosCard} overflow-hidden`}>
