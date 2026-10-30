@@ -35,7 +35,7 @@ def register_note_routes(bp, actor, require_api_key, preflight, db, excluded_cha
         except (ValueError, TypeError, AttributeError):
             return None, _json(400, error='Некорректный канал')
         if channel in excluded_channels:
-            return None, _json(403, error='Global обрабатывается отдельно')
+            return None, _json(403, error='Этот канал обрабатывается отдельно')
         return (channel, chat), None
 
     def exists(cursor, channel, chat):

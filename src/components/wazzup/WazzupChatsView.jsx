@@ -1508,7 +1508,7 @@ function ChatsWorkspace(props) {
     const voice = useVoiceTranscripts({ account, chat: mainTab === 'chats' ? selected : null, thread,
         apiBaseUrl, headers });
     /* Карточка водителя (ChatDriverCard.jsx) — у каждого чата Верификаторов,
-       кроме Global: его чаты обрабатываются отдельно. Видят её все, кому открыта
+       кроме Global и «Департамента»: их чаты обрабатываются отдельно. Видят её все, кому открыта
        переписка; заполнять может тот, кто обрабатывает (решает сервер, canEdit). */
     const driverCardEnabled = account === 'op' && !potok && Boolean(selected?.channelId && selected?.chatId)
         && !selected.isNew && !GLOBAL_CHANNEL_IDS.has(selected.channelId);

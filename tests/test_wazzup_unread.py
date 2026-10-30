@@ -9,6 +9,7 @@ from tests.test_wazzup_pilot import MemoryDatabase, fixture, user
 from tests.test_wazzup_pilot_persistence import PORT, pg  # noqa: F401: shared local-only PG fixture
 from wazzup.pilot import EXCLUDED_CHANNELS
 from wazzup.realtime import EventBroker, broadcast_changes
+from wazzup.unread import init_unread_schema
 
 
 postgres = pytest.mark.skipif(not PORT, reason='needs isolated local PG (WAZZUP_PILOT_TEST_PORT)')
@@ -130,6 +131,41 @@ def test_echo_deleted_group_other_account_and_global_do_not_increment(pg):
     db.store_wazzup_messages([inbound('other-account')], account='potok')
     cursor.execute('SELECT COUNT(*) FROM wazzup_chat_read_state')
     assert cursor.fetchone()[0] == 0
+
+
+@postgres
+def test_channel_excluded_later_drops_its_counter_and_open_tabs_hear_it(pg):
+    # +77008541777 «Департамент» счётчик вёл до 30.10.2026: строки того времени
+    # (ждущий чат и уже отвеченный) уходят при старте схемы, чужие каналы — нет.
+    connection, cursor, database, connect = pg
+    department = '33bc674a-727f-4e2d-b350-da1832ecfdd5'
+    cursor.execute('''INSERT INTO wazzup_chat_read_state
+        (account,channel_id,chat_id,unread_count,last_inbound_id,revision)
+        VALUES('op',%s,'70000000001',1,'waiting-1',4),('op',%s,'70000000002',0,'answered-1',2),
+              ('op','channel','70000000003',1,'kept-1',1)''', (department, department))
+    cursor.execute('''INSERT INTO wazzup_unanswered_messages(account,channel_id,chat_id,message_id,sent_at)
+        VALUES('op',%s,'70000000001','waiting-1',now()),('op','channel','70000000003','kept-1',now())''',
+                   (department,))
+    connection.commit()
+    listener = connect()
+    listener.autocommit = True
+    with listener.cursor() as listen:
+        listen.execute('LISTEN wazzup_pilot_events')
+    init_unread_schema(cursor)
+    connection.commit()
+    select.select([listener], [], [], .5)
+    listener.poll()
+    events = [json.loads(event.payload) for event in listener.notifies]
+    # Открытая вкладка слышит обнуление ждущего чата; удаление строки она бы не услышала.
+    assert [(e['channelId'], e['chatId'], e['unreadCount']) for e in events
+            if e.get('kind') == 'unread'] == [(department, '70000000001', 0)]
+    cursor.execute('SELECT channel_id,chat_id FROM wazzup_chat_read_state')
+    assert cursor.fetchall() == [('channel', '70000000003')]
+    cursor.execute('SELECT channel_id,message_id FROM wazzup_unanswered_messages')
+    assert cursor.fetchall() == [('channel', 'kept-1')]
+    database().store_wazzup_messages([inbound('department-new', channelId=department)])
+    cursor.execute('SELECT COUNT(*) FROM wazzup_chat_read_state WHERE channel_id=%s', (department,))
+    assert cursor.fetchone() == (0,)
 
 
 @postgres

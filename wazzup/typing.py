@@ -145,7 +145,7 @@ def register_typing_routes(bp, actor, require_api_key, preflight, db, excluded_c
         except ValueError:
             return jsonify(error='Некорректный канал или клиент'), 400
         if cid in excluded_channels:
-            return jsonify(error='Global обрабатывается отдельно'), 403
+            return jsonify(error='Этот канал обрабатывается отдельно'), 403
         user_id = str(user[0])
         reservation = limiter.reserve(user_id, client_id, (cid, chat), body['typing'], sequence)
         if reservation is None:

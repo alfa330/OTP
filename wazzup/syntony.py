@@ -1,7 +1,8 @@
 """Forward the events of selected channels without making the webhook wait.
 
-Each route forwards its own channels to its own receiver: Global goes to
-Syntony, +77070253322 «Help Taxi» goes to the CRM of the «Поток» group. Routes
+Each route forwards its own channels to its own receiver: Global and
++77008541777 «Департамент» go to Syntony, +77070253322 «Help Taxi» goes to the
+CRM of the «Поток» group. Routes
 share one durable queue and one worker; every route is enabled and configured
 separately, so one receiver never sees another route's events or credentials.
 
@@ -31,6 +32,12 @@ GLOBAL_CHANNEL_IDS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
 })
+# +77008541777 «Департамент»: Syntony answers it like Global, and «Чаты ОП» no
+# longer process it (owner, 30.10.2026).
+DEPARTMENT_CHANNEL_IDS = frozenset({
+    '33bc674a-727f-4e2d-b350-da1832ecfdd5',
+})
+SYNTONY_CHANNEL_IDS = GLOBAL_CHANNEL_IDS | DEPARTMENT_CHANNEL_IDS
 # +77070253322 «Help Taxi». Until 15.10.2026 this number lived in the «Поток»
 # Wazzup account, whose own webhook still points to the CRM of that group; the
 # number now belongs to the «op» account, whose webhook comes to iCORE. The CRM
@@ -73,7 +80,7 @@ class Route:
     prepare: object = field(default=None, compare=False)
 
 
-SYNTONY = Route('syntony', 'SYNTONY_WEBHOOK', GLOBAL_CHANNEL_IDS)
+SYNTONY = Route('syntony', 'SYNTONY_WEBHOOK', SYNTONY_CHANNEL_IDS)
 # The CRM sees who wrote: the echo of an iCORE send gets its CRM user (crm_identity.py).
 POTOK_CRM = Route('potok_crm', 'POTOK_CRM_WEBHOOK', POTOK_CRM_CHANNEL_IDS,
                   prepare=crm_identity.attach_authors)
@@ -146,10 +153,10 @@ def _message_mapping(payload, existing=None):
     return mapping
 
 
-def filter_payload(payload, channel_by_message=None, channels=GLOBAL_CHANNEL_IDS):
+def filter_payload(payload, channel_by_message=None, channels=SYNTONY_CHANNEL_IDS):
     """Return (route events, unresolved statuses, can_preserve_raw_body).
 
-    `channels` are the route's channels (Global by default). Only three
+    `channels` are the route's channels (Syntony's by default). Only three
     documented, channel-scoped arrays are eligible. Object values remain
     untouched; in particular we never add a channelId to a status.
     """

@@ -235,7 +235,7 @@ def register_attachment_routes(bp, actor, require_api_key, preflight, db, exclud
         if not all(isinstance(v, str) and 0 < len(v) <= 200 for v in (cid, chat, mid)):
             raise AttachmentError('Некорректное вложение')
         if cid in excluded_channels:
-            raise AttachmentError('Global обрабатывается отдельно', 403)
+            raise AttachmentError('Этот канал обрабатывается отдельно', 403)
         with db._get_cursor() as cursor:
             cursor.execute("""SELECT content_uri FROM wazzup_messages
                 WHERE account='op' AND channel_id=%s AND chat_id=%s AND message_id=%s

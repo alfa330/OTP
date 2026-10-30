@@ -28,6 +28,8 @@ from .workspace_store import WorkspaceStore
 EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',  # Global Taxi
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',  # old Global
+    # +77008541777 «Департамент»: answered by Syntony like Global (owner, 30.10.2026).
+    '33bc674a-727f-4e2d-b350-da1832ecfdd5',
 })
 MAX_TEXT = 4096
 # Every stream holds a Waitress thread for its whole lifetime, and the bell and
@@ -478,7 +480,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return jsonify(error='Некорректный идентификатор сообщения или канала'), 400
         body['clientMessageId'] = request_id
         if cid in EXCLUDED_CHANNELS:
-            return jsonify(error='Global обрабатывается отдельно и исключён из отправки'), 403
+            return jsonify(error='Этот канал обрабатывается отдельно и исключён из отправки'), 403
         scope = channel_scope()
         if scope is not None and cid not in scope:
             return jsonify(error='Этот канал вам не открыт', code='CHANNEL_NOT_ALLOWED',

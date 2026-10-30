@@ -29,6 +29,7 @@ MAX_IMPORT_BYTES = 8 * 1024 * 1024
 EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
+    '33bc674a-727f-4e2d-b350-da1832ecfdd5',  # +77008541777 «Департамент», like Global
 })
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)
@@ -337,7 +338,7 @@ def register_template_routes(bp, actor, require_api_key, preflight, db,
                 except ValueError:
                     return jsonify(error='Некорректный канал'), 400
                 if channel_id in excluded_channels:
-                    return jsonify(error='Global исключён из обработки'), 403
+                    return jsonify(error='Этот канал исключён из обработки'), 403
             with db._get_cursor() as cur:
                 cur.execute("SELECT id,title,body FROM wazzup_quick_templates "
                             "WHERE account='op' ORDER BY lower(title),id")

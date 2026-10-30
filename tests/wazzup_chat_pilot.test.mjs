@@ -78,7 +78,8 @@ test('timeouts and ambiguous server errors preserve the send identity', () => {
 test('chat identity separates account, channel and opaque chat identifiers', () => {
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('potok', chat));
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('op', { ...chat, channelId: 'other' }));
-    assert.equal(GLOBAL_CHANNEL_IDS.size, 2);
+    // Global (два канала) и +77008541777 «Департамент».
+    assert.equal(GLOBAL_CHANNEL_IDS.size, 3);
 });
 
 test('empty composer has disabled send and does not perform requests on render', () => {

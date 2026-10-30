@@ -296,7 +296,7 @@ def register_upload_routes(bp, actor, require_api_key, preflight, db, excluded_c
             if not isinstance(chat, str) or not chat.strip() or len(chat) > 100:
                 raise UploadError('Некорректный чат')
             if cid in excluded_channels:
-                raise UploadError('Global обрабатывается отдельно', 403)
+                raise UploadError('Этот канал обрабатывается отдельно', 403)
             files = list(incoming_files.items(multi=True))
             if len(files) != 1 or files[0][0] != 'file':
                 raise UploadError('Выберите один файл для отправки')

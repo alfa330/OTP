@@ -191,7 +191,7 @@ def test_the_same_save_retried_is_one_version_and_a_reused_id_elsewhere_is_refus
     ({'cityId': 'x'}, 400, 'Некорректное значение'),
     ({'parkId': True}, 400, 'Некорректное значение'),
     ({'driverId': '', 'parkId': None, 'cityId': None}, 400, 'хотя бы одно поле'),
-    ({'channelId': GLOBAL}, 403, 'Global'),
+    ({'channelId': GLOBAL}, 403, 'обрабатывается отдельно'),
     ({'account': 'potok'}, 403, 'только в чатах Верификаторов'),
     ({'chatId': '70000000000'}, 404, 'Чат не найден'),
     ({'channelId': 'not-a-uuid'}, 400, 'Некорректный канал'),

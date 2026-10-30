@@ -6,9 +6,12 @@ const STATUS_ORDER ={ queued: 0, pending: 0, sent: 1, error: 2, delivered: 3, re
 // Статус доставки не откатывается: опоздавшее «доставлено» не гасит «прочитано».
 export const laterStatus = (current, next) => ((STATUS_ORDER[current] ?? -1) > (STATUS_ORDER[next] ?? -1) ? current : next);
 
+// Каналы, которые обрабатываются отдельно (wazzup/pilot.py EXCLUDED_CHANNELS).
 export const GLOBAL_CHANNEL_IDS = new Set([
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
+    // +77008541777 «Департамент»: как Global, отвечает Syntony (владелец, 30.10.2026).
+    '33bc674a-727f-4e2d-b350-da1832ecfdd5',
 ]);
 
 export const pilotChatKey = (account, chat) => chat

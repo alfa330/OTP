@@ -83,7 +83,7 @@ def register_send_check_route(bp, actor, require_api_key, preflight, db, exclude
         if not isinstance(chat, str) or not chat.strip() or len(chat) > 100:
             return jsonify(error='Некорректный чат'), 400
         if cid in excluded_channels:
-            return jsonify(error='Global обрабатывается отдельно'), 403
+            return jsonify(error='Этот канал обрабатывается отдельно'), 403
         with db._get_cursor() as cur:
             result = inspect_send(cur, request_id, user[0], cid, chat)
         return jsonify(**result, clientMessageId=request_id,

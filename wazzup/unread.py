@@ -76,9 +76,11 @@ def init_unread_schema(cursor):
         DECLARE answered TIMESTAMPTZ; event_time TIMESTAMPTZ;
                 removed INTEGER; inserted INTEGER;
         BEGIN
+            -- Channels processed outside «Чаты ОП» (wazzup/pilot.py EXCLUDED_CHANNELS).
             IF NEW.account<>'op' OR NEW.chat_type IS DISTINCT FROM 'whatsapp'
                OR NEW.channel_id IN ('99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
-                                     'a4bccb5e-5d41-483d-b7c1-a1079685577d') THEN RETURN NEW; END IF;
+                                     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
+                                     '33bc674a-727f-4e2d-b350-da1832ecfdd5') THEN RETURN NEW; END IF;
             event_time := COALESCE(NEW.wazzup_dt,NEW.dt);
             IF NOT NEW.is_echo AND NOT NEW.is_deleted AND TG_OP='INSERT' THEN
                 SELECT answered_through INTO answered FROM wazzup_chat_read_state
@@ -182,6 +184,22 @@ def init_unread_schema(cursor):
         DROP TRIGGER IF EXISTS wazzup_unread_notify ON wazzup_chat_read_state;
         CREATE TRIGGER wazzup_unread_notify AFTER INSERT OR UPDATE ON wazzup_chat_read_state
             FOR EACH ROW EXECUTE FUNCTION wazzup_notify_unread();
+
+        -- A channel excluded later (+77008541777 «Департамент», 30.10.2026) drops what
+        -- the counter kept for it: the trigger above no longer sees its replies and
+        -- «Ответ не нужен» is refused there, so its chats would wait forever, and the
+        -- wallboard would read stale rows instead of its message rule, as for Global.
+        -- Zero first: open tabs hear the update, they do not hear a delete.
+        DO $$
+        DECLARE untracked TEXT[] := ARRAY['99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
+                                          'a4bccb5e-5d41-483d-b7c1-a1079685577d',
+                                          '33bc674a-727f-4e2d-b350-da1832ecfdd5'];
+        BEGIN
+            UPDATE wazzup_chat_read_state SET unread_count=0,revision=revision+1,updated_at=now()
+                WHERE account='op' AND channel_id=ANY(untracked) AND unread_count>0;
+            DELETE FROM wazzup_unanswered_messages WHERE account='op' AND channel_id=ANY(untracked);
+            DELETE FROM wazzup_chat_read_state WHERE account='op' AND channel_id=ANY(untracked);
+        END $$;
     """)
 
 
@@ -245,7 +263,7 @@ def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_c
         if not all(isinstance(v,str) and 0 < len(v) <= 200 for v in (cid,chat,seen)):
             return jsonify(error='Некорректный чат или сообщение'), 400
         if cid in excluded_channels:
-            return jsonify(error='Global обрабатывается отдельно'), 403
+            return jsonify(error='Этот канал обрабатывается отдельно'), 403
         with db._get_cursor() as cur:
             # This is an explicit "Ответ не нужен" action. Opening a chat does
             # not call it. The row lock protects the pending IDs and the count
