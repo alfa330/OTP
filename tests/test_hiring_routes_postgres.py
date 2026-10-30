@@ -97,6 +97,59 @@ class _FakeJournal:
         return len(self.calls)
 
 
+class _DialListError(Exception):
+    """Как dial_list.service.DialListError: текст и HTTP-статус."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+_DialListError.__name__ = 'DialListError'
+
+
+class _FakeDialList:
+    """Сервис «Удаленного КЦ» без Binotel: один отдел, две линии, посадка «чужого» сотрудника."""
+
+    def __init__(self):
+        self.members = {}        # user_id -> (department_id, internal_number)
+        self.calls = []
+
+    def list_departments(self, department_ids=None, profile=None):
+        return [{'department_id': 2200, 'department_name': 'Удаленный КЦ', 'code': 'remote_cc', 'profile': 'remote_cc'}]
+
+    def department_sip_server(self, department_id):
+        return 'sip52.binotel.com'
+
+    def list_lines(self, department_id):
+        holders = {number: uid for uid, (dep, number) in self.members.items() if dep == department_id}
+        return [{'internal_number': number, 'online': number == '8501', 'status': 'online' if number == '8501' else 'offline',
+                 'icore_user': ({'id': holders[number], 'name': 'Сотрудник %s' % holders[number], 'login': 'x', 'guest': True,
+                                 'department_name': ''} if number in holders else None)}
+                for number in ('8501', '8502')]
+
+    def line_member(self, user_id):
+        member = self.members.get(int(user_id))
+        return {'user_id': int(user_id), 'department_id': member[0], 'internal_number': member[1]} if member else None
+
+    def assign_line(self, department_id, user_id, internal_number, changed_by=None, seat_anyone=False):
+        self.calls.append(('assign', department_id, user_id, internal_number, changed_by, seat_anyone))
+        if not seat_anyone:
+            raise _DialListError('нужно seat_anyone', 403)
+        if internal_number not in ('8501', '8502'):
+            raise _DialListError('Линии %s у компании Binotel нет' % internal_number, 404)
+        for uid, (dep, number) in self.members.items():
+            if dep == department_id and number == internal_number and uid != int(user_id):
+                raise _DialListError('Линия %s уже у сотрудника %s' % (internal_number, uid), 409)
+        self.members[int(user_id)] = (int(department_id), internal_number)
+        return {'user_id': int(user_id), 'internal_number': internal_number, 'guest': True}
+
+    def release_line(self, department_id, user_id, changed_by=None, seat_anyone=False):
+        self.calls.append(('release', department_id, user_id, changed_by, seat_anyone))
+        self.members.pop(int(user_id), None)
+        return {'user_id': int(user_id), 'internal_number': ''}
+
+
 @pytest.fixture
 def client():
     name = 't_hiringroutes_' + uuid.uuid4().hex
@@ -129,14 +182,15 @@ def client():
         return int(raw), SimpleNamespace(id=int(raw)), None
 
     journal = _FakeJournal()
+    dial_list = _FakeDialList()
     app.register_blueprint(routes.build_hiring_blueprint(
         db=db, require_api_key=require_api_key, build_cors_preflight_response=lambda: ('', 204),
-        resolve_requester=resolve_requester, service=service))
+        resolve_requester=resolve_requester, service=service, dial_list=lambda: dial_list))
     app.register_blueprint(routes.build_hiring_external_blueprint(
         db=db, service=service, partner_auth=_FakeAuth(), partner_scopes=SimpleNamespace(HIRING_LEADS='hiring_leads'),
         partner_journal=journal, rate_limiter=RateLimiter(100)))
     test_client = app.test_client()
-    test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db}
+    test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db, 'dial_list': dial_list}
     try:
         yield test_client
     finally:
@@ -302,3 +356,43 @@ def test_external_responses(client):
     assert [call[1]['outcome'] for call in client.world['journal'].calls] == ['forbidden', 'ok', 'ok', 'rejected', 'rejected']
     card = client.get('/api/hiring/cards', query_string={'q': 'Kaspi'}, headers=as_user(HR_HEAD)).get_json()['items'][0]
     assert card['source_code'] == 'kaspi' and card['vacancy_text'] == 'Водитель' and card['stage'] == 'responses'
+
+
+def test_recruiter_lines_from_remote_call_center(client):
+    """Линия Binotel рекрутеру — из настроек воронки (владелец 30.10.2026): тем же сервисом, что
+    в «Удаленном КЦ», посадка «чужого» сотрудника (seat_anyone); отключение снимает линию."""
+    lead = as_user(HR_HEAD)
+    dial_list = client.world['dial_list']
+    people = client.get('/api/hiring/people', headers=lead).get_json()
+    assert people['lines_available'] is True and all(row['line'] is None for row in people['items'])
+    departments = client.get('/api/hiring/lines', headers=lead).get_json()
+    assert departments['departments'] == [{'department_id': 2200, 'department_name': 'Удаленный КЦ'}] and departments['lines'] == []
+    lines = client.get('/api/hiring/lines', query_string={'department_id': 2200}, headers=lead).get_json()
+    assert lines['sip_server'] == 'sip52.binotel.com'
+    assert [(line['internal_number'], line['online'], line['holder']) for line in lines['lines']] == [('8501', True, None), ('8502', False, None)]
+    assert client.get('/api/hiring/lines', query_string={'department_id': 1}, headers=lead).status_code == 404
+    assert client.get('/api/hiring/lines', headers=as_user(REC1)).status_code == 403
+    # Посадить можно только действующего рекрутера, только на известную линию, и не дважды на одну.
+    assert client.post('/api/hiring/people/%s/line' % TRAINER, json={'department_id': 2200, 'internal_number': '8501'}, headers=lead).get_json()['code'] == 'HIRING_NOT_RECRUITER'
+    assert client.post('/api/hiring/people/%s/line' % REC1, json={'department_id': 2200}, headers=lead).status_code == 400
+    missing = client.post('/api/hiring/people/%s/line' % REC1, json={'department_id': 2200, 'internal_number': '9999'}, headers=lead)
+    assert missing.status_code == 404 and missing.get_json()['code'] == 'HIRING_LINE_ERROR'
+    seated = client.post('/api/hiring/people/%s/line' % REC1, json={'department_id': 2200, 'internal_number': '8501'}, headers=lead)
+    assert seated.status_code == 200
+    row = next(item for item in seated.get_json()['items'] if item['user_id'] == REC1)
+    assert row['line'] == {'department_id': 2200, 'department_name': 'Удаленный КЦ', 'internal_number': '8501'}
+    assert dial_list.calls[-1] == ('assign', 2200, REC1, '8501', HR_HEAD, True)
+    busy = client.post('/api/hiring/people/%s/line' % REC2, json={'department_id': 2200, 'internal_number': '8501'}, headers=lead)
+    assert busy.status_code == 409 and 'уже у сотрудника' in busy.get_json()['error']
+    taken = client.get('/api/hiring/lines', query_string={'department_id': 2200}, headers=lead).get_json()['lines'][0]
+    assert taken['holder']['id'] == REC1
+    assert client.post('/api/hiring/people/%s/line' % REC1, json={'department_id': 2200, 'internal_number': '8501'}, headers=as_user(REC1)).status_code == 403
+    # Снять с линии — и явно, и при отключении рекрутера.
+    released = client.delete('/api/hiring/people/%s/line' % REC1, headers=lead)
+    assert released.status_code == 200 and next(item for item in released.get_json()['items'] if item['user_id'] == REC1)['line'] is None
+    assert dial_list.calls[-1] == ('release', 2200, REC1, HR_HEAD, True)
+    assert client.delete('/api/hiring/people/%s/line' % REC1, headers=lead).status_code == 404
+    client.post('/api/hiring/people/%s/line' % REC2, json={'department_id': 2200, 'internal_number': '8502'}, headers=lead)
+    assert dial_list.line_member(REC2)['internal_number'] == '8502'
+    assert client.delete('/api/hiring/people/%s' % REC2, headers=lead).status_code == 200
+    assert dial_list.line_member(REC2) is None

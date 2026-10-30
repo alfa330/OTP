@@ -68000,6 +68000,9 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         service=_HIRING['service'],
+        # Линии Binotel «Удаленного КЦ» для рекрутеров (владелец 30.10.2026): сервис раздела
+        # появляется ниже по файлу, поэтому берётся по требованию, а не при подключении.
+        dial_list=lambda: _dial_list_service,
     ))
     app.register_blueprint(build_hiring_external_blueprint(
         db=db,

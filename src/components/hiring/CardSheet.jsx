@@ -7,7 +7,7 @@ import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel }
 import {
     ASSIGNMENT_LABELS, FINAL_STAGES, MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES,
     SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, addDays, codeOf, errorOf, fullDate, joinDateTime, longTime,
-    reasonKindFor, shortTime, splitDateTime, todayIso,
+    openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
 } from './hiringMeta';
 import { DATE_TRIGGER, FIELD, Label, Loading, Pill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 
@@ -432,7 +432,16 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
 
     const call = () => {
         if (!card?.phone) return;
-        try { window.location.href = `tel:${card.phone}`; } catch (e) { /* софтфона нет — результат всё равно можно записать */ }
+        // Звонок уходит в iCore Phone на этом компьютере (icore-phone:call?number=…): телефон должен
+        // быть запущен, вход выполнен, рекрутер — на линии. Браузер результата не сообщает — после
+        // клика подсказка и окно результата звонка.
+        try {
+            openICorePhoneCall(card.phone);
+            toast('Звонок передан в iCore Phone. Если ничего не произошло — проверьте, что телефон запущен и вход выполнен', 'info');
+        } catch (error) {
+            toast(error.message || 'Номер для звонка не разобран', 'error');
+            return;
+        }
         setCalling(true);
     };
     const whatsapp = async () => {

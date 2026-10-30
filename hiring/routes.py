@@ -94,8 +94,18 @@ def public_card(card, ctx):
     return data
 
 
-def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service):
+def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service,
+                           dial_list=None):
+    """dial_list — () -> сервис раздела «Удаленный КЦ» (dial_list.service.DialListService) или None.
+    Через него руководитель рекрутинга сажает рекрутера на линию Binotel прямо из настроек воронки,
+    чтобы отклики прозванивались из iCore Phone (владелец 30.10.2026). Без него линии недоступны."""
     bp = Blueprint('hiring', __name__, url_prefix='/api/hiring')
+
+    def _dial_list():
+        try:
+            return dial_list() if callable(dial_list) else dial_list
+        except Exception:  # noqa: BLE001
+            return None
 
     def hiring_route(rule, methods=('GET',)):
         all_methods = tuple(methods) + ('OPTIONS',)
@@ -472,12 +482,106 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     # ─── Настройки ───────────────────────────────────────────────────────────
 
+    def _people_payload(cursor):
+        """Выдачи плюс линия Binotel каждого (членство в линии «Удаленного КЦ»), без учёток линий."""
+        rows = _json(queries.list_people(cursor))
+        lines = _dial_list()
+        departments = {}
+        if lines is not None:
+            try:
+                departments = {row['department_id']: row['department_name'] for row in lines.list_departments()}
+            except Exception:  # noqa: BLE001
+                log.exception('hiring: отделы «Удаленного КЦ» не прочитаны')
+        for row in rows:
+            row['line'] = None
+            if lines is None or not row.get('is_active'):
+                continue
+            try:
+                member = lines.line_member(row['user_id'])
+            except Exception:  # noqa: BLE001
+                log.exception('hiring: линия сотрудника %s не прочитана', row['user_id'])
+                member = None
+            if member:
+                row['line'] = {'department_id': member['department_id'],
+                               'department_name': departments.get(member['department_id'], ''),
+                               'internal_number': member['internal_number']}
+        return rows
+
     @hiring_route('/people')
     def hiring_people(ctx):
         _manage_only(ctx)
         with db._get_cursor() as cursor:
-            rows = queries.list_people(cursor)
-        return jsonify({'items': _json(rows)})
+            rows = _people_payload(cursor)
+        return jsonify({'items': rows, 'lines_available': _dial_list() is not None})
+
+    # ─── Линии «Удаленного КЦ» для рекрутеров (владелец 30.10.2026) ─────────
+    # Рекрутера сажают на свободную линию Binotel отдела удалённого КЦ прямо здесь — тем же
+    # сервисом, что в разделе «Удаленный КЦ» (посадка «чужого» сотрудника, seat_anyone): его
+    # iCore Phone регистрируется на линии, и отклики прозваниваются кнопкой из карточки.
+
+    def _dial_list_error(exc):
+        status = int(getattr(exc, 'status', 0) or 0)
+        if type(exc).__name__ == 'DialListError' and status:
+            return _bad(str(exc), 'HIRING_LINE_ERROR', status)
+        log.exception('hiring: сервис линий «Удаленного КЦ» упал')
+        return _bad('Сервис линий «Удаленного КЦ» не ответил', 'HIRING_LINE_UNAVAILABLE', 502)
+
+    def _recruiter_grant(cursor, user_id):
+        return next((row for row in queries.list_people(cursor) if row['user_id'] == int(user_id) and row['is_active']), None)
+
+    @hiring_route('/lines')
+    def hiring_lines(ctx):
+        """Отделы удалённого КЦ, а с ?department_id= — его линии Binotel и кто на них сидит."""
+        _manage_only(ctx)
+        lines = _dial_list()
+        if lines is None:
+            return _bad('Раздел «Удаленный КЦ» не подключён', 'HIRING_LINES_OFF', 503)
+        department_id = _int(request.args.get('department_id'))
+        try:
+            departments = [{'department_id': row['department_id'], 'department_name': row['department_name']}
+                           for row in lines.list_departments(profile='remote_cc')]
+            payload = {'departments': departments, 'lines': [], 'sip_server': ''}
+            if department_id:
+                if department_id not in {row['department_id'] for row in departments}:
+                    return _bad('Отдел не подключён к «Удаленному КЦ»', 'HIRING_NOT_FOUND', 404)
+                payload['sip_server'] = lines.department_sip_server(department_id)
+                payload['lines'] = [{
+                    'internal_number': line['internal_number'], 'online': line['online'], 'status': line['status'],
+                    'holder': ({'id': line['icore_user']['id'], 'name': line['icore_user']['name']}
+                               if line.get('icore_user') else None),
+                } for line in lines.list_lines(department_id)]
+        except Exception as exc:  # noqa: BLE001
+            return _dial_list_error(exc)
+        return jsonify(_json(payload))
+
+    @hiring_route('/people/<int:user_id>/line', methods=('POST', 'DELETE'))
+    def hiring_people_line(user_id, ctx):
+        _manage_only(ctx)
+        lines = _dial_list()
+        if lines is None:
+            return _bad('Раздел «Удаленный КЦ» не подключён', 'HIRING_LINES_OFF', 503)
+        with db._get_cursor() as cursor:
+            grant = _recruiter_grant(cursor, user_id)
+        if not grant:
+            return _bad('Линию получает только действующий рекрутер (выдача в разделе)', 'HIRING_NOT_RECRUITER', 409)
+        try:
+            if request.method == 'DELETE':
+                member = lines.line_member(user_id)
+                if not member:
+                    return _bad('У сотрудника нет линии', 'HIRING_NOT_FOUND', 404)
+                lines.release_line(member['department_id'], user_id, changed_by=ctx['user_id'], seat_anyone=True)
+            else:
+                body = _body()
+                department_id = _int(body.get('department_id'))
+                number = str(body.get('internal_number') or '').strip()
+                if not department_id or not number:
+                    return _bad('Нужны отдел и внутренний номер линии', 'HIRING_BAD_LINE')
+                lines.assign_line(department_id, user_id, number, changed_by=ctx['user_id'], seat_anyone=True)
+        except Exception as exc:  # noqa: BLE001
+            return _dial_list_error(exc)
+        with db._get_cursor() as cursor:
+            rows = _people_payload(cursor)
+        return jsonify({'items': rows, 'lines_available': True})
 
     @hiring_route('/people/search')
     def hiring_people_search(ctx):
@@ -498,15 +602,25 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             if not queries.user_name(cursor, user_id):
                 return _bad('Сотрудник не найден', 'HIRING_NOT_FOUND', 404)
             queries.upsert_person(cursor, user_id, kind, ctx['user_id'], now)
-            rows = queries.list_people(cursor)
-        return jsonify({'items': _json(rows)}), 201
+            rows = _people_payload(cursor)
+        return jsonify({'items': rows, 'lines_available': _dial_list() is not None}), 201
 
     @hiring_route('/people/<int:user_id>', methods=('DELETE',))
     def hiring_people_remove(user_id, ctx):
         returned = service.deactivate_person(ctx, user_id)
+        # Отключённый рекрутер освобождает и линию Binotel: иначе линия осталась бы занята
+        # человеком, которого в воронке уже нет.
+        lines = _dial_list()
+        if lines is not None:
+            try:
+                member = lines.line_member(user_id)
+                if member:
+                    lines.release_line(member['department_id'], user_id, changed_by=ctx['user_id'], seat_anyone=True)
+            except Exception:  # noqa: BLE001
+                log.exception('hiring: линия отключённого рекрутера %s не снята', user_id)
         with db._get_cursor() as cursor:
-            rows = queries.list_people(cursor)
-        return jsonify({'items': _json(rows), 'returned_to_pool': returned})
+            rows = _people_payload(cursor)
+        return jsonify({'items': rows, 'returned_to_pool': returned, 'lines_available': lines is not None})
 
     @hiring_route('/sources', methods=('POST',))
     def hiring_source_add(ctx):

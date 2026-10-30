@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Phone, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
@@ -46,13 +46,125 @@ const useUsers = (api) => {
     return users;
 };
 
+/* ─── Линия Binotel рекрутера (владелец 30.10.2026) ─────────────────────── */
+/* Рекрутера сажают на свободную линию отдела удалённого КЦ прямо здесь: его iCore Phone
+   регистрируется на этой линии, и отклики прозваниваются кнопкой из карточки. Линии и посадку
+   даёт тот же сервис, что в разделе «Удаленный КЦ». */
+const LineModal = ({ open, onClose, api, toast, person, onDone }) => {
+    const [departments, setDepartments] = useState([]);
+    const [departmentId, setDepartmentId] = useState('');
+    const [lines, setLines] = useState(null);
+    const [sipServer, setSipServer] = useState('');
+    const [busy, setBusy] = useState('');
+    useEffect(() => {
+        if (!open) return undefined;
+        let alive = true;
+        setLines(null);
+        api.get('/lines').then(({ data }) => {
+            if (!alive) return;
+            setDepartments(data.departments || []);
+            const preset = person?.line?.department_id || (data.departments?.length === 1 ? data.departments[0].department_id : '');
+            setDepartmentId(preset ? String(preset) : '');
+        }).catch((error) => toast(errorOf(error, 'Линии не загрузились'), 'error'));
+        return () => { alive = false; };
+    }, [open, api, person, toast]);
+    useEffect(() => {
+        if (!open || !departmentId) return undefined;
+        let alive = true;
+        setLines(null);
+        api.get('/lines', { department_id: departmentId }).then(({ data }) => {
+            if (!alive) return;
+            setLines(data.lines || []);
+            setSipServer(data.sip_server || '');
+        }).catch((error) => { if (alive) { setLines([]); toast(errorOf(error, 'Линии не загрузились'), 'error'); } });
+        return () => { alive = false; };
+    }, [open, departmentId, api, toast]);
+    const assign = async (line) => {
+        setBusy(line.internal_number);
+        try {
+            const { data } = await api.post(`/people/${person.user_id}/line`, { department_id: Number(departmentId), internal_number: line.internal_number });
+            toast(`${person.name} — на линии ${line.internal_number}`, 'success');
+            onDone(data);
+            onClose();
+        } catch (error) {
+            toast(errorOf(error, 'Не удалось посадить на линию'), 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+    const release = async () => {
+        setBusy('release');
+        try {
+            const { data } = await api.delete(`/people/${person.user_id}/line`);
+            toast(`${person.name} снят с линии`, 'success');
+            onDone(data);
+            onClose();
+        } catch (error) {
+            toast(errorOf(error, 'Не удалось снять с линии'), 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+    const current = person?.line?.internal_number;
+    return (
+        <IosModal open={open} onClose={onClose} title={person ? `Линия: ${person.name}` : 'Линия'}
+                  subtitle="Свободная линия Binotel отдела удалённого КЦ — для звонков из iCore Phone"
+                  footer={(
+                      <div className="flex flex-wrap justify-end gap-2">
+                          {current && <button type="button" className={iosBtnSecondary} onClick={release} disabled={Boolean(busy)}>Снять с линии {current}</button>}
+                          <button type="button" className={iosBtnSecondary} onClick={onClose}>Закрыть</button>
+                      </div>
+                  )}>
+            <div className="space-y-3">
+                {departments.length > 1 && (
+                    <div>
+                        <Label>Отдел удалённого КЦ</Label>
+                        <CustomSelect variant="ios" value={departmentId} onChange={setDepartmentId} placeholder="Выберите отдел"
+                                      options={departments.map((d) => ({ value: String(d.department_id), label: d.department_name }))} />
+                    </div>
+                )}
+                {departments.length === 0 && <Empty>Отделов удалённого КЦ с линиями нет</Empty>}
+                {departmentId && !lines && <Loading text="Спрашиваем линии у Binotel…" />}
+                {departmentId && lines && (
+                    <div className="overflow-hidden rounded-2xl ring-1 ring-slate-200/60">
+                        {sipServer && <div className="bg-slate-50 px-3 py-1.5 font-mono text-[11.5px] text-slate-500">{sipServer}</div>}
+                        {lines.length === 0 && <Empty>У отдела нет линий Binotel</Empty>}
+                        <ul className="divide-y divide-slate-100">
+                            {lines.map((line) => {
+                                const mine = line.holder && Number(line.holder.id) === Number(person?.user_id);
+                                const taken = line.holder && !mine;
+                                return (
+                                    <li key={line.internal_number} className="flex items-center gap-3 px-3 py-2">
+                                        <span className="w-16 font-mono text-[13.5px] tabular-nums text-slate-900">{line.internal_number}</span>
+                                        <Pill tone={line.online ? 'green' : 'slate'}>{line.online ? 'онлайн' : 'офлайн'}</Pill>
+                                        <span className="min-w-0 grow truncate text-[12.5px] text-slate-500">
+                                            {mine ? 'эта линия у рекрутера' : taken ? `занята: ${line.holder.name}` : 'свободна'}
+                                        </span>
+                                        {!taken && !mine && (
+                                            <button type="button" className={TOOLBAR_BTN} onClick={() => assign(line)} disabled={Boolean(busy)}>
+                                                {busy === line.internal_number ? 'Сажаем…' : 'Посадить'}
+                                            </button>
+                                        )}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    </div>
+                )}
+            </div>
+        </IosModal>
+    );
+};
+
 /* ─── Рекрутеры ─────────────────────────────────────────────────────────── */
 const PeopleSection = ({ api, toast, boot, reloadBoot }) => {
     const [items, setItems] = useState(null);
     const [userId, setUserId] = useState('');
     const [kind, setKind] = useState('staff');
+    const [linesAvailable, setLinesAvailable] = useState(false);
+    const [linePerson, setLinePerson] = useState(null);
     const users = useUsers(api);
-    const load = useCallback(() => api.get('/people').then(({ data }) => setItems(data.items))
+    const load = useCallback(() => api.get('/people').then(({ data }) => { setItems(data.items); setLinesAvailable(Boolean(data.lines_available)); })
         .catch((error) => toast(errorOf(error, 'Не удалось загрузить'), 'error')), [api, toast]);
     useEffect(() => { load(); }, [load]);
     const add = async () => {
@@ -106,13 +218,21 @@ const PeopleSection = ({ api, toast, boot, reloadBoot }) => {
                                     <div className="truncate text-[13.5px] font-medium text-slate-900">{row.name}</div>
                                     <div className="truncate text-[12px] text-slate-500">{[row.department_name, `выдан ${shortTime(row.granted_at)}`].filter(Boolean).join(' · ')}</div>
                                 </div>
+                                {row.line && <Pill tone="green" title={row.line.department_name}>линия {row.line.internal_number}</Pill>}
                                 <Pill tone={row.is_active ? 'blue' : 'slate'}>{row.is_active ? GRANT_LABELS[row.kind] : 'Отключён'}</Pill>
+                                {row.is_active && linesAvailable && (
+                                    <button type="button" className={TOOLBAR_BTN} onClick={() => setLinePerson(row)}>
+                                        <Phone size={14} /> {row.line ? 'Линия' : 'На линию'}
+                                    </button>
+                                )}
                                 {row.is_active && <button type="button" className={TOOLBAR_BTN} onClick={() => remove(row)} aria-label="Отключить"><Trash2 size={14} /></button>}
                             </Row>
                         ))}
                     </ul>
                 )}
             </div>
+            <LineModal open={Boolean(linePerson)} onClose={() => setLinePerson(null)} api={api} toast={toast} person={linePerson}
+                       onDone={(data) => { setItems(data.items); setLinesAvailable(Boolean(data.lines_available)); }} />
         </div>
     );
 };

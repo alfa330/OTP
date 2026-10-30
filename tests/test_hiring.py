@@ -319,6 +319,8 @@ class WiringTests(unittest.TestCase):
         self.assertIn('build_hiring_blueprint(', self.bot)
         self.assertIn('build_hiring_external_blueprint(', self.bot)
         self.assertIn('"hiring_access": hiring_access,', self.bot)
+        # Линии Binotel «Удаленного КЦ» рекрутерам — сервис раздела по требованию (появляется ниже по файлу).
+        self.assertIn('dial_list=lambda: _dial_list_service,', self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
         self.assertIn("id='hiring_%s' % _hiring_name", self.bot)

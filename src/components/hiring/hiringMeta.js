@@ -148,6 +148,39 @@ export const daysSince = (iso, today = todayIso()) => {
     return Math.round((Date.UTC(b.year, b.month - 1, b.day) - Date.UTC(a.year, a.month - 1, a.day)) / 86400000);
 };
 
+/*
+ * Звонок из карточки — в iCore Phone на этом же компьютере (владелец 30.10.2026: «заменить tel:
+ * на наш icore-phone:call?number=»). Формат — docs/CLICK-TO-CALL.md телефона:
+ * icore-phone:call?number=<2–15 цифр>, префикс не нужен — рекрутеры сидят на линиях Binotel.
+ * Открывается скрытым iframe (как помощник icore-phone.js), а не переходом страницы: переход
+ * поднял бы «Покинуть страницу?» у несохранённых форм. Вызывать прямо в обработчике клика.
+ */
+export const ICORE_PHONE_FRAME_ID = 'icore-phone-call-frame';
+
+export const buildICorePhoneUrl = (phone) => {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 2 || digits.length > 15) return null;
+    return `icore-phone:call?number=${digits}`;
+};
+
+export const openICorePhoneCall = (phone, doc = typeof document === 'undefined' ? null : document) => {
+    const url = buildICorePhoneUrl(phone);
+    if (!url) throw new Error('Номер для звонка не разобран');
+    if (!doc) return url;
+    let frame = doc.getElementById(ICORE_PHONE_FRAME_ID);
+    if (!frame) {
+        frame = doc.createElement('iframe');
+        frame.id = ICORE_PHONE_FRAME_ID;
+        frame.title = 'Звонок в iCore Phone';
+        frame.tabIndex = -1;
+        frame.setAttribute('aria-hidden', 'true');
+        frame.style.display = 'none';
+        doc.body.appendChild(frame);
+    }
+    frame.src = url;
+    return url;
+};
+
 export const errorOf = (error, fallback) => error?.response?.data?.error || fallback;
 export const codeOf = (error) => error?.response?.data?.code || '';
 
