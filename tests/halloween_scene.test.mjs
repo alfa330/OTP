@@ -136,6 +136,7 @@ for (const screen of SCREENS) {
             for (const zone of controls) {
                 assert.equal(intersects(solid, zone), false, 'тыква закрывает поля, кнопку или ссылку');
             }
+            assert.equal(intersects(solid, card), false, 'тыква заходит на карточку входа');
         }
         if (layout.bats) {
             assert.ok(layout.bats.bottom <= card.top, 'мыши летают над карточкой');
@@ -155,10 +156,10 @@ test('панель установки снизу: тыквы на неё не н
             assert.ok(layout.pumpkins.width >= 104, 'тыквы мельче 104 px не показываем');
         }
     }
-    /* 390×844 и панель в 320 px: под карточкой 79 px вместо 90 — тыквы есть, но меньше. */
+    /* 390×844 и панель в 260 px: под карточкой 75 px вместо 90 — тыквы есть, но меньше. */
     const screen = { width: 390, height: 844 };
     const roomy = loginLayout({ ...screen, card: cardFor(screen) }).pumpkins;
-    const tight = loginLayout({ ...screen, card: cardFor({ ...screen, bottomInset: 320 }), bottomInset: 320 }).pumpkins;
+    const tight = loginLayout({ ...screen, card: cardFor({ ...screen, bottomInset: 260 }), bottomInset: 260 }).pumpkins;
     assert.ok(tight, 'в тесноте тыквы не пропадают');
     assert.ok(tight.width < roomy.width, `тыквы не уменьшились: ${tight.width} при ${roomy.width}`);
 });
@@ -313,16 +314,19 @@ test('тёмная тема в праздник — у всех, выбор «с
     assert.match(util, /const DARK_THEME_LOGINS = \['sherzad'\];/);
 });
 
-test('тыква в шарике — своим чанком сразу при старте, при сбое остаётся прежний знак', () => {
+test('тыква в шарике — по выбранному облику, своим чанком, при сбое остаётся знак', () => {
     const orb = read('../src/components/assistant/Orb.jsx');
-    // Грузится до первой отрисовки шарика и только до срока — знак не меняется на глазах.
-    assert.match(orb, /const pumpkinReady = isHalloweenTime\(\)\n\s+\? import\('\.\.\/seasonal\/halloween\/PumpkinMascot\.jsx'\)/);
+    assert.match(orb, /const wantsPumpkin = effect === PUMPKIN_APPEARANCE;/);
+    assert.match(orb, /import\('\.\/pumpkin\/PumpkinMascot\.jsx'\)/);
+    // В праздник (у всех) и после — у выбравших тыкву: грузится со стартом портала.
+    assert.match(orb, /if \(typeof window !== 'undefined' && \(isHalloweenTime\(\) \|\| pumpkinChosenHere\(\)\)\) loadPumpkin\(\);/);
     assert.match(orb, /LoadedPumpkin = module\?\.default \|\| null;/);
-    assert.match(orb, /\.catch\(\(\) => \{\}\)/);
-    assert.match(orb, /const Pumpkin = halloween \? LoadedPumpkin : null;/);
     assert.match(orb, /: <IcoreAssistantMark /, 'без тыквы — прежний знак');
-    assert.match(orb, /const halloween = useHalloweenActive\(\);/);
     assert.doesNotMatch(orb, /<Suspense|lazy\(/, 'Suspense показал бы знак кадр-другой перед тыквой');
+    // Выбор облика: тыква в списке, превью — картинкой.
+    const picker = read('../src/components/assistant/AssistantAppearancePicker.jsx');
+    assert.match(picker, /ASSISTANT_APPEARANCES\.map/);
+    assert.match(picker, /effect === PUMPKIN_APPEARANCE/);
 });
 
 test('слой не мешает работе: некликабелен, гаснет при окне, не встаёт на кнопки, снимается по сроку', () => {
@@ -333,9 +337,11 @@ test('слой не мешает работе: некликабелен, гас�
     assert.match(css, /\.otp-halloween\.is-muted > \* \{\s*opacity: 0 !important;/);
     assert.match(layer, /otp-halloween\$\{screen\.modal \? ' is-muted' : ''\}/);
     assert.match(layer, /const modal = next\.mode !== 'none' && isModalOpen\(\);/);
-    assert.match(layer, /nextCorners\.spider\.blocked = coversControl\(/);
-    assert.match(layer, /nextCorners\.ghost\.blocked = coversControl\(/);
-    assert.match(layer, /const remeasure = useCallback\(\(\) => \{\n\s+if \(!isHalloweenTime\(\)\) \{\n\s+onExpire\(\);/);
+    assert.match(layer, /controlsRef\.current\.spider = coversControl\(/);
+    assert.match(layer, /controlsRef\.current\.ghost = coversControl\(/);
+    assert.match(layer, /nextCorners\.spider\.blocked = controlsRef\.current\.spider;/);
+    assert.match(layer, /nextCorners\.ghost\.blocked = controlsRef\.current\.ghost;/);
+    assert.match(layer, /const remeasure = useCallback\(\(force = false\) => \{\n\s+if \(!isHalloweenTime\(\)\) \{\n\s+onExpire\(\);/);
     assert.match(layer, /return \(\) => root\.removeAttribute\('data-otp-halloween'\);/);
     assert.match(layer, /!screenRef\.current\.modal && !isMenuOpen\(\)/, 'мыши взлетают поверх окна или меню');
     assert.match(mount, /shouldMountHalloween\(\{ search: window\.location\.search, framed \}\)/);
@@ -356,4 +362,24 @@ test('оранжевая тема собрана скриптом и весит 
     assert.doesNotMatch(css, /body \.bg-(blue|indigo)-(50|100|200|300) \{/);
     // Текст на синей подложке остаётся парой к ней; :where не добавляет веса.
     assert.match(css, /\.text-blue-700:where\(:not\(\[class\*="bg-blue-"\]\):not\(\[class\*="bg-indigo-"\]\)\) \{/);
+});
+
+test('слой дёшев для слабого компьютера', () => {
+    const layer = read('../src/components/seasonal/halloween/HalloweenLayer.jsx');
+    const css = read('../src/components/seasonal/halloween/halloween.css');
+    const pumpkinCss = read('../src/components/assistant/pumpkin/pumpkin-mascot.css');
+    // Опрос только в видимой вкладке, кнопки под украшениями — раз в три секунды.
+    assert.match(layer, /if \(document\.hidden && force !== true\) return;/);
+    assert.match(layer, /tickRef\.current % CONTROL_CHECK_EVERY === 1/);
+    // Уход от курсора — по прямоугольникам из опроса, без getBoundingClientRect на движении.
+    const shy = layer.slice(layer.indexOf('/* Украшения уходят от курсора'), layer.indexOf('zoneRef.current = '));
+    assert.doesNotMatch(shy, /getBoundingClientRect/);
+    // Слабая машина: без пролётов, спусков и покачиваний.
+    assert.match(layer, /if \(reduced \|\| LOW_END \|\| screen\.mode === 'none'\) return undefined;/);
+    assert.match(layer, /if \(reduced \|\| LOW_END \|\| !hasSpider\) return undefined;/);
+    assert.match(css, /\.otp-halloween\.is-lite \.hw-spider__bob,/);
+    // Ни одного CSS-фильтра: свечение тыквы запечено в картинки.
+    assert.doesNotMatch(css, /filter:/);
+    assert.doesNotMatch(pumpkinCss, /filter:/);
+    assert.match(pumpkinCss, /\.hw-mascot\.is-lite \.hw-mascot__breathe,/);
 });

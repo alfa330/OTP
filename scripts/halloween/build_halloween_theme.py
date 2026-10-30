@@ -71,8 +71,9 @@ def declaration(prop, shade, alpha):
         name = 'border-color' if prop == 'border' else 'outline-color'
         return '%s: %s' % (name, color(ORANGE[shade], alpha if alpha is not None else 0.85))
     if prop == 'ring':
-        if shade not in ('300',) + SOLID:
-            return None
+        # Кольца — фокус и выбор, не статусы: тыквенные все, светлые — прозрачнее.
+        if shade in ('50', '100', '200'):
+            return '--tw-ring-color: rgb(249 115 22 / %s)' % ('%.2f' % (alpha if alpha is not None else 0.35))
         rgb = ORANGE['500']
         opacity = ('%.2f' % alpha) if alpha is not None else 'var(--tw-ring-opacity, 1)'
         return '--tw-ring-color: rgb(%d %d %d / %s)' % (rgb + (opacity,))
@@ -134,13 +135,16 @@ def scan():
     return found
 
 
-CHROME = '''/* Сайдбар: та же графитовая плита тёмного слоя, выбранный раздел — тыквенный. */
+CHROME = '''/* Сайдбар: та же графитовая плита тёмного слоя, выбранный раздел — тыквенный.
+   Телефон: акцент нижнего бара и шторки со ссылками («Все отделы», «Имя»). */
 %(vars)s {
     --otp-bar-card: #1c1714;
     --otp-bar-hover: #2b1f18;
     --otp-bar-select: #c2410c;
     --otp-bar-select-ink: #fff7ed;
     --otp-bar-knob: #2b1f18;
+    --mtb-accent: #fb923c;
+    --sheet-accent: #f97316;
 }
 
 /* Экран входа — ночь: тёплый отсвет снизу, лиловая дымка сверху. */
@@ -156,9 +160,9 @@ CHROME = '''/* Сайдбар: та же графитовая плита тём�
    глазах через секунду после загрузки. Правила не требуют тёмной темы. Плашка
    со знаком на входе сохраняет рамку и размер — свой svg только прячется. */
 html[data-otp-halloween] .auth-card h1 > span > span:last-child {
-    background-image: url('./assets/mascot-logo.webp');
+    background-image: url('../../assistant/pumpkin/assets/mascot-logo.webp');
     background-position: center;
-    background-size: 84%%;
+    background-size: 88%%;
     background-repeat: no-repeat;
 }
 
@@ -166,20 +170,76 @@ html[data-otp-halloween] .auth-card h1 > span > span:last-child > svg {
     visibility: hidden;
 }
 
-/* Сайдбар: логотип — картинка; знак справа накрываем плашкой с тыквой. */
+/* Сайдбар: праздничная версия логотипа целиком (оранжевая плашка, белые буквы,
+   тёмное место под знак) и тыква поверх тёмного места. Картинку логотипа
+   прячем, а не подменяем: кнопка «4 You» поверх знака остаётся на месте. */
+html[data-otp-halloween] .sidebar-logo-full {
+    background: url('./assets/sidebar-logo-halloween.svg') center / 100%% 100%% no-repeat;
+}
+
+html[data-otp-halloween] .sidebar-logo-full > img {
+    visibility: hidden;
+}
+
 html[data-otp-halloween] .sidebar-logo-full::after {
     content: '';
     position: absolute;
-    top: 1px;
-    right: 1px;
-    bottom: 1px;
+    top: 3px;
+    right: 4px;
+    bottom: 3px;
     width: 52px;
-    border-radius: 0 15px 15px 0;
-    background: #17110f url('./assets/mascot-logo.webp') center / 82%% no-repeat;
+    background: url('../../assistant/pumpkin/assets/mascot-logo.webp') center / contain no-repeat;
     pointer-events: none;
 }
 
+/* Колокол в свёрнутом сайдбаре: плитка значка в styles.css — синий #2563eb. */
+html[data-otp-halloween] body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot > div > button > svg:first-child {
+    background: #ea580c;
+}
+
+/* Карточка входа на ночном фоне: тонкая тёплая кайма и отсвет, иначе её край
+   почти не отличить от фона. */
+%(vars)s .auth-card {
+    box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.16), 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 90px rgba(234, 88, 12, 0.12) !important;
+}
+
+/* Поля входа одинаковые. В тёмном слое общее правило input[type=text] (из
+   палитры разделов) даёт полю «Логин» рамку и свой фон, а «Пароль» под него не
+   попадает — на входе тёмную тему раньше не видел никто, разнобой всплыл сейчас. */
+%(vars)s .auth-card input {
+    border: 0 !important;
+    background: #22262d !important;
+}
+
+%(vars)s .auth-card input:focus {
+    background: #1e2127 !important;
+}
+
+/* Выбор облика помощника: выбранная строка и кружок — тёплые, а не индиго. */
+%(vars)s .aorb-appearance-option:has(input:checked) {
+    background: #3a2318;
+    color: #fed7aa;
+}
+
+%(vars)s .aorb-appearance-option input {
+    accent-color: #f97316;
+}
+
+%(vars)s .aorb-appearance-trigger:hover,
+%(vars)s .aorb-appearance-trigger[aria-expanded="true"] {
+    background: #3a2318;
+    color: #fdba74;
+}
+
 @media print {
+    html[data-otp-halloween] .sidebar-logo-full {
+        background: none;
+    }
+
+    html[data-otp-halloween] .sidebar-logo-full > img {
+        visibility: visible;
+    }
+
     html[data-otp-halloween] .sidebar-logo-full::after {
         content: none;
     }

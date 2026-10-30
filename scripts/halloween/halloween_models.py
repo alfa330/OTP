@@ -9,7 +9,8 @@ build_assets.py режет их по альфе и сжимает в WebP. Ка�
     B=/Applications/Blender.app/Contents/MacOS/Blender
     HW_SAMPLES=192 HW_SIZE=900 $B -b --factory-startup -P halloween_models.py -- out pumpkins ghost hat
     HW_SAMPLES=192 HW_SIZE=480 $B -b --factory-startup -P halloween_models.py -- out bat spider
-    python build_assets.py out ../../src/components/seasonal/halloween/assets
+    HW_SAMPLES=192 HW_SIZE=640 $B -b --factory-startup -P halloween_models.py -- out mascot
+    python build_assets.py out
 
 Стиль — мягкие «эмодзи»-формы под iOS-вид портала; шляпа с лентой фирменного
 индиго (#4f46e5), как кнопки сайта.
@@ -1177,17 +1178,11 @@ def holdout_material():
 
 def scene_mascot():
     body, flesh, decor, core, lamp = mascot_scene()
-    # 1. Тело без лица — подложка для всех эмоций.
+    # 1. Тело без лица — подложка для всех эмоций (логотип собирает build_assets.py
+    #    из тела и обычного лица — так он светится так же, как тыква в шарике).
     render_to('mascot-body')
-    # 2. Логотип: тело с обычным лицом, всё целиком.
-    logo = body.copy()
-    logo.data = body.data.copy()
-    bpy.context.scene.collection.objects.link(logo)
     body.hide_render = True
-    carve_face(logo, 'normal', 1.0, flesh)
-    render_to('mascot-logo')
-    bpy.data.objects.remove(logo)
-    # 3. Лица: только вырезы с нутром — кожура и хвостик прозрачны.
+    # 2. Лица: только вырезы с нутром — кожура и хвостик прозрачны.
     hold = holdout_material()
     for obj in decor:
         obj.hide_render = True

@@ -6,6 +6,7 @@ import spiderUrl from './assets/spider.webp';
 import batStripUrl from './assets/bat-strip.webp';
 import faviconUrl from './assets/pumpkin-favicon.png';
 import { isHalloweenTime } from './halloweenWindow';
+import { isLowEndDevice } from '../../../utils/devicePerformance';
 import {
     ART,
     appCorners,
@@ -29,7 +30,16 @@ import {
  *   - пока открыто окно с затемнением, весь слой прячется;
  *   - в «Чатах ОП», «Журнале оценок» и «Аукционе смен» у правого края работа —
  *     там нет паутины с пауком.
+ *
+ * Дёшево для любого компьютера: анимации — только transform/opacity (их ведёт
+ * видеокарта); опрос раз в секунду и только в видимой вкладке, проверка кнопок
+ * под пауком и привидением — раз в три секунды; уход от курсора считает по
+ * запомненным прямоугольникам, без пересчёта раскладки на движении мыши. На
+ * слабой машине (isLowEndDevice) украшения стоят: ни пролётов, ни покачиваний.
  */
+
+const LOW_END = isLowEndDevice();
+const CONTROL_CHECK_EVERY = 3;
 
 const ROUTE_POLL_MS = 1000;
 const SPIDER_DROP_HOLD_MS = 3600;
@@ -237,6 +247,9 @@ export default function HalloweenLayer({ onExpire }) {
     const zoneRef = useRef(null);
     const flockSeq = useRef(0);
     const shyRefs = useRef({});
+    const shyRects = useRef({});
+    const tickRef = useRef(0);
+    const controlsRef = useRef({ spider: false, ghost: false });
     const screenRef = useRef(screen);
     screenRef.current = screen;
 
@@ -281,11 +294,13 @@ export default function HalloweenLayer({ onExpire }) {
 
     /* Где сейчас человек и что вокруг. Дёшево — несколько querySelector в
        секунду; подписка на мутации всего портала обошлась бы дороже. */
-    const remeasure = useCallback(() => {
+    const remeasure = useCallback((force = false) => {
         if (!isHalloweenTime()) {
             onExpire();
             return;
         }
+        if (document.hidden && force !== true) return;
+        tickRef.current += 1;
         const next = readScreen();
         const modal = next.mode !== 'none' && isModalOpen();
         cardRef.current = next.card;
@@ -309,27 +324,38 @@ export default function HalloweenLayer({ onExpire }) {
                 orb: orb && orb.width ? { left: orb.left, top: orb.top, right: orb.right, bottom: orb.bottom } : null,
             });
             // Паук и привидение не встают туда, где под ними кнопка или поле.
-            if (nextCorners.spider) {
-                const s = nextCorners.spider;
-                const left = window.innerWidth - s.right - s.width;
-                nextCorners.spider.blocked = coversControl({ left, right: left + s.width, top: s.top, bottom: s.top + s.height, width: s.width, height: s.height });
+            // elementFromPoint требует свежей раскладки — раз в три секунды хватает.
+            if (force === true || tickRef.current % CONTROL_CHECK_EVERY === 1) {
+                if (nextCorners.spider) {
+                    const s = nextCorners.spider;
+                    const left = window.innerWidth - s.right - s.width;
+                    controlsRef.current.spider = coversControl({ left, right: left + s.width, top: s.top, bottom: s.top + s.height, width: s.width, height: s.height });
+                }
+                if (nextCorners.ghost) {
+                    const g = nextCorners.ghost;
+                    const top = window.innerHeight - g.peek;
+                    controlsRef.current.ghost = coversControl({ left: g.left, right: g.left + g.width, top, bottom: window.innerHeight, width: g.width, height: g.peek });
+                }
             }
-            if (nextCorners.ghost) {
-                const g = nextCorners.ghost;
-                const top = window.innerHeight - g.peek;
-                nextCorners.ghost.blocked = coversControl({ left: g.left, right: g.left + g.width, top, bottom: window.innerHeight, width: g.width, height: g.peek });
-            }
+            if (nextCorners.spider) nextCorners.spider.blocked = controlsRef.current.spider;
+            if (nextCorners.ghost) nextCorners.ghost.blocked = controlsRef.current.ghost;
         }
         setCorners((prev) => (sameJson(prev, nextCorners) ? prev : nextCorners));
+        // Прямоугольники для ухода от курсора — здесь, а не на каждом движении мыши.
+        const rects = {};
+        for (const [key, node] of Object.entries(shyRefs.current)) {
+            if (node) rects[key] = node.getBoundingClientRect();
+        }
+        shyRects.current = rects;
     }, [onExpire]);
 
     useEffect(() => {
-        remeasure();
+        remeasure(true);
         const poll = window.setInterval(remeasure, ROUTE_POLL_MS);
         let frame = 0;
         const onResize = () => {
             window.cancelAnimationFrame(frame);
-            frame = window.requestAnimationFrame(remeasure);
+            frame = window.requestAnimationFrame(() => remeasure(true));
         };
         window.addEventListener('resize', onResize);
         window.visualViewport?.addEventListener('resize', onResize);
@@ -345,31 +371,41 @@ export default function HalloweenLayer({ onExpire }) {
        ошибка входа меняет высоту. Следим за её размером и за экраном входа. */
     useEffect(() => {
         if (screen.mode !== 'login' || !cardRef.current || typeof ResizeObserver === 'undefined') return undefined;
-        const observer = new ResizeObserver(() => remeasure());
+        const observer = new ResizeObserver(() => remeasure(true));
         observer.observe(cardRef.current);
         const authScreen = cardRef.current.closest('.auth-screen');
         if (authScreen) observer.observe(authScreen);
-        const onTransitionEnd = () => remeasure();
+        const onTransitionEnd = () => remeasure(true);
+        // Экран входа прокручивается (низкий экран, клавиатура телефона) — украшения едут с карточкой.
+        let frame = 0;
+        const onScroll = () => {
+            if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; remeasure(true); });
+        };
         authScreen?.addEventListener('transitionend', onTransitionEnd);
+        authScreen?.addEventListener('scroll', onScroll, { passive: true });
         return () => {
             observer.disconnect();
+            window.cancelAnimationFrame(frame);
             authScreen?.removeEventListener('transitionend', onTransitionEnd);
+            authScreen?.removeEventListener('scroll', onScroll);
         };
     }, [screen.mode, remeasure]);
 
-    /* Украшения уходят от курсора — мимо React: класс на узле раз в кадр. */
+    /* Украшения уходят от курсора — мимо React: класс на узле раз в кадр, по
+       прямоугольникам из опроса (раскладку на движении мыши не трогаем). */
     useEffect(() => {
         if (screen.mode !== 'app') return undefined;
         let frame = 0;
         let pointer = null;
         const apply = () => {
             frame = 0;
-            for (const node of Object.values(shyRefs.current)) {
-                if (!node || !pointer) continue;
-                const rect = node.getBoundingClientRect();
+            for (const [key, node] of Object.entries(shyRefs.current)) {
+                const rect = shyRects.current[key];
+                if (!node || !rect || !pointer) continue;
                 const dx = Math.max(rect.left - pointer.x, 0, pointer.x - rect.right);
                 const dy = Math.max(rect.top - pointer.y, 0, pointer.y - rect.bottom);
-                node.classList.toggle('is-shy', Math.hypot(dx, dy) < SHY_RADIUS);
+                const shy = Math.hypot(dx, dy) < SHY_RADIUS;
+                if (node.classList.contains('is-shy') !== shy) node.classList.toggle('is-shy', shy);
             }
         };
         const onMove = (event) => {
@@ -398,7 +434,7 @@ export default function HalloweenLayer({ onExpire }) {
        через пару секунд после входа и дальше раз в 4–7 минут. Не взлетают,
        пока открыто окно или выпадающий список. */
     useEffect(() => {
-        if (reduced || screen.mode === 'none') return undefined;
+        if (reduced || LOW_END || screen.mode === 'none') return undefined;
         const login = screen.mode === 'login';
         let timer = 0;
         const launch = () => {
@@ -428,7 +464,7 @@ export default function HalloweenLayer({ onExpire }) {
         ? Boolean(layout?.spider)
         : Boolean(corners?.spider && !corners.spider.blocked);
     useEffect(() => {
-        if (reduced || !hasSpider) return undefined;
+        if (reduced || LOW_END || !hasSpider) return undefined;
         const login = screen.mode === 'login';
         let timer = 0;
         let holdTimer = 0;
@@ -453,7 +489,7 @@ export default function HalloweenLayer({ onExpire }) {
     };
 
     return (
-        <div className={`otp-halloween${screen.modal ? ' is-muted' : ''}`} aria-hidden="true">
+        <div className={`otp-halloween${screen.modal ? ' is-muted' : ''}${LOW_END ? ' is-lite' : ''}`} aria-hidden="true">
             {screen.mode === 'login' && layout && (
                 <>
                     {layout.web && <Cobweb size={layout.web.size} corner="tl" style={{ left: 0, top: 0 }} />}

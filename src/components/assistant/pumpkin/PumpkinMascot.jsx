@@ -1,4 +1,5 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
+import { isLowEndDevice } from '../../../utils/devicePerformance';
 import './pumpkin-mascot.css';
 import bodyUrl from './assets/mascot-body.webp';
 import logoUrl from './assets/mascot-logo.webp';
@@ -23,15 +24,25 @@ import {
     moodReducer,
 } from './mascotMood';
 
-/* Хэллоуин-2026: шарик помощника становится тыквой из Blender (тело и 12 лиц
- * — scripts/halloween/halloween_models.py, сцена mascot). Лица лежат на теле
- * отдельными картинками: лицо смещается к курсору, тыква чуть наклоняется
- * следом — «следит», а эмоция меняется подменой лица.
+/* Облик помощника «Тыква» — появился к Хэллоуину-2026 (наброски владельца
+ * «Тыква (эмоции)») и остался на выбор в «Внешнем виде помощника». Тело и 12
+ * лиц — Blender, scripts/halloween/halloween_models.py (сцена mascot), сборка —
+ * scripts/halloween/build_assets.py. Лица лежат на теле отдельными картинками:
+ * лицо смещается к курсору, тыква чуть наклоняется следом — «следит», эмоция
+ * меняется подменой лица. Свечение запечено в картинки — без CSS-фильтров.
  *
  * Помощника тыква не трогает: открытие, перетаскивание и окно делает кнопка
  * AssistantOrb, а тыква только слушает её (наведение, нажатие, класс
  * aorb-dragging, aria-expanded) — так ни один жест шарика не меняется.
+ *
+ * Дёшево для любого компьютера: лица грузятся в простое после первой
+ * отрисовки, в разметке — только уже показанные; положение тыквы для взгляда
+ * читается не чаще раза в полсекунды; на слабой машине тыква не дышит и не
+ * мерцает (isLowEndDevice).
  */
+
+const LOW_END = isLowEndDevice();
+const RECT_TTL_MS = 500;
 
 const FACE_URLS = {
     normal: faceNormal,
@@ -131,11 +142,31 @@ function Extras({ emotion }) {
     }
 }
 
+/* Остальные лица — в простое после первой отрисовки: браузер положит их в кэш,
+   и смена эмоции не будет ждать сеть. */
+let facesPreloaded = false;
+const preloadFaces = () => {
+    if (facesPreloaded || typeof window === 'undefined') return;
+    facesPreloaded = true;
+    const run = () => Object.values(FACE_URLS).forEach((url) => {
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = url;
+    });
+    if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 4000 });
+    else window.setTimeout(run, 1500);
+};
+
 export default function PumpkinMascot({ variant = 'orb', animated = true }) {
     const rootRef = useRef(null);
     const [mood, dispatch] = useReducer(moodReducer, undefined, initialMood);
     const [, setTick] = useState(0);
+    const shownRef = useRef(new Set(['normal']));
     const interactive = variant !== 'mini';
+
+    useEffect(() => {
+        if (interactive) preloadFaces();
+    }, [interactive]);
 
     /* Подмена лица по истечении временной эмоции — перерисовка ровно в срок. */
     useEffect(() => {
@@ -184,42 +215,60 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
         });
         if (target !== root) observer.observe(target, { attributes: true, attributeFilter: ['class', 'aria-expanded'] });
 
-        /* Взгляд — мимо React: две переменные CSS раз в кадр. */
+        /* Взгляд — мимо React и мимо пересчёта стилей всей тыквы: transform
+           пишется прямо в два узла (наклон и лицо), и только когда взгляд
+           заметно сдвинулся. Положение тыквы читается не чаще раза в полсекунды. */
+        const tilt = root.querySelector('.hw-mascot__tilt');
+        const face = root.querySelector('.hw-mascot__face');
         let frame = 0;
         let pointer = null;
+        let rect = null;
+        let rectAt = 0;
+        let lookX = 0;
+        let lookY = 0;
+        const setLook = (x, y) => {
+            if (Math.abs(x - lookX) < 0.02 && Math.abs(y - lookY) < 0.02) return;
+            lookX = x;
+            lookY = y;
+            if (tilt) tilt.style.transform = `rotate(${(x * 6).toFixed(2)}deg)`;
+            if (face) face.style.transform = `translate(${(x * 5.5).toFixed(2)}%, ${(y * 4).toFixed(2)}%)`;
+        };
         const applyLook = () => {
             frame = 0;
             if (!pointer) return;
-            const rect = root.getBoundingClientRect();
+            const at = Date.now();
+            if (!rect || at - rectAt > RECT_TTL_MS || dragging) {
+                rect = root.getBoundingClientRect();
+                rectAt = at;
+            }
             const look = lookVector(pointer.x - (rect.left + rect.width / 2), pointer.y - (rect.top + rect.height / 2));
-            root.style.setProperty('--hw-look-x', look.x.toFixed(3));
-            root.style.setProperty('--hw-look-y', look.y.toFixed(3));
+            setLook(look.x, look.y);
         };
-        let idleTimer = 0;
-        const armSleep = () => {
-            window.clearTimeout(idleTimer);
-            idleTimer = window.setTimeout(() => dispatch({ type: 'sleep', now: now() }), SLEEP_AFTER_MS);
-        };
+        /* Сон — через 45 с без движения. Таймер не перезаводится на каждом
+           движении мыши: раз в секунду сверяемся с моментом последнего движения. */
+        let lastActive = now();
+        const idleTimer = setInterval(() => {
+            if (now() - lastActive >= SLEEP_AFTER_MS) dispatch({ type: 'sleep', now: now() });
+        }, 1000);
+        idleTimer?.unref?.();
         const onMove = (event) => {
             pointer = { x: event.clientX, y: event.clientY };
             if (!frame) frame = window.requestAnimationFrame(applyLook);
-            dispatch({ type: 'wake', now: now() });
-            armSleep();
+            lastActive = now();
+            dispatch({ type: 'wake', now: lastActive });
         };
         const onOut = (event) => {
             if (event.relatedTarget) return;      // ушли не за окно, а на другой элемент
             pointer = null;
-            root.style.setProperty('--hw-look-x', '0');
-            root.style.setProperty('--hw-look-y', '0');
+            setLook(0, 0);
         };
         const onKey = () => {
-            dispatch({ type: 'wake', now: now() });
-            armSleep();
+            lastActive = now();
+            dispatch({ type: 'wake', now: lastActive });
         };
         window.addEventListener('pointermove', onMove, { passive: true });
         document.addEventListener('pointerout', onOut);
         window.addEventListener('keydown', onKey, { passive: true });
-        armSleep();
 
         return () => {
             target.removeEventListener('pointerenter', onEnter);
@@ -230,8 +279,8 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
             window.removeEventListener('pointermove', onMove);
             document.removeEventListener('pointerout', onOut);
             window.removeEventListener('keydown', onKey);
-            window.cancelAnimationFrame(frame);
-            window.clearTimeout(idleTimer);
+            window.cancelAnimationFrame?.(frame);
+            clearInterval(idleTimer);
         };
     }, [interactive]);
 
@@ -244,17 +293,18 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
     }
 
     const emotion = displayEmotion(mood, Date.now());
+    shownRef.current.add(emotion);
     return (
         <span
             ref={rootRef}
-            className={`hw-mascot hw-mascot--${variant} is-${emotion}${animated ? '' : ' is-paused'}`}
+            className={`hw-mascot hw-mascot--${variant} is-${emotion}${animated ? '' : ' is-paused'}${LOW_END ? ' is-lite' : ''}`}
             aria-hidden="true"
         >
             <span className="hw-mascot__breathe">
                 <span className="hw-mascot__tilt">
                     <img className="hw-mascot__body" src={bodyUrl} alt="" draggable={false} />
                     <span className="hw-mascot__face">
-                        {EMOTIONS.map((name) => (
+                        {EMOTIONS.filter((name) => shownRef.current.has(name)).map((name) => (
                             <img
                                 key={name}
                                 className={name === emotion ? 'is-on' : undefined}

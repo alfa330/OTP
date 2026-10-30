@@ -20,9 +20,8 @@ export const ART = {
  * (getBoundingClientRect), на выход — места украшений или null, если места
  * нет. Правила:
  *   - паутина в левом верхнем углу экрана, паук свисает с неё;
- *   - тыквы у левого нижнего угла карточки: на компьютере — снаружи слева,
- *     на телефоне — под карточкой, заходя на её угол не выше нижнего поля
- *     (кнопка «Войти» и ссылка под ней не закрываются никогда);
+ *   - тыквы у левого нижнего угла карточки, не заходя на неё: на компьютере —
+ *     слева, на телефоне и планшете — под карточкой;
  *   - привидение справа от карточки, а если справа тесно — над ней;
  *   - мыши летают в полосе над карточкой.
  * Ничего не выходит за окно и не залезает на панель установки снизу.
@@ -51,21 +50,21 @@ export const loginLayout = ({ width, height, card, bottomInset = 0, topInset = 0
         ? { left: spiderX, anchor: anchorY, top: spiderTop, width: spiderW, height: spiderH, drop: spiderDrop }
         : null;
 
-    /* Сбоку от карточки (компьютер) — а если слева тесно (телефон, планшет),
-       под её левым углом: заходят на угол не выше нижнего поля карточки. */
+    /* Тыквы стоят рядом с карточкой, не заходя на неё: на компьютере — слева у
+       нижнего угла, а если слева тесно (телефон, планшет) — под карточкой. */
     let pumpkins = null;
     if (!compact) {
         const w = Math.round(clamp(card.width * 0.5, 168, 204));
         const h = Math.round(w / ART.pumpkins);
-        const left = Math.round(card.left - w + 34);
-        const top = Math.round(card.bottom - h + 20);
+        const left = Math.round(card.left - w - 10);
+        const top = Math.round(card.bottom - h + 8);
         if (left >= 8 && top + h <= floor) pumpkins = { left, top, width: w, height: h };
     }
     if (!pumpkins) {
-        const top = Math.round(card.bottom - 24);
+        const top = Math.round(card.bottom + 10);
         /* В тесноте (панель установки снизу) тыквы мельчают, но не меньше 104 px. */
         const w = Math.min(Math.round(clamp(card.width * 0.42, 124, 168)), Math.floor((floor - top) * ART.pumpkins));
-        if (w >= 104) pumpkins = { left: Math.round(card.left + 2), top, width: w, height: Math.round(w / ART.pumpkins) };
+        if (w >= 104) pumpkins = { left: Math.round(card.left + 4), top, width: w, height: Math.round(w / ART.pumpkins) };
     }
 
     let ghost = null;

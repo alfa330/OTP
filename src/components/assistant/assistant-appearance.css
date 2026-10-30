@@ -42,6 +42,7 @@
 .aorb-appearance-option:has(input:focus-visible) { outline: 2px solid #6366f1; outline-offset: -2px; }
 .aorb-appearance-option input { margin-left: auto; accent-color: #6366f1; width: 14px; height: 14px; flex: none; cursor: pointer; }
 .aorb-appearance-popup > p { margin: 8px 6px 3px; color: #94a3b8; font-size: 10px; }
+.aorb-appearance-pumpkin { display: block; flex: none; object-fit: contain; }
 
 html[data-otp-theme="dark"] .aorb-appearance-trigger:hover,
 html[data-otp-theme="dark"] .aorb-appearance-trigger[aria-expanded="true"] { background: #30334b; color: #b3b8ff; }

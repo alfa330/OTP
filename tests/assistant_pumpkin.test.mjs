@@ -1,10 +1,12 @@
-// Хэллоуин-2026: настроение тыквы-помощника (наброски владельца «Тыква (эмоции)»).
+// Облик помощника «Тыква» (к Хэллоуину-2026, остался на выбор): настроение
+// тыквы и выбор облика.
 //
 // Тыква меняет лицо от того, что человек делает с шариком помощника: наведение,
 // щелчки, перетаскивание, закрытие, простой. Стережём, что каждая из 12 эмоций
-// достижима, временные эмоции гаснут вовремя, а взгляд следует за курсором.
+// достижима, временные эмоции гаснут вовремя, взгляд следует за курсором, а
+// выбор облика в праздник и после него ведёт себя, как обещано владельцу.
 //
-// Запуск: node --test tests/halloween_mascot.test.mjs
+// Запуск: node --test tests/assistant_pumpkin.test.mjs
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,14 +21,14 @@ import {
     initialMood,
     lookVector,
     moodReducer,
-} from '../src/components/seasonal/halloween/mascotMood.js';
+} from '../src/components/assistant/pumpkin/mascotMood.js';
 
 const run = (events) => events.reduce(moodReducer, initialMood());
 
 test('у каждой из 12 эмоций есть лицо из Blender', () => {
     assert.equal(EMOTIONS.length, 12);
     for (const emotion of EMOTIONS) {
-        const file = new URL(`../src/components/seasonal/halloween/assets/mascot-face-${emotion}.webp`, import.meta.url);
+        const file = new URL(`../src/components/assistant/pumpkin/assets/mascot-face-${emotion}.webp`, import.meta.url);
         assert.ok(existsSync(file), `нет лица ${emotion}`);
     }
     for (const emotion of CLICK_CYCLE) assert.ok(EMOTIONS.includes(emotion));
@@ -106,4 +108,58 @@ test('взгляд следует за курсором и упирается в
     const far = lookVector(100000, -100000);
     assert.ok(far.x <= 1 && far.y >= -1);
     assert.ok(lookVector(40, 0).x < lookVector(400, 0).x, 'дальше — сильнее');
+});
+
+/* Хранилище браузера для модуля облика: window.localStorage в node — заглушка. */
+const storage = new Map();
+globalThis.window = globalThis.window || {};
+globalThis.window.localStorage = {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: (key) => storage.delete(key),
+};
+
+const appearance = await import('../src/components/assistant/assistantAppearance.js');
+const { isLowEndDevice } = await import('../src/utils/devicePerformance.js');
+
+test('тыква — облик в выборе, но не эффект знака iCORE', () => {
+    const ids = appearance.ASSISTANT_APPEARANCES.map((item) => item.id);
+    assert.ok(ids.includes('pumpkin'));
+    assert.equal(ids.length, appearance.ICORE_ASSISTANT_EFFECTS.length + 1);
+    assert.ok(!appearance.ICORE_ASSISTANT_EFFECTS.some((item) => item.id === 'pumpkin'), 'знак с эффектом «pumpkin» нарисовался бы пустым');
+    assert.equal(appearance.normalizeAssistantAppearance('pumpkin'), 'pumpkin');
+    assert.equal(appearance.normalizeAssistantAppearance('мусор'), appearance.DEFAULT_ASSISTANT_EFFECT);
+    assert.equal(appearance.normalizeAssistantEffect('pumpkin'), appearance.DEFAULT_ASSISTANT_EFFECT);
+});
+
+test('в праздник облик по умолчанию — тыква, после — прежний выбор человека', () => {
+    storage.clear();
+    const key = appearance.assistantAppearanceKey(7);
+    storage.set(key, 'dust');                         // выбрал до праздника
+    assert.equal(appearance.readAssistantEffect(key, true), 'pumpkin', 'в праздник — тыква у всех');
+    assert.equal(appearance.readAssistantEffect(key, false), 'dust', 'после — снова его выбор');
+    assert.equal(appearance.readAssistantEffect(appearance.assistantAppearanceKey(8), false), appearance.DEFAULT_ASSISTANT_EFFECT);
+    assert.equal(appearance.readAssistantEffect(null, true), 'pumpkin');
+});
+
+test('выбор в праздник остаётся за человеком и после праздника', () => {
+    storage.clear();
+    const key = appearance.assistantAppearanceKey(9);
+    appearance.storeAssistantEffect(key, 'glass', true);
+    assert.equal(appearance.readAssistantEffect(key, true), 'glass', 'в праздник — то, что выбрал, а не тыква');
+    assert.equal(appearance.readAssistantEffect(key, false), 'glass');
+    appearance.storeAssistantEffect(key, 'pumpkin', true);
+    assert.equal(appearance.readAssistantEffect(key, false), 'pumpkin', 'тыква, выбранная в праздник, остаётся');
+    appearance.storeAssistantEffect(key, 'flow', false);
+    assert.equal(appearance.readAssistantEffect(key, false), 'flow');
+    assert.ok(appearance.isAssistantAppearanceKey(`${key}:halloween-2026`, key), 'вкладки слышат и праздничный ключ');
+    assert.ok(!appearance.isAssistantAppearanceKey('otp:assistant:appearance:10', key));
+});
+
+test('слабый компьютер — два ядра или до 4 ГБ памяти', () => {
+    assert.equal(isLowEndDevice({ hardwareConcurrency: 2 }), true);
+    assert.equal(isLowEndDevice({ hardwareConcurrency: 8, deviceMemory: 4 }), true);
+    assert.equal(isLowEndDevice({ hardwareConcurrency: 4, deviceMemory: 8 }), false);
+    assert.equal(isLowEndDevice({ hardwareConcurrency: 8 }), false, 'Safari и Firefox не говорят про память');
+    assert.equal(isLowEndDevice(null), false);
 });

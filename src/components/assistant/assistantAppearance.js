@@ -1,3 +1,5 @@
+import { isHalloweenTime } from '../seasonal/halloween/halloweenWindow.js';
+
 export const DEFAULT_ASSISTANT_EFFECT = 'aurora';
 
 export const ICORE_ASSISTANT_EFFECTS = [
@@ -11,14 +13,49 @@ export const normalizeAssistantEffect = value => (
     ICORE_ASSISTANT_EFFECTS.some(item => item.id === value) ? value : DEFAULT_ASSISTANT_EFFECT
 );
 
+/* Облик помощника — один из эффектов знака iCORE или тыква с эмоциями (появилась
+   к Хэллоуину-2026 и осталась на выбор). Тыква — не эффект знака, поэтому в
+   ICORE_ASSISTANT_EFFECTS её нет: тот список рисует знак и в лаборатории иконок. */
+export const PUMPKIN_APPEARANCE = 'pumpkin';
+
+export const ASSISTANT_APPEARANCES = [
+    ...ICORE_ASSISTANT_EFFECTS,
+    { id: PUMPKIN_APPEARANCE, number: '05', name: 'Тыква', caption: 'С характером', description: 'Следит за курсором и меняет эмоции: радуется наведению, удивляется нажатию, засыпает без дела.' },
+];
+
+export const normalizeAssistantAppearance = value => (
+    value === PUMPKIN_APPEARANCE ? value : normalizeAssistantEffect(value)
+);
+
 export const assistantAppearanceKey = userId => (
     userId == null ? null : `otp:assistant:appearance:${userId}`
 );
 
-export function readAssistantEffect(key) {
+/* Хэллоуин: облик по умолчанию — тыква, а выбор этих дней хранится отдельно.
+   Кто выбор не трогал, после праздника увидит свой прежний облик; кто выбрал в
+   праздник (тыкву или знак) — тот выбор за ним и остаётся. */
+const HALLOWEEN_SUFFIX = ':halloween-2026';
+const fallback = halloween => (halloween ? PUMPKIN_APPEARANCE : DEFAULT_ASSISTANT_EFFECT);
+
+export function readAssistantEffect(key, halloween = isHalloweenTime()) {
     try {
-        return key ? normalizeAssistantEffect(window.localStorage.getItem(key)) : DEFAULT_ASSISTANT_EFFECT;
+        if (!key) return fallback(halloween);
+        if (halloween) {
+            const festive = window.localStorage.getItem(key + HALLOWEEN_SUFFIX);
+            return festive ? normalizeAssistantAppearance(festive) : PUMPKIN_APPEARANCE;
+        }
+        return normalizeAssistantAppearance(window.localStorage.getItem(key));
     } catch {
-        return DEFAULT_ASSISTANT_EFFECT;
+        return fallback(halloween);
     }
 }
+
+export function storeAssistantEffect(key, effect, halloween = isHalloweenTime()) {
+    if (!key) return;
+    window.localStorage.setItem(key, effect);
+    if (halloween) window.localStorage.setItem(key + HALLOWEEN_SUFFIX, effect);
+}
+
+export const isAssistantAppearanceKey = (storageKey, key) => (
+    Boolean(key) && (storageKey === key || storageKey === key + HALLOWEEN_SUFFIX)
+);

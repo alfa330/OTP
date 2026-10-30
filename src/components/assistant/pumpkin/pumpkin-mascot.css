@@ -1,14 +1,22 @@
-/* Хэллоуин-2026: тыква-помощник (PumpkinMascot.jsx). Тыква занимает место
-   знака iCORE в шарике — тот же квадрат .aorb, без своей геометрии, поэтому
-   перетаскивание и стыковка шарика не меняются. */
+/* Облик помощника «Тыква» (PumpkinMascot.jsx). Тыква занимает место знака
+   iCORE в шарике — тот же квадрат .aorb, без своей геометрии, поэтому
+   перетаскивание и стыковка шарика не меняются; крупнее она только на вид
+   (scale), кнопка остаётся прежней.
+
+   Для слабых машин: анимируются только transform и opacity (их считает
+   видеокарта, а не процессор), фильтров нет — свечение запечено в картинки,
+   на .is-lite (isLowEndDevice) постоянных анимаций нет вовсе. */
 
 .hw-mascot {
-    --hw-look-x: 0;
-    --hw-look-y: 0;
     position: absolute;
     inset: 0;
     display: block;
     pointer-events: none;
+}
+
+/* В шарике тыква на пятую часть крупнее знака (просьба владельца 30.10). */
+.hw-mascot--orb {
+    scale: 1.2;
 }
 
 .hw-mascot img {
@@ -35,6 +43,7 @@
 .hw-mascot__breathe {
     animation: hw-mascot-breathe 3.8s ease-in-out infinite;
     transform-origin: 50% 90%;
+    will-change: transform;
 }
 
 @keyframes hw-mascot-breathe {
@@ -42,18 +51,17 @@
     50% { transform: scale(1.025, 1.035); }
 }
 
+/* Наклон и сдвиг лица к курсору PumpkinMascot пишет прямо в style.transform. */
 .hw-mascot__tilt {
-    transform: rotate(calc(var(--hw-look-x) * 6deg));
     transform-origin: 50% 88%;
     transition: transform 0.18s ease-out;
 }
 
 /* Лицо смещается к курсору сильнее тела — так и читается взгляд. */
 .hw-mascot__face {
-    transform: translate(calc(var(--hw-look-x) * 5.5%), calc(var(--hw-look-y) * 4%));
     transition: transform 0.14s ease-out;
-    filter: drop-shadow(0 0 2px rgba(255, 150, 40, 0.9)) drop-shadow(0 0 5px rgba(255, 110, 20, 0.45));
     animation: hw-mascot-candle 3.2s linear infinite;
+    will-change: transform, opacity;
 }
 
 .hw-mascot__face img {
@@ -110,9 +118,6 @@
     animation: none;
 }
 
-.hw-mascot.is-anger .hw-mascot__face {
-    filter: drop-shadow(0 0 2px rgba(255, 90, 30, 0.95)) drop-shadow(0 0 6px rgba(255, 60, 20, 0.55));
-}
 
 /* ── Значки вокруг ─────────────────────────────────────────────────────── */
 
@@ -128,7 +133,6 @@
 
 .hw-mascot__extras .hw-x {
     fill: #fb923c;
-    filter: drop-shadow(0 0 1.5px rgba(251, 146, 60, 0.9));
     transform-box: fill-box;
     transform-origin: center;
 }
@@ -176,6 +180,14 @@
     animation-play-state: paused !important;
 }
 
+/* Слабая машина: тыква не дышит и не мерцает; значки эмоций — без движения. */
+.hw-mascot.is-lite .hw-mascot__breathe,
+.hw-mascot.is-lite .hw-mascot__face,
+.hw-mascot.is-lite .hw-mascot__extras .hw-x {
+    animation: none;
+    will-change: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
     .hw-mascot *,
     .hw-mascot {
@@ -189,7 +201,7 @@
     }
 }
 
-/* Кольцо фокуса шарика — тыквенное, как остальные акценты праздника. */
-html[data-otp-halloween] .aorb-button:focus-visible {
+/* Кольцо фокуса шарика с тыквой — тыквенное. */
+.aorb-button:has(.hw-mascot):focus-visible {
     outline-color: #f97316;
 }
