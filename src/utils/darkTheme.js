@@ -24,6 +24,7 @@
  */
 
 import { setThemeColorMeta } from './pwa';
+import { isHalloweenTime } from '../components/seasonal/halloween/halloweenWindow';
 
 /* Цвет строки состояния установленного портала. Светлый совпадает с фоном
    портала (bg-gray-50), тёмный — с холстом тёмного слоя: у приложения на
@@ -38,17 +39,27 @@ export const DARK_THEME_STORAGE_KEY = 'otp.theme';
 /* Кому режим доступен. Список логинов в нижнем регистре. */
 const DARK_THEME_LOGINS = ['sherzad'];
 
+/* Хэллоуин-2026 (до конца 1 ноября по Астане, просьба владельца 30.10):
+   праздничное оформление — этот же тёмный слой с оранжевыми акцентами — у
+   всех, и на экране входа тоже. Тычок в аватар на эти дни есть у каждого:
+   кому темно, вернёт светлую, и выбор запомнится словом 'light'. После срока
+   право снова решает только список логинов, а 'light' читается как «светлая». */
 export const canUseDarkTheme = (user) => {
+    if (isHalloweenTime()) return true;
     const login = String(user?.login || '').trim().toLowerCase();
     return !!login && DARK_THEME_LOGINS.includes(login);
 };
 
 /* Слой запрашивается один раз за сессию: повторное включение уже ничего не
-   грузит, промис переиспользуется. */
+   грузит, промис переиспользуется. В праздник вместе с ним — оранжевые
+   акценты; их селекторы весят так, что порядок загрузки двух файлов неважен. */
 let stylesheetPromise = null;
 const loadStylesheet = () => {
     if (!stylesheetPromise) {
-        stylesheetPromise = import('../theme-dark.css');
+        stylesheetPromise = Promise.all([
+            import('../theme-dark.css'),
+            isHalloweenTime() ? import('../components/seasonal/halloween/halloween-theme.css') : null,
+        ]);
     }
     return stylesheetPromise;
 };
@@ -79,9 +90,10 @@ export const applyDarkTheme = async (enabled, isStale) => {
 
 export const readStoredDarkTheme = () => {
     try {
-        return localStorage.getItem(DARK_THEME_STORAGE_KEY) === 'dark';
+        const stored = localStorage.getItem(DARK_THEME_STORAGE_KEY);
+        return isHalloweenTime() ? stored !== 'light' : stored === 'dark';
     } catch (error) {
-        return false;
+        return isHalloweenTime();
     }
 };
 
@@ -89,6 +101,8 @@ export const storeDarkTheme = (enabled) => {
     try {
         if (enabled) {
             localStorage.setItem(DARK_THEME_STORAGE_KEY, 'dark');
+        } else if (isHalloweenTime()) {
+            localStorage.setItem(DARK_THEME_STORAGE_KEY, 'light');
         } else {
             localStorage.removeItem(DARK_THEME_STORAGE_KEY);
         }

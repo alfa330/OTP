@@ -90,11 +90,11 @@ def add_area_light(name, location, target, size, energy, color=(1, 1, 1)):
     return obj
 
 
-def studio_lights(scale=1.0):
+def studio_lights(scale=1.0, energy=1.0):
     # Мягкий «эмодзи»-свет: большой ключ сверху слева, заполняющий справа, контровой сзади.
-    add_area_light('Key', (-3.2 * scale, -4.2 * scale, 4.6 * scale), (0, 0, 0), 5.5 * scale, 720 * scale * scale)
-    add_area_light('Fill', (4.2 * scale, -3.0 * scale, 0.8 * scale), (0, 0, 0), 5.0 * scale, 260 * scale * scale, (0.86, 0.9, 1.0))
-    add_area_light('Rim', (1.2 * scale, 4.4 * scale, 3.4 * scale), (0, 0, 0), 3.0 * scale, 700 * scale * scale, (0.9, 0.85, 1.0))
+    add_area_light('Key', (-3.2 * scale, -4.2 * scale, 4.6 * scale), (0, 0, 0), 5.5 * scale, 720 * scale * scale * energy)
+    add_area_light('Fill', (4.2 * scale, -3.0 * scale, 0.8 * scale), (0, 0, 0), 5.0 * scale, 260 * scale * scale * energy, (0.86, 0.9, 1.0))
+    add_area_light('Rim', (1.2 * scale, 4.4 * scale, 3.4 * scale), (0, 0, 0), 3.0 * scale, 700 * scale * scale * energy, (0.9, 0.85, 1.0))
 
 
 def look_camera(location, target, lens=70):
@@ -242,7 +242,8 @@ def groove(theta, lobes):
     return max(0.0, 1.0 - d) ** 6
 
 
-def pumpkin_body(name, radius=1.0, lobes=9, squash=0.78, groove_depth=0.075, seed=0.0):
+def pumpkin_body(name, radius=1.0, lobes=9, squash=0.78, groove_depth=0.075, seed=0.0,
+                 palette=None, skin=None):
     bm = uv_sphere(72, 40, radius)
     for v in bm.verts:
         x, y, z = v.co
@@ -269,16 +270,17 @@ def pumpkin_body(name, radius=1.0, lobes=9, squash=0.78, groove_depth=0.075, see
         g = groove(theta, lobes)
         top = max(0.0, co.z / (radius * squash))
         t = min(1.0, 0.75 * g + 0.25 * (1 - rho) + 0.12 * top)
-        return mix(PUMPKIN_LIGHT, PUMPKIN_DARK, t)
+        light, dark = palette or (PUMPKIN_LIGHT, PUMPKIN_DARK)
+        return mix(light, dark, t)
 
     set_color_attr(obj, color)
     obj.data.materials.append(attribute_material(f'{name}Skin', 'Col', 0.46,
-                                                 Coat_Weight=0.14, Coat_Roughness=0.35,
-                                                 Subsurface_Weight=0.04))
+                                                 **(skin or dict(Coat_Weight=0.14, Coat_Roughness=0.35,
+                                                                 Subsurface_Weight=0.04))))
     return obj
 
 
-def pumpkin_stem(name, base_z, height=0.42, radius=0.11, bend=0.35, twist=0.6):
+def pumpkin_stem(name, base_z, height=0.42, radius=0.11, bend=0.35, twist=0.6, color='#6b5a2e', curl=0.0):
     bm = bmesh.new()
     rings, segs = 10, 10
     prev = None
@@ -288,6 +290,11 @@ def pumpkin_stem(name, base_z, height=0.42, radius=0.11, bend=0.35, twist=0.6):
         ring = []
         cx = bend * height * (t ** 2)
         cz = base_z + height * t
+        if curl:
+            # Завиток на конце, как на набросках владельца: кончик загибается вниз.
+            k = max(0.0, (t - 0.55) / 0.45)
+            cx += curl * height * 0.55 * math.sin(k * math.pi * 0.9)
+            cz -= curl * height * 0.5 * (1 - math.cos(k * math.pi * 0.9))
         rad = radius * (1.0 - 0.38 * t) * (1.25 - 0.25 * min(1.0, t * 4))
         for s in range(segs):
             a = 2 * math.pi * s / segs + twist * t
@@ -303,12 +310,12 @@ def pumpkin_stem(name, base_z, height=0.42, radius=0.11, bend=0.35, twist=0.6):
     bm.faces.new(list(reversed(rows[0])))
     obj = mesh_object(name, bm)
     add_subsurf(obj, 2)
-    obj.data.materials.append(principled(f'{name}Mat', srgb('#6b5a2e'), 0.75,
+    obj.data.materials.append(principled(f'{name}Mat', srgb(color), 0.75,
                                          Coat_Weight=0.05))
     return obj
 
 
-def tendril(name, origin, turns=2.3, length=0.55, radius=0.16, thickness=0.018):
+def tendril(name, origin, turns=2.3, length=0.55, radius=0.16, thickness=0.018, color='#4d7c0f', roughness=0.55):
     curve = bpy.data.curves.new(name, 'CURVE')
     curve.dimensions = '3D'
     curve.bevel_depth = thickness
@@ -325,11 +332,11 @@ def tendril(name, origin, turns=2.3, length=0.55, radius=0.16, thickness=0.018):
                                oy - math.sin(a) * r, oz + 0.05 + 0.25 * t * (1 - t) + math.sin(a) * r * 0.5, 1)
     obj = bpy.data.objects.new(name, curve)
     bpy.context.scene.collection.objects.link(obj)
-    obj.data.materials.append(principled(f'{name}Mat', srgb('#4d7c0f'), 0.55))
+    obj.data.materials.append(principled(f'{name}Mat', srgb(color), roughness))
     return obj
 
 
-def leaf(name, location, rotation, size=0.42):
+def leaf(name, location, rotation, size=0.42, color='#3f7d20'):
     bm = bmesh.new()
     pts = []
     n = 28
@@ -346,7 +353,7 @@ def leaf(name, location, rotation, size=0.42):
     add_subsurf(obj, 2)
     obj.location = location
     obj.rotation_euler = rotation
-    obj.data.materials.append(principled(f'{name}Mat', srgb('#3f7d20'), 0.5, Sheen_Weight=0.2))
+    obj.data.materials.append(principled(f'{name}Mat', srgb(color), 0.5, Sheen_Weight=0.2))
     return obj
 
 
@@ -875,7 +882,328 @@ def scene_hat():
     render_to('hat')
 
 
+# ---------------------------------------------------------------- тыква-талисман
+
+# По наброскам владельца (30.10.2026, «Тыква (эмоции)»): тёмно-оранжевая тыква с
+# глубокими дольками, тёмный хвостик с завитком и листьями, лицо светится изнутри.
+# Тело и лица рендерятся отдельно: лицо — вырезы со светящимся нутром на прозрачном
+# фоне (кожура — holdout), чтобы в браузере лицо смещалось к курсору и менялось.
+MASCOT_SKIN = (srgb('#d0560f'), srgb('#451303'))
+MASCOT_STEM = '#2b1f17'
+MASCOT_LEAF = '#3b3a2a'
+MASCOT_FACE_SCALE = 1.12
+
+
+def poly_ellipse(cx, cz, rx, rz, rot=0.0, n=32):
+    c, s_ = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    pts = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        x, z = math.cos(a) * rx, math.sin(a) * rz
+        pts.append((cx + x * c - z * s_, cz + x * s_ + z * c))
+    return pts
+
+
+def poly_arc_band(cx, cz, r_out, r_in, a0, a1, n=20):
+    """Дуга-полоска (закрытый глаз): внешняя дуга туда, внутренняя обратно."""
+    outer = [(cx + math.cos(math.radians(a0 + (a1 - a0) * i / n)) * r_out,
+              cz + math.sin(math.radians(a0 + (a1 - a0) * i / n)) * r_out) for i in range(n + 1)]
+    inner = [(cx + math.cos(math.radians(a1 - (a1 - a0) * i / n)) * r_in,
+              cz + math.sin(math.radians(a1 - (a1 - a0) * i / n)) * r_in) for i in range(n + 1)]
+    return outer + inner
+
+
+def poly_crescent(x0, x1, z0, z1, a_top, a_bot, n=24):
+    """Улыбка-серп: верх и низ сходятся в уголках; z0/z1 — высота уголков."""
+    top, bottom = [], []
+    for i in range(n + 1):
+        t = i / n
+        x = x0 + (x1 - x0) * t
+        mid = z0 + (z1 - z0) * t
+        top.append((x, mid - a_top * math.sin(math.pi * t)))
+    for i in range(n - 1, 0, -1):
+        t = i / n
+        x = x0 + (x1 - x0) * t
+        mid = z0 + (z1 - z0) * t
+        bottom.append((x, mid - a_bot * math.sin(math.pi * t)))
+    return top + bottom
+
+
+def poly_band(fn, x0, x1, half, n=28):
+    """Полоска толщиной 2*half вдоль кривой z = fn(x) (волнистый рот, бровь)."""
+    upper = [(x0 + (x1 - x0) * i / n, fn(x0 + (x1 - x0) * i / n) + half) for i in range(n + 1)]
+    lower = [(x1 - (x1 - x0) * i / n, fn(x1 - (x1 - x0) * i / n) - half) for i in range(n + 1)]
+    return upper + lower
+
+
+def poly_heart(cx, cz, size, n=48):
+    pts = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
+        x = 16 * math.sin(t) ** 3
+        z = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        pts.append((cx + x / 17 * size, cz + z / 17 * size))
+    return pts
+
+
+def poly_jagged(x0, x1, top, bottom, teeth, depth):
+    """Рот с острыми зубами сверху и снизу: зубья смещены на полшага."""
+    pts = []
+    for i in range(2 * teeth + 1):
+        t = i / (2 * teeth)
+        pts.append((x0 + (x1 - x0) * t, top - (depth if i % 2 else 0.0) * math.sin(math.pi * t) ** 0.3))
+    for i in range(2 * teeth, -1, -1):
+        t = i / (2 * teeth)
+        pts.append((x0 + (x1 - x0) * t, bottom + (depth if i % 2 == 0 else 0.0) * math.sin(math.pi * t) ** 0.3))
+    # убираем дубли уголков
+    clean = []
+    for p in pts:
+        if not clean or (abs(clean[-1][0] - p[0]) > 1e-6 or abs(clean[-1][1] - p[1]) > 1e-6):
+            clean.append(p)
+    if abs(clean[0][0] - clean[-1][0]) < 1e-6 and abs(clean[0][1] - clean[-1][1]) < 1e-6:
+        clean.pop()
+    return clean
+
+
+def mirror(poly):
+    return [(-x, z) for x, z in reversed(poly)]
+
+
+def tooth(x, z_lo, z_hi, w=0.1):
+    return (x, z_lo, z_hi, w)
+
+
+# Лица: (вырезы, зубы). Координаты — доли радиуса в плоскости XZ, лицо смотрит на -Y.
+def face_shapes(emotion):
+    polys, teeth = _face_shapes(emotion)
+    k, oz = MASCOT_FACE_SCALE, -0.05
+    polys = [[(x * k, oz + (z - oz) * k) for x, z in poly] for poly in polys]
+    teeth = [(x * k, oz + (lo - oz) * k, oz + (hi - oz) * k, w * k) for x, lo, hi, w in teeth]
+    return polys, teeth
+
+
+def _face_shapes(emotion):
+    tri_l = [(-0.5, 0.08), (-0.13, 0.1), (-0.27, 0.37)]
+    if emotion == 'normal':
+        mouth = poly_crescent(-0.52, 0.52, -0.14, -0.14, 0.1, 0.38)
+        return [tri_l, mirror(tri_l), mouth], [tooth(-0.2, -0.33, -0.2), tooth(0.2, -0.33, -0.2), tooth(0.0, -0.53, -0.4)]
+    if emotion == 'joy':
+        eye = poly_arc_band(-0.3, 0.12, 0.18, 0.075, 15, 165)
+        mouth = poly_crescent(-0.48, 0.48, -0.12, -0.12, 0.03, 0.44)
+        return [eye, mirror(eye), mouth], [tooth(-0.13, -0.24, -0.12), tooth(0.13, -0.24, -0.12)]
+    if emotion == 'anger':
+        eye = [(-0.52, 0.32), (-0.12, 0.13), (-0.44, 0.05)]
+        mouth = poly_jagged(-0.48, 0.48, -0.18, -0.46, 5, 0.1)
+        return [eye, mirror(eye), mouth], []
+    if emotion == 'sad':
+        eye = [(x, z) for x, z in poly_ellipse(-0.3, 0.16, 0.15, 0.1, rot=14, n=32) if True]
+        eye = [p for p in eye if p[1] <= 0.16 + (p[0] + 0.3) * math.tan(math.radians(14)) + 1e-9]
+        mouth = poly_band(lambda x: -0.36 + 0.11 * (1 - (x / 0.36) ** 2) + 0.022 * math.sin(x * 26), -0.36, 0.36, 0.035)
+        return [eye, mirror(eye), mouth], []
+    if emotion == 'surprise':
+        eye = poly_ellipse(-0.27, 0.2, 0.1, 0.14)
+        return [eye, mirror(eye), poly_ellipse(0.0, -0.31, 0.09, 0.12)], []
+    if emotion == 'wink':
+        open_eye = poly_ellipse(-0.28, 0.2, 0.1, 0.13)
+        closed = mirror(poly_arc_band(-0.28, 0.12, 0.16, 0.06, 20, 160))
+        mouth = poly_crescent(-0.4, 0.4, -0.16, -0.16, 0.06, 0.3)
+        return [open_eye, closed, mouth], [tooth(0.12, -0.27, -0.16)]
+    if emotion == 'sleep':
+        eye = poly_arc_band(-0.28, 0.24, 0.17, 0.08, 200, 340)
+        mouth = poly_crescent(-0.12, 0.12, -0.29, -0.29, 0.02, 0.13)
+        return [eye, mirror(eye), mouth], []
+    if emotion == 'confusion':
+        left = poly_ellipse(-0.28, 0.18, 0.09, 0.12)
+        right = poly_ellipse(0.28, 0.15, 0.11, 0.065)
+        brow = poly_band(lambda x: 0.34 - 0.22 * (x - 0.16), 0.16, 0.42, 0.028)
+        mouth = poly_band(lambda x: -0.32 + 0.045 * math.sin(x * 14), -0.3, 0.3, 0.032)
+        return [left, right, brow, mouth], []
+    if emotion == 'love':
+        heart = poly_heart(-0.28, 0.17, 0.16)
+        mouth = poly_crescent(-0.36, 0.36, -0.18, -0.18, 0.05, 0.3)
+        return [heart, mirror(heart), mouth], [tooth(0.0, -0.28, -0.17)]
+    if emotion == 'fear':
+        eye = poly_ellipse(-0.27, 0.19, 0.11, 0.15)
+        mouth = poly_jagged(-0.32, 0.32, -0.22, -0.47, 4, 0.08)
+        return [eye, mirror(eye), mouth], []
+    if emotion == 'cool':
+        eye = poly_ellipse(-0.3, 0.18, 0.17, 0.06, rot=-14)
+        mouth = poly_crescent(-0.3, 0.38, -0.32, -0.18, 0.02, 0.16)
+        return [eye, mirror(eye), mouth], []
+    if emotion == 'neutral':
+        eye = poly_ellipse(-0.28, 0.16, 0.15, 0.06)
+        mouth = poly_band(lambda x: -0.3, -0.18, 0.18, 0.04)
+        return [eye, mirror(eye), mouth], []
+    raise ValueError(emotion)
+
+
+MASCOT_EMOTIONS = ['normal', 'joy', 'anger', 'sad', 'surprise', 'wink', 'sleep', 'confusion',
+                   'love', 'fear', 'cool', 'neutral']
+
+
+def mascot_stem(name, points, radii, thickness, color):
+    """Хвостик кривой с фаской: сечение идёт поперёк изгиба, завиток не сплющивается."""
+    curve = bpy.data.curves.new(name, 'CURVE')
+    curve.dimensions = '3D'
+    curve.bevel_depth = thickness
+    curve.bevel_resolution = 6
+    curve.use_fill_caps = True
+    spline = curve.splines.new('BEZIER')
+    spline.bezier_points.add(len(points) - 1)
+    for bp, co, r in zip(spline.bezier_points, points, radii):
+        bp.co = co
+        bp.handle_left_type = 'AUTO'
+        bp.handle_right_type = 'AUTO'
+        bp.radius = r
+    obj = bpy.data.objects.new(name, curve)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.data.materials.append(principled(f'{name}Mat', srgb(color), 0.72, Coat_Weight=0.05))
+    return obj
+
+
+def prism_cutter(name, poly, radius, mat):
+    bm = bmesh.new()
+    front = [bm.verts.new((x * radius, -2.0 * radius, z * radius)) for x, z in poly]
+    back = [bm.verts.new((x * radius, 0.0, z * radius)) for x, z in poly]
+    bm.faces.new(front)
+    bm.faces.new(list(reversed(back)))
+    k = len(poly)
+    for i in range(k):
+        bm.faces.new((front[i], front[(i + 1) % k], back[(i + 1) % k], back[i]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    obj = mesh_object(name, bm)
+    obj.data.materials.append(mat)
+    return obj
+
+
+def boolean_apply(target, other, operation='DIFFERENCE'):
+    mod = target.modifiers.new('Bool', 'BOOLEAN')
+    mod.operation = operation
+    mod.solver = 'EXACT'
+    mod.object = other
+    try:
+        mod.material_mode = 'TRANSFER'
+    except (AttributeError, TypeError):
+        pass
+    apply_modifiers(target)
+
+
+def carve_face(shell, emotion, radius, flesh):
+    cutters_polys, teeth = face_shapes(emotion)
+    cutters = [prism_cutter(f'Cut{i}', poly, radius, flesh) for i, poly in enumerate(cutters_polys)]
+    mouth = cutters[-1]
+    for x, z_lo, z_hi, w in teeth:
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=1.0)
+        for v in bm.verts:
+            v.co.x *= w * radius
+            v.co.y *= 2.4 * radius
+            v.co.z *= (z_hi - z_lo) * radius
+        tooth_obj = mesh_object('Tooth', bm)
+        tooth_obj.location = (x * radius, -1.0 * radius, (z_lo + z_hi) / 2 * radius)
+        boolean_apply(mouth, tooth_obj)
+        bpy.data.objects.remove(tooth_obj)
+    for cutter in cutters:
+        boolean_apply(shell, cutter)
+        bpy.data.objects.remove(cutter)
+    for poly in shell.data.polygons:
+        poly.use_smooth = True
+
+
+def mascot_scene():
+    """Тело (без лица), хвостик с листьями, ядро света. Возвращает всё нужное для рендеров."""
+    reset_scene()
+    studio_lights(energy=0.62)
+    bpy.context.scene.world.node_tree.nodes['Background'].inputs['Strength'].default_value = 0.2
+    # Холодный контровой сверху-сзади: тёмная тыква не тонет на тёмном фоне портала.
+    add_area_light('Moon', (-2.0, 3.6, 4.2), (0, 0, 0.2), 3.0, 620, (0.78, 0.72, 1.0))
+    radius = 1.0
+    body = pumpkin_body('Mascot', radius, lobes=8, squash=0.84, groove_depth=0.11,
+                        palette=MASCOT_SKIN, skin=dict(Coat_Weight=0.08, Coat_Roughness=0.45,
+                                                       Subsurface_Weight=0.03))
+    body.modifiers['Subsurf'].levels = 2
+    body.modifiers['Subsurf'].render_levels = 2
+    apply_modifiers(body)
+    flesh = principled('MascotFlesh', srgb('#ff9a2e'), 0.6,
+                       Emission_Color=srgb('#ff7a0a'), Emission_Strength=1.5)
+    body.data.materials.append(flesh)
+    sol = body.modifiers.new('Shell', 'SOLIDIFY')
+    sol.thickness = 0.09 * radius
+    sol.offset = -1.0
+    sol.material_offset = 1
+    sol.material_offset_rim = 1
+    apply_modifiers(body)
+    core = mesh_object('MascotCore', uv_sphere(24, 12, 0.36 * radius))
+    core.scale = (1.0, 1.0, 0.8)
+    core.location = (0, 0.25, -0.02)
+    core.data.materials.append(emission_material('MascotCoreMat', srgb('#ffd04a'), 4.0))
+    lamp = bpy.data.lights.new('MascotLamp', 'POINT')
+    lamp.energy = 420
+    lamp.color = (1.0, 0.6, 0.2)
+    lamp.shadow_soft_size = 0.2
+    lamp_obj = bpy.data.objects.new('MascotLamp', lamp)
+    bpy.context.scene.collection.objects.link(lamp_obj)
+    lamp_obj.location = (0, 0.12, -0.05)
+    stem = mascot_stem('MascotStem',
+                       [(0.0, 0.0, 0.56), (0.02, 0.0, 0.82), (0.1, 0.0, 1.0), (0.24, 0.0, 1.07),
+                        (0.32, 0.0, 0.99), (0.27, 0.0, 0.92)],
+                       [1.0, 0.86, 0.7, 0.56, 0.44, 0.34], 0.12, MASCOT_STEM)
+    # Листья развёрнуты к камере (иначе плоский лист сверху виден ребром).
+    leaves = [
+        leaf('MascotLeafL', (-0.3, -0.12, 0.74), Euler((math.radians(58), math.radians(-28), math.radians(8))),
+             size=0.34, color=MASCOT_LEAF),
+        leaf('MascotLeafR', (0.32, -0.08, 0.76), Euler((math.radians(62), math.radians(24), math.radians(-10))),
+             size=0.3, color=MASCOT_LEAF),
+    ]
+    vine = tendril('MascotVine', (-0.12, -0.1, 0.78), turns=1.6, length=0.4, radius=0.12,
+                   thickness=0.016, color=MASCOT_LEAF, roughness=0.88)
+    cam = look_camera((0.0, -8.0, 1.25), (0, 0, 0.12), lens=85)
+    bpy.context.view_layer.update()
+    frame_camera(cam, [body, stem, vine] + leaves, margin=1.08)
+    return body, flesh, [stem, vine] + leaves, core, lamp_obj
+
+
+def holdout_material():
+    mat = bpy.data.materials.new('Holdout')
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    for n in list(nodes):
+        nodes.remove(n)
+    out = nodes.new('ShaderNodeOutputMaterial')
+    hold = nodes.new('ShaderNodeHoldout')
+    mat.node_tree.links.new(hold.outputs['Holdout'], out.inputs['Surface'])
+    return mat
+
+
+def scene_mascot():
+    body, flesh, decor, core, lamp = mascot_scene()
+    # 1. Тело без лица — подложка для всех эмоций.
+    render_to('mascot-body')
+    # 2. Логотип: тело с обычным лицом, всё целиком.
+    logo = body.copy()
+    logo.data = body.data.copy()
+    bpy.context.scene.collection.objects.link(logo)
+    body.hide_render = True
+    carve_face(logo, 'normal', 1.0, flesh)
+    render_to('mascot-logo')
+    bpy.data.objects.remove(logo)
+    # 3. Лица: только вырезы с нутром — кожура и хвостик прозрачны.
+    hold = holdout_material()
+    for obj in decor:
+        obj.hide_render = True
+    for emotion in MASCOT_EMOTIONS:
+        shell = body.copy()
+        shell.data = body.data.copy()
+        bpy.context.scene.collection.objects.link(shell)
+        shell.hide_render = False
+        carve_face(shell, emotion, 1.0, flesh)
+        shell.data.materials[0] = hold
+        render_to(f'mascot-face-{emotion}')
+        bpy.data.objects.remove(shell)
+
+
 SCENES = {
+    'mascot': scene_mascot,
     'pumpkins': scene_pumpkins,
     'bat': scene_bat,
     'ghost': scene_ghost,

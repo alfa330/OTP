@@ -1,0 +1,195 @@
+/* Хэллоуин-2026: тыква-помощник (PumpkinMascot.jsx). Тыква занимает место
+   знака iCORE в шарике — тот же квадрат .aorb, без своей геометрии, поэтому
+   перетаскивание и стыковка шарика не меняются. */
+
+.hw-mascot {
+    --hw-look-x: 0;
+    --hw-look-y: 0;
+    position: absolute;
+    inset: 0;
+    display: block;
+    pointer-events: none;
+}
+
+.hw-mascot img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    object-fit: contain;
+    -webkit-user-drag: none;
+    user-select: none;
+}
+
+.hw-mascot__breathe,
+.hw-mascot__tilt,
+.hw-mascot__face {
+    position: absolute;
+    inset: 0;
+    display: block;
+}
+
+/* Дыхание — едва заметно; наклон к курсору — от низа тыквы, как головой. */
+.hw-mascot__breathe {
+    animation: hw-mascot-breathe 3.8s ease-in-out infinite;
+    transform-origin: 50% 90%;
+}
+
+@keyframes hw-mascot-breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.025, 1.035); }
+}
+
+.hw-mascot__tilt {
+    transform: rotate(calc(var(--hw-look-x) * 6deg));
+    transform-origin: 50% 88%;
+    transition: transform 0.18s ease-out;
+}
+
+/* Лицо смещается к курсору сильнее тела — так и читается взгляд. */
+.hw-mascot__face {
+    transform: translate(calc(var(--hw-look-x) * 5.5%), calc(var(--hw-look-y) * 4%));
+    transition: transform 0.14s ease-out;
+    filter: drop-shadow(0 0 2px rgba(255, 150, 40, 0.9)) drop-shadow(0 0 5px rgba(255, 110, 20, 0.45));
+    animation: hw-mascot-candle 3.2s linear infinite;
+}
+
+.hw-mascot__face img {
+    opacity: 0;
+    transition: opacity 0.16s ease-out;
+}
+
+.hw-mascot__face img.is-on {
+    opacity: 1;
+}
+
+@keyframes hw-mascot-candle {
+    0%, 100% { opacity: 1; }
+    9% { opacity: 0.86; }
+    12% { opacity: 1; }
+    47% { opacity: 0.93; }
+    51% { opacity: 1; }
+    78% { opacity: 0.88; }
+    81% { opacity: 1; }
+}
+
+/* Смена эмоции — короткий «подскок» всей тыквы. */
+.hw-mascot.is-surprise .hw-mascot__tilt,
+.hw-mascot.is-joy .hw-mascot__tilt,
+.hw-mascot.is-love .hw-mascot__tilt {
+    animation: hw-mascot-hop 0.42s cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+@keyframes hw-mascot-hop {
+    0% { translate: 0 0; }
+    40% { translate: 0 -9%; }
+    100% { translate: 0 0; }
+}
+
+/* Страх — мелкая дрожь, пока шарик тащат. */
+.hw-mascot.is-fear .hw-mascot__breathe {
+    animation: hw-mascot-shiver 0.11s linear infinite;
+}
+
+@keyframes hw-mascot-shiver {
+    0%, 100% { transform: translate(0, 0); }
+    25% { transform: translate(-1.5%, 0.5%); }
+    50% { transform: translate(1.5%, -0.5%); }
+    75% { transform: translate(-1%, -0.5%); }
+}
+
+/* Сон — дыхание медленнее, огонёк приглушён. */
+.hw-mascot.is-sleep .hw-mascot__breathe {
+    animation-duration: 5.6s;
+}
+
+.hw-mascot.is-sleep .hw-mascot__face {
+    opacity: 0.72;
+    animation: none;
+}
+
+.hw-mascot.is-anger .hw-mascot__face {
+    filter: drop-shadow(0 0 2px rgba(255, 90, 30, 0.95)) drop-shadow(0 0 6px rgba(255, 60, 20, 0.55));
+}
+
+/* ── Значки вокруг ─────────────────────────────────────────────────────── */
+
+.hw-mascot__extras {
+    position: absolute;
+    left: -20%;
+    top: -20%;
+    width: 140%;
+    height: 140%;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.hw-mascot__extras .hw-x {
+    fill: #fb923c;
+    filter: drop-shadow(0 0 1.5px rgba(251, 146, 60, 0.9));
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.hw-mascot__extras .hw-x--stroke {
+    fill: none;
+    stroke: #fb923c;
+    stroke-width: 2.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.hw-mascot__extras text.hw-x {
+    font: 800 15px/1 -apple-system, BlinkMacSystemFont, 'SF Pro Rounded', 'Segoe UI', sans-serif;
+}
+
+.hw-x--late { animation-delay: 0.25s !important; }
+.hw-x--later { animation-delay: 0.5s !important; }
+
+.hw-x--float { animation: hw-x-float 1.6s ease-in-out infinite alternate both; }
+.hw-x--rise { animation: hw-x-rise 1.8s ease-out infinite both; }
+.hw-x--pulse { animation: hw-x-pulse 0.5s ease-in-out infinite alternate both; }
+.hw-x--tear { animation: hw-x-tear 1.6s ease-in infinite both; }
+.hw-x--pop { animation: hw-x-pop 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+.hw-x--jitter { animation: hw-x-jitter 0.12s linear infinite; }
+.hw-x--twinkle { animation: hw-x-twinkle 0.9s ease-in-out infinite alternate both; }
+.hw-x--zzz { animation: hw-x-zzz 2.4s ease-in-out infinite both; }
+.hw-x--wobble { animation: hw-x-wobble 0.8s ease-in-out infinite alternate both; }
+.hw-x--dots { animation: hw-x-dots 1.2s ease-in-out infinite both; }
+
+@keyframes hw-x-float { from { translate: 0 2px; opacity: 0.75; } to { translate: 0 -3px; opacity: 1; } }
+@keyframes hw-x-rise { from { translate: 0 6px; opacity: 0; } 25% { opacity: 1; } to { translate: 0 -12px; opacity: 0; } }
+@keyframes hw-x-pulse { from { scale: 0.85; } to { scale: 1.1; } }
+@keyframes hw-x-tear { from { translate: 0 -2px; opacity: 0; } 20% { opacity: 1; } to { translate: 0 10px; opacity: 0; } }
+@keyframes hw-x-pop { from { scale: 0.2; opacity: 0; } to { scale: 1; opacity: 1; } }
+@keyframes hw-x-jitter { 0%, 100% { translate: 0 0; } 50% { translate: 1px -1px; } }
+@keyframes hw-x-twinkle { from { scale: 0.7; opacity: 0.6; } to { scale: 1.15; opacity: 1; } }
+@keyframes hw-x-zzz { from { translate: 0 4px; opacity: 0; } 30% { opacity: 1; } to { translate: 2px -8px; opacity: 0; } }
+@keyframes hw-x-wobble { from { rotate: -10deg; } to { rotate: 10deg; } }
+@keyframes hw-x-dots { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* Вкладка в фоне — анимации стоят (как у знака iCORE). */
+.hw-mascot.is-paused *,
+.hw-mascot.is-paused {
+    animation-play-state: paused !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hw-mascot *,
+    .hw-mascot {
+        animation: none !important;
+        transition: none !important;
+    }
+
+    .hw-mascot__tilt,
+    .hw-mascot__face {
+        transform: none !important;
+    }
+}
+
+/* Кольцо фокуса шарика — тыквенное, как остальные акценты праздника. */
+html[data-otp-halloween] .aorb-button:focus-visible {
+    outline-color: #f97316;
+}

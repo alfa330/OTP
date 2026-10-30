@@ -7,7 +7,25 @@ import App, { ErrorBoundary } from './App';
 import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
 import { startPwaRuntime } from './utils/pwa';
 import { isHalloweenTime } from './components/seasonal/halloween/halloweenWindow';
+import { applyDarkTheme, readStoredDarkTheme } from './utils/darkTheme';
 import './styles.css';
+
+/* Хэллоуин (до конца 1 ноября 2026). Праздничная метка и тёмный слой — сразу, до
+   отрисовки: иначе каждая загрузка начиналась бы со светлого кадра и синих кнопок.
+   Сбой праздничного чанка (сеть, выкладка) не должен перезагружать портал через
+   staleBundleRecovery: украшения просто не появятся. Слушатель на фазе перехвата
+   срабатывает раньше восстановления и гасит только свои чанки. */
+const HALLOWEEN_CHUNK_RE = /mountHalloween|PumpkinMascot|halloween-theme/;
+if (isHalloweenTime()) {
+  document.documentElement.setAttribute('data-otp-halloween', '');
+  window.addEventListener('vite:preloadError', (event) => {
+    if (!HALLOWEEN_CHUNK_RE.test(String(event?.payload?.message || event?.payload || ''))) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  import('./components/seasonal/halloween/halloween-theme.css').catch(() => {});
+  if (readStoredDarkTheme()) applyDarkTheme(true);
+}
 
 try {
   /* Метки перезагрузки (?v=, ?auth_reload=) свою работу уже сделали — документ
@@ -60,7 +78,7 @@ try {
        После срока чанк не грузится вовсе. */
     if (isHalloweenTime()) {
       const startHalloween = () => import('./components/seasonal/halloween/mountHalloween')
-        .then((module) => module.mountHalloween())
+        .then((module) => module?.mountHalloween?.())
         .catch(() => {});
       if ('requestIdleCallback' in window) window.requestIdleCallback(startHalloween, { timeout: 2500 });
       else window.setTimeout(startHalloween, 800);

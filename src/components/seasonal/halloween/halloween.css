@@ -1,16 +1,18 @@
 /* Хэллоуин-2026 — слой украшений поверх портала (см. HalloweenLayer.jsx).
  *
  * Всё здесь — накладка: разметку портала не меняет ни одно правило, кроме
- * шляпок на аватаре и логотипе (там нужен position: relative и снятая
- * обрезка круга). Эти правила живут под html[data-otp-halloween] — метку
- * ставит и снимает сам слой, поэтому в открытой вкладке шляпки исчезают
- * вместе со сроком, хотя стили чанка остаются в документе. Метка — именно
- * атрибут, не класс: .otp-halloween — это корень слоя (fixed, 0×0), и тот же
- * класс на <html> схлопнул бы всю страницу.
+ * шляпки на аватаре (position: relative и обрезка круга на фото вместо
+ * кружка; тыква в логотипах — в halloween-theme.css). Эти правила живут под
+ * html[data-otp-halloween] — метку ставит main.jsx и снимает слой по сроку,
+ * поэтому в открытой вкладке шляпка исчезает вместе со сроком, хотя
+ * стили чанка остаются в документе. Метка — именно атрибут, не класс:
+ * .otp-halloween — это корень слоя (fixed, 0×0), и тот же класс на <html>
+ * схлопнул бы всю страницу.
  *
  * Слой лежит на z-index 49: выше содержимого разделов, но ниже сайдбара (50),
- * любых окон (50+), шарика помощника (84), панели установки (90) и тостов.
- * Мыши пролетают ЗА сайдбаром, окна и меню всегда поверх украшений.
+ * окон (50+), шарика помощника (84), панели установки (90) и тостов. Мыши
+ * пролетают ЗА сайдбаром. Окна с затемнением ниже 49 (их несколько) слой
+ * ловит сам и на это время гаснет (.is-muted).
  *
  * Ни одного элемента шире 90 % окна у верхней грани: на iOS 26 такой fixed
  * перекрашивает полосу под часами (см. tests/test_mobile_status_bar_glass.py).
@@ -40,19 +42,30 @@
     pointer-events: none;
 }
 
+/* backwards, а не both: после появления элемент живёт своими стилями — иначе
+   «застывшая» последняя рамка анимации перебивала бы .is-shy. */
 .otp-halloween .hw-appear {
-    animation: hw-appear 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    animation: hw-appear 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes hw-appear {
     from { opacity: 0; transform: translateY(10px) scale(0.96); }
-    to { opacity: 1; transform: none; }
+}
+
+/* Пока открыто окно с затемнением — слоя нет. */
+.otp-halloween > * {
+    transition: opacity 0.25s ease;
+}
+
+.otp-halloween.is-muted > * {
+    opacity: 0 !important;
 }
 
 /* ── Паутина ─────────────────────────────────────────────────────────── */
 
 .otp-halloween .hw-web {
     color: rgba(71, 85, 105, 0.46);
+    transition: opacity 0.35s ease;
 }
 
 .otp-halloween .hw-web svg {
@@ -60,6 +73,21 @@
     width: 100%;
     height: 100%;
     overflow: visible;
+}
+
+/* Угол рисунка — левый верхний; в другие углы его разворачивает svg, не
+   контейнер: у контейнера transform занят появлением. */
+.otp-halloween .hw-web--tr svg { transform: scaleX(-1); }
+.otp-halloween .hw-web--bl svg { transform: scaleY(-1); }
+
+/* В портале паутина тише, чем на экране входа, и бледнеет у курсора. */
+.otp-halloween .hw-web--tr,
+.otp-halloween .hw-web--bl {
+    color: rgba(71, 85, 105, 0.3);
+}
+
+.otp-halloween .hw-web.is-shy {
+    opacity: 0.2;
 }
 
 /* ── Паук на нити ────────────────────────────────────────────────────── */
@@ -79,6 +107,13 @@
 .otp-halloween .hw-spider.is-dropping .hw-spider__drop {
     transform: translateY(var(--hw-drop, 40px));
     transition-duration: 2.1s;
+}
+
+/* Курсор рядом — паук быстро взбирается к паутине (правило после спуска:
+   при равном весе выигрывает оно). */
+.otp-halloween .hw-spider.is-shy .hw-spider__drop {
+    transform: translateY(calc(var(--hw-hang, 0px) * -1 + 6px));
+    transition: transform 0.55s cubic-bezier(0.3, 0.7, 0.2, 1);
 }
 
 .otp-halloween .hw-spider__bob {
@@ -162,7 +197,7 @@
     bottom: -9px;
 }
 
-/* ── Привидение у карточки входа ─────────────────────────────────────── */
+/* ── Привидение ──────────────────────────────────────────────────────── */
 
 .otp-halloween .hw-ghost img {
     position: relative;
@@ -190,24 +225,29 @@
     50% { opacity: 1; transform: scale(1); }
 }
 
-/* Привидение в работе: изредка поднимается из-за нижней кромки и тает.
-   Белое на белом не читается — отсюда мягкая тень, как у окон портала. */
-.otp-halloween .hw-ghost-visit {
-    position: fixed;
-    bottom: -96px;
-    width: 72px;
-    height: auto;
-    filter: drop-shadow(0 6px 12px rgba(15, 23, 42, 0.2)) drop-shadow(0 1px 2px rgba(15, 23, 42, 0.16));
-    animation: hw-ghost-visit 9s ease-in-out both;
-    will-change: transform, opacity;
+/* В портале привидение выглядывает из-за нижней кромки справа (макет) и
+   ныряет обратно, когда к нему тянется курсор. */
+.otp-halloween .hw-ghost-peek {
+    bottom: 0;
+    transform: translateY(calc(100% - var(--hw-peek, 40px)));
+    transition: transform 0.45s cubic-bezier(0.3, 0.7, 0.2, 1);
 }
 
-@keyframes hw-ghost-visit {
-    0% { opacity: 0; transform: translate(0, 0) rotate(-6deg); }
-    14% { opacity: 1; }
-    48% { transform: translate(24px, -190px) rotate(5deg); }
-    76% { opacity: 1; }
-    100% { opacity: 0; transform: translate(-8px, -340px) rotate(-4deg); }
+.otp-halloween .hw-ghost-peek img {
+    width: 100%;
+    height: auto;
+    opacity: 0.94;
+    filter: drop-shadow(0 4px 10px rgba(15, 23, 42, 0.25));
+    animation: hw-ghost-peek 4.6s ease-in-out infinite;
+}
+
+@keyframes hw-ghost-peek {
+    0%, 100% { transform: translateY(2px) rotate(-4deg); }
+    50% { transform: translateY(-3px) rotate(3deg); }
+}
+
+.otp-halloween .hw-ghost-peek.is-shy {
+    transform: translateY(100%);
 }
 
 /* ── Летучие мыши ────────────────────────────────────────────────────── */
@@ -255,81 +295,70 @@
     to { transform: translateX(-100%); }
 }
 
-/* ── Шляпки: на «i» в логотипе входа и сайдбара, на аватаре ──────────── */
+/* ── Шляпка ведьмы на аватаре ────────────────────────────────────────── */
 
-html[data-otp-halloween] .auth-card h1 > span > span:first-child,
 html[data-otp-halloween] .sidebar-avatar,
 html[data-otp-halloween] .mtb-item__avatar {
     position: relative;
-}
-
-/* Круг аватара обрезал бы шляпку — обрезку переносим на саму фотографию. */
-html[data-otp-halloween] .sidebar-avatar,
-html[data-otp-halloween] .mtb-item__avatar {
     overflow: visible;
 }
 
+/* Круг аватара обрезал бы шляпку — обрезку переносим на саму фотографию. */
 html[data-otp-halloween] .sidebar-avatar img,
 html[data-otp-halloween] .mtb-item__avatar img {
     border-radius: 9999px;
 }
 
-html[data-otp-halloween] .auth-card h1 > span > span:first-child::before,
-html[data-otp-halloween] .sidebar-logo-full::before,
+/* Плитка аватара в сайдбаре срезает всё выше 8 px над кружком — шляпка
+   укладывается в этот запас целиком. */
 html[data-otp-halloween] .sidebar-avatar::before,
 html[data-otp-halloween] .mtb-item__avatar::before {
     content: '';
     position: absolute;
     z-index: 1;
+    left: -6px;
+    top: -8px;
+    width: 21px;
+    height: 17px;
+    transform: rotate(-20deg);
     pointer-events: none;
     background: url('./assets/hat.webp') center / contain no-repeat;
     animation: hw-hat-on 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.25) both;
 }
 
-html[data-otp-halloween] .auth-card h1 > span > span:first-child::before {
-    left: -1px;
-    top: -23px;
-    width: 42px;
-    height: 35px;
-    transform: rotate(-14deg);
-}
-
-html[data-otp-halloween] .sidebar-logo-full::before {
-    left: 1px;
-    top: -14px;
-    width: 32px;
-    height: 27px;
-    transform: rotate(-14deg);
-}
-
-html[data-otp-halloween] .sidebar-avatar::before,
-html[data-otp-halloween] .mtb-item__avatar::before {
-    left: -8px;
-    top: -14px;
-    width: 26px;
-    height: 22px;
-    transform: rotate(-20deg);
-}
-
 @keyframes hw-hat-on {
-    from { opacity: 0; translate: 0 -8px; }
+    from { opacity: 0; translate: 0 -6px; }
     to { opacity: 1; translate: 0 0; }
 }
 
-/* ── Тёмная тема ─────────────────────────────────────────────────────── */
+/* ── Тёмная тема (в праздник — у всех) ───────────────────────────────── */
 
-/* Только украшения портала: экран входа остаётся светлым и в тёмном режиме,
-   поэтому паутина, тени тыкв и привидения там всегда «светлые». */
-html[data-otp-theme='dark'] .otp-halloween .hw-spider--app .hw-spider__thread {
-    background: linear-gradient(to bottom, rgba(226, 232, 240, 0.1), rgba(226, 232, 240, 0.5) 92%);
+html[data-otp-theme='dark'] .otp-halloween .hw-web {
+    color: rgba(226, 232, 240, 0.3);
+}
+
+html[data-otp-theme='dark'] .otp-halloween .hw-web--tr,
+html[data-otp-theme='dark'] .otp-halloween .hw-web--bl {
+    color: rgba(226, 232, 240, 0.17);
+}
+
+html[data-otp-theme='dark'] .otp-halloween .hw-spider__thread {
+    background: linear-gradient(to bottom, rgba(226, 232, 240, 0.12), rgba(226, 232, 240, 0.5) 92%);
+}
+
+html[data-otp-theme='dark'] .otp-halloween .hw-pumpkins__shadow,
+html[data-otp-theme='dark'] .otp-halloween .hw-ghost__shadow {
+    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0));
+}
+
+html[data-otp-theme='dark'] .otp-halloween .hw-pumpkins__glow {
+    background: radial-gradient(closest-side, rgba(251, 146, 60, 0.55), rgba(251, 146, 60, 0.2) 55%, rgba(251, 146, 60, 0));
 }
 
 /* ── Без движения и на печати ────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {
     .otp-halloween *,
-    html[data-otp-halloween] .auth-card h1 > span > span:first-child::before,
-    html[data-otp-halloween] .sidebar-logo-full::before,
     html[data-otp-halloween] .sidebar-avatar::before,
     html[data-otp-halloween] .mtb-item__avatar::before {
         animation: none !important;
@@ -342,8 +371,6 @@ html[data-otp-theme='dark'] .otp-halloween .hw-spider--app .hw-spider__thread {
         display: none !important;
     }
 
-    html[data-otp-halloween] .auth-card h1 > span > span:first-child::before,
-    html[data-otp-halloween] .sidebar-logo-full::before,
     html[data-otp-halloween] .sidebar-avatar::before,
     html[data-otp-halloween] .mtb-item__avatar::before {
         content: none;

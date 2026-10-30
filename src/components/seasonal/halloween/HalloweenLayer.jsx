@@ -4,45 +4,68 @@ import pumpkinsUrl from './assets/pumpkins.webp';
 import ghostUrl from './assets/ghost.webp';
 import spiderUrl from './assets/spider.webp';
 import batStripUrl from './assets/bat-strip.webp';
-import { HALLOWEEN_ENDS_AT, isHalloweenTime } from './halloweenWindow';
+import faviconUrl from './assets/pumpkin-favicon.png';
+import { isHalloweenTime } from './halloweenWindow';
 import {
     ART,
+    appCorners,
     loginLayout,
     makeBatFlock,
     nextBatDelay,
-    nextGhostDelay,
     nextSpiderDropDelay,
 } from './halloweenScene';
 
-/* Хэллоуин-2026 — слой украшений поверх портала. Модели (тыквы, привидение,
- * паук, летучая мышь, шляпа) построены и отрендерены в Blender, см.
- * scripts/halloween/halloween_models.py.
+/* Хэллоуин-2026 — слой украшений поверх портала (макет владельца 30.10.2026:
+ * тёмный портал, паутина по углам, паук, летучие мыши, привидение). Модели —
+ * Blender, scripts/halloween/halloween_models.py.
  *
  * Портал слой не трогает: где он сейчас, слой узнаёт по разметке (карточка
  * входа .auth-card, сайдбар .sidebar, оболочка телефона body.mobile-shell).
- * Всё некликабельно (pointer-events: none) и спрятано от экранных дикторов.
- *
- *   вход    — паутина с пауком, тыквы с дрожащим огоньком у карточки,
- *             привидение, шляпа на «i» в логотипе, мыши над карточкой;
- *   портал  — шляпа на аватаре и логотипе, на компьютере паук у правой
- *             кромки (кроме «Чатов ОП» и «Журнала оценок»); мыши пролетают
- *             раз в 4–7 минут, привидение поднимается раз в 10–15.
+ * Работать украшения не мешают:
+ *   - некликабельны и спрятаны от экранных дикторов;
+ *   - уходят от курсора: паутина бледнеет, паук взбирается, привидение
+ *     ныряет за кромку — к кнопке под ними человек дотянется сразу;
+ *   - паук и привидение не встают туда, где под ними кнопка или поле;
+ *   - пока открыто окно с затемнением, весь слой прячется;
+ *   - в «Чатах ОП», «Журнале оценок» и «Аукционе смен» у правого края работа —
+ *     там нет паутины с пауком.
  */
 
 const ROUTE_POLL_MS = 1000;
 const SPIDER_DROP_HOLD_MS = 3600;
+const SHY_RADIUS = 140;
 const APP_BAT_ZONE = { top: 76, bottom: 250 };
 const MOBILE_BAT_ZONE = { top: 120, bottom: 270 };
-const APP_SPIDER = { width: 26, top: 64, drop: 58 };
+const BUSY_VIEWS = new Set(['wazzup_chats', 'shift_auction']);
+const CONTROL_SELECTOR = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"], [contenteditable="true"]';
 
-/* «Чаты ОП» и «Журнал оценок» работают вплотную к правому краю — там
-   паук не висит (мыши и привидение мимолётны и остаются). */
 const isBusyRightEdge = () => {
     const main = document.querySelector('.main-content');
-    if (!main) return false;
-    return main.classList.contains('wz-main-content')
-        || (main.classList.contains('h-screen') && main.classList.contains('overflow-hidden'));
+    if (main && (main.classList.contains('wz-main-content')
+        || (main.classList.contains('h-screen') && main.classList.contains('overflow-hidden')))) return true;
+    try {
+        return BUSY_VIEWS.has(new URLSearchParams(window.location.search).get('view') || '');
+    } catch (error) {
+        return false;
+    }
 };
+
+/* Открыто окно с затемнением — украшения не должны светиться поверх него. */
+const isModalOpen = () => {
+    if (document.querySelector('.otp-modal-dim, [aria-modal="true"]')) return true;
+    for (const el of document.querySelectorAll('.fixed.inset-0')) {
+        if (el.closest('.otp-halloween')) continue;
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) < 0.05) continue;
+        const match = /rgba?\(([^)]+)\)/.exec(style.backgroundColor);
+        const parts = match ? match[1].split(',').map((v) => parseFloat(v)) : [];
+        const alpha = parts.length === 4 ? parts[3] : (parts.length === 3 ? 1 : 0);
+        if (alpha >= 0.15 || (style.backdropFilter && style.backdropFilter !== 'none')) return true;
+    }
+    return false;
+};
+
+const isMenuOpen = () => Boolean(document.querySelector('[role="menu"], [role="listbox"]'));
 
 const readScreen = () => {
     const card = document.querySelector('.auth-screen .auth-card');
@@ -80,7 +103,24 @@ const measureLogin = (card) => {
     });
 };
 
-const sameLayout = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+/* Лежит ли под прямоугольником (с запасом CONTROL_GAP вокруг) кнопка, ссылка
+   или поле: украшение не встаёт вплотную к тому, чем работают. Наш слой с
+   pointer-events: none в elementFromPoint не попадает. */
+const CONTROL_GAP = 8;
+const coversControl = (rect) => {
+    const xs = [rect.left - CONTROL_GAP, rect.left + rect.width / 2, rect.right + CONTROL_GAP];
+    const ys = [rect.top - CONTROL_GAP, rect.top + rect.height / 2, rect.bottom + CONTROL_GAP];
+    for (const x of xs) {
+        for (const y of ys) {
+            if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+            const top = document.elementFromPoint(x, y);
+            if (top && top.closest(CONTROL_SELECTOR)) return true;
+        }
+    }
+    return false;
+};
+
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const useReducedMotion = () => {
     const [reduced, setReduced] = useState(() => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches));
@@ -94,8 +134,8 @@ const useReducedMotion = () => {
     return reduced;
 };
 
-/* Паутина в углу: радиальные нити и провисшие витки между ними. Небольшая
-   неровность витков — по синусу, без случайности: одна и та же у всех. */
+/* Паутина в углу: радиальные нити и провисшие витки между ними. Неровность
+   витков — по синусу, без случайности: одна и та же у всех. */
 const WEB_PATH = (() => {
     const angles = [4, 17, 31, 45, 59, 73, 86].map((deg) => (deg * Math.PI) / 180);
     const radii = [13, 25, 38, 52, 66, 80, 93];
@@ -114,21 +154,22 @@ const WEB_PATH = (() => {
     return parts.join('');
 })();
 
-function Cobweb({ size }) {
+/* corner — угол экрана: 'tl' (вход), 'tr' и 'bl' (портал). */
+const Cobweb = React.forwardRef(function Cobweb({ size, corner = 'tl', style }, ref) {
     return (
-        <div className="hw-fixed hw-web hw-appear" style={{ left: 0, top: 0, width: size, height: size }}>
+        <div ref={ref} className={`hw-fixed hw-web hw-web--${corner} hw-appear`} style={{ width: size, height: size, ...style }}>
             <svg viewBox="0 0 100 100" aria-hidden="true" focusable="false">
                 <path d={WEB_PATH} fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
             </svg>
         </div>
     );
-}
+});
 
 /* Обёртка шире паука на SPIDER_SWAY_ROOM с каждой стороны: она обрезает нить
    выше точки крепления, а качание не должно подрезать лапки. */
 const SPIDER_SWAY_ROOM = 18;
 
-function Spider({ placement, dropping, app = false }) {
+const Spider = React.forwardRef(function Spider({ placement, dropping, app = false }, ref) {
     const { left, right, anchor, top, width, height, drop } = placement;
     const style = {
         left: left === undefined ? undefined : left - SPIDER_SWAY_ROOM,
@@ -141,7 +182,7 @@ function Spider({ placement, dropping, app = false }) {
         '--hw-room': `${SPIDER_SWAY_ROOM}px`,
     };
     return (
-        <div className={`hw-fixed hw-spider hw-appear${app ? ' hw-spider--app' : ''}${dropping ? ' is-dropping' : ''}`} style={style}>
+        <div ref={ref} className={`hw-fixed hw-spider hw-appear${app ? ' hw-spider--app' : ''}${dropping ? ' is-dropping' : ''}`} style={style}>
             <div className="hw-spider__drop">
                 <div className="hw-spider__bob">
                     <span className="hw-spider__thread" />
@@ -150,7 +191,7 @@ function Spider({ placement, dropping, app = false }) {
             </div>
         </div>
     );
-}
+});
 
 function Bat({ bat, onDone }) {
     const height = Math.round(bat.size / ART.bat);
@@ -187,56 +228,100 @@ function Bat({ bat, onDone }) {
 
 export default function HalloweenLayer({ onExpire }) {
     const reduced = useReducedMotion();
-    const [screen, setScreen] = useState(() => ({ mode: 'none', mobile: false, busyRight: false }));
+    const [screen, setScreen] = useState(() => ({ mode: 'none', mobile: false, busyRight: false, modal: false }));
     const [layout, setLayout] = useState(null);
+    const [corners, setCorners] = useState(null);
     const [flocks, setFlocks] = useState([]);
-    const [ghostVisit, setGhostVisit] = useState(null);
     const [dropping, setDropping] = useState(false);
     const cardRef = useRef(null);
     const zoneRef = useRef(null);
     const flockSeq = useRef(0);
+    const shyRefs = useRef({});
+    const screenRef = useRef(screen);
+    screenRef.current = screen;
 
-    /* Метка на <html> — для шляпок в CSS. Снимается вместе со слоем. */
+    /* Метка на <html> — для шляпки на аватаре и логотипа в CSS. main.jsx ставит
+       её ещё до отрисовки; слой держит её и снимает вместе с собой. */
     useLayoutEffect(() => {
         const root = document.documentElement;
         root.setAttribute('data-otp-halloween', '');
         return () => root.removeAttribute('data-otp-halloween');
     }, []);
 
-    /* Срок: в открытой вкладке слой гаснет сам ровно в полночь 2 ноября
-       (и при возвращении на вкладку, если она спала дольше). */
+    /* Значок вкладки — тыква; по сроку возвращается прежний. */
     useEffect(() => {
-        let timer = 0;
+        const links = [...document.querySelectorAll('link[rel~="icon"]')];
+        const saved = links.map((link) => [link, link.getAttribute('href'), link.getAttribute('type')]);
+        links.forEach((link) => {
+            link.setAttribute('href', faviconUrl);
+            link.setAttribute('type', 'image/png');
+        });
+        return () => saved.forEach(([link, href, type]) => {
+            if (href) link.setAttribute('href', href); else link.removeAttribute('href');
+            if (type) link.setAttribute('type', type); else link.removeAttribute('type');
+        });
+    }, []);
+
+    /* Срок: проверка в каждом опросе и при возвращении на вкладку — таймеры
+       спят вместе с ноутбуком, и один таймер до полуночи мог бы опоздать. */
+    useEffect(() => {
         const check = () => {
-            if (!isHalloweenTime()) {
-                onExpire();
-                return;
-            }
-            timer = window.setTimeout(check, Math.min(HALLOWEEN_ENDS_AT - Date.now() + 50, 6 * 60 * 60 * 1000));
+            if (!isHalloweenTime()) onExpire();
         };
         check();
-        const onVisible = () => {
-            if (document.visibilityState === 'visible' && !isHalloweenTime()) onExpire();
-        };
-        document.addEventListener('visibilitychange', onVisible);
+        document.addEventListener('visibilitychange', check);
+        window.addEventListener('focus', check);
+        window.addEventListener('pageshow', check);
         return () => {
-            window.clearTimeout(timer);
-            document.removeEventListener('visibilitychange', onVisible);
+            document.removeEventListener('visibilitychange', check);
+            window.removeEventListener('focus', check);
+            window.removeEventListener('pageshow', check);
         };
     }, [onExpire]);
 
-    /* Где сейчас человек: вход или портал, компьютер или телефон. Дёшево —
-       два querySelector в секунду; подписка на мутации всего портала
-       обошлась бы дороже. */
+    /* Где сейчас человек и что вокруг. Дёшево — несколько querySelector в
+       секунду; подписка на мутации всего портала обошлась бы дороже. */
     const remeasure = useCallback(() => {
+        if (!isHalloweenTime()) {
+            onExpire();
+            return;
+        }
         const next = readScreen();
+        const modal = next.mode !== 'none' && isModalOpen();
         cardRef.current = next.card;
-        setScreen((prev) => (prev.mode === next.mode && prev.mobile === next.mobile && prev.busyRight === next.busyRight
+        setScreen((prev) => (prev.mode === next.mode && prev.mobile === next.mobile
+            && prev.busyRight === next.busyRight && prev.modal === modal
             ? prev
-            : { mode: next.mode, mobile: next.mobile, busyRight: next.busyRight }));
+            : { mode: next.mode, mobile: next.mobile, busyRight: next.busyRight, modal }));
         const nextLayout = next.card ? measureLogin(next.card) : null;
-        setLayout((prev) => (sameLayout(prev, nextLayout) ? prev : nextLayout));
-    }, []);
+        setLayout((prev) => (sameJson(prev, nextLayout) ? prev : nextLayout));
+
+        let nextCorners = null;
+        if (next.mode === 'app' && !next.mobile) {
+            const orbEl = document.querySelector('.aorb-button');
+            const orb = orbEl ? orbEl.getBoundingClientRect() : null;
+            nextCorners = appCorners({
+                width: window.innerWidth,
+                height: window.innerHeight,
+                // Свёрнутый сайдбар объявляет ширину на body (body.sidebar-collapsed), а не на :root.
+                sidebar: pxVar(document.body, '--app-sidebar-offset') || 80,
+                busyRight: next.busyRight,
+                orb: orb && orb.width ? { left: orb.left, top: orb.top, right: orb.right, bottom: orb.bottom } : null,
+            });
+            // Паук и привидение не встают туда, где под ними кнопка или поле.
+            if (nextCorners.spider) {
+                const s = nextCorners.spider;
+                const left = window.innerWidth - s.right - s.width;
+                nextCorners.spider.blocked = coversControl({ left, right: left + s.width, top: s.top, bottom: s.top + s.height, width: s.width, height: s.height });
+            }
+            if (nextCorners.ghost) {
+                const g = nextCorners.ghost;
+                const top = window.innerHeight - g.peek;
+                nextCorners.ghost.blocked = coversControl({ left: g.left, right: g.left + g.width, top, bottom: window.innerHeight, width: g.width, height: g.peek });
+            }
+        }
+        setCorners((prev) => (sameJson(prev, nextCorners) ? prev : nextCorners));
+    }, [onExpire]);
 
     useEffect(() => {
         remeasure();
@@ -272,6 +357,32 @@ export default function HalloweenLayer({ onExpire }) {
         };
     }, [screen.mode, remeasure]);
 
+    /* Украшения уходят от курсора — мимо React: класс на узле раз в кадр. */
+    useEffect(() => {
+        if (screen.mode !== 'app') return undefined;
+        let frame = 0;
+        let pointer = null;
+        const apply = () => {
+            frame = 0;
+            for (const node of Object.values(shyRefs.current)) {
+                if (!node || !pointer) continue;
+                const rect = node.getBoundingClientRect();
+                const dx = Math.max(rect.left - pointer.x, 0, pointer.x - rect.right);
+                const dy = Math.max(rect.top - pointer.y, 0, pointer.y - rect.bottom);
+                node.classList.toggle('is-shy', Math.hypot(dx, dy) < SHY_RADIUS);
+            }
+        };
+        const onMove = (event) => {
+            pointer = { x: event.clientX, y: event.clientY };
+            if (!frame) frame = window.requestAnimationFrame(apply);
+        };
+        window.addEventListener('pointermove', onMove, { passive: true });
+        return () => {
+            window.removeEventListener('pointermove', onMove);
+            window.cancelAnimationFrame(frame);
+        };
+    }, [screen.mode]);
+
     zoneRef.current = (() => {
         if (screen.mode === 'login') {
             return layout?.bats ? { zoneTop: layout.bats.top, zoneBottom: layout.bats.bottom, compact: layout.compact } : null;
@@ -284,14 +395,15 @@ export default function HalloweenLayer({ onExpire }) {
     })();
 
     /* Летучие мыши: на входе — сразу и потом раз в 15–27 секунд, в портале —
-       через пару секунд после входа и дальше раз в 4–7 минут. */
+       через пару секунд после входа и дальше раз в 4–7 минут. Не взлетают,
+       пока открыто окно или выпадающий список. */
     useEffect(() => {
         if (reduced || screen.mode === 'none') return undefined;
         const login = screen.mode === 'login';
         let timer = 0;
         const launch = () => {
             const zone = zoneRef.current;
-            if (!document.hidden && zone) {
+            if (!document.hidden && zone && !screenRef.current.modal && !isMenuOpen()) {
                 flockSeq.current += 1;
                 const id = flockSeq.current;
                 const bats = makeBatFlock(Math.random, { ...zone, width: window.innerWidth });
@@ -311,23 +423,11 @@ export default function HalloweenLayer({ onExpire }) {
             .filter((flock) => flock.left > 0));
     }, []);
 
-    /* Привидение в портале — только на компьютере и редко. */
-    useEffect(() => {
-        if (reduced || screen.mode !== 'app' || screen.mobile) return undefined;
-        let timer = 0;
-        const visit = () => {
-            if (!document.hidden) setGhostVisit({ id: Date.now(), x: Math.round(36 + Math.random() * 140) });
-            timer = window.setTimeout(visit, nextGhostDelay(Math.random));
-        };
-        timer = window.setTimeout(visit, 60000);
-        return () => window.clearTimeout(timer);
-    }, [reduced, screen.mode, screen.mobile]);
-
     /* Паук время от времени спускается и забирается обратно. */
+    const hasSpider = screen.mode === 'login'
+        ? Boolean(layout?.spider)
+        : Boolean(corners?.spider && !corners.spider.blocked);
     useEffect(() => {
-        const hasSpider = screen.mode === 'login'
-            ? Boolean(layout?.spider)
-            : screen.mode === 'app' && !screen.mobile && !screen.busyRight;
         if (reduced || !hasSpider) return undefined;
         const login = screen.mode === 'login';
         let timer = 0;
@@ -345,24 +445,18 @@ export default function HalloweenLayer({ onExpire }) {
             window.clearTimeout(holdTimer);
             setDropping(false);
         };
-    }, [reduced, screen.mode, screen.mobile, screen.busyRight, layout?.spider]);
+    }, [reduced, screen.mode, hasSpider]);
 
-    const appSpider = screen.mode === 'app' && !screen.mobile && !screen.busyRight
-        ? {
-            right: 1,
-            anchor: 0,
-            top: APP_SPIDER.top,
-            width: APP_SPIDER.width,
-            height: Math.round(APP_SPIDER.width / ART.spider),
-            drop: APP_SPIDER.drop,
-        }
-        : null;
+    const app = screen.mode === 'app' && corners;
+    const shyRef = (key) => (node) => {
+        shyRefs.current[key] = node;
+    };
 
     return (
-        <div className="otp-halloween" aria-hidden="true">
+        <div className={`otp-halloween${screen.modal ? ' is-muted' : ''}`} aria-hidden="true">
             {screen.mode === 'login' && layout && (
                 <>
-                    {layout.web && <Cobweb size={layout.web.size} />}
+                    {layout.web && <Cobweb size={layout.web.size} corner="tl" style={{ left: 0, top: 0 }} />}
                     {layout.spider && <Spider placement={layout.spider} dropping={dropping} />}
                     {layout.ghost && (
                         <div
@@ -385,17 +479,23 @@ export default function HalloweenLayer({ onExpire }) {
                     )}
                 </>
             )}
-            {appSpider && <Spider placement={appSpider} dropping={dropping} app />}
-            {ghostVisit && screen.mode === 'app' && (
-                <img
-                    key={ghostVisit.id}
-                    className="hw-ghost-visit"
-                    src={ghostUrl}
-                    alt=""
-                    draggable={false}
-                    style={{ left: `calc(var(--app-sidebar-offset, 0px) + ${ghostVisit.x}px)` }}
-                    onAnimationEnd={() => setGhostVisit(null)}
-                />
+            {app && corners.webTop && (
+                <Cobweb ref={shyRef('webTop')} size={corners.webTop.size} corner="tr" style={{ right: 0, top: 0 }} />
+            )}
+            {app && corners.webBottom && (
+                <Cobweb ref={shyRef('webBottom')} size={corners.webBottom.size} corner="bl" style={{ left: corners.webBottom.left, bottom: 0 }} />
+            )}
+            {app && corners.spider && !corners.spider.blocked && (
+                <Spider ref={shyRef('spider')} placement={corners.spider} dropping={dropping} app />
+            )}
+            {app && corners.ghost && !corners.ghost.blocked && (
+                <div
+                    ref={shyRef('ghost')}
+                    className="hw-fixed hw-ghost-peek hw-appear"
+                    style={{ left: corners.ghost.left, width: corners.ghost.width, '--hw-peek': `${corners.ghost.peek}px` }}
+                >
+                    <img src={ghostUrl} alt="" draggable={false} />
+                </div>
             )}
             {flocks.map((flock) => flock.bats.map((bat) => (
                 <Bat key={`${flock.id}-${bat.key}`} bat={bat} onDone={() => batDone(flock.id)} />

@@ -170,7 +170,7 @@ async function buildAndImport({ lab, axiosPath, reactPath, outPath }) {
         platform: 'node',
         target: 'node18',
         jsx: 'transform',
-        loader: { '.jsx': 'jsx', '.js': 'jsx', '.css': 'empty', '.png': 'empty', '.svg': 'empty' },
+        loader: { '.jsx': 'jsx', '.js': 'jsx', '.css': 'empty', '.png': 'empty', '.svg': 'empty', '.webp': 'empty' },
         // Библиотеки — снаружи: их ленивые половины (редактор, 3D-тренажёр) при
         // входе не нужны, и собирать их ради теста незачем.
         packages: 'external',

@@ -96,6 +96,38 @@ export const loginLayout = ({ width, height, card, bottomInset = 0, topInset = 0
     return { compact, web, spider, pumpkins, ghost, bats };
 };
 
+/* Углы портала на компьютере (макет владельца 30.10.2026): паутина справа
+ * сверху, с неё свисает паук; паутина слева снизу у сайдбара; привидение
+ * выглядывает из-за нижней кромки справа — левее шарика помощника, если тот
+ * стоит в углу. busyRight — раздел работает у правого края («Чаты ОП»,
+ * «Журнал оценок», «Аукцион смен»): там ни паутины, ни паука справа.
+ * Паук: right — от правого края окна до правого края паука. */
+export const appCorners = ({ width, height, sidebar = 80, busyRight = false, orb = null }) => {
+    if (!(width > 0) || !(height > 0)) return null;
+    const webTopSize = Math.round(clamp(width * 0.1, 110, 160));
+    const spiderW = 26;
+    const spiderH = Math.round(spiderW / ART.spider);
+    const ghostW = 64;
+    const peek = 40;
+    let ghostLeft = width - 96 - ghostW;
+    if (orb && ghostLeft < orb.right + 12 && ghostLeft + ghostW > orb.left - 12 && height - peek < orb.bottom + 12) {
+        ghostLeft = Math.round(orb.left - 16 - ghostW);
+    }
+    return {
+        webTop: busyRight ? null : { size: webTopSize },
+        webBottom: { size: Math.round(clamp(width * 0.08, 90, 130)), left: Math.round(sidebar) },
+        spider: busyRight ? null : {
+            right: Math.round(webTopSize * 0.36 - spiderW / 2),
+            anchor: Math.round(webTopSize * 0.26),
+            top: Math.round(webTopSize * 0.62),
+            width: spiderW,
+            height: spiderH,
+            drop: 40,
+        },
+        ghost: ghostLeft > sidebar + 140 ? { left: Math.round(ghostLeft), width: ghostW, peek } : null,
+    };
+};
+
 /* Стайка летучих мышей: 2–3 штуки летят через экран в одну сторону, каждая
  * своим ходом — разный размер, задержка, высота волны и такт взмахов. rand —
  * генератор [0, 1) (в тестах — свой, с зерном). */
@@ -132,5 +164,4 @@ export const makeBatFlock = (rand, { zoneTop, zoneBottom, width, compact = false
 /* Паузы между появлениями, мс. На экране входа живее, в работе — редко:
    портал рабочий, движение на краю взгляда не должно отвлекать. */
 export const nextBatDelay = (rand, { login }) => (login ? 15000 + rand() * 12000 : 240000 + rand() * 180000);
-export const nextGhostDelay = (rand) => 600000 + rand() * 300000;
 export const nextSpiderDropDelay = (rand, { login }) => (login ? 9000 + rand() * 7000 : 38000 + rand() * 26000);

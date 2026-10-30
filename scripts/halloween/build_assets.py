@@ -35,20 +35,43 @@ def load(name):
     return Image.open(SRC / f'{name}.png').convert('RGBA')
 
 
-webp(fit(crop(load('pumpkins')), width=440), 'pumpkins')
-webp(fit(crop(load('ghost')), height=240), 'ghost')
-webp(fit(crop(load('hat')), width=150), 'hat')
-webp(fit(crop(load('spider')), width=120), 'spider')
+def union_box(images, pad=4):
+    boxes = [im.getbbox() for im in images]
+    return (min(b[0] for b in boxes) - pad, min(b[1] for b in boxes) - pad,
+            max(b[2] for b in boxes) + pad, max(b[3] for b in boxes) + pad)
 
-frames = [load(f'bat-{i}') for i in range(6)]
-boxes = [f.getbbox() for f in frames]
-union = (min(b[0] for b in boxes) - 4, min(b[1] for b in boxes) - 4,
-         max(b[2] for b in boxes) + 4, max(b[3] for b in boxes) + 4)
-frames = [fit(f.crop(union), width=128) for f in frames]
-strip = Image.new('RGBA', (128 * 6, frames[0].height), (0, 0, 0, 0))
-for i, f in enumerate(frames):
-    strip.alpha_composite(f, (128 * i, 0))
-webp(strip, 'bat-strip', q=86)
+
+if (SRC / 'pumpkins.png').exists():
+    webp(fit(crop(load('pumpkins')), width=440), 'pumpkins')
+    webp(fit(crop(load('ghost')), height=240), 'ghost')
+    webp(fit(crop(load('hat')), width=150), 'hat')
+    webp(fit(crop(load('spider')), width=120), 'spider')
+
+    frames = [load(f'bat-{i}') for i in range(6)]
+    union = union_box(frames)
+    frames = [fit(f.crop(union), width=128) for f in frames]
+    strip = Image.new('RGBA', (128 * 6, frames[0].height), (0, 0, 0, 0))
+    for i, f in enumerate(frames):
+        strip.alpha_composite(f, (128 * i, 0))
+    webp(strip, 'bat-strip', q=86)
+
+# Тыква-талисман: тело и лица режутся ОДНОЙ рамкой — лицо ложится на тело пиксель в пиксель.
+EMOTIONS = ['normal', 'joy', 'anger', 'sad', 'surprise', 'wink', 'sleep', 'confusion',
+            'love', 'fear', 'cool', 'neutral']
+if (SRC / 'mascot-body.png').exists():
+    body, logo = load('mascot-body'), load('mascot-logo')
+    box = union_box([body, logo])
+    webp(fit(body.crop(box), width=216), 'mascot-body', q=86)
+    webp(fit(logo.crop(box), width=216), 'mascot-logo', q=86)
+    for emotion in EMOTIONS:
+        webp(fit(load(f'mascot-face-{emotion}').crop(box), width=216), f'mascot-face-{emotion}', q=88)
+    # Значок вкладки: тыква с лицом в квадрате 64×64.
+    icon = crop(logo, pad=2)
+    icon.thumbnail((62, 62), Image.LANCZOS)
+    square = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+    square.alpha_composite(icon, ((64 - icon.width) // 2, (64 - icon.height) // 2))
+    square.save(DST / 'pumpkin-favicon.png', optimize=True)
+    print('pumpkin-favicon.png', square.size, (DST / 'pumpkin-favicon.png').stat().st_size, 'bytes')
 
 for f in TMP.iterdir():
     f.unlink()

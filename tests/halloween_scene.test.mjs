@@ -18,10 +18,10 @@ import {
 } from '../src/components/seasonal/halloween/halloweenWindow.js';
 import {
     ART,
+    appCorners,
     loginLayout,
     makeBatFlock,
     nextBatDelay,
-    nextGhostDelay,
     nextSpiderDropDelay,
 } from '../src/components/seasonal/halloween/halloweenScene.js';
 
@@ -202,24 +202,70 @@ test('мыши не взлетают, если полоса слишком уз�
     assert.deepEqual(makeBatFlock(seeded(7), { zoneTop: 100, zoneBottom: 300, width: 0 }), []);
 });
 
-test('в работе мыши и привидение редки, на входе — живее', () => {
+test('в работе мыши редки, на входе — живее', () => {
     for (const r of [0, 0.5, 0.999]) {
         const rand = () => r;
         const appBats = nextBatDelay(rand, { login: false });
         const loginBats = nextBatDelay(rand, { login: true });
         assert.ok(appBats >= 4 * 60000 && appBats <= 7 * 60000, `мыши в портале через ${appBats} мс`);
         assert.ok(loginBats >= 15000 && loginBats <= 27000);
-        const ghost = nextGhostDelay(rand);
-        assert.ok(ghost >= 10 * 60000 && ghost <= 15 * 60000, `привидение через ${ghost} мс`);
         assert.ok(nextSpiderDropDelay(rand, { login: false }) >= 38000);
     }
 });
 
+for (const screen of [{ width: 1280, height: 720 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
+    test(`углы портала ${screen.width}×${screen.height}: паук в паутине, привидение у кромки, всё в окне`, () => {
+        const orb = { left: screen.width - 80, top: screen.height - 152, right: screen.width - 24, bottom: screen.height - 96 };
+        const c = appCorners({ ...screen, sidebar: 80, orb });
+        assert.ok(c.webTop.size >= 110 && c.webTop.size <= 160);
+        assert.equal(c.webBottom.left, 80, 'нижняя паутина — сразу за сайдбаром');
+        // Паук висит внутри верхней паутины и в нижней точке спуска не уходит далеко под неё.
+        const s = c.spider;
+        const center = screen.width - s.right - s.width / 2;
+        assert.ok(center > screen.width - c.webTop.size && center < screen.width, 'паук не под своей паутиной');
+        assert.ok(s.anchor > 0 && s.anchor < s.top, 'нить идёт из паутины вниз');
+        assert.ok(s.top + s.height + s.drop <= c.webTop.size + 60, 'паук спускается в рабочую область');
+        assert.ok(screen.width - s.right - s.width >= 0);
+        // Привидение выглядывает снизу и не заходит на шарик помощника.
+        const g = c.ghost;
+        assert.ok(g, 'привидение есть');
+        assert.ok(g.peek > 0 && g.peek < g.width * 1.2);
+        const ghostBox = { left: g.left, right: g.left + g.width, top: screen.height - g.peek, bottom: screen.height };
+        const overlap = ghostBox.left < orb.right + 12 && orb.left - 12 < ghostBox.right
+            && ghostBox.top < orb.bottom + 12 && orb.top - 12 < ghostBox.bottom;
+        assert.equal(overlap, false, 'привидение на шарике помощника');
+        assert.ok(g.left > 80 && g.left + g.width <= screen.width);
+    });
+}
+
+test('шарик в правом нижнем углу — привидение левее него', () => {
+    const screen = { width: 1440, height: 900 };
+    const orb = { left: 1300, top: 820, right: 1356, bottom: 876 };
+    const g = appCorners({ ...screen, sidebar: 80, orb }).ghost;
+    assert.ok(g.left + g.width <= orb.left - 12, `привидение ${g.left}+${g.width} заходит на шарик ${orb.left}`);
+});
+
+test('«Чаты ОП», «Журнал оценок», «Аукцион смен»: справа ни паутины, ни паука', () => {
+    const c = appCorners({ width: 1440, height: 900, sidebar: 80, busyRight: true });
+    assert.equal(c.webTop, null);
+    assert.equal(c.spider, null);
+    assert.ok(c.webBottom, 'нижняя паутина у сайдбара остаётся');
+});
+
+test('узкое окно с раскрытым сайдбаром — привидению нет места', () => {
+    const c = appCorners({ width: 600, height: 800, sidebar: 300, orb: { left: 520, top: 700, right: 576, bottom: 756 } });
+    assert.equal(c.ghost, null);
+    assert.equal(appCorners({ width: 0, height: 800 }), null);
+});
+
+const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+
 test('слой грузится отдельным чанком и только до срока', () => {
-    const main = readFileSync(new URL('../src/main.jsx', import.meta.url), 'utf8');
+    const main = read('../src/main.jsx');
     assert.match(main, /import \{ isHalloweenTime \} from '\.\/components\/seasonal\/halloween\/halloweenWindow';/);
     assert.match(main, /if \(isHalloweenTime\(\)\) \{/);
     assert.match(main, /import\('\.\/components\/seasonal\/halloween\/mountHalloween'\)/);
+    assert.match(main, /module\?\.mountHalloween\?\.\(\)/, 'погашенный сбой чанка отдаёт undefined — вызов без падения');
     assert.doesNotMatch(main, /import [^;]*from '\.\/components\/seasonal\/halloween\/(mountHalloween|HalloweenLayer)/,
         'статический импорт слоя затащил бы картинки и стили в основной бандл');
     const windowModule = readFileSync(new URL('../src/components/seasonal/halloween/halloweenWindow.js', import.meta.url), 'utf8');
@@ -235,4 +281,79 @@ test('метка на <html> — атрибут, а не класс корня �
     assert.doesNotMatch(layer, /documentElement\.classList/);
     assert.doesNotMatch(css, /html\.otp-halloween/);
     assert.match(css, /\.otp-halloween \{\s*position: fixed;[^}]*width: 0;[^}]*height: 0;[^}]*z-index: 49;/);
+});
+
+test('сбой праздничного чанка не перезагружает портал', () => {
+    /* staleBundleRecovery на vite:preloadError делает location.replace. Свой
+       слушатель — на фазе перехвата, раньше него, и только для своих чанков. */
+    const main = read('../src/main.jsx');
+    const at = main.indexOf("window.addEventListener('vite:preloadError'");
+    assert.ok(at > 0, 'нет слушателя vite:preloadError');
+    const block = main.slice(at, main.indexOf('}, true);', at) + 9);
+    assert.match(block, /HALLOWEEN_CHUNK_RE\.test/);
+    assert.match(block, /event\.preventDefault\(\)/);
+    assert.match(block, /event\.stopImmediatePropagation\(\)/);
+    assert.match(block, /\}, true\);$/, 'слушатель обязан быть на фазе перехвата');
+    for (const chunk of ['mountHalloween', 'PumpkinMascot', 'halloween-theme']) {
+        assert.ok(/HALLOWEEN_CHUNK_RE = \/([^/]+)\//.exec(main)[1].includes(chunk), `чанк ${chunk} не прикрыт`);
+    }
+    // Метка и тема — до отрисовки, иначе первый кадр светлый, а кнопки синие.
+    assert.ok(main.indexOf("setAttribute('data-otp-halloween', '')") < main.indexOf('createRoot('));
+    assert.ok(main.indexOf('applyDarkTheme(true)') < main.indexOf('createRoot('));
+    assert.match(main, /import\('\.\/components\/seasonal\/halloween\/halloween-theme\.css'\)\.catch/);
+});
+
+test('тёмная тема в праздник — у всех, выбор «светлая» помнится и не даёт темы после срока', () => {
+    const util = read('../src/utils/darkTheme.js');
+    assert.match(util, /export const canUseDarkTheme = \(user\) => \{\n\s+if \(isHalloweenTime\(\)\) return true;/);
+    assert.match(util, /return isHalloweenTime\(\) \? stored !== 'light' : stored === 'dark';/);
+    assert.match(util, /else if \(isHalloweenTime\(\)\) \{\n\s+localStorage\.setItem\(DARK_THEME_STORAGE_KEY, 'light'\);/);
+    assert.match(util, /isHalloweenTime\(\) \? import\('\.\.\/components\/seasonal\/halloween\/halloween-theme\.css'\) : null/);
+    // Прежний список логинов — по-прежнему единственное право вне праздника.
+    assert.match(util, /const DARK_THEME_LOGINS = \['sherzad'\];/);
+});
+
+test('тыква в шарике — своим чанком сразу при старте, при сбое остаётся прежний знак', () => {
+    const orb = read('../src/components/assistant/Orb.jsx');
+    // Грузится до первой отрисовки шарика и только до срока — знак не меняется на глазах.
+    assert.match(orb, /const pumpkinReady = isHalloweenTime\(\)\n\s+\? import\('\.\.\/seasonal\/halloween\/PumpkinMascot\.jsx'\)/);
+    assert.match(orb, /LoadedPumpkin = module\?\.default \|\| null;/);
+    assert.match(orb, /\.catch\(\(\) => \{\}\)/);
+    assert.match(orb, /const Pumpkin = halloween \? LoadedPumpkin : null;/);
+    assert.match(orb, /: <IcoreAssistantMark /, 'без тыквы — прежний знак');
+    assert.match(orb, /const halloween = useHalloweenActive\(\);/);
+    assert.doesNotMatch(orb, /<Suspense|lazy\(/, 'Suspense показал бы знак кадр-другой перед тыквой');
+});
+
+test('слой не мешает работе: некликабелен, гаснет при окне, не встаёт на кнопки, снимается по сроку', () => {
+    const layer = read('../src/components/seasonal/halloween/HalloweenLayer.jsx');
+    const css = read('../src/components/seasonal/halloween/halloween.css');
+    const mount = read('../src/components/seasonal/halloween/mountHalloween.jsx');
+    assert.match(css, /\.otp-halloween \{[^}]*pointer-events: none;/);
+    assert.match(css, /\.otp-halloween\.is-muted > \* \{\s*opacity: 0 !important;/);
+    assert.match(layer, /otp-halloween\$\{screen\.modal \? ' is-muted' : ''\}/);
+    assert.match(layer, /const modal = next\.mode !== 'none' && isModalOpen\(\);/);
+    assert.match(layer, /nextCorners\.spider\.blocked = coversControl\(/);
+    assert.match(layer, /nextCorners\.ghost\.blocked = coversControl\(/);
+    assert.match(layer, /const remeasure = useCallback\(\(\) => \{\n\s+if \(!isHalloweenTime\(\)\) \{\n\s+onExpire\(\);/);
+    assert.match(layer, /return \(\) => root\.removeAttribute\('data-otp-halloween'\);/);
+    assert.match(layer, /!screenRef\.current\.modal && !isMenuOpen\(\)/, 'мыши взлетают поверх окна или меню');
+    assert.match(mount, /shouldMountHalloween\(\{ search: window\.location\.search, framed \}\)/);
+    assert.match(mount, /window\.self !== window\.top/);
+    assert.match(mount, /root\.unmount\(\);\n\s+host\.remove\(\);/);
+});
+
+test('оранжевая тема собрана скриптом и весит как задумано', () => {
+    const css = read('../src/components/seasonal/halloween/halloween-theme.css');
+    assert.ok(css.startsWith('/* СОБРАН СКРИПТОМ scripts/halloween/build_halloween_theme.py'));
+    const rules = css.split('\n').filter((line) => line.includes(' !important; }'));
+    assert.ok(rules.length > 100, `правил всего ${rules.length}`);
+    for (const line of rules) {
+        // (0,2,2): бьёт базовое правило тёмного слоя, уступает его :hover.
+        assert.ok(line.trimStart().startsWith('html[data-otp-theme="dark"]:where([data-otp-halloween]) body '), line);
+    }
+    // Мягкие подложки статусов (50–300) остаются своим цветом — смысл, а не украшение.
+    assert.doesNotMatch(css, /body \.bg-(blue|indigo)-(50|100|200|300) \{/);
+    // Текст на синей подложке остаётся парой к ней; :where не добавляет веса.
+    assert.match(css, /\.text-blue-700:where\(:not\(\[class\*="bg-blue-"\]\):not\(\[class\*="bg-indigo-"\]\)\) \{/);
 });

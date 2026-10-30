@@ -47,6 +47,7 @@
     "test:wiki-search-status": "node --test tests/wiki_search_result_status.test.mjs",
     "test:assistant-orb": "node --test tests/assistant_orb_position.test.mjs",
     "test:halloween": "node --test tests/halloween_scene.test.mjs",
+    "test:halloween-mascot": "node --test tests/halloween_mascot.test.mjs",
     "test:assistant-scroll": "node --test tests/assistant_thread_scroll.test.mjs",
     "test:pip-window": "node --test tests/pip_window.test.mjs",
     "test:file-download": "node --test tests/file_download.test.mjs",
