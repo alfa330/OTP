@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, X } from 'lucide-react';
+import { Download } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosModal, IosSegmented, iosBtnSecondary, iosCard } from '../ui/ios';
@@ -7,6 +7,7 @@ import {
     FUNNEL_LABELS, MOTIVATION_LABELS, MOTIVATION_TONES, STAGE_LABELS, currentMonth,
     errorOf, fullDate, monthLabel, percent, shortTime,
 } from './hiringMeta';
+import { DATE_TRIGGER, Empty, FiltersRow, FiltersToggle, Group, Loading, MonthSwitch, Pill, Stat, TOOLBAR_BTN, Table } from './hiringUi';
 
 /* Файл приходит ответом API (не подписанной ссылкой), поэтому — ссылка на объект в этом же
    окне, как у выгрузки «Аренды авто». */
@@ -20,7 +21,6 @@ const saveBlob = (blob, name) => {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
-import { DATE_TRIGGER, Empty, Group, Loading, MonthSwitch, Pill, Stat, TOOLBAR_BTN, Table } from './hiringUi';
 
 /*
  * Вкладка «Отчёты» (ТЗ 8.1, 8.2): итоговый дашборд воронки одним экраном — плитки, воронка
@@ -30,6 +30,7 @@ import { DATE_TRIGGER, Empty, Group, Loading, MonthSwitch, Pill, Stat, TOOLBAR_B
  * Когорта — карточки, взятые в работу в отчётном месяце; «достиг этапа» — хоть раз был в
  * колонке; фильтры действуют на все блоки разом. Клик по любой цифре открывает список
  * карточек, из которых она сложилась. Рекрутеру сервер показывает отчёт только по нему.
+ * В панели инструментов — только период и выгрузка; отборы — за кнопкой «Фильтры».
  */
 
 const VIEWS = [
@@ -45,11 +46,11 @@ const FunnelBars = ({ rows, onCell }) => {
                 <button key={row.stage} type="button" onClick={() => onCell(row.key, row.label)} className="group block w-full text-left">
                     <div className="flex items-center gap-3">
                         <span className="w-44 shrink-0 truncate text-[12.5px] text-slate-600">{FUNNEL_LABELS[row.stage] || row.label}</span>
-                        <div className="relative h-7 grow overflow-hidden rounded-lg bg-slate-100">
+                        <div className="h-6 grow overflow-hidden rounded-lg bg-slate-100">
                             <div className="h-full rounded-lg bg-blue-500 transition group-hover:bg-blue-600" style={{ width: `${Math.max(1.5, (row.count / max) * 100)}%` }} />
-                            <span className="absolute inset-y-0 left-2 flex items-center text-[12px] font-semibold tabular-nums text-white mix-blend-difference">{row.count}</span>
                         </div>
-                        <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-slate-500">{row.stage === 'in_work' ? '' : percent(row.from_previous)}</span>
+                        <span className="w-9 shrink-0 text-right text-[13px] font-semibold tabular-nums text-slate-900">{row.count}</span>
+                        <span className="w-14 shrink-0 text-right text-[12px] tabular-nums text-slate-500">{row.stage === 'in_work' ? '' : percent(row.from_previous)}</span>
                     </div>
                 </button>
             ))}
@@ -104,6 +105,7 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
     const [stage, setStage] = useState('');
     const [stageFrom, setStageFrom] = useState('');
     const [stageTo, setStageTo] = useState('');
+    const [filtersOpen, setFiltersOpen] = useState(false);
     const [data, setData] = useState(null);
     const [motivation, setMotivation] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -160,21 +162,29 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
         ...extra,
     ];
 
+    const dashboard = view === 'dashboard';
+    const activeFilters = [vacancyId, city, recruiters.length, sources.length, stage && (stageFrom || stageTo)].filter(Boolean).length;
+    const resetFilters = () => { setVacancyId(''); setCity(''); setRecruiters([]); setSources([]); setStage(''); setStageFrom(''); setStageTo(''); };
+
     return (
-        <div className="space-y-4">
+        <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
                 <IosSegmented value={view} onChange={setView} options={VIEWS} ariaLabel="Отчёт" />
-                {view === 'dashboard' && (
+                {dashboard && (
                     <IosSegmented size="xs" value={periodMode} onChange={setPeriodMode} ariaLabel="Месяц или период"
                                   options={[{ value: 'month', label: 'Месяц' }, { value: 'period', label: 'Период' }]} />
                 )}
-                {periodMode === 'period' && view === 'dashboard' ? (
+                {periodMode === 'period' && dashboard ? (
                     <>
                         <div className="w-36"><IosDatePicker value={periodFrom} onChange={setPeriodFrom} allowEmpty placeholder="с" triggerClassName={DATE_TRIGGER} ariaLabel="Период с" /></div>
                         <div className="w-36"><IosDatePicker value={periodTo} onChange={setPeriodTo} allowEmpty placeholder="по" triggerClassName={DATE_TRIGGER} ariaLabel="Период по" /></div>
                     </>
                 ) : <MonthSwitch value={month} onChange={setMonth} max={currentMonth()} />}
-                {view === 'dashboard' && (
+                <FiltersToggle open={filtersOpen} count={activeFilters} onToggle={() => setFiltersOpen((v) => !v)} />
+                <button type="button" className={`${TOOLBAR_BTN} ml-auto`} onClick={download}><Download size={14} /> Excel</button>
+            </div>
+            <FiltersRow open={filtersOpen} count={activeFilters} onReset={resetFilters}>
+                {dashboard && (
                     <>
                         <CustomSelect variant="ios" value={vacancyId} onChange={setVacancyId} className="w-44" ariaLabel="Вакансия"
                                       options={[{ value: '', label: 'Все вакансии' }, ...(dictionaries.vacancies || []).map((v) => ({ value: String(v.id), label: v.name }))]} />
@@ -190,7 +200,7 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
                 <CustomSelect variant="ios" multiple value={sources} onChange={setSources} className="w-48" ariaLabel="Источники" placeholder="Все источники"
                               options={(dictionaries.sources || []).map((s) => ({ value: String(s.id), label: s.name }))} bulkActions
                               renderValue={(vals) => (vals.length ? `Источники: ${vals.length}` : 'Все источники')} />
-                {view === 'dashboard' && (
+                {dashboard && (
                     <>
                         <CustomSelect variant="ios" value={stage} onChange={setStage} className="w-48" ariaLabel="Дата этапа" placeholder="Дата этапа"
                                       options={[{ value: '', label: 'Без фильтра по этапу' }, ...(boot.meta?.stage_dates || []).map((s) => ({ value: s.code, label: s.label }))]} />
@@ -198,21 +208,19 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
                             <>
                                 <div className="w-36"><IosDatePicker value={stageFrom} onChange={setStageFrom} allowEmpty placeholder="с" triggerClassName={DATE_TRIGGER} ariaLabel="Этап с" /></div>
                                 <div className="w-36"><IosDatePicker value={stageTo} onChange={setStageTo} allowEmpty placeholder="по" triggerClassName={DATE_TRIGGER} ariaLabel="Этап по" /></div>
-                                <button type="button" className={TOOLBAR_BTN} onClick={() => { setStage(''); setStageFrom(''); setStageTo(''); }} aria-label="Снять фильтр"><X size={14} /></button>
                             </>
                         )}
                     </>
                 )}
-                <button type="button" className={`${TOOLBAR_BTN} ml-auto`} onClick={download}><Download size={14} /> Excel</button>
-            </div>
+            </FiltersRow>
 
             {loading && !data && !motivation && <Loading text="Считаем…" />}
 
-            {view === 'dashboard' && data && (
-                <>
+            {dashboard && data && (
+                <div className="space-y-4 pt-1">
                     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
                         {data.totals.map((tile, index) => (
-                            <Stat key={`${tile.key}-${index}`} label={tile.label} value={tile.value} unit={tile.unit ? ' %' : ''} hint={tile.hint}
+                            <Stat key={`${tile.key}-${index}`} label={tile.label} value={tile.unit ? String(tile.value ?? '—').replace('.', ',') : tile.value} unit={tile.unit ? ' %' : ''} hint={tile.hint}
                                   sub={tile.plan ? `план ${tile.plan} FTE` : undefined}
                                   tone={tile.plan ? (tile.value >= tile.plan ? 'green' : undefined) : undefined}
                                   onClick={() => onCell(tile.key, tile.label)} />
@@ -304,33 +312,35 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
                             { key: 'median_days', label: 'Медиана, дней', align: 'right', render: (row) => (row.median_days ?? '—') },
                         ]} />
                     </Group>
-                </>
+                </div>
             )}
 
             {view === 'motivation' && motivation && (
-                <Group title={`Начисления · ${monthLabel(motivation.month)}`}>
-                    {motivation.items.length === 0 ? <div className={`${iosCard}`}><Empty>Начислений за месяц нет</Empty></div> : motivation.items.map((group) => (
-                        <div key={String(group.recruiter_id)} className={`${iosCard} mb-3 overflow-hidden`}>
-                            <div className="flex flex-wrap items-center gap-3 px-4 py-2.5">
-                                <span className="text-[13.5px] font-semibold text-slate-900">{group.recruiter_name}</span>
-                                <span className="text-[12px] tabular-nums text-slate-500">засчитано {group.counted} · выплачено {group.paid} · ожидают {group.pending}</span>
+                <div className="pt-1">
+                    <Group title={`Начисления · ${monthLabel(motivation.month)}`}>
+                        {motivation.items.length === 0 ? <div className={`${iosCard}`}><Empty>Начислений за месяц нет</Empty></div> : motivation.items.map((group) => (
+                            <div key={String(group.recruiter_id)} className={`${iosCard} mb-3 overflow-hidden`}>
+                                <div className="flex flex-wrap items-center gap-3 px-4 py-2.5">
+                                    <span className="text-[13.5px] font-semibold text-slate-900">{group.recruiter_name}</span>
+                                    <span className="text-[12px] tabular-nums text-slate-500">засчитано {group.counted} · выплачено {group.paid} · ожидают {group.pending}</span>
+                                </div>
+                                <ul className="divide-y divide-slate-100">
+                                    {group.items.map((item) => (
+                                        <li key={item.id}>
+                                            <button type="button" onClick={() => onOpenCard(item.card_id)} className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-slate-50">
+                                                <div className="min-w-0 grow basis-0">
+                                                    <div className="truncate text-[13px] text-slate-900">{item.full_name || 'Без имени'} <span className="text-slate-400">№{item.candidate_no}</span></div>
+                                                    <div className="truncate text-[12px] text-slate-500">{[item.vacancy_name, item.line_started_at ? `на линии с ${fullDate(item.line_started_at)}` : null, item.confirmed_at ? `подтверждено ${shortTime(item.confirmed_at)}` : null].filter(Boolean).join(' · ')}</div>
+                                                </div>
+                                                <Pill tone={MOTIVATION_TONES[item.status]}>{MOTIVATION_LABELS[item.status]}</Pill>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
                             </div>
-                            <ul className="divide-y divide-slate-100">
-                                {group.items.map((item) => (
-                                    <li key={item.id}>
-                                        <button type="button" onClick={() => onOpenCard(item.card_id)} className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-slate-50">
-                                            <div className="min-w-0 grow basis-0">
-                                                <div className="truncate text-[13px] text-slate-900">{item.full_name || 'Без имени'} <span className="text-slate-400">№{item.candidate_no}</span></div>
-                                                <div className="truncate text-[12px] text-slate-500">{[item.vacancy_name, item.line_started_at ? `на линии с ${fullDate(item.line_started_at)}` : null, item.confirmed_at ? `подтверждено ${shortTime(item.confirmed_at)}` : null].filter(Boolean).join(' · ')}</div>
-                                            </div>
-                                            <Pill tone={MOTIVATION_TONES[item.status]}>{MOTIVATION_LABELS[item.status]}</Pill>
-                                        </button>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    ))}
-                </Group>
+                        ))}
+                    </Group>
+                </div>
             )}
 
             <CardsModal api={api} toast={toast} request={request} onClose={() => setRequest(null)} onOpenCard={onOpenCard} filters={filters} />

@@ -1,16 +1,57 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FileSpreadsheet, Upload } from 'lucide-react';
+import { FileSpreadsheet, Upload, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import { IosModal, iosBtnSecondary, iosCard } from '../ui/ios';
 import { errorOf, plural, shortTime } from './hiringMeta';
-import { Empty, Group, Label, Loading, Notice, TOOLBAR_BTN_PRIMARY } from './hiringUi';
+import { Empty, Group, ICON_BTN, Label, Loading, Notice, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
 /*
  * Вкладка «Загрузки» (ТЗ 5.1): база контактов файлом Excel / CSV с полями ФИО, телефон, город,
  * комментарий; источник выбирается один на весь файл. Телефоны приводятся к +7XXXXXXXXXX,
  * пустые и неразборные строки отбрасываются; итог — загружено, дублей, ошибок. Каждая
  * загрузка — партия: по ней считается эффективность баз в отчётах.
+ *
+ * Файл — перетаскиванием в область или выбором; размер и имя видны до загрузки.
  */
+
+const ACCEPT = '.xlsx,.xlsm,.csv,.txt';
+
+const fileSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1).replace('.', ',')} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`);
+
+const DropZone = ({ file, onFile, inputRef }) => {
+    const [over, setOver] = useState(false);
+    const pick = (event) => {
+        const next = event.target.files?.[0] || null;
+        onFile(next);
+    };
+    return (
+        <div
+            onDragOver={(event) => { event.preventDefault(); setOver(true); }}
+            onDragLeave={() => setOver(false)}
+            onDrop={(event) => { event.preventDefault(); setOver(false); const dropped = event.dataTransfer.files?.[0]; if (dropped) onFile(dropped); }}
+            className={`flex flex-col items-center justify-center gap-1.5 rounded-2xl border border-dashed px-4 py-7 text-center transition ${
+                over ? 'border-blue-400 bg-blue-50/60' : file ? 'border-slate-200 bg-white' : 'border-slate-300 bg-slate-50/70'}`}
+        >
+            <FileSpreadsheet size={22} className={file ? 'text-blue-600' : 'text-slate-400'} />
+            {file ? (
+                <div className="flex items-center gap-1.5">
+                    <span className="text-[13.5px] font-medium text-slate-900">{file.name}</span>
+                    <span className="text-[12px] tabular-nums text-slate-500">{fileSize(file.size)}</span>
+                    <button type="button" className={ICON_BTN} aria-label="Убрать файл" onClick={() => { onFile(null); if (inputRef.current) inputRef.current.value = ''; }}><X size={14} /></button>
+                </div>
+            ) : (
+                <div className="text-[13.5px] text-slate-700">
+                    Перетащите файл сюда или{' '}
+                    <label className="cursor-pointer font-medium text-blue-700 hover:underline">
+                        выберите
+                        <input ref={inputRef} type="file" accept={ACCEPT} className="hidden" onChange={pick} />
+                    </label>
+                </div>
+            )}
+            <div className="text-[12px] text-slate-500">Excel или CSV: ФИО, телефон, город, комментарий</div>
+        </div>
+    );
+};
 
 const UploadTab = ({ api, toast, boot, onChanged, version }) => {
     const [sourceId, setSourceId] = useState('');
@@ -62,27 +103,20 @@ const UploadTab = ({ api, toast, boot, onChanged, version }) => {
     return (
         <div className="space-y-4">
             <Group title="Загрузить базу контактов">
-                <div className={`${iosCard} p-4`}>
-                    <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
-                        <div>
-                            <Label required hint="Один источник на весь файл: по нему считается эффективность базы. Новые источники заводятся в «Настройках».">Источник контактов</Label>
-                            <CustomSelect variant="ios" value={sourceId} onChange={setSourceId} placeholder="Выберите источник" invalid={!sourceId}
-                                          options={sources.map((s) => ({ value: String(s.id), label: s.name }))} />
-                        </div>
-                        <div>
-                            <Label hint="Excel (.xlsx) или CSV. Колонки узнаются по заголовкам: ФИО, телефон, город, комментарий; без заголовков — в этом порядке.">Файл</Label>
-                            <label className="inline-flex h-[41px] cursor-pointer items-center gap-2 rounded-xl bg-slate-100 px-3.5 text-[13.5px] text-slate-700 hover:bg-slate-200/70">
-                                <FileSpreadsheet size={15} className="text-slate-500" />
-                                <span className="max-w-[220px] truncate">{file ? file.name : 'Выбрать файл'}</span>
-                                <input ref={inputRef} type="file" accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-                            </label>
-                        </div>
-                        <button type="button" className={`${TOOLBAR_BTN_PRIMARY} h-[41px]`} onClick={upload} disabled={uploading || !file || !sourceId}>
+                <div className={`${iosCard} space-y-3 p-4`}>
+                    <div className="sm:w-80">
+                        <Label required hint="Один источник на весь файл: по нему считается эффективность базы. Новые источники заводятся в «Настройках».">Источник контактов</Label>
+                        <CustomSelect variant="ios" value={sourceId} onChange={setSourceId} placeholder="Выберите источник" invalid={!sourceId}
+                                      options={sources.map((s) => ({ value: String(s.id), label: s.name }))} />
+                    </div>
+                    <DropZone file={file} onFile={setFile} inputRef={inputRef} />
+                    <div className="flex justify-end">
+                        <button type="button" className={TOOLBAR_BTN_PRIMARY} onClick={upload} disabled={uploading || !file || !sourceId}>
                             <Upload size={14} /> {uploading ? 'Загружаем…' : 'Загрузить'}
                         </button>
                     </div>
                     {sources.length === 0 && (
-                        <div className="mt-3"><Notice tone="amber" title="Нет источников контактов">Заведите источник вида «контакты» в «Настройках» — например, «База бывших водителей».</Notice></div>
+                        <Notice tone="amber" title="Нет источников контактов">Заведите источник вида «контакты» в «Настройках» — например, «База бывших водителей».</Notice>
                     )}
                 </div>
             </Group>

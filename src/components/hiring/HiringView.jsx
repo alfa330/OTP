@@ -110,6 +110,8 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const [openCardId, setOpenCardId] = useState(cardFromLocation);
     // Перетаскивание на доске открывает карточку сразу с выбранным переходом.
     const [openMove, setOpenMove] = useState(null);
+    // «Позвонить» со стола или с доски: звонок уже ушёл в iCore Phone, карточка открывается с окном результата.
+    const [openCall, setOpenCall] = useState(false);
     // Растёт после любого изменения карточки — вкладки перечитывают свои списки.
     const [version, setVersion] = useState(0);
 
@@ -153,9 +155,11 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const onChanged = useCallback(() => setVersion((n) => n + 1), []);
     const openCard = useCallback((id, options) => {
         setOpenMove(options?.move || null);
+        setOpenCall(Boolean(options?.call));
         setOpenCardId(Number(id) || null);
     }, []);
     const moveConsumed = useCallback(() => setOpenMove(null), []);
+    const callConsumed = useCallback(() => setOpenCall(false), []);
 
     const shell = (children) => (
         <div className="relative mx-auto min-h-screen w-full max-w-[1600px] bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0"
@@ -205,10 +209,12 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                 boot={boot}
                 caps={caps}
                 cardId={openCardId}
-                onClose={() => { setOpenCardId(null); setOpenMove(null); }}
+                onClose={() => { setOpenCardId(null); setOpenMove(null); setOpenCall(false); }}
                 onChanged={onChanged}
                 initialMove={openMove}
                 onMoveConsumed={moveConsumed}
+                initialCall={openCall}
+                onCallConsumed={callConsumed}
             />
         </>,
     );

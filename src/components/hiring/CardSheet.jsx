@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ExternalLink, Loader2, MessageCircle, Pencil, Phone, Play, Repeat, UserCog } from 'lucide-react';
+import {
+    ArrowRight, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming, PhoneMissed,
+    PhoneOutgoing, Play, Repeat, UserCog,
+} from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
@@ -10,17 +13,18 @@ import {
     codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime, openICorePhoneCall, reasonKindFor, shortTime,
     splitDateTime, todayIso,
 } from './hiringMeta';
-import { DATE_TRIGGER, FIELD, Label, Loading, Pill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { DATE_TRIGGER, FIELD, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 
 /*
  * Карточка кандидата (ТЗ 6): одно окно на весь раздел. Внутри — поля по группам ТЗ 6.1,
  * лента касаний и входов в этапы, переходы по правилам ТЗ 4.2 с их обязательными полями,
  * смены на линии и подтверждение «Отработал 7 дней» (руководитель отдела), мотивация.
  *
- * Связь с кандидатом — кнопками «Позвонить» (tel:, его ловит софтфон iCorefone) и «Написать в
- * WhatsApp» (WhatsApp Web). Касание пишется в ленту при нажатии: звонок — с результатом,
- * который спрашивается сразу (дозвон / недозвон), переписка — фактом открытия чата. Телефон
- * удалённому рекрутеру виден только в своих карточках — сервер его иначе не присылает.
+ * Связь с кандидатом — кнопками «Позвонить» (icore-phone:call — звонок уходит в iCore Phone на
+ * этом компьютере) и «Написать в WhatsApp» (WhatsApp Web). Касание пишется в ленту при нажатии:
+ * звонок — с результатом, который спрашивается сразу (дозвон / недозвон), переписка — фактом
+ * открытия чата; звонок из телефонии потом дописывает отметку исходом, длительностью и записью.
+ * Телефон удалённому рекрутеру виден только в своих карточках — сервер его иначе не присылает.
  */
 
 const InfoRow = ({ label, children }) => (
@@ -385,6 +389,20 @@ const CallRow = ({ item, call, api }) => {
     );
 };
 
+/* Значок события ленты — серый, чтобы лента читалась с одного взгляда: звонок (и куда он
+   прошёл), переписка, комментарий, повторный отклик, переход этапа. Цвет остаётся за исходом. */
+const timelineIcon = (item, call) => {
+    if (item.kind === 'stage') return ArrowRight;
+    if (item.kind === 'call') {
+        if (call) return call.direction === 'in' ? PhoneIncoming : (call.result === 'answered' ? PhoneOutgoing : PhoneMissed);
+        return item.result === 'dial' ? PhoneOutgoing : PhoneMissed;
+    }
+    if (item.kind === 'whatsapp') return MessageCircle;
+    if (item.kind === 'comment') return MessageSquareText;
+    if (item.kind === 'repeat_response') return Repeat;
+    return Info;
+};
+
 const Timeline = ({ touches, stages, calls = [], api }) => {
     const callsByTouch = useMemo(() => Object.fromEntries(calls.filter((c) => c.touch_id).map((c) => [c.touch_id, c])), [calls]);
     const items = useMemo(() => {
@@ -397,13 +415,18 @@ const Timeline = ({ touches, stages, calls = [], api }) => {
     if (!items.length) return <div className="py-4 text-center text-[12.5px] text-slate-500">Касаний пока нет</div>;
     return (
         <ul className="divide-y divide-slate-200/70">
-            {items.map((item) => (
+            {items.map((item) => {
+                const Icon = timelineIcon(item, item.kind === 'call' ? callsByTouch[item.id] : null);
+                return (
                 <li key={item.key} className="flex gap-3 py-2">
                     <span className="w-[88px] shrink-0 text-[12px] tabular-nums text-slate-400">{shortTime(item.at)}</span>
+                    <span className="mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full bg-white text-slate-400 ring-1 ring-slate-200/70">
+                        <Icon size={11} strokeWidth={2.25} />
+                    </span>
                     <div className="min-w-0 grow">
                         {item.kind === 'stage' ? (
                             <div className="text-[13px] text-slate-700">
-                                → <span className="font-medium">{STAGE_LABELS[item.stage]}</span>
+                                <span className="font-medium">{STAGE_LABELS[item.stage]}</span>
                                 {item.substage ? ` · ${SUBSTAGE_LABELS[item.substage]}` : ''}
                                 {item.author ? <span className="text-slate-400"> · {item.author}</span> : null}
                             </div>
@@ -419,18 +442,20 @@ const Timeline = ({ touches, stages, calls = [], api }) => {
                         )}
                     </div>
                 </li>
-            ))}
+                );
+            })}
         </ul>
     );
 };
 
-const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed }) => {
+const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [move, setMove] = useState(null);
     const [calling, setCalling] = useState(false);
     const [editing, setEditing] = useState(false);
     const [reassigning, setReassigning] = useState(false);
+    const [cancelling, setCancelling] = useState(false);
     const [comment, setComment] = useState('');
     const [savingComment, setSavingComment] = useState(false);
     const [shiftDate, setShiftDate] = useState(todayIso);
@@ -453,12 +478,17 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
         setEditing(false);
         setCalling(false);
         setReassigning(false);
+        setCancelling(false);
         if (cardId) load();
     }, [cardId, load]);
 
     useEffect(() => {
         if (initialMove && data?.card) { setMove(initialMove); onMoveConsumed?.(); }
     }, [initialMove, data?.card, onMoveConsumed]);
+    // «Позвонить» со стола или с доски: звонок уже ушёл, здесь — сразу окно результата.
+    useEffect(() => {
+        if (initialCall && data?.card) { setCalling(true); onCallConsumed?.(); }
+    }, [initialCall, data?.card, onCallConsumed]);
 
     const changed = useCallback(() => { load(); onChanged(); }, [load, onChanged]);
 
@@ -540,17 +570,13 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             toast(errorOf(requestError, 'Смена не отмечена'), 'error');
         }
     };
-    const motivation = async (status) => {
-        let reason = null;
-        if (status === 'cancelled') {
-            reason = window.prompt('Причина отмены начисления'); // eslint-disable-line no-alert
-            if (!reason) return;
-        }
+    const motivation = async (status, reason = null) => {
         try {
             await api.put(`/cards/${card.id}/motivation`, { status, reason });
             changed();
         } catch (requestError) {
             toast(errorOf(requestError, 'Статус начисления не изменён'), 'error');
+            throw requestError;
         }
     };
 
@@ -595,14 +621,14 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
 
                         {targets.length > 0 && (
                             <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[12px] text-slate-500">Перевести:</span>
-                                {targets.map((target) => (
+                                {/* Шаги вперёд — первыми, завершения («Отказ», «Отсев») — в конце и красным контуром. */}
+                                {[...targets].sort((a, b) => Number(FINAL_STAGES.includes(a) && a !== 'hired') - Number(FINAL_STAGES.includes(b) && b !== 'hired')).map((target) => (
                                     <button key={target} type="button" onClick={() => setMove(target)}
-                                            className={`inline-flex h-8 items-center rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
+                                            className={`inline-flex h-8 items-center gap-1 rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
                                                 FINAL_STAGES.includes(target) && target !== 'hired' ? 'bg-white text-rose-700 ring-rose-200 hover:bg-rose-50'
                                                     : target === 'hired' ? 'bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-700'
                                                         : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'}`}>
-                                        {STAGE_LABELS[target]}
+                                        <ArrowRight size={13} className="opacity-60" /> {STAGE_LABELS[target]}
                                     </button>
                                 ))}
                             </div>
@@ -702,8 +728,8 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                         {data.motivation && (
                             <Section title="Мотивация" right={caps.manage && data.motivation.status === 'counted' ? (
                                 <div className="flex gap-1.5">
-                                    <button type="button" className={TOOLBAR_BTN} onClick={() => motivation('paid')}>Выплачено</button>
-                                    <button type="button" className={TOOLBAR_BTN} onClick={() => motivation('cancelled')}>Отменить</button>
+                                    <button type="button" className={TOOLBAR_BTN} onClick={() => motivation('paid').catch(() => {})}>Выплачено</button>
+                                    <button type="button" className={TOOLBAR_BTN} onClick={() => setCancelling(true)}>Отменить</button>
                                 </div>
                             ) : null}>
                                 <InfoRow label="Статус"><Pill tone={MOTIVATION_TONES[data.motivation.status]}>{MOTIVATION_LABELS[data.motivation.status]}</Pill></InfoRow>
@@ -729,6 +755,11 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             {card && <CallDialog open={calling} onClose={() => setCalling(false)} api={api} toast={toast} card={card} onDone={changed} />}
             {card && <EditDialog open={editing} onClose={() => setEditing(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && <ReassignDialog open={reassigning} onClose={() => setReassigning(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
+            {card && (
+                <ReasonDialog open={cancelling} onClose={() => setCancelling(false)} title="Отменить начисление" danger confirmLabel="Отменить начисление"
+                              subtitle="Причина останется в карточке — её увидит рекрутер" label="Причина отмены"
+                              onSubmit={(reason) => motivation('cancelled', reason)} />
+            )}
         </>
     );
 };

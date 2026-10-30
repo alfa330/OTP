@@ -1,6 +1,6 @@
-import React from 'react';
-import { ChevronLeft, ChevronRight, CircleAlert, Loader2 } from 'lucide-react';
-import { IosHint, iosGroupLabel } from '../ui/ios';
+import React, { useEffect, useState } from 'react';
+import { ChevronLeft, ChevronRight, CircleAlert, Loader2, SlidersHorizontal } from 'lucide-react';
+import { IosHint, IosModal, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import { monthLabel, shiftMonth } from './hiringMeta';
 
 /*
@@ -20,6 +20,14 @@ export const TOOLBAR_BTN_PRIMARY =
 
 export const ICON_BTN =
     'grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 active:scale-95 disabled:opacity-40';
+
+export const DANGER_BTN =
+    'inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-[13.5px] font-semibold text-white shadow-sm transition-all hover:bg-rose-700 active:scale-[0.98] disabled:opacity-50';
+
+/* Действие строки, которое нужно не всегда: там, где есть наведение, появляется по нему (и по
+   фокусу с клавиатуры), на сенсорных экранах видно сразу — наведения там нет. Родитель — `group`. */
+export const HOVER_REVEAL =
+    '[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100';
 
 export const FIELD =
     'w-full rounded-xl border-0 bg-slate-100 px-3.5 py-2.5 text-[14px] text-slate-900 placeholder-slate-400 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
@@ -127,6 +135,81 @@ export const MonthSwitch = ({ value, onChange, max }) => (
                 className="grid h-9 w-9 place-items-center rounded-r-xl text-slate-500 hover:bg-slate-50 disabled:opacity-40">
             <ChevronRight size={16} />
         </button>
+    </div>
+);
+
+/* Фильтры — за кнопкой (владелец: поля формы прятать за кнопки, шум = брак). Кнопка носит число
+   включённых отборов, сами поля раскрываются строкой под панелью инструментов. */
+export const FiltersToggle = ({ open, count = 0, onToggle }) => (
+    <button type="button" aria-expanded={open} onClick={onToggle}
+            className={`${TOOLBAR_BTN} ${open ? 'bg-slate-100 text-slate-900' : ''}`}>
+        <SlidersHorizontal size={14} /> Фильтры
+        {count > 0 && (
+            <span className="grid h-[18px] min-w-[18px] place-items-center rounded-full bg-blue-600 px-1 text-[11px] font-semibold leading-none text-white">{count}</span>
+        )}
+    </button>
+);
+
+export const FiltersRow = ({ open, count = 0, onReset, children }) => (open ? (
+    <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-white p-2.5 ring-1 ring-slate-200/70">
+        {children}
+        {count > 0 && onReset && (
+            <button type="button" className={`${iosBtnGhost} ml-auto`} onClick={onReset}>Сбросить</button>
+        )}
+    </div>
+) : null);
+
+/* Подтверждение в стиле раздела — вместо системного window.confirm, который рисует ОС. */
+export const ConfirmDialog = ({ open, onClose, title, text, confirmLabel = 'Подтвердить', danger = false, busy = false, onConfirm }) => (
+    <IosModal open={open} onClose={onClose} title={title} maxWidth="max-w-md"
+              footer={(
+                  <div className="flex justify-end gap-2">
+                      <button type="button" className={iosBtnSecondary} onClick={onClose} disabled={busy}>Отмена</button>
+                      <button type="button" className={danger ? DANGER_BTN : iosBtnPrimary} onClick={onConfirm} disabled={busy}>{confirmLabel}</button>
+                  </div>
+              )}>
+        <div className="text-[13.5px] leading-relaxed text-slate-700">{text}</div>
+    </IosModal>
+);
+
+/* Окно с одним обязательным текстом (причина) — вместо window.prompt. onSubmit(text) может быть
+   асинхронным: окно закрывается после успешного ответа. */
+export const ReasonDialog = ({ open, onClose, title, subtitle, label = 'Причина', placeholder = '', confirmLabel = 'Готово', danger = false, onSubmit }) => {
+    const [value, setValue] = useState('');
+    const [busy, setBusy] = useState(false);
+    useEffect(() => { if (open) setValue(''); }, [open]);
+    const submit = async () => {
+        if (!value.trim()) return;
+        setBusy(true);
+        try {
+            await onSubmit(value.trim());
+            onClose();
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <IosModal open={open} onClose={onClose} title={title} subtitle={subtitle} maxWidth="max-w-md"
+                  footer={(
+                      <div className="flex justify-end gap-2">
+                          <button type="button" className={iosBtnSecondary} onClick={onClose} disabled={busy}>Отмена</button>
+                          <button type="button" className={danger ? DANGER_BTN : iosBtnPrimary} onClick={submit} disabled={busy || !value.trim()}>{confirmLabel}</button>
+                      </div>
+                  )}>
+            <Label required>{label}</Label>
+            <textarea className={`${FIELD} min-h-[84px]`} value={value} onChange={(event) => setValue(event.target.value)} placeholder={placeholder} />
+        </IosModal>
+    );
+};
+
+/* Заголовок группы со счётчиком: иконка серая, число — таблеткой; красится только просрочка. */
+export const GroupHeading = ({ icon: Icon, label, count, tone }) => (
+    <div className={`flex items-center gap-1.5 px-4 pb-1 pt-3 text-[11.5px] font-semibold uppercase tracking-wide ${tone === 'red' ? 'text-rose-600' : 'text-slate-500'}`}>
+        {Icon && <Icon size={13} />}
+        <span>{label}</span>
+        {count !== undefined && (
+            <span className={`ml-0.5 rounded-full px-1.5 py-px text-[11px] tabular-nums ${tone === 'red' ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>{count}</span>
+        )}
     </div>
 );
 
