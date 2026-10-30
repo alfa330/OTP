@@ -198,22 +198,33 @@ class HiringService:
             batch_id = queries.create_batch(cursor, source['id'], _text(file_name, 255), ctx['user_id'], ctx['name'], now)
         loaded = duplicates = 0
         skipped = []
-        for start in range(0, len(contacts), UPLOAD_CHUNK):
+        try:
+            # Порциями по UPLOAD_CHUNK строк — своей транзакцией каждая: длинная открытая транзакция на
+            # тысячи строк держала бы деплой; сбой посреди файла оставляет уже записанные порции.
+            for start in range(0, len(contacts), UPLOAD_CHUNK):
+                chunk_loaded = chunk_duplicates = 0
+                chunk_skipped = []
+                with self._cursor() as cursor:
+                    for item in contacts[start:start + UPLOAD_CHUNK]:
+                        outcome, _card_id = self._intake_one(
+                            cursor, phone=item['phone'], kind=rules.KIND_CONTACT, source=source, now=now,
+                            by=ctx['user_id'], by_name=ctx['name'], full_name=item['full_name'], city=item['city'],
+                            comment=item['comment'], batch_id=batch_id, notify=False)
+                        if outcome == 'created':
+                            chunk_loaded += 1
+                        elif outcome == 'repeat':
+                            chunk_duplicates += 1
+                        else:
+                            chunk_skipped.append({'row': item['row'], 'value': item['phone'], 'error': 'Телефон действующего сотрудника'})
+                # Счётчики — только за записанную порцию: откатившаяся порция в итог не попадает.
+                loaded += chunk_loaded
+                duplicates += chunk_duplicates
+                skipped.extend(chunk_skipped)
+        finally:
+            all_errors = sorted(errors + skipped, key=lambda row: row['row'])
             with self._cursor() as cursor:
-                for item in contacts[start:start + UPLOAD_CHUNK]:
-                    outcome, _card_id = self._intake_one(
-                        cursor, phone=item['phone'], kind=rules.KIND_CONTACT, source=source, now=now,
-                        by=ctx['user_id'], by_name=ctx['name'], full_name=item['full_name'], city=item['city'],
-                        comment=item['comment'], batch_id=batch_id, notify=False)
-                    if outcome == 'created':
-                        loaded += 1
-                    elif outcome == 'repeat':
-                        duplicates += 1
-                    else:
-                        skipped.append({'row': item['row'], 'value': item['phone'], 'error': 'Телефон действующего сотрудника'})
-        all_errors = sorted(errors + skipped, key=lambda row: row['row'])
+                queries.finish_batch(cursor, batch_id, total, loaded, duplicates, len(all_errors), all_errors)
         with self._cursor() as cursor:
-            queries.finish_batch(cursor, batch_id, total, loaded, duplicates, len(all_errors), all_errors)
             batch = queries.get_batch(cursor, batch_id)
         return batch
 
@@ -324,7 +335,17 @@ class HiringService:
             self._pull_lock.release()
 
     def pull_hh(self, environ=None):
-        """Отклики HeadHunter (ТЗ 5.2) — когда в окружении есть токен работодателя."""
+        """Отклики HeadHunter (ТЗ 5.2) — когда в окружении есть токен работодателя.
+        Под тем же замком, что OLX: кнопка «Опросить» рядом с планировщиком не должна дважды
+        разобрать одни отклики с одной закладкой."""
+        if not self._pull_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._pull_hh(environ)
+        finally:
+            self._pull_lock.release()
+
+    def _pull_hh(self, environ):
         config = hh.config_from_env(environ)
         now = self._now()
         if not config:
@@ -608,6 +629,11 @@ class HiringService:
                                    (int(card_id),))
                 queries.update_card(cursor, card_id, **fields)
                 queries.add_assignment(cursor, card_id, new, 'reassign', ctx['user_id'], ctx['name'], now, comment)
+                # Ожидающее начисление (кандидат на линии) переезжает к новому рекрутеру — мотивация
+                # засчитывается тому, за кем карточка закреплена в момент подтверждения 7 смен (ТЗ 7.2).
+                motivation = queries.get_motivation(cursor, card_id)
+                if motivation and motivation['status'] == rules.MOTIVATION_PENDING:
+                    queries.set_motivation(cursor, card_id, now, recruiter_id=new)
             else:
                 if card['stage'] not in rules.ASSIGNED_STAGES:
                     raise HiringError('HIRING_NOT_RETURNABLE', 'В пул возвращаются карточки до выхода на обучение', 409)

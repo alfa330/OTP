@@ -433,6 +433,11 @@ def test_drop_on_line_cancels_motivation(world):
         service.move(trainer, card['id'], 'dropped', {'initiator': 'we', 'reason_id': drop_we['id']})
     assert caught.value.code == 'HIRING_NEED_DAY'
     card = service.move(me, card['id'], 'on_line', {'line_started_at': '2026-10-25'})
+    # Переназначение на линии переносит ожидающее начисление к новому рекрутеру (ТЗ 7.2).
+    card = service.reassign(ctx_of(world, LEAD_GRANT), card['id'], REC2, 'передача на линии')
+    with world['db']._get_cursor() as cur:
+        pending = queries.get_motivation(cur, card['id'])
+        assert pending['status'] == 'pending' and pending['recruiter_id'] == REC2
     with pytest.raises(HiringError) as caught:
         service.move(trainer, card['id'], 'dropped', {'initiator': 'self', 'reason_id': drop_self['id'], 'day': 2})
     assert caught.value.code == 'HIRING_FORBIDDEN'

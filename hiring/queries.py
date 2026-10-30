@@ -888,6 +888,7 @@ def overdue_cards_by_recruiter(cursor, today_start):
     cursor.execute("""
         SELECT c.recruiter_id, COUNT(*) FROM hiring_cards c
          WHERE c.recruiter_id IS NOT NULL AND NOT c.is_closed AND c.next_contact_at < %s
+           AND c.stage IN ('in_work', 'invited_office', 'invited_training')
          GROUP BY c.recruiter_id
     """, (today_start,))
     return {int(recruiter_id): int(count) for recruiter_id, count in cursor.fetchall()}
