@@ -58,6 +58,19 @@ def load(name):
     return Image.open(SRC / f'{name}.png').convert('RGBA')
 
 
+def shadowed(im, radius=7, offset=(0, 5), alpha=0.34, pad=14):
+    """Мягкая тень под картинкой: белое привидение читается и на белом разделе."""
+    canvas = Image.new('RGBA', (im.width + 2 * pad, im.height + 2 * pad), (0, 0, 0, 0))
+    mask = Image.new('L', canvas.size, 0)
+    mask.paste(im.getchannel('A'), (pad + offset[0], pad + offset[1]))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius)).point(lambda v: int(v * alpha))
+    shadow = Image.new('RGBA', canvas.size, (15, 23, 42, 0))
+    shadow.putalpha(mask)
+    canvas.alpha_composite(shadow)
+    canvas.alpha_composite(im, (pad, pad))
+    return canvas
+
+
 def glowing(face):
     """Тёплый отсвет вокруг прорезей — две мягкие каймы под самим лицом."""
     alpha = face.getchannel('A')
@@ -73,7 +86,9 @@ def glowing(face):
 
 if (SRC / 'pumpkins.png').exists():
     webp(fit(crop(load('pumpkins')), width=440), DECOR, 'pumpkins')
-    webp(fit(crop(load('ghost')), height=240), DECOR, 'ghost')
+    ghost = fit(crop(load('ghost')), height=240)
+    webp(ghost, DECOR, 'ghost')
+    webp(shadowed(ghost), DECOR, 'ghost-peek')     # в портале — с тенью, раздел светлый
     webp(fit(crop(load('hat')), width=150), DECOR, 'hat')
     webp(fit(crop(load('spider')), width=120), DECOR, 'spider')
 

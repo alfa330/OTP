@@ -106,8 +106,8 @@ export const appCorners = ({ width, height, sidebar = 80, busyRight = false, orb
     const webTopSize = Math.round(clamp(width * 0.1, 110, 160));
     const spiderW = 26;
     const spiderH = Math.round(spiderW / ART.spider);
-    const ghostW = 64;
-    const peek = 40;
+    const ghostW = 72;             // картинка с полями под тень (ghost-peek.webp)
+    const peek = 44;
     let ghostLeft = width - 96 - ghostW;
     if (orb && ghostLeft < orb.right + 12 && ghostLeft + ghostW > orb.left - 12 && height - peek < orb.bottom + 12) {
         ghostLeft = Math.round(orb.left - 16 - ghostW);

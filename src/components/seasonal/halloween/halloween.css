@@ -2,7 +2,7 @@
  *
  * Всё здесь — накладка: разметку портала не меняет ни одно правило, кроме
  * шляпки на аватаре (position: relative и обрезка круга на фото вместо
- * кружка; тыква в логотипах — в halloween-theme.css). Эти правила живут под
+ * кружка; сайдбар, вход и логотип — в halloween-theme.css). Эти правила живут под
  * html[data-otp-halloween] — метку ставит main.jsx и снимает слой по сроку,
  * поэтому в открытой вкладке шляпка исчезает вместе со сроком, хотя
  * стили чанка остаются в документе. Метка — именно атрибут, не класс:
@@ -333,10 +333,26 @@ html[data-otp-halloween] .mtb-item__avatar::before {
     to { opacity: 1; translate: 0 0; }
 }
 
-/* ── Тёмная тема (в праздник — у всех) ───────────────────────────────── */
+/* ── Цвета по фону ───────────────────────────────────────────────────────
+   Экран входа в праздник ночной в любой теме (halloween-theme.css) — его
+   паутина, нить паука и тени тыкв и привидения всегда «ночные». В портале
+   разделы свои: светлые — паутина и нить серые, в тёмной теме — светлые. */
 
-html[data-otp-theme='dark'] .otp-halloween .hw-web {
+.otp-halloween .hw-web--tl {
     color: rgba(226, 232, 240, 0.3);
+}
+
+.otp-halloween .hw-spider:not(.hw-spider--app) .hw-spider__thread {
+    background: linear-gradient(to bottom, rgba(226, 232, 240, 0.12), rgba(226, 232, 240, 0.5) 92%);
+}
+
+.otp-halloween .hw-pumpkins__shadow,
+.otp-halloween .hw-ghost__shadow {
+    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0));
+}
+
+.otp-halloween .hw-pumpkins__glow {
+    background: radial-gradient(closest-side, rgba(251, 146, 60, 0.55), rgba(251, 146, 60, 0.2) 55%, rgba(251, 146, 60, 0));
 }
 
 html[data-otp-theme='dark'] .otp-halloween .hw-web--tr,
@@ -344,17 +360,8 @@ html[data-otp-theme='dark'] .otp-halloween .hw-web--bl {
     color: rgba(226, 232, 240, 0.17);
 }
 
-html[data-otp-theme='dark'] .otp-halloween .hw-spider__thread {
+html[data-otp-theme='dark'] .otp-halloween .hw-spider--app .hw-spider__thread {
     background: linear-gradient(to bottom, rgba(226, 232, 240, 0.12), rgba(226, 232, 240, 0.5) 92%);
-}
-
-html[data-otp-theme='dark'] .otp-halloween .hw-pumpkins__shadow,
-html[data-otp-theme='dark'] .otp-halloween .hw-ghost__shadow {
-    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0));
-}
-
-html[data-otp-theme='dark'] .otp-halloween .hw-pumpkins__glow {
-    background: radial-gradient(closest-side, rgba(251, 146, 60, 0.55), rgba(251, 146, 60, 0.2) 55%, rgba(251, 146, 60, 0));
 }
 
 /* ── Слабый компьютер: украшения стоят (isLowEndDevice) ──────────────── */

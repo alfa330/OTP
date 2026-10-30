@@ -1,40 +1,57 @@
-/* СОБРАН СКРИПТОМ scripts/halloween/build_halloween_theme.py — руками не править.
-   Хэллоуин-2026: оранжевые акценты поверх тёмного слоя (до конца 1 ноября). */
+/* Хэллоуин-2026 (до конца 1 ноября по Астане): праздничное обрамление портала —
+ * сайдбар, экран входа, логотип, колокол. Разделы праздник не перекрашивает
+ * (решение владельца 30.10: «стили самих разделов лучше не трогать»), поэтому
+ * здесь нет ни одного правила для их содержимого.
+ *
+ * Файл грузит main.jsx сразу, до отрисовки — логотип и сайдбар не сменятся на
+ * глазах. Всё заперто меткой html[data-otp-halloween]: её ставит main.jsx и
+ * снимает слой украшений по сроку. Обрамление одно в светлой и тёмной теме.
+ */
 
-/* Сайдбар: та же графитовая плита тёмного слоя, выбранный раздел — тыквенный.
-   Телефон: акцент нижнего бара и шторки со ссылками («Все отделы», «Имя»). */
-html[data-otp-theme="dark"][data-otp-halloween] {
+/* ── Сайдбар: графитовая плита, выбранный раздел — тыквенный ─────────────
+   Цвета сайдбара — переменные --otp-bar-* (светлые на :root, тёмные в
+   theme-dark.css на html). Здесь они на body: ближе к сайдбару, поэтому
+   перекрывают обе темы без борьбы весов. Телефона не касается: там сайдбар —
+   светлая шторка со своей палитрой; у бара разделов тыквенный только акцент. */
+html[data-otp-halloween] body:not(.mobile-shell) {
+    --otp-bar-bg: #0c0a09;
+    --otp-bar-edge: rgba(84, 84, 88, 0.65);
     --otp-bar-card: #1c1714;
+    --otp-bar-ink: #ffffff;
+    --otp-bar-muted: #a8a29e;
+    --otp-bar-sep: rgba(84, 84, 88, 0.65);
     --otp-bar-hover: #2b1f18;
+    --otp-bar-tile: rgba(255, 255, 255, 0.14);
     --otp-bar-select: #c2410c;
     --otp-bar-select-ink: #fff7ed;
+    --otp-bar-danger: #f87171;
+    --otp-bar-danger-wash: #3a1d1d;
     --otp-bar-knob: #2b1f18;
-    --mtb-accent: #fb923c;
-    --sheet-accent: #f97316;
+    --otp-bar-knob-ink: #fafaf9;
+    --otp-bar-thumb: rgba(168, 162, 158, 0.55);
 }
 
-/* Экран входа — ночь: тёплый отсвет снизу, лиловая дымка сверху. */
-html[data-otp-theme="dark"][data-otp-halloween] .auth-screen {
-    background-image:
-        radial-gradient(90% 55% at 50% 112%, rgba(234, 88, 12, 0.3), rgba(234, 88, 12, 0) 65%),
-        radial-gradient(70% 45% at 88% -6%, rgba(124, 58, 237, 0.22), rgba(124, 58, 237, 0) 70%),
-        linear-gradient(180deg, #0f0c13 0%, #17111a 100%) !important;
+/* Телефон: у бара разделов тыквенные значок открытого раздела и пилюля под ним
+   (в mobile-shell.css пилюля синяя), у колокола в углу — значок на прежнем
+   стекле. body в селекторах — запас веса над правилами тёмной темы телефона. */
+html[data-otp-halloween] body {
+    --mtb-accent: #ea580c;
 }
 
-/* Логотип: на месте знака iCORE — тыква (наброски владельца). Здесь, а не в
-   слое украшений: этот файл main.jsx грузит сразу, и знак не сменится на
-   глазах через секунду после загрузки. Правила не требуют тёмной темы. Плашка
-   со знаком на входе сохраняет рамку и размер — свой svg только прячется. */
-html[data-otp-halloween] .auth-card h1 > span > span:last-child {
-    background-image: url('../../assistant/pumpkin/assets/mascot-logo.webp');
-    background-position: center;
-    background-size: 88%;
-    background-repeat: no-repeat;
+html[data-otp-halloween] body .mtb-item.is-active .mtb-item__icon {
+    background: rgba(234, 88, 12, 0.14);
 }
 
-html[data-otp-halloween] .auth-card h1 > span > span:last-child > svg {
-    visibility: hidden;
+html[data-otp-halloween] body .mobile-bell-slot > div > button {
+    color: #ea580c;
 }
+
+/* Колокол в свёрнутом сайдбаре: плитка значка в styles.css — синий #2563eb. */
+html[data-otp-halloween] body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot > div > button > svg:first-child {
+    background: #ea580c;
+}
+
+/* ── Логотип: на месте знака iCORE — тыква (наброски владельца) ───────── */
 
 /* Сайдбар: праздничная версия логотипа целиком (оранжевая плашка, белые буквы,
    тёмное место под знак) и тыква поверх тёмного места. Картинку логотипа
@@ -58,43 +75,98 @@ html[data-otp-halloween] .sidebar-logo-full::after {
     pointer-events: none;
 }
 
-/* Колокол в свёрнутом сайдбаре: плитка значка в styles.css — синий #2563eb. */
-html[data-otp-halloween] body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot > div > button > svg:first-child {
-    background: #ea580c;
+/* ── Экран входа — ночь ──────────────────────────────────────────────────
+   Свои правила, а не тёмный слой: до входа тема человека неизвестна, а слой
+   перекрасил бы и разделы после входа. Раскладка карточки не меняется ни на
+   пиксель — только цвета. */
+html[data-otp-halloween] .auth-screen {
+    background-image:
+        radial-gradient(90% 55% at 50% 112%, rgba(234, 88, 12, 0.3), rgba(234, 88, 12, 0) 65%),
+        radial-gradient(70% 45% at 88% -6%, rgba(124, 58, 237, 0.22), rgba(124, 58, 237, 0) 70%),
+        linear-gradient(180deg, #0f0c13 0%, #17111a 100%);
 }
 
-/* Карточка входа на ночном фоне: тонкая тёплая кайма и отсвет, иначе её край
-   почти не отличить от фона. */
-html[data-otp-theme="dark"][data-otp-halloween] .auth-card {
-    box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.16), 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 90px rgba(234, 88, 12, 0.12) !important;
+html[data-otp-halloween] .auth-card {
+    background-color: rgba(27, 23, 32, 0.94);
+    color: #f5f5f4;
+    box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.18), 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 90px rgba(234, 88, 12, 0.12);
 }
 
-/* Поля входа одинаковые. В тёмном слое общее правило input[type=text] (из
-   палитры разделов) даёт полю «Логин» рамку и свой фон, а «Пароль» под него не
-   попадает — на входе тёмную тему раньше не видел никто, разнобой всплыл сейчас. */
-html[data-otp-theme="dark"][data-otp-halloween] .auth-card input {
-    border: 0 !important;
-    background: #22262d !important;
+html[data-otp-halloween] .auth-card h1 > span > span:first-child {
+    background-color: #c2410c;
+    border-color: #c2410c;
 }
 
-html[data-otp-theme="dark"][data-otp-halloween] .auth-card input:focus {
-    background: #1e2127 !important;
+/* Плашка со знаком сохраняет рамку и размер — свой svg только прячется. */
+html[data-otp-halloween] .auth-card h1 > span > span:last-child {
+    background-color: #17110f;
+    border-color: #c2410c;
+    background-image: url('../../assistant/pumpkin/assets/mascot-logo.webp');
+    background-position: center;
+    background-size: 88%;
+    background-repeat: no-repeat;
 }
 
-/* Выбор облика помощника: выбранная строка и кружок — тёплые, а не индиго. */
-html[data-otp-theme="dark"][data-otp-halloween] .aorb-appearance-option:has(input:checked) {
-    background: #3a2318;
-    color: #fed7aa;
+html[data-otp-halloween] .auth-card h1 > span > span:last-child > svg {
+    visibility: hidden;
 }
 
-html[data-otp-theme="dark"][data-otp-halloween] .aorb-appearance-option input {
-    accent-color: #f97316;
+html[data-otp-halloween] .auth-card input {
+    background-color: #26212d;
+    color: #f5f5f4;
 }
 
-html[data-otp-theme="dark"][data-otp-halloween] .aorb-appearance-trigger:hover,
-html[data-otp-theme="dark"][data-otp-halloween] .aorb-appearance-trigger[aria-expanded="true"] {
-    background: #3a2318;
+html[data-otp-halloween] .auth-card input::placeholder {
+    color: #8d8796;
+}
+
+html[data-otp-halloween] .auth-card input:focus {
+    background-color: #1f1b25;
+    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.7);
+}
+
+/* Сохранённый логин и пароль браузер красит своим фоном (Chrome — голубым,
+   Safari — жёлтым) поверх любых правил, а текст — чёрным. На ночной карточке
+   это светлая заплатка: фон закрываем внутренней тенью, текст — заливкой. */
+html[data-otp-halloween] .auth-card input:-webkit-autofill {
+    -webkit-text-fill-color: #f5f5f4;
+    caret-color: #f5f5f4;
+    box-shadow: inset 0 0 0 100px #26212d;
+}
+
+html[data-otp-halloween] .auth-card input:-webkit-autofill:focus {
+    box-shadow: inset 0 0 0 100px #1f1b25, 0 0 0 2px rgba(249, 115, 22, 0.7);
+}
+
+html[data-otp-halloween] .auth-card label button:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #e7e5e4;
+}
+
+html[data-otp-halloween] .auth-card .auth-error-slot p {
+    background-color: rgba(239, 68, 68, 0.14);
+    color: #fca5a5;
+}
+
+html[data-otp-halloween] .auth-card button[type='submit'] {
+    background-color: #ea580c;
+}
+
+html[data-otp-halloween] .auth-card button[type='submit']:hover {
+    background-color: #c2410c;
+}
+
+html[data-otp-halloween] .auth-card form + div button {
     color: #fdba74;
+}
+
+/* «Проверка сессии…» — тот же экран, вместо формы строка с вертушкой. */
+html[data-otp-halloween] .auth-card h1 + div {
+    color: #a8a29e;
+}
+
+html[data-otp-halloween] .auth-card h1 + div > :first-child {
+    color: #fb923c;
 }
 
 @media print {
@@ -110,161 +182,3 @@ html[data-otp-theme="dark"][data-otp-halloween] .aorb-appearance-trigger[aria-ex
         content: none;
     }
 }
-
-/* Полотно разделов: тёплый отсвет снизу — виден в просветах между карточками. */
-html[data-otp-theme="dark"][data-otp-halloween] .main-content {
-    background-image: radial-gradient(120% 50% at 50% 118%, rgba(234, 88, 12, 0.14), rgba(234, 88, 12, 0) 62%) !important;
-}
-
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .accent-blue-600 { accent-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .accent-indigo-500 { accent-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .accent-indigo-600 { accent-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .before\:bg-blue-500::before { background-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-400 { background-color: #fb923c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-400\/70 { background-color: rgba(251, 146, 60, 0.7) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-500 { background-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-500\/10 { background-color: rgba(249, 115, 22, 0.1) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-500\/70 { background-color: rgba(249, 115, 22, 0.7) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-500\/85 { background-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-500\/90 { background-color: rgba(249, 115, 22, 0.9) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-600 { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-600\/10 { background-color: rgba(234, 88, 12, 0.1) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-700 { background-color: #c2410c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-blue-800 { background-color: #9a3412 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-400 { background-color: #fb923c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-500 { background-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-500\/90 { background-color: rgba(249, 115, 22, 0.9) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-600 { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-600\/90 { background-color: rgba(234, 88, 12, 0.9) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-700 { background-color: #c2410c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .bg-indigo-800 { background-color: #9a3412 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-blue-400 { border-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-blue-500 { border-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-blue-600 { border-color: rgba(234, 88, 12, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-blue-700 { border-color: rgba(194, 65, 12, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-blue-800 { border-color: rgba(154, 52, 18, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-indigo-400 { border-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-indigo-500 { border-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-indigo-600 { border-color: rgba(234, 88, 12, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-indigo-700 { border-color: rgba(194, 65, 12, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .border-indigo-800 { border-color: rgba(154, 52, 18, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:outline-blue-400:focus-visible { outline-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:outline-blue-500:focus-visible { outline-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:ring-blue-300:focus-visible { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:ring-blue-400:focus-visible { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:ring-blue-500:focus-visible { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:ring-blue-500\/50:focus-visible { --tw-ring-color: rgb(249 115 22 / 0.50) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-visible\:ring-blue-500\/60:focus-visible { --tw-ring-color: rgb(249 115 22 / 0.60) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus-within\:ring-blue-500\/70:focus-within { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:border-blue-400:focus { border-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:border-blue-500:focus { border-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:border-indigo-400:focus { border-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:border-indigo-500:focus { border-color: rgba(249, 115, 22, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-100:focus { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-200:focus { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-300:focus { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-400:focus { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-500:focus { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-500\/30:focus { --tw-ring-color: rgb(249 115 22 / 0.30) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-500\/60:focus { --tw-ring-color: rgb(249 115 22 / 0.60) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-blue-500\/70:focus { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-indigo-100:focus { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-indigo-500:focus { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .focus\:ring-indigo-500\/70:focus { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-blue-400 { --tw-gradient-from: #fb923c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-blue-500 { --tw-gradient-from: #f97316 var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-blue-600 { --tw-gradient-from: #ea580c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-blue-700 { --tw-gradient-from: #c2410c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-blue-800 { --tw-gradient-from: #9a3412 var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-indigo-400 { --tw-gradient-from: #fb923c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-indigo-500 { --tw-gradient-from: #f97316 var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .from-indigo-600 { --tw-gradient-from: #ea580c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .group:hover .group-hover\:bg-blue-600 { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .group:hover .group-hover\:text-indigo-500:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .group:hover .group-hover\:text-indigo-700:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-400:hover { background-color: #fb923c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-500:hover { background-color: #f97316 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-500\/15:hover { background-color: rgba(249, 115, 22, 0.15) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-600:hover { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-700:hover { background-color: #c2410c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-blue-800:hover { background-color: #9a3412 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-indigo-600:hover { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:bg-indigo-700:hover { background-color: #c2410c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:border-blue-400:hover { border-color: rgba(251, 146, 60, 0.85) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:from-blue-700:hover { --tw-gradient-from: #c2410c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:from-indigo-700:hover { --tw-gradient-from: #c2410c var(--tw-gradient-from-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:ring-blue-200:hover { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:ring-blue-300:hover { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:ring-blue-400:hover { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:ring-blue-500\/40:hover { --tw-ring-color: rgb(249 115 22 / 0.40) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:ring-indigo-500\/20:hover { --tw-ring-color: rgb(249 115 22 / 0.20) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-blue-500:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-blue-600:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-blue-700:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-blue-800:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-blue-900:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-indigo-600:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-indigo-700:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-indigo-800:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:text-indigo-900:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])):hover { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:to-blue-600:hover { --tw-gradient-to: #ea580c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:to-blue-700:hover { --tw-gradient-to: #c2410c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .hover\:to-indigo-700:hover { --tw-gradient-to: #c2410c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .peer:checked ~ .peer-checked\:bg-blue-600 { background-color: #ea580c !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .peer:focus ~ .peer-focus\:ring-blue-300 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-100 { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-200 { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-200\/70 { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-200\/80 { --tw-ring-color: rgb(249 115 22 / 0.80) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-300 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-300\/60 { --tw-ring-color: rgb(249 115 22 / 0.60) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-400 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-400\/50 { --tw-ring-color: rgb(249 115 22 / 0.50) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-500 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-500\/25 { --tw-ring-color: rgb(249 115 22 / 0.25) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-500\/40 { --tw-ring-color: rgb(249 115 22 / 0.40) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-500\/60 { --tw-ring-color: rgb(249 115 22 / 0.60) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-500\/70 { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-600 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-600\/25 { --tw-ring-color: rgb(249 115 22 / 0.25) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-700 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-blue-800 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-100 { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-200 { --tw-ring-color: rgb(249 115 22 / 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-200\/70 { --tw-ring-color: rgb(249 115 22 / 0.70) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-300 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-400 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-500 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-500\/30 { --tw-ring-color: rgb(249 115 22 / 0.30) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-600 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-700 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .ring-indigo-800 { --tw-ring-color: rgb(249 115 22 / var(--tw-ring-opacity, 1)) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .shadow-blue-100\/70 { --tw-shadow-color: rgba(249, 115, 22, 0.7) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .shadow-blue-200 { --tw-shadow-color: rgba(249, 115, 22, 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .shadow-blue-500\/20 { --tw-shadow-color: rgba(249, 115, 22, 0.2) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .shadow-indigo-100 { --tw-shadow-color: rgba(249, 115, 22, 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .shadow-indigo-200 { --tw-shadow-color: rgba(249, 115, 22, 0.35) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-400:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-500:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-600:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-600\/80:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: rgba(253, 186, 116, 0.8) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-700:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-700\/80:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: rgba(253, 186, 116, 0.8) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-800:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-900:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-900\/70:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: rgba(253, 186, 116, 0.7) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-900\/80:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: rgba(253, 186, 116, 0.8) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-blue-950:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-400:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-500:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-600:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-700:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-800:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .text-indigo-900:where(:not([class*="bg-blue-"]):not([class*="bg-indigo-"])) { color: #fdba74 !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-blue-500 { --tw-gradient-to: #f97316 var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-blue-600 { --tw-gradient-to: #ea580c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-blue-700 { --tw-gradient-to: #c2410c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-blue-900 { --tw-gradient-to: #7c2d12 var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-indigo-500 { --tw-gradient-to: #f97316 var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-indigo-600 { --tw-gradient-to: #ea580c var(--tw-gradient-to-position) !important; }
-html[data-otp-theme="dark"]:where([data-otp-halloween]) body .to-indigo-700 { --tw-gradient-to: #c2410c var(--tw-gradient-to-position) !important; }

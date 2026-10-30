@@ -298,20 +298,20 @@ test('сбой праздничного чанка не перезагружае
     for (const chunk of ['mountHalloween', 'PumpkinMascot', 'halloween-theme']) {
         assert.ok(/HALLOWEEN_CHUNK_RE = \/([^/]+)\//.exec(main)[1].includes(chunk), `чанк ${chunk} не прикрыт`);
     }
-    // Метка и тема — до отрисовки, иначе первый кадр светлый, а кнопки синие.
+    // Метка и обрамление — до отрисовки, иначе логотип и сайдбар сменились бы на глазах.
     assert.ok(main.indexOf("setAttribute('data-otp-halloween', '')") < main.indexOf('createRoot('));
-    assert.ok(main.indexOf('applyDarkTheme(true)') < main.indexOf('createRoot('));
     assert.match(main, /import\('\.\/components\/seasonal\/halloween\/halloween-theme\.css'\)\.catch/);
 });
 
-test('тёмная тема в праздник — у всех, выбор «светлая» помнится и не даёт темы после срока', () => {
+test('разделы праздник не перекрашивает: тёмная тема по-прежнему личная', () => {
+    /* Решение владельца 30.10: «стили самих разделов лучше не трогать». Тёмный
+       слой — только для тех, кому он выдан, и main.jsx его не включает. */
     const util = read('../src/utils/darkTheme.js');
-    assert.match(util, /export const canUseDarkTheme = \(user\) => \{\n\s+if \(isHalloweenTime\(\)\) return true;/);
-    assert.match(util, /return isHalloweenTime\(\) \? stored !== 'light' : stored === 'dark';/);
-    assert.match(util, /else if \(isHalloweenTime\(\)\) \{\n\s+localStorage\.setItem\(DARK_THEME_STORAGE_KEY, 'light'\);/);
-    assert.match(util, /isHalloweenTime\(\) \? import\('\.\.\/components\/seasonal\/halloween\/halloween-theme\.css'\) : null/);
-    // Прежний список логинов — по-прежнему единственное право вне праздника.
-    assert.match(util, /const DARK_THEME_LOGINS = \['sherzad'\];/);
+    assert.doesNotMatch(util, /isHalloweenTime|halloween/i);
+    assert.match(util, /return localStorage\.getItem\(DARK_THEME_STORAGE_KEY\) === 'dark';/);
+    assert.match(util, /return !!login && DARK_THEME_LOGINS\.includes\(login\);/);
+    const main = read('../src/main.jsx');
+    assert.doesNotMatch(main, /applyDarkTheme|readStoredDarkTheme/);
 });
 
 test('тыква в шарике — по выбранному облику, своим чанком, при сбое остаётся знак', () => {
@@ -349,19 +349,31 @@ test('слой не мешает работе: некликабелен, гас�
     assert.match(mount, /root\.unmount\(\);\n\s+host\.remove\(\);/);
 });
 
-test('оранжевая тема собрана скриптом и весит как задумано', () => {
+test('праздничное обрамление — сайдбар, вход, логотип, колокол — и ни одного правила для разделов', () => {
     const css = read('../src/components/seasonal/halloween/halloween-theme.css');
-    assert.ok(css.startsWith('/* СОБРАН СКРИПТОМ scripts/halloween/build_halloween_theme.py'));
-    const rules = css.split('\n').filter((line) => line.includes(' !important; }'));
-    assert.ok(rules.length > 100, `правил всего ${rules.length}`);
-    for (const line of rules) {
-        // (0,2,2): бьёт базовое правило тёмного слоя, уступает его :hover.
-        assert.ok(line.trimStart().startsWith('html[data-otp-theme="dark"]:where([data-otp-halloween]) body '), line);
+    const selectors = css
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('{')
+        .map((chunk) => chunk.split('}').pop().trim())
+        .filter((sel) => sel && !sel.startsWith('@media'));
+    assert.ok(selectors.length > 10);
+    for (const sel of selectors) {
+        assert.ok(sel.startsWith('html[data-otp-halloween]'), `правило без праздничной метки: ${sel}`);
+        // Ни утилит Tailwind, ни раздела: только сайдбар, вход, логотип, бар телефона.
+        assert.doesNotMatch(sel, /\.(bg|text|border|ring|from|to|via|fill|stroke)-/, `правило красит утилиту: ${sel}`);
+        assert.doesNotMatch(sel, /main-content/, `правило красит раздел: ${sel}`);
+        assert.match(sel, /body(:not\(\.mobile-shell\))?\s*$|\.sidebar|\.auth-screen|\.auth-card|\.mtb-item|\.mobile-bell-slot/, `правило вне обрамления: ${sel}`);
     }
-    // Мягкие подложки статусов (50–300) остаются своим цветом — смысл, а не украшение.
-    assert.doesNotMatch(css, /body \.bg-(blue|indigo)-(50|100|200|300) \{/);
-    // Текст на синей подложке остаётся парой к ней; :where не добавляет веса.
-    assert.match(css, /\.text-blue-700:where\(:not\(\[class\*="bg-blue-"\]\):not\(\[class\*="bg-indigo-"\]\)\) \{/);
+    // Сайдбар — переменные на body: перекрывают обе темы без борьбы весов.
+    // Только на компьютере: шторка телефона светлая со своей палитрой.
+    assert.match(css, /html\[data-otp-halloween\] body:not\(\.mobile-shell\) \{[^}]*--otp-bar-bg: #0c0a09;[^}]*--otp-bar-select: #c2410c;/);
+    assert.match(css, /html\[data-otp-halloween\] body \{\s*--mtb-accent: #ea580c;\s*\}/);
+    // Вход: свои цвета, а не тёмный слой.
+    assert.match(css, /\.auth-card button\[type='submit'\] \{\s*background-color: #ea580c;/);
+    assert.match(css, /\.auth-card input:focus \{/);
+    // Автозаполнение не оставляет светлой заплатки на ночной карточке.
+    assert.match(css, /\.auth-card input:-webkit-autofill \{[^}]*-webkit-text-fill-color: #f5f5f4;[^}]*box-shadow: inset 0 0 0 100px #26212d;/);
+    assert.doesNotMatch(css, /data-otp-theme/);
 });
 
 test('слой дёшев для слабого компьютера', () => {

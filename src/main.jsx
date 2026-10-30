@@ -7,11 +7,11 @@ import App, { ErrorBoundary } from './App';
 import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
 import { startPwaRuntime } from './utils/pwa';
 import { isHalloweenTime } from './components/seasonal/halloween/halloweenWindow';
-import { applyDarkTheme, readStoredDarkTheme } from './utils/darkTheme';
 import './styles.css';
 
-/* Хэллоуин (до конца 1 ноября 2026). Праздничная метка и тёмный слой — сразу, до
-   отрисовки: иначе каждая загрузка начиналась бы со светлого кадра и синих кнопок.
+/* Хэллоуин (до конца 1 ноября 2026). Праздничная метка и оформление сайдбара и
+   входа — сразу, до отрисовки: иначе логотип и сайдбар сменились бы на глазах.
+   Сами разделы праздник не перекрашивает (решение владельца 30.10).
    Сбой праздничного чанка (сеть, выкладка) не должен перезагружать портал через
    staleBundleRecovery: украшения просто не появятся. Слушатель на фазе перехвата
    срабатывает раньше восстановления и гасит только свои чанки. */
@@ -24,7 +24,6 @@ if (isHalloweenTime()) {
     event.stopImmediatePropagation();
   }, true);
   import('./components/seasonal/halloween/halloween-theme.css').catch(() => {});
-  if (readStoredDarkTheme()) applyDarkTheme(true);
 }
 
 try {

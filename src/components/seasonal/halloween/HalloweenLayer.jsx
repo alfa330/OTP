@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import './halloween.css';
 import pumpkinsUrl from './assets/pumpkins.webp';
 import ghostUrl from './assets/ghost.webp';
+import ghostPeekUrl from './assets/ghost-peek.webp';
 import spiderUrl from './assets/spider.webp';
 import batStripUrl from './assets/bat-strip.webp';
 import faviconUrl from './assets/pumpkin-favicon.png';
@@ -530,7 +531,7 @@ export default function HalloweenLayer({ onExpire }) {
                     className="hw-fixed hw-ghost-peek hw-appear"
                     style={{ left: corners.ghost.left, width: corners.ghost.width, '--hw-peek': `${corners.ghost.peek}px` }}
                 >
-                    <img src={ghostUrl} alt="" draggable={false} />
+                    <img src={ghostPeekUrl} alt="" draggable={false} />
                 </div>
             )}
             {flocks.map((flock) => flock.bats.map((bat) => (
