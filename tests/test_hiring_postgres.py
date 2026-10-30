@@ -835,7 +835,8 @@ def test_pending_call_waits_for_telephony(world):
     with world['db']._get_cursor() as cur:
         cur.execute("INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (%s, 367, '8503')", (REC1,))
     clock.now = NOW + timedelta(hours=2)
-    before = service.touch(me, card['id'], {'kind': 'call'})
+    # «Позвонить» нажал руководитель из своей учётки, звонок уйдёт с линии рекрутера — слияние всё равно в это касание.
+    before = service.touch(ctx_of(world, HR_HEAD), card['id'], {'kind': 'call'})
     assert before['substage'] == 'dial' and before['no_answer_streak'] == 0      # исхода ещё нет — ничего не решено
     with world['db']._get_cursor() as cur:
         pending = queries.card_touches(cur, card['id'])[-1]
@@ -869,3 +870,27 @@ def test_pending_call_waits_for_telephony(world):
     with pytest.raises(HiringError) as caught:
         service.edit_touch(ctx_of(world, REC2), card['id'], manual['id'], {'body': 'чужое'})
     assert caught.value.code == 'HIRING_NOT_FOUND'
+    # Ожидание, мимо которого телефония уже завела свою запись (как было до правки слияния): джоба
+    # переносит звонок в ожидание и убирает лишнюю запись; комментарий ожидания остаётся.
+    clock.now = NOW + timedelta(hours=4)
+    orphan = service.touch(me, card['id'], {'kind': 'call', 'body': 'ждал исход'})
+    with world['db']._get_cursor() as cur:
+        orphan_id = queries.card_touches(cur, card['id'])[-1]['id']
+        stray_at = clock.now + timedelta(minutes=1)
+        stray_call = {'general_call_id': 'p-9', 'internal_number': '8503', 'external_phone': card['phone'], 'direction': 'out',
+                      'disposition': 'ANSWER', 'billsec': 50, 'waitsec': 3, 'started_at': stray_at}
+        stray_call_id = queries.insert_call(cur, stray_call, card['id'], REC1, 367, 'answered', 'available', 'webhook', stray_at)
+        stray_touch = queries.add_touch(cur, card['id'], 'call', 'dial', 'Исходящий звонок · Дозвонились · 0:50', REC1, 'Первый Рекрутер',
+                                        stray_at, duration_sec=50, meta={'general_call_id': 'p-9'})
+        queries.link_call_touch(cur, stray_call_id, stray_touch)
+    clock.now = NOW + timedelta(hours=4, minutes=10)
+    assert service.adopt_orphan_pending_calls() == 1
+    with world['db']._get_cursor() as cur:
+        touches = queries.card_touches(cur, card['id'])
+        assert all(t['id'] != stray_touch for t in touches)
+        adopted = next(t for t in touches if t['id'] == orphan_id)
+        assert adopted['result'] == 'dial' and adopted['call_id'] == stray_call_id and adopted['duration_sec'] == 50
+        assert adopted['body'] == 'Исходящий звонок · Дозвонились · 0:50\nждал исход' and adopted['meta'] == {'general_call_id': 'p-9'}
+        assert queries.get_call(cur, stray_call_id)['touch_id'] == orphan_id
+    assert service.adopt_orphan_pending_calls() == 0
+    assert orphan['substage'] == 'dial'

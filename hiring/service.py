@@ -846,13 +846,33 @@ class HiringService:
             except Exception:  # noqa: BLE001
                 log.exception('hiring: не удалось выключить обзвон рекрутеру %s', line['user_id'])
 
+    def adopt_orphan_pending_calls(self, now=None):
+        """Касания «ждём исход», мимо которых телефония завела свою запись (так было до правки слияния
+        30.10.2026: искали только отметки рекрутера линии): звонок переезжает в ожидание — исход,
+        длительность, запись, комментарий сохраняются, лишняя запись удаляется. Возвращает число."""
+        now = now or self._now()
+        adopted = 0
+        with self._calls_lock:
+            with self._cursor() as cursor:
+                for row in queries.orphan_pending_calls(cursor, now - timedelta(minutes=2), calls.MERGE_WINDOW_MINUTES):
+                    body = (row['body'] or '') + (('\n' + row['pending_body']) if row.get('pending_body') else '')
+                    queries.update_touch(cursor, row['pending_id'], result=row['result'], body=body,
+                                         duration_sec=row['duration_sec'], meta=row['meta'])
+                    queries.link_call_touch(cursor, row['call_id'], row['pending_id'])
+                    queries.delete_touch(cursor, row['touch_id'])
+                    adopted += 1
+        if adopted:
+            log.info('hiring: %d ожидающих касаний получили исход из записей телефонии', adopted)
+        return adopted
+
     def sync_call_history(self, now=None):
         """Добор звонков по линиям рекрутеров из истории Binotel (вебхук мог не дойти). Раз в десять
         минут, окно с перекрытием; первый раз — сутки. Возвращает число записанных звонков."""
+        now = now or self._now()
+        self.adopt_orphan_pending_calls(now)
         dial_list = self._dial_list_service()
         if dial_list is None:
             return 0
-        now = now or self._now()
         with self._cursor() as cursor:
             lines = queries.recruiter_lines(cursor)
             state = queries.get_integration(cursor, 'binotel') or {}

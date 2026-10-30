@@ -787,14 +787,47 @@ def card_calls(cursor, card_id):
 
 
 def manual_call_touch(cursor, card_id, recruiter_id, around, window_minutes):
-    """Ручная отметка звонка того же рекрутера рядом по времени, ещё не связанная со звонком АТС."""
+    """Отметка звонка рядом по времени, ещё не связанная со звонком АТС: отметка того же рекрутера
+    (с исходом или без) либо чья угодно отметка «ждём исход» — «Позвонить» мог нажать руководитель
+    из своей учётки, а звонок ушёл с линии рекрутера. Чужую отметку с исходом не трогаем."""
     cursor.execute("""
         SELECT id, result, body, at FROM hiring_touches
-         WHERE card_id = %s AND kind = 'call' AND call_id IS NULL AND author_id = %s
+         WHERE card_id = %s AND kind = 'call' AND call_id IS NULL
+           AND (author_id = %s OR result IS NULL)
            AND at BETWEEN %s - (%s * interval '1 minute') AND %s + (%s * interval '1 minute')
-         ORDER BY abs(extract(epoch FROM (at - %s))) LIMIT 1
-    """, (int(card_id), int(recruiter_id), around, int(window_minutes), around, int(window_minutes), around))
+         ORDER BY (author_id = %s) DESC, abs(extract(epoch FROM (at - %s))) LIMIT 1
+    """, (int(card_id), int(recruiter_id), around, int(window_minutes), around, int(window_minutes),
+          int(recruiter_id), around))
     return _one(cursor)
+
+
+def orphan_pending_calls(cursor, before, window_minutes):
+    """Касания «ждём исход», которые телефония обошла стороной — завела свою запись на той же
+    карточке в окне после них (до правки слияния 30.10.2026): [(id ожидания, тело, id записи
+    телефонии, её исход, тело, длительность, meta, id звонка)], по одной записи на ожидание."""
+    cursor.execute("""
+        SELECT DISTINCT ON (p.id) p.id, p.body, t.id, t.result, t.body, t.duration_sec, t.meta, c.id
+          FROM hiring_touches p
+          JOIN hiring_touches t ON t.card_id = p.card_id AND t.kind = 'call' AND t.call_id IS NOT NULL
+               AND t.at >= p.at AND t.at <= p.at + (%s * interval '1 minute')
+          JOIN hiring_calls c ON c.id = t.call_id
+         WHERE p.kind = 'call' AND p.result IS NULL AND p.call_id IS NULL AND p.at <= %s
+         ORDER BY p.id, t.at
+    """, (int(window_minutes), before))
+    rows = cursor.fetchall()
+    result = []
+    for row in rows:
+        meta = row[6]
+        if isinstance(meta, str):
+            meta = json.loads(meta or '{}')
+        result.append({'pending_id': int(row[0]), 'pending_body': row[1], 'touch_id': int(row[2]), 'result': row[3],
+                       'body': row[4], 'duration_sec': row[5], 'meta': meta or {}, 'call_id': int(row[7])})
+    return result
+
+
+def delete_touch(cursor, touch_id):
+    cursor.execute("DELETE FROM hiring_touches WHERE id = %s", (int(touch_id),))
+    return cursor.rowcount
 
 
 def update_touch(cursor, touch_id, **fields):
