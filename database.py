@@ -51015,6 +51015,7 @@ class Database:
                 raise ValueError("У операторов должно быть указано направление")
             if not self._are_swap_directions_compatible(requester_direction_name, target_direction_name):
                 raise ValueError("Оператор для замены должен быть в том же направлении (СМЗ и Основа взаимозаменяемы)")
+            self._refuse_swap_on_late_day_tx(cursor, [requester_operator_id, target_operator_id], swap_date_obj)
 
             cursor.execute(
                 """
@@ -51547,6 +51548,14 @@ class Database:
                 if before_tgt != after_tgt:
                     target_affected_dates.append(day_obj)
 
+            # Замок смен с опозданием — по каждому дню, который обмен перепишет
+            # (день обмена и соседние: хвост ночной смены живёт в соседнем дне).
+            self._refuse_swap_on_late_pairs_tx(
+                cursor,
+                [(int(requester_operator_id), day_obj) for day_obj in requester_affected_dates]
+                + [(int(target_operator_id), day_obj) for day_obj in target_affected_dates]
+            )
+
             # Снимки перерывов обеих сторон до очистки дней: перерывы, которые уже
             # отсижены к моменту передачи часов, переносятся как есть — их нельзя
             # ни подвинуть, ни списать со второй стороны.
@@ -51974,7 +51983,8 @@ class Database:
             end_date_obj=max(shift_date_obj, target_date_obj) + timedelta(days=1)
         )
 
-    def _apply_shift_change_move_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id):
+    def _apply_shift_change_move_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id,
+                                    late_lock=False):
         """Перенести кусок смены по одобренной заявке. Возвращает затронутые даты.
 
         Пишем точечно: строки старого куска удаляются, новый кусок сохраняет
@@ -51988,6 +51998,8 @@ class Database:
 
         target_date_obj = self._shift_change_target_date(shift_date_obj, payload)
         affected_dates = sorted({shift_date_obj, target_date_obj})
+        if late_lock:
+            self._refuse_late_change_tx(cursor, [(operator_id, day_obj) for day_obj in affected_dates])
         # Перерывы уезжают из базы каскадом вместе со строкой смены, поэтому
         # снимок нового дня снимаем до удаления старого куска.
         target_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, target_date_obj)
@@ -52061,9 +52073,12 @@ class Database:
             )
         return affected_dates
 
-    def _apply_shift_change_day_off_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id):
+    def _apply_shift_change_day_off_tx(self, cursor, operator_id, shift_date_obj, payload, actor_id,
+                                       late_lock=False):
         """Поставить выходной по одобренной заявке. Трогает только день заявки."""
         operator_id = int(operator_id)
+        if late_lock:
+            self._refuse_late_change_tx(cursor, [(operator_id, shift_date_obj)])
         day_map = self._load_operator_shift_map_for_period_tx(
             cursor=cursor,
             operator_id=operator_id,
@@ -52091,7 +52106,7 @@ class Database:
         return [shift_date_obj]
 
     def _apply_shift_change_request_tx(self, cursor, operator_id, shift_date_obj,
-                                       kind, payload, actor_id):
+                                       kind, payload, actor_id, late_lock=False):
         """Вписать одобренную заявку в график. Возвращает список затронутых дат.
 
         Сокращение и доп. часть пишем ровно тем же путём, что и обмен сменами:
@@ -52103,11 +52118,11 @@ class Database:
         """
         if kind == 'change':
             return self._apply_shift_change_move_tx(
-                cursor, operator_id, shift_date_obj, payload, actor_id
+                cursor, operator_id, shift_date_obj, payload, actor_id, late_lock=late_lock
             )
         if kind == 'day_off':
             return self._apply_shift_change_day_off_tx(
-                cursor, operator_id, shift_date_obj, payload, actor_id
+                cursor, operator_id, shift_date_obj, payload, actor_id, late_lock=late_lock
             )
         day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
         self._validate_shift_change_against_schedule(kind, payload, window)
@@ -52157,6 +52172,9 @@ class Database:
                     day_off_dates.append(day_obj)
         if not affected_dates:
             return []
+        if late_lock:
+            # Ночь, склеенная через полночь, переписывает и соседний день.
+            self._refuse_late_change_tx(cursor, [(int(operator_id), day_obj) for day_obj in affected_dates])
 
         now = self._almaty_now()
         breaks_snapshots = {}
@@ -52530,12 +52548,14 @@ class Database:
         }
 
     def respond_shift_change_request(self, request_id, reviewer_id, action,
-                                     response_comment=None):
+                                     response_comment=None, late_lock=False):
         """Согласовать, отклонить или отозвать заявку.
 
         `approve` сразу правит график — это и есть требование задачи #17
         («при одобрении смена должна проставиться автоматически»). Отзыв
-        (`cancel`) доступен только автору и график не трогает.
+        (`cancel`) доступен только автору и график не трогает. late_lock —
+        замок смен с опозданием держит согласующего (решает роут): применение
+        откажет LateShiftLockedError, если перепишет такую смену.
         """
         request_id = int(request_id)
         reviewer_id = int(reviewer_id)
@@ -52612,7 +52632,8 @@ class Database:
                 shift_date_obj=shift_date_obj,
                 kind=kind,
                 payload=payload,
-                actor_id=reviewer_id
+                actor_id=reviewer_id,
+                late_lock=late_lock
             )
             cursor.execute(
                 """
@@ -52688,6 +52709,175 @@ class Database:
             )
             row = cursor.fetchone()
             return int(row[0]) if row and row[0] is not None else None
+
+    def get_shift_change_request_days(self, request_id):
+        """Какие дни графика тронет согласование заявки: [(оператор, день)].
+
+        День заявки и, у переноса, новый день — тот же расчёт, что у самого
+        переноса (_shift_change_target_date). Нужен роуту для правила «смену с
+        опозданием СВ не меняет» ДО того, как заявка будет согласована."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operator_id, request_kind, shift_date, payload_json
+                  FROM work_shift_change_requests
+                 WHERE id = %s
+                """,
+                (int(request_id),)
+            )
+            row = cursor.fetchone()
+        if not row or row[0] is None or row[2] is None:
+            return []
+        operator_id, request_kind, shift_date_obj, payload_raw = row
+        days = {shift_date_obj}
+        try:
+            kind = self._normalize_shift_change_kind(request_kind)
+        except ValueError:
+            kind = None
+        if kind == 'change':
+            payload = payload_raw if isinstance(payload_raw, dict) else {}
+            try:
+                days.add(self._shift_change_target_date(shift_date_obj, payload))
+            except (TypeError, ValueError):
+                pass
+        return [(int(operator_id), day) for day in sorted(days)]
+
+    def get_late_shift_days(self, operator_dates):
+        """Дни, когда человек опоздал на смену: {(оператор, день): (минуты, ФИО)}.
+
+        Правило владельца (20.10.2026): «если человек опоздал на смену, СВ после
+        этого не может ему сменить смену — это могут админ и выше». Опоздание —
+        это late_minutes в daily_hours: пересчёт по статусам идёт на каждом
+        событии статуса (append_operator_status_event), так что опоздание видно,
+        как только человек вышел на линию. Отклонённое СВ опоздание считается
+        тоже: иначе «отклонить, потом сдвинуть смену» снимало бы замок. День —
+        дата начала смены, как в самом пересчёте (shifts_by_start_day).
+        """
+        pairs = set()
+        for operator_id, day in operator_dates or ():
+            if operator_id is None or not day:
+                continue
+            try:
+                pairs.add((int(operator_id), self._normalize_schedule_date(day)))
+            except (TypeError, ValueError):
+                continue
+        if not pairs:
+            return {}
+        with self._get_cursor() as cursor:
+            return self._late_shift_days_tx(cursor, pairs)
+
+    def _late_shift_days_tx(self, cursor, pairs):
+        ordered = sorted(pairs)
+        if not ordered:
+            return {}
+        cursor.execute(
+            """
+            SELECT dh.operator_id, dh.day, dh.late_minutes, u.name
+              FROM unnest(%s::int[], %s::date[]) AS p(operator_id, day)
+              JOIN daily_hours dh ON dh.operator_id = p.operator_id AND dh.day = p.day
+              LEFT JOIN users u ON u.id = dh.operator_id
+             WHERE COALESCE(dh.late_minutes, 0) > 0
+            """,
+            ([pair[0] for pair in ordered], [pair[1] for pair in ordered])
+        )
+        return {
+            (int(row[0]), row[1]): (int(row[2]), str(row[3] or '').strip())
+            for row in cursor.fetchall()
+        }
+
+    def _refuse_swap_on_late_day_tx(self, cursor, operator_ids, swap_date):
+        """Обмен сменами — тоже правка смены: опоздавший отдал бы смену коллеге,
+        пересчёт часов стёр бы опоздание. По правилу владельца (20.10.2026) смену
+        с опозданием меняет только администратор, поэтому обмен на такой день
+        не создаётся и не принимается."""
+        day = self._normalize_schedule_date(swap_date)
+        self._refuse_swap_on_late_pairs_tx(
+            cursor, {(int(operator_id), day) for operator_id in operator_ids if operator_id})
+
+    def _refuse_swap_on_late_pairs_tx(self, cursor, pairs):
+        """То же по точным парам (оператор, день): при принятии обмена — по дням,
+        которые он действительно перепишет (хвост ночной смены — соседний день).
+
+        Отказ читает оператор, и опоздать мог не он, а коллега по обмену, —
+        поэтому в тексте только день: ни ФИО, ни минут чужого опоздания."""
+        locked = self._late_shift_days_tx(cursor, set(pairs))
+        if not locked:
+            return
+        locked_day = min(day for _operator_id, day in locked)
+        raise ValueError(
+            "Обмен сменой за %s недоступен — эту смену меняет администратор" % locked_day.strftime('%d.%m')
+        )
+
+    def _refuse_late_change_tx(self, cursor, pairs):
+        """Согласование заявки задело бы смену с опозданием — отказ. Дни — те,
+        что применение действительно перепишет: сокращение и доп. часть
+        склеивают ночь через полночь и трогают соседний день, а заранее этих
+        дней роут не знает. Держит ли замок согласующего, решает роут (late_lock)."""
+        locked = self._late_shift_days_tx(cursor, set(pairs))
+        if locked:
+            raise LateShiftLockedError("Смену с опозданием меняет администратор", locked)
+
+    def get_shift_auction_publish_days(self, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        """(участник, день) прошедших и сегодняшних дней периода аукциона: их
+        публикация сотрёт и соберёт заново — для замка смен с опозданием."""
+        mode = normalize_shift_auction_mode(direction_mode)
+        today = self._almaty_now().date()
+        with self._get_cursor() as cursor:
+            days = [day for day in self._get_shift_auction_lot_dates_tx(cursor, direction_mode=mode) if day <= today]
+            if not days:
+                return []
+            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode))
+        return [(int(operator_id), day) for operator_id in operator_ids for day in days]
+
+    def get_shift_auction_target_days(self, lot_id=None, plan_id=None, source_schedule_shift_id=None,
+                                      claimed_by=None, operator_id=None):
+        """(оператор, день) смены, которую тронет админская правка аукциона —
+        для замка смен с опозданием. Снятие: чей claim снимается; добор за
+        оператора: operator_id. Цель адресуется так же, как в admin_unclaim_shift
+        и admin_claim_shift_for_operator: lot_id либо (plan_id, source_schedule_shift_id)."""
+        def _int_or_none(value):
+            try:
+                return int(value) if value not in (None, '') else None
+            except (TypeError, ValueError):
+                return None
+
+        lot_id, plan_id = _int_or_none(lot_id), _int_or_none(plan_id)
+        shift_id, claimed_by = _int_or_none(source_schedule_shift_id), _int_or_none(claimed_by)
+        operator_id = _int_or_none(operator_id)
+        with self._get_cursor() as cursor:
+            if lot_id:
+                cursor.execute(
+                    "SELECT shift_date, claimed_by FROM shift_auction_test_lots WHERE id = %s", (lot_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return []
+                target = operator_id or (int(row[1]) if row[1] is not None else None)
+                return [(target, row[0])] if target else []
+            if not (plan_id and shift_id):
+                return []
+            cursor.execute(
+                "SELECT shift_date FROM resource_saved_schedule_shifts WHERE id = %s AND plan_id = %s",
+                (shift_id, plan_id)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            shift_date = row[0]
+            if operator_id:
+                return [(operator_id, shift_date)]
+            if claimed_by:
+                return [(claimed_by, shift_date)]
+            cursor.execute(
+                """
+                SELECT claimed_by FROM shift_auction_historical_claims
+                 WHERE plan_id = %s AND source_schedule_shift_id = %s
+                 ORDER BY claimed_start_time NULLS FIRST
+                 LIMIT 1
+                """, (plan_id, shift_id)
+            )
+            claim = cursor.fetchone()
+            return [(int(claim[0]), shift_date)] if claim and claim[0] is not None else []
 
     def get_shift_change_request_operator_ids(self, statuses=None,
                                               start_date=None, end_date=None):
@@ -66185,6 +66375,16 @@ class LowRatingAttributionConflict(ValueError):
     """Кому засчитана низкая оценка, поменял другой проверяющий уже после того,
     как сохраняющий открыл карточку (задача #286). Решение об атрибуции одно на
     разбор, поэтому сохранение по устаревшим отметкам молча стёрло бы чужое."""
+
+
+class LateShiftLockedError(ValueError):
+    """Согласование заявки задело смену с опозданием, а замок держит того, кто
+    согласует (владелец, 20.10.2026). locked — {(оператор, день): (минуты, ФИО)},
+    как у Database.get_late_shift_days: роут отдаёт из него тот же отказ 403."""
+
+    def __init__(self, message, locked):
+        super().__init__(message)
+        self.locked = locked
 
 
 # Initialize database
