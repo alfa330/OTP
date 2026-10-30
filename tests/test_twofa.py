@@ -614,15 +614,17 @@ class MainMenuTest(unittest.TestCase):
 
     def test_without_codes_the_menu_is_the_role_menu(self):
         self.assertEqual(self._rows(self.menu(30, 'operator')), self.OPERATOR_ROWS)
-        self.assertIsNone(self.menu(20, 'marketing_manager'))
+        # Роль без своих кнопок: одна строка «Доступ🔑» — там «Выход🚪».
+        self.assertEqual(self._rows(self.menu(20, 'marketing_manager')), [['Доступ🔑']])
 
-    def test_codes_add_one_button_under_the_role_menu(self):
+    def test_codes_add_one_button_above_the_access_row(self):
         self.granted.update({1, 20, 30})
-        self.assertEqual(self._rows(self.menu(30, 'operator')), self.OPERATOR_ROWS + [[rules.REQUEST_BUTTON]])
-        self.assertEqual(self._rows(self.menu(20, 'marketing_manager')), [[rules.REQUEST_BUTTON]])
+        self.assertEqual(self._rows(self.menu(30, 'operator')),
+                         self.OPERATOR_ROWS[:-1] + [[rules.REQUEST_BUTTON], ['Доступ🔑']])
+        self.assertEqual(self._rows(self.menu(20, 'marketing_manager')), [[rules.REQUEST_BUTTON], ['Доступ🔑']])
         admin = self._rows(self.menu(1, 'super_admin'))
         self.assertEqual(admin[0], ['Редактор СВ📝', 'Операторы👷'])
-        self.assertEqual(admin[-1], [rules.REQUEST_BUTTON])
+        self.assertEqual(admin[-2:], [[rules.REQUEST_BUTTON], ['Доступ🔑']])
 
     def test_the_button_does_not_stick_to_someone_else_s_menu(self):
         self.granted.add(30)

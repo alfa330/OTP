@@ -1008,7 +1008,7 @@ def test_button_without_access_answers_with_the_menu_that_has_no_button(env):
     [reply] = env['tg'].to(OTHER_TG)
     assert reply['text'] == rules.request_closed_text() and reply['markup'] == OPERATOR_MENU
     assert asked == [OTHER]
-    # У роли нет своего меню — кнопку убрать целиком.
+    # Меню от бота не пришло (сервис без бота или сбой сборки) — кнопку убрать целиком.
     assert env['service'].offer_accounts(OTHER_TG) == {'outcome': 'closed'}
     assert env['tg'].to(OTHER_TG)[-1]['markup'] == {'remove_keyboard': True}
 
@@ -1092,15 +1092,17 @@ def test_bot_menu_runs_the_real_functions_from_the_bot(env):
     exec(compile(ast.Module(body=body, type_ignores=[]), str(bot), 'exec'), namespace)
     assert names <= set(namespace)
     reply_menu = namespace['_twofa_reply_menu']
-    assert reply_menu(ANNA) == {'keyboard': [[{'text': rules.REQUEST_BUTTON}]], 'resize_keyboard': True}
-    assert reply_menu(BORIS) is None  # роль без меню и без кодов
-    operator_rows = [[{'text': 'Моя статистика📊'}], [{'text': 'Мои оценки📝'}], [{'text': 'Доступ🔑'}]]
+    access_row = [{'text': 'Доступ🔑'}]
+    assert reply_menu(ANNA) == {'keyboard': [[{'text': rules.REQUEST_BUTTON}], access_row], 'resize_keyboard': True}
+    # Роль без своих кнопок и без кодов — одна строка «Доступ🔑»: там «Выход🚪».
+    assert reply_menu(BORIS) == {'keyboard': [access_row], 'resize_keyboard': True}
+    operator_rows = [[{'text': 'Моя статистика📊'}], [{'text': 'Мои оценки📝'}], access_row]
     assert reply_menu(OTHER)['keyboard'] == operator_rows
-    # Сервис с настоящим меню бота: первая выдача приносит оператору его меню и кнопку под ним.
+    # Сервис с настоящим меню бота: первая выдача приносит оператору его меню с кнопкой над «Доступ🔑».
     service = _with_menu(env, reply_menu)
     service.set_person_grants(service.context(HEAD), OTHER, [env['account_id']])
     [welcome] = env['tg'].to(OTHER_TG)
-    assert welcome['markup']['keyboard'] == operator_rows + [[{'text': rules.REQUEST_BUTTON}]]
+    assert welcome['markup']['keyboard'] == operator_rows[:-1] + [[{'text': rules.REQUEST_BUTTON}], access_row]
     assert not namespace['_twofa_can_request_for'](None)
 
 

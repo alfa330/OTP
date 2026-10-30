@@ -57748,7 +57748,6 @@ def get_admin_keyboard():
     kb.add(KeyboardButton('Редактор СВ📝'))
     kb.insert(KeyboardButton('Операторы👷'))
     kb.add(KeyboardButton('Данные📈'))
-    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 def get_data_keyboard():
@@ -57768,7 +57767,6 @@ def get_sv_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить таблицу часов📊'))
     kb.add(KeyboardButton('Управление операторами🔑'))
-    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 def get_verify_keyboard():
@@ -57812,17 +57810,18 @@ def get_operator_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Моя статистика📊'))
     kb.add(KeyboardButton('Мои оценки📝'))
-    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 
 def _main_menu_keyboard(user_id, role):
-    """Главное меню человека: кнопки его роли и «Запросить код 🔐», если ему выданы аккаунты
-    «Кодов 2FA» (#373). Бот возвращает человека в главное меню из десятка мест — все берут
-    меню отсюда: иначе кнопка кодов пропадала бы после «Отмены» или отчёта.
+    """Главное меню человека: кнопки его роли, «Запросить код 🔐», если ему выданы аккаунты
+    «Кодов 2FA» (#373), и последней строкой «Доступ🔑» — смена логина, пароля и «Выход🚪».
+    Бот возвращает человека в главное меню из десятка мест — все берут меню отсюда: иначе
+    кнопка кодов пропадала бы после «Отмены» или отчёта.
 
-    None — меню нет: у роли нет своих кнопок (маркетинг, HR, бухгалтерия, тренер), а кодов ей
-    не выдано."""
+    «Доступ🔑» — у каждого, кто вошёл, в том числе у ролей без своих кнопок (маркетинг, HR,
+    бухгалтерия, тренер): раньше у них меню не было вовсе или была одна кнопка кодов, и выйти
+    было нечем."""
     if _is_admin_role(role):
         kb = get_admin_keyboard()
     elif role == 'sv':
@@ -57830,10 +57829,10 @@ def _main_menu_keyboard(user_id, role):
     elif role == 'operator':
         kb = get_operator_keyboard()
     else:
-        kb = None
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
     if TWOFA_REQUEST_BUTTON and _twofa_can_request_for(user_id):
-        kb = kb or ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(KeyboardButton(TWOFA_REQUEST_BUTTON))
+    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 # «Коды 2FA» (#373): «Подтвердить / Отклонить» у главы маркетинга и «Код не подошёл» у
@@ -58442,13 +58441,13 @@ async def start_command(message: types.Message):
                 reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         else:
-            # Роли без своего меню (маркетинг, HR, бухгалтерия, тренер): раньше /start им молчал.
-            # Кнопки — только «Запросить код 🔐», если выданы коды; иначе убрать устаревшие.
+            # Роли без своих кнопок (маркетинг, HR, бухгалтерия, тренер): раньше /start им молчал.
+            # Меню — «Запросить код 🔐», если выданы коды, и «Доступ🔑» с «Выход🚪».
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text=f"<b>Добро пожаловать, {html.escape(user[2] or '')}!</b>",
                 parse_mode='HTML',
-                reply_markup=_main_menu_keyboard(user[0], user[3]) or ReplyKeyboardRemove()
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -58466,9 +58465,10 @@ async def start_auth(message: types.Message):
     if user:
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Вы уже авторизованы как {user[2]} ({user[3]})</b>.\n\n",
+            text=(f"<b>Вы уже авторизованы как {html.escape(user[2] or '')}.</b>\n\n"
+                  "Чтобы войти под другой учёткой, нажмите «Доступ🔑» → «Выход🚪»."),
             parse_mode='HTML',
-            reply_markup=_main_menu_keyboard(user[0], user[3]) or ReplyKeyboardRemove()
+            reply_markup=_main_menu_keyboard(user[0], user[3])
         )
         await message.delete()
         return
@@ -58581,12 +58581,12 @@ async def process_password(message: types.Message, state: FSMContext):
                 reply_markup=_main_menu_keyboard(user['id'], role)
             )
         else:
-            # Роли без своего меню: раньше вход заканчивался молча, и человек не знал, вошёл ли.
-            # Убираем и «Отмена ❌» шага входа — если кодов нет, кнопок не остаётся вовсе.
+            # Роли без своих кнопок: раньше вход заканчивался молча, и человек не знал, вошёл ли.
+            # Меню заменяет и «Отмена ❌» шага входа — в нём есть «Доступ🔑» с «Выход🚪».
             await message.answer(
                 f"<b>Добро пожаловать, {html.escape(name or '')}!</b>",
                 parse_mode='HTML',
-                reply_markup=_main_menu_keyboard(user['id'], role) or ReplyKeyboardRemove()
+                reply_markup=_main_menu_keyboard(user['id'], role)
             )
 
         logging.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
@@ -58630,25 +58630,13 @@ async def operators_menu(message: types.Message):
 
 @dp.message_handler(regexp='Назад 🔙')
 async def back_to_admin(message: types.Message):
+    # Любого, кто вошёл: из «Доступ🔑» сюда приходят и роли без своих кнопок (маркетинг, HR,
+    # бухгалтерия, тренер) — без меню они оставались бы в «Доступе» без «Запросить код 🔐».
     user = db.get_user(telegram_id=message.from_user.id)
-    if user and _is_admin_role(user[3]):
+    if user:
         await bot.send_message(
             chat_id=message.from_user.id,
             text='<b>Главное меню</b>',
-            parse_mode='HTML',
-            reply_markup=_main_menu_keyboard(user[0], user[3])
-        )
-    elif user and user[3] == 'sv':
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text=f'<b>Главное меню</b>',
-            parse_mode='HTML',
-            reply_markup=_main_menu_keyboard(user[0], user[3])
-        )
-    elif user and user[3] == 'operator':
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text=f'<b>Главное меню</b>',
             parse_mode='HTML',
             reply_markup=_main_menu_keyboard(user[0], user[3])
         )
@@ -59994,7 +59982,7 @@ async def change_credentials_menu(message: types.Message):
     if user:        
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите что хотите изменить:</b>",
+            text="<b>Выберите, что хотите сделать:</b>",
             parse_mode='HTML',
             reply_markup=get_access_keyboard()
         )
@@ -60038,17 +60026,21 @@ async def process_new_login(message: types.Message, state: FSMContext):
             # Обновляем логин
             with db._get_cursor() as cursor:
                 cursor.execute("UPDATE users SET login = %s WHERE id = %s", (new_login, user[0]))
-            
+
+            # Логин — в HTML экранированным: «<» или «&» в нём Telegram отверг бы, и человек
+            # прочёл бы «ошибка», хотя логин уже сменён. Меню — чтобы снова был «Доступ🔑».
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text=f"✅ Логин успешно изменен на: <code>{new_login}</code>",
-                parse_mode='HTML'
+                text=f"✅ Логин успешно изменен на: <code>{html.escape(new_login)}</code>",
+                parse_mode='HTML',
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
         except Exception as e:
             logging.error(f"Error changing login: {e}")
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="❌ Произошла ошибка при изменении логина. Попробуйте позже."
+                text="❌ Произошла ошибка при изменении логина. Попробуйте позже.",
+                reply_markup=_main_menu_keyboard(user[0], user[3])
             )
     
     await state.finish()
@@ -60100,22 +60092,28 @@ async def process_new_password(message: types.Message, state: FSMContext):
     
     user_data = await state.get_data()
     user_id = user_data.get('user_id')
-    
+
     if user_id:
+        menu = None
         try:
+            # Без меню у человека осталась бы только «Отмена ❌» шага — ни «Доступ🔑», ни кодов.
+            user = db.get_user(telegram_id=message.from_user.id)
+            menu = _main_menu_keyboard(user[0], user[3]) if user else None
             password_hash = pbkdf2_sha256.hash(new_password)
             with db._get_cursor() as cursor:
                 cursor.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
-            
+
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="✅ Пароль успешно изменен!"
+                text="✅ Пароль успешно изменен!",
+                reply_markup=menu
             )
         except Exception as e:
             logging.error(f"Error changing password: {e}")
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="❌ Произошла ошибка при изменении пароля. Попробуйте позже."
+                text="❌ Произошла ошибка при изменении пароля. Попробуйте позже.",
+                reply_markup=menu
             )
     
     await state.finish()
@@ -60130,7 +60128,7 @@ async def logout_user(message: types.Message):
             cursor.execute("UPDATE users SET telegram_id = NULL WHERE id = %s", (user[0],))
         await bot.send_message(  
             chat_id=message.from_user.id,
-            text="✅ <b>Вы успешно вышли из системы.</b>Для входа снова нажмите 'Вход👤'.",
+            text="✅ <b>Вы успешно вышли из системы.</b>\n\nДля входа снова нажмите «Вход👤».",
             parse_mode='HTML',
             reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Вход👤'))
             )
