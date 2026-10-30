@@ -11,15 +11,18 @@ HTTP-запрос к получателю не держит транзакцию
 
 | Маршрут | Каналы | Настройки |
 |---|---|---|
-| `syntony` | Global (два канала ниже) и +77008541777 «Департамент» | `SYNTONY_WEBHOOK_*` |
+| `syntony` | Global (два канала ниже) | `SYNTONY_WEBHOOK_*` |
+| `syntony_department` | `33bc674a-727f-4e2d-b350-da1832ecfdd5` — +77008541777 «Департамент» | `SYNTONY_DEPARTMENT_WEBHOOK_*` |
 | `potok_crm` | `6983db13-ae8e-4b27-b09d-6c10ae4f54cf` — +77070253322 «Help Taxi» | `POTOK_CRM_WEBHOOK_*` |
 
 **«Департамент» → Syntony (30.10.2026).** Владелец: «отключить от чатов оп как и
-глобал и пересылать все вебхуки на syntony прямо как глобал». Канал идёт тем же
-маршрутом — тот же адрес, ключ и выключатель, что у Global. В «Чатах ОП» он, как
-Global, только для чтения (`pilot.py: EXCLUDED_CHANNELS`): ни отправки, ни заметок,
-ни карточки водителя; счётчик «ждут ответа» его не ведёт, накопленное до исключения
-снято при старте схемы (`unread.py`). Пересылка — с выкладки, прошлое не досылается.
+глобал и пересылать все вебхуки на syntony прямо как глобал». В Syntony у канала своё
+подключение («ДепТакси»), и различает она их по ключу: с ключом Global его сообщения
+падали в подключение Global. Поэтому маршрут свой — тот же адрес Syntony, свой ключ и
+выключатель. В «Чатах ОП» канал, как Global, только для чтения
+(`pilot.py: EXCLUDED_CHANNELS`): ни отправки, ни заметок, ни карточки водителя;
+счётчик «ждут ответа» его не ведёт, накопленное до исключения снято при старте схемы
+(`unread.py`). Пересылка — с выкладки, прошлое не досылается.
 
 **Help Taxi → CRM «Потока» (20.10.2026).** До 15.10.2026 номер жил в аккаунте
 Wazzup «Поток», чей вебхук смотрит в CRM группы. С 15.10 номер в аккаунте `op`,
@@ -74,6 +77,10 @@ SYNTONY_WEBHOOK_API_URL=<HTTPS endpoint Syntony>
 SYNTONY_WEBHOOK_API_KEY=<ключ Syntony>
 SYNTONY_WEBHOOK_AUTH_HEADER=Authorization
 SYNTONY_WEBHOOK_AUTH_PREFIX=Bearer
+
+SYNTONY_DEPARTMENT_WEBHOOK_ENABLED=true
+SYNTONY_DEPARTMENT_WEBHOOK_API_URL=<тот же HTTPS endpoint Syntony>
+SYNTONY_DEPARTMENT_WEBHOOK_API_KEY=<ключ подключения «ДепТакси» в Syntony>
 
 POTOK_CRM_WEBHOOK_ENABLED=true
 POTOK_CRM_WEBHOOK_API_URL=<HTTPS endpoint CRM «Потока»>

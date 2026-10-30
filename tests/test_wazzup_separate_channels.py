@@ -35,21 +35,27 @@ def test_department_is_excluded_from_processing_like_global():
 
 
 def test_syntony_answers_global_and_department_and_operators_do_not():
-    assert syntony.SYNTONY.channels == syntony.GLOBAL_CHANNEL_IDS | {DEPARTMENT}
+    # У «Департамента» в Syntony своё подключение со своим ключом — и свой маршрут.
+    assert syntony.SYNTONY.channels == syntony.GLOBAL_CHANNEL_IDS
+    assert syntony.SYNTONY_DEPARTMENT.channels == {DEPARTMENT}
     # Что отвечает Syntony, операторы из «Чатов ОП» не трогают.
-    assert syntony.SYNTONY.channels <= pilot.EXCLUDED_CHANNELS
-    assert not syntony.POTOK_CRM.channels & syntony.SYNTONY.channels
+    assert syntony.SYNTONY.channels | syntony.SYNTONY_DEPARTMENT.channels <= pilot.EXCLUDED_CHANNELS
+    # Событие уходит одному получателю.
+    for index, route in enumerate(syntony.ROUTES):
+        for other in syntony.ROUTES[index + 1:]:
+            assert not route.channels & other.channels, (route.name, other.name)
 
 
-def test_department_events_go_to_syntony_whole_and_never_to_the_crm():
+def test_department_events_go_to_its_own_route_whole():
     payload = {'messages': [message('department-in', DEPARTMENT),
                             dict(message('department-out', DEPARTMENT), isEcho=True)],
                'statuses': [{'messageId': 'department-out', 'status': 'read'}],
                'channelsUpdates': [{'channelId': DEPARTMENT, 'state': 'active'}]}
-    ready, pending, complete = syntony.filter_payload(payload, channels=syntony.SYNTONY.channels)
+    ready, pending, complete = syntony.filter_payload(payload, channels=syntony.SYNTONY_DEPARTMENT.channels)
     assert ready == payload and not pending and complete
-    crm_ready, crm_pending, _ = syntony.filter_payload(payload, channels=syntony.POTOK_CRM.channels)
-    assert not crm_ready and not crm_pending
+    for route in (syntony.SYNTONY, syntony.POTOK_CRM):
+        other_ready, other_pending, _ = syntony.filter_payload(payload, channels=route.channels)
+        assert not other_ready and not other_pending, route.name
 
 
 def test_unread_counter_skips_and_clears_every_excluded_channel():

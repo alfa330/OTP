@@ -17,9 +17,11 @@ from tests.test_wazzup_syntony_persistence import Database, response, rows
 from wazzup import syntony, syntony_schema
 
 HELP_TAXI = '6983db13-ae8e-4b27-b09d-6c10ae4f54cf'
+DEPARTMENT = '33bc674a-727f-4e2d-b350-da1832ecfdd5'
 CRM_URL = 'https://crm.example.test/icore/wazzup'
 SYNTONY_URL = 'https://relay.example.test/wazzup'
-ENV_NAMES = [f'{prefix}_{suffix}' for prefix in ('SYNTONY_WEBHOOK', 'POTOK_CRM_WEBHOOK')
+ENV_NAMES = [f'{prefix}_{suffix}'
+             for prefix in ('SYNTONY_WEBHOOK', 'SYNTONY_DEPARTMENT_WEBHOOK', 'POTOK_CRM_WEBHOOK')
              for suffix in ('ENABLED', 'API_URL', 'API_KEY', 'AUTH_HEADER', 'AUTH_PREFIX')]
 needs_pg = pytest.mark.skipif(not PORT, reason='needs isolated local PG (WAZZUP_PILOT_TEST_PORT)')
 
@@ -43,6 +45,13 @@ def enable_syntony(monkeypatch):
     monkeypatch.setenv('SYNTONY_WEBHOOK_API_KEY', 'synthetic-syntony-secret')
 
 
+def enable_department(monkeypatch):
+    # Тот же приёмник Syntony, но ключ подключения «Департамента».
+    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_ENABLED', 'true')
+    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_API_URL', SYNTONY_URL)
+    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_API_KEY', 'synthetic-department-secret')
+
+
 def help_taxi(message_id, **changes):
     return message(message_id, HELP_TAXI, **changes)
 
@@ -50,7 +59,19 @@ def help_taxi(message_id, **changes):
 def test_help_taxi_belongs_to_the_crm_route_only():
     assert syntony.POTOK_CRM.channels == {HELP_TAXI}
     assert not syntony.POTOK_CRM.channels & syntony.GLOBAL_CHANNEL_IDS
-    assert [route.name for route in syntony.ROUTES] == ['syntony', 'potok_crm']
+    assert [route.name for route in syntony.ROUTES] == ['syntony', 'syntony_department', 'potok_crm']
+
+
+def test_department_has_its_own_switch_and_key(clean_env):
+    enable_syntony(clean_env)
+    # Настройки Global подключение «Департамента» не открывают.
+    assert syntony.load_config(syntony.SYNTONY_DEPARTMENT) is None
+    enable_department(clean_env)
+    department = syntony.load_config(syntony.SYNTONY_DEPARTMENT)
+    assert (department.url, department.key, department.auth_prefix) == (
+        SYNTONY_URL, 'synthetic-department-secret', 'Bearer')
+    assert syntony.load_config().key == 'synthetic-syntony-secret'
+    assert set(syntony.enabled_routes()) == {'syntony', 'syntony_department'}
 
 
 def test_each_route_has_its_own_switch_and_credentials(clean_env):
@@ -163,6 +184,29 @@ def test_mixed_webhook_goes_to_each_receiver_with_its_own_key(relay_db, clean_en
     assert syntony.enqueue(relay_db, payload) == 0
     deliver_all(relay_db, sent)
     assert len(sent) == 2
+
+
+@needs_pg
+def test_department_and_global_reach_syntony_each_with_its_own_key(relay_db, clean_env):
+    enable_syntony(clean_env)
+    enable_department(clean_env)
+    department_in, global_in = message('department-in', DEPARTMENT), message('global-in')
+    with relay_db._get_cursor() as cursor:
+        cursor.execute("INSERT INTO wazzup_messages (message_id, channel_id, chat_id, dt, is_echo, account) "
+                       "VALUES ('department-out', %s, '70000000000', now(), TRUE, 'op')", (DEPARTMENT,))
+    payload = {'messages': [global_in, department_in],
+               'statuses': [{'messageId': 'department-out', 'status': 'read'}]}
+    assert syntony.enqueue(relay_db, payload) == 2
+    assert sorted(routes_of(relay_db)) == [('syntony', 'ready'), ('syntony_department', 'ready')]
+    sent = []
+    deliver_all(relay_db, sent)
+    assert {url for url, _ in sent} == {SYNTONY_URL}
+    by_key = {kwargs['headers']['Authorization']: json.loads(kwargs['data']) for _, kwargs in sent}
+    assert by_key == {
+        'Bearer synthetic-syntony-secret': {'messages': [global_in]},
+        'Bearer synthetic-department-secret': {'messages': [department_in],
+                                               'statuses': payload['statuses']},
+    }
 
 
 @needs_pg
