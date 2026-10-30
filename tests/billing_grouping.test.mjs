@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   BILLING_GROUPING_AR_ALERT,
@@ -50,6 +51,25 @@ test('средние — целые секунды усечением, от пр
   const row = billingGroupingRow(hour(3, 2, 2, { talk_seconds: 1343, wait_ok_seconds: 1 }));
   assert.equal(row.talk, 671);
   assert.equal(row.wait, 0);
+});
+
+test('ожидание — среднее принятых плюс среднее неотвеченных, каждое усечено', () => {
+  // 0 ч 14.09: 1524,33 / 18 = 84 и 1193,75 / 11 = 108 — в таблице СЗоВ 192.
+  const row = billingGroupingRow(hour(0, 29, 18, { wait_ok_seconds: 1524.327603, wait_lost_seconds: 1193.7493 }));
+  assert.equal(row.wait, 192);
+  // принятых нет — остаётся ожидание неотвеченных
+  assert.equal(billingGroupingRow(hour(5, 2, 0, { wait_lost_seconds: 101 })).wait, 50);
+});
+
+test('таблица СЗоВ за 14.09 — все 24 часа «Средн. Прод.» и ожидания', () => {
+  // Суммы часов из Oktell и значения их таблицы, по которой сделана вкладка (задача #380).
+  const data = JSON.parse(readFileSync(new URL('./data/oktell_grouping_2026_09_14.json', import.meta.url), 'utf8'));
+  assert.equal(data.hours.length, 24);
+  const got = data.hours.map((item) => {
+    const row = billingGroupingRow(item);
+    return [item.hour, row.talk, row.wait];
+  });
+  assert.deepEqual(got, data.hours.map((item) => [item.hour, item.table_talk, item.table_wait]));
 });
 
 test('без звонков — прочерки, а не нули', () => {

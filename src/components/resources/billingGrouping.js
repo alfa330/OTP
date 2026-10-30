@@ -5,14 +5,15 @@
 
 // Подписи и порядок колонок — как в таблице владельца: по ней раздел и сделан,
 // и одни и те же слова на экране и в выгрузке не заставляют сверять, что есть что.
+// hint — подсказка при наведении на шапку: как считается колонка.
 export const BILLING_GROUPING_COLUMNS = [
   { key: 'hour', label: 'С' },
   { key: 'arrived', label: 'Получено' },
   { key: 'served', label: 'Принято' },
   { key: 'lost', label: 'Потеряно' },
   { key: 'ar', label: '% Неотв' },
-  { key: 'talk', label: 'Средн. Прод.' },
-  { key: 'wait', label: 'Средн. время ожидания' },
+  { key: 'talk', label: 'Средн. Прод.', hint: 'Средняя длина принятого звонка, как в Oktell: приветствие, очередь и разговор' },
+  { key: 'wait', label: 'Средн. время ожидания', hint: 'Как в отчёте Oktell: среднее ожидание в очереди принятых звонков плюс среднее ожидание неотвеченных' },
   { key: 'forecast', label: 'Прогноз смен' },
   { key: 'planned', label: 'Запланировано смен' },
   { key: 'fact', label: 'Факт смен' },
@@ -35,11 +36,21 @@ const shiftValue = (value) => {
   return Number.isFinite(number) ? Math.trunc(number) : null;
 };
 
-// Средние — целые секунды УСЕЧЕНИЕМ, как в отчёте владельца и в почасовой отбивке
-// табло: округление расходилось бы с ними на секунду в каждой второй строке.
+// Средние — целые секунды УСЕЧЕНИЕМ, как в отчёте Oktell, таблице владельца и почасовой
+// отбивке табло: округление расходилось бы с ними на секунду в каждой второй строке.
+// Суммы приходят с долями секунды: округлённые до целых давали ту же ошибку на секунду.
 const truncatedAverage = (sum, count) => (
   Number(count) > 0 ? Math.trunc(Number(sum || 0) / Number(count)) : null
 );
+
+// Ожидание — как в таблице СЗоВ: среднее у принятых ПЛЮС среднее у неотвеченных, каждое
+// усечено отдельно (это две колонки отчёта Oktell). Сверено на их таблице за 14.09: 24 часа
+// из 24 (задача #380). Нет неотвеченных — остаётся ожидание принятых, и наоборот.
+const groupingWait = (item, served, lost) => {
+  const waitOk = truncatedAverage(item.wait_ok_seconds, served);
+  const waitLost = truncatedAverage(item.wait_lost_seconds, lost);
+  return waitOk === null && waitLost === null ? null : (waitOk || 0) + (waitLost || 0);
+};
 
 export const billingGroupingRow = (item = {}) => {
   const arrived = Math.max(0, Number(item.arrived || 0));
@@ -55,9 +66,9 @@ export const billingGroupingRow = (item = {}) => {
     lost,
     ar,
     arAlert: ar !== null && ar > BILLING_GROUPING_AR_ALERT,
+    // «Средн. Прод.» — длина принятого звонка целиком, как «Среднее время разговора» Oktell.
     talk: truncatedAverage(item.talk_seconds, served),
-    // «Ожидание» — у принятых звонков, как «Ср. ожидание» соседних вкладок раздела.
-    wait: truncatedAverage(item.wait_ok_seconds, served),
+    wait: groupingWait(item, served, lost),
     forecast,
     planned: shiftValue(item.planned),
     fact,

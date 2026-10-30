@@ -227,13 +227,13 @@ class BillingOperatorDirectionTests(unittest.TestCase):
 
 
 class BillingTalkTimeTests(unittest.TestCase):
-    """«Время разговора» — только разговор с оператором, без IVR и очереди.
+    """«Время разговора» в Таксопарках, Номерах, Детализации и Группировке — как в отчёте
+    Oktell: принятый звонок целиком (`Call_Systems_hst.total_length` = IVR + очередь +
+    разговор). С ним СЗоВ сверяет биллинг и отчитывается паркам; решение владельца
+    30.10.2026 (задача #380), сверено на их таблице за 14.09 и образце за сентябрь.
 
-    `Call_Systems_hst.total_length` — это длина ВСЕЙ цепочки. Проверено на живых
-    данных 18.09.2026: у 2846 из 2846 отвеченных звонков за 15–17.09 она равна
-    плечо IVR и очереди (ct=4) + плечо оператора (ct=5). За неделю 11–17.09 отчёт
-    показывал средний «разговор» 334 с вместо фактических 244 с. AHT при этом
-    остаётся временем обработки звонка целиком — так решил владелец.
+    «Операторы» остаются на чистом разговоре (плечо оператора ct=5): там ATT — сам
+    разговор, а AHT — звонок целиком, так решил владелец.
     """
 
     @classmethod
@@ -247,20 +247,34 @@ class BillingTalkTimeTests(unittest.TestCase):
     def _has_not(self, needle, haystack, where):
         self.assertTrue(needle not in haystack, f"в {where} остался фрагмент: {needle}")
 
-    def test_talk_comes_from_operator_leg(self):
+    def test_billing_talk_is_the_oktell_one(self):
+        for needle in (
+            "t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds",
+            # детализация — та же величина построчно, обе страницы: сумма сходится с парками
+            "q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds",
+            "p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds",
+        ):
+            self._has(needle, self.backend, "bot_schedule2.py")
+        for needle in (
+            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds",
+            "THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds",
+        ):
+            self._has_not(needle, self.backend, "bot_schedule2.py")
+
+    def test_operators_keep_the_operator_leg(self):
         for needle in (
             '_OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"',
             "SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec",
             "WHERE ConnectionType = 5 AND TimeStart >=",
-            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds",
             "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds",
-            # детализация — та же величина построчно, обе страницы
-            "THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds",
         ):
             self._has(needle, self.backend, "bot_schedule2.py")
-        # старая подмена разговора длиной всей цепочки не должна вернуться
-        self._has_not("THEN t.total_length ELSE 0 END) AS talk_seconds", self.backend,
-                      "bot_schedule2.py")
+
+    def test_averages_are_truncated_like_oktell(self):
+        self._has("const attSeconds = truncatedRatio(item.talk_seconds, item.served);", self.source,
+                  "ResourceFteView.jsx")
+        self._has("att = None if served <= 0 else int(float(item.get('talk_seconds') or 0) / served)",
+                  self.backend, "bot_schedule2.py")
 
     def test_whole_call_stays_for_total_and_aht(self):
         for needle in (
@@ -272,11 +286,18 @@ class BillingTalkTimeTests(unittest.TestCase):
         self._has("Number(item.handle_seconds || 0)", self.source, "ResourceFteView.jsx")
 
     def test_labels_say_what_is_counted(self):
-        self._has("без IVR и ожидания", self.source, "ResourceFteView.jsx")
-        self._has("Звонки целиком: IVR, ожидание в очереди и разговор", self.source,
-                  "ResourceFteView.jsx")
-        self._has("Время разговора — только разговор с оператором, без IVR и ожидания",
+        for needle in (
+            "Принятые звонки целиком, как в Oktell: приветствие, очередь и разговор",
+            "Все звонки целиком, вместе с неотвеченными",
+            "Как в Oktell: с приветствием и очередью",
+        ):
+            self._has(needle, self.source, "ResourceFteView.jsx")
+        self._has("Время разговора — как в Oktell: принятые звонки целиком",
                   self.backend, "bot_schedule2.py")
+        # прежние подписи чистого разговора не должны остаться у парков и детализации
+        self._has_not("Без IVR и очереди · всего", self.source, "ResourceFteView.jsx")
+        self._has_not("Разговор с оператором, без IVR и ожидания в очереди", self.source,
+                      "ResourceFteView.jsx")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+{
+ "about": "Часы 14.09.2026 из Oktell (Call_Systems_hst, суммы секунд с долями) и значения таблицы СЗоВ за этот день — «Средн. Прод.» и «Средн. время ожидания» (скриншот владельца 15.09.2026, по нему сделана «Группировка»). Задача #380.",
+ "hours": [
+  {"hour": 0, "arrived": 29, "served": 18, "lost": 11, "talk_seconds": 6044.668419, "wait_ok_seconds": 1524.327603, "wait_lost_seconds": 1193.7493, "table_talk": 335, "table_wait": 192},
+  {"hour": 1, "arrived": 13, "served": 9, "lost": 4, "talk_seconds": 4137.390622, "wait_ok_seconds": 1387.093678, "wait_lost_seconds": 463.8618, "table_talk": 459, "table_wait": 269},
+  {"hour": 2, "arrived": 8, "served": 7, "lost": 1, "talk_seconds": 2260.62502, "wait_ok_seconds": 490.858359, "wait_lost_seconds": 111.875, "table_talk": 322, "table_wait": 181},
+  {"hour": 3, "arrived": 2, "served": 2, "lost": 0, "talk_seconds": 1345.531232, "wait_ok_seconds": 1.421919, "wait_lost_seconds": 0.0, "table_talk": 672, "table_wait": 0},
+  {"hour": 4, "arrived": 7, "served": 5, "lost": 2, "talk_seconds": 1905.968806, "wait_ok_seconds": 67.10934, "wait_lost_seconds": 454.532, "table_talk": 381, "table_wait": 240},
+  {"hour": 5, "arrived": 3, "served": 3, "lost": 0, "talk_seconds": 1142.344035, "wait_ok_seconds": 1.984324, "wait_lost_seconds": 0.0, "table_talk": 380, "table_wait": 0},
+  {"hour": 6, "arrived": 7, "served": 6, "lost": 1, "talk_seconds": 500.468891, "wait_ok_seconds": 4.093719, "wait_lost_seconds": 1.37505, "table_talk": 83, "table_wait": 1},
+  {"hour": 7, "arrived": 19, "served": 17, "lost": 2, "talk_seconds": 4355.812455, "wait_ok_seconds": 296.733932, "wait_lost_seconds": 248.1248, "table_talk": 256, "table_wait": 141},
+  {"hour": 8, "arrived": 50, "served": 48, "lost": 2, "talk_seconds": 10811.265827, "wait_ok_seconds": 573.765093, "wait_lost_seconds": 108.2188, "table_talk": 225, "table_wait": 65},
+  {"hour": 9, "arrived": 64, "served": 63, "lost": 1, "talk_seconds": 15014.546602, "wait_ok_seconds": 358.578046, "wait_lost_seconds": 31.8437, "table_talk": 238, "table_wait": 36},
+  {"hour": 10, "arrived": 59, "served": 59, "lost": 0, "talk_seconds": 12899.90342, "wait_ok_seconds": 65.000224, "wait_lost_seconds": 0.0, "table_talk": 218, "table_wait": 1},
+  {"hour": 11, "arrived": 96, "served": 96, "lost": 0, "talk_seconds": 21751.859544, "wait_ok_seconds": 224.546787, "wait_lost_seconds": 0.0, "table_talk": 226, "table_wait": 2},
+  {"hour": 12, "arrived": 88, "served": 88, "lost": 0, "talk_seconds": 21061.172021, "wait_ok_seconds": 173.187458, "wait_lost_seconds": 0.0, "table_talk": 239, "table_wait": 1},
+  {"hour": 13, "arrived": 114, "served": 97, "lost": 17, "talk_seconds": 29484.28118, "wait_ok_seconds": 3745.795265, "wait_lost_seconds": 986.1716, "table_talk": 303, "table_wait": 96},
+  {"hour": 14, "arrived": 123, "served": 113, "lost": 10, "talk_seconds": 31811.905947, "wait_ok_seconds": 2991.468405, "wait_lost_seconds": 677.3445, "table_talk": 281, "table_wait": 93},
+  {"hour": 15, "arrived": 180, "served": 63, "lost": 117, "talk_seconds": 28337.530911, "wait_ok_seconds": 8071.469577, "wait_lost_seconds": 14149.32273, "table_talk": 449, "table_wait": 248},
+  {"hour": 16, "arrived": 205, "served": 42, "lost": 163, "talk_seconds": 19540.406356, "wait_ok_seconds": 7131.592767, "wait_lost_seconds": 16045.98963, "table_talk": 465, "table_wait": 267},
+  {"hour": 17, "arrived": 266, "served": 31, "lost": 235, "talk_seconds": 13821.3281, "wait_ok_seconds": 6123.56174, "wait_lost_seconds": 29993.1586, "table_talk": 445, "table_wait": 324},
+  {"hour": 18, "arrived": 209, "served": 51, "lost": 158, "talk_seconds": 25788.252881, "wait_ok_seconds": 11639.12538, "wait_lost_seconds": 19097.07402, "table_talk": 505, "table_wait": 348},
+  {"hour": 19, "arrived": 183, "served": 32, "lost": 151, "talk_seconds": 19215.906254, "wait_ok_seconds": 6937.32843, "wait_lost_seconds": 15689.03963, "table_talk": 600, "table_wait": 319},
+  {"hour": 20, "arrived": 153, "served": 64, "lost": 89, "talk_seconds": 25457.850235, "wait_ok_seconds": 7017.499134, "wait_lost_seconds": 6176.7503, "table_talk": 397, "table_wait": 178},
+  {"hour": 21, "arrived": 84, "served": 68, "lost": 16, "talk_seconds": 23418.718719, "wait_ok_seconds": 1674.062529, "wait_lost_seconds": 592.71864, "table_talk": 344, "table_wait": 61},
+  {"hour": 22, "arrived": 63, "served": 51, "lost": 12, "talk_seconds": 16033.718912, "wait_ok_seconds": 1853.233572, "wait_lost_seconds": 483.79697, "table_talk": 314, "table_wait": 76},
+  {"hour": 23, "arrived": 50, "served": 50, "lost": 0, "talk_seconds": 11205.093922, "wait_ok_seconds": 346.265478, "wait_lost_seconds": 0.0, "table_talk": 224, "table_wait": 6}
+ ]
+}

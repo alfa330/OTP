@@ -159,6 +159,11 @@ const timeStringToMinutes = (value) => {
 
 const safeRatio = (numerator, denominator) => (Number(denominator) > 0 ? Number(numerator || 0) / Number(denominator) : null);
 
+const truncatedRatio = (numerator, denominator) => {
+  const ratio = safeRatio(numerator, denominator);
+  return ratio === null ? null : Math.trunc(ratio);
+};
+
 const calculateForecastMatchPercent = (fact, forecast) => {
   const forecastNumber = Number(forecast || 0);
   if (forecastNumber <= 0) return 0;
@@ -2150,7 +2155,7 @@ const LINE_DIRECTION = {
     loadingText: 'Получаем данные из Oktell...',
     errorText: 'Не удалось получить данные из Oktell',
     detailTitle: 'Детализация звонков',
-    detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только сам разговор с оператором, без IVR и ожидания.',
+    detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — как в Oktell: принятый звонок целиком, с приветствием и очередью.',
     // Без слова «входящих»: этот же текст показывается во вкладке «Операторы · исход».
     emptyText: 'Oktell не вернул звонков за указанный период и окно времени.',
     idleText: 'Отчёт соберётся сам. Чтобы сменить период или окно времени, задайте их сверху и нажмите «Сформировать».',
@@ -2641,8 +2646,9 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
     const arRatio = safeRatio(item.lost, item.arrived);
     // SL: отвеченные за порог ожидания ко ВСЕМ попавшим в очередь (обслуженные + потерянные)
     const slRatio = safeRatio(item.served_sl, item.arrived);
-    const attSeconds = safeRatio(item.talk_seconds, item.served);
-    const waitSeconds = safeRatio(item.wait_ok_seconds, item.served);
+    // Средние — целые секунды усечением, как в отчёте Oktell, с которым сверяет СЗоВ.
+    const attSeconds = truncatedRatio(item.talk_seconds, item.served);
+    const waitSeconds = truncatedRatio(item.wait_ok_seconds, item.served);
     // Оценка водителя после разговора (IVR, 1–5): сумма баллов на число оценок.
     const ratingAvg = safeRatio(item.rating_sum, item.rating_count);
     return (
@@ -2683,13 +2689,13 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
             <th className="px-3 py-2.5 text-right font-semibold">Потеряно</th>
             <th className="px-3 py-2.5 text-right font-semibold">AR</th>
             <th className="px-3 py-2.5 text-right font-semibold">SL</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Средний разговор с оператором, без IVR и очереди">Ср. разговор</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Средняя длина принятого звонка, как в Oktell: приветствие, очередь и разговор">Ср. разговор</th>
             {/* Отчётность СЗоВ ведётся в секундах (задача #298), поэтому рядом с
                 ч:мм:сс — то же среднее целым числом секунд. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Среднее время разговора (ATT) в секундах">Ср. разговор, сек</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Ср. ожидание</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Разговоры с операторами, без IVR и очереди">Время разговора</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Звонки целиком: IVR, ожидание в очереди и разговор">Общее время</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Среднее ожидание в очереди у принятых звонков">Ср. ожидание</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Принятые звонки целиком, как в Oktell: приветствие, очередь и разговор">Время разговора</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Все звонки целиком, вместе с неотвеченными: приветствие, очередь и разговор">Общее время</th>
             <th className="px-3 py-2.5 text-right font-semibold">Сброс на приветствии</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Средний балл 1–5, который водитель ставит в IVR после разговора с оператором. Разговоры без оценки в среднее не входят.">Ср. оценка</th>
           </tr>
@@ -2749,6 +2755,7 @@ const BillingGroupingTable = ({ date, hours, onEditComment }) => {
               <th
                 key={column.key}
                 scope="col"
+                title={column.hint}
                 className={`px-3 py-2.5 align-bottom font-semibold leading-tight ${
                   column.key === 'hour' ? 'text-left' : column.key === 'comment' ? 'min-w-[260px] text-center' : 'text-right'
                 } ${BILLING_GROUPING_SHIFT_KEYS.has(column.key) ? 'bg-sky-50' : 'bg-slate-50'}`}
@@ -3051,7 +3058,7 @@ const BillingDetailTable = ({ rows }) => (
           <th className="px-3 py-2.5 text-left font-semibold">Номер водителя</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Звонки, которые не дошли до очереди после IVR">Сброс на IVR</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Оператор не принял звонок, водитель сбросил">Сброс в очереди/пропущенные</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Разговор с оператором, без IVR и ожидания в очереди">Время разговора</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Принятый звонок целиком, как в Oktell: приветствие, очередь и разговор">Время разговора</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100">
@@ -6119,7 +6126,7 @@ const ResourceFteView = ({
           { key: 'lost', label: 'Потеряно', value: formatInt(billingTotals.lost), tone: Number(billingTotals.lost || 0) > 0 ? 'rose' : 'slate' },
           { key: 'ar', label: 'AR', value: billingArRatio === null ? '—' : formatPercent(billingArRatio, 1), tone: phoneArTone(billingArRatio) },
           { key: 'sl', label: 'SL', value: billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1), hint: `ответ ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingSlRatio) },
-          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: `без IVR и очереди · всего ${formatDurationHms(billingTotals.total_seconds)}` },
+          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: 'как в Oktell: с приветствием и очередью' },
         ];
       }
     }
@@ -8407,7 +8414,7 @@ const ResourceFteView = ({
                       hint={`Ответ за ≤ ${billingSlSeconds} сек от поступивших`}
                       tone={billingSlRatio !== null && billingSlRatio >= 0.8 ? 'emerald' : billingSlRatio !== null && billingSlRatio >= 0.6 ? 'amber' : 'rose'}
                     />
-                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Без IVR и очереди · всего ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
+                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint="Как в Oktell: с приветствием и очередью" tone="slate" />
                   </div>
                 ))}
 

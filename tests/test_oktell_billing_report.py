@@ -9,6 +9,7 @@ bot_schedule2.py через AST и исполняются в изолирова�
 """
 
 import ast
+import json
 import logging
 import re
 import textwrap
@@ -38,6 +39,7 @@ FUNCTION_NAMES = [
     "_oktell_fetch_billing_rows",
     "_oktell_billing_int",
     "_oktell_billing_sec",
+    "_oktell_billing_fraction_sec",
     "_oktell_billing_metrics_row",
     "_oktell_billing_build_report",
     "_oktell_billing_build_hourly_report",
@@ -209,16 +211,17 @@ class SqlBuilderTests(unittest.TestCase):
 
     def test_base_filters_and_sl(self):
         sql = self.ns["_oktell_billing_sql"]("20260701", "20260702", 0, 1439, 25)
-        # «Время разговора» — плечо оператора (ct=5), а НЕ total_length: тот равен
-        # длине всей цепочки вместе с IVR и очередью (проверено на живых данных
-        # 18.09.2026: 2846 из 2846 звонков, разговор 268 с против 404 с).
-        self.assertIn("COALESCE(k.talk_sec, 0) ELSE 0 END) AS talk_seconds", sql)
-        self.assertIn("ConnectionType = 5", sql)
-        self.assertIn("SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec", sql)
-        # окно джойна расширено на сутки назад — звонок мог начаться до полуночи
-        self.assertIn("TimeStart >= '20260630'", sql)
-        # «Общее время» остаётся длиной звонка целиком
-        self.assertIn("THEN t.total_length ELSE 0 END) AS total_seconds", sql)
+        # «Время разговора» — как в отчёте Oktell: принятый звонок целиком (total_length),
+        # с ним СЗоВ и сверяет биллинг (задача #380). Плечо оператора здесь не нужно —
+        # в этот запрос оно больше не ходит.
+        self.assertIn("t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds", sql)
+        self.assertNotIn("TimeAnswer", sql)
+        self.assertNotIn("A_Stat_Connections_1x1", sql)
+        # «Общее время» — все звонки целиком, вместе с неотвеченными
+        self.assertIn("t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds", sql)
+        # ожидание принятых и неотвеченных — из них «Средн. время ожидания» группировки
+        self.assertIn("THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds", sql)
+        self.assertIn("THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds", sql)
         self.assertIn("t.route = 'incoming'", sql)
         self.assertIn("t.taxi_park <> ''", sql)
         self.assertIn("N'Неудачный звонок'", sql)
@@ -231,8 +234,7 @@ class SqlBuilderTests(unittest.TestCase):
 
     def test_park_mode_has_no_line_join(self):
         sql = self.ns["_oktell_billing_sql"]("20260701", "20260702", 0, 1439, 20, "park")
-        # Плечо ct=4 (набранная линия) в этом разрезе не нужно; плечо ct=5 нужно —
-        # из него берётся время разговора.
+        # Плечо ct=4 (набранная линия) в этом разрезе не нужно.
         self.assertNotIn("ConnectionType = 4", sql)
         self.assertNotIn("line_number", sql)
 
@@ -421,7 +423,8 @@ class BuildReportTests(unittest.TestCase):
         # итоги за период по паркам
         parks = {p["park"]: p for p in report["parks"]}
         self.assertEqual(parks["Amanat"]["arrived"], 15)
-        self.assertEqual(parks["Amanat"]["talk_seconds"], 301)  # 200 + round(100.6)
+        # секунды складываются с долями: средние Oktell — усечение дробной суммы
+        self.assertAlmostEqual(parks["Amanat"]["talk_seconds"], 300.6)
         self.assertEqual(report["totals"]["arrived"], 65)
         self.assertEqual(report["totals"]["served_sl"], 40)
 
@@ -1120,11 +1123,19 @@ class GroupingReportTests(unittest.TestCase):
 
     def test_values_follow_the_owner_table(self):
         values = self.ns["_oktell_billing_grouping_values"]
+        # 0 ч 14.09: «Средн. Прод.» 335 = 6044,67 / 18; ожидание 192 = 84 у принятых
+        # (1524,33 / 18) + 108 у неотвеченных (1193,75 / 11), каждое усечено отдельно.
         row = values({"hour": 0, "arrived": 29, "served": 18, "lost": 11,
-                      "talk_seconds": 18 * 335 + 17, "wait_ok_seconds": 18 * 192 + 5,
+                      "talk_seconds": 6044.668419, "wait_ok_seconds": 1524.327603,
+                      "wait_lost_seconds": 1193.7493,
                       "forecast": 3, "planned": 3, "fact": 3, "comment": " СМЗ "})
-        # средние — целые секунды усечением
         self.assertEqual((row["talk"], row["wait"]), (335, 192))
+        # нет неотвеченных — остаётся ожидание принятых; нет принятых — неотвеченных
+        self.assertEqual(values({"hour": 10, "arrived": 59, "served": 59, "lost": 0,
+                                 "wait_ok_seconds": 66.5, "wait_lost_seconds": 0})["wait"], 1)
+        only_lost = values({"hour": 5, "arrived": 2, "served": 0, "lost": 2,
+                            "wait_ok_seconds": 0, "wait_lost_seconds": 101})
+        self.assertEqual((only_lost["talk"], only_lost["wait"]), (None, 50))
         self.assertAlmostEqual(row["ar"], 11 / 29)
         self.assertEqual((row["delta"], row["comment"]), (0, "СМЗ"))
         # разница — факт минус ПРОГНОЗ, а не минус план
@@ -1137,6 +1148,25 @@ class GroupingReportTests(unittest.TestCase):
         self.assertIsNone(empty["wait"])
         self.assertIsNone(empty["delta"])
         self.assertEqual(empty["planned"], 0)
+
+    def test_averages_match_the_szov_table_hour_by_hour(self):
+        """Таблица СЗоВ за 14.09 — по ней сделана «Группировка»; суммы часов взяты из Oktell
+        (задача #380). Ожидание — среднее принятых плюс среднее неотвеченных, «Средн. Прод.» —
+        длина принятого звонка целиком; обе — усечением дробной суммы."""
+        data = json.loads((BOT_PATH.parent / "tests" / "data" / "oktell_grouping_2026_09_14.json")
+                          .read_text(encoding="utf-8"))
+        values = self.ns["_oktell_billing_grouping_values"]
+        metrics_row = self.ns["_oktell_billing_metrics_row"]
+        got = []
+        for hour in data["hours"]:
+            # через разбор строки Oktell: суммы секунд обязаны дойти до среднего с долями
+            raw = {key: str(hour[key]) for key in ("arrived", "served", "talk_seconds",
+                                                    "wait_ok_seconds", "wait_lost_seconds")}
+            row = values({"hour": hour["hour"], **metrics_row(raw)})
+            got.append((hour["hour"], row["talk"], row["wait"]))
+        expected = [(hour["hour"], hour["table_talk"], hour["table_wait"]) for hour in data["hours"]]
+        self.assertEqual(len(expected), 24)
+        self.assertEqual(got, expected)
 
     def test_workbook_matches_the_owner_table(self):
         said = "Во время поступления звонка оператор находился в разговоре"
@@ -1194,7 +1224,7 @@ class GroupingReportTests(unittest.TestCase):
         front = (BOT_PATH.parent / "src" / "components" / "resources" / "billingGrouping.js").read_text(encoding="utf-8")
         block = front[front.index("export const BILLING_GROUPING_COLUMNS = ["):]
         block = block[:block.index("];")]
-        front_columns = re.findall(r"\{ key: '(\w+)', label: '([^']+)' \}", block)
+        front_columns = re.findall(r"\{ key: '(\w+)', label: '([^']+)'(?:, hint: '[^']+')? \}", block)
         back_columns = [(key, title) for key, title, _width in self.ns["_OKTELL_BILLING_GROUPING_COLUMNS"]]
         self.assertEqual(front_columns, back_columns)
         self.assertIn("export const BILLING_GROUPING_AR_ALERT = 0.05;", front)

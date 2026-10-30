@@ -40702,14 +40702,22 @@ def _oktell_billing_minute_filter(minute_from, minute_to, column='t.dt_insert'):
     return ''
 
 
-# --- Чистое время разговора входящего звонка ----------------------------------------------------
+# --- Время разговора входящего звонка -----------------------------------------------------------
 # ⚠️ `Call_Systems_hst.total_length` — это НЕ разговор, а длина всей цепочки: IVR плюс очередь
 # плюс разговор. Проверено 18.09.2026 на 2846 отвеченных звонках за 15–17.09: у 2846 из 2846
 # total_length = плечо «снаружи в IVR» (ct=4) + плечо оператора (ct=5), расхождение ≤ 3 с.
-# За неделю 11–17.09 это давало средний «разговор» 334 с вместо фактических 244 с (+37 %).
-# Разговор оператора с клиентом — это плечо ct=5 от ответа оператора (TimeAnswer) до конца
-# коммутации; переводов может быть несколько, поэтому суммируем все плечи цепочки.
-# Окно по TimeStart расширено на сутки назад: звонок мог начаться до полуночи.
+#
+# Таксопарки, Номера, Детализация и Группировка тем не менее показывают именно total_length:
+# так считает «Время разговора» отчёт Oktell «Статистика входящих», и с ним СЗоВ сверяет биллинг
+# и отчитывается паркам (задача #380, решение владельца 30.10.2026). Сверено на их же таблицах:
+# «Средн. Прод.» почасовой таблицы за 14.09 — 24 часа из 24, ATT образца выгрузки за сентябрь —
+# 507 строк парков из 526. С 18.09 по 30.10 здесь стоял чистый разговор, и цифры были на
+# 40–100 с ниже, чем в Oktell.
+#
+# Чистый разговор — плечо ct=5 от ответа оператора (TimeAnswer) до конца коммутации; переводов
+# может быть несколько, поэтому суммируем все плечи цепочки. Нужен «Операторам»: там ATT — сам
+# разговор, а AHT — звонок целиком (владелец). Окно по TimeStart расширено на сутки назад:
+# звонок мог начаться до полуночи.
 def _oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, chain_expr='t.chainid', alias='k'):
     conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
     return (
@@ -40781,15 +40789,15 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         # числитель SL: отвечены оператором И ждали в очереди не дольше порога (LenQueue — секунды в очереди)
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END) AS served_sl, "
         f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greet_drop, "
-        # Разговор — плечо оператора, без IVR и очереди (см. _oktell_billing_talk_join_sql).
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN {_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds, "
+        # Разговор — как в отчёте Oktell: принятый звонок целиком (см. «Время разговора
+        # входящего звонка» выше).
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds, "
         f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds, "
         f"{rating_select}"
         "FROM oktell.dbo.Call_Systems_hst t "
         f"{line_join}"
-        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact)}"
         f"{rating_join}"
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
@@ -40840,8 +40848,19 @@ def _oktell_billing_sec(value):
         return 0
 
 
+def _oktell_billing_fraction_sec(value):
+    """Сумма секунд с долями: total_length и LenQueue у Oktell дробные, а средние в его отчёте —
+    усечение дробной суммы. Округлённая до целых сумма давала расхождение на секунду в 3 часах
+    из 24 почасовой таблицы СЗоВ за 14.09 (задача #380)."""
+    try:
+        return round(float(value or 0), 6)
+    except Exception:
+        return 0
+
+
 def _oktell_billing_metrics_row(raw):
-    """Сырая строка Oktell -> счётчики биллинга в целых числах; одна на все разрезы."""
+    """Сырая строка Oktell -> счётчики биллинга; одна на все разрезы. Счётчики целые,
+    секунды — с долями (см. _oktell_billing_fraction_sec)."""
     arrived = max(0, _oktell_billing_int(raw.get('arrived')))
     served = max(0, _oktell_billing_int(raw.get('served')))
     return {
@@ -40850,10 +40869,10 @@ def _oktell_billing_metrics_row(raw):
         'lost': max(0, arrived - served),
         'served_sl': max(0, _oktell_billing_int(raw.get('served_sl'))),
         'greet_drop': max(0, _oktell_billing_int(raw.get('greet_drop'))),
-        'talk_seconds': _oktell_billing_sec(raw.get('talk_seconds')),
-        'wait_ok_seconds': _oktell_billing_sec(raw.get('wait_ok_seconds')),
-        'wait_lost_seconds': _oktell_billing_sec(raw.get('wait_lost_seconds')),
-        'total_seconds': _oktell_billing_sec(raw.get('total_seconds')),
+        'talk_seconds': _oktell_billing_fraction_sec(raw.get('talk_seconds')),
+        'wait_ok_seconds': _oktell_billing_fraction_sec(raw.get('wait_ok_seconds')),
+        'wait_lost_seconds': _oktell_billing_fraction_sec(raw.get('wait_lost_seconds')),
+        'total_seconds': _oktell_billing_fraction_sec(raw.get('total_seconds')),
         # Сумма и число оценок, а не готовое среднее: иначе итог за день и за период
         # пришлось бы считать средним средних, и маленький парк весил бы как большой.
         'rating_sum': max(0, _oktell_billing_int(raw.get('rating_sum'))),
@@ -41054,7 +41073,9 @@ def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
         "COALESCE(NULLIF(q.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
         f"CASE WHEN q.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
         f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds, "
+        # Разговор — как в отчёте Oktell, тот же, что у «Таксопарков» (см. «Время разговора
+        # входящего звонка»): сумма по детализации сходится с их итогом.
+        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds, "
         "q.total_count, q.snapshot_id "
         "FROM (SELECT ranked.* FROM (SELECT "
         f"{select_sql}, "
@@ -41064,7 +41085,6 @@ def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
         ") ranked "
         f"WHERE ranked.row_num BETWEEN {row_from} AND {row_to}) q "
         f"{_oktell_billing_detail_line_apply_sql('q', date_from_compact, date_to_excl_compact)}"
-        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, 'q.chain_id')}"
         "ORDER BY q.row_num"
     )
 
@@ -41082,12 +41102,11 @@ def _oktell_billing_detail_export_page_sql(date_from_compact, date_to_excl_compa
         "COALESCE(NULLIF(p.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
         f"CASE WHEN p.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
         f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds "
+        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds "
         f"FROM (SELECT TOP {size} {_oktell_billing_detail_select_sql()} "
         f"{source_sql}"
         "ORDER BY t.Id DESC) p "
         f"{_oktell_billing_detail_line_apply_sql('p', date_from_compact, date_to_excl_compact)}"
-        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, 'p.chain_id')}"
         "ORDER BY p.call_id DESC"
     )
 
@@ -41623,6 +41642,9 @@ def _oktell_billing_export_values(mode, item, label=None, with_dial_wait=False):
 
     arrived = item.get('arrived') or 0
     served = item.get('served') or 0
+    # Средние — целые секунды усечением, как в отчёте Oktell, с которым сверяет СЗоВ (#380).
+    att = None if served <= 0 else int(float(item.get('talk_seconds') or 0) / served)
+    wait_ok = None if served <= 0 else int(float(item.get('wait_ok_seconds') or 0) / served)
     metrics = [
         arrived,
         served,
@@ -41630,9 +41652,9 @@ def _oktell_billing_export_values(mode, item, label=None, with_dial_wait=False):
         _opt(_oktell_billing_ratio(item.get('lost'), arrived)),
         # SL: знаменатель — все попавшие в очередь (обслуженные + потерянные), не только отвеченные
         _opt(_oktell_billing_ratio(item.get('served_sl'), arrived)),
-        _opt(None if served <= 0 else _dur(float(item.get('talk_seconds') or 0) / served)),
-        _opt(None if served <= 0 else int(round(float(item.get('talk_seconds') or 0) / served))),
-        _opt(None if served <= 0 else _dur(float(item.get('wait_ok_seconds') or 0) / served)),
+        _opt(None if att is None else _dur(att)),
+        _opt(att),
+        _opt(None if wait_ok is None else _dur(wait_ok)),
         _dur(item.get('talk_seconds')),
         _dur(item.get('total_seconds')),
         item.get('greet_drop') or 0,
@@ -41669,8 +41691,8 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction=
                      'момент ответа Oktell пишет только в предиктивном режиме обзвона')
     else:
         note = (f'SL — отвечено за ≤ {sl_seconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь. '
-                'Время разговора — только разговор с оператором, без IVR и ожидания; '
-                'звонок целиком — в колонке «Общее время»')
+                'Время разговора — как в Oktell: принятые звонки целиком, с приветствием и очередью; '
+                '«Общее время» — вместе с неотвеченными')
     header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
     header_font = Font(color='FFFFFF', bold=True)
     bold_font = Font(bold=True)
@@ -41795,18 +41817,25 @@ def _oktell_billing_grouping_values(item):
         except (TypeError, ValueError):
             return None
 
+    # Средние — целые секунды усечением, как в отчёте Oktell, таблице СЗоВ и отбивке табло.
+    def _average(total, count):
+        return int(float(total or 0) / count) if count > 0 else None
+
     forecast = _shift(item.get('forecast'))
     fact = _shift(item.get('fact'))
+    wait_ok = _average(item.get('wait_ok_seconds'), served)
+    wait_lost = _average(item.get('wait_lost_seconds'), lost)
     return {
         'hour': _oktell_billing_int(item.get('hour')),
         'arrived': arrived,
         'served': served,
         'lost': lost,
         'ar': (lost / arrived) if arrived > 0 else None,
-        # Средние — целые секунды усечением, как в отчёте владельца и в отбивке табло;
-        # ожидание — у принятых звонков, как «Ср. ожидание» соседних разрезов.
-        'talk': int(float(item.get('talk_seconds') or 0) / served) if served > 0 else None,
-        'wait': int(float(item.get('wait_ok_seconds') or 0) / served) if served > 0 else None,
+        'talk': _average(item.get('talk_seconds'), served),
+        # Ожидание — как в таблице СЗоВ: среднее у принятых ПЛЮС среднее у неотвеченных, каждое
+        # усечено отдельно (две колонки отчёта Oktell). Сверено на их таблице за 14.09: 24 часа
+        # из 24 (задача #380). Нет неотвеченных — остаётся ожидание принятых, и наоборот.
+        'wait': None if wait_ok is None and wait_lost is None else (wait_ok or 0) + (wait_lost or 0),
         'forecast': forecast,
         'planned': _shift(item.get('planned')),
         'fact': fact,
