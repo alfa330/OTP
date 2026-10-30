@@ -252,6 +252,14 @@ def test_card_flow_through_routes(client):
     assert touched.status_code == 201
     # Первое касание в ленте — повторный отклик от второго POST, звонок — последнее.
     assert touched.get_json()['card']['substage'] == 'no_answer' and touched.get_json()['touches'][-1]['kind'] == 'call'
+    # «Позвонить» без исхода — касание ждёт телефонию; недостающее дописывается PATCH.
+    pending = client.post('/api/hiring/cards/%s/touches' % card['id'], json={'kind': 'call'}, headers=as_user(REC1))
+    assert pending.status_code == 201 and pending.get_json()['touches'][-1]['result'] is None
+    touch_id = pending.get_json()['touches'][-1]['id']
+    edited = client.patch('/api/hiring/cards/%s/touches/%s' % (card['id'], touch_id), json={'result': 'dial', 'body': 'договорились'}, headers=as_user(REC1))
+    assert edited.status_code == 200 and edited.get_json()['card']['substage'] == 'dial' and edited.get_json()['touches'][-1]['body'] == 'договорились'
+    assert client.patch('/api/hiring/cards/%s/touches/%s' % (card['id'], touch_id), json={'result': 'maybe'}, headers=as_user(REC1)).status_code == 400
+    assert client.patch('/api/hiring/cards/%s/touches/999999' % card['id'], json={'body': 'x'}, headers=as_user(REC1)).status_code == 404
     assert client.put('/api/hiring/cards/%s/substage' % card['id'], json={'substage': 'whatsapp'}, headers=as_user(REC1)).get_json()['card']['substage'] == 'whatsapp'
     bad = client.post('/api/hiring/cards/%s/move' % card['id'], json={'target': 'invited_office'}, headers=as_user(REC1))
     assert bad.status_code == 409 and bad.get_json()['code'] == 'HIRING_NEED_OFFICE_DATE'

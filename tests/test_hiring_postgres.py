@@ -295,8 +295,11 @@ def test_touches_set_substage_and_suggest_refusal(world):
     card = service.touch(me, card['id'], {'kind': 'call', 'result': 'dial', 'next_contact_at': '2026-10-16T10:00'})
     assert card['substage'] == 'dial' and card['no_answer_streak'] == 0
     assert card['next_contact_at'] == datetime(2026, 10, 16, 10, 0)
+    # Звонок без исхода — ждёт телефонию (владелец 30.10.2026): подстатус и серия не меняются.
+    card = service.touch(me, card['id'], {'kind': 'call'})
+    assert card['substage'] == 'dial' and card['no_answer_streak'] == 0
     with pytest.raises(HiringError):
-        service.touch(me, card['id'], {'kind': 'call'})
+        service.touch(me, card['id'], {'kind': 'call', 'result': 'maybe'})
     with pytest.raises(HiringError):
         service.touch(me, card['id'], {'kind': 'comment', 'body': '  '})
     card = service.set_substage(me, card['id'], 'no_answer')
@@ -788,4 +791,50 @@ def test_binotel_calls_land_in_cards(world):
     assert caught.value.code == 'HIRING_NO_RECORDING'
     with pytest.raises(HiringError) as caught:
         service.recording_url(ctx_of(world, REC2), answered['id'])
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+
+
+def test_pending_call_waits_for_telephony(world):
+    """«Позвонить» без исхода (владелец 30.10.2026: исход подтягивается сам, рекрутер дописывает
+    недостающее): касание ждёт телефонию, вебхук дописывает исход, подстатус и серию недозвонов;
+    без телефонии исход ставят руками; исход из телефонии руками не переписать."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    card = take_and_touch(world, REC1, '8 705 500 00 02')
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (%s, 367, '8503')", (REC1,))
+    clock.now = NOW + timedelta(hours=2)
+    before = service.touch(me, card['id'], {'kind': 'call'})
+    assert before['substage'] == 'dial' and before['no_answer_streak'] == 0      # исхода ещё нет — ничего не решено
+    with world['db']._get_cursor() as cur:
+        pending = queries.card_touches(cur, card['id'])[-1]
+        assert pending['kind'] == 'call' and pending['result'] is None and pending['call_id'] is None
+    # Пока телефония молчит, рекрутер дописывает комментарий и следующий контакт.
+    edited = service.edit_touch(me, card['id'], pending['id'], {'body': 'перезвонить вечером', 'next_contact_at': '2026-10-16T18:00'})
+    assert edited['next_contact_at'] == datetime(2026, 10, 16, 18, 0)
+    # Телефония: не поднял трубку — исход в то же касание, подстатус и серия как у ручной отметки.
+    started = int((clock.now + timedelta(seconds=20)).replace(tzinfo=rules.ALMATY).timestamp())
+    assert service.on_binotel_call(_webhook('p-1', '87055000002', disposition='NOANSWER', billsec=0, line='8503', start=started), matched=False)
+    with world['db']._get_cursor() as cur:
+        filled = next(t for t in queries.card_touches(cur, card['id']) if t['id'] == pending['id'])
+        assert filled['result'] == 'no_answer' and filled['call_id'] and 'перезвонить вечером' in filled['body']
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['substage'] == 'no_answer' and fresh['no_answer_streak'] == 1
+    with pytest.raises(HiringError) as caught:
+        service.edit_touch(me, card['id'], pending['id'], {'result': 'dial'})
+    assert caught.value.code == 'HIRING_TOUCH_FROM_PBX'
+    # Звонок мимо телефонии: исход ставят руками — подстатус и серия считаются.
+    clock.now = NOW + timedelta(hours=3)
+    service.touch(me, card['id'], {'kind': 'call'})
+    with world['db']._get_cursor() as cur:
+        manual = queries.card_touches(cur, card['id'])[-1]
+    after = service.edit_touch(me, card['id'], manual['id'], {'result': 'no_answer'})
+    assert after['substage'] == 'no_answer' and after['no_answer_streak'] == 2
+    after = service.edit_touch(me, card['id'], manual['id'], {'result': 'dial'})
+    assert after['substage'] == 'dial' and after['no_answer_streak'] == 0
+    with pytest.raises(HiringError) as caught:
+        service.edit_touch(me, card['id'], manual['id'], {'result': 'maybe'})
+    assert caught.value.code == 'HIRING_BAD_CALL_RESULT'
+    with pytest.raises(HiringError) as caught:
+        service.edit_touch(ctx_of(world, REC2), card['id'], manual['id'], {'body': 'чужое'})
     assert caught.value.code == 'HIRING_NOT_FOUND'

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ArrowRight, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming, PhoneMissed,
-    PhoneOutgoing, Play, Repeat, UserCog,
+    PhoneOutgoing, Play, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -13,7 +13,7 @@ import {
     codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime, openICorePhoneCall, reasonKindFor, shortTime,
     splitDateTime, todayIso,
 } from './hiringMeta';
-import { DATE_TRIGGER, FIELD, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 
 /*
  * Карточка кандидата (ТЗ 6): одно окно на весь раздел. Внутри — поля по группам ТЗ 6.1,
@@ -36,10 +36,12 @@ const InfoRow = ({ label, children }) => (
 
 const Section = ({ title, right, children }) => (
     <section className="space-y-1.5">
-        <div className="flex items-end justify-between gap-2">
-            <div className={iosGroupLabel}>{title}</div>
-            {right}
-        </div>
+        {(title || right) && (
+            <div className="flex items-end justify-between gap-2">
+                <div className={iosGroupLabel}>{title}</div>
+                {right}
+            </div>
+        )}
         <div className="rounded-2xl bg-slate-50 px-4 py-2 ring-1 ring-slate-200/60">{children}</div>
     </section>
 );
@@ -189,52 +191,90 @@ const MoveDialog = ({ open, onClose, card, target, boot, caps, api, toast, onDon
     );
 };
 
-/* Результат звонка — сразу после нажатия «Позвонить» (ТЗ 5.4: подстатус ставится сам). */
-const CallDialog = ({ open, onClose, api, toast, card, onDone }) => {
-    const [result, setResult] = useState('dial');
+/* Панель звонка в ленте касаний — после «Позвонить» (владелец 30.10.2026: исход подтягивается из
+   телефонии сам, рекрутер дописывает недостающее). Пока телефония молчит, касание «ждёт исход»;
+   здесь — комментарий, следующий контакт и, если звонок прошёл мимо телефонии, исход руками. */
+const CallPanel = ({ touch, call, api, toast, card, onDone, onClose }) => {
     const [comment, setComment] = useState('');
     const [next, setNext] = useState({ date: '', time: '10:00' });
     const [saving, setSaving] = useState(false);
-    useEffect(() => { if (open) { setResult('dial'); setComment(''); setNext({ date: '', time: '10:00' }); } }, [open]);
-    const submit = async () => {
+    const waiting = !touch.call_id && !touch.result;
+    // Исход ждём из телефонии; ручной выбор показывается, только если за 45 секунд ничего не пришло
+    // (рекрутер не на линии удалённого КЦ или звонок не прошёл).
+    const [showManual, setShowManual] = useState(false);
+    useEffect(() => {
+        if (!waiting) return undefined;
+        const timer = setTimeout(() => setShowManual(true), 45000);
+        return () => clearTimeout(timer);
+    }, [waiting]);
+    const patch = async (payload, closeAfter) => {
         setSaving(true);
         try {
-            await api.post(`/cards/${card.id}/touches`, { kind: 'call', result, body: comment || null,
-                next_contact_at: next.date ? joinDateTime(next.date, next.time) : undefined });
+            await api.patch(`/cards/${card.id}/touches/${touch.id}`, payload);
             onDone();
-            onClose();
+            if (closeAfter) onClose();
         } catch (error) {
-            toast(errorOf(error, 'Звонок не записан'), 'error');
+            toast(errorOf(error, 'Не сохранилось'), 'error');
         } finally {
             setSaving(false);
         }
     };
+    const save = () => {
+        const payload = {};
+        // У звонка из телефонии первая строка тела — его исход; комментарий дописывается под ней.
+        if (comment.trim()) payload.body = touch.call_id && touch.body ? `${touch.body.split('\n')[0]}\n${comment.trim()}` : comment.trim();
+        if (next.date) payload.next_contact_at = joinDateTime(next.date, next.time);
+        if (!Object.keys(payload).length) { onClose(); return; }
+        patch(payload, true);
+    };
+    const result = call ? (call.result || 'other') : null;
     return (
-        <IosModal open={open} onClose={onClose} title="Результат звонка" subtitle="Подстатус «Дозвон» или «Недозвон» поставится сам"
-                  footer={(
-                      <div className="flex justify-end gap-2">
-                          <button type="button" className={iosBtnSecondary} onClick={onClose}>Не записывать</button>
-                          <button type="button" className={iosBtnPrimary} onClick={submit} disabled={saving}>Записать</button>
-                      </div>
-                  )}>
-            <div className="space-y-3">
-                <IosSegmented stretch value={result} onChange={setResult} ariaLabel="Результат"
-                              options={[{ value: 'dial', label: 'Дозвон' }, { value: 'no_answer', label: 'Недозвон' }]} />
+        <div className="mb-3 rounded-2xl bg-white p-3 ring-1 ring-blue-200">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
+                <Phone size={14} className="text-slate-500" />
+                <span className="font-medium text-slate-900">{call ? CALL_DIRECTION_LABELS[call.direction] || 'Звонок' : 'Звонок'}</span>
+                {waiting ? (
+                    <span className="inline-flex items-center gap-1.5 text-slate-500"><Loader2 size={13} className="animate-spin" /> ждём исход из телефонии</span>
+                ) : call ? (
+                    <>
+                        <Pill tone={CALL_RESULT_TONES[result]}>{CALL_RESULT_LABELS[result] || result}</Pill>
+                        {call.billsec > 0 && <span className="tabular-nums text-slate-500">{fmtDuration(call.billsec)}</span>}
+                    </>
+                ) : (
+                    <Pill tone={touch.result === 'dial' ? 'green' : 'amber'}>{SUBSTAGE_LABELS[touch.result]}</Pill>
+                )}
+                <button type="button" className={`${ICON_BTN} ml-auto`} aria-label="Закрыть" onClick={onClose}><X size={14} /></button>
+            </div>
+            <div className="mt-2 space-y-3">
                 <div>
                     <Label>Комментарий</Label>
-                    <textarea className={`${FIELD} min-h-[64px]`} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="О чём договорились" />
+                    <input className={FIELD} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="О чём договорились"
+                           onKeyDown={(e) => { if (e.key === 'Enter') save(); }} />
                 </div>
                 <div>
                     <Label hint="Наступит дата — напомним в колоколе и покажем в задачах на сегодня.">Следующий контакт</Label>
-                    <div className="mb-2 flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                         {[['Завтра', 1], ['Через 3 дня', 3], ['Через неделю', 7]].map(([label, days]) => (
                             <button key={label} type="button" className={TOOLBAR_BTN} onClick={() => setNext((n) => ({ ...n, date: addDays(todayIso(), days) }))}>{label}</button>
                         ))}
+                        <div className="w-full sm:w-72">
+                            <DateTimeField date={next.date} time={next.time} onDate={(v) => setNext((n) => ({ ...n, date: v }))} onTime={(v) => setNext((n) => ({ ...n, time: v }))} />
+                        </div>
                     </div>
-                    <DateTimeField date={next.date} time={next.time} onDate={(v) => setNext((n) => ({ ...n, date: v }))} onTime={(v) => setNext((n) => ({ ...n, time: v }))} />
                 </div>
+                {waiting && showManual && (
+                    <div>
+                        <Label hint="Исход и длительность приходят из телефонии сами, если рекрутер посажен на линию удалённого КЦ. Звонок прошёл мимо неё — отметьте исход здесь.">Если телефония не увидела звонок</Label>
+                        <IosSegmented value="" onChange={(value) => patch({ result: value }, false)} ariaLabel="Исход звонка" size="xs"
+                                      options={[{ value: 'dial', label: 'Дозвон' }, { value: 'no_answer', label: 'Недозвон' }]} />
+                    </div>
+                )}
             </div>
-        </IosModal>
+            <div className="mt-3 flex justify-end gap-2">
+                <button type="button" className={iosBtnSecondary} onClick={onClose} disabled={saving}>Закрыть</button>
+                <button type="button" className={iosBtnPrimary} onClick={save} disabled={saving}>Сохранить</button>
+            </div>
+        </div>
     );
 };
 
@@ -390,12 +430,11 @@ const CallRow = ({ item, call, api }) => {
 };
 
 /* Значок события ленты — серый, чтобы лента читалась с одного взгляда: звонок (и куда он
-   прошёл), переписка, комментарий, повторный отклик, переход этапа. Цвет остаётся за исходом. */
+   прошёл), переписка, комментарий, повторный отклик. Цвет остаётся за исходом. */
 const timelineIcon = (item, call) => {
-    if (item.kind === 'stage') return ArrowRight;
     if (item.kind === 'call') {
         if (call) return call.direction === 'in' ? PhoneIncoming : (call.result === 'answered' ? PhoneOutgoing : PhoneMissed);
-        return item.result === 'dial' ? PhoneOutgoing : PhoneMissed;
+        return item.result === 'no_answer' ? PhoneMissed : PhoneOutgoing;
     }
     if (item.kind === 'whatsapp') return MessageCircle;
     if (item.kind === 'comment') return MessageSquareText;
@@ -403,62 +442,102 @@ const timelineIcon = (item, call) => {
     return Info;
 };
 
-const Timeline = ({ touches, stages, calls = [], api }) => {
+const SMALL_BTN = 'inline-flex h-7 items-center rounded-lg bg-white px-2.5 text-[12px] font-medium text-slate-700 ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.98]';
+
+/* Лента касаний: свежие сверху. Звонок без исхода ждёт телефонию; если звонок прошёл мимо неё,
+   закреплённый рекрутер ставит исход прямо в строке. */
+const Timeline = ({ touches, calls = [], api, canEdit, onSetResult }) => {
     const callsByTouch = useMemo(() => Object.fromEntries(calls.filter((c) => c.touch_id).map((c) => [c.touch_id, c])), [calls]);
-    const items = useMemo(() => {
-        const rows = [
-            ...touches.map((t) => ({ key: `t${t.id}`, id: t.id, at: t.at, kind: t.kind, result: t.result, body: t.body, author: t.author_name, order: 1 })),
-            ...stages.map((s) => ({ key: `s${s.id}`, at: s.entered_at, kind: 'stage', stage: s.stage, substage: s.substage, author: s.by_user_name, order: 0 })),
-        ];
-        return rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.order - a.order));
-    }, [touches, stages]);
+    const items = useMemo(() => [...touches].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.id - a.id)), [touches]);
     if (!items.length) return <div className="py-4 text-center text-[12.5px] text-slate-500">Касаний пока нет</div>;
     return (
         <ul className="divide-y divide-slate-200/70">
             {items.map((item) => {
-                const Icon = timelineIcon(item, item.kind === 'call' ? callsByTouch[item.id] : null);
+                const call = item.kind === 'call' ? callsByTouch[item.id] : null;
+                const pending = item.kind === 'call' && !call && !item.result;
+                const Icon = timelineIcon(item, call);
                 return (
-                <li key={item.key} className="flex gap-3 py-2">
-                    <span className="w-[88px] shrink-0 text-[12px] tabular-nums text-slate-400">{shortTime(item.at)}</span>
-                    <span className="mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full bg-white text-slate-400 ring-1 ring-slate-200/70">
-                        <Icon size={11} strokeWidth={2.25} />
-                    </span>
-                    <div className="min-w-0 grow">
-                        {item.kind === 'stage' ? (
-                            <div className="text-[13px] text-slate-700">
-                                <span className="font-medium">{STAGE_LABELS[item.stage]}</span>
-                                {item.substage ? ` · ${SUBSTAGE_LABELS[item.substage]}` : ''}
-                                {item.author ? <span className="text-slate-400"> · {item.author}</span> : null}
-                            </div>
-                        ) : item.kind === 'call' && callsByTouch[item.id] ? (
-                            <CallRow item={item} call={callsByTouch[item.id]} api={api} />
-                        ) : (
-                            <div className="text-[13px] text-slate-800">
-                                <span className="font-medium">{TOUCH_LABELS[item.kind] || item.kind}</span>
-                                {item.kind === 'call' && item.result ? <Pill tone={item.result === 'dial' ? 'green' : 'amber'} className="ml-1.5">{SUBSTAGE_LABELS[item.result]}</Pill> : null}
-                                {item.author ? <span className="text-slate-400"> · {item.author}</span> : null}
-                                {item.body && <div className="whitespace-pre-wrap text-slate-600">{item.body}</div>}
-                            </div>
-                        )}
-                    </div>
-                </li>
+                    <li key={item.id} className="flex gap-3 py-2">
+                        <span className="w-[88px] shrink-0 text-[12px] tabular-nums text-slate-400">{shortTime(item.at)}</span>
+                        <span className="mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full bg-white text-slate-400 ring-1 ring-slate-200/70">
+                            <Icon size={11} strokeWidth={2.25} />
+                        </span>
+                        <div className="min-w-0 grow">
+                            {call ? <CallRow item={item} call={call} api={api} /> : (
+                                <div className="text-[13px] text-slate-800">
+                                    <span className="font-medium">{TOUCH_LABELS[item.kind] || item.kind}</span>
+                                    {item.kind === 'call' && item.result ? <Pill tone={item.result === 'dial' ? 'green' : 'amber'} className="ml-1.5">{SUBSTAGE_LABELS[item.result]}</Pill> : null}
+                                    {pending && <Pill className="ml-1.5">ждём исход из телефонии</Pill>}
+                                    {item.author_name ? <span className="text-slate-400"> · {item.author_name}</span> : null}
+                                    {item.body && <div className="whitespace-pre-wrap text-slate-600">{item.body}</div>}
+                                    {pending && canEdit && (
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px] text-slate-500">
+                                            <span>Звонок прошёл мимо телефонии — исход:</span>
+                                            <button type="button" className={SMALL_BTN} onClick={() => onSetResult(item.id, 'dial')}>Дозвон</button>
+                                            <button type="button" className={SMALL_BTN} onClick={() => onSetResult(item.id, 'no_answer')}>Недозвон</button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </li>
                 );
             })}
         </ul>
     );
 };
 
+/* Вкладка «История»: входы в этапы и закрепления — то, что в ленте касаний только мешало бы. */
+const StageHistory = ({ stages, assignments }) => (
+    <div className="grid gap-4 md:grid-cols-2">
+        <Section title="Этапы">
+            {stages.length === 0 ? <div className="py-3 text-center text-[12.5px] text-slate-500">Переходов ещё не было</div> : (
+                <ul className="divide-y divide-slate-200/70">
+                    {[...stages].reverse().map((row) => (
+                        <li key={row.id} className="flex gap-3 py-2 text-[13px]">
+                            <span className="w-[88px] shrink-0 text-[12px] tabular-nums text-slate-400">{shortTime(row.entered_at)}</span>
+                            <div className="min-w-0 text-slate-700">
+                                <span className="font-medium">{STAGE_LABELS[row.stage]}</span>
+                                {row.substage ? ` · ${SUBSTAGE_LABELS[row.substage]}` : ''}
+                                {row.by_user_name ? <span className="text-slate-400"> · {row.by_user_name}</span> : null}
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </Section>
+        <Section title="Закрепления">
+            {assignments.length === 0 ? <div className="py-3 text-center text-[12.5px] text-slate-500">Карточку ещё не брали в работу</div> : (
+                <ul className="divide-y divide-slate-200/70">
+                    {[...assignments].reverse().map((row) => (
+                        <li key={row.id} className="flex gap-3 py-2 text-[13px]">
+                            <span className="w-[88px] shrink-0 text-[12px] tabular-nums text-slate-400">{shortTime(row.assigned_at)}</span>
+                            <div className="min-w-0 text-slate-700">
+                                <span className="font-medium">{ASSIGNMENT_LABELS[row.reason] || row.reason}</span>
+                                {row.recruiter_name ? ` · ${row.recruiter_name}` : ''}
+                                {row.comment ? <div className="text-slate-500">{row.comment}</div> : null}
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </Section>
+    </div>
+);
+
 const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
+    const [tab, setTab] = useState('card');
     const [move, setMove] = useState(null);
-    const [calling, setCalling] = useState(false);
     const [editing, setEditing] = useState(false);
     const [reassigning, setReassigning] = useState(false);
     const [cancelling, setCancelling] = useState(false);
     const [comment, setComment] = useState('');
     const [savingComment, setSavingComment] = useState(false);
     const [shiftDate, setShiftDate] = useState(todayIso);
+    // Касание звонка, с которым рекрутер работает сейчас (панель в ленте).
+    const [activeCallId, setActiveCallId] = useState(null);
 
     const load = useCallback(() => {
         if (!cardId) return undefined;
@@ -468,27 +547,24 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
     }, [api, cardId]);
 
     useEffect(() => {
-        // Новая карточка — чистое окно: черновик комментария, дата смены и открытые диалоги прошлой
-        // карточки не должны переехать в следующую (окно смонтировано всегда).
+        // Новая карточка — чистое окно: вкладка, черновик комментария, дата смены и открытые диалоги
+        // прошлой карточки не должны переехать в следующую (окно смонтировано всегда).
         setData(null);
         setError('');
+        setTab('card');
         setMove(null);
         setComment('');
         setShiftDate(todayIso());
         setEditing(false);
-        setCalling(false);
         setReassigning(false);
         setCancelling(false);
+        setActiveCallId(null);
         if (cardId) load();
     }, [cardId, load]);
 
     useEffect(() => {
         if (initialMove && data?.card) { setMove(initialMove); onMoveConsumed?.(); }
     }, [initialMove, data?.card, onMoveConsumed]);
-    // «Позвонить» со стола или с доски: звонок уже ушёл, здесь — сразу окно результата.
-    useEffect(() => {
-        if (initialCall && data?.card) { setCalling(true); onCallConsumed?.(); }
-    }, [initialCall, data?.card, onCallConsumed]);
 
     const changed = useCallback(() => { load(); onChanged(); }, [load, onChanged]);
 
@@ -507,19 +583,49 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
     };
     const targets = card ? (card.targets || []).filter(canMoveTo) : [];
 
+    // Сам вызов уже ушёл в iCore Phone (кнопкой здесь или со стола/доски). В ленте появляется касание
+    // «ждём исход из телефонии», а панель над лентой — для комментария и следующего контакта.
+    const startCall = useCallback(async () => {
+        if (!card) return;
+        try {
+            const { data: payload } = await api.post(`/cards/${card.id}/touches`, { kind: 'call' });
+            const mine = [...(payload.touches || [])].reverse().find((t) => t.kind === 'call' && !t.result && !t.call_id);
+            setActiveCallId(mine?.id || null);
+            setTab('touches');
+            changed();
+        } catch (requestError) {
+            toast(errorOf(requestError, 'Звонок не записан'), 'error');
+        }
+    }, [api, card, changed, toast]);
+    useEffect(() => {
+        if (initialCall && data?.card) { onCallConsumed?.(); startCall(); }
+    }, [initialCall, data?.card, onCallConsumed, startCall]);
+
+    const activeTouch = useMemo(() => (data?.touches || []).find((t) => t.id === activeCallId) || null, [data, activeCallId]);
+    const activeCall = useMemo(() => (activeTouch?.call_id ? (data?.calls || []).find((c) => c.id === activeTouch.call_id) || null : null), [data, activeTouch]);
+    const waitingTelephony = Boolean(activeTouch && !activeTouch.call_id && !activeTouch.result);
+    // Пока ждём исход, карточка перечитывается раз в восемь секунд — не дольше пятнадцати минут.
+    useEffect(() => {
+        if (!waitingTelephony) return undefined;
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            if (Date.now() - startedAt > 15 * 60 * 1000) { clearInterval(timer); return; }
+            load();
+        }, 8000);
+        return () => clearInterval(timer);
+    }, [waitingTelephony, load]);
+
     const call = () => {
         if (!card?.phone) return;
-        // Звонок уходит в iCore Phone на этом компьютере (icore-phone:call?number=…): телефон должен
-        // быть запущен, вход выполнен, рекрутер — на линии. Браузер результата не сообщает — после
-        // клика подсказка и окно результата звонка.
+        // Внешнюю схему браузер пускает только из обработчика клика; телефон должен быть запущен,
+        // вход выполнен, рекрутер — на линии. Исход звонка придёт из телефонии сам.
         try {
             openICorePhoneCall(card.phone);
-            toast('Звонок передан в iCore Phone. Если ничего не произошло — проверьте, что телефон запущен и вход выполнен', 'info');
-        } catch (error) {
-            toast(error.message || 'Номер для звонка не разобран', 'error');
+        } catch (requestError) {
+            toast(requestError.message || 'Номер для звонка не разобран', 'error');
             return;
         }
-        setCalling(true);
+        startCall();
     };
     const whatsapp = async () => {
         if (!card?.whatsapp_link) return;
@@ -542,6 +648,14 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             toast(errorOf(requestError, 'Комментарий не записан'), 'error');
         } finally {
             setSavingComment(false);
+        }
+    };
+    const setResult = async (touchId, result) => {
+        try {
+            await api.patch(`/cards/${card.id}/touches/${touchId}`, { result });
+            changed();
+        } catch (requestError) {
+            toast(errorOf(requestError, 'Исход не записан'), 'error');
         }
     };
     const setSubstage = async (substage) => {
@@ -586,10 +700,20 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
         card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') : '';
     const substages = card ? (boot.meta.substages[card.stage] || []) : [];
     const shiftsDone = data?.shifts?.length || 0;
+    const touchCount = (data?.touches || []).length;
+    const showHire = Boolean(card && (card.stage === 'on_line' || data?.motivation));
+    // Вкладки карточки (владелец 30.10.2026: карточка перегружена — поделить хотя бы на табы).
+    const tabs = card ? [
+        { value: 'card', label: 'Карточка' },
+        { value: 'touches', label: touchCount ? `Касания · ${touchCount}` : 'Касания' },
+        ...(showHire ? [{ value: 'hire', label: 'Смены и мотивация' }] : []),
+        { value: 'history', label: 'История' },
+    ] : [];
+    const activeTab = tabs.some((item) => item.value === tab) ? tab : 'card';
 
     return (
         <>
-            <IosModal open={open} onClose={onClose} title={title} subtitle={subtitle} maxWidth="max-w-3xl" sizeKey={card ? 'ready' : 'loading'}
+            <IosModal open={open} onClose={onClose} title={title} subtitle={subtitle} maxWidth="max-w-3xl" sizeKey={card ? `ready-${activeTab}` : 'loading'}
                       headerActions={card && isOwnerOrLead && !card.is_closed ? (
                           <button type="button" className={TOOLBAR_BTN} onClick={() => setEditing(true)}><Pencil size={14} /> Изменить</button>
                       ) : null}>
@@ -597,7 +721,7 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                 {!card && !error && <Loading text="Открываем карточку…" />}
                 {card && (
                     <div className="space-y-4">
-                        {/* Этап и действия. */}
+                        {/* Этап и действия — всегда на виду, над вкладками. */}
                         <div className="flex flex-wrap items-center gap-2">
                             <Pill tone={STAGE_TONES[card.stage]} className="text-[13px]">{STAGE_LABELS[card.stage]}</Pill>
                             {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
@@ -619,140 +743,144 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                             </div>
                         </div>
 
-                        {targets.length > 0 && (
-                            <div className="flex flex-wrap items-center gap-1.5">
-                                {/* Шаги вперёд — первыми, завершения («Отказ», «Отсев») — в конце и красным контуром. */}
-                                {[...targets].sort((a, b) => Number(FINAL_STAGES.includes(a) && a !== 'hired') - Number(FINAL_STAGES.includes(b) && b !== 'hired')).map((target) => (
-                                    <button key={target} type="button" onClick={() => setMove(target)}
-                                            className={`inline-flex h-8 items-center gap-1 rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
-                                                FINAL_STAGES.includes(target) && target !== 'hired' ? 'bg-white text-rose-700 ring-rose-200 hover:bg-rose-50'
-                                                    : target === 'hired' ? 'bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-700'
-                                                        : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'}`}>
-                                        <ArrowRight size={13} className="opacity-60" /> {STAGE_LABELS[target]}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
+                        <IosSegmented value={activeTab} onChange={setTab} options={tabs} ariaLabel="Раздел карточки" />
 
-                        {substages.length > 0 && isOwnerOrLead && !card.is_closed && (
-                            <IosSegmented value={card.substage || ''} onChange={setSubstage} ariaLabel="Подстатус" size="xs"
-                                          options={substages.map((item) => ({ value: item.code, label: item.label }))} />
-                        )}
-
-                        <div className="grid gap-4 md:grid-cols-2">
-                            <Section title="Основное">
-                                <InfoRow label="Телефон">
-                                    {card.phone_hidden ? <span className="text-slate-400">скрыт до взятия в работу</span>
-                                        : card.phone ? <span className="tabular-nums">{card.phone_pretty || card.phone}</span> : '—'}
-                                </InfoRow>
-                                {card.whatsapp && card.whatsapp !== card.phone && <InfoRow label="WhatsApp"><span className="tabular-nums">{card.whatsapp}</span></InfoRow>}
-                                <InfoRow label="Город">{card.city}</InfoRow>
-                                <InfoRow label="Вакансия">{card.vacancy_name || card.vacancy_text}</InfoRow>
-                                <InfoRow label="Тип">{card.kind === 'contact' ? 'Контакт' : 'Отклик'}</InfoRow>
-                                <InfoRow label="Источник">{card.source_name}{card.batch_file ? ` · ${card.batch_file}` : ''}</InfoRow>
-                                {card.campaign && <InfoRow label="Кампания">{card.campaign}</InfoRow>}
-                                {card.referred_by && <InfoRow label="Кто привёл">{card.referred_by}</InfoRow>}
-                                <InfoRow label="Поступил">{longTime(card.received_at)}</InfoRow>
-                                {card.platform_ref && /^https?:/.test(card.platform_ref) && (
-                                    <InfoRow label="Площадка">
-                                        <a href={card.platform_ref} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">
-                                            открыть <ExternalLink size={12} />
-                                        </a>
-                                    </InfoRow>
-                                )}
-                                {data.repeat_of && (
-                                    <InfoRow label="Прошлая карточка">
-                                        №{data.repeat_of.candidate_no || data.repeat_of.id} · {STAGE_LABELS[data.repeat_of.stage]}
-                                        {data.repeat_of.close_reason_text ? ` · ${data.repeat_of.close_reason_text}` : ''}
-                                    </InfoRow>
-                                )}
-                                {card.comment && <div className="whitespace-pre-wrap py-1.5 text-[13px] text-slate-700">{card.comment}</div>}
-                            </Section>
-
-                            <Section title="Закрепление и воронка">
-                                <InfoRow label="Рекрутер">{card.recruiter_name || <span className="text-slate-400">в общем пуле</span>}</InfoRow>
-                                {card.taken_at && <InfoRow label="В работе с">{longTime(card.taken_at)}</InfoRow>}
-                                {card.next_contact_at && !card.is_closed && <InfoRow label="Следующий контакт">{longTime(card.next_contact_at)}</InfoRow>}
-                                {card.office_visit_at && <InfoRow label="Визит в офис">{longTime(card.office_visit_at)}</InfoRow>}
-                                {card.group_name && <InfoRow label="Группа">{card.group_name}{card.group_start_date ? ` · с ${fullDate(card.group_start_date)}` : ''}</InfoRow>}
-                                {card.training_started_at && <InfoRow label="Вышел на обучение">{fullDate(card.training_started_at)}</InfoRow>}
-                                {card.line_started_at && <InfoRow label="Вышел на линию">{fullDate(card.line_started_at)}</InfoRow>}
-                                {card.hired_at && <InfoRow label="7 смен подтверждены">{longTime(card.hired_at)}</InfoRow>}
-                                {card.is_closed && card.stage !== 'hired' && (
-                                    <>
-                                        <InfoRow label={card.stage === 'refused' ? 'Отказ' : 'Отсев'}>
-                                            {SUBSTAGE_LABELS[card.close_initiator]} · {card.close_reason_text}
-                                            {card.close_stage ? ` · ${card.close_stage === 'line' ? 'линия' : 'обучение'}, день ${card.close_day}` : ''}
-                                        </InfoRow>
-                                        {card.close_comment && <div className="whitespace-pre-wrap py-1 text-[13px] text-slate-700">{card.close_comment}</div>}
-                                    </>
-                                )}
-                                {data.assignments?.length > 1 && (
-                                    <details className="py-1.5 text-[12.5px] text-slate-600">
-                                        <summary className="cursor-pointer select-none text-slate-500">История закреплений · {data.assignments.length}</summary>
-                                        <ul className="mt-1 space-y-0.5">
-                                            {data.assignments.map((row) => (
-                                                <li key={row.id} className="flex justify-between gap-2">
-                                                    <span>{ASSIGNMENT_LABELS[row.reason] || row.reason}{row.recruiter_name ? ` · ${row.recruiter_name}` : ''}{row.comment ? ` — ${row.comment}` : ''}</span>
-                                                    <span className="shrink-0 tabular-nums text-slate-400">{shortTime(row.assigned_at)}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </details>
-                                )}
-                            </Section>
-                        </div>
-
-                        {/* Смены на линии (ТЗ 7.2): отмечает руководитель отдела, куда был найм. */}
-                        {card.stage === 'on_line' && (
-                            <Section title={`Смены на линии · ${shiftsDone} из ${boot.meta.shifts_to_hire}`}>
-                                <div className="flex flex-wrap items-center gap-2 py-1">
-                                    {(data.shifts || []).map((shift) => <Pill key={shift.shift_date} tone="green">{fullDate(shift.shift_date)}</Pill>)}
-                                    {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока не отмечено</span>}
-                                </div>
-                                {actor.includes('dept_head') && (
-                                    <div className="flex flex-wrap items-center gap-2 py-1.5">
-                                        <div className="w-44"><IosDatePicker value={shiftDate} onChange={setShiftDate} max={todayIso()} triggerClassName={DATE_TRIGGER} ariaLabel="Дата смены" /></div>
-                                        <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(false)}>Отметить смену</button>
-                                        {(data.shifts || []).some((s) => s.shift_date === shiftDate) && (
-                                            <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(true)}>Снять отметку</button>
-                                        )}
-                                        {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
-                                            <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
-                                        )}
+                        {activeTab === 'card' && (
+                            <>
+                                {targets.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        {/* Шаги вперёд — первыми, завершения («Отказ», «Отсев») — в конце и красным контуром. */}
+                                        {[...targets].sort((a, b) => Number(FINAL_STAGES.includes(a) && a !== 'hired') - Number(FINAL_STAGES.includes(b) && b !== 'hired')).map((target) => (
+                                            <button key={target} type="button" onClick={() => setMove(target)}
+                                                    className={`inline-flex h-8 items-center gap-1 rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
+                                                        FINAL_STAGES.includes(target) && target !== 'hired' ? 'bg-white text-rose-700 ring-rose-200 hover:bg-rose-50'
+                                                            : target === 'hired' ? 'bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-700'
+                                                                : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'}`}>
+                                                <ArrowRight size={13} className="opacity-60" /> {STAGE_LABELS[target]}
+                                            </button>
+                                        ))}
                                     </div>
                                 )}
-                            </Section>
-                        )}
 
-                        {data.motivation && (
-                            <Section title="Мотивация" right={caps.manage && data.motivation.status === 'counted' ? (
-                                <div className="flex gap-1.5">
-                                    <button type="button" className={TOOLBAR_BTN} onClick={() => motivation('paid').catch(() => {})}>Выплачено</button>
-                                    <button type="button" className={TOOLBAR_BTN} onClick={() => setCancelling(true)}>Отменить</button>
+                                {substages.length > 0 && isOwnerOrLead && !card.is_closed && (
+                                    <IosSegmented value={card.substage || ''} onChange={setSubstage} ariaLabel="Подстатус" size="xs"
+                                                  options={substages.map((item) => ({ value: item.code, label: item.label }))} />
+                                )}
+
+                                <div className="grid gap-4 md:grid-cols-2">
+                                    <Section title="Основное">
+                                        <InfoRow label="Телефон">
+                                            {card.phone_hidden ? <span className="text-slate-400">скрыт до взятия в работу</span>
+                                                : card.phone ? <span className="tabular-nums">{card.phone_pretty || card.phone}</span> : '—'}
+                                        </InfoRow>
+                                        {card.whatsapp && card.whatsapp !== card.phone && <InfoRow label="WhatsApp"><span className="tabular-nums">{card.whatsapp}</span></InfoRow>}
+                                        <InfoRow label="Город">{card.city}</InfoRow>
+                                        <InfoRow label="Вакансия">{card.vacancy_name || card.vacancy_text}</InfoRow>
+                                        <InfoRow label="Тип">{card.kind === 'contact' ? 'Контакт' : 'Отклик'}</InfoRow>
+                                        <InfoRow label="Источник">{card.source_name}{card.batch_file ? ` · ${card.batch_file}` : ''}</InfoRow>
+                                        {card.campaign && <InfoRow label="Кампания">{card.campaign}</InfoRow>}
+                                        {card.referred_by && <InfoRow label="Кто привёл">{card.referred_by}</InfoRow>}
+                                        <InfoRow label="Поступил">{longTime(card.received_at)}</InfoRow>
+                                        {card.platform_ref && /^https?:/.test(card.platform_ref) && (
+                                            <InfoRow label="Площадка">
+                                                <a href={card.platform_ref} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">
+                                                    открыть <ExternalLink size={12} />
+                                                </a>
+                                            </InfoRow>
+                                        )}
+                                        {data.repeat_of && (
+                                            <InfoRow label="Прошлая карточка">
+                                                №{data.repeat_of.candidate_no || data.repeat_of.id} · {STAGE_LABELS[data.repeat_of.stage]}
+                                                {data.repeat_of.close_reason_text ? ` · ${data.repeat_of.close_reason_text}` : ''}
+                                            </InfoRow>
+                                        )}
+                                        {card.comment && <div className="whitespace-pre-wrap py-1.5 text-[13px] text-slate-700">{card.comment}</div>}
+                                    </Section>
+
+                                    <Section title="Закрепление и воронка">
+                                        <InfoRow label="Рекрутер">{card.recruiter_name || <span className="text-slate-400">в общем пуле</span>}</InfoRow>
+                                        {card.taken_at && <InfoRow label="В работе с">{longTime(card.taken_at)}</InfoRow>}
+                                        {card.next_contact_at && !card.is_closed && <InfoRow label="Следующий контакт">{longTime(card.next_contact_at)}</InfoRow>}
+                                        {card.office_visit_at && <InfoRow label="Визит в офис">{longTime(card.office_visit_at)}</InfoRow>}
+                                        {card.group_name && <InfoRow label="Группа">{card.group_name}{card.group_start_date ? ` · с ${fullDate(card.group_start_date)}` : ''}</InfoRow>}
+                                        {card.training_started_at && <InfoRow label="Вышел на обучение">{fullDate(card.training_started_at)}</InfoRow>}
+                                        {card.line_started_at && <InfoRow label="Вышел на линию">{fullDate(card.line_started_at)}</InfoRow>}
+                                        {card.hired_at && <InfoRow label="7 смен подтверждены">{longTime(card.hired_at)}</InfoRow>}
+                                        {card.is_closed && card.stage !== 'hired' && (
+                                            <>
+                                                <InfoRow label={card.stage === 'refused' ? 'Отказ' : 'Отсев'}>
+                                                    {SUBSTAGE_LABELS[card.close_initiator]} · {card.close_reason_text}
+                                                    {card.close_stage ? ` · ${card.close_stage === 'line' ? 'линия' : 'обучение'}, день ${card.close_day}` : ''}
+                                                </InfoRow>
+                                                {card.close_comment && <div className="whitespace-pre-wrap py-1 text-[13px] text-slate-700">{card.close_comment}</div>}
+                                            </>
+                                        )}
+                                    </Section>
                                 </div>
-                            ) : null}>
-                                <InfoRow label="Статус"><Pill tone={MOTIVATION_TONES[data.motivation.status]}>{MOTIVATION_LABELS[data.motivation.status]}</Pill></InfoRow>
-                                <InfoRow label="Рекрутер">{data.motivation.recruiter_name}</InfoRow>
-                                {data.motivation.confirmed_at && <InfoRow label="Подтверждено">{longTime(data.motivation.confirmed_at)}</InfoRow>}
-                                {data.motivation.paid_at && <InfoRow label="Выплачено">{longTime(data.motivation.paid_at)}</InfoRow>}
-                                {data.motivation.cancel_reason && <InfoRow label="Отмена">{data.motivation.cancel_reason}</InfoRow>}
+                            </>
+                        )}
+
+                        {activeTab === 'touches' && (
+                            <Section>
+                                {activeTouch && (
+                                    <CallPanel touch={activeTouch} call={activeCall} api={api} toast={toast} card={card} onDone={changed}
+                                               onClose={() => setActiveCallId(null)} />
+                                )}
+                                <div className="flex gap-2 py-2">
+                                    <input className={FIELD} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий в ленту"
+                                           onKeyDown={(e) => { if (e.key === 'Enter') addComment(); }} />
+                                    <button type="button" className={iosBtnSecondary} onClick={addComment} disabled={savingComment || !comment.trim()}>Записать</button>
+                                </div>
+                                <Timeline touches={data.touches || []} calls={data.calls || []} api={api}
+                                          canEdit={isOwnerOrLead && !card.is_closed} onSetResult={setResult} />
                             </Section>
                         )}
 
-                        <Section title="Касания">
-                            <div className="flex gap-2 py-2">
-                                <input className={FIELD} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий в ленту"
-                                       onKeyDown={(e) => { if (e.key === 'Enter') addComment(); }} />
-                                <button type="button" className={iosBtnSecondary} onClick={addComment} disabled={savingComment || !comment.trim()}>Записать</button>
+                        {activeTab === 'hire' && (
+                            <div className="space-y-4">
+                                {/* Смены на линии (ТЗ 7.2): отмечает руководитель отдела, куда был найм. */}
+                                {card.stage === 'on_line' && (
+                                    <Section title={`Смены на линии · ${shiftsDone} из ${boot.meta.shifts_to_hire}`}>
+                                        <div className="flex flex-wrap items-center gap-2 py-1">
+                                            {(data.shifts || []).map((shift) => <Pill key={shift.shift_date} tone="green">{fullDate(shift.shift_date)}</Pill>)}
+                                            {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока не отмечено</span>}
+                                        </div>
+                                        {actor.includes('dept_head') && (
+                                            <div className="flex flex-wrap items-center gap-2 py-1.5">
+                                                <div className="w-44"><IosDatePicker value={shiftDate} onChange={setShiftDate} max={todayIso()} triggerClassName={DATE_TRIGGER} ariaLabel="Дата смены" /></div>
+                                                <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(false)}>Отметить смену</button>
+                                                {(data.shifts || []).some((s) => s.shift_date === shiftDate) && (
+                                                    <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(true)}>Снять отметку</button>
+                                                )}
+                                                {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
+                                                    <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </Section>
+                                )}
+                                {data.motivation && (
+                                    <Section title="Мотивация" right={caps.manage && data.motivation.status === 'counted' ? (
+                                        <div className="flex gap-1.5">
+                                            <button type="button" className={TOOLBAR_BTN} onClick={() => motivation('paid').catch(() => {})}>Выплачено</button>
+                                            <button type="button" className={TOOLBAR_BTN} onClick={() => setCancelling(true)}>Отменить</button>
+                                        </div>
+                                    ) : null}>
+                                        <InfoRow label="Статус"><Pill tone={MOTIVATION_TONES[data.motivation.status]}>{MOTIVATION_LABELS[data.motivation.status]}</Pill></InfoRow>
+                                        <InfoRow label="Рекрутер">{data.motivation.recruiter_name}</InfoRow>
+                                        {data.motivation.confirmed_at && <InfoRow label="Подтверждено">{longTime(data.motivation.confirmed_at)}</InfoRow>}
+                                        {data.motivation.paid_at && <InfoRow label="Выплачено">{longTime(data.motivation.paid_at)}</InfoRow>}
+                                        {data.motivation.cancel_reason && <InfoRow label="Отмена">{data.motivation.cancel_reason}</InfoRow>}
+                                    </Section>
+                                )}
                             </div>
-                            <Timeline touches={data.touches || []} stages={data.stages || []} calls={data.calls || []} api={api} />
-                        </Section>
+                        )}
+
+                        {activeTab === 'history' && <StageHistory stages={data.stages || []} assignments={data.assignments || []} />}
                     </div>
                 )}
             </IosModal>
             {card && <MoveDialog open={Boolean(move)} onClose={() => setMove(null)} card={card} target={move} boot={boot} caps={caps} api={api} toast={toast} onDone={changed} />}
-            {card && <CallDialog open={calling} onClose={() => setCalling(false)} api={api} toast={toast} card={card} onDone={changed} />}
             {card && <EditDialog open={editing} onClose={() => setEditing(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && <ReassignDialog open={reassigning} onClose={() => setReassigning(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && (

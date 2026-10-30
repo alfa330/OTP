@@ -525,6 +525,14 @@ def add_touch(cursor, card_id, kind, result, body, by, by_name, now, duration_se
     return int(cursor.fetchone()[0])
 
 
+def get_touch(cursor, touch_id):
+    cursor.execute("""
+        SELECT id, card_id, kind, result, body, duration_sec, author_id, author_name, at, meta, call_id
+          FROM hiring_touches WHERE id = %s
+    """, (int(touch_id),))
+    return _parse_json_fields(_one(cursor), 'meta')
+
+
 def card_touches(cursor, card_id):
     cursor.execute("""
         SELECT id, kind, result, body, duration_sec, author_id, author_name, at, meta, call_id FROM hiring_touches

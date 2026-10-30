@@ -170,7 +170,8 @@ export const ICORE_PHONE_FRAME_ID = 'icore-phone-call-frame';
 export const buildICorePhoneUrl = (phone) => {
     const digits = String(phone || '').replace(/\D/g, '');
     if (digits.length < 2 || digits.length > 15) return null;
-    return `icore-phone:call?number=${digits}`;
+    // «+» впереди обязателен: без него линия Binotel номер не набирала (владелец 30.10.2026); в ссылке — %2B.
+    return `icore-phone:call?number=%2B${digits}`;
 };
 
 export const openICorePhoneCall = (phone, doc = typeof document === 'undefined' ? null : document) => {

@@ -14,7 +14,8 @@ Blueprint собирается фабрикой и получает зависи
     GET    /cards/<id>                       карточка целиком (гасит уведомления по ней)
     PATCH  /cards/<id>                       поля карточки
     POST   /cards/<id>/take                  «Взять в работу»
-    POST   /cards/<id>/touches               касание: звонок, WhatsApp, комментарий
+    POST   /cards/<id>/touches               касание: звонок (исход можно не указывать — ждём телефонию), WhatsApp, комментарий
+    PATCH  /cards/<id>/touches/<touch_id>    дописать касание: комментарий, следующий контакт, исход звонка без телефонии
     PUT    /cards/<id>/substage              подстатус «В работе» / «Приглашен в офис»
     POST   /cards/<id>/move                  переход по этапам
     POST   /cards/<id>/reassign              переназначить / вернуть в пул (руководитель)
@@ -360,6 +361,14 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         with db._get_cursor() as cursor:
             touches = queries.card_touches(cursor, card_id)
         return jsonify({'card': public_card(card, ctx), 'touches': _json(touches)}), 201
+
+    @hiring_route('/cards/<int:card_id>/touches/<int:touch_id>', methods=('PATCH',))
+    def hiring_touch_edit(card_id, touch_id, ctx):
+        """Дописать касание: комментарий, следующий контакт, исход звонка, которого телефония не видела."""
+        card = service.edit_touch(ctx, card_id, touch_id, _body())
+        with db._get_cursor() as cursor:
+            touches = queries.card_touches(cursor, card_id)
+        return jsonify({'card': public_card(card, ctx), 'touches': _json(touches)})
 
     @hiring_route('/cards/<int:card_id>/substage', methods=('PUT',))
     def hiring_substage(card_id, ctx):

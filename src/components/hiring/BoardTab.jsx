@@ -21,7 +21,8 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
  * прямо с карточки в пуле, по наведению; «Позвонить» — с карточки в работе, в iCore Phone.
  */
 
-const COLUMN_WIDTH = 'w-[272px] min-w-[272px]';
+// Колонка растёт, когда экран широкий (на большом мониторе все десять этапов без прокрутки), но не уже 236 px.
+const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
 const EMPTY_FILTERS = { vacancy_id: '', city: '', source_id: '', recruiter_id: '' };
 

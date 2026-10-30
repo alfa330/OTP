@@ -10,8 +10,8 @@ import {
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
-    // Формат — docs/CLICK-TO-CALL.md телефона: icore-phone:call?number=<2–15 цифр>, без префикса.
-    assert.equal(buildICorePhoneUrl('+7 (705) 123-45-67'), 'icore-phone:call?number=77051234567');
+    // Формат — docs/CLICK-TO-CALL.md телефона: icore-phone:call?number=%2B<2–15 цифр> (плюс обязателен — линия Binotel), без префикса.
+    assert.equal(buildICorePhoneUrl('+7 (705) 123-45-67'), 'icore-phone:call?number=%2B77051234567');
     assert.equal(buildICorePhoneUrl('x'), null);
     assert.equal(buildICorePhoneUrl('1234567890123456'), null);
     const frames = [];
@@ -20,14 +20,14 @@ test('call goes to iCore Phone through a hidden frame, number as digits only', (
         getElementById: (id) => frames.find((node) => node.id === id) || null,
         createElement: () => ({ style: {}, setAttribute() {} }),
     };
-    assert.equal(openICorePhoneCall('+77051234567', doc), 'icore-phone:call?number=77051234567');
+    assert.equal(openICorePhoneCall('+77051234567', doc), 'icore-phone:call?number=%2B77051234567');
     assert.equal(frames.length, 1);
     assert.equal(frames[0].id, ICORE_PHONE_FRAME_ID);
-    assert.equal(frames[0].src, 'icore-phone:call?number=77051234567');
+    assert.equal(frames[0].src, 'icore-phone:call?number=%2B77051234567');
     assert.equal(frames[0].style.display, 'none');
     openICorePhoneCall('+77051234568', doc);
     assert.equal(frames.length, 1);                      // кадр один на страницу
-    assert.equal(frames[0].src, 'icore-phone:call?number=77051234568');
+    assert.equal(frames[0].src, 'icore-phone:call?number=%2B77051234568');
     assert.throws(() => openICorePhoneCall('нет номера', doc), /не разобран/);
 });
 

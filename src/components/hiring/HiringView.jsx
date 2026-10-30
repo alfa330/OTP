@@ -161,8 +161,11 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const moveConsumed = useCallback(() => setOpenMove(null), []);
     const callConsumed = useCallback(() => setOpenCall(false), []);
 
+    // Доска — на всю ширину экрана (владелец 30.10.2026: на большом мониторе видеть все этапы), остальные
+    // вкладки — в обычной ширине раздела.
+    const wide = (tabs.includes(tab) ? tab : tabs[0]) === 'board';
     const shell = (children) => (
-        <div className="relative mx-auto min-h-screen w-full max-w-[1600px] bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0"
+        <div className={`relative mx-auto min-h-screen w-full ${wide ? 'max-w-none' : 'max-w-[1600px]'} bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0`}
              style={{ fontFamily: APPLE_FONT }}>
             {children}
         </div>

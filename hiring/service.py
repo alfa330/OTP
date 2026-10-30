@@ -415,14 +415,18 @@ class HiringService:
             return queries.get_card(cursor, card_id)
 
     def touch(self, ctx, card_id, payload):
-        """Касание (ТЗ 5.4, 6.1): звонок с результатом, WhatsApp, комментарий; подстатус — сам."""
+        """Касание (ТЗ 5.4, 6.1): звонок, WhatsApp, комментарий; подстатус — сам.
+
+        Звонок без результата — «Позвонить» нажато, исход ждём из телефонии (владелец 30.10.2026:
+        исход подтягивается сам, рекрутер дописывает недостающее): подстатус и серия недозвонов
+        меняются, когда исход придёт (on_binotel_call) или его поставят руками (edit_touch)."""
         payload = payload or {}
         kind = str(payload.get('kind') or '').strip()
         if kind not in rules.HUMAN_TOUCHES:
             raise HiringError('HIRING_BAD_TOUCH', 'Касание бывает звонком, сообщением в WhatsApp или комментарием')
         result = str(payload.get('result') or '').strip() or None
-        if kind == rules.TOUCH_CALL and result not in rules.CALL_RESULT_CODES:
-            raise HiringError('HIRING_BAD_CALL_RESULT', 'Укажите результат звонка: дозвон или недозвон')
+        if kind == rules.TOUCH_CALL and result is not None and result not in rules.CALL_RESULT_CODES:
+            raise HiringError('HIRING_BAD_CALL_RESULT', 'Результат звонка — дозвон или недозвон')
         body = _text(payload.get('body'), 4000)
         if kind == rules.TOUCH_COMMENT and not body:
             raise HiringError('HIRING_EMPTY_COMMENT', 'Комментарий пустой')
@@ -443,12 +447,49 @@ class HiringService:
                 fields['next_contact_at'] = next_contact_at
                 fields['next_contact_notified'] = None
             if card['stage'] == rules.IN_WORK:
-                if kind == rules.TOUCH_CALL:
+                if kind == rules.TOUCH_CALL and result:
                     fields['substage'] = 'dial' if result == 'dial' else 'no_answer'
                     fields['no_answer_streak'] = 0 if result == 'dial' else int(card['no_answer_streak'] or 0) + 1
                 elif kind == rules.TOUCH_WHATSAPP:
                     fields['substage'] = 'whatsapp'
             queries.update_card(cursor, card_id, **fields)
+            return queries.get_card(cursor, card_id)
+
+    def edit_touch(self, ctx, card_id, touch_id, payload):
+        """Дописать касание (владелец 30.10.2026): комментарий и следующий контакт к звонку; у звонка,
+        который телефония не увидела (рекрутер не на линии), — исход руками. Исход, пришедший из
+        телефонии, не переписывается."""
+        payload = payload or {}
+        now = self._now()
+        with self._cursor() as cursor:
+            card = self._load_visible(cursor, ctx, card_id, lock=True)
+            touch = queries.get_touch(cursor, touch_id)
+            if not touch or int(touch['card_id']) != int(card_id):
+                raise HiringError('HIRING_NOT_FOUND', 'Касание не найдено', 404)
+            if not self._is_owner_or_lead(ctx, card):
+                raise _forbidden('Касания дописывает закреплённый рекрутер')
+            fields = {}
+            card_fields = {'updated_at': now}
+            if 'body' in payload:
+                fields['body'] = _text(payload.get('body'), 4000)
+            if 'next_contact_at' in payload:
+                card_fields['next_contact_at'] = _parse_moment(payload.get('next_contact_at'), 'дату следующего контакта')
+                card_fields['next_contact_notified'] = None
+            result = str(payload.get('result') or '').strip() or None
+            if result is not None:
+                if touch['kind'] != rules.TOUCH_CALL:
+                    raise HiringError('HIRING_BAD_TOUCH', 'Исход бывает только у звонка')
+                if result not in rules.CALL_RESULT_CODES:
+                    raise HiringError('HIRING_BAD_CALL_RESULT', 'Результат звонка — дозвон или недозвон')
+                if touch.get('call_id'):
+                    raise HiringError('HIRING_TOUCH_FROM_PBX', 'Исход этого звонка пришёл из телефонии — его не переписать', 409)
+                fields['result'] = result
+                if card['stage'] == rules.IN_WORK and not card['is_closed']:
+                    card_fields['substage'] = 'dial' if result == 'dial' else 'no_answer'
+                    card_fields['no_answer_streak'] = 0 if result == 'dial' else int(card['no_answer_streak'] or 0) + 1
+            if fields:
+                queries.update_touch(cursor, touch_id, **fields)
+            queries.update_card(cursor, card_id, **card_fields)
             return queries.get_card(cursor, card_id)
 
     def set_substage(self, ctx, card_id, substage):
@@ -747,7 +788,8 @@ class HiringService:
         fields = {'updated_at': now}
         if not card['is_closed']:
             fields['last_touch_at'] = max(started, card.get('last_touch_at') or started)
-            if card['stage'] == rules.IN_WORK and not manual:
+            # Ручная отметка с исходом уже решила подстатус; отметка «ждём телефонию» (без исхода) — нет.
+            if card['stage'] == rules.IN_WORK and (not manual or not manual.get('result')):
                 talked = calls.talked(call)
                 fields['substage'] = 'dial' if talked else 'no_answer'
                 fields['no_answer_streak'] = 0 if talked else int(card['no_answer_streak'] or 0) + 1
