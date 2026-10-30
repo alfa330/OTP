@@ -286,7 +286,7 @@ function CallsModal({ item, base, headers, scopeTitles, formatDate, onClose }) {
             title={item ? `Вызовы · ${item.name}` : ''}
             subtitle={total > 0 ? `${total} ${callWord(total)}` : (loading ? 'Загрузка…' : 'Пока ни одного вызова')}
             maxWidth="max-w-3xl"
-            bodyClassName="p-0"
+            bodyClassName="thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain p-0"
         >
             {error && <p className="px-4 py-3 text-[13px] text-rose-600">{error}</p>}
             {calls.length > 0 && (
