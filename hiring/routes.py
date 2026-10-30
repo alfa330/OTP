@@ -19,7 +19,7 @@ Blueprint собирается фабрикой и получает зависи
     PUT    /cards/<id>/substage              подстатус «В работе» / «Приглашен в офис»
     POST   /cards/<id>/move                  переход по этапам
     POST   /cards/<id>/reassign              переназначить / вернуть в пул (руководитель)
-    POST   /cards/<id>/shifts                отметить / снять смену (руководитель отдела)
+    POST   /cards/<id>/shifts/sync           пересчитать смены из статусов работы сейчас (руками смены не ведутся)
     PUT    /cards/<id>/motivation            выплачено / отменено (руководитель рекрутинга)
     POST   /upload                           файл базы контактов (multipart: file, source_id)
     GET    /batches, /batches/<id>           партии загрузки
@@ -393,10 +393,10 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             assignments = queries.card_assignments(cursor, card_id)
         return jsonify({'card': public_card(card, ctx), 'assignments': _json(assignments)})
 
-    @hiring_route('/cards/<int:card_id>/shifts', methods=('POST',))
-    def hiring_shift(card_id, ctx):
-        body = _body()
-        card = service.mark_shift(ctx, card_id, body.get('date'), undo=bool(body.get('undo')))
+    @hiring_route('/cards/<int:card_id>/shifts/sync', methods=('POST',))
+    def hiring_shifts_sync(card_id, ctx):
+        """Пересчитать смены из статусов работы сейчас (джоба делает это сама раз в полчаса)."""
+        card = service.sync_card_shifts(ctx, card_id)
         with db._get_cursor() as cursor:
             shifts = queries.card_shifts(cursor, card_id)
         return jsonify({'card': public_card(card, ctx), 'shifts': _json(shifts)})

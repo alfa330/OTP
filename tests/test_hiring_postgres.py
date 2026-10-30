@@ -40,6 +40,10 @@ BASE_DDL = '''
                               head_user_id integer, is_active boolean NOT NULL DEFAULT TRUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, role text NOT NULL,
                         status text NOT NULL DEFAULT 'working', department_id integer, phone text, telegram_id bigint);
+    -- Часы дня по статусам работы («Учет часов», daily_hours) — по ним считаются смены на линии.
+    CREATE TABLE daily_hours (id serial PRIMARY KEY, operator_id integer NOT NULL, day date NOT NULL,
+                              work_time double precision NOT NULL DEFAULT 0, auto_aggregated boolean NOT NULL DEFAULT TRUE,
+                              UNIQUE (operator_id, day));
     -- Членство в линии Binotel «Удаленного КЦ» (dial_list_line_members) — по нему звонок находит рекрутера.
     CREATE TABLE dial_list_line_members (id bigserial PRIMARY KEY, user_id integer NOT NULL, department_id integer NOT NULL,
                                          internal_number varchar(64) NOT NULL, assigned_at timestamptz NOT NULL DEFAULT now(),
@@ -342,26 +346,39 @@ def test_full_path_to_hired(world):
         assert queries.get_motivation(cur, card['id'])['status'] == 'pending'
         total, rows = queries.bell(cur, OP_HEAD, 10)
         assert total == 1 and rows[0]['kind'] == notices.KIND_ON_LINE
-    # Смены отмечает руководитель отдела, не рекрутер и не руководитель рекрутинга.
-    with pytest.raises(HiringError) as caught:
-        service.mark_shift(me, card['id'], '2026-10-25')
-    assert caught.value.code == 'HIRING_FORBIDDEN'
-    with pytest.raises(HiringError) as caught:
-        service.mark_shift(lead, card['id'], '2026-10-25')
-    assert caught.value.code == 'HIRING_FORBIDDEN'
+    # Смены — из статусов работы сотрудника (владелец 30.10.2026), руками не ведутся: пока учётки с
+    # телефоном кандидата в «Учете сотрудников» нет — смен нет.
+    assert service.sync_shifts() == {'cards': 1, 'matched': 0, 'shifts': 0}
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (77, 'Новый Оператор', 'operator', 'working', 367, %s)",
+                    ('8 (%s) %s-%s-%s' % (card['phone'][2:5], card['phone'][5:8], card['phone'][8:10], card['phone'][10:]),))
+        for day in range(25, 31):
+            cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, %s, 7.5)", (datetime(2026, 10, day).date(),))
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-10-31', 0.75)")   # меньше часа — не смена
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-10-20', 8)")      # до выхода на линию
     clock.now = datetime(2026, 11, 3, 12, 0)
-    for day in range(25, 31):
-        card = service.mark_shift(head, card['id'], '2026-10-%02d' % day)
-    assert card['shifts_done'] == 6
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 6}
+    with world['db']._get_cursor() as cur:
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['shifts_done'] == 6 and fresh['employee_user_id'] == 77 and fresh['employee_name'] == 'Новый Оператор'
+        shifts = queries.card_shifts(cur, card['id'])
+        assert [str(s['shift_date']) for s in shifts] == ['2026-10-%02d' % d for d in range(25, 31)]
+        assert shifts[0]['source'] == 'auto' and float(shifts[0]['work_hours']) == 7.5
     with pytest.raises(HiringError) as caught:
         service.move(head, card['id'], 'hired', {})
     assert caught.value.code == 'HIRING_NEED_SHIFTS'
-    with pytest.raises(HiringError) as caught:
-        service.mark_shift(head, card['id'], '2026-11-04')
-    assert caught.value.code == 'HIRING_FUTURE_SHIFT'
-    card = service.mark_shift(head, card['id'], '2026-11-01')
-    card = service.mark_shift(head, card['id'], '2026-11-01')   # повтор той же даты не удваивает
+    # Седьмой день с часом работы — седьмая смена и колокол руководителю отдела; повторный прогон ничего не удваивает.
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-11-01', 1.0)")
+    card = service.sync_card_shifts(head, card['id'])
     assert card['shifts_done'] == 7
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 7}
+    with world['db']._get_cursor() as cur:
+        total, rows = queries.bell(cur, OP_HEAD, 10)
+        assert any(row['title'].startswith('Семь смен на линии') for row in rows)
+    with pytest.raises(HiringError) as caught:
+        service.sync_card_shifts(ctx_of(world, REC2), card['id'])
+    assert caught.value.code == 'HIRING_NOT_FOUND'
     with pytest.raises(HiringError) as caught:
         service.move(lead, card['id'], 'hired', {})
     assert caught.value.code == 'HIRING_FORBIDDEN'
@@ -620,8 +637,11 @@ def test_dashboard_cohort_and_click_through(world):
     service.move(trainer, hired['id'], 'on_training', {})
     service.move(me, hired['id'], 'on_line', {'line_started_at': '2026-10-20'})
     world['clock'].now = datetime(2026, 11, 2, 12, 0)
-    for day in range(20, 27):
-        service.mark_shift(head, hired['id'], '2026-10-%02d' % day)
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (78, 'Нанятый Оператор', 'operator', 'working', 367, '+77051000001')")
+        for day in range(20, 27):
+            cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (78, %s, 8)", (datetime(2026, 10, day).date(),))
+    assert service.sync_shifts()['shifts'] == 7
     service.move(head, hired['id'], 'hired', {})
     world['clock'].now = NOW
     refused = take_and_touch(world, REC2, '8 705 100 00 02')

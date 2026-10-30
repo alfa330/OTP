@@ -398,6 +398,7 @@ _CARD_COLUMNS = """
     c.group_id, c.training_started_at, c.line_started_at, c.shifts_done, c.hired_at, c.hired_by,
     c.close_initiator, c.close_reason_id, c.close_reason_text, c.close_stage, c.close_day, c.close_comment,
     c.is_closed, c.closed_at, c.repeat_of_card_id, c.reactivations, c.comment, c.created_by, c.created_at, c.updated_at,
+    c.employee_user_id, e.name AS employee_name,
     v.name AS vacancy_name, COALESCE(v.department_id, g.department_id) AS department_id,
     s.name AS source_name, s.code AS source_code, r.name AS recruiter_name, g.name AS group_name,
     g.start_date AS group_start_date, g.trainer_id AS trainer_id, b.file_name AS batch_file
@@ -409,6 +410,7 @@ _CARD_FROM = """
     LEFT JOIN hiring_sources s ON s.id = c.source_id
     LEFT JOIN users r ON r.id = c.recruiter_id
     LEFT JOIN hiring_batches b ON b.id = c.batch_id
+    LEFT JOIN users e ON e.id = c.employee_user_id
 """
 
 
@@ -461,7 +463,7 @@ def update_card(cursor, card_id, **fields):
                'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_started_at',
                'line_started_at', 'shifts_done', 'hired_at', 'hired_by', 'close_initiator', 'close_reason_id',
                'close_reason_text', 'close_stage', 'close_day', 'close_comment', 'is_closed', 'closed_at',
-               'reactivations', 'comment', 'updated_at', 'candidate_no')
+               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id')
     return _update('hiring_cards', card_id, fields, allowed=allowed, cursor=cursor)
 
 
@@ -553,17 +555,35 @@ def has_human_touch(cursor, card_id, since=None):
     return bool(cursor.fetchone()[0])
 
 
-def add_shift(cursor, card_id, shift_date, by, by_name, now):
+def daily_hours_table_exists(cursor):
+    """Таблица «Учета часов» daily_hours (часы дня по статусам работы) есть? На стенде её может не быть."""
+    cursor.execute("SELECT to_regclass('daily_hours') IS NOT NULL")
+    return bool(cursor.fetchone()[0])
+
+
+def worked_days(cursor, user_id, since_day, until_day, min_hours):
+    """Дни сотрудника, где по статусам работы отработано не меньше min_hours часов
+    (daily_hours.work_time — часы, их считает «Учет часов» из статусов): {date: часы}."""
     cursor.execute("""
-        INSERT INTO hiring_shifts (card_id, shift_date, marked_by, marked_by_name, marked_at)
-        VALUES (%s, %s, %s, %s, %s) ON CONFLICT (card_id, shift_date) DO NOTHING
-    """, (int(card_id), shift_date, by, by_name, now))
-    return cursor.rowcount
+        SELECT day, work_time FROM daily_hours
+         WHERE operator_id = %s AND day >= %s AND day <= %s AND work_time >= %s
+         ORDER BY day
+    """, (int(user_id), since_day, until_day, float(min_hours)))
+    return {row[0]: float(row[1] or 0) for row in cursor.fetchall()}
 
 
-def remove_shift(cursor, card_id, shift_date):
-    cursor.execute("DELETE FROM hiring_shifts WHERE card_id = %s AND shift_date = %s", (int(card_id), shift_date))
-    return cursor.rowcount
+def replace_auto_shifts(cursor, card_id, days, now):
+    """Смены «из статусов» карточки привести к набору days {date: часы}: лишние убрать, новые
+    добавить, часы обновить. Возвращает общее число смен."""
+    cursor.execute("DELETE FROM hiring_shifts WHERE card_id = %s AND source = 'auto' AND NOT (shift_date = ANY(%s::date[]))",
+                   (int(card_id), list(days.keys())))
+    for day, hours in sorted(days.items()):
+        cursor.execute("""
+            INSERT INTO hiring_shifts (card_id, shift_date, marked_by, marked_by_name, marked_at, work_hours, source)
+            VALUES (%s, %s, NULL, 'статусы работы', %s, %s, 'auto')
+            ON CONFLICT (card_id, shift_date) DO UPDATE SET work_hours = EXCLUDED.work_hours, source = 'auto'
+        """, (int(card_id), day, now, round(float(hours), 2)))
+    return count_shifts(cursor, card_id)
 
 
 def count_shifts(cursor, card_id):
@@ -572,8 +592,16 @@ def count_shifts(cursor, card_id):
 
 
 def card_shifts(cursor, card_id):
-    cursor.execute("SELECT shift_date, marked_by, marked_by_name, marked_at FROM hiring_shifts WHERE card_id = %s ORDER BY shift_date",
-                   (int(card_id),))
+    cursor.execute("""
+        SELECT shift_date, marked_by, marked_by_name, marked_at, work_hours, source FROM hiring_shifts
+         WHERE card_id = %s ORDER BY shift_date
+    """, (int(card_id),))
+    return _all(cursor)
+
+
+def on_line_cards(cursor):
+    """Открытые карточки «Вышел на линию» — им смены считаются из статусов работы."""
+    cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + " WHERE c.stage = 'on_line' AND NOT c.is_closed ORDER BY c.id")
     return _all(cursor)
 
 

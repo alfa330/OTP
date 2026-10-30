@@ -33,6 +33,8 @@ BASE_DDL = '''
                               head_user_id integer, is_active boolean NOT NULL DEFAULT TRUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, role text NOT NULL,
                         status text NOT NULL DEFAULT 'working', department_id integer, phone text, telegram_id bigint);
+    CREATE TABLE daily_hours (id serial PRIMARY KEY, operator_id integer NOT NULL, day date NOT NULL,
+                              work_time double precision NOT NULL DEFAULT 0, UNIQUE (operator_id, day));
     INSERT INTO departments (id, code, name, head_user_id) VALUES
         (1499, 'hr', 'HR', 2), (367, 'op', 'Отдел продаж', 30), (1, 'szov', 'СЗоВ', NULL);
     INSERT INTO users (id, name, role, status, department_id) VALUES
@@ -269,6 +271,9 @@ def test_card_flow_through_routes(client):
     assert [row['stage'] for row in moved['stages']] == ['responses', 'in_work', 'invited_office']
     edited = client.patch('/api/hiring/cards/%s' % card['id'], json={'city': 'Астана', 'next_contact_at': None}, headers=as_user(REC1)).get_json()
     assert edited['card']['city'] == 'Астана' and edited['card']['next_contact_at'] is None
+    # Смены руками не ведутся: старой ручки нет, пересчёт из статусов — только у карточки на линии.
+    assert client.post('/api/hiring/cards/%s/shifts' % card['id'], json={'date': '2026-10-30'}, headers=as_user(REC1)).status_code == 404
+    assert client.post('/api/hiring/cards/%s/shifts/sync' % card['id'], headers=as_user(REC1)).status_code == 409
 
     full = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC1)).get_json()
     assert full['card']['targets'] == ['invited_training', 'refused'] and 'owner' in full['actor']

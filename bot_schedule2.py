@@ -68060,6 +68060,8 @@ def _hiring_job(name):
             return service.overdue_digest()
         if name == 'calls_sync':
             return service.sync_call_history()
+        if name == 'shifts_sync':
+            return service.sync_shifts()
     except Exception:
         logging.exception("Воронка найма: задача %s упала", name)
     return None
@@ -73630,6 +73632,8 @@ if __name__ == '__main__':
         ('overdue', CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty'))),
         # Добор звонков линий рекрутеров из истории Binotel — вебхук мог не дойти (перезапуск).
         ('calls_sync', CronTrigger(minute='6,16,26,36,46,56', timezone=ZoneInfo('Asia/Almaty'))),
+        # Смены на линии — из статусов работы (daily_hours), руками не ведутся (владелец 30.10.2026).
+        ('shifts_sync', CronTrigger(minute='12,42', timezone=ZoneInfo('Asia/Almaty'))),
     ):
         scheduler.add_job(
             hiring_job,

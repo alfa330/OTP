@@ -640,6 +640,8 @@ class HiringService:
             queries.upsert_motivation(cursor, card_id, card.get('recruiter_id'), rules.MOTIVATION_PENDING, now)
             fresh = queries.get_card(cursor, card_id)
             notices.on_line(cursor, fresh, now)
+            # Учётка сотрудника и смены по статусам — сразу, не дожидаясь джобы.
+            self._sync_card_shifts(cursor, fresh, now)
         elif target == rules.HIRED:
             queries.upsert_motivation(cursor, card_id, card.get('recruiter_id'), rules.MOTIVATION_COUNTED, now)
             queries.set_motivation(cursor, card_id, now, confirmed_at=now, confirmed_by=ctx['user_id'],
@@ -700,28 +702,62 @@ class HiringService:
             notices.reassigned(cursor, card, old, new, now, comment)
             return queries.get_card(cursor, card_id)
 
-    def mark_shift(self, ctx, card_id, shift_date, undo=False):
-        """Отметка смены на линии (ТЗ 7.2) — руководитель отдела, куда был найм."""
-        day = _parse_date(shift_date, 'дату смены')
-        if not day:
-            raise HiringError('HIRING_BAD_DATE', 'Укажите дату смены')
+    # ─── Смены на линии — из статусов работы (владелец 30.10.2026) ───────────
+    # Руками смены не ведутся: кандидат, вышедший на линию, — это сотрудник в «Учете сотрудников»
+    # с тем же телефоном, а его дни по статусам работы считает «Учет часов» (daily_hours.work_time).
+    # День, где отработано не меньше SHIFT_MIN_HOURS, — смена; седьмая — колокол руководителю отдела.
+
+    def _employee_for_card(self, cursor, card):
+        """Учётка сотрудника, в которого превратился кандидат, — по телефону; найденная запоминается."""
+        if card.get('employee_user_id'):
+            return int(card['employee_user_id'])
+        key = rules.phone_key(card.get('phone'))
+        employee = queries.employee_by_phone_key(cursor, key) if key else None
+        if not employee:
+            return None
+        queries.update_card(cursor, card['id'], employee_user_id=employee['id'])
+        return int(employee['id'])
+
+    def _sync_card_shifts(self, cursor, card, now):
+        """Смены одной карточки на линии из daily_hours её сотрудника. Возвращает (сотрудник найден, смен)."""
+        employee_id = self._employee_for_card(cursor, card)
+        before = int(card.get('shifts_done') or 0)
+        if not employee_id or not queries.daily_hours_table_exists(cursor):
+            return bool(employee_id), before
+        since = card.get('line_started_at') or (card['taken_at'].date() if card.get('taken_at') else now.date())
+        days = queries.worked_days(cursor, employee_id, since, now.date(), rules.SHIFT_MIN_HOURS)
+        total = queries.replace_auto_shifts(cursor, card['id'], days, now)
+        if total != before:
+            queries.update_card(cursor, card['id'], shifts_done=total, updated_at=now)
+        if total >= rules.SHIFTS_TO_HIRE and before < rules.SHIFTS_TO_HIRE:
+            notices.shifts_ready(cursor, queries.get_card(cursor, card['id']), now)
+        return True, total
+
+    def sync_shifts(self, now=None):
+        """Джоба: смены всех карточек на линии — из статусов работы. Сводка: карточек, с учёткой, смен."""
+        now = now or self._now()
+        summary = {'cards': 0, 'matched': 0, 'shifts': 0}
+        with self._cursor() as cursor:
+            cards = queries.on_line_cards(cursor)
+        for card in cards:
+            with self._cursor() as cursor:
+                fresh = queries.get_card(cursor, card['id'], lock=True)
+                if not fresh or fresh['stage'] != rules.ON_LINE or fresh['is_closed']:
+                    continue
+                matched, total = self._sync_card_shifts(cursor, fresh, now)
+            summary['cards'] += 1
+            summary['matched'] += int(matched)
+            summary['shifts'] += total
+        return summary
+
+    def sync_card_shifts(self, ctx, card_id):
+        """«Обновить из статусов» в карточке — тому, кто её видит; джоба делает то же раз в полчаса."""
         now = self._now()
-        caps = self._caps(ctx)
         with self._cursor() as cursor:
             card = self._load_visible(cursor, ctx, card_id, lock=True)
-            kinds = rules.actor_kinds(caps, card, ctx['user_id'], ctx.get('trainer_group_ids') or ())
-            if 'dept_head' not in kinds:
-                raise _forbidden('Смены отмечает руководитель отдела, куда был найм')
             if card['stage'] != rules.ON_LINE:
-                raise HiringError('HIRING_NOT_ON_LINE', 'Смены отмечаются после выхода на линию', 409)
-            if day > now.date():
-                raise HiringError('HIRING_FUTURE_SHIFT', 'Смена в будущем не отмечается')
-            if undo:
-                queries.remove_shift(cursor, card_id, day)
-            else:
-                queries.add_shift(cursor, card_id, day, ctx['user_id'], ctx['name'], now)
-            total = queries.count_shifts(cursor, card_id)
-            queries.update_card(cursor, card_id, shifts_done=total, updated_at=now)
+                raise HiringError('HIRING_NOT_ON_LINE', 'Смены считаются после выхода на линию', 409)
+            self._sync_card_shifts(cursor, card, now)
             return queries.get_card(cursor, card_id)
 
     # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ───────────────────

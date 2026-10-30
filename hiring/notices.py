@@ -91,16 +91,30 @@ def reassigned(cursor, card, old_recruiter_id, new_recruiter_id, now, comment=No
     return created
 
 
-def on_line(cursor, card, now):
-    """Выход на линию — руководителю отдела, куда был найм: отмечать смены и подтвердить седьмую."""
+def _department_head(cursor, card):
     department_id = card.get('department_id')
     heads = queries.heads_of_departments(cursor, [department_id]) if department_id else {}
-    head = heads.get(int(department_id)) if department_id else None
+    return heads.get(int(department_id)) if department_id else None
+
+
+def on_line(cursor, card, now):
+    """Выход на линию — руководителю отдела, куда был найм: смены считаются из статусов сами, седьмую подтвердить."""
+    head = _department_head(cursor, card)
     if not head:
         return 0
     return queries.push_notification(cursor, [head], KIND_ON_LINE, 'Вышел на линию: %s' % card_title(card),
-                                     'Отмечайте смены; после седьмой подтвердите «Отработал 7 дней»', card['id'], now,
-                                     dedupe_key='line:%s' % card['id'])
+                                     'Смены считаются из статусов работы сами; после седьмой подтвердите «Отработал 7 дней»',
+                                     card['id'], now, dedupe_key='line:%s' % card['id'])
+
+
+def shifts_ready(cursor, card, now):
+    """Семь смен по статусам набраны — руководителю отдела подтвердить «Отработал 7 дней»."""
+    head = _department_head(cursor, card)
+    if not head:
+        return 0
+    return queries.push_notification(cursor, [head], KIND_ON_LINE, 'Семь смен на линии: %s' % card_title(card),
+                                     'Подтвердите «Отработал 7 дней» в карточке', card['id'], now,
+                                     dedupe_key='shifts7:%s' % card['id'])
 
 
 def motivation_counted(cursor, card, recruiter_id, now):

@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ArrowRight, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming, PhoneMissed,
-    PhoneOutgoing, Play, Repeat, UserCog, X,
+    PhoneOutgoing, Play, RefreshCw, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
-import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
+import { IosHint, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
     ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES, MOTIVATION_LABELS,
     MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, addDays,
@@ -535,7 +535,7 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
     const [cancelling, setCancelling] = useState(false);
     const [comment, setComment] = useState('');
     const [savingComment, setSavingComment] = useState(false);
-    const [shiftDate, setShiftDate] = useState(todayIso);
+    const [syncingShifts, setSyncingShifts] = useState(false);
     // Касание звонка, с которым рекрутер работает сейчас (панель в ленте).
     const [activeCallId, setActiveCallId] = useState(null);
 
@@ -554,7 +554,6 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
         setTab('card');
         setMove(null);
         setComment('');
-        setShiftDate(todayIso());
         setEditing(false);
         setReassigning(false);
         setCancelling(false);
@@ -676,12 +675,16 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             load();
         }
     };
-    const markShift = async (undo) => {
+    // Смены на линии считаются из статусов работы сами (джоба раз в полчаса); здесь — пересчёт сейчас.
+    const syncShifts = async () => {
+        setSyncingShifts(true);
         try {
-            await api.post(`/cards/${card.id}/shifts`, { date: shiftDate, undo });
+            await api.post(`/cards/${card.id}/shifts/sync`);
             changed();
         } catch (requestError) {
-            toast(errorOf(requestError, 'Смена не отмечена'), 'error');
+            toast(errorOf(requestError, 'Смены не обновились'), 'error');
+        } finally {
+            setSyncingShifts(false);
         }
     };
     const motivation = async (status, reason = null) => {
@@ -838,25 +841,33 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
 
                         {activeTab === 'hire' && (
                             <div className="space-y-4">
-                                {/* Смены на линии (ТЗ 7.2): отмечает руководитель отдела, куда был найм. */}
+                                {/* Смены на линии (ТЗ 7.2) — из статусов работы сотрудника (владелец 30.10.2026: руками не
+                                    ведутся): день с работой по статусам не меньше часа — смена. Седьмую подтверждает
+                                    руководитель отдела, куда был найм. */}
                                 {card.stage === 'on_line' && (
-                                    <Section title={`Смены на линии · ${shiftsDone} из ${boot.meta.shifts_to_hire}`}>
-                                        <div className="flex flex-wrap items-center gap-2 py-1">
-                                            {(data.shifts || []).map((shift) => <Pill key={shift.shift_date} tone="green">{fullDate(shift.shift_date)}</Pill>)}
-                                            {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока не отмечено</span>}
+                                    <Section title={`Смены на линии · ${shiftsDone} из ${boot.meta.shifts_to_hire}`}
+                                             right={<IosHint align="right" text="Смены считаются из статусов работы сами: день, где по статусам отработано не меньше часа, — смена. Руками смены не отмечаются; пересчёт идёт раз в полчаса." />}>
+                                        <div className="py-1.5 text-[12.5px] text-slate-500">
+                                            {card.employee_name
+                                                ? <>По статусам работы сотрудника <span className="font-medium text-slate-700">{card.employee_name}</span></>
+                                                : 'Сотрудник с этим телефоном в «Учете сотрудников» пока не найден — смены подтянутся, когда учётка появится'}
                                         </div>
-                                        {actor.includes('dept_head') && (
-                                            <div className="flex flex-wrap items-center gap-2 py-1.5">
-                                                <div className="w-44"><IosDatePicker value={shiftDate} onChange={setShiftDate} max={todayIso()} triggerClassName={DATE_TRIGGER} ariaLabel="Дата смены" /></div>
-                                                <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(false)}>Отметить смену</button>
-                                                {(data.shifts || []).some((s) => s.shift_date === shiftDate) && (
-                                                    <button type="button" className={TOOLBAR_BTN} onClick={() => markShift(true)}>Снять отметку</button>
-                                                )}
-                                                {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
-                                                    <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
-                                                )}
-                                            </div>
-                                        )}
+                                        <div className="flex flex-wrap items-center gap-2 py-1">
+                                            {(data.shifts || []).map((shift) => (
+                                                <Pill key={shift.shift_date} tone="green" title={shift.source === 'auto' ? 'По статусам работы' : `Отмечено: ${shift.marked_by_name || ''}`}>
+                                                    {fullDate(shift.shift_date)}{shift.work_hours ? ` · ${String(Math.round(Number(shift.work_hours) * 10) / 10).replace('.', ',')} ч` : ''}
+                                                </Pill>
+                                            ))}
+                                            {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока нет</span>}
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-2 py-1.5">
+                                            <button type="button" className={TOOLBAR_BTN} onClick={syncShifts} disabled={syncingShifts}>
+                                                <RefreshCw size={14} className={syncingShifts ? 'animate-spin' : ''} /> Обновить из статусов
+                                            </button>
+                                            {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
+                                                <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
+                                            )}
+                                        </div>
                                     </Section>
                                 )}
                                 {data.motivation && (

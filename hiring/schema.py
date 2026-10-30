@@ -346,6 +346,13 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_hiring_calls_card ON hiring_calls (card_id, started_at)",
     "CREATE INDEX IF NOT EXISTS idx_hiring_calls_recruiter ON hiring_calls (recruiter_id, started_at)",
     "ALTER TABLE hiring_touches ADD COLUMN IF NOT EXISTS call_id INTEGER",
+
+    # Смены на линии — из статусов работы сотрудника (владелец 30.10.2026: руками не ведутся):
+    # учётка сотрудника, в которого превратился кандидат (по телефону), часы дня по статусам и
+    # источник смены (auto — статусы, manual — старые ручные отметки).
+    "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS employee_user_id INTEGER",
+    "ALTER TABLE hiring_shifts ADD COLUMN IF NOT EXISTS work_hours NUMERIC(6,2)",
+    "ALTER TABLE hiring_shifts ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'manual'",
 ]
 
 

@@ -379,6 +379,8 @@ class WiringTests(unittest.TestCase):
         self.assertIn("_dial_list_service.call_observers.append(_HIRING['service'].on_binotel_call)", self.bot)
         self.assertIn("('calls_sync', CronTrigger(", self.bot)
         self.assertIn("if name == 'calls_sync':", self.bot)
+        self.assertIn("('shifts_sync', CronTrigger(", self.bot)
+        self.assertIn("if name == 'shifts_sync':", self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
         self.assertIn("id='hiring_%s' % _hiring_name", self.bot)
