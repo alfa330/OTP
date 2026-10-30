@@ -656,19 +656,41 @@ def mark_all_seen(cursor, user_id, now):
 
 # ─── Интеграции ───────────────────────────────────────────────────────────────
 
-def get_integration(cursor, code):
-    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, cursor, received_total, updated_at "
-                   "FROM hiring_integrations WHERE code = %s", (code,))
-    row = _one(cursor)
-    if row and isinstance(row.get('cursor'), str):
-        row['cursor'] = json.loads(row['cursor'] or '{}')
+def _parse_json_fields(row, *names):
+    for name in names:
+        if row and isinstance(row.get(name), str):
+            row[name] = json.loads(row[name] or '{}')
     return row
 
 
+def get_integration(cursor, code):
+    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, cursor, settings, received_total, updated_at "
+                   "FROM hiring_integrations WHERE code = %s", (code,))
+    return _parse_json_fields(_one(cursor), 'cursor', 'settings')
+
+
 def list_integrations(cursor):
-    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, received_total, updated_at "
+    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, settings, received_total, updated_at "
                    "FROM hiring_integrations ORDER BY code")
-    return _all(cursor)
+    return [_parse_json_fields(row, 'settings') for row in _all(cursor)]
+
+
+def set_integration_settings(cursor, code, settings, now):
+    """Настройки интеграции руками руководителя (у OLX — кабинеты «для найма»)."""
+    cursor.execute("""
+        INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s) ON CONFLICT (code) DO NOTHING
+    """, (code, now))
+    cursor.execute("UPDATE hiring_integrations SET settings = %s::jsonb, updated_at = %s WHERE code = %s",
+                   (json.dumps(settings or {}, ensure_ascii=False), now, code))
+
+
+def olx_cabinet_codes(cursor):
+    """Коды кабинетов, которые знает робот OLX (таблица olx_accounts); нет таблицы — пусто."""
+    cursor.execute("SELECT to_regclass('olx_accounts') IS NOT NULL")
+    if not cursor.fetchone()[0]:
+        return []
+    cursor.execute("SELECT code FROM olx_accounts ORDER BY code")
+    return [row[0] for row in cursor.fetchall()]
 
 
 def set_integration(cursor, code, now, *, state=None, ok=False, error=None, cursor_value=None, received=0):
@@ -695,18 +717,27 @@ def olx_tables_exist(cursor):
     return bool(cursor.fetchone()[0])
 
 
-def olx_responses_since(cursor, last_journal_id, limit=200):
-    """Обращения робота OLX с номером: журнал после закладки, с именем и объявлением чата."""
+def olx_responses_since(cursor, last_journal_id, cabinets, limit=200):
+    """Обращения робота OLX с номером из кабинетов «для найма»: журнал после закладки, с именем и
+    объявлением чата. Кабинеты лидов (таксопарки) сюда не попадают — список задаёт руководитель."""
+    codes = [str(code) for code in (cabinets or ()) if code]
+    if not codes:
+        return []
     cursor.execute("""
         SELECT j.id, j.cabinet_code, j.thread_id, j.message_at, j.phone_normalized, j.created_at,
                t.interlocutor_name, t.advert_title
           FROM olx_journal j
           LEFT JOIN olx_threads t ON t.cabinet_code = j.cabinet_code AND t.thread_id = j.thread_id
-         WHERE j.id > %s AND j.phone_normalized IS NOT NULL
+         WHERE j.id > %s AND j.phone_normalized IS NOT NULL AND j.cabinet_code = ANY(%s)
            AND j.result IN ('lead_created', 'manual_review', 'duplicate')
          ORDER BY j.id LIMIT %s
-    """, (int(last_journal_id or 0), int(limit)))
+    """, (int(last_journal_id or 0), codes, int(limit)))
     return _all(cursor)
+
+
+def olx_journal_max_id(cursor):
+    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM olx_journal")
+    return int(cursor.fetchone()[0])
 
 
 # ─── Доска, списки, рабочий стол ──────────────────────────────────────────────

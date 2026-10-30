@@ -267,7 +267,15 @@ def test_upload_reports_and_settings(client):
     assert client.get('/api/hiring/plans', query_string={'month': '2026-11'}, headers=lead).get_json()['items'][0]['id'] == plan_id
     assert client.delete('/api/hiring/plans/%s' % plan_id, headers=lead).status_code == 200
     assert client.post('/api/hiring/plans', json={'month': '2026-11', 'plan_fte': 0}, headers=lead).status_code == 400
-    assert client.get('/api/hiring/integrations', headers=lead).status_code == 200
+    integrations = client.get('/api/hiring/integrations', headers=lead).get_json()['items']
+    olx = next(row for row in integrations if row['code'] == 'olx')
+    assert olx['settings'] == {} and any(item['code'] == 'itaxi' for item in olx['cabinets_available'])
+    # Кабинеты «для найма»: только известные роботу, пустой список — чаты в воронку не идут.
+    assert client.put('/api/hiring/integrations/olx/settings', json={'cabinets': ['nope']}, headers=lead).status_code == 400
+    assert client.put('/api/hiring/integrations/olx/settings', json={'cabinets': 'itaxi'}, headers=lead).status_code == 400
+    saved = client.put('/api/hiring/integrations/olx/settings', json={'cabinets': ['itaxi', 'itaxi']}, headers=lead).get_json()['items']
+    assert next(row for row in saved if row['code'] == 'olx')['settings'] == {'cabinets': ['itaxi']}
+    assert client.put('/api/hiring/integrations/olx/settings', json={'cabinets': ['itaxi']}, headers=as_user(REC1)).status_code == 403
     run = client.post('/api/hiring/integrations/olx/run', headers=lead).get_json()
     assert run['received'] == 0 and next(row for row in run['items'] if row['code'] == 'olx')['state'] == 'not_configured'
     assert client.post('/api/hiring/integrations/nope/run', headers=lead).status_code == 404

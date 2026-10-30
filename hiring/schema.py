@@ -312,6 +312,10 @@ _STATEMENTS = [
         updated_at       TIMESTAMP NOT NULL
     )
     """,
+    # Настройки интеграции руками руководителя (владелец 30.10.2026: кабинеты, подключённые к лидам
+    # OLX, к рекрутерам не попадают — для найма будут отдельные аккаунты): у OLX здесь список
+    # кабинетов «для найма», пустой — ничего не берём. Колонка появилась после выкладки — ALTER.
+    "ALTER TABLE hiring_integrations ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb",
 ]
 
 

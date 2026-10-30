@@ -286,8 +286,10 @@ class HiringService:
     # ─── Опрос площадок (планировщик) ────────────────────────────────────────
 
     def pull_olx(self):
-        """Отклики OLX из журнала робота (olx_amo): после закладки, только с номером.
-        Первый запуск ставит закладку на текущий конец журнала — история в пул не льётся."""
+        """Отклики OLX из журнала робота (olx_amo): после закладки, только с номером и только из
+        кабинетов «для найма» (настройка руководителя). Кабинеты, подключённые к лидам OLX, —
+        таксопарки, их чаты к рекрутерам не попадают (владелец 30.10.2026). Пока список пуст,
+        опрос только двигает закладку: включили кабинет — история прошлых недель в пул не льётся."""
         if not self._pull_lock.acquire(blocking=False):
             return None
         try:
@@ -297,15 +299,16 @@ class HiringService:
                     queries.set_integration(cursor, 'olx', now, state='not_configured', error='Робот OLX не развёрнут')
                     return 0
                 state = queries.get_integration(cursor, 'olx') or {}
+                cabinets = [str(code) for code in ((state.get('settings') or {}).get('cabinets') or []) if code]
                 bookmark = (state.get('cursor') or {}).get('journal_id')
-                if bookmark is None:
-                    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM olx_journal")
-                    bookmark = int(cursor.fetchone()[0])
-                    queries.set_integration(cursor, 'olx', now, state='ok', ok=True, error=None,
-                                            cursor_value={'journal_id': bookmark})
+                if bookmark is None or not cabinets:
+                    queries.set_integration(
+                        cursor, 'olx', now, state='ok' if cabinets else 'not_configured', ok=bool(cabinets),
+                        error=None if cabinets else 'Кабинеты OLX для найма не выбраны — чаты кабинетов лидов в воронку не идут',
+                        cursor_value={'journal_id': queries.olx_journal_max_id(cursor)})
                     return 0
                 source = queries.source_by_code(cursor, 'olx')
-                rows = queries.olx_responses_since(cursor, bookmark)
+                rows = queries.olx_responses_since(cursor, bookmark, cabinets)
                 received = 0
                 for row in rows:
                     phone = rules.normalize_phone(row['phone_normalized'])

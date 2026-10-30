@@ -563,25 +563,44 @@ def test_olx_feed(world):
             INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at)
                  VALUES ('itaxi', 't-old', '2026-10-01 10:00', '+77057000001', 'lead_created', '2026-10-01 10:00');
         """)
-    assert service.pull_olx() == 0          # первый запуск ставит закладку, историю не льёт
+    # Кабинеты «для найма» не выбраны: опрос только ставит закладку на конец журнала и ничего не берёт —
+    # кабинеты лидов (таксопарки) к рекрутерам не попадают (владелец 30.10.2026).
+    assert service.pull_olx() == 0
     with world['db']._get_cursor() as cur:
-        assert queries.get_integration(cur, 'olx')['cursor'] == {'journal_id': 1}
+        state = queries.get_integration(cur, 'olx')
+        assert state['cursor'] == {'journal_id': 1} and state['state'] == 'not_configured'
+        assert 'не выбраны' in state['last_error']
         cur.execute("""
             INSERT INTO olx_threads VALUES ('itaxi', 't-new', 'Ерлан', 'Водитель в iTaxi');
             INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at) VALUES
                 ('itaxi', 't-new', '2026-10-15 11:00', '+77057000002', 'lead_created', '2026-10-15 11:00'),
                 ('itaxi', 't-skip', '2026-10-15 11:05', NULL, 'canned_reply', '2026-10-15 11:05'),
-                ('jana', 't-dup', '2026-10-15 11:10', '+77057000002', 'duplicate', '2026-10-15 11:10');
+                ('jana', 't-dup', '2026-10-15 11:10', '+77057000002', 'duplicate', '2026-10-15 11:10'),
+                ('jana', 't-other', '2026-10-15 11:20', '+77057000003', 'lead_created', '2026-10-15 11:20');
+        """)
+    assert service.pull_olx() == 0            # по-прежнему пусто: закладка уехала на конец журнала
+    with world['db']._get_cursor() as cur:
+        assert queries.get_integration(cur, 'olx')['cursor'] == {'journal_id': 5}
+        assert queries.list_cards(cur, {'lead': True}, SUPER, {'source_id': world['sources']['olx']['id']})[0] == 0
+        # Руководитель выбрал кабинет «для найма» — берутся только его чаты, появившиеся после закладки.
+        queries.set_integration_settings(cur, 'olx', {'cabinets': ['itaxi']}, NOW)
+        cur.execute("""
+            INSERT INTO olx_threads VALUES ('itaxi', 't-hire', 'Асель', 'Оператор колл-центра');
+            INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at) VALUES
+                ('itaxi', 't-hire', '2026-10-16 09:00', '+77057000004', 'lead_created', '2026-10-16 09:00'),
+                ('jana', 't-park', '2026-10-16 09:05', '+77057000005', 'lead_created', '2026-10-16 09:05'),
+                ('itaxi', 't-hire', '2026-10-16 09:30', '+77057000004', 'duplicate', '2026-10-16 09:30');
         """)
     assert service.pull_olx() == 2
     with world['db']._get_cursor() as cur:
         total, rows = queries.list_cards(cur, {'lead': True}, SUPER, {'source_id': world['sources']['olx']['id']})
         assert total == 1
         card = rows[0]
-        assert card['full_name'] == 'Ерлан' and card['vacancy_text'] == 'Водитель в iTaxi'
-        assert card['platform_ref'] == 'olx:itaxi:t-new' and card['received_at'] == datetime(2026, 10, 15, 11, 0)
+        assert card['full_name'] == 'Асель' and card['vacancy_text'] == 'Оператор колл-центра'
+        assert card['platform_ref'] == 'olx:itaxi:t-hire' and card['received_at'] == datetime(2026, 10, 16, 9, 0)
         assert [t['kind'] for t in queries.card_touches(cur, card['id'])] == ['repeat_response']
-        assert queries.get_integration(cur, 'olx')['cursor'] == {'journal_id': 4}
+        assert queries.get_integration(cur, 'olx')['cursor'] == {'journal_id': 8}
+        assert queries.open_card_by_phone(cur, '+77057000005') is None   # кабинет лидов — мимо воронки
 
 
 # ─── Дашборд (ТЗ 8.1) и рабочий стол (ТЗ 3) ───────────────────────────────────

@@ -453,6 +453,34 @@ const PlansSection = ({ api, toast, boot }) => {
 const IntegrationsSection = ({ api, toast, boot }) => {
     const [items, setItems] = useState(boot.integrations || []);
     const [running, setRunning] = useState('');
+    // Кабинеты OLX «для найма» (владелец 30.10.2026: кабинеты лидов — таксопарки — к рекрутерам не
+    // попадают, для найма подключаются отдельные аккаунты). Пусто — чаты робота в воронку не идут.
+    const olxRow = items.find((row) => row.code === 'olx');
+    const savedCabinets = olxRow?.settings?.cabinets || [];
+    const [cabinets, setCabinets] = useState(savedCabinets);
+    const [savingCabinets, setSavingCabinets] = useState(false);
+    useEffect(() => {
+        let alive = true;
+        api.get('/integrations').then(({ data }) => {
+            if (!alive) return;
+            setItems(data.items);
+            setCabinets((data.items.find((row) => row.code === 'olx')?.settings?.cabinets) || []);
+        }).catch(() => {});
+        return () => { alive = false; };
+    }, [api]);
+    const cabinetsChanged = JSON.stringify([...cabinets].sort()) !== JSON.stringify([...savedCabinets].sort());
+    const saveCabinets = async () => {
+        setSavingCabinets(true);
+        try {
+            const { data } = await api.put('/integrations/olx/settings', { cabinets });
+            setItems(data.items);
+            toast(cabinets.length ? 'Кабинеты для найма сохранены' : 'Чаты робота OLX в воронку не идут', 'success');
+        } catch (error) {
+            toast(errorOf(error, 'Не удалось сохранить'), 'error');
+        } finally {
+            setSavingCabinets(false);
+        }
+    };
     const run = async (code) => {
         setRunning(code);
         try {
@@ -467,7 +495,7 @@ const IntegrationsSection = ({ api, toast, boot }) => {
     };
     const hints = {
         hh: 'Нужны переменные окружения HH_ACCESS_TOKEN и HH_USER_AGENT (токен приложения работодателя hh.ru). Опрос раз в 15 минут: активные вакансии → отклики → контакты резюме.',
-        olx: 'Отклики берутся из журнала робота OLX (9 кабинетов) раз в 5 минут — только обращения с номером телефона.',
+        olx: 'Раз в 5 минут из журнала робота OLX берутся обращения с номером телефона — только из кабинетов, выбранных здесь как «для найма». Кабинеты лидов (таксопарки) к рекрутерам не попадают.',
         webhook: 'Площадки без API (Kaspi, таргет, лид-формы) присылают отклики на POST /api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма» («Сессии → Ключи»).',
     };
     return (
@@ -481,6 +509,19 @@ const IntegrationsSection = ({ api, toast, boot }) => {
                                 <Pill tone={row.state === 'ok' ? 'green' : row.state === 'error' ? 'red' : 'slate'}>{INTEGRATION_STATE_LABELS[row.state] || row.state}</Pill>
                             </div>
                             <div className="text-[12px] text-slate-500">{hints[row.code]}</div>
+                            {row.code === 'olx' && (
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    <div className="w-72">
+                                        <CustomSelect variant="ios" multiple value={cabinets} onChange={setCabinets} ariaLabel="Кабинеты OLX для найма"
+                                                      placeholder="Кабинеты для найма не выбраны"
+                                                      options={(row.cabinets_available || []).map((c) => ({ value: c.code, label: c.title, meta: c.code }))}
+                                                      renderValue={(vals) => (vals.length ? `Кабинеты для найма: ${vals.length}` : 'Кабинеты для найма не выбраны')} />
+                                    </div>
+                                    {cabinetsChanged && (
+                                        <button type="button" className={TOOLBAR_BTN_PRIMARY} onClick={saveCabinets} disabled={savingCabinets}>Сохранить</button>
+                                    )}
+                                </div>
+                            )}
                             <div className="mt-0.5 text-[12px] tabular-nums text-slate-500">
                                 {[row.last_run_at ? `последний опрос ${shortTime(row.last_run_at)}` : 'ещё не опрашивалась',
                                     row.last_ok_at ? `успешно ${shortTime(row.last_ok_at)}` : null,

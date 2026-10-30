@@ -706,12 +706,58 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = queries.list_plans(cursor, row[0]) if row else []
         return jsonify({'items': _json(rows)})
 
+    def _olx_cabinet_catalog(cursor):
+        """Кабинеты, которые знает робот OLX: реестр (код и название) плюс учётки из базы."""
+        catalog = []
+        seen = set()
+        try:
+            from olx_amo import cabinets as olx_cabinets
+            for cabinet in olx_cabinets.CABINETS:
+                catalog.append({'code': cabinet.code, 'title': cabinet.title or cabinet.code})
+                seen.add(cabinet.code)
+        except Exception:  # noqa: BLE001 — робот не развёрнут: список только из базы
+            pass
+        for code in queries.olx_cabinet_codes(cursor):
+            if code not in seen:
+                catalog.append({'code': code, 'title': code})
+                seen.add(code)
+        return catalog
+
+    def _integrations_payload(cursor):
+        rows = _json(queries.list_integrations(cursor))
+        for row in rows:
+            if row['code'] == 'olx':
+                row['cabinets_available'] = _olx_cabinet_catalog(cursor)
+        return rows
+
     @hiring_route('/integrations')
     def hiring_integrations(ctx):
         _manage_only(ctx)
         with db._get_cursor() as cursor:
-            rows = queries.list_integrations(cursor)
-        return jsonify({'items': _json(rows)})
+            rows = _integrations_payload(cursor)
+        return jsonify({'items': rows})
+
+    @hiring_route('/integrations/olx/settings', methods=('PUT',))
+    def hiring_olx_settings(ctx):
+        """Кабинеты OLX «для найма»: чаты только этих кабинетов идут в «Отклики». Кабинеты лидов
+        (таксопарки) к рекрутерам не попадают — владелец 30.10.2026."""
+        _manage_only(ctx)
+        body = _body()
+        raw = body.get('cabinets')
+        if not isinstance(raw, list):
+            return _bad('Нужен список кодов кабинетов', 'HIRING_BAD_SETTINGS')
+        wanted = []
+        with db._get_cursor() as cursor:
+            known = {item['code'] for item in _olx_cabinet_catalog(cursor)}
+            for code in raw:
+                code = str(code or '').strip()
+                if code and code not in known:
+                    return _bad('Робот OLX не знает кабинет «%s»' % code[:40], 'HIRING_BAD_SETTINGS')
+                if code and code not in wanted:
+                    wanted.append(code)
+            queries.set_integration_settings(cursor, 'olx', {'cabinets': wanted}, rules.now_almaty())
+            rows = _integrations_payload(cursor)
+        return jsonify({'items': rows})
 
     @hiring_route('/integrations/<code>/run', methods=('POST',))
     def hiring_integration_run(code, ctx):
