@@ -23863,23 +23863,37 @@ class Database:
                      operator_id, is_qualifying)
                 VALUES %s
                 ON CONFLICT (general_call_id) DO UPDATE SET
-                    -- Повторная выкачка НЕ имеет права стереть уже известного
-                    -- сотрудника. Binotel перестаёт отдавать employeeData по
-                    -- старым звонкам, если сотрудника удалили у себя (так на
-                    -- проде 05.08.2026 обнулилась привязка звонков с sip 927 —
-                    -- уволенного оператора ОП — и 19 успешек июля исчезли).
-                    -- Пустое имя в ответе означает «нечем уточнить», а не
-                    -- «звонок ничей»: новое значение принимаем, только если оно
-                    -- содержательное.
-                    operator_id = COALESCE(EXCLUDED.operator_id, tez_lead_calls.operator_id),
+                    -- Кто говорил, решает ПЕРВАЯ выкачка, повторная это не
+                    -- переписывает. Binotel отдаёт имя ТЕКУЩЕГО сотрудника
+                    -- линии и для старых звонков: линию передают новому
+                    -- оператору переименованием, и вся её история приходит
+                    -- уже под новым именем (прод 30.10.2026: 41 звонок
+                    -- уволенного оператора с линии 920 за 11.08–17.09 ушёл
+                    -- новичку, который числился в группе раньше, чем принял
+                    -- линию). А удалённого сотрудника Binotel не отдаёт вовсе
+                    -- (05.08.2026, sip 927: обнулилась привязка, и 19 успешек
+                    -- июля исчезли).
+                    -- Поэтому известные имя и оператор остаются как есть, а
+                    -- оператора дописываем только звонку без него и только под
+                    -- тем же именем — или звонку, где имени ещё не было.
+                    operator_id = COALESCE(
+                        tez_lead_calls.operator_id,
+                        CASE WHEN tez_lead_calls.employee_name IN ('', EXCLUDED.employee_name)
+                             THEN EXCLUDED.operator_id END
+                    ),
+                    -- Признак считается от того оператора, что остался за
+                    -- звонком: исходящий и длительность от имени не зависят.
                     is_qualifying = CASE
                         WHEN EXCLUDED.operator_id IS NULL AND tez_lead_calls.operator_id IS NOT NULL
                             THEN tez_lead_calls.is_qualifying
+                        WHEN tez_lead_calls.operator_id IS NULL
+                             AND tez_lead_calls.employee_name NOT IN ('', EXCLUDED.employee_name)
+                            THEN FALSE
                         ELSE EXCLUDED.is_qualifying
                     END,
                     employee_name = CASE
-                        WHEN EXCLUDED.employee_name <> '' THEN EXCLUDED.employee_name
-                        ELSE tez_lead_calls.employee_name
+                        WHEN tez_lead_calls.employee_name <> '' THEN tez_lead_calls.employee_name
+                        ELSE EXCLUDED.employee_name
                     END,
                     -- Итог разговора тоже обновляем: зеркало перекачивает
                     -- сегодня и вчера как раз потому, что звонок мог попасть в

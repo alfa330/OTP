@@ -640,7 +640,7 @@ class GroupFilterTests(unittest.TestCase):
         """Повторная выкачка дня обязана обновлять итог звонка, а не только оператора:
         звонок мог попасть в первую выдачу незавершённым (billsec = 0)."""
         start = self.src.index("def save_tez_lead_calls")
-        body = self.src[start:start + 3600]
+        body = self.src[start:start + 5000]
         for field in ("billsec = EXCLUDED.billsec", "disposition = EXCLUDED.disposition",
                       "call_type = EXCLUDED.call_type"):
             self.assertIn(field, body)
@@ -662,11 +662,33 @@ class GroupFilterTests(unittest.TestCase):
         начисленные успешки (прод, 05.08.2026: sip 927, 19 успешек июля).
         """
         start = self.src.index("def save_tez_lead_calls")
-        body = self.src[start:start + 3600]
-        self.assertIn("operator_id = COALESCE(EXCLUDED.operator_id, tez_lead_calls.operator_id)", body)
-        self.assertIn("WHEN EXCLUDED.employee_name <> '' THEN EXCLUDED.employee_name", body)
+        body = " ".join(self.src[start:start + 5000].split())
+        self.assertIn("operator_id = COALESCE( tez_lead_calls.operator_id,", body)
         # Оператор сохранён -> сохраняется и признак квалифицирующего звонка.
         self.assertIn("THEN tez_lead_calls.is_qualifying", body)
+
+    def test_call_upsert_keeps_first_operator_when_line_is_renamed(self):
+        """Повторная выкачка НЕ переписывает звонок на нового сотрудника линии.
+
+        Binotel отдаёт имя ТЕКУЩЕГО сотрудника линии и для старых звонков: линию
+        передают переименованием, и история приходит под новым именем. Новый
+        оператор, числящийся в группе с более ранней даты, забирал так чужие
+        звонки (прод, 30.10.2026: 41 звонок за 11.08–17.09 на линии 920, под ними
+        6 августовских успешек). Первым идёт уже записанный оператор, новый
+        принимается только под прежним именем; имя тоже не перезаписывается.
+        """
+        start = self.src.index("def save_tez_lead_calls")
+        body = " ".join(self.src[start:start + 5000].split())
+        self.assertNotIn("COALESCE(EXCLUDED.operator_id", body)
+        self.assertIn(
+            "CASE WHEN tez_lead_calls.employee_name IN ('', EXCLUDED.employee_name) "
+            "THEN EXCLUDED.operator_id END",
+            body,
+        )
+        self.assertIn("WHEN tez_lead_calls.employee_name <> '' THEN tez_lead_calls.employee_name", body)
+        self.assertNotIn("WHEN EXCLUDED.employee_name <> '' THEN EXCLUDED.employee_name", body)
+        # Звонок под чужим именем без оператора не становится квалифицирующим.
+        self.assertIn("NOT IN ('', EXCLUDED.employee_name) THEN FALSE", body)
 
     def test_funnel_window_bounds_are_built_in_python(self):
         """Границы окна — готовые aware-даты, а не `date AT TIME ZONE` в SQL.
