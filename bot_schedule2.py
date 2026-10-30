@@ -68007,7 +68007,7 @@ try:
         partner_auth=_hiring_partner_auth,
         partner_scopes=_hiring_partner_scopes,
         partner_journal=_hiring_partner_journal,
-        rate_limiter=_HiringRateLimiter(60),
+        rate_limiter=_HiringRateLimiter(30),
     ))
     logging.info("Раздел «Воронка найма»: Blueprint подключён на /api/hiring")
 except Exception:

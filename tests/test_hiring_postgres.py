@@ -228,11 +228,39 @@ def test_take_is_exclusive_and_visibility(world):
     with pytest.raises(HiringError) as caught:
         service.touch(ctx_of(world, REC2), card['id'], {'kind': 'comment', 'body': 'чужое'})
     assert caught.value.code == 'HIRING_NOT_FOUND'
+    # «В работе» через move — по этапу карточки: из пула это то же атомарное взятие, флаг из тела не обходит его.
+    _outcome, other = add_response(world, REC1, '8 705 222 33 45')
+    via_move = service.move(ctx_of(world, REC2), other['id'], 'in_work', {'reactivate': True, 'recruiter_id': REC1})
+    assert via_move['recruiter_id'] == REC2 and via_move['candidate_no'] and via_move['taken_at']
+    with pytest.raises(HiringError) as caught:
+        service.move(ctx_of(world, REC1), other['id'], 'in_work', {'reactivate': True})
+    # Чужая закреплённая карточка для другого рекрутера не существует вовсе — ни взять, ни перевести.
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+    # Удалённый рекрутер ищет по цифрам телефона только среди своих карточек — иначе поиск по карточке
+    # пула (телефон скрыт) выдавал бы «нашлось / не нашлось» о скрытом номере.
+    add_response(world, REC1, '8 705 222 33 46')
     with world['db']._get_cursor() as cur:
+        caps_remote = {'recruiter': True, 'remote': True}
+        total, _rows = queries.list_cards(cur, caps_remote, REMOTE, {'query': '2223346', 'phone_scope_user_id': REMOTE})
+        assert total == 0
+        total, _rows = queries.list_cards(cur, caps_remote, REMOTE, {'query': '2223346'})
+        assert total == 1   # без границы (штатный рекрутер) карточка в пуле нашлась бы
+    # Снятая выдача снимает и права владельца на свои карточки, даже если человек остался в разделе тренером.
+    with world['db']._get_cursor() as cur:
+        queries.create_group(cur, 'Группа Б', NOW.date(), REC1, 367, world['vacancy_id'], SUPER, NOW)
+        queries.deactivate_person(cur, REC1, NOW)
+    former = ctx_of(world, REC1)
+    assert former['grant'] is None and former['trainer_group_ids']
+    assert not service.visible(former, taken)
+    with pytest.raises(HiringError) as caught:
+        service.touch(former, taken['id'], {'kind': 'call', 'result': 'dial'})
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+    with world['db']._get_cursor() as cur:
+        # Доска второго рекрутера: его карточка (взятая через move) и пул; чужая закреплённая — нет.
         columns, counts = queries.board(cur, {'recruiter': True}, REC2, {})
-        assert counts == {}   # второму рекрутеру карточка не видна ни в одной колонке
+        assert counts == {'in_work': 1, 'responses': 1} and columns['in_work'][0]['id'] == other['id']
         columns, counts = queries.board(cur, {'recruiter': True}, REC1, {})
-        assert counts == {'in_work': 1} and columns['in_work'][0]['id'] == card['id']
+        assert counts == {'in_work': 1, 'responses': 1} and columns['in_work'][0]['id'] == card['id']
         assert queries.card_assignments(cur, card['id'])[0]['reason'] == 'take'
 
 
@@ -378,10 +406,13 @@ def test_refusal_and_reactivation(world):
     with pytest.raises(HiringError) as caught:
         service.move(me, card['id'], 'in_work', {'reactivate': True})
     assert caught.value.code == 'HIRING_FORBIDDEN'
-    # Закрыли новую — старую можно вернуть в работу за другим рекрутером.
+    # Закрыли новую — старую можно вернуть в работу за другим рекрутером (но только за рекрутером).
     service.take(me, fresh['id'])
     service.touch(me, fresh['id'], {'kind': 'comment', 'body': 'x'})
     service.move(me, fresh['id'], 'refused', {'initiator': 'ours', 'reason_id': ours['id']})
+    with pytest.raises(HiringError) as caught:
+        service.move(lead, card['id'], 'in_work', {'reactivate': True, 'recruiter_id': TRAINER})
+    assert caught.value.code == 'HIRING_BAD_RECRUITER'
     card = service.move(lead, card['id'], 'in_work', {'reactivate': True, 'recruiter_id': REC2})
     assert card['stage'] == 'in_work' and not card['is_closed'] and card['recruiter_id'] == REC2 and card['reactivations'] == 1
     assert card['close_reason_text'] is None

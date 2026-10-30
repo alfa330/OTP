@@ -146,7 +146,8 @@ def actor_kinds(ctx_caps, card, ctx_user_id, trainer_group_ids=()):
         kinds.add('lead')
     if ctx_caps.get('recruiter') or ctx_caps.get('lead'):
         kinds.add('recruiter')
-    if card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx_user_id):
+    # Владелец — только действующий рекрутер или руководитель: снятая выдача снимает и права на свои карточки.
+    if (kinds & {'recruiter', 'lead'}) and card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx_user_id):
         kinds.add('owner')
     if card.get('group_id') and int(card['group_id']) in {int(g) for g in trainer_group_ids}:
         kinds.add('trainer')

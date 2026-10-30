@@ -143,6 +143,8 @@ class TransitionTests(unittest.TestCase):
         card = {'recruiter_id': 7, 'group_id': 3, 'department_id': 5}
         self.assertEqual(rules.actor_kinds(caps, card, 7, trainer_group_ids=[3]), {'recruiter', 'owner', 'trainer', 'dept_head'})
         self.assertEqual(rules.actor_kinds(caps, card, 8, trainer_group_ids=[]), {'recruiter', 'dept_head'})
+        # Выдачу сняли — «владельцем» своей старой карточки человек больше не считается.
+        self.assertEqual(rules.actor_kinds({'lead': False, 'recruiter': False, 'headed_ids': []}, card, 7, trainer_group_ids=[3]), {'trainer'})
         self.assertIn('lead', rules.actor_kinds({'lead': True, 'headed_ids': []}, card, 8))
         self.assertIn('dept_head', rules.actor_kinds({'super_admin': True, 'headed_ids': []}, card, 8))
 

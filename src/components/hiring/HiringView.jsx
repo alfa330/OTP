@@ -88,7 +88,12 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
 
     const api = useMemo(() => {
         const url = (path) => `${apiBaseUrl}/api/hiring${path}`;
-        const config = (extra) => ({ headers: headersRef.current ? headersRef.current() : {}, ...extra });
+        // Заголовки сливаются, а не подменяются: иначе свой Content-Type у загрузки файла стёр бы
+        // авторизацию (Authorization / X-Auth-Transport), и запрос жил бы только на cookie.
+        const config = (extra = {}) => {
+            const { headers: own = {}, ...rest } = extra || {};
+            return { headers: { ...(headersRef.current ? headersRef.current() : {}), ...own }, ...rest };
+        };
         return {
             get: (path, params) => axios.get(url(path), config({ params })),
             post: (path, body, extra) => axios.post(url(path), body || {}, config(extra)),

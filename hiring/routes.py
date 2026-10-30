@@ -44,9 +44,9 @@ from .service import HiringError
 
 log = logging.getLogger(__name__)
 
-EXTERNAL_MAX_ITEMS = 200
+EXTERNAL_MAX_ITEMS = 100
 EXTERNAL_MAX_BODY = 256 * 1024
-EXTERNAL_PER_MINUTE = 60
+EXTERNAL_PER_MINUTE = 30
 
 
 def _json(value):
@@ -88,7 +88,9 @@ def public_card(card, ctx):
         data['whatsapp_link'] = rules.whatsapp_link(card.get('whatsapp') or card.get('phone'))
     data['no_answer_suggest'] = (card.get('stage') == rules.IN_WORK
                                  and int(card.get('no_answer_streak') or 0) >= rules.NO_ANSWER_SUGGEST_AFTER)
-    data['targets'] = rules.TARGETS_FROM.get(card.get('stage'), [])
+    # Из пула путь один — «Взять в работу» (отдельная кнопка и ручка /take), поэтому целей перехода у
+    # карточки пула нет: иначе интерфейс рисовал бы второй путь в «В работе» мимо закрепления.
+    data['targets'] = [] if card.get('stage') in rules.POOL_STAGES else rules.TARGETS_FROM.get(card.get('stage'), [])
     return data
 
 
@@ -249,13 +251,20 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     def _filters_from_args(ctx):
         args = request.args
+        caps = access.capabilities(ctx)
         filters = {
             'vacancy_id': _int(args.get('vacancy_id')), 'city': args.get('city') or None,
             'source_id': _int(args.get('source_id')), 'recruiter_id': _int(args.get('recruiter_id')),
             'stage': args.get('stage') or None, 'query': args.get('q') or None,
         }
-        if args.get('mine') in ('1', 'true'):
+        # «Мои и пул» осмысленно только рекрутеру: тренеру и руководителю отдела такой отбор
+        # пересёкся бы с их кругом (группы, отдел) в пустоту.
+        if args.get('mine') in ('1', 'true') and caps['recruiter']:
             filters['mine_user_id'] = ctx['user_id']
+        # Удалённый рекрутер телефонов в пуле не видит — и искать по цифрам телефона может только
+        # среди своих карточек, иначе поиск отвечал бы «есть/нет» о скрытом номере.
+        if caps['remote']:
+            filters['phone_scope_user_id'] = ctx['user_id']
         if args.get('from'):
             try:
                 filters['from'] = datetime.fromisoformat(str(args.get('from'))[:10])
@@ -795,6 +804,11 @@ def build_hiring_external_blueprint(*, db, service, partner_auth, partner_scopes
         partner_journal.record(db, key, scope=scope, endpoint='POST /api/hiring/external/responses', outcome='ok',
                                summary='%s: %d новых из %d' % (source_code, created, len(results)),
                                details={'source': source_code, 'created': created, 'total': len(results)})
-        return jsonify({'results': results, 'created': created})
+        # Партнёру — только «принят / не телефон»: чем кончился приём внутри (новая карточка, повтор по
+        # открытой, телефон действующего сотрудника) и номера карточек — наши персональные данные,
+        # по ним внешняя сторона перебором узнавала бы, кто у нас сотрудник и кто в найме.
+        public = [{'status': 'accepted' if row['status'] in ('created', 'repeat', 'employee') else 'invalid',
+                   'phone': row.get('phone')} for row in results]
+        return jsonify({'results': public, 'accepted': sum(1 for row in public if row['status'] == 'accepted')})
 
     return bp

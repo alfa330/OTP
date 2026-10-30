@@ -42,7 +42,7 @@ const Section = ({ title, right, children }) => (
 const DateTimeField = ({ date, time, onDate, onTime }) => (
     <div className="grid grid-cols-[1fr_112px] gap-2">
         <IosDatePicker value={date} onChange={onDate} allowEmpty triggerClassName={DATE_TRIGGER} ariaLabel="Дата" />
-        <IosTimePicker value={time} onChange={onTime} className={TIME_INPUT} ariaLabel="Время" />
+        <IosTimePicker value={time} onChange={onTime} className="w-full" inputClassName={TIME_INPUT} ariaLabel="Время" />
     </div>
 );
 
@@ -396,9 +396,16 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
     }, [api, cardId]);
 
     useEffect(() => {
+        // Новая карточка — чистое окно: черновик комментария, дата смены и открытые диалоги прошлой
+        // карточки не должны переехать в следующую (окно смонтировано всегда).
         setData(null);
         setError('');
         setMove(null);
+        setComment('');
+        setShiftDate(todayIso());
+        setEditing(false);
+        setCalling(false);
+        setReassigning(false);
         if (cardId) load();
     }, [cardId, load]);
 

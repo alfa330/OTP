@@ -281,10 +281,16 @@ def test_external_responses(client):
     accepted = client.post('/api/hiring/external/responses', json=body, headers={'X-Api-Key': 'good'})
     assert accepted.status_code == 200
     payload = accepted.get_json()
-    assert payload['created'] == 1 and [row['status'] for row in payload['results']] == ['created', 'invalid']
+    # Партнёру — только «принят / не телефон», без номеров карточек и без «это наш сотрудник».
+    assert payload['accepted'] == 1 and [row['status'] for row in payload['results']] == ['accepted', 'invalid']
+    assert all('card_id' not in row for row in payload['results'])
+    repeat = client.post('/api/hiring/external/responses', json={'source': 'kaspi', 'phone': '8 705 777 00 01'}, headers={'X-Api-Key': 'good'}).get_json()
+    assert repeat['results'] == [{'status': 'accepted', 'phone': '+77057770001'}]
+    # Площадки со своим опросом (hh, olx) и базы контактов партнёру закрыты.
+    assert client.post('/api/hiring/external/responses', json={'source': 'hh', 'phone': '8 705 777 00 05'}, headers={'X-Api-Key': 'good'}).status_code == 400
     assert client.post('/api/hiring/external/responses', json={'items': [{'phone': '8 705 777 00 02'}]}, headers={'X-Api-Key': 'good'}).status_code == 400
     assert client.post('/api/hiring/external/responses', json={'source': 'nope', 'phone': '8 705 777 00 03'}, headers={'X-Api-Key': 'good'}).status_code == 400
     assert client.post('/api/hiring/external/responses', data='[]', content_type='application/json', headers={'X-Api-Key': 'good'}).status_code == 400
-    assert [call[1]['outcome'] for call in client.world['journal'].calls] == ['forbidden', 'ok', 'rejected']
+    assert [call[1]['outcome'] for call in client.world['journal'].calls] == ['forbidden', 'ok', 'ok', 'rejected', 'rejected']
     card = client.get('/api/hiring/cards', query_string={'q': 'Kaspi'}, headers=as_user(HR_HEAD)).get_json()['items'][0]
     assert card['source_code'] == 'kaspi' and card['vacancy_text'] == 'Водитель' and card['stage'] == 'responses'

@@ -187,7 +187,9 @@ const AddResponseModal = ({ open, onClose, api, toast, boot, onCreated }) => {
 };
 
 const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => {
-    const [scope, setScope] = useState(caps.lead ? 'all' : 'mine');
+    // «Мои и пул» — отбор рекрутера; тренер и руководитель отдела видят свой круг целиком (сервер
+    // отбор mine у них и не применяет), руководитель рекрутинга — всё с переключателем.
+    const [scope, setScope] = useState(caps.lead || !caps.recruiter ? 'all' : 'mine');
     const [query, setQuery] = useState('');
     const [filters, setFilters] = useState({ vacancy_id: '', city: '', source_id: '', recruiter_id: '' });
     const [columns, setColumns] = useState(null);
@@ -251,11 +253,16 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
         if (!id) return;
         const card = (columns || []).flatMap((column) => column.cards).find((item) => item.id === id);
         if (!card || card.stage === stage) return;
+        // Из пула — только «Взять в работу» (атомарное закрепление); других целей у карточки пула нет.
+        if (POOL_STAGES.includes(card.stage)) {
+            if (stage === 'in_work' && caps.take) take(card);
+            else toast('Из пула карточка берётся только в работу', 'error');
+            return;
+        }
         if (!(card.targets || []).includes(stage)) {
             toast(`Из «${(columns || []).find((c) => c.stage === card.stage)?.label}» в «${(columns || []).find((c) => c.stage === stage)?.label}» карточка не переходит`, 'error');
             return;
         }
-        if (POOL_STAGES.includes(card.stage) && stage === 'in_work') { take(card); return; }
         onOpenCard(id, { move: stage });
     };
 

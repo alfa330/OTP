@@ -34,7 +34,8 @@ const UploadTab = ({ api, toast, boot, onChanged, version }) => {
         form.append('source_id', sourceId);
         setUploading(true);
         try {
-            const { data } = await api.post('/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } });
+            // Content-Type для FormData axios ставит сам (с границей частей); свой заголовок здесь не нужен.
+            const { data } = await api.post('/upload', form);
             const batch = data.batch;
             toast(`Загружено ${batch.loaded}, дублей ${batch.duplicates}, ошибок ${batch.errors}`, 'success');
             setFile(null);

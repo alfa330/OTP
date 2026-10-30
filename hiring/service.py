@@ -98,7 +98,9 @@ class HiringService:
             return True
         if caps['recruiter'] and (card['stage'] in rules.POOL_STAGES and not card['is_closed']):
             return True
-        if card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']):
+        # Владелец — только действующий рекрутер: снятая выдача снимает и права на свои карточки
+        # (в списках их уже нет — queries.scope_clause, и по card_id не должно быть).
+        if caps['recruiter'] and card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']):
             return True
         if card.get('group_id') and int(card['group_id']) in set(caps['trainer_group_ids']):
             return True
@@ -115,7 +117,7 @@ class HiringService:
     @staticmethod
     def _is_owner_or_lead(ctx, card):
         caps = access.capabilities(ctx)
-        return caps['lead'] or (card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']))
+        return caps['lead'] or (caps['recruiter'] and card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']))
 
     # ─── Приём контактов и откликов ──────────────────────────────────────────
 
@@ -247,7 +249,11 @@ class HiringService:
         results = []
         with self._cursor() as cursor:
             source = queries.source_by_code(cursor, source_code)
-            if not source or not source['is_active']:
+            # Партнёру открыты только источники откликов без своего опроса (Kaspi, таргет, свои):
+            # писать от имени HeadHunter, OLX или загруженной базы он не может — иначе отчёт по
+            # источникам перестал бы отличать, откуда пришёл отклик.
+            if (not source or not source['is_active'] or source['kind'] != rules.SOURCE_RESPONSES
+                    or source.get('platform') not in (None, 'webhook')):
                 raise HiringError('HIRING_BAD_SOURCE', 'Неизвестный источник: %s' % str(source_code)[:40])
             for item in items:
                 item = item if isinstance(item, dict) else {}
@@ -465,8 +471,14 @@ class HiringService:
         payload = payload or {}
         if target not in rules.STAGE_CODES:
             raise HiringError('HIRING_BAD_STAGE', 'Такого этапа нет')
-        if target == rules.IN_WORK and not payload.get('reactivate'):
-            return self.take(ctx, card_id)
+        if target == rules.IN_WORK:
+            # Из пула в работу — только атомарным «Взять в работу» (claim_card): по ЭТАПУ карточки, а не по
+            # флагу из тела, иначе любой рекрутер переводил бы чужие контакты в «В работе» без закрепления.
+            # Из «Отказа» / «Отсева» — повторная активация (правило с reactivate, только руководитель).
+            with self._cursor() as cursor:
+                current = self._load_visible(cursor, ctx, card_id)
+            if current['stage'] in rules.POOL_STAGES:
+                return self.take(ctx, card_id)
         now = self._now()
         caps = self._caps(ctx)
         with self._cursor() as cursor:
@@ -536,6 +548,9 @@ class HiringService:
         recruiter_id = _int(payload.get('recruiter_id')) or card.get('recruiter_id')
         if not recruiter_id:
             raise HiringError('HIRING_NEED_RECRUITER', 'Укажите рекрутера, за которым закрепить карточку')
+        # Та же проверка, что у reassign: закрепить можно только за действующим рекрутером или руководителем.
+        if recruiter_id not in set(queries.recruiter_user_ids(cursor)) | set(queries.lead_user_ids(cursor)):
+            raise HiringError('HIRING_BAD_RECRUITER', 'Этот человек не рекрутер')
         return {
             'recruiter_id': recruiter_id, 'is_closed': False, 'closed_at': None, 'close_initiator': None,
             'close_reason_id': None, 'close_reason_text': None, 'close_stage': None, 'close_day': None,

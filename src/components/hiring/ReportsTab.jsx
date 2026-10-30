@@ -109,7 +109,8 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
     const [loading, setLoading] = useState(false);
     const [request, setRequest] = useState(null);
 
-    const byPeriod = periodMode === 'period' && periodFrom && periodTo;
+    // Период есть только у дашборда: на «Мотивации» показан переключатель месяца — по месяцу и запрос.
+    const byPeriod = view === 'dashboard' && periodMode === 'period' && periodFrom && periodTo;
     const filters = useMemo(() => ({
         month: byPeriod ? undefined : month,
         from: byPeriod ? periodFrom : undefined,

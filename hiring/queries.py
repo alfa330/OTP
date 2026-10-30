@@ -756,8 +756,15 @@ def _filters(filters):
         text = str(filters['query']).strip()
         digits = ''.join(ch for ch in text if ch.isdigit())
         if len(digits) >= 4:
-            where.append("(c.full_name ILIKE %s OR c.phone LIKE %s OR c.candidate_no::text = %s)")
-            params.extend(['%' + text + '%', '%' + digits[-10:] + '%', digits])
+            # Удалённому рекрутеру (phone_scope_user_id) поиск по цифрам телефона — только в своих карточках:
+            # в пуле телефон ему не показывается, и «нашлось / не нашлось» выдавало бы скрытый номер.
+            phone_clause = "c.phone LIKE %s"
+            phone_params = ['%' + digits[-10:] + '%']
+            if filters.get('phone_scope_user_id'):
+                phone_clause = "(c.phone LIKE %s AND c.recruiter_id = %s)"
+                phone_params.append(int(filters['phone_scope_user_id']))
+            where.append("(c.full_name ILIKE %s OR " + phone_clause + " OR c.candidate_no::text = %s)")
+            params.extend(['%' + text + '%'] + phone_params + [digits])
         else:
             where.append("(c.full_name ILIKE %s OR c.city ILIKE %s OR COALESCE(c.vacancy_text, '') ILIKE %s)")
             params.extend(['%' + text + '%', '%' + text + '%', '%' + text + '%'])
