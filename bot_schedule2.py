@@ -67993,6 +67993,9 @@ try:
         cursor_factory=db._get_cursor,
         send_telegram=_send_telegram_text_message,
         web_app_base_url=TASK_WEB_APP_BASE_URL,
+        # Клиент Binotel отдела линии (история звонков рекрутера, ссылка на запись) — из сервиса
+        # «Удаленного КЦ», который появляется ниже по файлу: берётся по требованию.
+        dial_list=lambda: _dial_list_service,
     )
     app.register_blueprint(build_hiring_blueprint(
         db=db,
@@ -68055,6 +68058,8 @@ def _hiring_job(name):
             return service.auto_return()
         if name == 'overdue':
             return service.overdue_digest()
+        if name == 'calls_sync':
+            return service.sync_call_history()
     except Exception:
         logging.exception("Воронка найма: задача %s упала", name)
     return None
@@ -68792,6 +68797,11 @@ try:
     app.register_blueprint(_dial_list_bp)
     _dial_list_service = _dial_list_bp.service
     logging.info("Раздел «Удаленный КЦ»: Blueprint подключён на /api/operator/dial_list")
+    # «Воронка найма» слушает вебхук Binotel «API Call Completed» (владелец 30.10.2026): звонки с линий
+    # рекрутеров и входящие на них ложатся в карточки кандидатов с исходом, длительностью и записью.
+    if _HIRING.get('service') is not None:
+        _dial_list_service.call_observers.append(_HIRING['service'].on_binotel_call)
+        logging.info("Воронка найма: наблюдатель вебхука Binotel подключён")
 except Exception:
     logging.exception("Раздел «Удаленный КЦ»: Blueprint НЕ подключён")
 
@@ -73618,6 +73628,8 @@ if __name__ == '__main__':
         ('next_contacts', CronTrigger(minute='1,11,21,31,41,51', timezone=ZoneInfo('Asia/Almaty'))),
         ('auto_return', CronTrigger(hour=3, minute=20, timezone=ZoneInfo('Asia/Almaty'))),
         ('overdue', CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty'))),
+        # Добор звонков линий рекрутеров из истории Binotel — вебхук мог не дойти (перезапуск).
+        ('calls_sync', CronTrigger(minute='6,16,26,36,46,56', timezone=ZoneInfo('Asia/Almaty'))),
     ):
         scheduler.add_job(
             hiring_job,

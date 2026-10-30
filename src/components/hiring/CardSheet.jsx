@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ExternalLink, MessageCircle, Pencil, Phone, Repeat, UserCog } from 'lucide-react';
+import { ExternalLink, Loader2, MessageCircle, Pencil, Phone, Play, Repeat, UserCog } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
-    ASSIGNMENT_LABELS, FINAL_STAGES, MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES,
-    SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, addDays, codeOf, errorOf, fullDate, joinDateTime, longTime,
-    openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
+    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES, MOTIVATION_LABELS,
+    MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, addDays,
+    codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime, openICorePhoneCall, reasonKindFor, shortTime,
+    splitDateTime, todayIso,
 } from './hiringMeta';
 import { DATE_TRIGGER, FIELD, Label, Loading, Pill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 
@@ -341,10 +342,54 @@ const ReassignDialog = ({ open, onClose, api, toast, card, boot, onDone }) => {
     );
 };
 
-const Timeline = ({ touches, stages }) => {
+/* Звонок из телефонии в ленте — как в журнале «Удаленного КЦ»: направление, исход, длительность,
+   линия, запись по нажатию (ссылка у Binotel живёт около часа, поэтому спрашивается на клик). */
+const CallRow = ({ item, call, api }) => {
+    const [rec, setRec] = useState({});
+    const load = async () => {
+        setRec({ loading: true });
+        try {
+            const { data } = await api.get(`/calls/${call.id}/recording`);
+            setRec({ url: data.url });
+        } catch (error) {
+            setRec({ error: errorOf(error, 'АТС не отдала запись') });
+        }
+    };
+    const result = call.result || 'other';
+    return (
+        <div className="text-[13px] text-slate-800">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                <span className="font-medium">{CALL_DIRECTION_LABELS[call.direction] || 'Звонок'}</span>
+                <Pill tone={CALL_RESULT_TONES[result]}>{CALL_RESULT_LABELS[result] || result}</Pill>
+                {call.billsec > 0 && <span className="tabular-nums text-slate-500">{fmtDuration(call.billsec)}</span>}
+                <span className="text-slate-400">· линия {call.internal_number}{item.author ? ` · ${item.author}` : ''}</span>
+            </div>
+            {item.body && item.body.split('\n').slice(1).join('\n') && (
+                <div className="whitespace-pre-wrap text-slate-600">{item.body.split('\n').slice(1).join('\n')}</div>
+            )}
+            {call.recording === 'available' && (
+                <div className="mt-1.5">
+                    {rec.url ? (
+                        <audio controls autoPlay preload="auto" src={rec.url} className="h-9 w-full max-w-md" aria-label="Запись разговора" />
+                    ) : (
+                        <button type="button" onClick={load} disabled={rec.loading}
+                                className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12.5px] font-medium text-slate-700 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-60">
+                            {rec.loading ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} className="fill-current" />}
+                            {rec.loading ? 'Запрашиваем у АТС…' : 'Прослушать запись'}
+                        </button>
+                    )}
+                    {rec.error && <div className="mt-1 text-[12px] text-rose-600">{rec.error}</div>}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const Timeline = ({ touches, stages, calls = [], api }) => {
+    const callsByTouch = useMemo(() => Object.fromEntries(calls.filter((c) => c.touch_id).map((c) => [c.touch_id, c])), [calls]);
     const items = useMemo(() => {
         const rows = [
-            ...touches.map((t) => ({ key: `t${t.id}`, at: t.at, kind: t.kind, result: t.result, body: t.body, author: t.author_name, order: 1 })),
+            ...touches.map((t) => ({ key: `t${t.id}`, id: t.id, at: t.at, kind: t.kind, result: t.result, body: t.body, author: t.author_name, order: 1 })),
             ...stages.map((s) => ({ key: `s${s.id}`, at: s.entered_at, kind: 'stage', stage: s.stage, substage: s.substage, author: s.by_user_name, order: 0 })),
         ];
         return rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.order - a.order));
@@ -362,6 +407,8 @@ const Timeline = ({ touches, stages }) => {
                                 {item.substage ? ` · ${SUBSTAGE_LABELS[item.substage]}` : ''}
                                 {item.author ? <span className="text-slate-400"> · {item.author}</span> : null}
                             </div>
+                        ) : item.kind === 'call' && callsByTouch[item.id] ? (
+                            <CallRow item={item} call={callsByTouch[item.id]} api={api} />
                         ) : (
                             <div className="text-[13px] text-slate-800">
                                 <span className="font-medium">{TOUCH_LABELS[item.kind] || item.kind}</span>
@@ -673,7 +720,7 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                                        onKeyDown={(e) => { if (e.key === 'Enter') addComment(); }} />
                                 <button type="button" className={iosBtnSecondary} onClick={addComment} disabled={savingComment || !comment.trim()}>Записать</button>
                             </div>
-                            <Timeline touches={data.touches || []} stages={data.stages || []} />
+                            <Timeline touches={data.touches || []} stages={data.stages || []} calls={data.calls || []} api={api} />
                         </Section>
                     </div>
                 )}

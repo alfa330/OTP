@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 
-from . import access, hh, notices, queries, rules, upload
+from . import access, calls, hh, notices, queries, rules, upload
 
 log = logging.getLogger(__name__)
 
@@ -72,13 +72,24 @@ def _text(value, limit):
 
 
 class HiringService:
-    def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None, hh_transport=None):
+    def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None, hh_transport=None,
+                 dial_list=None):
+        """dial_list — () -> сервис «Удаленного КЦ» или None: клиент Binotel отдела для истории звонков
+        линии рекрутера и ссылки на запись разговора."""
         self._cursor = cursor_factory
         self._send_telegram = send_telegram
         self._base_url = web_app_base_url
         self._now = now or rules.now_almaty
         self._hh_transport = hh_transport
+        self._dial_list = dial_list
         self._pull_lock = threading.Lock()
+        self._calls_lock = threading.Lock()
+
+    def _dial_list_service(self):
+        try:
+            return self._dial_list() if callable(self._dial_list) else self._dial_list
+        except Exception:  # noqa: BLE001
+            return None
 
     # ─── Контекст ────────────────────────────────────────────────────────────
 
@@ -671,6 +682,137 @@ class HiringService:
             total = queries.count_shifts(cursor, card_id)
             queries.update_card(cursor, card_id, shifts_done=total, updated_at=now)
             return queries.get_card(cursor, card_id)
+
+    # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ───────────────────
+
+    def on_binotel_call(self, fields, matched=False):
+        """Наблюдатель вебхука «API Call Completed» раздела «Удаленный КЦ»: звонок с линии рекрутера
+        (или входящий на неё) ложится в карточку кандидата с исходом, длительностью и записью.
+        Звонки обзвона (matched) — не наши."""
+        if matched:
+            return None
+        call = calls.from_webhook(fields)
+        if not call:
+            return None
+        with self._calls_lock:
+            with self._cursor() as cursor:
+                call_id, _created = self._record_call(cursor, call, source='webhook', now=self._now())
+                return call_id
+
+    def _record_call(self, cursor, call, *, source, now):
+        """Один звонок → строка hiring_calls и касание в ленте карточки. Возвращает (id звонка, новый ли);
+        (None, False) — звонок не к нам: линия не рекрутера, номер без карточки, звонок ещё идёт."""
+        if not call.get('external_phone'):
+            return None, False
+        result = calls.map_result(call.get('disposition'))
+        if not result:
+            return None, False
+        seat = queries.recruiter_by_line(cursor, call['internal_number'])
+        if not seat:
+            return None, False
+        known = queries.get_call_by_general_id(cursor, call['general_call_id'])
+        recording = calls.recording_state(call)
+        if known:
+            # Вебхук дошёл после истории (или наоборот): исход тот же, длительность — большая.
+            if known['result'] != result or int(call['billsec']) > int(known['billsec'] or 0):
+                queries.update_call_outcome(cursor, known['id'], call['disposition'], result, call['billsec'],
+                                            call['waitsec'], recording, now)
+                if known.get('touch_id'):
+                    queries.update_touch(cursor, known['touch_id'], result=calls.touch_result(call),
+                                         body=calls.touch_body(call), duration_sec=int(call['billsec']))
+            return known['id'], False
+        card = queries.card_for_call(cursor, call['external_phone'], seat['user_id'])
+        if not card:
+            return None, False
+        call_id = queries.insert_call(cursor, call, card['id'], seat['user_id'], seat['department_id'], result, recording,
+                                      source, now)
+        if not call_id:
+            return None, False
+        started = call.get('started_at') or now
+        meta = {'general_call_id': call['general_call_id'], 'direction': call['direction'], 'line': call['internal_number'],
+                'disposition': call['disposition'], 'result': result, 'waitsec': call['waitsec'], 'recording': recording,
+                'source': source}
+        # Ручная отметка после «Позвонить» рядом по времени — тот же звонок: дописываем её, а не дублируем.
+        manual = queries.manual_call_touch(cursor, card['id'], seat['user_id'], started, calls.MERGE_WINDOW_MINUTES)
+        if manual:
+            body = calls.touch_body(call) + (('\n' + manual['body']) if manual.get('body') else '')
+            queries.update_touch(cursor, manual['id'], result=calls.touch_result(call), body=body,
+                                 duration_sec=int(call['billsec']), meta=meta)
+            touch_id = manual['id']
+        else:
+            touch_id = queries.add_touch(cursor, card['id'], rules.TOUCH_CALL, calls.touch_result(call),
+                                         calls.touch_body(call), seat['user_id'], queries.user_name(cursor, seat['user_id']),
+                                         started, duration_sec=int(call['billsec']), meta=meta)
+        queries.link_call_touch(cursor, call_id, touch_id)
+        fields = {'updated_at': now}
+        if not card['is_closed']:
+            fields['last_touch_at'] = max(started, card.get('last_touch_at') or started)
+            if card['stage'] == rules.IN_WORK and not manual:
+                talked = calls.talked(call)
+                fields['substage'] = 'dial' if talked else 'no_answer'
+                fields['no_answer_streak'] = 0 if talked else int(card['no_answer_streak'] or 0) + 1
+        queries.update_card(cursor, card['id'], **fields)
+        return call_id, True
+
+    def sync_call_history(self, now=None):
+        """Добор звонков по линиям рекрутеров из истории Binotel (вебхук мог не дойти). Раз в десять
+        минут, окно с перекрытием; первый раз — сутки. Возвращает число записанных звонков."""
+        dial_list = self._dial_list_service()
+        if dial_list is None:
+            return 0
+        now = now or self._now()
+        with self._cursor() as cursor:
+            lines = queries.recruiter_lines(cursor)
+            state = queries.get_integration(cursor, 'binotel') or {}
+        if not lines:
+            return 0
+        last = (state.get('cursor') or {}).get('synced_at')
+        since = datetime.fromisoformat(last) - timedelta(minutes=calls.HISTORY_OVERLAP_MINUTES) if last \
+            else now - timedelta(hours=calls.HISTORY_FIRST_HOURS)
+        tz = rules.ALMATY
+        start_ts = int(since.replace(tzinfo=tz).timestamp())
+        stop_ts = int(now.replace(tzinfo=tz).timestamp())
+        recorded = 0
+        problems = []
+        for line in lines:
+            try:
+                client = dial_list.client_for_department(line['department_id'])
+                history = client.list_calls_by_internal_number(line['internal_number'], start_ts, stop_ts)
+            except Exception as exc:  # noqa: BLE001
+                problems.append('линия %s: %s' % (line['internal_number'], str(exc)[:120]))
+                continue
+            with self._calls_lock:
+                with self._cursor() as cursor:
+                    for raw in history:
+                        call = calls.from_history(raw)
+                        if call and self._record_call(cursor, call, source='history', now=now)[1]:
+                            recorded += 1
+        with self._cursor() as cursor:
+            queries.set_integration(cursor, 'binotel', now, state='ok' if not problems else 'error', ok=not problems,
+                                    error=('; '.join(problems)[:500] or None),
+                                    cursor_value={'synced_at': now.isoformat(timespec='seconds')}, received=recorded)
+        return recorded
+
+    def recording_url(self, ctx, call_id):
+        """Ссылка на запись разговора у Binotel (подписанная, живёт около часа) — тому, кто видит карточку."""
+        with self._cursor() as cursor:
+            call = queries.get_call(cursor, call_id)
+            if not call:
+                raise HiringError('HIRING_NOT_FOUND', 'Звонок не найден', 404)
+            self._load_visible(cursor, ctx, call['card_id'])
+        if call['result'] != 'answered' or int(call['billsec'] or 0) <= 0:
+            raise HiringError('HIRING_NO_RECORDING', 'Разговора не было — записи нет', 404)
+        dial_list = self._dial_list_service()
+        if dial_list is None or not call.get('department_id'):
+            raise HiringError('HIRING_LINES_OFF', 'Записи недоступны: раздел «Удаленный КЦ» не подключён', 503)
+        try:
+            url = dial_list.client_for_department(call['department_id']).get_call_record_url(call['general_call_id'])
+        except Exception as exc:  # noqa: BLE001
+            log.warning('hiring: запись %s недоступна: %s', call['general_call_id'], exc)
+            raise HiringError('HIRING_RECORDING_UNAVAILABLE', 'АТС не отдала запись. Попробуйте позже', 502)
+        if not url:
+            raise HiringError('HIRING_RECORDING_NOT_READY', 'Запись ещё не готова у АТС. Попробуйте через минуту', 404)
+        return {'call_id': call['id'], 'url': url, 'billsec': int(call['billsec'] or 0)}
 
     def set_motivation(self, ctx, card_id, status, reason=None):
         """Выплачено / отмена с причиной — руководитель рекрутинга."""

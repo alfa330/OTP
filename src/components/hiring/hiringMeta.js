@@ -42,6 +42,16 @@ export const SUBSTAGE_TONES = { no_answer: 'amber', no_show: 'red', came: 'green
 export const TOUCH_LABELS = {
     call: 'Звонок', whatsapp: 'WhatsApp', comment: 'Комментарий', repeat_response: 'Повторный отклик', system: 'Система',
 };
+/* Звонки из телефонии Binotel (hiring/calls.py): исход — как в журнале «Удаленного КЦ». */
+export const CALL_RESULT_LABELS = { answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не поднял трубку', other: 'Не состоялся' };
+export const CALL_RESULT_TONES = { answered: 'green', busy: 'amber', no_answer: 'amber', other: 'slate' };
+export const CALL_DIRECTION_LABELS = { out: 'Исходящий звонок', in: 'Входящий звонок' };
+
+/** «3:07» — длительность разговора в секундах. */
+export const fmtDuration = (seconds) => {
+    const total = Math.max(0, Number(seconds) || 0);
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+};
 export const MOTIVATION_LABELS = {
     pending: 'Ожидает подтверждения', counted: 'Засчитано', paid: 'Выплачено', cancelled: 'Отменено',
 };

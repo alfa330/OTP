@@ -527,7 +527,7 @@ def add_touch(cursor, card_id, kind, result, body, by, by_name, now, duration_se
 
 def card_touches(cursor, card_id):
     cursor.execute("""
-        SELECT id, kind, result, body, duration_sec, author_id, author_name, at, meta FROM hiring_touches
+        SELECT id, kind, result, body, duration_sec, author_id, author_name, at, meta, call_id FROM hiring_touches
          WHERE card_id = %s ORDER BY id
     """, (int(card_id),))
     rows = _all(cursor)
@@ -651,6 +651,124 @@ def mark_card_seen(cursor, user_id, card_id, now):
 
 def mark_all_seen(cursor, user_id, now):
     cursor.execute("UPDATE hiring_notifications SET read_at = %s WHERE user_id = %s AND read_at IS NULL", (now, int(user_id)))
+    return cursor.rowcount
+
+
+# ─── Звонки из телефонии (Binotel) ────────────────────────────────────────────
+
+def line_members_table_exists(cursor):
+    cursor.execute("SELECT to_regclass('dial_list_line_members') IS NOT NULL")
+    return bool(cursor.fetchone()[0])
+
+
+def recruiter_by_line(cursor, internal_number):
+    """Действующий рекрутер на линии Binotel (членство в линии «Удаленного КЦ» + выдача):
+    {'user_id', 'department_id'} или None."""
+    if not line_members_table_exists(cursor):
+        return None
+    cursor.execute("""
+        SELECT m.user_id, m.department_id FROM dial_list_line_members m
+          JOIN hiring_people p ON p.user_id = m.user_id AND p.is_active
+         WHERE m.released_at IS NULL AND m.internal_number = %s
+         ORDER BY m.assigned_at DESC LIMIT 1
+    """, (str(internal_number),))
+    row = cursor.fetchone()
+    return {'user_id': int(row[0]), 'department_id': int(row[1])} if row else None
+
+
+def recruiter_lines(cursor):
+    """Линии действующих рекрутеров: [{'user_id', 'department_id', 'internal_number'}] — для добора истории."""
+    if not line_members_table_exists(cursor):
+        return []
+    cursor.execute("""
+        SELECT m.user_id, m.department_id, m.internal_number FROM dial_list_line_members m
+          JOIN hiring_people p ON p.user_id = m.user_id AND p.is_active
+         WHERE m.released_at IS NULL ORDER BY m.user_id
+    """)
+    return [{'user_id': int(row[0]), 'department_id': int(row[1]), 'internal_number': str(row[2]).strip()}
+            for row in cursor.fetchall()]
+
+
+def card_for_call(cursor, phone, recruiter_id):
+    """К какой карточке относится звонок по номеру: открытая этого рекрутера → любая открытая →
+    последняя завершённая. None — такого кандидата у нас нет."""
+    cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + """
+         WHERE c.phone = %s
+         ORDER BY (NOT c.is_closed) DESC, (c.recruiter_id = %s) DESC, c.id DESC LIMIT 1
+    """, (phone, int(recruiter_id or 0)))
+    return _one(cursor)
+
+
+def get_call(cursor, call_id):
+    cursor.execute("""
+        SELECT id, general_call_id, card_id, recruiter_id, department_id, internal_number, external_phone, direction,
+               disposition, result, billsec, waitsec, started_at, recording, source, touch_id, created_at, updated_at
+          FROM hiring_calls WHERE id = %s
+    """, (int(call_id),))
+    return _one(cursor)
+
+
+def get_call_by_general_id(cursor, general_call_id):
+    cursor.execute("SELECT id, card_id, touch_id, result, billsec, disposition FROM hiring_calls WHERE general_call_id = %s",
+                   (str(general_call_id),))
+    return _one(cursor)
+
+
+def insert_call(cursor, call, card_id, recruiter_id, department_id, result, recording, source, now):
+    cursor.execute("""
+        INSERT INTO hiring_calls (general_call_id, card_id, recruiter_id, department_id, internal_number, external_phone,
+                                  direction, disposition, result, billsec, waitsec, started_at, recording, source,
+                                  created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (general_call_id) DO NOTHING RETURNING id
+    """, (call['general_call_id'], int(card_id), recruiter_id, department_id, call['internal_number'], call['external_phone'],
+          call['direction'], call['disposition'], result, int(call['billsec']), int(call['waitsec']),
+          call['started_at'] or now, recording, source, now, now))
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def update_call_outcome(cursor, call_id, disposition, result, billsec, waitsec, recording, now):
+    cursor.execute("""
+        UPDATE hiring_calls SET disposition = %s, result = %s, billsec = %s, waitsec = %s, recording = %s, updated_at = %s
+         WHERE id = %s
+    """, (disposition, result, int(billsec), int(waitsec), recording, now, int(call_id)))
+
+
+def link_call_touch(cursor, call_id, touch_id):
+    cursor.execute("UPDATE hiring_calls SET touch_id = %s WHERE id = %s", (int(touch_id), int(call_id)))
+    cursor.execute("UPDATE hiring_touches SET call_id = %s WHERE id = %s", (int(call_id), int(touch_id)))
+
+
+def card_calls(cursor, card_id):
+    cursor.execute("""
+        SELECT c.id, c.general_call_id, c.recruiter_id, u.name AS recruiter_name, c.department_id, c.internal_number,
+               c.direction, c.disposition, c.result, c.billsec, c.waitsec, c.started_at, c.recording, c.source, c.touch_id
+          FROM hiring_calls c LEFT JOIN users u ON u.id = c.recruiter_id
+         WHERE c.card_id = %s ORDER BY c.started_at, c.id
+    """, (int(card_id),))
+    return _all(cursor)
+
+
+def manual_call_touch(cursor, card_id, recruiter_id, around, window_minutes):
+    """Ручная отметка звонка того же рекрутера рядом по времени, ещё не связанная со звонком АТС."""
+    cursor.execute("""
+        SELECT id, result, body, at FROM hiring_touches
+         WHERE card_id = %s AND kind = 'call' AND call_id IS NULL AND author_id = %s
+           AND at BETWEEN %s - (%s * interval '1 minute') AND %s + (%s * interval '1 minute')
+         ORDER BY abs(extract(epoch FROM (at - %s))) LIMIT 1
+    """, (int(card_id), int(recruiter_id), around, int(window_minutes), around, int(window_minutes), around))
+    return _one(cursor)
+
+
+def update_touch(cursor, touch_id, **fields):
+    allowed = ('result', 'body', 'duration_sec', 'meta', 'at')
+    pairs = [(key, value) for key, value in fields.items() if key in allowed]
+    if not pairs:
+        return 0
+    sets = ", ".join(("%s = %%s::jsonb" if key == 'meta' else "%s = %%s") % key for key, _ in pairs)
+    values = [json.dumps(value, ensure_ascii=False) if key == 'meta' else value for key, value in pairs]
+    cursor.execute("UPDATE hiring_touches SET " + sets + " WHERE id = %s", values + [int(touch_id)])
     return cursor.rowcount
 
 

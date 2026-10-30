@@ -332,6 +332,8 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 'assignments': _json(queries.card_assignments(cursor, card_id)),
                 'shifts': _json(queries.card_shifts(cursor, card_id)),
                 'motivation': _json(queries.get_motivation(cursor, card_id)),
+                # Звонки из телефонии Binotel (исход, длительность, запись) — к касаниям по touch_id.
+                'calls': _json(queries.card_calls(cursor, card_id)),
                 'repeat_of': None,
             }
             if card.get('repeat_of_card_id'):
@@ -394,6 +396,11 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_motivation(card_id, ctx):
         body = _body()
         return jsonify({'motivation': _json(service.set_motivation(ctx, card_id, body.get('status'), body.get('reason')))})
+
+    @hiring_route('/calls/<int:call_id>/recording')
+    def hiring_call_recording(call_id, ctx):
+        """Ссылка на запись разговора у Binotel (живёт около часа) — тому, кто видит карточку."""
+        return jsonify(service.recording_url(ctx, call_id))
 
     # ─── Загрузка базы ───────────────────────────────────────────────────────
 

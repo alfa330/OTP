@@ -271,6 +271,60 @@ class HHTests(unittest.TestCase):
                                transport=lambda *_args: (403, {}))
 
 
+class CallsTests(unittest.TestCase):
+    """Звонки из телефонии Binotel (hiring/calls.py): разбор вебхука и истории, исход, запись."""
+
+    WEBHOOK = {
+        'callDetails[generalCallID]': '4411', 'callDetails[callType]': '1', 'callDetails[internalNumber]': '8501',
+        'callDetails[externalNumber]': '77051234567', 'callDetails[disposition]': 'ANSWER', 'callDetails[billsec]': '187',
+        'callDetails[waitsec]': '12', 'callDetails[startTime]': '1793350000', 'callDetails[recordingStatus]': '1',
+        'callDetails[companyID]': '77', 'requestType': 'apiCallCompleted',
+    }
+
+    def test_result_mapping_matches_remote_call_center(self):
+        from hiring import calls
+        self.assertEqual(calls.map_result('ANSWER'), 'answered')
+        self.assertEqual(calls.map_result('vm-success'), 'answered')
+        self.assertEqual(calls.map_result('BUSY'), 'busy')
+        self.assertEqual(calls.map_result('NOANSWER'), 'no_answer')
+        self.assertEqual(calls.map_result('CANCEL'), 'no_answer')
+        self.assertEqual(calls.map_result('CONGESTION'), 'other')
+        for pending in ('', 'ONLINE', 'CALLING', 'RINGING'):
+            self.assertEqual(calls.map_result(pending), '')
+
+    def test_webhook_fields_become_a_call(self):
+        from hiring import calls
+        call = calls.from_webhook(self.WEBHOOK)
+        self.assertEqual(call['general_call_id'], '4411')
+        self.assertEqual(call['internal_number'], '8501')
+        self.assertEqual(call['external_phone'], '+77051234567')
+        self.assertEqual(call['direction'], 'out')
+        self.assertEqual((call['billsec'], call['waitsec']), (187, 12))
+        self.assertEqual(call['started_at'], datetime(2026, 10, 30, 13, 46, 40))   # unix UTC → Алматы (+5)
+        self.assertTrue(calls.talked(call))
+        self.assertEqual(calls.touch_result(call), 'dial')
+        self.assertEqual(calls.touch_body(call), 'Исходящий звонок · Дозвонились · 3:07')
+        self.assertEqual(calls.recording_state(call), 'available')
+        incoming = calls.from_webhook(dict(self.WEBHOOK, **{'callDetails[callType]': '0', 'callDetails[disposition]': 'NOANSWER',
+                                                              'callDetails[billsec]': '0'}))
+        self.assertEqual(incoming['direction'], 'in')
+        self.assertEqual(calls.touch_result(incoming), 'no_answer')
+        self.assertEqual(calls.touch_body(incoming), 'Входящий звонок · Не поднял трубку')
+        self.assertEqual(calls.recording_state(incoming), 'none')
+        self.assertIsNone(calls.from_webhook({'callDetails[generalCallID]': '1'}))          # без линии
+        self.assertIsNone(calls.from_webhook({'generalCallID': '', 'internalNumber': '8501'}))
+
+    def test_history_row_becomes_the_same_call(self):
+        from hiring import calls
+        call = calls.from_history({'general_call_id': '4411', 'call_type': 1, 'internal_number': '8501',
+                                   'external_number': '87051234567', 'disposition': 'ANSWER', 'billsec': 61, 'waitsec': 4,
+                                   'start_time': 1793350000, 'recording_status': ''})
+        self.assertEqual(call['external_phone'], '+77051234567')
+        self.assertEqual(call['started_at'], datetime(2026, 10, 30, 13, 46, 40))
+        self.assertEqual(calls.format_duration(61), '1:01')
+        self.assertIsNone(calls.from_history({'general_call_id': '', 'internal_number': '8501'}))
+
+
 class ReportFilterTests(unittest.TestCase):
     def test_month_and_cohort_bounds(self):
         filters = reports.parse_filters({'month': '2026-10', 'recruiters': '3,5,x', 'sources': '2'})
@@ -320,7 +374,11 @@ class WiringTests(unittest.TestCase):
         self.assertIn('build_hiring_external_blueprint(', self.bot)
         self.assertIn('"hiring_access": hiring_access,', self.bot)
         # Линии Binotel «Удаленного КЦ» рекрутерам — сервис раздела по требованию (появляется ниже по файлу).
-        self.assertIn('dial_list=lambda: _dial_list_service,', self.bot)
+        self.assertEqual(self.bot.count('dial_list=lambda: _dial_list_service,'), 2)   # Blueprint и сервис
+        # Звонки из телефонии: наблюдатель вебхука Binotel и добор истории линий рекрутеров.
+        self.assertIn("_dial_list_service.call_observers.append(_HIRING['service'].on_binotel_call)", self.bot)
+        self.assertIn("('calls_sync', CronTrigger(", self.bot)
+        self.assertIn("if name == 'calls_sync':", self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
         self.assertIn("id='hiring_%s' % _hiring_name", self.bot)

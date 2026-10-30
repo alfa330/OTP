@@ -40,6 +40,10 @@ BASE_DDL = '''
                               head_user_id integer, is_active boolean NOT NULL DEFAULT TRUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, role text NOT NULL,
                         status text NOT NULL DEFAULT 'working', department_id integer, phone text, telegram_id bigint);
+    -- Членство в линии Binotel «Удаленного КЦ» (dial_list_line_members) — по нему звонок находит рекрутера.
+    CREATE TABLE dial_list_line_members (id bigserial PRIMARY KEY, user_id integer NOT NULL, department_id integer NOT NULL,
+                                         internal_number varchar(64) NOT NULL, assigned_at timestamptz NOT NULL DEFAULT now(),
+                                         released_at timestamptz);
     INSERT INTO departments (id, code, name, head_user_id) VALUES
         (1499, 'hr', 'HR', 2), (367, 'op', 'Отдел продаж', 30), (1, 'szov', 'СЗоВ', NULL);
     INSERT INTO users (id, name, role, status, department_id, phone, telegram_id) VALUES
@@ -677,3 +681,111 @@ def test_dashboard_cohort_and_click_through(world):
     with world['db']._get_cursor() as cur:
         tasks = queries.desk_tasks(cur, REC1, datetime(2026, 10, 15), datetime(2026, 10, 16))
         assert [card['id'] for card in tasks] == [today_card['id']]
+
+
+# ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
+
+def _webhook(general_call_id, phone, *, disposition='ANSWER', billsec=120, call_type='1', line='8501', start=1792000000):
+    return {'callDetails[generalCallID]': str(general_call_id), 'callDetails[callType]': call_type,
+            'callDetails[internalNumber]': line, 'callDetails[externalNumber]': phone,
+            'callDetails[disposition]': disposition, 'callDetails[billsec]': str(billsec), 'callDetails[waitsec]': '7',
+            'callDetails[startTime]': str(start), 'callDetails[recordingStatus]': '1'}
+
+
+class _FakeBinotelClient:
+    def __init__(self, history):
+        self.history = history
+        self.record_requests = []
+
+    def list_calls_by_internal_number(self, internal_number, start_ts, stop_ts, max_wait=None):
+        return [row for row in self.history if row['internal_number'] == internal_number]
+
+    def get_call_record_url(self, general_call_id, max_wait=None):
+        self.record_requests.append(general_call_id)
+        return 'https://records.test/%s.mp3' % general_call_id
+
+
+class _FakeDialList:
+    def __init__(self, client):
+        self.client = client
+
+    def client_for_department(self, department_id):
+        return self.client
+
+
+def test_binotel_calls_land_in_cards(world):
+    """Звонок с линии рекрутера — касание в карточке с исходом, длительностью и записью; ручная отметка
+    рядом по времени дописывается, а не дублируется; входящий — тоже; чужая линия и чужой номер — мимо."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    card = take_and_touch(world, REC1, '8 705 500 00 01')
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (%s, 367, '8501')", (REC1,))
+    # Телефония: разговор 2 минуты — касание «дозвон», подстатус «Дозвон», запись доступна.
+    assert service.on_binotel_call(_webhook('c-1', '87055000001'), matched=False)
+    with world['db']._get_cursor() as cur:
+        rows = queries.card_calls(cur, card['id'])
+        assert len(rows) == 1 and rows[0]['result'] == 'answered' and rows[0]['billsec'] == 120
+        assert rows[0]['recording'] == 'available' and rows[0]['direction'] == 'out' and rows[0]['recruiter_id'] == REC1
+        touches = queries.card_touches(cur, card['id'])
+        last = touches[-1]
+        assert last['kind'] == 'call' and last['result'] == 'dial' and last['duration_sec'] == 120
+        assert last['body'].startswith('Исходящий звонок · Дозвонились · 2:00') and last['call_id'] == rows[0]['id']
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['substage'] == 'dial' and fresh['no_answer_streak'] == 0
+    # Тот же звонок второй раз (история после вебхука) — без дубля.
+    assert service.on_binotel_call(_webhook('c-1', '87055000001'), matched=False)
+    with world['db']._get_cursor() as cur:
+        assert len(queries.card_calls(cur, card['id'])) == 1
+        assert sum(1 for t in queries.card_touches(cur, card['id']) if t['kind'] == 'call') == 2   # первый — из take_and_touch
+    # Звонок обзвона (matched) и звонок ещё идёт — не наши.
+    assert service.on_binotel_call(_webhook('c-2', '87055000001'), matched=True) is None
+    assert service.on_binotel_call(_webhook('c-3', '87055000001', disposition='ONLINE'), matched=False) is None
+    # Ручная отметка «недозвон» сразу после «Позвонить», потом вебхук того же звонка — одна строка.
+    clock.now = NOW + timedelta(hours=1)
+    manual = service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer', 'body': 'не берёт'})
+    started = int((clock.now - timedelta(minutes=2)).replace(tzinfo=rules.ALMATY).timestamp())
+    assert service.on_binotel_call(_webhook('c-4', '87055000001', disposition='NOANSWER', billsec=0, start=started), matched=False)
+    with world['db']._get_cursor() as cur:
+        touches = [t for t in queries.card_touches(cur, card['id']) if t['kind'] == 'call']
+        assert len(touches) == 3
+        merged = touches[-1]
+        assert merged['call_id'] and merged['result'] == 'no_answer' and 'не берёт' in merged['body']
+        assert merged['body'].startswith('Исходящий звонок · Не поднял трубку')
+        assert queries.get_card(cur, card['id'])['no_answer_streak'] == 1    # ручная отметка уже посчитала
+    # Входящий от кандидата на линию рекрутера — тоже в карточку.
+    assert service.on_binotel_call(_webhook('c-5', '87055000001', call_type='0', billsec=30, start=1792052000), matched=False)
+    with world['db']._get_cursor() as cur:
+        incoming = [row for row in queries.card_calls(cur, card['id']) if row['direction'] == 'in']
+        assert len(incoming) == 1 and incoming[0]['result'] == 'answered'
+    # Чужая линия и неизвестный номер — мимо.
+    assert service.on_binotel_call(_webhook('c-6', '87055000001', line='8502'), matched=False) is None
+    assert service.on_binotel_call(_webhook('c-7', '87055009999'), matched=False) is None
+    # Добор истории по линии рекрутера — те же правила, новые звонки появляются, старые не дублируются.
+    client = _FakeBinotelClient([
+        {'general_call_id': 'c-1', 'call_type': 1, 'internal_number': '8501', 'external_number': '87055000001',
+         'disposition': 'ANSWER', 'billsec': 120, 'waitsec': 7, 'start_time': 1792000000},
+        {'general_call_id': 'c-8', 'call_type': 1, 'internal_number': '8501', 'external_number': '87055000001',
+         'disposition': 'BUSY', 'billsec': 0, 'waitsec': 3, 'start_time': 1792053000},
+        {'general_call_id': 'c-9', 'call_type': 1, 'internal_number': '8599', 'external_number': '87055000001',
+         'disposition': 'ANSWER', 'billsec': 50, 'waitsec': 3, 'start_time': 1792053000},
+    ])
+    service._dial_list = lambda: _FakeDialList(client)
+    assert service.sync_call_history() == 1
+    with world['db']._get_cursor() as cur:
+        rows = queries.card_calls(cur, card['id'])
+        assert [row['general_call_id'] for row in rows] == ['c-1', 'c-4', 'c-5', 'c-8']
+        assert rows[-1]['result'] == 'busy' and rows[-1]['source'] == 'history'
+        state = queries.get_integration(cur, 'binotel')
+        assert state['state'] == 'ok' and state['cursor'].get('synced_at')
+    # Запись разговора — тому, кто видит карточку; для недозвона записи нет.
+    answered = next(row for row in rows if row['general_call_id'] == 'c-1')
+    link = service.recording_url(me, answered['id'])
+    assert link['url'] == 'https://records.test/c-1.mp3' and link['billsec'] == 120 and client.record_requests == ['c-1']
+    busy = next(row for row in rows if row['general_call_id'] == 'c-8')
+    with pytest.raises(HiringError) as caught:
+        service.recording_url(me, busy['id'])
+    assert caught.value.code == 'HIRING_NO_RECORDING'
+    with pytest.raises(HiringError) as caught:
+        service.recording_url(ctx_of(world, REC2), answered['id'])
+    assert caught.value.code == 'HIRING_NOT_FOUND'

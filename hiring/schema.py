@@ -316,6 +316,36 @@ _STATEMENTS = [
     # OLX, к рекрутерам не попадают — для найма будут отдельные аккаунты): у OLX здесь список
     # кабинетов «для найма», пустой — ничего не берём. Колонка появилась после выкладки — ALTER.
     "ALTER TABLE hiring_integrations ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb",
+
+    # Звонки откликам из телефонии Binotel (владелец 30.10.2026: «фактически видны, как в удалённом
+    # КЦ»): вебхук по звонкам компании и история линии рекрутера. Один звонок — одна строка по
+    # generalCallID; касание в ленте карточки — touch_id. result — calls.map_result; recording —
+    # calls.recording_state (ссылку на запись спрашивают у Binotel по нажатию, она живёт час).
+    """
+    CREATE TABLE IF NOT EXISTS hiring_calls (
+        id               SERIAL PRIMARY KEY,
+        general_call_id  VARCHAR(32) NOT NULL UNIQUE,
+        card_id          INTEGER NOT NULL,
+        recruiter_id     INTEGER,
+        department_id    INTEGER,
+        internal_number  VARCHAR(64) NOT NULL,
+        external_phone   VARCHAR(16) NOT NULL,
+        direction        VARCHAR(8) NOT NULL,
+        disposition      VARCHAR(32) NOT NULL DEFAULT '',
+        result           VARCHAR(16) NOT NULL DEFAULT '',
+        billsec          INTEGER NOT NULL DEFAULT 0,
+        waitsec          INTEGER NOT NULL DEFAULT 0,
+        started_at       TIMESTAMP NOT NULL,
+        recording        VARCHAR(16) NOT NULL DEFAULT 'unknown',
+        source           VARCHAR(16) NOT NULL,
+        touch_id         BIGINT,
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_calls_card ON hiring_calls (card_id, started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_calls_recruiter ON hiring_calls (recruiter_id, started_at)",
+    "ALTER TABLE hiring_touches ADD COLUMN IF NOT EXISTS call_id INTEGER",
 ]
 
 

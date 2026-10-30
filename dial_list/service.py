@@ -1477,6 +1477,11 @@ class DialListService:
         self._calls = {}
         self._calls_lock = threading.Lock()
         self._calls_submit = calls_submit
+        # Наблюдатели вебхука «API Call Completed» (владелец 30.10.2026: звонки рекрутеров откликам
+        # должны быть видны в «Воронке найма» как здесь). Каждому отдаётся разобранный вебхук
+        # целиком — и по звонкам обзвона, и по остальным звонкам компании; ошибка наблюдателя
+        # вебхук не роняет. Вешает bot_schedule2 после подключения обоих разделов.
+        self.call_observers = []
 
     # ------------------------------------------------------------ доступ и отделы
     _DEPARTMENTS_SQL = """
@@ -2446,6 +2451,11 @@ class DialListService:
                       department_id, cfg["env_prefix"], cfg["env_prefix"])
             raise DialListError("Подключение к Binotel для отдела не настроено на сервере", 503)
         return binotel.BinotelApiClient.from_config(cfg)
+
+    def client_for_department(self, department_id):
+        """Клиент API Binotel компании отдела — другим разделам (история звонков линии рекрутера и
+        ссылка на запись в «Воронке найма»). Тот же кэш и тот же темп запросов, что у раздела."""
+        return self._client(department_id)
 
     def _client(self, department_id):
         department_id = int(department_id)
@@ -6741,6 +6751,12 @@ class DialListService:
         log.info("dial_list: вебхук Binotel с %s: generalCallID=%s, %s, разговор %d с — %s", remote_addr or "?",
                  general_call_id or "—", disposition or "без исхода", billsec,
                  "попытка обзвона найдена" if matched else "это не звонок обзвона")
+        # Другие разделы («Воронка найма»): разобранный вебхук целиком, до обрезки журнала.
+        for observer in list(self.call_observers):
+            try:
+                observer(dict(data), matched)
+            except Exception:  # noqa: BLE001 — чужой наблюдатель вебхук не роняет
+                log.exception("dial_list: наблюдатель вебхука %r упал", getattr(observer, "__name__", observer))
         payload = json.dumps(data, ensure_ascii=False)
         if not matched:
             # Звонок не обзвона: у компании Тез вебхук приходит по ВСЕМ звонкам линии (поддержка,

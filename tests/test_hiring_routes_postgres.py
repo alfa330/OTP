@@ -149,6 +149,10 @@ class _FakeDialList:
         self.members.pop(int(user_id), None)
         return {'user_id': int(user_id), 'internal_number': ''}
 
+    def client_for_department(self, department_id):
+        return SimpleNamespace(get_call_record_url=lambda general_call_id, max_wait=None:
+                               'https://records.test/%s/%s.mp3' % (department_id, general_call_id))
+
 
 @pytest.fixture
 def client():
@@ -166,7 +170,8 @@ def client():
         group_id = queries.create_group(cur, 'Группа', datetime(2026, 11, 5).date(), TRAINER, 367, vacancy_id, SUPER, rules.now_almaty())
     admin.commit()
 
-    service = HiringService(cursor_factory=db._get_cursor)
+    dial_list = _FakeDialList()
+    service = HiringService(cursor_factory=db._get_cursor, dial_list=lambda: dial_list)
     app = Flask('hiring-test')
 
     def require_api_key(handler):
@@ -182,7 +187,6 @@ def client():
         return int(raw), SimpleNamespace(id=int(raw)), None
 
     journal = _FakeJournal()
-    dial_list = _FakeDialList()
     app.register_blueprint(routes.build_hiring_blueprint(
         db=db, require_api_key=require_api_key, build_cors_preflight_response=lambda: ('', 204),
         resolve_requester=resolve_requester, service=service, dial_list=lambda: dial_list))
@@ -396,3 +400,34 @@ def test_recruiter_lines_from_remote_call_center(client):
     assert dial_list.line_member(REC2)['internal_number'] == '8502'
     assert client.delete('/api/hiring/people/%s' % REC2, headers=lead).status_code == 200
     assert dial_list.line_member(REC2) is None
+
+
+def test_call_recording_link(client):
+    """Звонки из телефонии в карточке и запись разговора ссылкой от Binotel — тому, кто видит карточку;
+    у недозвона записи нет (владелец 30.10.2026)."""
+    vacancy_id = client.world['vacancy_id']
+    boot = client.get('/api/hiring', headers=as_user(REC1)).get_json()
+    manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
+    card = client.post('/api/hiring/cards', json={'phone': '8 705 777 00 01', 'full_name': 'Данияр', 'source_id': manual['id'],
+                                                  'vacancy_id': vacancy_id}, headers=as_user(REC1)).get_json()['card']
+    assert client.post('/api/hiring/cards/%s/take' % card['id'], headers=as_user(REC1)).status_code == 200
+    now = datetime(2026, 10, 30, 11, 0)
+    with client.world['db']._get_cursor() as cur:
+        answered = queries.insert_call(cur, {'general_call_id': 'g-1', 'internal_number': '8501', 'external_phone': '+77057770001',
+                                             'direction': 'out', 'disposition': 'ANSWER', 'billsec': 95, 'waitsec': 4,
+                                             'started_at': now}, card['id'], REC1, 2200, 'answered', 'available', 'webhook', now)
+        missed = queries.insert_call(cur, {'general_call_id': 'g-2', 'internal_number': '8501', 'external_phone': '+77057770001',
+                                           'direction': 'in', 'disposition': 'NOANSWER', 'billsec': 0, 'waitsec': 20,
+                                           'started_at': now}, card['id'], REC1, 2200, 'no_answer', 'none', 'history', now)
+    shown = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC1)).get_json()
+    assert [(row['general_call_id'], row['result'], row['recording']) for row in shown['calls']] == \
+        [('g-1', 'answered', 'available'), ('g-2', 'no_answer', 'none')]
+    assert shown['calls'][0]['recruiter_name'] == 'Первый Рекрутер' and shown['calls'][0]['started_at'] == '2026-10-30T11:00:00'
+    link = client.get('/api/hiring/calls/%s/recording' % answered, headers=as_user(REC1))
+    assert link.status_code == 200
+    assert link.get_json() == {'call_id': answered, 'url': 'https://records.test/2200/g-1.mp3', 'billsec': 95}
+    none = client.get('/api/hiring/calls/%s/recording' % missed, headers=as_user(REC1))
+    assert none.status_code == 404 and none.get_json()['code'] == 'HIRING_NO_RECORDING'
+    assert client.get('/api/hiring/calls/%s/recording' % answered, headers=as_user(REC2)).status_code == 404
+    assert client.get('/api/hiring/calls/%s/recording' % answered, headers=as_user(HR_HEAD)).status_code == 200
+    assert client.get('/api/hiring/calls/999999/recording', headers=as_user(REC1)).status_code == 404
