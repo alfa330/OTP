@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom';
 import App, { ErrorBoundary } from './App';
 import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
 import { startPwaRuntime } from './utils/pwa';
+import { isHalloweenTime } from './components/seasonal/halloween/halloweenWindow';
 import './styles.css';
 
 try {
@@ -54,6 +55,16 @@ try {
         </ErrorBoundary>
       </BrowserRouter>
     );
+    /* Хэллоуин (до конца 1 ноября 2026): украшения поверх портала — своим
+       чанком и своим корнем, когда портал уже встал и браузер свободен.
+       После срока чанк не грузится вовсе. */
+    if (isHalloweenTime()) {
+      const startHalloween = () => import('./components/seasonal/halloween/mountHalloween')
+        .then((module) => module.mountHalloween())
+        .catch(() => {});
+      if ('requestIdleCallback' in window) window.requestIdleCallback(startHalloween, { timeout: 2500 });
+      else window.setTimeout(startHalloween, 800);
+    }
   }).catch((err) => console.error('Root rendering error:', err));
 } catch (err) {
   console.error('Root rendering error:', err);
