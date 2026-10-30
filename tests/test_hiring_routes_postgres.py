@@ -116,6 +116,14 @@ class _FakeDialList:
     def __init__(self):
         self.members = {}        # user_id -> (department_id, internal_number)
         self.calls = []
+        self.settings = {}       # user_id -> персональное включение обзвона (None = как у отдела)
+
+    def user_setting(self, user_id):
+        return self.settings.get(int(user_id))
+
+    def save_user_setting(self, user_id, enabled, changed_by=None):
+        self.settings[int(user_id)] = enabled
+        return {'user_id': int(user_id), 'enabled': enabled}
 
     def list_departments(self, department_ids=None, profile=None):
         return [{'department_id': 2200, 'department_name': 'Удаленный КЦ', 'code': 'remote_cc', 'profile': 'remote_cc'}]
@@ -399,6 +407,8 @@ def test_recruiter_lines_from_remote_call_center(client):
     row = next(item for item in seated.get_json()['items'] if item['user_id'] == REC1)
     assert row['line'] == {'department_id': 2200, 'department_name': 'Удаленный КЦ', 'internal_number': '8501'}
     assert dial_list.calls[-1] == ('assign', 2200, REC1, '8501', HR_HEAD, True)
+    # Телефон рекрутера — обычная учётка, не обзвон (владелец 30.10.2026): персонально «выключено».
+    assert dial_list.settings[REC1] is False
     busy = client.post('/api/hiring/people/%s/line' % REC2, json={'department_id': 2200, 'internal_number': '8501'}, headers=lead)
     assert busy.status_code == 409 and 'уже у сотрудника' in busy.get_json()['error']
     taken = client.get('/api/hiring/lines', query_string={'department_id': 2200}, headers=lead).get_json()['lines'][0]
@@ -408,6 +418,7 @@ def test_recruiter_lines_from_remote_call_center(client):
     released = client.delete('/api/hiring/people/%s/line' % REC1, headers=lead)
     assert released.status_code == 200 and next(item for item in released.get_json()['items'] if item['user_id'] == REC1)['line'] is None
     assert dial_list.calls[-1] == ('release', 2200, REC1, HR_HEAD, True)
+    assert dial_list.settings[REC1] is None      # снят с линии — снова «как у отдела»
     assert client.delete('/api/hiring/people/%s/line' % REC1, headers=lead).status_code == 404
     client.post('/api/hiring/people/%s/line' % REC2, json={'department_id': 2200, 'internal_number': '8502'}, headers=lead)
     assert dial_list.line_member(REC2)['internal_number'] == '8502'

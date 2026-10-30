@@ -586,6 +586,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 if not member:
                     return _bad('У сотрудника нет линии', 'HIRING_NOT_FOUND', 404)
                 lines.release_line(member['department_id'], user_id, changed_by=ctx['user_id'], seat_anyone=True)
+                lines.save_user_setting(user_id, None, changed_by=ctx['user_id'])
             else:
                 body = _body()
                 department_id = _int(body.get('department_id'))
@@ -593,6 +594,9 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 if not department_id or not number:
                     return _bad('Нужны отдел и внутренний номер линии', 'HIRING_BAD_LINE')
                 lines.assign_line(department_id, user_id, number, changed_by=ctx['user_id'], seat_anyone=True)
+                # Линия рекрутеру — обычная учётка телефона, не обзвон (владелец 30.10.2026): отдел
+                # линии включает режим обзвона всем своим, персональное «выключено» сильнее отдела.
+                lines.save_user_setting(user_id, False, changed_by=ctx['user_id'])
         except Exception as exc:  # noqa: BLE001
             return _dial_list_error(exc)
         with db._get_cursor() as cursor:
@@ -632,6 +636,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 member = lines.line_member(user_id)
                 if member:
                     lines.release_line(member['department_id'], user_id, changed_by=ctx['user_id'], seat_anyone=True)
+                    lines.save_user_setting(user_id, None, changed_by=ctx['user_id'])
             except Exception:  # noqa: BLE001
                 log.exception('hiring: линия отключённого рекрутера %s не снята', user_id)
         with db._get_cursor() as cursor:

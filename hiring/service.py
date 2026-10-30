@@ -832,6 +832,20 @@ class HiringService:
         queries.update_card(cursor, card['id'], **fields)
         return call_id, True
 
+    @staticmethod
+    def _keep_recruiter_phones_regular(dial_list, lines):
+        """Рекрутер на линии удалённого КЦ — обычная учётка iCore Phone, не обзвон (владелец
+        30.10.2026): отдел линии включает режим обзвона всем своим, а персональное «выключено»
+        сильнее отдела. Ставится при посадке; здесь — страховка для посаженных раньше."""
+        for line in lines:
+            try:
+                if dial_list.user_setting(line['user_id']) is not False:
+                    dial_list.save_user_setting(line['user_id'], False)
+                    log.info('hiring: у рекрутера %s на линии %s выключен режим обзвона телефона',
+                             line['user_id'], line['internal_number'])
+            except Exception:  # noqa: BLE001
+                log.exception('hiring: не удалось выключить обзвон рекрутеру %s', line['user_id'])
+
     def sync_call_history(self, now=None):
         """Добор звонков по линиям рекрутеров из истории Binotel (вебхук мог не дойти). Раз в десять
         минут, окно с перекрытием; первый раз — сутки. Возвращает число записанных звонков."""
@@ -844,6 +858,7 @@ class HiringService:
             state = queries.get_integration(cursor, 'binotel') or {}
         if not lines:
             return 0
+        self._keep_recruiter_phones_regular(dial_list, lines)
         last = (state.get('cursor') or {}).get('synced_at')
         since = datetime.fromisoformat(last) - timedelta(minutes=calls.HISTORY_OVERLAP_MINUTES) if last \
             else now - timedelta(hours=calls.HISTORY_FIRST_HOURS)

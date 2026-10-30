@@ -731,9 +731,16 @@ class _FakeBinotelClient:
 class _FakeDialList:
     def __init__(self, client):
         self.client = client
+        self.settings = {}
 
     def client_for_department(self, department_id):
         return self.client
+
+    def user_setting(self, user_id):
+        return self.settings.get(int(user_id))
+
+    def save_user_setting(self, user_id, enabled, changed_by=None):
+        self.settings[int(user_id)] = enabled
 
 
 def test_binotel_calls_land_in_cards(world):
@@ -793,8 +800,10 @@ def test_binotel_calls_land_in_cards(world):
         {'general_call_id': 'c-9', 'call_type': 1, 'internal_number': '8599', 'external_number': '87055000001',
          'disposition': 'ANSWER', 'billsec': 50, 'waitsec': 3, 'start_time': 1792053000},
     ])
-    service._dial_list = lambda: _FakeDialList(client)
+    fake_lines = _FakeDialList(client)
+    service._dial_list = lambda: fake_lines
     assert service.sync_call_history() == 1
+    assert fake_lines.settings == {REC1: False}      # посаженному раньше рекрутеру обзвон выключен (обычная учётка)
     with world['db']._get_cursor() as cur:
         rows = queries.card_calls(cur, card['id'])
         assert [row['general_call_id'] for row in rows] == ['c-1', 'c-4', 'c-5', 'c-8']
