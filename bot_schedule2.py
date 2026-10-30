@@ -52,7 +52,6 @@ from yataxi import reg_contest
 from yataxi import front_office_calls
 from database import (
     db,
-    LateShiftLockedError,
     LowRatingAttributionConflict,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
     SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES,
@@ -2921,131 +2920,6 @@ def _resolve_management_requester():
     ):
         return None, None, ("Forbidden", 403)
     return requester_id, requester, None
-
-
-LATE_SHIFT_LOCKED_CODE = 'LATE_SHIFT_LOCKED'
-
-
-def _late_shift_lock_message(name, day, minutes):
-    who = f"У {name}" if name else "У сотрудника"
-    return (
-        f"{who} опоздание на смену {day.strftime('%d.%m')} ({int(minutes)} мин) — "
-        "менять эту смену может только администратор"
-    )
-
-
-def _late_shift_locked_days(requester, operator_dates):
-    """Смены с опозданием, которые этот управленец менять не вправе.
-
-    Правило владельца (20.10.2026): «если человек опоздал на смену, сделать
-    так, чтобы СВ не смог ему после этого сменить смену, это могут сделать
-    админ и выше». Иначе опоздание стирается правкой: пересчёт часов берёт
-    начало смены из графика, и сдвинутая или снятая смена «опаздывать»
-    перестаёт — вместе со штрафом. «Админ и выше» — роль уровня admin
-    (_is_admin_role); глава отдела с ролью СВ сюда не входит.
-
-    Отдел поимённого допуска (WORK_SCHEDULE_SUPERVISOR_GRANTS) админ ведёт
-    «как СВ этого отдела» — там замок держит и его (владелец, 30.10.2026:
-    глава ООЗ, 476, смены Тез КЦ с опозданием не меняет, а в своём ООЗ меняет).
-
-    operator_dates — пары (оператор, день смены), которые тронет запрос.
-    Возвращает {(оператор, день): (минуты, ФИО)}; пусто — можно.
-    """
-    if not _late_shift_lock_may_apply(requester):
-        return {}
-    pairs = list(operator_dates or ())
-    if _is_admin_role(requester[3]):
-        granted = _work_schedule_granted_member_ids(requester[0])
-        kept = []
-        for operator_id, day in pairs:
-            try:
-                if int(operator_id) in granted:
-                    kept.append((operator_id, day))
-            except (TypeError, ValueError):
-                continue
-        pairs = kept
-        if not pairs:
-            return {}
-    return db.get_late_shift_days(pairs)
-
-
-def _late_shift_lock_may_apply(requester):
-    """Может ли замок вообще коснуться requester: СВ и ниже — да, админ и
-    выше — только при отделе поимённого допуска. Без него база не спрашивается."""
-    if not _is_admin_role(requester[3]):
-        return True
-    return bool(_work_schedule_granted_department_ids(requester[0]))
-
-
-def _late_shift_lock_applies(requester, operator_id):
-    """Держит ли замок requester на сменах этого сотрудника — правило
-    _late_shift_locked_days для одного человека."""
-    if not _late_shift_lock_may_apply(requester):
-        return False
-    if not _is_admin_role(requester[3]):
-        return True
-    try:
-        return int(operator_id) in _work_schedule_granted_member_ids(requester[0])
-    except (TypeError, ValueError):
-        return False
-
-
-def _late_shift_lock_response(requester, operator_dates):
-    """Готовый отказ 403 для правки смены с опозданием или None."""
-    locked = _late_shift_locked_days(requester, operator_dates)
-    return _late_shift_lock_payload(locked) if locked else None
-
-
-def _late_shift_lock_payload(locked):
-    """Отказ 403 по {(оператор, день): (минуты, ФИО)}.
-
-    Массовая правка отклоняется целиком — поэтому в отказе названы ВСЕ дни с
-    опозданием, а не первый: иначе СВ выяснял бы их по одному."""
-    ordered = sorted(locked.items(), key=lambda item: (item[0][1], item[1][1], item[0][0]))
-    if len(ordered) == 1:
-        (_operator_id, day), (minutes, name) = ordered[0]
-        message = _late_shift_lock_message(name, day, minutes)
-    else:
-        shown = ['%s %s (%d мин)' % (name or 'сотрудник', day.strftime('%d.%m'), minutes)
-                 for (_operator_id, day), (minutes, name) in ordered[:6]]
-        rest = len(ordered) - len(shown)
-        message = 'Опоздание на смены: %s%s — менять эти смены может только администратор' % (
-            ', '.join(shown), (' и ещё %d' % rest) if rest > 0 else '')
-    return jsonify({
-        "error": message,
-        "code": LATE_SHIFT_LOCKED_CODE,
-        "locked": [{"operator_id": operator_id, "date": day.strftime('%Y-%m-%d')}
-                   for (operator_id, day), _value in ordered],
-    }), 403
-
-
-def _mark_late_locked_requests(user_data, requests):
-    """Очередь «Запросы»: заявка на день с опозданием — согласует её только
-    администратор. СВ видит у неё замок вместо «Одобрить» (сервер всё равно
-    отказал бы). Отклонить заявку замок не мешает."""
-    if not _late_shift_lock_may_apply(user_data):
-        return
-    pending = [item for item in requests or () if item and item.get('status') == 'pending']
-    wanted = {}
-    for item in pending:
-        days = {item.get('shiftDate')}
-        new_date = (item.get('payload') or {}).get('newDate') if item.get('kind') == 'change' else None
-        if new_date:
-            days.add(str(new_date)[:10])
-        pairs = []
-        for day in days:
-            try:
-                pairs.append((int(item['operator']['id']), datetime.strptime(str(day)[:10], '%Y-%m-%d').date()))
-            except (KeyError, TypeError, ValueError):
-                continue
-        wanted[item['id']] = pairs
-    locked = _late_shift_locked_days(user_data, [pair for pairs in wanted.values() for pair in pairs]) if wanted else {}
-    if not locked:
-        return
-    for item in pending:
-        hits = sorted((pair[1], locked[pair][0]) for pair in wanted.get(item['id'], ()) if pair in locked)
-        if hits:
-            item['lateLocked'] = {'date': hits[0][0].strftime('%Y-%m-%d'), 'minutes': hits[0][1]}
 
 
 def _resolve_work_schedule_viewer():
@@ -14949,14 +14823,6 @@ def api_shift_auction_admin_unclaim_shift():
         if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
             return jsonify({"error": "Not allowed"}), 403
         payload = request.get_json(silent=True) or {}
-        late_locked = _late_shift_lock_response(requester, db.get_shift_auction_target_days(
-            lot_id=payload.get('lot_id'),
-            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
-            source_schedule_shift_id=payload.get('source_schedule_shift_id'),
-            claimed_by=payload.get('claimed_by') or payload.get('operator_id'),
-        ))
-        if late_locked:
-            return late_locked
         result = db.admin_unclaim_shift(
             admin_id=requester_id,
             lot_id=payload.get('lot_id'),
@@ -14989,14 +14855,6 @@ def api_shift_auction_admin_claim_for_operator():
         operator_id = payload.get('operator_id')
         if not operator_id:
             return jsonify({"error": "operator_id is required"}), 400
-        late_locked = _late_shift_lock_response(requester, db.get_shift_auction_target_days(
-            lot_id=payload.get('lot_id'),
-            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
-            source_schedule_shift_id=payload.get('source_schedule_shift_id'),
-            operator_id=operator_id,
-        ))
-        if late_locked:
-            return late_locked
         result = db.admin_claim_shift_for_operator(
             admin_id=requester_id,
             operator_id=operator_id,
@@ -15315,19 +15173,12 @@ def api_shift_auction_test_publish():
         if not _is_shift_auction_manager(requester_id, requester[3]):
             return jsonify({"error": "Only admins and СЗоВ supervisors can publish shift auctions"}), 403
 
-        direction_mode = _resolve_shift_auction_direction(
-            requester_id, _normalize_user_role(requester[3]),
-            _requested_shift_auction_direction(request.get_json(silent=True))
-        )
-        # Публикация стирает и собирает заново дни участников, в том числе
-        # прошедшие дни идущего периода — а с ними и смены с опозданием.
-        if _late_shift_lock_may_apply(requester):
-            late_locked = _late_shift_lock_response(requester, db.get_shift_auction_publish_days(direction_mode))
-            if late_locked:
-                return late_locked
         result = db.publish_shift_auction_test_to_work_schedules(
             updated_by=requester_id,
-            direction_mode=direction_mode,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True))
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -53215,7 +53066,6 @@ def review_shift_change_requests():
             end_date=end_date,
             limit=limit
         )
-        _mark_late_locked_requests(user_data, payload.get('requests'))
         # Тренеру очередь видна, но кнопок решения у него быть не должно —
         # то же правило, что и plannerReadOnly во фронте.
         payload['canReview'] = bool(
@@ -53283,7 +53133,6 @@ def respond_shift_change_request():
         if not request_id or action not in ('approve', 'reject', 'cancel'):
             return jsonify({"error": "request_id and a valid action are required"}), 400
 
-        late_lock = False
         if action == 'cancel':
             requester_id, _user_data, err = _work_schedule_operator_requester()
             if err:
@@ -53301,29 +53150,15 @@ def respond_shift_change_request():
             )
             if not allowed:
                 return jsonify({"error": "Forbidden"}), 403
-            # Согласование правит график — то же правило, что у ручной правки.
-            if action == 'approve':
-                locked = _late_shift_lock_response(
-                    user_data, db.get_shift_change_request_days(request_id)
-                )
-                if locked:
-                    return locked
-                # Сокращение и доп. часть склеивают ночь через полночь и
-                # переписывают соседний день — какой, знает только применение,
-                # поэтому база проверяет ещё раз в своей транзакции.
-                late_lock = _late_shift_lock_applies(user_data, target_operator_id)
 
         updated = db.respond_shift_change_request(
             request_id=request_id,
             reviewer_id=requester_id,
             action=action,
-            response_comment=data.get('comment'),
-            late_lock=late_lock
+            response_comment=data.get('comment')
         )
         return jsonify({"message": "Shift change request updated", "request": updated}), 200
 
-    except LateShiftLockedError as e:
-        return _late_shift_lock_payload(e.locked)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -54031,11 +53866,7 @@ def save_work_shift():
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
-
-        locked = _late_shift_lock_response(user_data, [(int(target_operator[0]), shift_date)])
-        if locked:
-            return locked
-
+        
         shift_id = db.save_shift(
             int(target_operator[0]),
             shift_date,
@@ -54088,11 +53919,7 @@ def delete_work_shift():
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
-
-        locked = _late_shift_lock_response(user_data, [(int(target_operator[0]), shift_date)])
-        if locked:
-            return locked
-
+        
         success = db.delete_shift(
             int(target_operator[0]), shift_date, start_time, end_time, actor_id=user_id
         )
@@ -54136,11 +53963,7 @@ def toggle_work_day_off():
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
-
-        locked = _late_shift_lock_response(user_data, [(int(target_operator[0]), day_off_date)])
-        if locked:
-            return locked
-
+        
         is_day_off = db.toggle_day_off(int(target_operator[0]), day_off_date, actor_id=user_id)
         
         return jsonify({
@@ -54400,14 +54223,7 @@ def save_shifts_bulk():
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
-
-        locked = _late_shift_lock_response(user_data, [
-            (int(target_operator[0]), (item or {}).get('date'))
-            for item in shifts if isinstance(item, dict)
-        ])
-        if locked:
-            return locked
-
+        
         shift_ids = db.save_shifts_bulk(int(target_operator[0]), shifts, actor_id=user_id)
         
         return jsonify({
@@ -54453,16 +54269,6 @@ def apply_work_schedule_bulk_actions():
                 message, status_code = scope_error
                 return jsonify({"error": message}), status_code
             action['operator_id'] = int(target_operator[0])
-
-        # День — тем же выражением, что берёт база (Database.apply_work_schedule_bulk_actions):
-        # shift_date или day_off_date вместо date иначе проходили бы мимо замка.
-        for action in actions:
-            action['date'] = action.get('date') or action.get('shift_date') or action.get('day_off_date')
-        locked = _late_shift_lock_response(user_data, [
-            (action['operator_id'], action['date']) for action in actions
-        ])
-        if locked:
-            return locked
 
         result = db.apply_work_schedule_bulk_actions(actions, actor_id=requester_id)
         return jsonify({
@@ -55063,28 +54869,6 @@ def import_work_schedules_excel():
                     entry['shifts'] = parsed_cell.get('shifts') or []
                 parsed_entries.append(entry)
 
-        # Смену с опозданием СВ не меняет — и файлом тоже. Такие дни не валят
-        # весь импорт (в месячном файле прошедшие дни идут подряд), а
-        # пропускаются и попадают в итоги отдельной строкой.
-        late_locked_entries = []
-        late_locked = _late_shift_locked_days(
-            user_data, [(entry['operator_id'], entry['date']) for entry in parsed_entries]
-        )
-        if late_locked:
-            kept_entries = []
-            for entry in parsed_entries:
-                key = (int(entry['operator_id']), datetime.strptime(entry['date'], '%Y-%m-%d').date())
-                if key in late_locked:
-                    late_locked_entries.append({
-                        'operator_id': entry['operator_id'],
-                        'operator_name': entry.get('operator_name') or late_locked[key][1],
-                        'date': entry['date'],
-                        'late_minutes': late_locked[key][0],
-                    })
-                else:
-                    kept_entries.append(entry)
-            parsed_entries = kept_entries
-
         if not parsed_entries and not invalid_cells:
             return jsonify({
                 "message": "No schedule cells found to import",
@@ -55106,9 +54890,7 @@ def import_work_schedules_excel():
                     "ambiguous_rows": ambiguous_rows,
                     "invalid_cells": invalid_cells,
                     "blacklist_skipped_entries": [],
-                    "blacklist_skipped_total": 0,
-                    "late_locked_entries": late_locked_entries[:30],
-                    "late_locked_total": len(late_locked_entries)
+                    "blacklist_skipped_total": 0
                 }
             }), 200
 
@@ -55134,9 +54916,7 @@ def import_work_schedules_excel():
                     "invalid_cells": invalid_cells[:30],
                     "invalid_cells_total": len(invalid_cells),
                     "blacklist_skipped_entries": [],
-                    "blacklist_skipped_total": 0,
-                    "late_locked_entries": late_locked_entries[:30],
-                    "late_locked_total": len(late_locked_entries)
+                    "blacklist_skipped_total": 0
                 }
             }), 200
 
@@ -55181,9 +54961,7 @@ def import_work_schedules_excel():
                 "invalid_cells": invalid_cells[:30],
                 "invalid_cells_total": len(invalid_cells),
                 "blacklist_skipped_entries": result.get('blacklist_skipped_entries') or [],
-                "blacklist_skipped_total": int(result.get('blacklist_skipped_total') or 0),
-                "late_locked_entries": late_locked_entries[:30],
-                "late_locked_total": len(late_locked_entries)
+                "blacklist_skipped_total": int(result.get('blacklist_skipped_total') or 0)
             }
         }), 200
 

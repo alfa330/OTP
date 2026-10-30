@@ -16547,11 +16547,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
             // из общего списка пользователей для тренера не используется.
             const plannerReadOnly = normalizeRole(user?.role) === 'trainer';
-            // Смену, на которую человек опоздал, меняют только админ и выше
-            // (владелец, 20.10.2026): иначе сдвинутая смена «опаздывать»
-            // перестаёт вместе со штрафом. Сервер держит то же правило
-            // (_late_shift_lock_response), здесь — чтобы замок был виден заранее.
-            const plannerCanEditLateShifts = ['admin', 'super_admin'].includes(normalizeRole(user?.role));
             // Строки СВ (задача #352): их график ведёт РОП. Рядовой СВ видит свою
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
@@ -16664,12 +16659,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 () => new Set(plannerGrantedDepartments.map(dep => String(dep.id))),
                 [plannerGrantedDepartments]
             );
-            // В отделе допуска админ — «как СВ этого отдела», и смену с
-            // опозданием там не меняет (владелец, 30.10.2026; сервер —
-            // _late_shift_locked_days).
-            const plannerCanEditLateShiftOf = (op) => (
-                plannerCanEditLateShifts && !plannerGrantedDepartmentIds.has(String(op?.department_id ?? ''))
-            );
             const [daySortMode, setDaySortMode] = useState('default');
             const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
@@ -16714,16 +16703,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
-            /* Отказ сервера «смену с опозданием меняет администратор» — в самом окне,
-               красной строкой: тосты в основном бандле не видны (window.showToast
-               ставит только страница оценки звонков). Новое окно или выделение — сброс. */
-            const [plannerLateLockRefusal, setPlannerLateLockRefusal] = useState('');
-            useEffect(() => {
-                setPlannerLateLockRefusal('');
-            }, [modalState.open, modalState.opId, modalState.date, modalState.multipleDates, modalState.multipleTargets]);
-            const notePlannerLateLockRefusal = (error) => {
-                if (error?.userMessage) setPlannerLateLockRefusal(error.userMessage);
-            };
             const [dayAggregateLoading, setDayAggregateLoading] = useState(false);
             const [plannerAutoFlagActionLoading, setPlannerAutoFlagActionLoading] = useState('');
             const [plannerTrainingModalState, setPlannerTrainingModalState] = useState({
@@ -19760,18 +19739,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             };
 
-            // Отказ «опоздание — меняет администратор» сервер пишет по-русски и
-            // с кодом: его показываем как есть. Прочие ответы ручек графика —
-            // служебные и по-английски, для них остаются общие тосты.
-            const plannerLateLockedError = async (response, fallback) => {
-                const payload = await response.json().catch(() => ({}));
-                const lateMessage = payload?.code === 'LATE_SHIFT_LOCKED' ? String(payload?.error || '').trim() : '';
-                // У страницы опоздания могло ещё не быть: перечитываем — и замок
-                // встаёт в открытом окне сам, даже если тост не виден.
-                if (lateMessage) fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true }).catch(() => {});
-                return Object.assign(new Error(lateMessage || fallback), { userMessage: lateMessage || null });
-            };
-
             const toggleDayOff = async (opId, date) => {
                 if (plannerReadOnly) return;
                 if (isPlannerRowLocked(opId)) return;
@@ -19790,7 +19757,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     });
 
                     if (!response.ok) {
-                        throw await plannerLateLockedError(response, 'Failed to toggle day off');
+                        throw new Error('Failed to toggle day off');
                     }
 
                     const result = await response.json();
@@ -19826,8 +19793,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     setModalState(m => ({ ...m, isDayOff: result.is_day_off }));
                 } catch (error) {
                     console.error('Error toggling day off:', error);
-                    notePlannerLateLockRefusal(error);
-                    emitAppToast(error?.userMessage || 'Ошибка изменения выходного дня', 'error');
+                    emitAppToast('Ошибка изменения выходного дня', 'error');
                 }
             };
 
@@ -20269,13 +20235,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     });
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        // Отказ «опоздание» называет все запертые дни — его показываем
-                        // как есть, а данные перечитываем: у страницы опоздания могло
-                        // ещё не быть, и замок появится в окне сам.
-                        if (payload?.code === 'LATE_SHIFT_LOCKED') {
-                            fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true }).catch(() => {});
-                            throw Object.assign(new Error(payload.error), { userMessage: String(payload.error || '').trim() || null });
-                        }
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     return payload;
@@ -22391,8 +22350,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         || (Array.isArray(warnings.blacklist_skipped_entries) ? warnings.blacklist_skipped_entries.length : 0)
                         || 0
                     );
-                    const lateLockedCount = Number(warnings.late_locked_total || 0);
-                    const hasWarnings = (invalidCellsCount + unmatchedCount + ambiguousCount + blacklistSkippedCount + lateLockedCount) > 0;
+                    const hasWarnings = (invalidCellsCount + unmatchedCount + ambiguousCount + blacklistSkippedCount) > 0;
                     const processedDays = Number(result.days_processed || 0);
                     setExcelImportReport({
                         kind: (processedDays > 0 && !hasWarnings) ? 'success' : 'warning',
@@ -22518,8 +22476,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                   await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving multiple shifts:', error);
-                  notePlannerLateLockRefusal(error);
-                  emitAppToast(error?.userMessage || 'Ошибка массового сохранения смен', 'error');
+                  emitAppToast('Ошибка массового сохранения смен', 'error');
                 }
             };
 
@@ -22571,8 +22528,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error setting multiple day offs:', error);
-                    notePlannerLateLockRefusal(error);
-                    emitAppToast(error?.userMessage || 'Ошибка массового назначения выходного', 'error');
+                    emitAppToast('Ошибка массового назначения выходного', 'error');
                 }
             };
 
@@ -22612,8 +22568,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error deleting multiple shifts:', error);
-                    notePlannerLateLockRefusal(error);
-                    emitAppToast(error?.userMessage || 'Ошибка массовой очистки дней', 'error');
+                    emitAppToast('Ошибка массовой очистки дней', 'error');
                 }
             };
 
@@ -23811,7 +23766,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     body: JSON.stringify(payload)
                   });
               
-                  if (!response.ok) throw await plannerLateLockedError(response, 'Failed to save shift');
+                  if (!response.ok) throw new Error('Failed to save shift');
               
                   // Обновляем локальное состояние (оставляем вашу логику обновления как было)
                   setOperators(prev => {
@@ -23889,8 +23844,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                   await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                   console.error('Error saving shift:', error);
-                  notePlannerLateLockRefusal(error);
-                  emitAppToast(error?.userMessage || 'Ошибка сохранения смены', 'error');
+                  emitAppToast('Ошибка сохранения смены', 'error');
                 }
               };              
 
@@ -23917,7 +23871,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     });
 
                     if (!response.ok) {
-                        throw await plannerLateLockedError(response, 'Failed to delete shift');
+                        throw new Error('Failed to delete shift');
                     }
 
                     // Обновляем локальное состояние
@@ -23933,8 +23887,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
                 } catch (error) {
                     console.error('Error deleting shift:', error);
-                    notePlannerLateLockRefusal(error);
-                    emitAppToast(error?.userMessage || 'Ошибка удаления смены', 'error');
+                    emitAppToast('Ошибка удаления смены', 'error');
                 }
             };
 
@@ -24418,70 +24371,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 const op = operators.find(o => o.id === modalState.opId);
                 return getPlannerAggregatedFlagsForDate(op, modalState.date);
             }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
-            // День с опозданием: смены в нём СВ не меняет — ни правкой, ни
-            // выходным, ни удалением. Опоздание считается и отклонённое: сервер
-            // смотрит на сам факт (Database.get_late_shift_days).
-            const modalLateLockMinutes = (!plannerCanEditLateShiftOf(plannerModalOperator) && !modalState?.multipleDates)
-                ? Math.max(0, Math.round(Number(modalAggregatedFlags?.lateMinutes || 0)))
-                : 0;
-            const modalShiftEditLocked = plannerReadOnly || modalLateLockMinutes > 0;
-            /* Массовая правка: дни с опозданием в выделении. Сервер отклонит пакет
-               целиком, поэтому называем их заранее — СВ снимет их с выделения. */
-            const modalBulkLateLocked = useMemo(() => {
-                if (!modalState?.open || (plannerCanEditLateShifts && plannerGrantedDepartmentIds.size === 0)) return [];
-                const targets = modalBulkTargets.length > 0
-                    ? modalBulkTargets.map(target => ({ opId: target.opId, date: target.date }))
-                    : (Array.isArray(modalState?.multipleDates) && modalState?.opId
-                        ? modalState.multipleDates.map(date => ({ opId: modalState.opId, date }))
-                        : []);
-                return targets.map(target => {
-                    const op = operators.find(o => o.id === target.opId);
-                    if (!op || plannerCanEditLateShiftOf(op)) return null;
-                    const minutes = Math.round(Number(getPlannerAggregatedFlagsForDate(op, target.date)?.lateMinutes || 0));
-                    return minutes > 0 ? { ...target, minutes, name: op?.name || '' } : null;
-                }).filter(Boolean).sort((a, b) => String(a.date).localeCompare(String(b.date)));
-            }, [plannerCanEditLateShifts, plannerGrantedDepartmentIds, modalState?.open, modalBulkTargets, modalState?.multipleDates, modalState?.opId, operators]); // eslint-disable-line react-hooks/exhaustive-deps
-            const renderBulkLateLockNote = () => {
-                if (!modalBulkLateLocked.length) return null;
-                const count = modalBulkLateLocked.length;
-                const days = count % 10 === 1 && count % 100 !== 11 ? 'день'
-                    : (count % 10 >= 2 && count % 10 <= 4 && !(count % 100 >= 12 && count % 100 <= 14) ? 'дня' : 'дней');
-                const listed = modalBulkLateLocked.slice(0, 4).map(item => {
-                    const short = String(item.name || '').split(/\s+/).filter(Boolean)[0] || 'сотрудник';
-                    return `${short} ${String(item.date).slice(8, 10)}.${String(item.date).slice(5, 7)} (${item.minutes} мин)`;
-                });
-                const rest = count - listed.length;
-                return (
-                    <div className="flex items-start gap-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3">
-                        <FaIcon className="fas fa-lock mt-0.5 text-[13px] text-amber-600"></FaIcon>
-                        <div className="min-w-0 text-[13px] leading-snug">
-                            <div className="font-semibold text-amber-900 tabular-nums">В выделении {count} {days} с опозданием</div>
-                            <div className="text-amber-800/80 tabular-nums">
-                                {listed.join(', ')}{rest > 0 ? ` и ещё ${rest}` : ''}. Их смены меняет администратор — снимите эти дни с выделения.
-                            </div>
-                        </div>
-                    </div>
-                );
-            };
-            // Встал замок дня или плашка массовой правки — они уже всё объясняют,
-            // строка отказа повторяла бы их; она нужна, пока данные не перечитаны.
-            const plannerLateLockRefusalVisible = Boolean(plannerLateLockRefusal)
-                && modalLateLockMinutes === 0 && modalBulkLateLocked.length === 0;
-            const renderLateLockRefusal = () => (plannerLateLockRefusalVisible ? (
-                <div className="flex items-start gap-3 rounded-2xl border border-rose-200/80 bg-rose-50/80 px-4 py-3" role="alert">
-                    <FaIcon className="fas fa-lock mt-0.5 text-[13px] text-rose-600"></FaIcon>
-                    <div className="min-w-0 text-[13px] leading-snug text-rose-800 tabular-nums">{plannerLateLockRefusal}</div>
-                </div>
-            ) : null);
-            const renderLateShiftLockNote = () => (modalLateLockMinutes > 0 ? (
-                <div className="flex items-start gap-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3">
-                    <FaIcon className="fas fa-lock mt-0.5 text-[13px] text-amber-600"></FaIcon>
-                    <div className="min-w-0 text-[13px] leading-snug">
-                        <div className="font-semibold text-amber-900 tabular-nums">Опоздание {modalLateLockMinutes} мин</div>
-                        <div className="text-amber-800/80">Смены этого дня меняет администратор.</div>
-                    </div>
-                </div>
-            ) : null);
             const modalSavedTrainings = useMemo(() => {
                 if (isBulkSelectionModal || !modalState?.opId || !modalState?.date) return [];
                 return (plannerTrainingsByOperator[String(modalState.opId)] || [])
@@ -32308,17 +32197,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                 >
                                                                     Отклонить
                                                                 </button>
-                                                                {/* День с опозданием: согласует администратор —
-                                                                    вместо «Одобрить» замок (сервер отказал бы).
-                                                                    lateLocked сервер ставит только тому, кого
-                                                                    замок держит (_mark_late_locked_requests). */}
-                                                                {item.lateLocked ? (
-                                                                    <span className="inline-flex items-center gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] font-medium text-amber-800 ring-1 ring-amber-200/80"
-                                                                          title="Опоздание на эту смену — согласует администратор">
-                                                                        <FaIcon className="fas fa-lock text-[11px] text-amber-600"></FaIcon>
-                                                                        <span className="tabular-nums">Опоздание {item.lateLocked.minutes} мин · решает администратор</span>
-                                                                    </span>
-                                                                ) : (
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => respondReviewRequest(item.id, 'approve')}
@@ -32327,7 +32205,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                 >
                                                                     {busy ? 'Применяем…' : 'Одобрить'}
                                                                 </button>
-                                                                )}
                                                             </div>
                                                         </div>
                                                     )}
@@ -32950,7 +32827,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             footer={(() => {
                                 if (plannerReadOnly) return null;
                                 if (modalActiveTab === 'shifts') {
-                                    if (modalState.isDayOff || modalLateLockMinutes > 0) return null;
+                                    if (modalState.isDayOff) return null;
                                     if (wsModalEditing) {
                                         return (
                                             <button
@@ -33016,9 +32893,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             emptyLabel={modalState.isDayOff ? 'Выходной' : 'Смен нет'}
                                             caption="Янтарным внутри полосы — перерывы."
                                         />
-                                        {renderLateShiftLockNote()}
-                                        {renderLateLockRefusal()}
-                                        {!modalShiftEditLocked ? (
+                                        {!plannerReadOnly ? (
                                             <WsPhoneGroup label="День">
                                                 <WsPhoneRow
                                                     title="Выходной"
@@ -33049,11 +32924,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             ? { label: PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL, tone: 'practice' } : null,
                                                         isPlannerPhoneShift(seg)
                                                             ? { label: PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL, tone: 'phone' } : null,
-                                                        !modalShiftEditLocked && modalState.editIndex === idx
+                                                        modalState.editIndex === idx
                                                             ? { label: 'Редактируется', tone: 'editing' } : null
                                                     ].filter(Boolean)}
                                                     breaks={wsBreaksForShift(idx)}
-                                                    onEdit={modalShiftEditLocked ? null : () => setModalState(m => ({
+                                                    onEdit={plannerReadOnly ? null : () => setModalState(m => ({
                                                         ...m,
                                                         start: seg.start,
                                                         end: seg.end,
@@ -33062,7 +32937,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         breaks: [],
                                                         showAddPanel: true
                                                     }))}
-                                                    onRemove={modalShiftEditLocked ? null : () => removeSegment({
+                                                    onRemove={plannerReadOnly ? null : () => removeSegment({
                                                         opId: modalState.opId,
                                                         date: modalState.date,
                                                         index: idx
@@ -33071,7 +32946,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             ))}
                                         </WsPhoneGroup>
 
-                                        {!modalShiftEditLocked && !modalState.isDayOff && wsModalEditing ? (
+                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing ? (
                                             <WsPhoneGroup
                                                 label={modalState.editIndex !== null ? 'Редактирование смены' : 'Новая смена'}
                                                 right={(
@@ -33118,7 +32993,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </WsPhoneGroup>
                                         ) : null}
 
-                                        {!modalShiftEditLocked && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
+                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
                                             <WsPhoneGroup
                                                 label="Перерывы"
                                                 hint={modalBreaksManualOnly
@@ -35622,18 +35497,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     </div>
                     )}
 
-                    {!modalState.multipleDates && modalTabShifts && modalLateLockMinutes > 0 && (
-                    <div className="mb-6">{renderLateShiftLockNote()}</div>
-                    )}
-                    {modalTabShifts && plannerLateLockRefusalVisible && (
-                    <div className="mb-6">{renderLateLockRefusal()}</div>
-                    )}
-
-                    {modalTabShifts && modalBulkLateLocked.length > 0 && (
-                    <div className="mb-6">{renderBulkLateLockNote()}</div>
-                    )}
-
-                    {!modalState.multipleDates && modalTabShifts && !modalShiftEditLocked && (
+                    {!modalState.multipleDates && modalTabShifts && (
                     <div className="mb-6 p-4 bg-sky-50 border border-sky-200 rounded-xl">
                         <label className="flex items-center gap-3 cursor-pointer group">
                             <input
@@ -36423,9 +36287,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 const duration = ((timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? timeToMinutes(seg.end) + 1440 : timeToMinutes(seg.end)) - timeToMinutes(seg.start)) / 60;
                                 const isPracticeShift = isPlannerOfficePracticeShift(seg);
                                 const isPhoneShift = isPlannerPhoneShift(seg);
-                                // На запертом дне (опоздание, режим просмотра) смену не правят —
-                                // и «Редактируется» на ней не показываем.
-                                const isEditing = !modalShiftEditLocked && modalState.editIndex === idx;
+                                const isEditing = modalState.editIndex === idx;
                                 return (
                                 <div key={idx} className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all ${isEditing ? 'border-blue-400 bg-blue-50 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'}`}>
                                     <div className="flex-1">
@@ -36441,7 +36303,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <span className="font-medium">{duration.toFixed(2)} часов</span>
                                         </div>
                                     </div>
-                                    {!modalShiftEditLocked && (
                                     <div className="flex gap-2">
                                         <button 
                                             className="px-3 py-2 text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors flex items-center gap-1"
@@ -36468,7 +36329,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <FaIcon className="fas fa-trash-alt"></FaIcon>
                                         </button>
                                     </div>
-                                    )}
                                 </div>
                                 );
                             });
@@ -36476,7 +36336,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         </div>
                     </div>
 
-                    {!modalShiftEditLocked && (
                     <div className="mb-4">
                         <div className="flex items-center justify-between gap-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
@@ -36499,9 +36358,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             )}
                         </div>
                     </div>
-                    )}
 
-                    {!modalShiftEditLocked && (modalState.editIndex !== null || modalState.showAddPanel) && (
+                    {(modalState.editIndex !== null || modalState.showAddPanel) && (
                     <>
                     <div className="mb-6 p-4 rounded-xl border-2 border-blue-100 bg-gradient-to-br from-blue-50/70 to-white">
                         <div className="grid grid-cols-2 gap-4">
@@ -36754,13 +36612,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 <FaIcon className="fas fa-times"></FaIcon>
                                 Закрыть
                             </button>
-                            {/* В выделении дни с опозданием — пакет сервер отклонит целиком,
-                                поэтому кнопки выключены, пока их не снимут (плашка выше). */}
                             {isBulkSelectionModal && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold border border-rose-200 transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                                     onClick={() => deleteShiftsForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
-                                    disabled={bulkActionState.loading || modalBulkLateLocked.length > 0}
+                                    disabled={bulkActionState.loading}
                                 >
                                     <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'delete_shifts' ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'delete_shifts'
@@ -36772,7 +36628,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-semibold border border-sky-200 transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                                     onClick={() => setDayOffForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
-                                    disabled={bulkActionState.loading || modalBulkLateLocked.length > 0}
+                                    disabled={bulkActionState.loading}
                                 >
                                     <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_day_off' ? 'fa-spinner fa-spin' : 'fa-calendar-times'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'set_day_off'
@@ -36790,7 +36646,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         shiftType: modalState.shiftType,
                                         breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null
                                     })}
-                                    disabled={bulkActionState.loading || modalBulkLateLocked.length > 0}
+                                    disabled={bulkActionState.loading}
                                 >
                                     <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_shift' ? 'fa-spinner fa-spin' : 'fa-check-double'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'set_shift'
@@ -36798,7 +36654,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         : `Применить ко всем (${modalBulkCount})`}
                                 </button>
                             )}
-                            {!modalShiftEditLocked && !modalState.isDayOff && !modalState.multipleDates && (modalState.editIndex !== null || modalState.showAddPanel) && (
+                            {!modalState.isDayOff && !modalState.multipleDates && (modalState.editIndex !== null || modalState.showAddPanel) && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
                                     onClick={() => saveSegment({
@@ -37809,13 +37665,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         const unmatchedPreview = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.slice(0, 5) : [];
                         const ambiguousPreview = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.slice(0, 5) : [];
                         const blacklistSkippedPreview = Array.isArray(warnings.blacklist_skipped_entries) ? warnings.blacklist_skipped_entries.slice(0, 5) : [];
-                        // Дни с опозданием СВ файлом не меняет — они пропущены (сервер).
-                        const lateLockedCount = Number(warnings.late_locked_total || 0);
-                        const lateLockedPreview = Array.isArray(warnings.late_locked_entries) ? warnings.late_locked_entries.slice(0, 5) : [];
                         const errorInvalidCells = Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.slice(0, 5) : [];
                         const errorInvalidCount = Number(report?.details?.invalid_cells_total || errorInvalidCells.length || 0);
                         const reportTime = report.createdAt ? new Date(report.createdAt) : null;
-                        const hasWarnings = invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0 || blacklistSkippedCount > 0 || lateLockedCount > 0;
+                        const hasWarnings = invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0 || blacklistSkippedCount > 0;
 
                         return (
                             <>
@@ -37906,11 +37759,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                 Пропущены из-за ЧС: {blacklistSkippedCount}
                                                             </span>
                                                         )}
-                                                        {lateLockedCount > 0 && (
-                                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
-                                                                Пропущены дни с опозданием: {lateLockedCount}
-                                                            </span>
-                                                        )}
                                                     </div>
 
                                                     {invalidPreview.length > 0 && (
@@ -37961,18 +37809,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                 {blacklistSkippedPreview.map((item, idx) => (
                                                                     <div key={`excel-blacklist-skipped-${idx}`} className="text-xs bg-white border rounded px-2 py-1 text-slate-700">
                                                                         {(item?.name || (item?.operator_id ? `ID ${item.operator_id}` : '—'))} • {item?.date || '—'}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                    {lateLockedPreview.length > 0 && (
-                                                        <div className="mt-3">
-                                                            <div className="text-xs font-medium text-slate-700 mb-1">Дни с опозданием — меняет администратор</div>
-                                                            <div className="space-y-1">
-                                                                {lateLockedPreview.map((item, idx) => (
-                                                                    <div key={`excel-late-locked-${idx}`} className="text-xs bg-white border rounded px-2 py-1 text-slate-700 tabular-nums">
-                                                                        {(item?.operator_name || (item?.operator_id ? `ID ${item.operator_id}` : '—'))} • {item?.date || '—'} • {Number(item?.late_minutes || 0)} мин
                                                                     </div>
                                                                 ))}
                                                             </div>

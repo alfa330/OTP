@@ -19,7 +19,7 @@ import copy
 import logging
 import time
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,12 +58,6 @@ UNDER_TEST = (
     "_with_granted_break_rules",
     "_resolve_management_requester",
     "_resolve_work_schedule_viewer",
-    "_late_shift_lock_message",
-    "_late_shift_locked_days",
-    "_late_shift_lock_may_apply",
-    "_late_shift_lock_response",
-    "_late_shift_lock_payload",
-    "_late_shift_lock_applies",
     "_can_remove_dismissal_blacklist",
     "_normalize_management_role",
     "get_operators_with_schedules",
@@ -80,15 +74,6 @@ UNDER_TEST = (
     "delete_work_schedule_status_period",
     "apply_work_schedule_bulk_actions",
 )
-
-
-def _database_class(name):
-    """Класс уровня модуля database.py (LateShiftLockedError) — настоящий, из исходника."""
-    source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-    node = next(n for n in source_cache.parse(source).body if isinstance(n, ast.ClassDef) and n.name == name)
-    namespace = {}
-    exec(ast.get_source_segment(source, node), namespace)  # noqa: S102
-    return namespace[name]
 
 
 def _constant(name):
@@ -125,14 +110,11 @@ class _Portal:
     # id периода статуса → чей он (больничный оператора СЗоВ и Тез КЦ).
     STATUS_PERIODS = {5: 1003, 6: 1001}
 
-    def __init__(self, *, heads=None, inactive=(), people=None, late=None):
+    def __init__(self, *, heads=None, inactive=(), people=None):
         self.heads = {476: {OOZ}, 300: {TEZ}} if heads is None else heads
         self.inactive = set(inactive)
         if people is not None:
             self.PEOPLE = people
-        # Опоздания: {(оператор, день): (минуты, ФИО)} — как Database.get_late_shift_days.
-        self.late = dict(late or {})
-        self.late_queries = []
         self.calls = []
         self.lookups = 0
 
@@ -156,13 +138,6 @@ class _Portal:
     def departments(self):
         self.calls.append(("get_departments",))
         return [dict(item, is_active=item["id"] not in self.inactive) for item in self.DEPARTMENTS]
-
-    def late_days(self, operator_dates):
-        pairs = []
-        for operator_id, day in operator_dates:
-            pairs.append((int(operator_id), date.fromisoformat(day) if isinstance(day, str) else day))
-        self.late_queries.append(pairs)
-        return {pair: self.late[pair] for pair in pairs if pair in self.late}
 
     def rules(self, department_id=None):
         names = sorted(
@@ -195,11 +170,7 @@ class _Portal:
             delete_shift=lambda operator_id, *a, **k: self.calls.append(("delete_shift", operator_id)) or True,
             toggle_day_off=lambda operator_id, *a, **k: self.calls.append(("day_off", operator_id)) or True,
             get_shift_change_request_operator=lambda request_id: int(request_id),
-            # Заявка N — на день 24.10 оператора N (как get_shift_change_request_operator).
-            get_shift_change_request_days=lambda request_id: [(int(request_id), date(2026, 10, 24))],
-            get_late_shift_days=self.late_days,
-            respond_shift_change_request=lambda **kw: self.calls.append(
-                ("respond", kw["request_id"], kw.get("late_lock"))) or {},
+            respond_shift_change_request=lambda **kw: self.calls.append(("respond", kw["request_id"])) or {},
             delete_schedule_status_period=self.delete_status_period,
             apply_work_schedule_bulk_actions=lambda actions, actor_id=None: (
                 self.calls.append(("bulk", [a["operator_id"] for a in actions])) or {}),
@@ -228,8 +199,6 @@ class _Portal:
             "ROLE_HIERARCHY": _constant("ROLE_HIERARCHY"),
             "TRAINING_TARGET_ROLES": _constant("TRAINING_TARGET_ROLES"),
             "WORK_SCHEDULE_SUPERVISOR_GRANTS": _constant("WORK_SCHEDULE_SUPERVISOR_GRANTS"),
-            "LATE_SHIFT_LOCKED_CODE": _constant("LATE_SHIFT_LOCKED_CODE"),
-            "LateShiftLockedError": _database_class("LateShiftLockedError"),
             "_get_authenticated_requester": lambda: (requester_id, portal.user(requester_id), None),
             "_headed_department_ids": headed,
             "_headed_department_id": lambda user_id: next(iter(sorted(headed(user_id))), None),
@@ -525,85 +494,6 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(saved, [[{"direction": "ТП линия", "rules": []}]])
         # Ответ — в той же области, что и чтение: окно правил не теряет Тез КЦ.
         self.assertEqual([item["direction"] for item in payload["direction_rules"]], ["ОП линия", "ТП линия"])
-
-
-class LateShiftLockUnderGrantTests(unittest.TestCase):
-    """Смену с опозданием меняют админ и выше (владелец, 20.10.2026), но в отделе
-    допуска админ — «как СВ этого отдела» (владелец, 30.10.2026): глава ООЗ (476)
-    смены Тез КЦ с опозданием не меняет, а в своём ООЗ меняет, как любой админ."""
-
-    DAY = date(2026, 10, 24)
-    LATE = {(1001, DAY): (14, "User 1001"), (523, DAY): (9, "User 523")}
-    WRITES = (
-        ("save_work_shift", "save_shift",
-         lambda op: {"operator_id": op, "shift_date": "2026-10-24", "start_time": "09:30", "end_time": "18:00"}),
-        ("delete_work_shift", "delete_shift",
-         lambda op: {"operator_id": op, "shift_date": "2026-10-24", "start_time": "09:00", "end_time": "18:00"}),
-        ("toggle_work_day_off", "day_off", lambda op: {"operator_id": op, "day_off_date": "2026-10-24"}),
-        ("respond_shift_change_request", "respond", lambda op: {"request_id": op, "action": "approve"}),
-        ("apply_work_schedule_bulk_actions", "bulk",
-         lambda op: {"actions": [{"action": "set_day_off", "operator_id": op, "date": "2026-10-24"}]}),
-    )
-
-    def _write(self, requester_id, handler, body):
-        portal = _Portal(late=self.LATE)
-        payload, status = portal.load(requester_id, body=body)[handler]()
-        return payload, status, portal
-
-    def test_every_write_of_a_late_day_is_closed_to_her_in_the_granted_department(self):
-        for handler, call, body in self.WRITES:
-            with self.subTest(handler=handler):
-                payload, status, portal = self._write(476, handler, body(1001))
-                self.assertEqual(status, 403)
-                self.assertEqual(payload["code"], "LATE_SHIFT_LOCKED")
-                self.assertFalse(any(c[0] == call for c in portal.calls))
-
-    def test_her_own_department_keeps_the_admin_rule(self):
-        for handler, call, body in self.WRITES:
-            with self.subTest(handler=handler):
-                payload, status, portal = self._write(476, handler, body(523))
-                self.assertEqual(status, 200, payload)
-                self.assertTrue(any(c[0] == call for c in portal.calls))
-                # Опоздания своего отдела у неё даже не запрашиваются.
-                self.assertEqual(portal.late_queries, [])
-
-    def test_head_of_the_granted_department_and_its_supervisor_keep_their_rules(self):
-        body = {"operator_id": 1001, "shift_date": "2026-10-24", "start_time": "09:30", "end_time": "18:00"}
-        payload, status, portal = self._write(300, "save_work_shift", body)
-        self.assertEqual(status, 200, "глава Тез КЦ с ролью admin меняет, как раньше")
-        self.assertEqual(portal.late_queries, [])
-        payload, status, _portal = self._write(3, "save_work_shift", body)
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["code"], "LATE_SHIFT_LOCKED")
-
-    def test_bulk_edit_of_both_departments_names_only_the_granted_late_day(self):
-        body = {"actions": [
-            {"action": "set_day_off", "operator_id": 523, "date": "2026-10-24"},
-            {"action": "set_day_off", "operator_id": 1001, "date": "2026-10-24"},
-        ]}
-        payload, status, portal = self._write(476, "apply_work_schedule_bulk_actions", body)
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["locked"], [{"operator_id": 1001, "date": "2026-10-24"}])
-        self.assertEqual(portal.late_queries, [[(1001, self.DAY)]])
-        self.assertNotIn("bulk", [c[0] for c in portal.calls])
-
-    def test_approval_tells_the_database_whom_the_lock_holds(self):
-        """Соседний день склеенной ночи база проверяет сама — если замок держит
-        согласующего: Дану на заявке оператора Тез КЦ, но не на своём ООЗ."""
-        for operator_id, expected in ((1001, True), (523, False)):
-            with self.subTest(operator_id=operator_id):
-                portal = _Portal(late={})
-                _payload, status = portal.load(476, body={"request_id": operator_id, "action": "approve"})[
-                    "respond_shift_change_request"]()
-                self.assertEqual(status, 200)
-                self.assertIn(("respond", operator_id, expected), portal.calls)
-
-    def test_a_day_without_lateness_stays_open_to_her(self):
-        portal = _Portal(late={})
-        body = {"operator_id": 1001, "shift_date": "2026-10-24", "start_time": "09:30", "end_time": "18:00"}
-        _payload, status = portal.load(476, body=body)["save_work_shift"]()
-        self.assertEqual(status, 200)
-        self.assertEqual(portal.late_queries, [[(1001, self.DAY)]])
 
 
 class DayRecordRouteTests(unittest.TestCase):

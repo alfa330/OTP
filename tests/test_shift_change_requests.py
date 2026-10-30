@@ -685,15 +685,6 @@ class SerializerTests(unittest.TestCase):
 
 
 @lru_cache(maxsize=None)
-def _module_class_source(name):
-    """Класс уровня модуля (например, LateShiftLockedError) — из исходника."""
-    source = _database_source()
-    module = source_cache.parse(source)
-    node = next(item for item in module.body if isinstance(item, ast.ClassDef) and item.name == name)
-    return textwrap.dedent(ast.get_source_segment(source, node))
-
-
-@lru_cache(maxsize=None)
 def _module_assign_source(name):
     """Присваивание константы уровня модуля — вместе с её значением."""
     source = _database_source()
@@ -758,14 +749,12 @@ class _WriterDb(_Db):
         '_apply_shift_change_move_tx',
         '_apply_shift_change_day_off_tx',
         'create_shift_change_request',
-        '_refuse_late_change_tx',
     )
-    MODULE_CLASSES = ('LateShiftLockedError',)
     SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS = 45
 
-    def __init__(self, day_map=None, cursor=None, now=None, late=None):
+    def __init__(self, day_map=None, cursor=None, now=None):
         import json
-        from typing import Any, Dict, List, Optional, Tuple
+        from typing import Optional
 
         namespace = {
             'date': date,
@@ -773,13 +762,7 @@ class _WriterDb(_Db):
             'dt_time': dt_time,
             'timedelta': timedelta,
             'json': json,
-            # Те же имена typing, что импортирует database.py: аннотации
-            # функций модуля вычисляются при exec.
-            'Any': Any,
-            'Dict': Dict,
-            'List': List,
             'Optional': Optional,
-            'Tuple': Tuple,
             # Роль на стенде уже нормализована.
             'normalize_role_value': lambda value: value,
         }
@@ -787,8 +770,6 @@ class _WriterDb(_Db):
             exec(_module_assign_source(constant_name), namespace)
         for function_name in self.MODULE_FUNCTIONS:
             exec(_module_function_source(function_name), namespace)
-        for class_name in self.MODULE_CLASSES:
-            exec(_module_class_source(class_name), namespace)
         for method_name in self.METHODS:
             exec(_method_source(method_name), namespace)
             setattr(self.__class__, method_name, namespace[method_name])
@@ -798,8 +779,6 @@ class _WriterDb(_Db):
         self.day_map = day_map or {}
         self.cursor = cursor or _FakeCursor()
         self.now = now or datetime(2026, 10, 12, 10, 0)
-        # Опоздания: {(оператор, день): (минуты, ФИО)} — как Database.get_late_shift_days.
-        self.late = dict(late or {})
         self.calls = []
 
     # ── то, что ходит в базу ──────────────────────────────────────────────
@@ -831,10 +810,6 @@ class _WriterDb(_Db):
     def _load_day_shift_breaks_tx(self, cursor, operator_id, shift_date):
         self.calls.append(('breaks_snapshot', shift_date))
         return ['снимок перерывов']
-
-    def _late_shift_days_tx(self, cursor, pairs):
-        self.calls.append(('late_check', tuple(sorted(pairs))))
-        return {pair: self.late[pair] for pair in pairs if pair in self.late}
 
     def _schedule_change_actor(self, cursor, actor_id=None, source='supervisor', actor_name=None):
         return {'id': actor_id, 'source': source}
@@ -903,11 +878,10 @@ class DispatchTests(unittest.TestCase):
         ):
             db = _WriterDb()
             seen = []
-            setattr(db, writer, lambda *args, _seen=seen, **kwargs: _seen.append((args, kwargs)) or ['готово'])
-            result = db._apply_shift_change_request_tx(db.cursor, 7, self.day, kind, {'x': 1}, 9, late_lock=True)
+            setattr(db, writer, lambda *args, _seen=seen: _seen.append(args) or ['готово'])
+            result = db._apply_shift_change_request_tx(db.cursor, 7, self.day, kind, {'x': 1}, 9)
             self.assertEqual(result, ['готово'], kind)
-            # Флаг замка смен с опозданием уходит дальше — проверять дни будет писатель.
-            self.assertEqual(seen, [((db.cursor, 7, self.day, {'x': 1}, 9), {'late_lock': True})], kind)
+            self.assertEqual(seen, [(db.cursor, 7, self.day, {'x': 1}, 9)], kind)
             self.assertEqual(db.named('load_window'), [], kind)
 
     def test_old_kinds_keep_the_window_path(self):
@@ -1697,104 +1671,3 @@ class FourKindsFrontendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class _WindowWriterDb(_WriterDb):
-    """Писатель с настоящим окном «вчера/сегодня/завтра» — путь сокращения и
-    доп. части, который склеивает ночь через полночь."""
-
-    MODULE_FUNCTIONS = _WriterDb.MODULE_FUNCTIONS + ('_merge_shifts_for_date',)
-    METHODS = _WriterDb.METHODS + (
-        '_load_shift_change_window_tx',
-        '_build_swap_window_intervals',
-        '_swap_subtract_interval',
-        '_swap_subtract_intervals',
-        '_swap_serialize_intervals_to_day_map',
-    )
-
-    def _extra_occupied_from_day_snapshots(self, **kwargs):
-        return []
-
-
-class LateLockWriterTests(unittest.TestCase):
-    """Замок смен с опозданием при согласовании заявки (владелец, 20.10.2026).
-
-    Роут проверяет день заявки заранее, но сокращение и доп. часть склеивают
-    ночь через полночь и переписывают соседний день — его знает только само
-    применение. Поэтому писатель проверяет ровно те дни, которые перепишет, и
-    только когда замок держит согласующего (late_lock решает роут)."""
-
-    NIGHT = {
-        # Ночь, разобранная в аукционе кусками: 16.10 20:00–00:00 (опоздание) и 17.10 00:00–08:00.
-        '2026-10-16': [{'start': '20:00', 'end': '00:00', 'shift_type': 'regular', 'breaks': []}],
-        '2026-10-17': [{'start': '00:00', 'end': '08:00', 'shift_type': 'regular', 'breaks': []}],
-    }
-    LATE_START = date(2026, 10, 16)
-    TAIL = date(2026, 10, 17)
-
-    def _shorten_tail(self, late, late_lock):
-        db = _WindowWriterDb(day_map=self.NIGHT, late=late)
-        payload = db._normalize_shift_change_payload(
-            'shorten', {'segment': {'start': '00:00', 'end': '08:00'}, 'newStart': '00:00', 'newEnd': '06:00'},
-            self.TAIL)
-        return db, lambda: db._apply_shift_change_request_tx(db.cursor, 7, self.TAIL, 'shorten', payload, 9,
-                                                             late_lock=late_lock)
-
-    def test_window_stub_is_complete(self):
-        _assert_stub_is_complete(self, _WindowWriterDb(), _WindowWriterDb.METHODS)
-
-    def test_shortening_the_tail_does_not_rewrite_the_late_start_day(self):
-        db, apply = self._shorten_tail({(7, self.LATE_START): (25, 'Иванова Анна')}, late_lock=True)
-        LateShiftLockedError = db.namespace['LateShiftLockedError']
-        with self.assertRaises(LateShiftLockedError) as caught:
-            apply()
-        self.assertEqual(caught.exception.locked, {(7, self.LATE_START): (25, 'Иванова Анна')})
-        # Проверены дни, которые применение перепишет, — и соседний день склеенной ночи.
-        self.assertIn((7, self.LATE_START), db.named('late_check')[0][1])
-        self.assertEqual(db.named('clear_day') + db.named('save_shift') + db.named('set_day_off'), [])
-
-    def test_admin_approval_is_not_checked(self):
-        db, apply = self._shorten_tail({(7, self.LATE_START): (25, 'Иванова Анна')}, late_lock=False)
-        affected = apply()
-        self.assertIn(self.LATE_START, affected)
-        self.assertEqual(db.named('late_check'), [])
-        self.assertTrue(db.named('clear_day'))
-
-    def test_without_lateness_the_window_is_written(self):
-        db, apply = self._shorten_tail({}, late_lock=True)
-        affected = apply()
-        self.assertEqual(len(db.named('late_check')), 1)
-        self.assertEqual([call[2] for call in db.named('clear_day')], affected)
-
-    def test_move_checks_both_days_before_deleting(self):
-        day, other = date(2026, 10, 14), date(2026, 10, 17)
-        cursor = _FakeCursor([
-            ('SELECT id, start_time, end_time, shift_type FROM work_shifts',
-             [(12, dt_time(15, 0), dt_time(19, 0), 'regular')]),
-            ('SELECT 1 FROM work_shifts', [(1,)]),
-        ])
-        db = _WriterDb(day_map={'2026-10-14': [{'start': '15:00', 'end': '19:00'}],
-                                '2026-10-17': [{'start': '10:00', 'end': '14:00'}]},
-                       cursor=cursor, late={(7, other): (5, 'Петров Олег')})
-        payload = db._normalize_shift_change_payload(
-            'change', {'segment': {'start': '15:00', 'end': '19:00'}, 'newStart': '15:00', 'newEnd': '19:00',
-                       'newDate': '2026-10-17'}, day)
-        with self.assertRaises(db.namespace['LateShiftLockedError']):
-            db._apply_shift_change_move_tx(db.cursor, 7, day, payload, 9, late_lock=True)
-        self.assertEqual(db.named('late_check'), [('late_check', ((7, day), (7, other)))])
-        self.assertEqual(db.cursor.statements('DELETE FROM work_shifts'), [])
-        self.assertEqual(db.named('save_shift'), [])
-
-    def test_day_off_is_checked_before_it_is_set(self):
-        day = date(2026, 10, 14)
-        day_map = {'2026-10-14': [{'start': '09:00', 'end': '13:00'}]}
-        db = _WriterDb(day_map=day_map, late={(7, day): (12, 'Иванова Анна')})
-        payload = db._shift_change_day_off_payload(day_map['2026-10-14'])
-        with self.assertRaises(db.namespace['LateShiftLockedError']):
-            db._apply_shift_change_day_off_tx(db.cursor, 7, day, payload, 9, late_lock=True)
-        self.assertEqual(db.named('set_day_off'), [])
-
-    def test_approval_passes_the_flag_to_the_writer(self):
-        source = _method_source('respond_shift_change_request')
-        self.assertIn('late_lock=False', source.split(':', 1)[0] + source.split('\n', 2)[1])
-        self.assertIn('late_lock=late_lock', source)
