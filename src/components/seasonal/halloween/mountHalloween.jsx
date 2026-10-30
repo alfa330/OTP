@@ -1,19 +1,12 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import HalloweenLayer from './HalloweenLayer';
-import { shouldMountHalloween } from './halloweenWindow';
+import { isFramedWindow, shouldMountHalloween } from './halloweenWindow';
 
 /* Свой корень React рядом с порталом, а не внутри него: упавшее украшение не
    уронит портал, а по сроку слой снимается целиком вместе с узлом. */
 export function mountHalloween() {
-    const framed = (() => {
-        try {
-            return window.self !== window.top;
-        } catch (error) {
-            return true;
-        }
-    })();
-    if (!shouldMountHalloween({ search: window.location.search, framed })) return;
+    if (!shouldMountHalloween({ search: window.location.search, framed: isFramedWindow() })) return;
     if (document.getElementById('otp-halloween-root')) return;
     const host = document.createElement('div');
     host.id = 'otp-halloween-root';

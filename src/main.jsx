@@ -6,23 +6,37 @@ import { BrowserRouter } from 'react-router-dom';
 import App, { ErrorBoundary } from './App';
 import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
 import { startPwaRuntime } from './utils/pwa';
-import { isHalloweenTime } from './components/seasonal/halloween/halloweenWindow';
+import {
+  isFramedWindow,
+  isHalloweenTime,
+  shouldMountHalloween,
+  watchHalloweenEnd,
+} from './components/seasonal/halloween/halloweenWindow';
 import './styles.css';
 
-/* Хэллоуин (до конца 1 ноября 2026). Праздничная метка и оформление сайдбара и
-   входа — сразу, до отрисовки: иначе логотип и сайдбар сменились бы на глазах.
-   Сами разделы праздник не перекрашивает (решение владельца 30.10).
+/* Хэллоуин (до конца 1 ноября 2026).
    Сбой праздничного чанка (сеть, выкладка) не должен перезагружать портал через
-   staleBundleRecovery: украшения просто не появятся. Слушатель на фазе перехвата
-   срабатывает раньше восстановления и гасит только свои чанки. */
+   staleBundleRecovery: украшения просто не появятся, шарик останется знаком.
+   Слушатель на фазе перехвата срабатывает раньше восстановления и гасит только
+   свои чанки.
+   Праздничная метка и оформление сайдбара и входа — сразу, до отрисовки: иначе
+   логотип и сайдбар сменились бы на глазах. Сами разделы праздник не
+   перекрашивает (решение владельца 30.10). Срок метки стережёт и этот блок, а
+   не только слой украшений: слой может не подняться (сбой его чанка, вкладка
+   открыта за секунды до полуночи), и без этого сайдбар и вход остались бы
+   праздничными до перезагрузки. */
 const HALLOWEEN_CHUNK_RE = /mountHalloween|PumpkinMascot|halloween-theme/;
 if (isHalloweenTime()) {
-  document.documentElement.setAttribute('data-otp-halloween', '');
   window.addEventListener('vite:preloadError', (event) => {
     if (!HALLOWEEN_CHUNK_RE.test(String(event?.payload?.message || event?.payload || ''))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
+}
+const halloweenHere = shouldMountHalloween({ search: window.location.search, framed: isFramedWindow() });
+if (halloweenHere) {
+  document.documentElement.setAttribute('data-otp-halloween', '');
+  watchHalloweenEnd(() => document.documentElement.removeAttribute('data-otp-halloween'));
   import('./components/seasonal/halloween/halloween-theme.css').catch(() => {});
 }
 
@@ -74,8 +88,8 @@ try {
     );
     /* Хэллоуин (до конца 1 ноября 2026): украшения поверх портала — своим
        чанком и своим корнем, когда портал уже встал и браузер свободен.
-       После срока чанк не грузится вовсе. */
-    if (isHalloweenTime()) {
+       После срока и во встроенном окне чанк не грузится вовсе. */
+    if (halloweenHere && isHalloweenTime()) {
       const startHalloween = () => import('./components/seasonal/halloween/mountHalloween')
         .then((module) => module?.mountHalloween?.())
         .catch(() => {});

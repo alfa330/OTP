@@ -15,6 +15,7 @@ import {
     HALLOWEEN_ENDS_AT,
     isHalloweenTime,
     shouldMountHalloween,
+    watchHalloweenEnd,
 } from '../src/components/seasonal/halloween/halloweenWindow.js';
 import {
     ART,
@@ -48,6 +49,48 @@ test('окно «Чатов ОП» в CRM и чужой фрейм украше�
     assert.equal(shouldMountHalloween({ now, search: '?embed=1&crm_user=5' }), false);
     assert.equal(shouldMountHalloween({ now, search: '', framed: true }), false);
     assert.equal(shouldMountHalloween({ now: at('2026-11-02T00:00:01+05:00'), search: '' }), false);
+});
+
+test('после полуночи прежний вид возвращается и без слоя украшений', (t) => {
+    /* Метку праздника (сайдбар, вход) ставит main.jsx, и снимает её тоже он:
+       слой может не подняться — сбой его чанка, вкладка открыта за секунды до
+       полуночи, — и тогда праздник жил бы до перезагрузки (так было на стенде). */
+    let clock = at('2026-11-01T23:59:00+05:00');
+    t.mock.method(Date, 'now', () => clock);
+    const timers = [];
+    t.mock.method(globalThis, 'setTimeout', (fn, ms) => timers.push({ kind: 'timeout', fn, ms }));
+    t.mock.method(globalThis, 'setInterval', (fn, ms) => timers.push({ kind: 'interval', fn, ms }));
+    t.mock.method(globalThis, 'clearTimeout', () => {});
+    t.mock.method(globalThis, 'clearInterval', () => {});
+    let ended = 0;
+    watchHalloweenEnd(() => { ended += 1; });
+    const timeout = timers.find((timer) => timer.kind === 'timeout');
+    const poll = timers.find((timer) => timer.kind === 'interval');
+    assert.ok(timeout.ms >= 60_000 && timeout.ms <= 60_100, `таймер — до полуночи, а не ${timeout.ms} мс`);
+    assert.equal(poll.ms, 60_000, 'и проверка раз в минуту');
+    poll.fn();
+    assert.equal(ended, 0, 'до полуночи праздник идёт');
+    // Ноутбук проспал полночь: таймер ещё спит, минутная проверка уже видит срок.
+    clock = at('2026-11-02T08:30:00+05:00');
+    poll.fn();
+    assert.equal(ended, 1);
+    timeout.fn();
+    poll.fn();
+    assert.equal(ended, 1, 'конец — один раз');
+    // Вкладку открыли уже после срока — конец сразу, без таймеров.
+    timers.length = 0;
+    watchHalloweenEnd(() => { ended += 1; });
+    assert.equal(ended, 2);
+    assert.equal(timers.length, 0);
+
+    const main = read('../src/main.jsx');
+    assert.match(main, /const halloweenHere = shouldMountHalloween\(\{ search: window\.location\.search, framed: isFramedWindow\(\) \}\);/);
+    const start = main.indexOf('if (halloweenHere) {');
+    const block = main.slice(start, main.indexOf('\n}', start));
+    assert.match(block, /setAttribute\('data-otp-halloween', ''\);\n\s*watchHalloweenEnd\(\(\) => document\.documentElement\.removeAttribute\('data-otp-halloween'\)\);/);
+    assert.match(block, /import\('\.\/components\/seasonal\/halloween\/halloween-theme\.css'\)/);
+    assert.match(read('../src/components/seasonal/halloween/useHalloweenActive.js'), /return watchHalloweenEnd\(\(\) => setActive\(false\)\);/);
+    assert.match(read('../src/components/seasonal/halloween/mountHalloween.jsx'), /framed: isFramedWindow\(\)/);
 });
 
 /* Карточка входа так, как её ставит .auth-screen: ширина max-w-[380px] плюс
@@ -263,8 +306,8 @@ const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
 test('слой грузится отдельным чанком и только до срока', () => {
     const main = read('../src/main.jsx');
-    assert.match(main, /import \{ isHalloweenTime \} from '\.\/components\/seasonal\/halloween\/halloweenWindow';/);
-    assert.match(main, /if \(isHalloweenTime\(\)\) \{/);
+    assert.match(main, /import \{\s*isFramedWindow,\s*isHalloweenTime,\s*shouldMountHalloween,\s*watchHalloweenEnd,\s*\} from '\.\/components\/seasonal\/halloween\/halloweenWindow';/);
+    assert.match(main, /if \(halloweenHere && isHalloweenTime\(\)\) \{/);
     assert.match(main, /import\('\.\/components\/seasonal\/halloween\/mountHalloween'\)/);
     assert.match(main, /module\?\.mountHalloween\?\.\(\)/, 'погашенный сбой чанка отдаёт undefined — вызов без падения');
     assert.doesNotMatch(main, /import [^;]*from '\.\/components\/seasonal\/halloween\/(mountHalloween|HalloweenLayer)/,
@@ -344,8 +387,8 @@ test('слой не мешает работе: некликабелен, гас�
     assert.match(layer, /const remeasure = useCallback\(\(force = false\) => \{\n\s+if \(!isHalloweenTime\(\)\) \{\n\s+onExpire\(\);/);
     assert.match(layer, /return \(\) => root\.removeAttribute\('data-otp-halloween'\);/);
     assert.match(layer, /!screenRef\.current\.modal && !isMenuOpen\(\)/, 'мыши взлетают поверх окна или меню');
-    assert.match(mount, /shouldMountHalloween\(\{ search: window\.location\.search, framed \}\)/);
-    assert.match(mount, /window\.self !== window\.top/);
+    assert.match(mount, /shouldMountHalloween\(\{ search: window\.location\.search, framed: isFramedWindow\(\) \}\)/);
+    assert.match(read('../src/components/seasonal/halloween/halloweenWindow.js'), /return window\.self !== window\.top;/);
     assert.match(mount, /root\.unmount\(\);\n\s+host\.remove\(\);/);
 });
 
