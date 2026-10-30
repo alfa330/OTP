@@ -191,9 +191,9 @@ def test_seed_and_context(world):
 
 def test_intake_dedupe_rules(world):
     service = world['service']
-    outcome, card = add_response(world, REC1, '8 705 111 22 33', full_name='Иванов')
-    assert outcome == 'created' and card['stage'] == 'responses' and card['phone'] == '+77051112233'
-    outcome, same = add_response(world, REC2, '+7 705 111-22-33')
+    outcome, card = add_response(world, REC1, '8 705 555 22 33', full_name='Иванов')
+    assert outcome == 'created' and card['stage'] == 'responses' and card['phone'] == '+77055552233'
+    outcome, same = add_response(world, REC2, '+7 705 555-22-33')
     assert outcome == 'repeat' and same['id'] == card['id']
     with world['db']._get_cursor() as cur:
         touches = queries.card_touches(cur, card['id'])
@@ -542,8 +542,8 @@ def test_auto_return_and_next_contact_notifications(world):
 def test_upload_contacts(world):
     service = world['service']
     lead = ctx_of(world, LEAD_GRANT)
-    add_response(world, REC1, '8 705 900 00 01')      # открытая карточка — строка станет повторным откликом
-    raw = ('ФИО;Телефон;Город\nА;8 705 900 00 01;Алматы\nБ;8 705 900 00 02;Астана\nВ;8 705 900 00 02;Астана\n'
+    add_response(world, REC1, '8 705 000 00 01')      # открытая карточка — строка станет повторным откликом
+    raw = ('ФИО;Телефон;Город\nА;8 705 000 00 01;Алматы\nБ;8 705 000 00 02;Астана\nВ;8 705 000 00 02;Астана\n'
            'Г;+7 777 999 88 77;Алматы\nД;нет;\n').encode('utf-8')
     with pytest.raises(HiringError) as caught:
         service.upload_contacts(ctx_of(world, REC1), raw, 'база.csv', world['sources']['base_bought']['id'])
@@ -556,7 +556,7 @@ def test_upload_contacts(world):
     assert [row['error'] for row in batch['error_rows']] == ['Повтор номера в файле', 'Телефон действующего сотрудника', 'Пустой или неразборный номер']
     with world['db']._get_cursor() as cur:
         total, rows = queries.list_cards(cur, {'lead': True}, SUPER, {'stage': 'contacts'})
-        assert total == 1 and rows[0]['phone'] == '+77059000002' and rows[0]['batch_id'] == batch['id']
+        assert total == 1 and rows[0]['phone'] == '+77050000002' and rows[0]['batch_id'] == batch['id']
         assert rows[0]['source_name'] == 'Купленная база'
 
 
@@ -585,7 +585,7 @@ def test_olx_feed(world):
                                       phone_normalized text, result text, created_at timestamp);
             CREATE TABLE olx_threads (cabinet_code text, thread_id text, interlocutor_name text, advert_title text);
             INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at)
-                 VALUES ('itaxi', 't-old', '2026-10-01 10:00', '+77057000001', 'lead_created', '2026-10-01 10:00');
+                 VALUES ('itaxi', 't-old', '2026-10-01 10:00', '+77055550001', 'lead_created', '2026-10-01 10:00');
         """)
     # Кабинеты «для найма» не выбраны: опрос только ставит закладку на конец журнала и ничего не берёт —
     # кабинеты лидов (таксопарки) к рекрутерам не попадают (владелец 30.10.2026).
@@ -597,10 +597,10 @@ def test_olx_feed(world):
         cur.execute("""
             INSERT INTO olx_threads VALUES ('itaxi', 't-new', 'Ерлан', 'Водитель в iTaxi');
             INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at) VALUES
-                ('itaxi', 't-new', '2026-10-15 11:00', '+77057000002', 'lead_created', '2026-10-15 11:00'),
+                ('itaxi', 't-new', '2026-10-15 11:00', '+77055550002', 'lead_created', '2026-10-15 11:00'),
                 ('itaxi', 't-skip', '2026-10-15 11:05', NULL, 'canned_reply', '2026-10-15 11:05'),
-                ('jana', 't-dup', '2026-10-15 11:10', '+77057000002', 'duplicate', '2026-10-15 11:10'),
-                ('jana', 't-other', '2026-10-15 11:20', '+77057000003', 'lead_created', '2026-10-15 11:20');
+                ('jana', 't-dup', '2026-10-15 11:10', '+77055550002', 'duplicate', '2026-10-15 11:10'),
+                ('jana', 't-other', '2026-10-15 11:20', '+77055550003', 'lead_created', '2026-10-15 11:20');
         """)
     assert service.pull_olx() == 0            # по-прежнему пусто: закладка уехала на конец журнала
     with world['db']._get_cursor() as cur:
@@ -611,9 +611,9 @@ def test_olx_feed(world):
         cur.execute("""
             INSERT INTO olx_threads VALUES ('itaxi', 't-hire', 'Асель', 'Оператор колл-центра');
             INSERT INTO olx_journal (cabinet_code, thread_id, message_at, phone_normalized, result, created_at) VALUES
-                ('itaxi', 't-hire', '2026-10-16 09:00', '+77057000004', 'lead_created', '2026-10-16 09:00'),
-                ('jana', 't-park', '2026-10-16 09:05', '+77057000005', 'lead_created', '2026-10-16 09:05'),
-                ('itaxi', 't-hire', '2026-10-16 09:30', '+77057000004', 'duplicate', '2026-10-16 09:30');
+                ('itaxi', 't-hire', '2026-10-16 09:00', '+77055550004', 'lead_created', '2026-10-16 09:00'),
+                ('jana', 't-park', '2026-10-16 09:05', '+77055550005', 'lead_created', '2026-10-16 09:05'),
+                ('itaxi', 't-hire', '2026-10-16 09:30', '+77055550004', 'duplicate', '2026-10-16 09:30');
         """)
     assert service.pull_olx() == 2
     with world['db']._get_cursor() as cur:
@@ -624,7 +624,7 @@ def test_olx_feed(world):
         assert card['platform_ref'] == 'olx:itaxi:t-hire' and card['received_at'] == datetime(2026, 10, 16, 9, 0)
         assert [t['kind'] for t in queries.card_touches(cur, card['id'])] == ['repeat_response']
         assert queries.get_integration(cur, 'olx')['cursor'] == {'journal_id': 8}
-        assert queries.open_card_by_phone(cur, '+77057000005') is None   # кабинет лидов — мимо воронки
+        assert queries.open_card_by_phone(cur, '+77055550005') is None   # кабинет лидов — мимо воронки
 
 
 # ─── Дашборд (ТЗ 8.1) и рабочий стол (ТЗ 3) ───────────────────────────────────
@@ -638,7 +638,8 @@ def test_dashboard_cohort_and_click_through(world):
     service.move(me, hired['id'], 'on_line', {'line_started_at': '2026-10-20'})
     world['clock'].now = datetime(2026, 11, 2, 12, 0)
     with world['db']._get_cursor() as cur:
-        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (78, 'Нанятый Оператор', 'operator', 'working', 367, '+77051000001')")
+        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (78, 'Нанятый Оператор', 'operator', 'working', 367, %s)",
+                    (hired['phone'],))
         for day in range(20, 27):
             cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (78, %s, 8)", (datetime(2026, 10, day).date(),))
     assert service.sync_shifts()['shifts'] == 7
@@ -749,10 +750,11 @@ def test_binotel_calls_land_in_cards(world):
     service, clock = world['service'], world['clock']
     me = ctx_of(world, REC1)
     card = take_and_touch(world, REC1, '8 705 500 00 01')
+    ext = '8' + card['phone'][2:]        # как Binotel пишет externalNumber: 8 + десять цифр
     with world['db']._get_cursor() as cur:
         cur.execute("INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (%s, 367, '8501')", (REC1,))
     # Телефония: разговор 2 минуты — касание «дозвон», подстатус «Дозвон», запись доступна.
-    assert service.on_binotel_call(_webhook('c-1', '87055000001'), matched=False)
+    assert service.on_binotel_call(_webhook('c-1', ext), matched=False)
     with world['db']._get_cursor() as cur:
         rows = queries.card_calls(cur, card['id'])
         assert len(rows) == 1 and rows[0]['result'] == 'answered' and rows[0]['billsec'] == 120
@@ -764,18 +766,18 @@ def test_binotel_calls_land_in_cards(world):
         fresh = queries.get_card(cur, card['id'])
         assert fresh['substage'] == 'dial' and fresh['no_answer_streak'] == 0
     # Тот же звонок второй раз (история после вебхука) — без дубля.
-    assert service.on_binotel_call(_webhook('c-1', '87055000001'), matched=False)
+    assert service.on_binotel_call(_webhook('c-1', ext), matched=False)
     with world['db']._get_cursor() as cur:
         assert len(queries.card_calls(cur, card['id'])) == 1
         assert sum(1 for t in queries.card_touches(cur, card['id']) if t['kind'] == 'call') == 2   # первый — из take_and_touch
     # Звонок обзвона (matched) и звонок ещё идёт — не наши.
-    assert service.on_binotel_call(_webhook('c-2', '87055000001'), matched=True) is None
-    assert service.on_binotel_call(_webhook('c-3', '87055000001', disposition='ONLINE'), matched=False) is None
+    assert service.on_binotel_call(_webhook('c-2', ext), matched=True) is None
+    assert service.on_binotel_call(_webhook('c-3', ext, disposition='ONLINE'), matched=False) is None
     # Ручная отметка «недозвон» сразу после «Позвонить», потом вебхук того же звонка — одна строка.
     clock.now = NOW + timedelta(hours=1)
     manual = service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer', 'body': 'не берёт'})
     started = int((clock.now - timedelta(minutes=2)).replace(tzinfo=rules.ALMATY).timestamp())
-    assert service.on_binotel_call(_webhook('c-4', '87055000001', disposition='NOANSWER', billsec=0, start=started), matched=False)
+    assert service.on_binotel_call(_webhook('c-4', ext, disposition='NOANSWER', billsec=0, start=started), matched=False)
     with world['db']._get_cursor() as cur:
         touches = [t for t in queries.card_touches(cur, card['id']) if t['kind'] == 'call']
         assert len(touches) == 3
@@ -784,20 +786,20 @@ def test_binotel_calls_land_in_cards(world):
         assert merged['body'].startswith('Исходящий звонок · Не поднял трубку')
         assert queries.get_card(cur, card['id'])['no_answer_streak'] == 1    # ручная отметка уже посчитала
     # Входящий от кандидата на линию рекрутера — тоже в карточку.
-    assert service.on_binotel_call(_webhook('c-5', '87055000001', call_type='0', billsec=30, start=1792052000), matched=False)
+    assert service.on_binotel_call(_webhook('c-5', ext, call_type='0', billsec=30, start=1792052000), matched=False)
     with world['db']._get_cursor() as cur:
         incoming = [row for row in queries.card_calls(cur, card['id']) if row['direction'] == 'in']
         assert len(incoming) == 1 and incoming[0]['result'] == 'answered'
     # Чужая линия и неизвестный номер — мимо.
-    assert service.on_binotel_call(_webhook('c-6', '87055000001', line='8502'), matched=False) is None
-    assert service.on_binotel_call(_webhook('c-7', '87055009999'), matched=False) is None
+    assert service.on_binotel_call(_webhook('c-6', ext, line='8502'), matched=False) is None
+    assert service.on_binotel_call(_webhook('c-7', '87055559999'), matched=False) is None
     # Добор истории по линии рекрутера — те же правила, новые звонки появляются, старые не дублируются.
     client = _FakeBinotelClient([
-        {'general_call_id': 'c-1', 'call_type': 1, 'internal_number': '8501', 'external_number': '87055000001',
+        {'general_call_id': 'c-1', 'call_type': 1, 'internal_number': '8501', 'external_number': ext,
          'disposition': 'ANSWER', 'billsec': 120, 'waitsec': 7, 'start_time': 1792000000},
-        {'general_call_id': 'c-8', 'call_type': 1, 'internal_number': '8501', 'external_number': '87055000001',
+        {'general_call_id': 'c-8', 'call_type': 1, 'internal_number': '8501', 'external_number': ext,
          'disposition': 'BUSY', 'billsec': 0, 'waitsec': 3, 'start_time': 1792053000},
-        {'general_call_id': 'c-9', 'call_type': 1, 'internal_number': '8599', 'external_number': '87055000001',
+        {'general_call_id': 'c-9', 'call_type': 1, 'internal_number': '8599', 'external_number': ext,
          'disposition': 'ANSWER', 'billsec': 50, 'waitsec': 3, 'start_time': 1792053000},
     ])
     fake_lines = _FakeDialList(client)
@@ -843,7 +845,7 @@ def test_pending_call_waits_for_telephony(world):
     assert edited['next_contact_at'] == datetime(2026, 10, 16, 18, 0)
     # Телефония: не поднял трубку — исход в то же касание, подстатус и серия как у ручной отметки.
     started = int((clock.now + timedelta(seconds=20)).replace(tzinfo=rules.ALMATY).timestamp())
-    assert service.on_binotel_call(_webhook('p-1', '87055000002', disposition='NOANSWER', billsec=0, line='8503', start=started), matched=False)
+    assert service.on_binotel_call(_webhook('p-1', '8' + card['phone'][2:], disposition='NOANSWER', billsec=0, line='8503', start=started), matched=False)
     with world['db']._get_cursor() as cur:
         filled = next(t for t in queries.card_touches(cur, card['id']) if t['id'] == pending['id'])
         assert filled['result'] == 'no_answer' and filled['call_id'] and 'перезвонить вечером' in filled['body']
