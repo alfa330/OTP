@@ -263,8 +263,9 @@ def touch_chat(cursor, user_id, chat_id, *, first_question=''):
 def _directory_available(kind, tab, space_id, directory_access):
     """Открыт ли источник-справочник человеку СЕЙЧАС: пространство выдано не
     гостем и вкладка в нём включена (directory.access_map). Снимок цитаты без
-    этого — лазейка: адрес и телефон из чужой вкладки через старый ответ."""
-    feature = tab if tab in ('offices', 'cities') else None
+    этого — лазейка: адрес и телефон из чужой вкладки через старый ответ.
+    Карточка парка (wiki/park_cards.py) — так же, по вкладке «Парки»."""
+    feature = tab if tab in ('offices', 'cities', 'parks') else None
     access = (directory_access or {}).get(space_id) or {}
     return bool(kind != 'article' and feature and access.get(feature))
 

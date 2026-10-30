@@ -32,6 +32,7 @@ from baiga import assistant as baiga_assistant
 
 from . import classifier as wiki_classifier
 from . import directory as wiki_directory
+from . import park_cards as wiki_park_cards
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import questions as wiki_questions
@@ -119,11 +120,36 @@ def registration_rows(cursor, ctx, question, space_id, search_query=None):
     return rows
 
 
-def directory_rows(cursor, ctx, question, space_id, search_query=None):
-    """Записи «Офисов» и «Городов» к вопросу (wiki/directory.py) — или [].
+def park_rows(cursor, ctx, question, space_id, search_query=None, answered=(), history=None):
+    """Карточки «Парков» к вопросу (wiki/park_cards.py) — или [].
+
+    answered — source_kind строк, уже собранных регистрацией и справочником:
+    на «куда регистрировать» и «адрес в Шымкенте» отвечают они, и карточка
+    нужна, только если о парке спросили что-то ещё. history — прошлые реплики
+    разговора: продолжение «а номер?» берёт парк из последней.
+
+    Своим савпоинтом, как регистрация: сбой карточек не должен отнимать у
+    оператора адрес офиса или комиссию из соседних справочников.
+    """
+    cursor.execute('SAVEPOINT wiki_ai_parks')
+    try:
+        rows = wiki_park_cards.ai_rows(cursor, ctx, question, space_id=space_id,
+                                       search_query=search_query, answered=answered,
+                                       history=history)
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_parks')
+        logging.exception('Помощник: справочник парков не ответил')
+        return []
+    cursor.execute('RELEASE SAVEPOINT wiki_ai_parks')
+    return rows
+
+
+def directory_rows(cursor, ctx, question, space_id, search_query=None, history=None):
+    """Записи «Офисов», «Городов» и «Парков» к вопросу — или [].
 
     Регистрация водителей — первой: на «куда зарегистрировать» отвечает она, а
-    офис и комиссия того же города — соседние сведения.
+    офис и комиссия того же города — соседние сведения. Карточки парков —
+    последними: офис и комиссия названного города точнее общей карточки.
 
     Под савпоинтом: справочник — приставка к ответу, и его сбой не должен
     отнимать у оператора ответ по статьям.
@@ -136,9 +162,13 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None):
     except Exception:                                    # noqa: BLE001
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_directory')
         logging.exception('Помощник: справочник не ответил')
-        return registration
-    cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
-    return registration + rows
+        rows = []
+    else:
+        cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
+    found = registration + rows
+    return found + park_rows(cursor, ctx, question, space_id, search_query,
+                             answered={row.get('source_kind') for row in found},
+                             history=history)
 
 
 def classifier_rows(cursor, question, article_ids, search_query=None, *, history=None):
@@ -492,9 +522,10 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
         # призе водителя отвечают они, а статьи об условиях акции — фон.
         #
         # Адреса офисов и комиссии Яндекса — из вкладок «Офисы» и «Города»,
-        # живыми данными на сегодня (wiki/directory.py). Впереди статей: при
-        # равной опоре источником становится справочник, а в промпте у него своя
-        # подпись и правило «при расхождении верен справочник».
+        # живыми данными на сегодня (wiki/directory.py), карточки парков — из
+        # вкладки «Парки» (wiki/park_cards.py). Впереди статей: при равной опоре
+        # источником становится справочник, а в промпте у него своя подпись и
+        # правило «при расхождении верен справочник».
         #
         # С какого года модель берут в тариф — из «Классификатора авто»
         # (wiki/classifier.py): годы по городам считает код, а не модель.
@@ -505,7 +536,7 @@ def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
             # приз». Вопросы берутся ДО записи нового — как и история выше.
             ai_store.recent_questions(cursor, chat_id, limit=baiga_assistant.PRIOR_TURNS),
             sensitive_access_granted)
-        rows = (lists + directory_rows(cursor, ctx, question, space_id, search_query)
+        rows = (lists + directory_rows(cursor, ctx, question, space_id, search_query, history=history)
                 + classifier_rows(cursor, question, scope['article_ids'], search_query, history=history)
                 + found['rows'])
 

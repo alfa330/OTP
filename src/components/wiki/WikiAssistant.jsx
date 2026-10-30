@@ -54,7 +54,11 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                                         askRequest = null, onAskRequestConsumed,
                                         openChatRequest = null, onOpenChatRequestConsumed }) {
     const toast = useStableCallback(showToast);
-    const openArticle = useStableCallback(onOpenArticle);
+    /* Источник уводит из вкладки, и она размонтируется. Номер открытого
+       разговора едет вместе со щелчком: по нему «К помощнику» вернёт в этот
+       ответ, а не на пустой экран (WikiView: assistantDoor). */
+    const openArticle = useStableCallback(
+        (slug, highlight, source) => onOpenArticle?.(slug, highlight, source, activeId));
     const consumeAskRequest = useStableCallback(onAskRequestConsumed);
     const consumeOpenChat = useStableCallback(onOpenChatRequestConsumed);
 

@@ -58,8 +58,10 @@ const ContactRow = ({ icon: Icon, label, children }) => (
     </div>
 );
 
+/* backLabel — подпись возврата: «К помощнику», когда парк открыли из источника
+   под ответом помощника (WikiLibrary берёт её из двери). */
 export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
-                                  spaceId = null }) {
+                                  spaceId = null, backLabel = 'К статьям' }) {
     const [park, setPark] = useState(null);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
@@ -97,7 +99,7 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
                 <div className="text-[15px] font-semibold text-slate-900">Парк не открылся</div>
                 <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">{error}</p>
                 <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={onBack}>
-                    <ArrowLeft size={14} /> К статьям
+                    <ArrowLeft size={14} /> {backLabel}
                 </button>
             </div>
         );
@@ -118,7 +120,7 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
         <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
                 <button type="button" className={iosBtnSecondary} onClick={onBack}>
-                    <ArrowLeft size={14} /> К статьям
+                    <ArrowLeft size={14} /> {backLabel}
                 </button>
                 {onOpenParks && (
                     <button type="button" className={iosBtnSecondary} onClick={onOpenParks}>

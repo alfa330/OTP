@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef } from 'react';
-import { AlertCircle, Car, FileText, Loader2, MapPin, Percent, Quote, Send, ThumbsDown, ThumbsUp, Trophy } from 'lucide-react';
+import { AlertCircle, Building2, Car, FileText, Loader2, MapPin, Percent, Quote, Send, ThumbsDown, ThumbsUp, Trophy } from 'lucide-react';
 import { iosBtnGhost, IosBadge } from '../ui/ios';
 import { ChatBubble, useThreadScroll } from '../ui/chat';
 import { threadScrollIntent } from './threadScroll';
@@ -89,10 +89,11 @@ export const STALE_CAVEATS = [
 
 /* Источник-справочник (wiki/directory.py) ведёт не в статью, а во вкладку
    «Офисы» или «Города» на этой записи: статьи у него нет, есть вкладка.
-   Источник «Списки Байги» (baiga/assistant.py) — в раздел портала, на неделю
-   и водителя из ответа. Источник «Классификатор авто» (wiki/classifier.py) — в
-   статью-калькулятор на машине из ответа. */
-const SOURCE_ICONS = { offices: MapPin, cities: Percent, baiga: Trophy, classifier: Car };
+   Карточка «Парков» (wiki/park_cards.py) — на страницу парка, с той же иконкой,
+   что у вкладки. Источник «Списки Байги» (baiga/assistant.py) — в раздел
+   портала, на неделю и водителя из ответа. Источник «Классификатор авто»
+   (wiki/classifier.py) — в статью-калькулятор на машине из ответа. */
+const SOURCE_ICONS = { offices: MapPin, cities: Percent, parks: Building2, baiga: Trophy, classifier: Car };
 
 /** Чип источника: название статьи (или вкладки справочника), раздел и цитата под ним. */
 export const SourceChip = ({ source, onOpen }) => {

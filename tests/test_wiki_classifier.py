@@ -1524,7 +1524,8 @@ class RouteWiringTest(unittest.TestCase):
 
     def test_ask_puts_the_classifier_between_the_directory_and_the_articles(self):
         ask = self.function('wiki_ai_ask')
-        self.assertIn("rows = lists + directory_rows(cursor, ctx, question, space_id, search_query) + "
+        self.assertIn("rows = lists + directory_rows(cursor, ctx, question, space_id, search_query, "
+                      "history=history) + "
                       "classifier_rows(cursor, question, scope['article_ids'], search_query, history=history) + "
                       "found['rows']", ask)
 
@@ -1551,7 +1552,7 @@ class RouteWiringTest(unittest.TestCase):
         self.assertIn("if (source?.tab === CLASSIFIER_TAB) {", wiki)
         self.assertIn("if (directoryFocus.tab === CLASSIFIER_TAB) {", wiki)
         # Справочник — вкладка, классификатор — статья: проверка вкладки идёт раньше.
-        self.assertLess(wiki.index('if (!slug && source?.tab) { openDirectory(source); return; }'),
+        self.assertLess(wiki.index('if (!slug && source?.tab) { openDirectory(source, from); return; }'),
                         wiki.index('if (source?.tab === CLASSIFIER_TAB) {'))
         orb = (ROOT / 'src' / 'components' / 'assistant' / 'AssistantOrb.jsx').read_text(
             encoding='utf-8')

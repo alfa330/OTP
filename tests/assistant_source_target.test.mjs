@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    baigaFocusOf, canEscalateMessage, classifierPrefillOf, sourceDisabled, sourceDoor,
+    baigaFocusOf, canEscalateMessage, classifierPrefillOf, parkTarget, sourceDisabled, sourceDoor,
 } from '../src/components/assistant/sourceTarget.js';
 
 const ARTICLE = { slug: 'rent', title: 'Аренда', source_kind: 'article' };
@@ -16,6 +16,8 @@ const CAR = {
 };
 const OFFICE = { slug: '', tab: 'offices', ref_id: 8, ref_city: 'Шымкент', source_kind: 'office' };
 const BAIGA = { slug: '', tab: 'baiga', ref_id: 3, ref_key: 'ZZ123456', source_kind: 'baiga' };
+// Карточка «Парков» (wiki/park_cards.py): страница парка по слагу из ref_key.
+const PARK = { slug: '', tab: 'parks', ref_id: 1, ref_key: 'itaxi', source_kind: 'park' };
 const KINDS = ['answer', 'clarify', 'no_answer'];
 
 test('у каждого источника своя дверь', () => {
@@ -26,6 +28,24 @@ test('у каждого источника своя дверь', () => {
     assert.notEqual(sourceDoor(BAIGA), sourceDoor(OFFICE));
     assert.equal(sourceDoor({ slug: '', tab: null }), null);
     assert.equal(sourceDoor(null), null);
+});
+
+test('карточка парка — справочник, а не статья', () => {
+    // Слаг парка лежит в ref_key, а не в slug: в slug он открыл бы статью с этим
+    // слагом, а у парка статьи нет.
+    assert.equal(sourceDoor(PARK), 'directory');
+    assert.equal(sourceDisabled(PARK), false);
+    // Вкладку закрыли — чип из истории неактивен, как у офиса.
+    assert.equal(sourceDoor({ ...PARK, available: false }), null);
+    assert.equal(sourceDisabled({ ...PARK, available: false, tab: null }), true);
+});
+
+test('карточка парка ведёт на страницу парка, сводка — во вкладку «Парки»', () => {
+    assert.deepEqual(parkTarget(PARK), { tab: 'library', park: 'itaxi' });
+    // Слаг не влез в источник (длиннее 64) или это сводка всех парков.
+    assert.deepEqual(parkTarget({ ...PARK, ref_key: null }), { tab: 'parks', park: null });
+    assert.deepEqual(parkTarget({ ...PARK, ref_key: '  ' }), { tab: 'parks', park: null });
+    assert.deepEqual(parkTarget(null), { tab: 'parks', park: null });
 });
 
 test('закрытый источник никуда не ведёт', () => {

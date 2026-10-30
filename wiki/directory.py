@@ -43,16 +43,48 @@ from . import text as wiki_text
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def directory_space(cursor, ctx, requested):
-    """Пространство справочников для этого запроса: {id, offices, cities} или None.
+DIRECTORY_TABS = ('offices', 'cities')
+# Вкладки, источник из которых бывает под ответом помощника: справочники этого
+# модуля и «Парки» (wiki/park_cards.py).
+SOURCE_TABS = DIRECTORY_TABS + ('parks',)
+
+# Память на время запроса. За один вопрос помощнику пространство справочника
+# спрашивают регистрация, офисы с городами и парки (routes_ai.directory_rows) —
+# трижды одни и те же два запроса. ctx собирается заново на каждый запрос
+# (wiki/routes.py: wiki_route), поэтому отзыв доступа память не переживёт.
+_MEMO = '_directory_memo'
+
+
+def _remembered(ctx, key, read):
+    memo = ctx.setdefault(_MEMO, {}) if isinstance(ctx, dict) else {}
+    if key not in memo:
+        memo[key] = read()
+    return memo[key]
+
+
+def _granted(cursor, ctx):
+    """Пространства, ВЫДАННЫЕ человеку не гостем (queries.spaces_for_user)."""
+    return _remembered(ctx, 'granted', lambda: set(
+        queries.spaces_for_user(cursor, ctx, include_guest=False)))
+
+
+def _spaces(cursor, ctx):
+    return _remembered(ctx, 'spaces', lambda: structure.list_spaces(cursor))
+
+
+def directory_space(cursor, ctx, requested, tabs=DIRECTORY_TABS):
+    """Пространство справочников для этого запроса: {id, <вкладка>: bool} или None.
 
     Как request_space, но без ответов ошибкой: поиск и помощник обязаны
     работать и тогда, когда справочник человеку не положен, — просто без него.
     Просьба (requested) принимается, только если пространство выдано не
     гостем; без просьбы берём единственное выданное, а из нескольких не
     выбираем никакое — показать справочник, которого не спрашивали, нельзя.
+
+    tabs — вкладки, о которых спрашивают: по умолчанию «Офисы» и «Города»,
+    «Парки» берёт свои (park_cards). Ни одна не включена — None.
     """
-    allowed = set(queries.spaces_for_user(cursor, ctx, include_guest=False))
+    allowed = _granted(cursor, ctx)
     if not allowed:
         return None
     if requested is None:
@@ -61,31 +93,29 @@ def directory_space(cursor, ctx, requested):
         requested = next(iter(allowed))
     if requested not in allowed:
         return None
-    for space in structure.list_spaces(cursor):
+    for space in _spaces(cursor, ctx):
         if space['id'] == requested:
             features = schema.space_features(space.get('features'))
-            result = {'id': requested,
-                      'offices': bool(features.get('offices')),
-                      'cities': bool(features.get('cities'))}
-            return result if (result['offices'] or result['cities']) else None
+            result = {'id': requested}
+            result.update((tab, bool(features.get(tab))) for tab in tabs)
+            return result if any(result[tab] for tab in tabs) else None
     return None
 
 
 def access_map(cursor, ctx):
-    """{space_id: {'offices', 'cities'}} — где справочники человеку открыты сейчас.
+    """{space_id: {'offices', 'cities', 'parks'}} — где справочники человеку открыты сейчас.
 
     Для истории помощника: источник-справочник из старого ответа показывается,
     только пока доступ к вкладке у человека есть (wiki/ai/store.py).
     """
-    allowed = set(queries.spaces_for_user(cursor, ctx, include_guest=False))
+    allowed = _granted(cursor, ctx)
     if not allowed:
         return {}
     result = {}
-    for space in structure.list_spaces(cursor):
+    for space in _spaces(cursor, ctx):
         if space['id'] in allowed:
             features = schema.space_features(space.get('features'))
-            result[space['id']] = {'offices': bool(features.get('offices')),
-                                   'cities': bool(features.get('cities'))}
+            result[space['id']] = {tab: bool(features.get(tab)) for tab in SOURCE_TABS}
     return result
 
 

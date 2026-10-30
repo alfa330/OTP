@@ -28,7 +28,9 @@ import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
 import { directoryTab } from './searchDirectory';
-import { CLASSIFIER_TAB, classifierPrefillOf, sourceDoor } from '../assistant/sourceTarget';
+import {
+    CLASSIFIER_TAB, classifierPrefillOf, parkTarget, sourceDoor,
+} from '../assistant/sourceTarget';
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
@@ -124,6 +126,11 @@ const returnDoor = (tab, mode = null) => {
     const label = (tab === 'catalog' && RETURN_LABELS_HALF[mode]) || RETURN_LABELS[tab];
     return label ? { tab, label } : null;
 };
+
+/* Дверь помощника несёт ещё и разговор: вкладка «Помощник» при уходе
+   размонтируется и сама не помнит, какой ответ был открыт, — без номера
+   «К помощнику» возвращало на пустой экран (разбор 30.10.2026). */
+const assistantDoor = (chatId) => ({ ...returnDoor('assistant'), chatId: chatId || null });
 
 /* Переключатель половин вкладки «Статьи»: смотреть содержимое или править
    разложение. Сегмент-контрол, а не две кнопки: это выбор ОДНОГО из двух
@@ -272,7 +279,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         if (readArticleSlugFromSearch(search)) return '';
         return readWikiTabFromSearch(search);
     });
-    const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
+    const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight} | {park, from}
     /* Вопрос, уехавший из поиска к помощнику. Просьба одноразовая, как
        createRequest: помощник её выполняет и гасит. Своим id, а не текстом —
        один и тот же запрос, заданный дважды подряд, обязан уйти дважды. */
@@ -649,12 +656,22 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const canOpenCities = useMemo(() => tabs.some((t) => t.key === 'cities'), [tabs]);
     const [officeFocus, setOfficeFocus] = useState(null);   // {officeId, city, nonce}
     const [cityFocus, setCityFocus] = useState(null);       // {cityId, nonce}
-    const openDirectory = useCallback((target) => {
+    const openDirectory = useCallback((target, door = null) => {
         const tabKey = target?.tab || directoryTab(target);
-        if (tabKey !== 'offices' && tabKey !== 'cities') return;
+        if (tabKey !== 'offices' && tabKey !== 'cities' && tabKey !== 'parks') return;
         // Запись из соседнего пространства (история помощника) — сначала в него.
         const space = Number(target.space_id) || null;
         if (space && space !== activeSpace?.id) setSpaceId(space);
+        /* Карточка «Парков» под ответом помощника (wiki/park_cards.py) —
+           страница парка на витрине, как из рельса, с дверью назад: её даёт
+           помощник (с разговором), иначе — вкладка, откуда пришли. Слаг не
+           влез в источник — вкладка «Парки» (parkTarget). */
+        if (tabKey === 'parks') {
+            const page = parkTarget(target);
+            setTab(page.tab);
+            if (page.park) setSearchTarget({ park: page.park, from: door || returnDoor(tab, catalogMode) });
+            return;
+        }
         // У строки поиска — id и город самой записи, у источника помощника —
         // ref_id и ref_city; у «всей вкладки» записи нет вовсе.
         const own = target.kind === 'office' || target.kind === 'city';
@@ -666,7 +683,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         } else {
             setCityFocus({ cityId: id, nonce });
         }
-    }, [activeSpace]);
+    }, [activeSpace, tab, catalogMode]);
     const consumeOfficeFocus = useCallback(() => setOfficeFocus(null), []);
     const consumeCityFocus = useCallback(() => setCityFocus(null), []);
 
@@ -971,6 +988,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const returnFromArticle = useCallback((exit) => {
         const known = exit?.tab && tabs.some((t) => t.key === exit.tab && t.show);
         setTab(known ? exit.tab : 'library');
+        // Дверь помощника несёт разговор (assistantDoor) — открываем его же.
+        if (known && exit.tab === 'assistant' && exit.chatId) {
+            setAssistantChat({ chatId: exit.chatId, nonce: Date.now() });
+        }
         scrollPortalTo(0);
     }, [tabs]);
 
@@ -1453,18 +1474,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             onAskRequestConsumed={() => setAssistantAsk(null)}
                             openChatRequest={assistantChat}
                             onOpenChatRequestConsumed={() => setAssistantChat(null)}
-                            onOpenArticle={(slug, highlight, source) => {
+                            onOpenArticle={(slug, highlight, source, chatId) => {
                                 // Источник «Списки Байги» ведёт в свой раздел портала.
                                 if (sourceDoor(source) === 'baiga') { onOpenBaiga?.(source); return; }
+                                // «К помощнику» вернёт в этот разговор (assistantDoor).
+                                const from = assistantDoor(chatId);
                                 // Источник-справочник ведёт во вкладку, а не в статью.
-                                if (!slug && source?.tab) { openDirectory(source); return; }
+                                if (!slug && source?.tab) { openDirectory(source, from); return; }
                                 // «Классификатор авто» — на машине из ответа.
                                 if (source?.tab === CLASSIFIER_TAB) {
-                                    openClassifierSource(source, returnDoor('assistant'));
+                                    openClassifierSource(source, from);
                                     return;
                                 }
                                 setTab('library');
-                                setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
+                                setSearchTarget({ slug, highlight, from });
                             }}
                         />
                     </Suspense>

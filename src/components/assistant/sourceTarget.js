@@ -4,7 +4,8 @@
  * или стал неактивным, иначе заметили бы только на проде.
  *
  *   статья           slug — витрина вики на статье
- *   справочник       tab 'offices' | 'cities' — вкладка вики на записи
+ *   справочник       tab 'offices' | 'cities' — вкладка вики на записи;
+ *                    tab 'parks' — страница парка (слаг в ref_key)
  *   «Списки Байги»   tab 'baiga' — раздел портала на неделе и водителе из ответа
  *   классификатор    slug статьи и tab 'classifier' — статья-калькулятор, уже
  *                    заполненная машиной, годом и городом из ответа
@@ -21,6 +22,14 @@ export const sourceDoor = (source) => {
     if (source.slug) return 'article';
     if (source.tab === BAIGA_TAB) return 'baiga';
     return source.tab ? 'directory' : null;
+};
+
+/** Куда ведёт карточка «Парков» (wiki/park_cards.py): страница парка на витрине
+ *  по слагу из ref_key; слага нет (не влез в источник, сводка всех парков) —
+ *  вкладка «Парки». */
+export const parkTarget = (source) => {
+    const park = String(source?.ref_key || '').trim();
+    return park ? { tab: 'library', park } : { tab: 'parks', park: null };
 };
 
 /** Просьба разделу «Списки Байги»: неделя (id загрузки) и водитель (номер ВУ). */

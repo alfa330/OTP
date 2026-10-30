@@ -274,9 +274,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        не внутри неё, и это не мелочь: цепочка обрезается по потолку глубины с
        самого старого конца, то есть корневая запись рано или поздно уходит — и
        вместе с ней ушла бы дверь. Цепочка про статьи, дверь — про выход. */
-    const [door, setDoor] = useState(null);   // {tab, label} либо null
+    /* Парк из источника под ответом помощника открывается С ПЕРВОГО кадра:
+       витрина монтируется уже с просьбой, и раньше она успевала нарисовать
+       главную, прежде чем эффект ниже её выполнял (разбор 30.10.2026: кадр
+       «обложка с поиском» между ответом и страницей парка). */
+    const [door, setDoor] = useState(() => (searchTarget?.park ? searchTarget.from || null : null));
     // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
-    const [openParkSlug, setOpenParkSlug] = useState(null);
+    const [openParkSlug, setOpenParkSlug] = useState(() => searchTarget?.park || null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
     // Документ, который надо применить к статье СРАЗУ после её открытия. Живёт
     // здесь, а не в редакторе: путь начинается в проверке дублей на другой
@@ -367,6 +371,18 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
             highlight: searchTarget.highlight || null,
             prefill: searchTarget.prefill || null,
         }));
+        consumeSearchTarget();
+    }, [searchTarget, consumeSearchTarget]);
+
+    /* Карточка «Парков» под ответом помощника (wiki/park_cards.py): страница
+       парка, как из рельса, но с дверью — вкладкой, откуда пришли. Цепочку
+       статей гасим: парк открыт снаружи, и возврат с него ведёт в дверь, а не в
+       статью, которую читали до перехода в помощника. */
+    useEffect(() => {
+        if (!searchTarget?.park) return;
+        setTrail([]);
+        setDoor(searchTarget.from || null);
+        setOpenParkSlug(searchTarget.park);
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
 
@@ -482,6 +498,16 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         setDoor(null);
         returnTo(exit);
     }, [trail.length, door, returnTo]);
+
+    /* Возврат со страницы парка — тем же порядком: пришли из другой вкладки
+       (источник под ответом помощника) — туда, иначе на витрину. */
+    const closePark = useCallback(() => {
+        setOpenParkSlug(null);
+        if (!door) return;
+        const exit = door;
+        setDoor(null);
+        returnTo(exit);
+    }, [door, returnTo]);
 
     /* Список после статьи показываем СВЕРХУ. Открытие статьи прокрутку сбивает
        само (высота страницы схлопывается под карточку загрузки, и браузер
@@ -794,7 +820,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 headers={headers}
                 slug={openParkSlug}
                 spaceId={spaceId}
-                onBack={() => setOpenParkSlug(null)}
+                onBack={closePark}
+                // Подпись кнопки — из двери, чтобы обещание и действие не разошлись.
+                backLabel={door?.label}
                 onOpenParks={onOpenParks}
             />
         );
@@ -881,7 +909,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 <WikiParkRail
                     parks={parks}
                     canManage={parksCanManage}
-                    onOpenPark={(slug) => setOpenParkSlug(slug)}
+                    /* Из рельса — вход с витрины: двери нет, и возврат ведёт
+                       сюда же, а не во вкладку прошлого перехода. */
+                    onOpenPark={(slug) => { setDoor(null); setOpenParkSlug(slug); }}
                     onOpenParks={onOpenParks}
                 />
             )}
